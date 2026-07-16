@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# Investable universe.
+#
+# The core universe is ~7 CROSS-ASSET ETFs, not sector SPDRs. Sector SPDRs are
+# all equity beta — a wall of positive correlations. A cross-asset basket has
+# genuinely mixed, regime-flipping correlation signs — the "frustrated
+# landscape" that makes the higher-moment / quantum-tunneling argument
+# physical rather than decorative (research-plan §4, Fang call).
+#
+# The `candidates` set (~19 ETFs) is the larger pool the asset-SELECTION QUBO
+# (arm Q-A) picks k≈7 from. That is the layer where the problem is genuinely
+# binary, and where a 19-qubit QAOA is enumerable/exact-checkable.
+# ---------------------------------------------------------------------------
+
+# Benchmark definitions (arms B0 / B1).
+benchmarks:
+  sixty_forty:            # B0 — the clean institutional comparison
+    ACWI: 0.60            # global equity
+    BNDW: 0.40            # global bonds
+  # B1 (equal-weight 1/N) is derived from `core` at runtime.
+
+# The primary ~7-asset cross-asset core (arms A1–A4, B1–B3, Q-B, Q-C output).
+core:
+  - ticker: ACWI          # global equities
+    name: iShares MSCI ACWI
+    asset_class: equity
+  - ticker: BNDW          # global aggregate bonds
+    name: Vanguard Total World Bond
+    asset_class: bonds
+  - ticker: GSG           # broad commodities
+    name: iShares S&P GSCI Commodity
+    asset_class: commodities
+  - ticker: IGF           # global infrastructure
+    name: iShares Global Infrastructure
+    asset_class: infrastructure
+  - ticker: GLD           # gold
+    name: SPDR Gold Shares
+    asset_class: gold
+  - ticker: VNQ           # real estate
+    name: Vanguard Real Estate
+    asset_class: real_estate
+  - ticker: EMB           # emerging-market USD bonds
+    name: iShares JPM USD EM Bond
+    asset_class: em_bonds
+
+# The ~19-ETF candidate pool for the selection QUBO (arm Q-A).
+# `core` tickers are a subset; the selector should be able to (re)discover
+# a well-diversified k≈7 basket out of the wider set.
+candidates:
+  - ACWI    # global equity
+  - SPY     # US large cap
+  - EFA     # developed ex-US equity
+  - EEM     # emerging equity
+  - IWM     # US small cap
+  - BNDW    # global bonds
+  - AGG     # US aggregate bonds
+  - BNDX    # intl bonds
+  - TLT     # long US treasuries
+  - EMB     # EM USD bonds
+  - HYG     # US high yield
+  - TIP     # US TIPS
+  - GLD     # gold
+  - GSG     # broad commodities
+  - DBC     # diversified commodities
+  - VNQ     # US real estate
+  - RWO     # global real estate
+  - IGF     # infrastructure
+  - USO     # oil
+
+# Target cardinality for the selection QUBO.
+selection_k: 7

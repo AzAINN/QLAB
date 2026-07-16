@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# Trading mandate — the hard, deterministic contract the autopilot operates
+# under. Enforced IN CODE (qlab/trader/mandate.py), never by prompt.
+#
+# "Give the agent $10k" does NOT mean the agent watches tickers and makes
+# calls. It means: the lab produces a validated policy; the agent operates
+# that policy under this mandate. Every limit below is checked before any
+# order plan can move from `proposed` to `checked` (research-plan §8).
+# ---------------------------------------------------------------------------
+
+account:
+  paper_capital: 10000.0        # USD. Paper only. Live is UNIMPLEMENTED.
+  base_currency: USD
+
+# Only these tickers may ever appear in a target. Anything else is rejected.
+universe_whitelist:
+  - ACWI
+  - BNDW
+  - GSG
+  - IGF
+  - GLD
+  - VNQ
+  - EMB
+
+constraints:
+  long_only: true               # no shorts
+  fully_invested: true          # weights sum to 1 (cash buffer handled separately)
+  max_weight_per_asset: 0.40    # per-asset cap
+  min_weight_per_asset: 0.0
+  max_turnover_per_rebalance: 0.50   # sum |Δw| capped per rebalance
+  max_orders_per_day: 20
+  order_type: marketable_limit  # never plain market orders
+
+# Trailing-drawdown kill-switch. Past this drawdown from the high-water mark,
+# the server refuses every non-liquidating order and pages the human.
+kill_switch:
+  trailing_drawdown_pct: 0.15   # 15% peak-to-trough
+
+# Rebalance triggers (checked by the daily ops session; no trigger => heartbeat).
+rebalance:
+  cadence: quarterly            # scheduled cadence
+  drift_band_pct: 0.05          # rebalance if any asset drifts > 5% from target
+  regime_triggered: true        # also rebalance on a regime flip
+
+# Fractional / notional orders are required — whole shares of a $250 ETF give
+# ~2.5% weight granularity, which would make the optimized weights fiction.
+execution:
+  allow_fractional: true

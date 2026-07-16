@@ -1,0 +1,90 @@
+# ---------------------------------------------------------------------------
+# Batch-mode experiment spec — the SUBMISSION NUMBERS.
+#
+# In batch mode an agent *authors* this declarative spec and the engine
+# executes it deterministically. Headline results must survive
+# `git clone && qlab batch configs/specs/ablation_v1.yaml`. This is the direct
+# answer to TradingAgents' concession that its results aren't reproducible
+# (research-plan §2.3, §6 experiment matrix).
+#
+# Everything hangs on holding all else constant and varying ONE thing (the
+# objective, or the solver). Arms are content-hashed into the registry so the
+# trial count feeds the deflated-Sharpe calculation as a schema feature.
+# ---------------------------------------------------------------------------
+
+name: ablation_v1
+seed: 7
+
+data:
+  universe: core            # the ~7 cross-asset ETFs from configs/universe.yaml
+  start: "2008-01-01"
+  end: "2024-12-31"
+  # If offline / no network, the engine serves the synthetic generator seeded
+  # from `seed` so the ablation still runs end-to-end.
+  offline_ok: true
+
+backtest:
+  rebalance: quarterly      # ~70 quarterly points from 2008 — a SMALL sample.
+  lookback_days: 756        # ~3y estimation window (an agent-judgment slot)
+  cost_bps: 5               # per-side transaction cost in basis points
+
+moments:
+  shrinkage: ledoit_wolf    # covariance shrinkage target
+  denoise: marchenko_pastur # RMT eigenvalue cleaning
+  comoment_shrinkage: 0.5   # structured shrink of coskew/cokurt toward MVN target
+
+# The experiment matrix (research-plan §6). Each arm = one (objective, solver).
+arms:
+  - id: B0                  # institutional benchmark
+    objective: sixty_forty
+    solver: none
+  - id: B1                  # naive benchmark — famously hard to beat
+    objective: equal_weight
+    solver: none
+  - id: B2                  # THE REAL BAR — robust to estimation error
+    objective: hrp
+    solver: hrp
+  - id: B3                  # practitioner benchmark
+    objective: risk_parity
+    solver: classical
+  - id: A1                  # classical min-variance baseline
+    objective: min_variance
+    solver: classical
+  - id: A2                  # THE FALSIFIABLE RIVAL — uses the distribution directly
+    objective: scenario_cvar
+    solver: cvar_lp
+  - id: A3                  # OBJECTIVE CLAIM — do higher moments help?
+    objective: mvsk
+    solver: classical_multistart
+    params: { skew_lambda: 0.5, kurt_lambda: 0.5 }
+  - id: A4                  # SOLVER CLAIM — does the hardware find better optima?
+    objective: mvsk
+    solver: dirac3          # requires QCI account; falls back to classical_multistart
+    params: { skew_lambda: 0.5, kurt_lambda: 0.5 }
+
+# Quantum arms (Aer simulator by default; IBM QPU if IBM_QUANTUM_TOKEN set).
+quantum_arms:
+  - id: QA                  # asset SELECTION QUBO (19 -> k≈7) — the real gate slot
+    objective: selection_qubo
+    solver: qaoa
+    universe: candidates
+    params: { k: 7, reps: 2 }
+  - id: QB                  # discretized MV via QAOA — the reality-check arm
+    objective: discretized_mv
+    solver: qaoa
+    params: { resolution_bits: 3, reps: 2 }
+  - id: QC                  # the 434-qubit MVSK->QUBO encoder — COUNT, don't run
+    objective: mvsk
+    solver: qubo_resource_count
+    params: { resolution_bits: 4 }
+
+metrics:
+  - ann_return
+  - ann_vol
+  - sortino
+  - max_drawdown
+  - cvar_95
+  - turnover
+  - realized_skew        # did optimizing tail shape actually deliver tail shape?
+  - realized_kurtosis
+  - deflated_sharpe      # uses the registry trial count

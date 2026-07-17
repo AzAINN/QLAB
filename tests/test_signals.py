@@ -103,3 +103,16 @@ def test_b4_arm_runs_regime_conditional():
     w, diag = solve_arm(arm, snap, moments=MomentsConfig(lookback_days=750))
     assert abs(sum(w.values) - 1.0) < 1e-6
     assert diag["moments"].get("regime_lambda") is not None
+
+
+def test_regime_conditional_rejects_higher_moments():
+    import pytest
+    from qlab.arms import Arm, MomentsConfig, solve_arm
+    from qlab.core.types import DataSnapshot
+    r = _two_regime_returns()
+    px = (1 + r).cumprod() * 100
+    snap = DataSnapshot(list(px.columns), px, px.index[-1].date())
+    arm = Arm("X", "mvsk", "classical_multistart",
+              {"skew_lambda": 0.5, "kurt_lambda": 0.5, "regime_conditional": True})
+    with pytest.raises(ValueError, match="covariance-only"):
+        solve_arm(arm, snap, moments=MomentsConfig(lookback_days=750))

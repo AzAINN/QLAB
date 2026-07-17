@@ -65,6 +65,12 @@ def estimate(snapshot: DataSnapshot, cfg: MomentsConfig, *, higher: bool) -> Mom
         higher_moments=higher,
     )
     if cfg.regime_conditional:
+        if higher:
+            raise ValueError(
+                "regime_conditional currently supports covariance-only objectives; "
+                "conditioning the coskew/cokurt tensors consistently is future work "
+                "(see condition.py docstring)"
+            )
         from qlab.signals.condition import condition_covariance, regime_labels
         from qlab.signals.hard import composite_regime
 

@@ -3,6 +3,17 @@
 Sigma(lam) = (1 - lam) * Sigma_calm + lam * Sigma_stress, with lam supplied by
 the composite hard-signal regime (later: clamped LLM views, roadmap §3). The
 solver stack is untouched - conditioning only changes the coefficients.
+
+Conditioning currently lambda-mixes ONLY Sigma. The coskew/cokurt tensors
+(whose Isserlis/one-factor targets embed the UNCONDITIONED covariance) are not
+conditioned, so mixing them in unmodified alongside a conditioned Sigma would
+silently blend two different regime covariances in one MVSK objective. Until
+the higher-moment tensors are conditioned consistently, ``qlab.arms.estimate``
+rejects ``regime_conditional=True`` for any objective that needs them (MVSK) -
+see the ``ValueError`` raised there. Separately, note that ``condition_covariance``
+returns an LW-only mix (no Marchenko-Pastur denoise applied to the blended
+result), so a conditioned arm differs from its unconditioned twin on both the
+regime-mixing axis and the denoising axis.
 """
 from __future__ import annotations
 

@@ -90,6 +90,7 @@ class Registry:
             self.path = str(p)
         self.con = duckdb.connect(self.path)
         self.con.execute(_SCHEMA)
+        self.con.execute("ALTER TABLE backtests ADD COLUMN IF NOT EXISTS objective VARCHAR")
 
     def close(self) -> None:
         self.con.close()
@@ -145,11 +146,12 @@ class Registry:
         return sid
 
     def log_backtest(self, run_id: str, arm_id: str, metrics: dict,
-                     artifact_hash: str = "") -> str:
+                     artifact_hash: str = "", objective: str = "") -> str:
         bid = uuid.uuid4().hex[:16]
         self.con.execute(
-            "INSERT INTO backtests VALUES (?,?,?,?,?,?)",
-            [bid, run_id, arm_id, _j(metrics), artifact_hash, _now()],
+            "INSERT INTO backtests (bt_id, run_id, arm_id, metrics, artifact_hash, "
+            "objective, created_at) VALUES (?,?,?,?,?,?,?)",
+            [bid, run_id, arm_id, _j(metrics), artifact_hash, objective, _now()],
         )
         return bid
 
@@ -195,6 +197,14 @@ class Registry:
     def backtest_trial_count(self) -> int:
         r = self.con.execute("SELECT COUNT(DISTINCT arm_id) FROM backtests").fetchone()
         return int(r[0]) if r else 0
+
+    def backtest_arm_ids(self, exclude_objectives: tuple[str, ...] = ("sixty_forty",)) -> set[str]:
+        ph = ",".join("?" for _ in exclude_objectives) or "''"
+        rows = self.con.execute(
+            f"SELECT DISTINCT arm_id FROM backtests "
+            f"WHERE COALESCE(objective, '') NOT IN ({ph})",
+            list(exclude_objectives)).fetchall()
+        return {r[0] for r in rows}
 
     # -- reporting ----------------------------------------------------------
     def list_runs(self, limit: int = 20) -> list[dict]:

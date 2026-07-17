@@ -57,7 +57,7 @@ def compute_metrics(
         "realized_skew": float(stats.skew(r, bias=False)) if len(r) > 3 else 0.0,
         "realized_kurtosis": float(stats.kurtosis(r, fisher=True, bias=False)) if len(r) > 3 else 0.0,
         "deflated_sharpe": deflated_sharpe(
-            r, sharpe_periodic=_periodic_sharpe(r), n_trials=n_trials,
+            r, sharpe_periodic=periodic_sharpe(r), n_trials=n_trials,
             trial_sharpe_var=trial_sharpe_var,
         ),
     }
@@ -81,9 +81,12 @@ def cvar(returns: pd.Series, level: float = 0.95) -> float:
     return float(tail.mean()) if len(tail) else float(q)
 
 
-def _periodic_sharpe(r: pd.Series) -> float:
+def periodic_sharpe(r: pd.Series) -> float:
     sd = r.std(ddof=1)
     return float(r.mean() / sd) if sd > 0 else 0.0
+
+
+_periodic_sharpe = periodic_sharpe
 
 
 def deflated_sharpe(
@@ -151,6 +154,9 @@ def block_bootstrap_ci(
         starts = rng.integers(0, n - block_size, size=n_blocks)
         sample = np.concatenate([r[s : s + block_size] for s in starts])[:n]
         stats_out.append(stat_fn(pd.Series(sample)))
-    lo = float(np.quantile(stats_out, alpha / 2))
-    hi = float(np.quantile(stats_out, 1 - alpha / 2))
+    finite = [s for s in stats_out if np.isfinite(s)]
+    if not finite:
+        return float("nan"), float("nan")
+    lo = float(np.quantile(finite, alpha / 2))
+    hi = float(np.quantile(finite, 1 - alpha / 2))
     return lo, hi

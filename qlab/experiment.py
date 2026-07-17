@@ -26,7 +26,7 @@ import yaml
 from qlab.arms import Arm, MomentsConfig, build_policy, estimate, solve_arm
 from qlab.core import data as market
 from qlab.core.backtest import BacktestResult, run_backtest
-from qlab.core.metrics import block_bootstrap_ci, deflated_sharpe
+from qlab.core.metrics import block_bootstrap_ci, deflated_sharpe, periodic_sharpe
 from qlab.core.objective import build_objective, compile_scipy
 from qlab.core.types import DataSnapshot
 from qlab.core.universe import load_universe
@@ -67,6 +67,7 @@ def run_ablation(
         comoment_shrinkage=float(m.get("comoment_shrinkage", 0.5)),
     )
     arms = [Arm(**_arm_kwargs(a)) for a in spec.get("arms", [])]
+    arm_by_id = {a.id: a for a in arms}
     n_trials = max(1, len([a for a in arms if a.objective not in ("sixty_forty",)]))
 
     results: dict[str, Any] = {"run_id": run_id, "arms": {}, "quantum": {}}
@@ -85,24 +86,27 @@ def run_ablation(
             results["arms"][arm.id] = {"error": repr(exc)}
 
     # cross-trial Sharpe variance + registry-counted trials -> honest DSR + CIs
-    def _psr(r):
-        sd = r.std(ddof=1)
-        return float(r.mean() / sd) if sd > 0 else 0.0
-
-    psrs = [_psr(r.returns) for r in bt_results.values()]
+    candidates = [aid for aid in bt_results if arm_by_id[aid].objective != "sixty_forty"]
+    psrs = [periodic_sharpe(bt_results[aid].returns) for aid in candidates]
     v_sr = float(np.var(psrs, ddof=1)) if len(psrs) > 1 else 0.0
+    # cumulative, registry-wide count of non-benchmark arms (this run's candidates
+    # included), computed before this run's backtests are logged so it never
+    # double-counts an arm already persisted from a prior run.
+    n_trials_dsr = max(len(reg.backtest_arm_ids() | set(candidates)), 2)
     for arm_id, res in bt_results.items():
         res.metrics["deflated_sharpe"] = deflated_sharpe(
-            res.returns, _psr(res.returns),
-            n_trials=max(len(bt_results), 2), trial_sharpe_var=v_sr)
-        for name, fn in (("sharpe_ci", _psr), ("sortino_ci", _sortino_stat)):
+            res.returns, periodic_sharpe(res.returns),
+            n_trials=n_trials_dsr, trial_sharpe_var=v_sr)
+        for name, fn in (("sharpe_ci", periodic_sharpe), ("sortino_ci", _sortino_stat)):
             res.metrics[name] = list(block_bootstrap_ci(res.returns, fn))
-        reg.log_backtest(run_id, arm_id, res.metrics)
+        reg.log_backtest(run_id, arm_id, res.metrics,
+                         objective=arm_by_id[arm_id].objective)
         results["arms"][arm_id] = {
-            "objective": next(a.objective for a in arms if a.id == arm_id),
-            "solver": next(a.solver for a in arms if a.id == arm_id),
+            "objective": arm_by_id[arm_id].objective,
+            "solver": arm_by_id[arm_id].solver,
             "metrics": res.metrics, "total_turnover": res.total_turnover}
     results["n_trials_registry"] = reg.backtest_trial_count()
+    results["n_trials_dsr"] = n_trials_dsr
 
     # quantum arms — single-shot at the latest snapshot
     for qa in spec.get("quantum_arms", []):
@@ -208,8 +212,12 @@ def compare_classical_quantum(
 # ---------------------------------------------------------------------------
 def _sortino_stat(r) -> float:
     downside = r[r < 0]
-    dv = downside.std(ddof=1) if len(downside) > 1 else 0.0
-    return float(r.mean() / dv) if dv > 0 else 0.0
+    if len(downside) <= 1:
+        return float("nan")
+    dv = downside.std(ddof=1)
+    if not dv > 0:
+        return float("nan")
+    return float(r.mean() / dv)
 
 
 def _rank(arms: dict) -> list[dict]:

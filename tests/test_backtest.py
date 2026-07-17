@@ -96,3 +96,27 @@ def test_ablation_reports_cis_and_registry_trials(tmp_path):
     assert "sharpe_ci" in m and m["sharpe_ci"][0] <= m["sharpe_ci"][1]
     assert "sortino_ci" in m
     assert reg.backtest_trial_count() == 2
+
+
+def test_dsr_trial_count_excludes_benchmark_and_accumulates():
+    from qlab.experiment import run_ablation
+    from qlab.state.registry import Registry
+    reg = Registry(":memory:")
+    spec = {"name": "t2", "seed": 7,
+            "data": {"universe": "core", "start": "2017-01-01", "end": "2020-12-31"},
+            "backtest": {"rebalance": "quarterly", "lookback_days": 504, "cost_bps": 5},
+            "moments": {}, "arms": [
+                {"id": "B0", "objective": "sixty_forty", "solver": "none"},
+                {"id": "B1", "objective": "equal_weight", "solver": "none"},
+                {"id": "A1", "objective": "min_variance", "solver": "classical"}]}
+    out = run_ablation(spec, registry=reg, offline=True, run_qaoa=False)
+    assert out["n_trials_dsr"] == 2                      # B0 excluded; B1+A1 count
+    spec2 = dict(spec, arms=[{"id": "B3", "objective": "risk_parity", "solver": "risk_parity"}])
+    out2 = run_ablation(spec2, registry=reg, offline=True, run_qaoa=False)
+    assert out2["n_trials_dsr"] == 3                     # accumulates: B1, A1, B3
+
+
+def test_sortino_stat_nan_on_all_positive():
+    import numpy as np, pandas as pd
+    from qlab.experiment import _sortino_stat
+    assert np.isnan(_sortino_stat(pd.Series([0.01, 0.02, 0.015, 0.03])))

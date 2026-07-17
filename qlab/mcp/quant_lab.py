@@ -30,10 +30,13 @@ from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
 from qlab.solvers.base import Constraints, get_solver
 
 
-def build_server(state: LabState | None = None):
-    FastMCP = require_fastmcp()
-    st = state or LabState(offline=os.environ.get("QLAB_OFFLINE") == "1")
-    app = FastMCP("quant-lab")
+def register_lab_tools(app, st: LabState) -> None:
+    """Mount every research-lab tool on ``app``, bound to session state ``st``.
+
+    Split out of ``build_server`` so the combined single-process server
+    (``qlab.mcp.server``) can mount the lab and trader namespaces on one
+    FastMCP app over one shared Registry (one DuckDB writer).
+    """
 
     # -- data ---------------------------------------------------------------
     @app.tool(name="data.fetch_universe")
@@ -220,6 +223,13 @@ def build_server(state: LabState | None = None):
                          kurt_lambda=kurt_lambda, offline=st.offline,
                          run_qaoa=run_qaoa, seed=st.seed)
 
+
+def build_server(state: LabState | None = None):
+    """Standalone quant-lab server (own app + state). Kept for direct use."""
+    FastMCP = require_fastmcp()
+    st = state or LabState(offline=os.environ.get("QLAB_OFFLINE") == "1")
+    app = FastMCP("quant-lab")
+    register_lab_tools(app, st)
     return app
 
 

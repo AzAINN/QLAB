@@ -4,7 +4,7 @@ description: Argues the opposite case to the moments-analyst on the estimation-w
   Use during a rebalance, right after the moments-analyst proposes its estimator choices.
 model: inherit
 mcp_servers:
-- quant-lab
+- qlab
 allowed_tools:
 - mcp__quant-lab__data.snapshot_summary
 - mcp__quant-lab__moments.estimate

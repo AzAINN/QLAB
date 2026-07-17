@@ -4,7 +4,7 @@ description: The approval gate. Read-only. Independently checks constraints, ben
   Must PASS. Use after the optimizer returns and before the reporter acts.
 model: inherit
 mcp_servers:
-- quant-lab
+- qlab
 allowed_tools:
 - mcp__quant-lab__registry.list_runs
 - mcp__quant-lab__registry.report

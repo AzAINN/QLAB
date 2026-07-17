@@ -4,8 +4,7 @@ description: Compiles the final recommendation for the human and, once the refer
   last in the pipeline.
 model: inherit
 mcp_servers:
-- quant-lab
-- quant-trader
+- qlab
 allowed_tools:
 - mcp__quant-lab__report.recommendation
 - mcp__quant-lab__registry.report

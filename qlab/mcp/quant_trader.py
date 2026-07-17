@@ -45,10 +45,14 @@ class TraderState:
         return self.mandate.universe_whitelist
 
 
-def build_server(state: TraderState | None = None):
-    FastMCP = require_fastmcp()
-    st = state or TraderState(offline=os.environ.get("QLAB_OFFLINE") == "1")
-    app = FastMCP("quant-trader")
+def register_trader_tools(app, st: TraderState) -> None:
+    """Mount every execution-gateway tool on ``app``, bound to state ``st``.
+
+    Split out of ``build_server`` so the combined single-process server
+    (``qlab.mcp.server``) can mount the lab and trader namespaces on one
+    FastMCP app over one shared Registry (one DuckDB writer). There is still
+    deliberately no raw order tool.
+    """
 
     @app.tool(name="get_portfolio_state")
     def get_portfolio_state() -> dict:
@@ -121,6 +125,13 @@ def build_server(state: TraderState | None = None):
             "cap_breaches": breaches, "halted": s["halted"],
         }
 
+
+def build_server(state: TraderState | None = None):
+    """Standalone quant-trader server (own app + state). Kept for direct use."""
+    FastMCP = require_fastmcp()
+    st = state or TraderState(offline=os.environ.get("QLAB_OFFLINE") == "1")
+    app = FastMCP("quant-trader")
+    register_trader_tools(app, st)
     return app
 
 

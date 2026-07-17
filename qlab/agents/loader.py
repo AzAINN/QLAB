@@ -22,6 +22,13 @@ _SRC = _REPO_ROOT / "agents"
 _CLAUDE_OUT = _REPO_ROOT / ".claude" / "agents"
 _BOB_OUT = _REPO_ROOT / ".bob" / "personas"
 
+# The lab and trader namespaces now live in one combined MCP process
+# (qlab.mcp.server) so a single DuckDB writer owns the book. Every persona
+# therefore connects to this one server; least-privilege still lives in the
+# per-agent tool allowlist (``server_scopes`` distinguishes lab vs trader
+# tools), not in a process boundary.
+SERVER_NAME = "qlab"
+
 
 @dataclass
 class AgentDef:
@@ -84,7 +91,7 @@ def _write_bob(agent: AgentDef, out_dir: Path) -> Path:
         "persona": agent.name,
         "description": agent.description,
         "model": agent.model,
-        "mcp_servers": sorted(agent.server_scopes),
+        "mcp_servers": [SERVER_NAME],
         "allowed_tools": agent.tools,
         "system_prompt": agent.body,
         "governance": {

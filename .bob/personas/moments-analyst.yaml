@@ -4,7 +4,7 @@ description: Chooses the estimation window, shrinkage intensity, and regime call
   a portfolio recommendation is requested. This is the primary judgment role.
 model: inherit
 mcp_servers:
-- quant-lab
+- qlab
 allowed_tools:
 - mcp__quant-lab__data.fetch_universe
 - mcp__quant-lab__data.snapshot_summary

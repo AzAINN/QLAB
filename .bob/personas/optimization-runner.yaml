@@ -4,7 +4,7 @@ description: Solves a prepared objective with the classical arm and the quantum 
   an objective_id. Exercises no judgment.
 model: inherit
 mcp_servers:
-- quant-lab
+- qlab
 allowed_tools:
 - mcp__quant-lab__objective.build
 - mcp__quant-lab__solve.classical

@@ -48,3 +48,16 @@ def test_plan_state_machine(reg):
     assert reg.get_plan("p1")["state"] == "proposed"
     reg.set_plan_state("p1", "checked")
     assert reg.get_plan("p1")["state"] == "checked"
+    assert reg.list_plans(1)[0]["plan_id"] == "p1"
+
+
+def test_events_are_read_in_display_order_with_cursor(reg):
+    first = reg.record_event("workflow.started", {"run": 1})
+    second = reg.record_event("tool.completed", {"tool": "moments.estimate"})
+
+    initial = reg.read_events()
+    assert [row["event_id"] for row in initial] == [first, second]
+    assert initial[0]["payload"] == {"run": 1}
+
+    later = reg.read_events(after=initial[0]["ts"])
+    assert any(row["event_id"] == second for row in later)

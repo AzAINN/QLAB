@@ -189,6 +189,10 @@ broker. Same tools, same decision log, same referee. See
 ```bash
 python -m pip install -e .            # light core: numpy/pandas/scipy/duckdb/pydantic/pyyaml
 python -m pip install -e ".[quantum,mcp]"   # optional: Aer QAOA + the MCP servers
+python -m pip install -e ".[operator]" # optional: Textual console + Claude MCP proxy
+
+# The terminal-native operator desk (offline synthetic data, paper book):
+qlab tui
 
 # The point-and-click way — launches the single-page UI and opens your browser:
 qlab ui                               # everything below, without touching the CLI
@@ -250,6 +254,45 @@ CLI and autopilot use, so the UI reflects the real paper portfolio.
 > reproducible *simulation* (returns/Sortino on the offline synthetic feed), and
 > what you can and cannot claim from each tab.
 
+### 0b. Terminal operator console
+
+```bash
+python -m pip install -e ".[operator]"
+qlab tui                 # offline synthetic daily bars; paper book only
+qlab tui --online        # live/cached yfinance daily bars
+qlab tui --port 9000
+```
+
+The Textual console is a quiet, keyboard-first workstation with no global top
+banner: navigation and universe context live in the left spine, the center
+switches between Desk / Market / Research / Audit, agent authority stays visible
+in the right rail, and events plus commands live at the bottom. It is an HTTP
+client of the same single-owner UI runtime; it never opens DuckDB itself.
+
+Core controls:
+
+| Input | Action |
+|---|---|
+| `1`–`4` | Desk, Market, Research, Audit |
+| `j` / `k` | Move through the universe |
+| `5` | Focus the agent surface in a narrow terminal |
+| `:` or `Ctrl-P` | Focus the universal command input |
+| `~` | Expand/collapse the event timeline |
+| `Ctrl-Q` | Quit |
+
+Useful commands include `view market`, `symbol GLD`, `rebalance dry`, `daily`,
+`batch`, `ask PROMPT`, and `help`. `rebalance paper` always opens an explicit
+confirmation and is labeled paper-only.
+
+Claude `ask` turns stream into the agent work rail with tools disabled. The
+`governed` command instead launches a **propose-only** MCP session through
+`qlab.mcp.tui_proxy`. That proxy never opens DuckDB: it calls the owner API and
+can inspect market/portfolio state, read audit history, run daily ops/research,
+and produce a dry rebalance proposal. It intentionally has no paper-execution
+tool; execution stays human-confirmed until the R0 referee gate is enforced in
+code. See
+[`planning-docs/plans/2026-07-17-quiet-workstation-tui.md`](planning-docs/plans/2026-07-17-quiet-workstation-tui.md).
+
 ### 1. Interactive (orchestrator + subagents)
 
 The two servers are registered in [`.mcp.json`](.mcp.json). Five subagents live
@@ -289,6 +332,7 @@ qlab batch      configs/specs/ablation_v1.yaml     # the reproducible ablation
 qlab recommend  [--as-of YYYY-MM-DD] [--offline]   # print an allocation, no trade
 qlab prewarm    [--universe core|candidates]       # pre-fill the cache
 qlab ui         [--port 8765] [--online]           # the single-page web UI
+qlab tui        [--port 8765] [--online]           # terminal operator console
 ```
 
 The daily-ops session's tool set structurally excludes execution — it *cannot*

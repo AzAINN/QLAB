@@ -270,11 +270,21 @@ class Registry:
         r = self._rows("SELECT * FROM plans WHERE plan_id=?", [plan_id])
         return r[0] if r else None
 
+    def list_plans(self, limit: int = 20) -> list[dict]:
+        """Return the newest structured rebalance proposals."""
+        return self._rows(
+            "SELECT * FROM plans ORDER BY created_at DESC LIMIT ?", [limit])
+
     def add_order(self, client_order_id: str, plan_id: str, ticker: str,
                   side: str, notional: float, state: str = "submitted") -> None:
         self.con.execute(
             "INSERT INTO orders VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
             [client_order_id, plan_id, ticker, side, notional, state, _now()])
+
+    def list_orders(self, limit: int = 50) -> list[dict]:
+        """Return recent order records for the audit surface."""
+        return self._rows(
+            "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", [limit])
 
     # -- events -------------------------------------------------------------
     def record_event(self, kind: str, payload: dict) -> str:
@@ -282,6 +292,26 @@ class Registry:
         self.con.execute("INSERT INTO events VALUES (?,?,?,?)",
                          [eid, _now(), kind, _j(payload)])
         return eid
+
+    def read_events(self, limit: int = 100, after: str | None = None) -> list[dict]:
+        """Read an ordered event window for observer clients.
+
+        ``after`` is an ISO timestamp returned by an earlier call. Initial
+        reads return the newest ``limit`` rows in chronological order; cursor
+        reads return only newer rows. Event ids remain the client-side
+        deduplication key when multiple events share a timestamp.
+        """
+        limit = max(1, min(int(limit), 500))
+        if after:
+            return self._rows(
+                "SELECT * FROM events WHERE ts > ? ORDER BY ts ASC LIMIT ?",
+                [after, limit],
+            )
+        return self._rows(
+            "SELECT * FROM (SELECT * FROM events ORDER BY ts DESC LIMIT ?) "
+            "ORDER BY ts ASC",
+            [limit],
+        )
 
     # -- internals ----------------------------------------------------------
     def _rows(self, query: str, params: list) -> list[dict]:

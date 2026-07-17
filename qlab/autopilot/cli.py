@@ -6,6 +6,7 @@
     qlab batch      <spec.yaml> [--offline] [--no-qaoa] the reproducible ablation
     qlab recommend  [--as-of DATE] [--offline]         print an allocation, no trade
     qlab prewarm    [--universe core|candidates]       pre-fill the data cache
+    qlab tui        [--online]                         terminal operator console
 
 All of it runs with zero external accounts thanks to ``--offline`` and the
 simulated paper broker.
@@ -15,8 +16,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
+import subprocess
 import sys
 import time
+from pathlib import Path
 
 from qlab.autopilot.loop import daily_ops, render_summary, run_once
 
@@ -92,6 +96,70 @@ def _cmd_ui(args) -> int:
     return 0
 
 
+def _cmd_tui(args) -> int:
+    """Launch the Textual client and, when needed, its owner API process."""
+    try:
+        from qlab.tui.app import QlabTui
+        from qlab.tui.client import ApiClient
+    except ImportError as exc:
+        raise SystemExit(
+            "The TUI extra is not installed. Run:\n"
+            "    pip install -e '.[operator]'\n"
+            f"(original error: {exc})"
+        ) from exc
+
+    def port_open() -> bool:
+        with socket.socket() as sock:
+            sock.settimeout(0.2)
+            return sock.connect_ex(("127.0.0.1", args.port)) == 0
+
+    owner = None
+    if not port_open():
+        server_argv = [
+            sys.executable, "-m", "qlab.autopilot.cli", "ui",
+            "--port", str(args.port), "--no-browser",
+        ]
+        if args.online:
+            server_argv.append("--online")
+        owner = subprocess.Popen(
+            server_argv,
+            cwd=str(Path(__file__).resolve().parents[2]),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(60):
+            if port_open():
+                break
+            if owner.poll() is not None:
+                detail = owner.stderr.read().strip() if owner.stderr else ""
+                raise SystemExit(
+                    "qlab UI runtime exited before the TUI connected"
+                    + (f":\n{detail}" if detail else "")
+                )
+            time.sleep(0.1)
+        else:
+            owner.terminate()
+            raise SystemExit(f"qlab UI runtime did not open port {args.port}")
+
+    client = ApiClient(f"http://127.0.0.1:{args.port}")
+    try:
+        client.get("/api/system", offline=int(not args.online))
+    except Exception as exc:
+        if owner is not None:
+            owner.terminate()
+        raise SystemExit(
+            f"port {args.port} is open but is not a compatible qlab runtime: {exc}") from exc
+
+    QlabTui(
+        client,
+        offline=not args.online,
+        refresh_interval=args.refresh,
+        owned_server=owner,
+    ).run()
+    return 0
+
+
 def _cmd_prewarm(args) -> int:
     from qlab.core import data as market
     from qlab.core.universe import load_universe
@@ -152,6 +220,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="use live yfinance data (default: offline synthetic)")
     ui.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
     ui.set_defaults(func=_cmd_ui)
+
+    tui = sub.add_parser("tui", help="launch the terminal operator console")
+    tui.add_argument("--port", type=int, default=8765)
+    tui.add_argument("--online", action="store_true",
+                     help="use live/cached yfinance daily bars (default: offline synthetic)")
+    tui.add_argument("--refresh", type=float, default=2.0,
+                     help="snapshot refresh interval in seconds")
+    tui.set_defaults(func=_cmd_tui)
 
     return p
 

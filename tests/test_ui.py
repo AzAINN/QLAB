@@ -58,3 +58,29 @@ def test_recommend_and_run_once_and_reset(session):
 def test_unknown_route_is_404(session):
     status, obj = handle_api(session, "GET", "/api/nope", {}, {})
     assert status == 404 and "error" in obj
+
+
+def test_tui_snapshot_is_provenance_first(session):
+    session.registry.record_event("demo", {"stage": "observe"})
+    status, snap = handle_api(
+        session, "GET", "/api/tui", {"offline": ["1"]}, {})
+
+    assert status == 200
+    assert snap["system"]["mode"] == "paper"
+    assert snap["system"]["governed_authority"] == "propose_only"
+    assert snap["market"]["frequency"] == "daily"
+    assert snap["market"]["source"] in {"synthetic", "yfinance"}
+    assert len(snap["market"]["assets"]) == 7
+    assert snap["events"][-1]["kind"] == "demo"
+    assert {agent["name"] for agent in snap["agents"]} == {
+        "moments-analyst", "challenger", "optimization-runner", "referee", "reporter"
+    }
+
+
+def test_events_endpoint_supports_initial_window(session):
+    session.registry.record_event("one", {})
+    session.registry.record_event("two", {})
+    status, obj = handle_api(
+        session, "GET", "/api/events", {"limit": ["1"]}, {})
+    assert status == 200
+    assert [event["kind"] for event in obj["events"]] == ["two"]

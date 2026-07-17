@@ -22,7 +22,9 @@ POST /api/reset                reset the paper book to starting capital
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import shutil
 import threading
 import webbrowser
 from datetime import date
@@ -34,6 +36,7 @@ from qlab.core.types import _jsonable
 
 _HERE = Path(__file__).resolve().parent
 _INDEX = _HERE / "index.html"
+_REPO_ROOT = _HERE.parents[1]
 
 # A ThreadingHTTPServer keeps the browser's parallel/keep-alive connections
 # responsive, but the shared DuckDB connection is not thread-safe and Qiskit's
@@ -79,6 +82,117 @@ class UISession:
             "target_weights": targets,
         }
 
+    def market(self, offline: bool) -> dict:
+        """Compact, provenance-first daily-bar snapshot for terminal clients."""
+        import numpy as np
+
+        from qlab.core import data as market
+        from qlab.core.moments import detect_regime
+
+        tickers = self.mandate.universe_whitelist
+        snap = market.snapshot(
+            tickers, date.today().isoformat(), lookback_days=252,
+            offline=offline, seed=self.seed,
+        )
+        prices = snap.prices.dropna(how="any")
+        returns = prices.pct_change(fill_method=None)
+        last_dt = prices.index[-1].date()
+        assets = []
+        for ticker in tickers:
+            series = prices[ticker]
+            one_day = float(series.iloc[-1] / series.iloc[-2] - 1.0) if len(series) > 1 else 0.0
+            twenty_day = (
+                float(series.iloc[-1] / series.iloc[-21] - 1.0)
+                if len(series) > 20 else 0.0
+            )
+            vol = float(returns[ticker].dropna().tail(63).std() * np.sqrt(252.0))
+            assets.append({
+                "ticker": ticker,
+                "price": float(series.iloc[-1]),
+                "change_1d": one_day,
+                "change_20d": twenty_day,
+                "realized_vol": vol,
+                "history": [float(x) for x in series.tail(40)],
+            })
+        return {
+            "source": snap.source,
+            "as_of": last_dt.isoformat(),
+            "bar_age_days": max(0, (date.today() - last_dt).days),
+            "frequency": "daily",
+            "regime": detect_regime(snap),
+            "assets": assets,
+        }
+
+    def agents(self) -> list[dict]:
+        """Agent definitions shaped for the persistent work rail."""
+        from qlab.agents.loader import load_agents
+
+        rows = []
+        for agent in load_agents():
+            tools = agent.tools
+            if any("execute_plan" in tool for tool in tools):
+                authority = "PAPER"
+            elif agent.name == "referee":
+                authority = "VETO"
+            elif any("solve." in tool for tool in tools):
+                authority = "SOLVE"
+            elif agent.name == "challenger":
+                authority = "CHALLENGE"
+            else:
+                authority = "RESEARCH"
+            rows.append({
+                "name": agent.name,
+                "description": agent.description,
+                "authority": authority,
+                "state": "idle",
+                "tools": tools,
+            })
+        return rows
+
+    def system_status(self, offline: bool) -> dict:
+        """Health and authority facts shown quietly at the bottom edge."""
+        config_path = _REPO_ROOT / ".mcp.json"
+        servers: list[str] = []
+        if config_path.exists():
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                servers = sorted(config.get("mcpServers", {}))
+            except Exception:
+                servers = []
+        proxy_available = importlib.util.find_spec("fastmcp") is not None
+        return {
+            "mode": "paper",
+            "offline": offline,
+            "claude_available": bool(shutil.which("claude")),
+            "mcp_configured": bool(servers),
+            "mcp_servers": servers,
+            "mcp_proxy_available": proxy_available,
+            "governed_available": proxy_available and bool(shutil.which("claude")),
+            "governed_authority": "propose_only",
+            "governed_lock_reason": (
+                "paper execution remains human-confirmed until the R0 referee "
+                "gate is enforced in code"
+            ),
+        }
+
+    def tui_snapshot(self, offline: bool, event_limit: int = 100) -> dict:
+        """One consistent payload for a complete TUI refresh."""
+        from qlab.core.objective import mvsk_qubo_resource_count
+
+        plans = self.registry.list_plans(20)
+        return {
+            "portfolio": self.portfolio(offline),
+            "market": self.market(offline),
+            "agents": self.agents(),
+            "decisions": self.registry.recent_decisions(limit=30),
+            "runs": self.registry.list_runs(30),
+            "plans": plans,
+            "orders": self.registry.list_orders(50),
+            "events": self.registry.read_events(event_limit),
+            "system": self.system_status(offline),
+            "quantum": mvsk_qubo_resource_count(7, 4),
+        }
+
 
 # ---------------------------------------------------------------------------
 # API dispatch (pure functions of the session; easy to unit-test)
@@ -93,6 +207,32 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "GET" and path == "/api/portfolio":
         return 200, session.portfolio(_qbool(query, "offline", session.offline_default))
+
+    if method == "GET" and path == "/api/market":
+        return 200, session.market(_qbool(query, "offline", session.offline_default))
+
+    if method == "GET" and path == "/api/agents":
+        return 200, {"agents": session.agents()}
+
+    if method == "GET" and path == "/api/system":
+        offline = _qbool(query, "offline", session.offline_default)
+        return 200, session.system_status(offline)
+
+    if method == "GET" and path == "/api/events":
+        limit = int(query.get("limit", ["100"])[0])
+        after = query.get("after", [None])[0]
+        return 200, {"events": session.registry.read_events(limit, after)}
+
+    if method == "GET" and path == "/api/plans":
+        return 200, {"plans": session.registry.list_plans(20)}
+
+    if method == "GET" and path == "/api/orders":
+        return 200, {"orders": session.registry.list_orders(50)}
+
+    if method == "GET" and path == "/api/tui":
+        offline = _qbool(query, "offline", session.offline_default)
+        limit = int(query.get("event_limit", ["100"])[0])
+        return 200, session.tui_snapshot(offline, limit)
 
     if method == "GET" and path == "/api/resource_count":
         from qlab.core.objective import mvsk_qubo_resource_count

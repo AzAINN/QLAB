@@ -175,6 +175,54 @@ def test_headless_shell_has_no_header_and_switches_context():
     asyncio.run(run())
 
 
+class AuditClient(StubClient):
+    def get(self, path, **params):
+        snap = _snapshot()
+        snap["decisions"] = [{
+            "decision_id": "dec-pass-1",
+            "created_at": "2026-07-17T14:30:00+00:00",
+            "kind": "rebalance_gate",
+            "choice": {"regime": "calm"},
+            "rationale": "within mandate",
+            "challenger_view": "turnover is acceptable given the calm regime",
+            "reflection": "realized drawdown matched the projection",
+            "realized_outcome": {"drawdown": 0.01},
+            "verdict": {"verdict": "PASS", "source": "deterministic",
+                        "reasons": ["turnover within cap", "weights within mandate"]},
+        }]
+        snap["system"]["data_source"] = "synthetic"
+        snap["system"]["data_age_days"] = 0
+        return snap
+
+
+def test_audit_view_surfaces_verdict_reflection_and_data_token():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(AuditClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 44)) as pilot:
+            await pilot.pause(0.2)
+            table = app.query_one("#audit-table")
+            labels = [str(column.label) for column in table.columns.values()]
+            assert "verdict" in labels
+            assert "reflection" in labels
+
+            row = [str(cell) for cell in table.get_row("dec-pass-1")]
+            assert any("PASS" in cell for cell in row)                 # PASS row
+            assert any("realized drawdown" in cell for cell in row)    # reflection
+
+            # selected-row detail surfaces challenger_view + verdict reasons
+            app._render_audit_detail("dec-pass-1")
+            strip = app.query_one("#event-strip").content
+            assert "turnover is acceptable" in strip
+            assert "turnover within cap" in strip
+
+            # status strip carries the one DATA provenance token
+            assert "DATA synthetic·0d" in app.query_one("#system-status").content
+
+    asyncio.run(run())
+
+
 def test_dry_rebalance_routes_through_owner_api():
     from qlab.tui.app import QlabTui
 

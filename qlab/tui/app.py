@@ -37,6 +37,21 @@ _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 _VIEWS = ("desk", "market", "research", "audit")
 
 
+def _verdict_cell(verdict: dict | None) -> str:
+    """Compact referee token for the audit table: 'PASS·source' or '—'."""
+    if not verdict:
+        return "—"
+    label = str(verdict.get("verdict", "")).upper() or "—"
+    source = str(verdict.get("source", "")).strip()
+    return f"{label}·{source}" if source else label
+
+
+def _reflection_cell(reflection: str | None) -> str:
+    """First ~50 chars of a decision's reflection, 'pending' when unresolved."""
+    text = str(reflection or "").strip()
+    return text[:50] if text else "pending"
+
+
 class PaperConfirmScreen(ModalScreen[bool]):
     """Explicit confirmation for the only mutating action exposed by v1."""
 
@@ -310,6 +325,7 @@ class QlabTui(App[None]):
         self._event_ids: set[str] = set()
         self._runs_signature: tuple = ()
         self._audit_signature: tuple = ()
+        self._audit_decisions: dict[str, dict] = {}
         self._claude_buffer = ""
         self._claude_saw_delta = False
         self._agent_focus = False
@@ -370,7 +386,7 @@ class QlabTui(App[None]):
     def on_mount(self) -> None:
         self.query_one("#runs-table", DataTable).add_columns("run", "kind", "created")
         self.query_one("#audit-table", DataTable).add_columns(
-            "time", "object", "state", "detail")
+            "time", "object", "state", "verdict", "reflection", "detail")
         universe = self.query_one("#universe", ListView)
         universe.index = 0
         self._render_nav()
@@ -588,36 +604,73 @@ class QlabTui(App[None]):
             f"{len(decisions)} decisions   ·   {len(plans)} proposals   ·   {len(orders)} orders"
         )
         rows = []
+        self._audit_decisions = {}
         for decision in decisions:
             choice = decision.get("choice", {})
             detail = choice.get("regime") or choice.get("arm") or decision.get("rationale", "")
+            key = str(decision.get("decision_id", ""))
+            self._audit_decisions[key] = decision
             rows.append((
                 decision.get("created_at", ""), "decision", decision.get("kind", ""),
-                str(detail)[:48], decision.get("decision_id", ""),
+                _verdict_cell(decision.get("verdict")),
+                _reflection_cell(decision.get("reflection")),
+                str(detail)[:48], key,
             ))
         for plan in plans:
             rows.append((
                 plan.get("created_at", ""), "proposal", plan.get("state", ""),
+                "—", "—",
                 f"decision {str(plan.get('decision_id', ''))[:10]}", plan.get("plan_id", ""),
             ))
         for order in orders:
             rows.append((
                 order.get("created_at", ""), "paper order", order.get("state", ""),
+                "—", "—",
                 f"{order.get('side', '')} {order.get('ticker', '')} ${order.get('notional', 0):,.2f}",
                 order.get("client_order_id", ""),
             ))
         rows.sort(key=lambda row: row[0], reverse=True)
-        signature = tuple((row[4], row[0], row[2]) for row in rows)
+        signature = tuple((row[6], row[0], row[2], row[3], row[4]) for row in rows)
         if signature == self._audit_signature:
             return
         self._audit_signature = signature
         table = self.query_one("#audit-table", DataTable)
         table.clear()
-        for created, obj, state, detail, key in rows[:80]:
+        for created, obj, state, verdict_cell, reflection_cell, detail, key in rows[:80]:
             table.add_row(
-                str(created)[5:19].replace("T", " "), obj, str(state), str(detail),
+                str(created)[5:19].replace("T", " "), obj, str(state),
+                verdict_cell, reflection_cell, str(detail),
                 key=str(key),
             )
+
+    def _render_audit_detail(self, key: str) -> None:
+        """Surface a selected decision's challenger case and verdict reasons.
+
+        The quiet workstation has no detail pane, so the one-line event strip
+        carries the governance context on row selection — no banner, no flood.
+        """
+        decision = self._audit_decisions.get(str(key))
+        if not decision:
+            return
+        challenger = str(decision.get("challenger_view") or "").strip() or "no challenge recorded"
+        verdict = decision.get("verdict") or {}
+        label = str(verdict.get("verdict", "—")).upper() if verdict else "—"
+        reasons = verdict.get("reasons") or []
+        reason_text = "; ".join(str(reason) for reason in reasons) if reasons else "—"
+        line = (
+            f"{str(key)[:10]}  challenger: {challenger}  ·  "
+            f"verdict {label}: {reason_text}"
+        )
+        if len(line) > 200:
+            line = line[:199] + "…"
+        self.query_one("#event-strip", Static).update(escape(line))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "audit-table" or event.row_key is None:
+            return
+        key = event.row_key.value
+        if key:
+            self._render_audit_detail(str(key))
 
     def _render_agents(self) -> None:
         agents = self.snapshot.get("agents", []) if self.snapshot else []
@@ -656,8 +709,14 @@ class QlabTui(App[None]):
         claude = "CLAUDE READY" if system.get("claude_available") else "CLAUDE —"
         if self.claude.running:
             claude = "CLAUDE WORKING"
+        data_source = str(system.get("data_source", "none"))
+        age = system.get("data_age_days")
+        if data_source in ("none", "") or age is None:
+            data_token = "DATA none"
+        else:
+            data_token = f"DATA {data_source}·{age}d"
         self.query_one("#system-status", Static).update(
-            f"PAPER · {source}/DAILY · {mcp} · {claude}")
+            f"PAPER · {source}/DAILY · {mcp} · {claude} · {data_token}")
 
     # -- events -----------------------------------------------------------
     def _ingest_events(self, events_: list[dict]) -> None:

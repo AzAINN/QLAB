@@ -123,6 +123,34 @@ def snapshot(
     return snap
 
 
+def cached_provenance(
+    tickers: list[str],
+    start: str | date = "2008-01-01",
+    end: str | date | None = None,
+    *,
+    cache_dir: Path | None = None,
+) -> tuple[str, int] | None:
+    """Network-free provenance for an already-cached price panel.
+
+    Reads only the on-disk cache — never fetches, never synthesizes — so a
+    status poll can surface data source and freshness without ever risking a
+    hung network call. Returns ``(source, age_days)`` where ``source`` is the
+    panel's recorded provenance ("yfinance"/"synthetic") and ``age_days`` is
+    whole days from the last cached bar to today. Returns ``None`` when no
+    cache exists for this panel (the caller renders that as "no data").
+    """
+    end = end or date.today().isoformat()
+    cache_dir = cache_dir or _CACHE_DIR
+    cached = _read_cache(cache_dir / f"{_cache_key(tickers, start, end)}.parquet")
+    if cached is None or cached.empty:
+        return None
+    source = cached.attrs.get(
+        "source", "synthetic" if cached.attrs.get("synthetic") else "yfinance")
+    last = cached.index[-1]
+    last_date = last.date() if hasattr(last, "date") else _as_date(str(last))
+    return str(source), max(0, (date.today() - last_date).days)
+
+
 # ---------------------------------------------------------------------------
 # yfinance adapter (lazy import — optional dependency)
 # ---------------------------------------------------------------------------

@@ -82,3 +82,22 @@ def test_backtest_trial_count_counts_distinct_arms(reg):
     reg.log_backtest("run1", "A2", {"sharpe": 0.6})
     reg.log_backtest("run2", "A1", {"sharpe": 0.7})   # same arm, different run
     assert reg.backtest_trial_count() == 2
+
+
+def test_verdicts_for_returns_latest_verdict_per_decision(reg):
+    dec = Decision(as_of=date(2022, 6, 30), kind="rebalance_gate",
+                   choice={"targets": {"GLD": 1.0}}, rationale="calm regime")
+    did = reg.log_decision(dec)
+    # two verdicts on the same decision; the second (higher seq) must win
+    reg.log_verdict(did, "FAIL", ["turnover too high"],
+                    source="deterministic", targets={"GLD": 1.0})
+    reg.log_verdict(did, "PASS", ["within mandate"],
+                    source="deterministic", targets={"GLD": 1.0})
+
+    out = reg.verdicts_for([did])
+    assert out[did]["verdict"] == "PASS"                 # latest wins (seq DESC)
+    assert out[did]["reasons"] == ["within mandate"]      # reasons parsed to list
+    assert out[did]["source"] == "deterministic"
+
+    assert reg.verdicts_for([]) == {}                     # empty input → {}
+    assert reg.verdicts_for(["unknown"]) == {}            # no verdict → absent

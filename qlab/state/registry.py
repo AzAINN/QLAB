@@ -384,6 +384,33 @@ class Registry:
                        "ORDER BY seq DESC LIMIT 1", [decision_id])
         return r[0] if r else None
 
+    def verdicts_for(self, decision_ids: list[str]) -> dict[str, dict]:
+        """Latest verdict per decision id, for surfacing on the audit trail.
+
+        Returns ``{decision_id: {"verdict", "source", "reasons"}}`` for every
+        id that has a verdict; decisions with none are simply absent. Latest is
+        the highest ``seq`` (monotonic — timestamps can collide in a tight
+        referee loop). Empty input short-circuits without touching the DB.
+        """
+        if not decision_ids:
+            return {}
+        placeholders = ",".join("?" for _ in decision_ids)
+        rows = self._rows(
+            f"SELECT * FROM verdicts WHERE decision_id IN ({placeholders}) "
+            f"ORDER BY seq DESC",
+            list(decision_ids),
+        )
+        out: dict[str, dict] = {}
+        for row in rows:
+            did = row["decision_id"]
+            if did not in out:  # first row per id = highest seq = latest
+                out[did] = {
+                    "verdict": row["verdict"],
+                    "source": row["source"],
+                    "reasons": row["reasons"],
+                }
+        return out
+
     # -- events -------------------------------------------------------------
     def record_event(self, kind: str, payload: dict) -> str:
         eid = uuid.uuid4().hex[:16]

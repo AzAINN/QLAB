@@ -151,6 +151,8 @@ class UISession:
 
     def system_status(self, offline: bool) -> dict:
         """Health and authority facts shown quietly at the bottom edge."""
+        from qlab.core import data
+
         config_path = _REPO_ROOT / ".mcp.json"
         servers: list[str] = []
         if config_path.exists():
@@ -160,6 +162,8 @@ class UISession:
             except Exception:
                 servers = []
         proxy_available = importlib.util.find_spec("fastmcp") is not None
+        # Cache-only provenance: never a network fetch from a status poll.
+        provenance = data.cached_provenance(self.mandate.universe_whitelist)
         return {
             "mode": "paper",
             "offline": offline,
@@ -173,6 +177,8 @@ class UISession:
                 "agent authority is intentionally propose-only; paper execution "
                 "requires explicit human confirmation"
             ),
+            "data_source": provenance[0] if provenance else "none",
+            "data_age_days": provenance[1] if provenance else None,
         }
 
     def tui_snapshot(self, offline: bool, event_limit: int = 100) -> dict:
@@ -180,11 +186,16 @@ class UISession:
         from qlab.core.objective import mvsk_qubo_resource_count
 
         plans = self.registry.list_plans(20)
+        decisions = self.registry.recent_decisions(limit=30)
+        verdicts = self.registry.verdicts_for(
+            [decision["decision_id"] for decision in decisions])
+        for decision in decisions:
+            decision["verdict"] = verdicts.get(decision["decision_id"])
         return {
             "portfolio": self.portfolio(offline),
             "market": self.market(offline),
             "agents": self.agents(),
-            "decisions": self.registry.recent_decisions(limit=30),
+            "decisions": decisions,
             "runs": self.registry.list_runs(30),
             "plans": plans,
             "orders": self.registry.list_orders(50),

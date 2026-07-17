@@ -78,6 +78,42 @@ def test_tui_snapshot_is_provenance_first(session):
     }
 
 
+def test_tui_snapshot_surfaces_verdicts_and_data_provenance(session):
+    from datetime import date
+
+    from qlab.core.types import Decision
+
+    dec = Decision(as_of=date.today(), kind="rebalance_gate",
+                   choice={"targets": {"GLD": 1.0}}, rationale="calm regime",
+                   challenger_view="turnover is defensible under stress")
+    did = session.registry.log_decision(dec)
+    session.registry.log_verdict(did, "PASS", ["within mandate"],
+                                 source="deterministic", targets={"GLD": 1.0})
+
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+
+    by_id = {d["decision_id"]: d for d in snap["decisions"]}
+    assert by_id[did]["verdict"]["verdict"] == "PASS"
+    assert by_id[did]["verdict"]["reasons"] == ["within mandate"]
+    assert by_id[did]["verdict"]["source"] == "deterministic"
+    # challenger_view already rides along on the SELECT * decision row
+    assert by_id[did]["challenger_view"] == "turnover is defensible under stress"
+
+    # provenance is populated (tui_snapshot warms the panel cache first) and
+    # never triggers a network fetch
+    assert snap["system"]["data_source"] in {"synthetic", "yfinance"}
+    assert isinstance(snap["system"]["data_age_days"], int)
+    assert snap["system"]["data_age_days"] >= 0
+
+
+def test_system_status_reports_no_cache_provenance(session):
+    # a bare status poll with no warmed cache must not fetch and must say "none"
+    status = session.system_status(offline=True)
+    assert status["data_source"] == "none"
+    assert status["data_age_days"] is None
+
+
 def test_events_endpoint_supports_initial_window(session):
     session.registry.record_event("one", {})
     session.registry.record_event("two", {})

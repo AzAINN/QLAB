@@ -1,0 +1,417 @@
+# Quant Lab — Master Brief
+
+**Purpose:** context pack + brainstorming brief for Claude Code. Compiles the Fang call, the architecture work, the TradingAgents teardown, the Qiskit/IBM constraints, and the open questions into one document.
+**Status markers:** `[DECIDED]` = settled, don't relitigate. `[OPEN]` = needs a call. `[EXPLORE]` = brainstorm target.
+**Date:** 2026-07-13
+
+---
+
+## 0. STOP — three findings that reshape the plan
+
+These came out of verifying the challenge rules and the Qiskit stack. Read before anything else.
+
+### 0.1 The challenge requires **IBM Bob**, not Qiskit
+
+The IBM AI Builders Challenge (BeMyApp/IBM SkillsBuild) rules state IBM Bob is the **required primary development tool** and **"will be the core component of all project submissions."** Other IBM tech (watsonx, Granite, Qiskit) is explicitly *optional additional* tech. Qiskit is **not** the IBM tie-in — Bob is.
+
+This is good news architecturally. Bob is an agentic SDLC platform with:
+- persona-based modes and **subagents** (own context, tools, skills; parallel; background)
+- **BobShell** — CLI for interactive sessions, script automation, CI
+- **MCP integrations** — external tools via Model Context Protocol
+- human-in-the-loop governance, policy enforcement, and a self-documenting audit trail
+- multi-model routing (frontier models incl. Claude, plus Granite SLMs)
+
+That feature set is a near 1:1 match for the Claude Code design already drafted. **The MCP servers are the product; the orchestrator is swappable.** Consequence: `[DECIDED]` agent definitions must be **orchestrator-agnostic** — declarative `agents/*.md` as source of truth, thin adapters emitting Claude Code `.claude/agents/` *and* Bob personas. Build with Claude Code if preferred; the *submitted system* runs on Bob.
+
+There's also a narrative gift here. **Bob governs how the software is built. The lab's referee governs how the research is trusted. Same principle, two layers.** For a challenge whose entire pitch is *governed* agentic delivery, that is an unusually tight rubric fit.
+
+### 0.2 Deadlines are July 31 and August 31, and the Wildcard is open in both
+
+Today is **2026-07-13**. Challenge months: July (due Jul 31) and August (due Aug 31). One solution per month; each month you target either that month's theme *or* the Wildcard. **Wildcard theme: "Intelligent Systems for the Future of Work."**
+
+An agentic quant research desk *is* an intelligent system for the future of work. The theme fits without contortion.
+
+`[DECIDED]` **Target August 31 for the full system.** `[OPEN]` **Ship a July 31 entry as the M0–M2 classical vertical slice?** Two shots at the same prize pool from one codebase; the July slice is exactly the resilience milestone already planned (classical-only, agent-operated, no quantum hardware). 18 days is tight but M0–M2 was scoped at ~11–14 days.
+
+Also required: a SkillsBuild learning activity, a GitHub repo, a project page. Judging: technical execution, innovation, challenge fit, implementation, feasibility. Eligibility is restricted (enrolled university student, 18+, US / Canada ex-Quebec / UK / India) — **verify before investing.**
+
+### 0.3 Qiskit **cannot** solve the MVSK objective — and that is the project's headline result
+
+Do not try to force it. Count the resources instead, because the count *is* the argument.
+
+To put degree-4 MVSK on a gate-model machine you must (a) binarize the weights and (b) quadratize the resulting pseudo-Boolean polynomial into an Ising Hamiltonian.
+
+- n=7 assets, r=4 resolution bits → 28 binary variables for the weight vector.
+- Cokurtosis has C(10,4) = **210** unique entries; each expands to r⁴ = 256 degree-4 binary monomials → **~53,760** degree-4 monomials. Coskewness (C(9,3)=84 × r³=64) adds ~5,376 degree-3 monomials.
+- Efficient quadratization introduces one auxiliary per distinct binary *pair*: C(28,2)+28 = **406 auxiliary qubits**, each requiring an AND-gadget penalty whose weight must dominate the objective (crushing the objective's dynamic range against hardware noise).
+- **Total: ~434 logical qubits, dense couplings, 406 penalty gadgets** — on 156-qubit heavy-hex Heron hardware. Infeasible, and not marginally so.
+
+Dirac-3 takes the same degree-4 polynomial in **7 continuous variables**, natively, with all-to-all connectivity and a native sum-to-R constraint that *is* the long-only fully-invested budget.
+
+> **7 continuous variables vs ~434 logical qubits.** That single line is the entire quantum-architecture argument. It is only credible because you *built the encoder and counted*, rather than asserting it.
+
+So Qiskit's role is not "the MVSK solver." Qiskit's role is (a) the **measured baseline that proves the architectural claim**, and (b) the solver for the parts of the pipeline that are **genuinely binary**. See §5.
+
+---
+
+## 1. The thesis, in one paragraph
+
+`[DECIDED]` Quantum is applied only where its structure genuinely fits — **portfolio weight optimization and higher-moment risk modeling** — not as a price oracle. The LLM is applied only where **judgment** is genuinely required — estimation windows, shrinkage intensity, regime calls, experiment design — never where a number can be computed. Deterministic code owns **rigor** — constraint enforcement, look-ahead tripwires, trial counting, mandate limits. Three layers, hard boundaries, everything logged.
+
+**Positioning line (use this):** *TradingAgents puts the LLM where the alpha is. We put the LLM where the judgment is, and machines where the numbers are.*
+
+---
+
+## 2. Two products, one substrate
+
+```
+                        ┌──────────────────────────────────────┐
+                        │  ORCHESTRATOR  (IBM Bob / BobShell)  │
+                        │  personas · subagents · HITL · audit  │
+                        └───────────────┬──────────────────────┘
+                                        │ MCP
+                 ┌──────────────────────┴──────────────────────┐
+                 │                                             │
+     ┌───────────▼────────────┐                   ┌────────────▼───────────┐
+     │     quant-lab (MCP)    │                   │   quant-trader (MCP)   │
+     │   THE RESEARCH LAB     │                   │   THE AUTOPILOT        │
+     │  · data & universe     │                   │  · portfolio state     │
+     │  · moments & regimes   │                   │  · propose_rebalance   │
+     │  · objective & solve   │                   │  · execute_plan        │
+     │  · backtest & eval     │                   │  · risk_report/halt    │
+     │  · registry & report   │                   │  NO raw order tool     │
+     └───────────┬────────────┘                   └────────────┬───────────┘
+                 │                                             │
+                 └──────────────┬──────────────────────────────┘
+                                │
+        ┌───────────────────────▼────────────────────────┐
+        │  qlab.core  (pure Python quant library)        │
+        │  qlab.solvers  (adapter registry)              │
+        │  qlab.state  (DuckDB registry + artifacts)     │
+        └───────────────────────┬────────────────────────┘
+                                │
+     ┌──────────┬───────────────┼───────────────┬──────────────┐
+     ▼          ▼               ▼               ▼              ▼
+  SLSQP /   Scenario-CVaR   Dirac-3        Qiskit/QAOA      mock
+  PT / HRP     (LP)      (continuous HUBO) (binary QUBO)   (dev+demo)
+  (classical)              [QCI]           [IBM QPU]
+```
+
+**The key insight tying lab → autopilot:** stepped-mode backtest and live trading are **the same loop with a different clock**. In the lab, the server advances a historical `as_of` and `commit_weights` writes to a simulated book. Live, the clock is real and the commit routes to a broker. Same MCP tools, same decision log, same referee. The backtest *is* the rehearsal; you promote it by swapping the time source and adding an execution gateway.
+
+### 2.1 Component inventory
+
+| Component | Owns | Never does |
+|---|---|---|
+| **Orchestrator** (Bob) | Planning, delegation, synthesis, human dialogue | Compute numbers, place orders |
+| **`qlab.core`** | All math: moments, shrinkage, objectives, backtest, metrics | Know about MCP, agents, or brokers |
+| **`qlab.solvers`** | One `Solver` protocol, N implementations | Know about the registry or agents |
+| **`qlab.state`** | DuckDB registry + content-addressed artifacts | Contain business logic |
+| **`quant-lab`** | Validation, guardrails, jobs, registry writes | Exercise judgment |
+| **`quant-trader`** | Mandate enforcement, order plans, broker I/O | Expose a raw order tool |
+| **Subagents** | Judgment, with logged rationale | Touch data directly or bypass guards |
+
+### 2.2 Five invariants `[DECIDED]`
+
+1. **Ref-passing, never data-passing.** Tools return IDs + diagnostics. No matrices, tensors, or price panels ever enter model context.
+2. **Server is referee of facts; agent is author of choices.** Hard constraints in code and unarguable. Judgment calls made by agents and logged.
+3. **Everything is a run.** Content-hashed spec → registry row. Gives idempotent caching, provenance, and deflated-Sharpe trial counting *as a schema feature*.
+4. **One polynomial source of truth.** The objective is built once as a coefficient tensor and compiled to *(a)* a scipy callable, *(b)* the Dirac-3 encoding, *(c)* the Qiskit `QuadraticProgram`/HUBO encoding. Property-tested for agreement. Any divergence between arms would mean you're measuring encoding drift, not solver quality.
+5. **Async by default.** Quantum submissions and backtests return `job_id`; agents poll.
+
+### 2.3 The two operating modes `[DECIDED]`
+
+| Mode | Who drives | Produces | Why it exists |
+|---|---|---|---|
+| **Batch** | Agent *authors* a declarative YAML spec; engine executes it | **The submission numbers** — deterministic, reproducible from the repo | Headline results must survive `git clone && qlab run specs/ablation_v1.yaml` |
+| **Stepped** | Agent in the rebalance loop; **server advances the clock** | **The demo narrative** — a live decision feed | Look-ahead is structurally impossible, which is what makes agent judgment honest |
+
+Conflating them makes the numbers unreproducible *and* the demo dishonest. TradingAgents' README openly concedes its results aren't reproducible; batch mode is the direct answer to that.
+
+---
+
+## 3. TradingAgents teardown — what to steal, what to reject
+
+**What it is:** LangGraph multi-agent framework mirroring a trading firm. ~90k stars. Analyst Team (Fundamentals, Sentiment, News, Technical) → Researcher Team (structured bull/bear debate) → Trader → Risk Management → Portfolio Manager (approves/rejects → simulated exchange).
+
+**Why it's viable (the transferable lessons):**
+
+1. **Role decomposition maps to a legible org chart.** Humans understand it in five seconds. Enormous demo value.
+2. **The approval gate is architectural, not advisory.** The Portfolio Manager approves/rejects *before* the exchange. Governance lives in the graph.
+3. **Reflection loop with realized-outcome feedback.** After a run resolves, it fetches the realized return (raw *and* alpha vs SPY), generates a reflection, and injects recent same-ticker decisions plus cross-ticker lessons into the next Portfolio Manager prompt. The decision log is a *learning* artifact, not just an audit trail.
+4. **Structured outputs** (Pydantic) on the decision-making agents.
+5. **Checkpoint/resume** — LangGraph state snapshots per node, per-ticker SQLite.
+6. **Honest reproducibility disclaimer** — the README says outright that results vary and it should be treated as a research scaffold, not a strategy.
+
+**Why it's the wrong shape for us:**
+
+- It's **LLM-as-alpha-source.** Sentiment, news, and fundamentals go in; the LLM makes the call. No risk model, no optimizer, no statistical validation. The maintainers say so.
+- **Bull/bear debate on a stock has no ground truth and no convergence criterion.** It's structured vibes. Debate is only valuable where judgment is genuinely underdetermined.
+- **News/social inputs are a prompt-injection surface** for anything autonomous. An LLM trader reading Reddit is an LLM trader that can be told what to buy.
+
+### Steal list `[DECIDED]`
+
+| Steal | Our version |
+|---|---|
+| **Reflection loop** ← *the single best component* | Keyed on `decision_id`. When a rebalance period resolves, compute the realized outcome **of the judgment, not the portfolio** ("did shortening the window to 126d actually reduce realized vol?" "did the stress-regime call pay?"), write a reflection, inject prior reflections into the moments-analyst's context at the next rebalance. Turns the audit log into a learning loop. |
+| **Approval gate** | Referee subagent (read-only) must PASS before results reach the human; `propose_rebalance` → `execute_plan` two-phase before any order. |
+| **Structured outputs** | Pydantic schema enforced on `log_decision`. Undocumented judgment cannot enter a backtest. |
+| **Adversarial debate — *relocated*** | Put it where judgment is genuinely underdetermined: **the window/shrinkage/regime call** — i.e. exactly Fang's bottleneck. A `challenger` subagent argues the opposite case; moments-analyst must respond; the decision records both sides. **Where there's ground truth (objective value), no debate — just solve.** |
+| **Org-chart legibility** | Keep the roles nameable and few. This *is* the "future of work" narrative. |
+
+### Reject list `[DECIDED]`
+
+- News / sentiment / social analysts (injection surface, no validated edge, drags us back into return prediction).
+- LLM-generated trade calls of any kind.
+- Per-ticker stock picking (we're cross-asset ETF allocation).
+- Checkpoint/resume as designed — our content-hashed registry is strictly stronger.
+
+---
+
+## 4. What the Fang call settled `[DECIDED]`
+
+| Decision | Rationale |
+|---|---|
+| **Universe: ~7 cross-asset ETFs**, not sector SPDRs | ACWI, BNDW (or AGG+BNDX), GSG, IGF, GLD, VNQ/RWO, EMB. Sector SPDRs are all equity beta — a wall of positive correlations. Cross-asset gives genuinely **mixed and regime-flipping correlation signs**, which is the *frustrated landscape* that makes the quantum-tunneling argument physical rather than decorative. |
+| **Benchmark: 60/40** | Clean institutional comparison. Practitioners recognize it instantly. |
+| **Drop cardinality at the weight layer** | With ~7 assets all intended for inclusion, there's nothing to select. Continuous weights map *natively* onto Dirac-3. (Cardinality comes back at the **selection** layer — see §5.2. That's where it's genuinely binary.) |
+| **Risk-only MVSK — no expected-return term in the primary objective** | Fang: return estimation is the hardest open problem and past returns are poor predictors. Quantum doesn't touch it. So minimize variance, penalize cokurtosis, reward coskewness — a degree-4 polynomial in weights with **no μ anywhere**. This pre-empts the strongest critique ("your alpha is just your return forecast") and still fully exercises the HUBO. A max-utility variant with identical shrunk-historical μ across *all* arms is secondary. |
+| **Two separate claims, tested at different scales** | **Objective claim** (higher moments help) tested at n=7. **Solver claim** (Dirac-3 finds better optima) tested at 15–19 ETFs where classical multistart genuinely struggles. At n=7 classical multistart will probably *tie* Dirac-3 — say so up front. |
+
+**Fang's three bottlenecks, and where each lands:**
+
+1. *Higher moments* → the MVSK objective. This is the quantum slot.
+2. *Covariance window selection* → **the agent slot.** It's a judgment problem with no closed-form answer, which is precisely what the LLM layer is for. This is the demo.
+3. *Expected returns* → **deliberately out of scope.** Named as such, loudly.
+
+---
+
+## 5. Quantum: three modalities, three jobs `[DECIDED]` + `[EXPLORE]`
+
+### 5.1 Dirac-3 — the continuous MVSK solver
+
+Degree-5 native polynomial support, all-to-all connectivity, continuous variables, native sum-to-R constraint. Takes the MVSK objective in **7 continuous variables** with no binarization, no quadratization, no penalty gadgets. This is the structural fit. `[OPEN]` **Confirm the variable ceiling at degree 4** (memory says 19 at degree 5) — this gates whether the multi-period formulation in §7.3 is on the table.
+
+### 5.2 Qiskit / QAOA — the genuinely binary slots
+
+`qiskit-optimization` (0.7.x, community-maintained) is alive and supports V2 primitives, QAOA, SamplingVQE, `NumPyMinimumEigensolver`, GroverOptimizer, ADMM, and the `IntegerToBinary`/`InequalityToEquality` converters. `qiskit-finance` has a `PortfolioOptimization` application — note its output is a **binary selection vector**, not continuous weights. That tells you what the gate-model formulation actually is.
+
+**Slot Q-A: Asset selection QUBO — the real gate-model slot.**
+19 candidate ETFs → **19 qubits**. Relevance/redundancy QUBO (diagonal = standalone diversification value; off-diagonal = redundancy via correlation or mutual information) + cardinality penalty (select exactly k≈7). Runs comfortably on `ibm_kingston` (Heron r2, 156q). **`NumPyMinimumEigensolver` gives the exact ground state at 19 qubits** (2¹⁹ ≈ 524k states — enumerable), so you can report a **rigorous QAOA optimality gap** rather than a vibe.
+
+This elegantly restores cardinality *at the layer where it's genuinely binary*, and it produces the pipeline that is the submission's headline architecture:
+
+> **19 ETFs → [QAOA selection QUBO, IBM QPU] → k≈7 → [Dirac-3 continuous MVSK] → weights → [broker]**
+>
+> Each machine does the job its physics is suited to. Gate-model does discrete selection. Entropy-computing does continuous higher-order optimization. Classical does everything else.
+
+**Slot Q-B: Discretized MV via QAOA — the reality-check arm.**
+n=7, r=3 → 21 qubits, degree-2 (covariance only). The textbook qiskit-finance formulation. Report **two gaps**: QAOA-vs-exact (how good is the solver) and best-discrete-vs-continuous-optimum (how much the discretization itself costs you). Both are real, measurable numbers, and together they are the empirical basis for "why not gate-model for the weights."
+
+**Slot Q-C: The 434-qubit encoder — build it, count it, don't run it.**
+Write the MVSK→QUBO→Ising encoder in Qiskit. Emit the resource count. That artifact *is* §0.3's argument, made reproducible. This is a research contribution, not a cop-out.
+
+**Hardware budget reality `[OPEN]`:** IBM Quantum **Open Plan = 10 minutes per 28-day window**, free, on real 100+ qubit hardware (Heron r2 `ibm_kingston` is now available to Open users). Users who log 20 minutes in a 12-month period can opt into a **one-time 180-minute/12-month promotion**. Qiskit **Functions** (including Global Data Quantum's dynamic Portfolio Optimizer) are **Premium/Flex-gated** — not available on Open. Plan accordingly.
+
+> **Practical pattern that fits a 10-minute budget:** train QAOA parameters on Aer (noiseless simulator), then sample only the *final optimized circuit* on hardware. Report the simulator-vs-hardware solution-quality gap as a **noise measurement**. Standard, honest, and cheap. Use Qiskit Runtime **Sessions** to amortize queue overhead.
+
+### 5.3 D-Wave — optional, degree-2 only `[DECIDED]`
+
+If used at all, restrict to the quadratic MV baseline. Quadratizing a quartic for a QUBO annealer explodes auxiliaries and embedding — it would test the *encoding*, not the solver. Dirac-3's native HUBO is the differentiator; keep that story clean.
+
+
+---
+
+## 6. The experiment matrix — the spine of the whole project
+
+Everything hangs on holding all else constant and varying one thing. Arms B0–A3 are cheap (classical, minutes to run). A4 needs QCI. Q-A/Q-B need IBM QPU minutes.
+
+| Arm | Objective | Solver | What it tests |
+|---|---|---|---|
+| **B0** | 60/40 (ACWI/BNDW) | — | Institutional benchmark |
+| **B1** | Equal-weight (1/N) | — | Naive benchmark. **1/N is famously hard to beat** — respect it |
+| **B2** | **HRP** (Hierarchical Risk Parity) | clustering | **The real bar.** HRP beats MV out-of-sample precisely *because* MV is estimation-error-fragile. If MVSK can't beat HRP, there is no result |
+| **B3** | Risk parity (ERC) | classical | Practitioner benchmark |
+| **A1** | Min-variance, Ledoit–Wolf Σ | SLSQP | Classical MV baseline |
+| **A2** | **Scenario-CVaR** (Rockafellar–Uryasev) | **LP** | **The honest rival to the entire thesis** — see below |
+| **A3** | MVSK | SLSQP multistart + parallel tempering | **Objective claim**: do higher moments help? |
+| **A4** | MVSK | **Dirac-3** | **Solver claim**: does the hardware find better optima? |
+| **Q-A** | Selection QUBO (19 → k) | **QAOA, IBM QPU** | The genuine gate-model slot; feeds A4 |
+| **Q-B** | Discretized MV | **QAOA, IBM QPU** | Gate-model reality check + optimality gap vs exact |
+| **Q-C** | Selection QUBO → MVSK | QAOA + Dirac-3 | **The hybrid pipeline — the headline system** |
+
+### 6.1 Arm A2 deserves its own paragraph
+
+Fang described the practitioner alternative to mean-variance: **simulate or iterate through the full historical return paths** rather than compressing them into mean and covariance. That is scenario-based CVaR optimization — and it is a **linear program**. Quantum adds nothing to it.
+
+It is also the **falsifiable rival to the core thesis.** Co-moment tensors are a *lossy compression* of the empirical return distribution. Scenario-CVaR uses the distribution directly. If A2 beats A3/A4 out-of-sample, the moment-tensor approach isn't buying anything and the whole quantum framing is decoration on a worse objective.
+
+**Run it. Report it either way.** Building the arm that could kill your thesis is what makes the submission credible instead of self-serving — and it's the first thing a State Street quant will ask about.
+
+### 6.2 Metrics `[DECIDED]`
+
+Ann. return/vol, Sortino, max DD, CVaR-95, turnover, **realized skew and kurtosis of the portfolio's own return series** (the direct test of the MVSK claim — did optimizing tail shape actually deliver tail shape OOS?), deflated Sharpe using the registry's trial count, stationary block-bootstrap CIs. ~70 quarterly rebalance points from 2008 is a **small sample** — say so, and report intervals, not point estimates.
+
+---
+
+## 7. Gaps and additive components `[EXPLORE]`
+
+Ranked by value-per-effort.
+
+### 7.1 ★ Options-implied higher moments — the biggest additive idea
+
+**The connection between derivatives and this project isn't pricing. It's information.**
+
+Bakshi–Kapadia–Madan (2003) gives **model-free implied volatility, skewness, and kurtosis** from a strip of OTM option prices. These are **forward-looking**. Fang's verdict was that past returns are poor predictors — but we already sidestepped returns entirely and are optimizing **risk shape**. And the options market prices *exactly the quantities our objective cares about*, forward-looking, every day.
+
+Liquid ETF option chains exist for SPY, EEM, GLD, TLT, and commodity proxies. Uses:
+
+- **Shrinkage targets / tilts** for the marginal moments inside the co-moment tensors — the strongest use.
+- **Regime signal** — implied skew steepening as a stress indicator, cheaper and faster than realized-vol thresholds.
+- **Validation** — does the historical cokurtosis tensor imply marginal kurtosis consistent with what the option market is actually charging?
+
+**The honest gap that must be stated:** BKM gives **marginals**, not **co-moments**. Lifting implied marginals into a co-moment tensor needs a coupling assumption — e.g. preserve the historical co-moment *structure* while rescaling to match implied marginals. (This is the higher-moment analogue of combining an implied-vol surface with a historical correlation matrix — a standard practitioner move.) Defensible, and an honest open modeling question. Ask Fang about it directly; it's exactly the kind of question that gets a real answer.
+
+This is also a natural **agent judgment slot**: how much weight on implied vs realized, and how does that change by regime?
+
+`[EXPLORE]` Implied correlation (CBOE COR-style: index IV vs weighted constituent IVs) for forward-looking correlation. Harder for a custom cross-asset basket — no index option on your basket — but pairwise proxies may work. Stretch.
+
+### 7.2 ★ Better estimators — where the ML actually pays
+
+The return-prediction ban is `[DECIDED]`. **No LSTM, no transformer, no sentiment, no news signals.** State the ban in the submission and give the reason. What's left is where ML genuinely helps:
+
+| Method | Why |
+|---|---|
+| **HRP / NCO** (López de Prado) | Not just a benchmark — a *method*. Clustering-based allocation robust to estimation noise |
+| **RMT / Marchenko–Pastur denoising** | Clean the covariance eigenspectrum. Standard practitioner tool, cheap, real |
+| **Nonlinear shrinkage** (Ledoit–Wolf 2020) | Strictly better than linear LW |
+| **Structured shrinkage for co-moments** (Martellini–Ziemann style) | **The hard technical task of the project.** Sample cokurtosis is horrifically noisy. Shrink toward a 1-factor target, or toward the multivariate-normal-implied tensors (coskew → 0, cokurt → Isserlis combination of Σ) |
+| **Graphical Lasso** | Sparse precision matrix. The sparsity pattern is a structural prior that could *also* inform the selection QUBO — nice cross-link |
+| **HMM regime detection** (2–3 states) | Honest ML, no return prediction. v1 is a realized-vol threshold; v2 is the HMM |
+
+### 7.3 ★ Multi-period allocation — where HUBO genuinely scales `[EXPLORE]`
+
+The direct answer to *"does HUBO at higher dimensions relate to derivatives?"* — **not really, but here's where the dimension genuinely grows.**
+
+Multi-period (dynamic) portfolio optimization: T timesteps × n assets, with **transaction costs coupling adjacent periods** and higher moments raising the degree. Variables = n×T continuous on Dirac-3. This is where the problem gets big and where the degree ceiling actually gets tested.
+
+Useful calibration point: Global Data Quantum's Qiskit Function solves exactly this on gate hardware at **7 assets × 4 timesteps × 4 resolution qubits = 112 qubits** (published manuscript; Premium-gated, so it's a *reference*, not a tool you can call). That's a clean gate-model comparison anchor for the same problem Dirac-3 would take in 28 continuous variables.
+
+`[OPEN]` **Gated on Dirac-3's variable ceiling at degree 4.** Ask QCI. If n×T=28 exceeds it, multi-period is degree-3 only or off the table.
+
+### 7.4 Rebalance gate via meta-labeling `[EXPLORE]`
+
+Repurpose meta-labeling from the bibliography — but **not** to filter a return signal (banned). Instead: a binary classifier predicting **whether a proposed rebalance's turnover cost will be recouped.** Label = "did rebalancing beat *not* rebalancing over the next period?" Features: drift magnitude, regime, vol, cost estimate. Honest (no return prediction), and it directly reduces churn.
+
+**Severe caveat:** ~70 quarterly points is nowhere near enough to fit this. Monthly cadence gets ~200. Still underpowered. Tier-3 at best, with the power problem stated.
+
+### 7.5 Derivatives — the two honest non-answers
+
+- **QAE for option pricing / CVaR.** Quantum amplitude estimation gives a quadratic speedup over Monte Carlo. The crossover point where it beats classical MC needs **error-corrected** hardware; on NISQ it's a toy with very deep circuits. Build it as an *educational demo* if it strengthens the IBM story. **Label it as a demo. Do not put it in the pipeline.**
+- **Options-hedging basket selection as a HUBO.** Choosing a discrete set of strikes to hedge a tail exposure while matching higher moments of the hedged P&L *is* a genuine HUBO. It's also a whole options data + pricing stack. **Different project.** Name it as the natural extension; don't build it.
+
+### 7.6 Robust optimization `[EXPLORE]`
+Worst-case over an uncertainty ellipsoid on Σ — the classical alternative to shrinkage for handling estimation error. Worth a paragraph in the writeup as a road not taken, and possibly a cheap extra arm.
+
+
+---
+
+## 8. The autopilot — `quant-trader`
+
+**The guard against the vibes-trading version:** "give the agent $10k" does **not** mean the agent watches tickers and makes calls. It means: **the lab produces a validated policy; the agent operates that policy under a hard mandate.**
+
+### 8.1 The execution gateway `[DECIDED]`
+
+Second MCP server, same repo and registry. Wraps `alpaca-py` (paper mode hard-coded — live isn't *disabled*, it's *unimplemented*).
+
+**The agent gets no raw order tool.** This is why we do **not** mount Alpaca's official MCP server for the autonomous loop — it exposes `place_stock_order` directly, which means the mandate would be enforced by prompt, i.e. not enforced. Exposed tools only:
+
+```
+get_portfolio_state()                    → broker-truth positions, cash, P&L, drift vs target
+reconcile()                              → ledger vs broker diff; must be clean before anything
+propose_rebalance(targets, decision_id)  → plan_id + pre-trade report (mandate, turnover, est. costs)
+execute_plan(plan_id)                    → two-phase; only checked plans;
+                                           client_order_id = hash(plan_id, leg) → idempotent
+halt() / resume() / risk_report()
+```
+
+`mandate.yaml`, enforced in deterministic code: universe whitelist · long-only · per-asset weight caps · max turnover per rebalance · marketable-limit-only · market-calendar checks · daily order cap · **trailing-drawdown kill-switch** (past threshold, the server refuses every non-liquidating order and pages the human).
+
+Order plans are registry objects with a state machine (proposed → checked → submitted → filled → reconciled), so a session dying mid-rebalance **resumes** instead of double-ordering.
+
+**$10k practical note:** whole shares of a $250 ETF = ~2.5% weight granularity. Use Alpaca **fractional/notional** orders or the weights are fiction.
+
+### 8.2 Operating model `[DECIDED]`
+
+Claude Code / BobShell sessions are ephemeral; state lives in the registry. So the trader is **cron + headless runs**, each booting cold from IDs:
+
+- **Daily ops session** (small, cheap): `reconcile` → `data_health` → `risk_report` → check drift bands and regime triggers. No trigger → log heartbeat, exit. **This session's tool whitelist does not include `execute_plan`.** It cannot trade.
+- **Rebalance session** (quarterly, or when drift/regime triggers fire): the full lab loop — moments-analyst judgment for *this* date → solve with the champion arm → `log_decision` → propose → execute → memo.
+
+**Live risk levers** (all lab-validated, none invented at runtime): regime-triggered de-risking to pre-validated defensive targets, drift bands, kill-switch. **No intraday sleeve** — nothing in the lab validates one, and inventing it live is exactly the vibes-trading this architecture exists to prevent.
+
+### 8.3 What the paper book actually proves
+
+Run the champion policy live in paper; **shadow-book the challengers** (arms A1, A3, B0, B2) marked to the same prints without routing orders. Live paper becomes the forward-test column of the ablation — accruing now, and immune to the overfitting critique.
+
+**Be clear-eyed:** at quarterly cadence with 7 ETFs, weeks or months of paper trading **cannot statistically detect skill.** The backtest carries the *statistical* claim. The forward test carries the *credibility* claim — the loop runs unattended, respects its mandate, logs its reasoning, and survives real market plumbing. For judges, a live decision feed plus a running paper book is the "agent behaving in the market" artifact they actually want, and it's honest.
+
+**Security `[DECIDED]`:** the trader's inputs stay strictly numeric (prices, positions, fills). **No news or sentiment tools in the loop.** Text from the market is an injection surface an autonomous trader shouldn't have.
+
+---
+
+## 9. Build sequence
+
+| M | Contents | Exit criterion | Est. |
+|---|---|---|---|
+| **M0** | Repo scaffold, `universe.yaml`, data ingest, point-in-time snapshots, health checks | `DataSnapshot(as_of)` **provably cannot leak** | 2–3 d |
+| **M1** | Moments + shrinkage + diagnostics; objective builder + **all three compilers** (scipy / Dirac / Qiskit) + property tests; backtest engine + metrics; arms **B0–B3, A1, A2, A3** — library + CLI, **no MCP yet** | Full classical ablation runs from a spec file; numbers reproduce bit-for-bit | 6–7 d |
+| **M2** | Registry + artifacts; FastMCP server wrapping M1; guardrails; job queue; **mock solver**; agent definitions; **Bob orchestration** | **Submittable vertical slice** — agent-operated classical ablation. ← **This is the July 31 entry** | 4–5 d |
+| **M3** | Dirac-3 adapter + conditioning pass + telemetry + budget ledger; arm **A4** | Arm A4 results + telemetry package **sent to Fang** (open action item) | 3–4 d |
+| **M4** | Qiskit: selection QUBO (**Q-A**) + discretized MV (**Q-B**) on IBM QPU; the 434-qubit encoder + resource count (**Q-C**); the **Q-C hybrid pipeline** | The 7-vs-434 headline is a *measured* artifact, not a claim | 3–4 d |
+| **M5** | Subagents + stepped mode + **reflection loop** + challenger debate + referee protocol; sensitivity sweeps | Stepped demo recorded; **referee catches a planted flaw** in a test run | 4–5 d |
+| **M6** | `quant-trader`, mandate, cron, runbook, Alpaca paper account, shadow-booking | Live paper book + decision feed running | 4–6 d |
+| **M7** | 15–19-ETF solver-claim stress run; report/video assets; submission package | Frozen | 3–4 d |
+
+**M2 is the resilience point** — from there the project is demoable and submittable even if every external dependency (QCI, IBM QPU, Alpaca) slips.
+
+`[EXPLORE]` Optional TUI (Textual, read-only observer on the registry, tailing an `events` table). **Cap at 2 days.** Fallback: `rich` tables + matplotlib PNGs + one HTML report. **No C++/Rust** — the bottleneck is queue time and thinking time, not rendering.
+
+---
+
+## 10. Risks
+
+| Risk | Mitigation |
+|---|---|
+| **IBM Bob is required and isn't set up** | Highest-priority unblock. Everything else is portable to it; nothing else matters if this is missing |
+| Aug 31 slip | July 31 slice (M0–M2) is a real submission and a real hedge |
+| QCI queue / credits | Mock adapter + result cache from day one; M3 isolated so slippage doesn't block M4/M5 |
+| IBM QPU 10-min budget | Train QAOA on Aer, sample final circuit on hardware; use Runtime Sessions; check the 180-min promo |
+| **Classical parity at n=7 makes A4 look pointless** | Already priced in: objective claim at n=7, solver claim at 15–19 ETFs. Referee memo says it plainly |
+| **A2 (scenario-CVaR) beats MVSK** | Then that's the finding. Report it. A project that can be wrong is a project worth trusting |
+| Co-moment noise swamps signal | Structured shrinkage + agent-tuned intensity + implied-moment targets + stability diagnostics |
+| Agent token burn | Ref-passing; subagent isolation; delegate units of work, not chit-chat (subagent-heavy sessions run several× a single-thread session) |
+| Scope creep (QML, gate circuits for weights, options hedging) | Named and parked in §7.5. Roadmap slide, not code |
+
+---
+
+## 11. Open questions — answer these before building
+
+1. **`[BLOCKING]` IBM Bob** — do you have access? It is *required* as the core component. Is BobShell + MCP + subagents confirmed working?
+2. **`[BLOCKING]` Eligibility** — enrolled university student, 18+, resident of US / Canada (ex-Quebec) / UK / India? The whole plan is moot otherwise.
+3. **`[BLOCKING]` Which deadline** — Aug 31 only, or July 31 slice + Aug 31 full?
+4. **IBM Quantum plan** — Open (10 min / 28 days)? Do you qualify for the 180-minute promo? (Determines how much QAOA runs on real hardware vs Aer.)
+5. **QCI status** — credits, queue expectations, N-samples pricing. **And: what is the variable ceiling at degree 4?** (Gates multi-period, §7.3.)
+6. **Fang's papers** (incoming) — if the return-distribution methods imply a different objective family (scenario/CVaR terms), that lands in `qlab.core.objectives` as a new `form`. The architecture doesn't move.
+7. **Options data** — do you have access to an ETF option chain source (implied moments, §7.1)? Free options are thin; this may be the gating constraint on the best additive idea in the doc.
+8. **μ for the utility variant** — shrunk historical, or Black–Litterman-lite with neutral views? Identical across arms either way. Decide at M5.
+
+---
+
+## 12. One-line summaries to keep the narrative straight
+
+- **The system:** an agentic quant research lab that promotes its own validated policy into a mandated autopilot.
+- **The quantum claim:** 7 continuous variables on Dirac-3 vs ~434 logical qubits on gate hardware, for the *same objective* — measured, not asserted.
+- **The AI claim:** the LLM never computes a number and never picks a trade; it picks *estimators* and *gates*, and every choice is logged, challenged, and scored against what actually happened.
+- **The honesty claim:** we built the arm that could falsify us (scenario-CVaR), the benchmark that usually wins (HRP), and the referee that can fail us.
+- **The "future of work" claim:** this is what a research desk looks like when judgment is scaffolded by agents and rigor is enforced by machines.

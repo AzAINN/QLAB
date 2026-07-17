@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "quant-lab": {
+      "command": "python",
+      "args": ["-m", "qlab.mcp.quant_lab"],
+      "env": {},
+      "description": "The research lab: data, moments, objective, solve (classical + quantum), backtest, registry, report."
+    },
+    "quant-trader": {
+      "command": "python",
+      "args": ["-m", "qlab.mcp.quant_trader"],
+      "env": {},
+      "description": "The execution gateway: portfolio state, reconcile, propose_rebalance, execute_plan, halt/resume/risk_report. No raw order tool by design."
+    }
+  }
+}

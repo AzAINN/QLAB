@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>qlab — Quantum Quant Research Desk</title>
+<style>
+  :root{
+    --bg:#0a0e16; --panel:#111826; --panel2:#182231; --border:#25324a;
+    --text:#e7eef8; --muted:#8595ab; --accent:#4589ff; --accent2:#0f62fe;
+    --good:#42be65; --warn:#f1c21b; --bad:#fa4d56; --quantum:#a56eff;
+    --radius:12px; --mono:"SF Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#152036 0,var(--bg) 55%);
+    color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;min-height:100vh}
+  a{color:var(--accent)}
+  /* ---- header ---- */
+  header{display:flex;align-items:center;gap:16px;padding:14px 22px;
+    border-bottom:1px solid var(--border);background:rgba(10,14,22,.7);
+    backdrop-filter:blur(8px);position:sticky;top:0;z-index:20}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:700;letter-spacing:.2px}
+  .logo{width:30px;height:30px;border-radius:8px;background:
+    conic-gradient(from 200deg,var(--accent),var(--quantum),var(--accent));
+    box-shadow:0 0 18px rgba(69,137,255,.5)}
+  .brand small{display:block;font-weight:400;color:var(--muted);font-size:11px;letter-spacing:.3px}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border:1px solid var(--border);
+    border-radius:999px;background:var(--panel);font-size:12px;color:var(--muted)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--good)}
+  .dot.off{background:var(--warn)}
+  .switch{position:relative;display:inline-block;width:38px;height:20px;cursor:pointer;flex-shrink:0}
+  .switch input{opacity:0;width:0;height:0}
+  .slider-sw{position:absolute;inset:0;background:#33415c;border-radius:999px;transition:.2s;cursor:pointer}
+  .slider-sw:before{content:"";position:absolute;height:14px;width:14px;left:3px;top:3px;
+    background:#fff;border-radius:50%;transition:.2s}
+  input:checked+.slider-sw{background:var(--accent2)}
+  input:checked+.slider-sw:before{transform:translateX(18px)}
+  /* ---- layout ---- */
+  .app{display:grid;grid-template-columns:212px 1fr;min-height:calc(100vh - 61px)}
+  nav{border-right:1px solid var(--border);padding:16px 12px;background:rgba(17,24,38,.4)}
+  nav button{display:flex;align-items:center;gap:11px;width:100%;padding:10px 12px;margin-bottom:4px;
+    background:none;border:none;border-radius:9px;color:var(--muted);font-size:13.5px;
+    font-family:var(--sans);cursor:pointer;text-align:left;transition:.15s}
+  nav button:hover{background:var(--panel);color:var(--text)}
+  nav button.active{background:linear-gradient(90deg,rgba(69,137,255,.16),transparent);
+    color:var(--text);box-shadow:inset 3px 0 0 var(--accent)}
+  nav .ic{width:18px;text-align:center;opacity:.9}
+  nav .sep{height:1px;background:var(--border);margin:12px 6px}
+  nav .note{color:var(--muted);font-size:10.5px;padding:8px 12px;line-height:1.45}
+  main{padding:26px 30px;max-width:1080px}
+  section[data-panel]{display:none;animation:fade .25s ease}
+  section[data-panel].show{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 22px;font-size:13px}
+  /* ---- cards & grid ---- */
+  .card{background:linear-gradient(180deg,var(--panel),rgba(17,24,38,.6));
+    border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;margin-bottom:18px}
+  .card h3{margin:0 0 14px;font-size:14px;letter-spacing:.3px;display:flex;align-items:center;gap:8px}
+  .grid{display:grid;gap:16px}
+  .g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}
+  .g4{grid-template-columns:repeat(4,1fr)}
+  @media(max-width:680px){.app{grid-template-columns:1fr}nav{display:flex;flex-wrap:wrap;gap:4px}
+    nav button{width:auto}nav .sep,nav .note{display:none}}
+  @media(max-width:560px){.g2,.g3,.g4{grid-template-columns:1fr}}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+  .tile{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+  .tile .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+  .tile .val{font-family:var(--mono);font-size:24px;margin-top:5px;font-weight:600}
+  .tile .val.sm{font-size:18px}
+  .tile .sub{font-size:11px;margin:2px 0 0}
+  /* ---- forms ---- */
+  label.f{display:block;font-size:12px;color:var(--muted);margin:0 0 6px;letter-spacing:.3px}
+  input[type=date],select,input[type=text]{width:100%;padding:9px 11px;background:var(--panel2);
+    border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--sans);font-size:13px}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .row{display:flex;gap:16px;flex-wrap:wrap;align-items:end}
+  .row>div{flex:1;min-width:130px}
+  .rangeval{font-family:var(--mono);color:var(--accent);float:right}
+  .toggle-line{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted);margin-top:6px}
+  .btn{padding:10px 18px;border:1px solid var(--border);border-radius:9px;background:var(--panel2);
+    color:var(--text);font-family:var(--sans);font-size:13.5px;font-weight:600;cursor:pointer;transition:.15s}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:var(--accent2);border-color:var(--accent2)}
+  .btn.primary:hover{background:var(--accent)}
+  .btn.ghost{background:none}
+  .btn:disabled{opacity:.55;cursor:progress}
+  .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  /* ---- weights bars ---- */
+  .bars{display:flex;flex-direction:column;gap:8px}
+  .bar{display:grid;grid-template-columns:56px 1fr 56px;align-items:center;gap:10px;font-size:12.5px}
+  .bar .tk{font-family:var(--mono);color:var(--muted)}
+  .bar .track{height:20px;background:var(--panel2);border-radius:6px;overflow:hidden;border:1px solid var(--border)}
+  .bar .fill{height:100%;border-radius:6px 0 0 6px;
+    background:linear-gradient(90deg,var(--accent2),var(--accent));min-width:2px;transition:width .5s}
+  .bar .fill.q{background:linear-gradient(90deg,#6929c4,var(--quantum))}
+  .bar .pc{font-family:var(--mono);text-align:right}
+  /* ---- table ---- */
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{padding:9px 10px;text-align:right;border-bottom:1px solid var(--border)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  td.mono,.mono{font-family:var(--mono)}
+  tr.best td{background:rgba(66,190,101,.08)}
+  /* ---- badges ---- */
+  .badge{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
+    font-size:11.5px;font-weight:600;border:1px solid var(--border)}
+  .badge.good{color:var(--good);border-color:rgba(66,190,101,.4);background:rgba(66,190,101,.1)}
+  .badge.warn{color:var(--warn);border-color:rgba(241,194,27,.4);background:rgba(241,194,27,.1)}
+  .badge.bad{color:var(--bad);border-color:rgba(250,77,86,.4);background:rgba(250,77,86,.1)}
+  .badge.q{color:var(--quantum);border-color:rgba(165,110,255,.4);background:rgba(165,110,255,.1)}
+  /* ---- vs viz ---- */
+  .vs{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:18px;margin:6px 0}
+  .vsbox{text-align:center;padding:22px;border-radius:12px;border:1px solid var(--border)}
+  .vsbox.gate{background:linear-gradient(180deg,rgba(250,77,86,.09),transparent);border-color:rgba(250,77,86,.3)}
+  .vsbox.cont{background:linear-gradient(180deg,rgba(165,110,255,.1),transparent);border-color:rgba(165,110,255,.35)}
+  .vsbox .big{font-family:var(--mono);font-size:44px;font-weight:700;line-height:1}
+  .vsbox.gate .big{color:var(--bad)}.vsbox.cont .big{color:var(--quantum)}
+  .vsbox .cap{color:var(--muted);font-size:12px;margin-top:8px}
+  .vs .mid{font-size:20px;color:var(--muted);font-weight:700}
+  /* ---- misc ---- */
+  .agent{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--border)}
+  .agent:last-child{border:none}
+  .agent .num{width:26px;height:26px;border-radius:50%;background:var(--panel2);border:1px solid var(--border);
+    display:grid;place-items:center;font-family:var(--mono);font-size:12px;color:var(--accent);flex-shrink:0}
+  .agent .nm{font-weight:600}
+  .agent .ds{color:var(--muted);font-size:12px}
+  .agent .sc{margin-top:5px;display:flex;gap:6px;flex-wrap:wrap}
+  .kv{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px}
+  .kv:last-child{border:none}.kv .k{color:var(--muted)}.kv .v{font-family:var(--mono)}
+  pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:12px;
+    overflow:auto;font-family:var(--mono);font-size:11.5px;color:var(--muted);max-height:280px}
+  .muted{color:var(--muted)} .empty{color:var(--muted);font-size:13px;padding:8px 0}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.3);
+    border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  #toast{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:8px;z-index:50}
+  .toast{padding:12px 16px;border-radius:10px;border:1px solid var(--border);background:var(--panel);
+    box-shadow:0 8px 30px rgba(0,0,0,.4);font-size:13px;max-width:340px;animation:fade .2s}
+  .toast.err{border-color:var(--bad)}
+  .note-line{font-size:11.5px;color:var(--muted);margin-top:14px;padding-top:12px;border-top:1px dashed var(--border)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="logo"></div>
+    <div>qlab<small>quantum quant research desk</small></div></div>
+  <div class="spacer"></div>
+  <span class="pill"><span class="dot" id="modeDot"></span><span id="modeText">offline</span></span>
+  <div class="toggle-line" title="Offline serves the deterministic synthetic feed">
+    <span>Offline</span>
+    <label class="switch"><input type="checkbox" id="offlineToggle" checked><span class="slider-sw"></span></label>
+  </div>
+  <span class="pill" id="capitalPill">$10,000 paper</span>
+</header>
+
+<div class="app">
+  <nav>
+    <button data-nav="dashboard" class="active"><span class="ic">◈</span>Dashboard</button>
+    <button data-nav="recommend"><span class="ic">✦</span>Recommend</button>
+    <button data-nav="autopilot"><span class="ic">◐</span>Autopilot</button>
+    <button data-nav="experiment"><span class="ic">▤</span>Experiment</button>
+    <button data-nav="quantum"><span class="ic">⚛</span>Quantum</button>
+    <button data-nav="registry"><span class="ic">❏</span>Registry</button>
+    <div class="sep"></div>
+    <button data-nav="about"><span class="ic">◇</span>About &amp; Governance</button>
+    <div class="note">Paper capital only. The system never places a real order. Live trading is
+      unimplemented by design.</div>
+  </nav>
+
+  <main>
+    <!-- DASHBOARD -->
+    <section data-panel="dashboard" class="show">
+      <h1>Dashboard</h1>
+      <p class="sub">Broker-truth paper book, risk headroom, and current target allocation.</p>
+      <div class="tiles" id="dashTiles"></div>
+      <div class="grid g2" style="margin-top:18px">
+        <div class="card"><h3>Target allocation <span class="badge" id="regimeBadge"></span></h3>
+          <div id="dashTargets" class="empty">Run a recommendation or the autopilot to set targets.</div></div>
+        <div class="card"><h3>Positions</h3><div id="dashPositions" class="empty">No positions yet.</div></div>
+      </div>
+      <div class="btnrow">
+        <button class="btn primary" id="dashDeploy">Deploy / rebalance now</button>
+        <button class="btn" id="dashHeartbeat">Daily-ops heartbeat</button>
+        <button class="btn ghost" id="dashRefresh">Refresh</button>
+        <button class="btn ghost" id="dashReset" style="margin-left:auto">Reset paper book</button>
+      </div>
+    </section>
+
+    <!-- RECOMMEND -->
+    <section data-panel="recommend">
+      <h1>Recommend an allocation</h1>
+      <p class="sub">The MVSK champion under the mandate, with a real classical-vs-quantum comparison.
+        The LLM would pick the window &amp; shrinkage; here you set them directly.</p>
+      <div class="card">
+        <div class="row">
+          <div><label class="f">As of</label><input type="date" id="recDate"></div>
+          <div><label class="f">Universe</label><select id="recUni">
+            <option value="core">core (7 cross-asset ETFs)</option>
+            <option value="candidates">candidates (19 ETFs)</option></select></div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <div><label class="f">Skew reward λ₃ <span class="rangeval" id="recSkewV">0.5</span></label>
+            <input type="range" id="recSkew" min="0" max="2" step="0.1" value="0.5"></div>
+          <div><label class="f">Kurtosis penalty λ₄ <span class="rangeval" id="recKurtV">0.5</span></label>
+            <input type="range" id="recKurt" min="0" max="2" step="0.1" value="0.5"></div>
+        </div>
+        <div class="toggle-line" style="margin-top:14px">
+          <label class="switch"><input type="checkbox" id="recQaoa"><span class="slider-sw"></span></label>
+          <span>Run the Aer QAOA arm in the comparison (slower)</span></div>
+        <div class="btnrow"><button class="btn primary" id="recRun">Get recommendation</button></div>
+      </div>
+      <div id="recOut"></div>
+    </section>
+
+    <!-- AUTOPILOT -->
+    <section data-panel="autopilot">
+      <h1>Autopilot</h1>
+      <p class="sub">One cold-boot iteration of the same pipeline the orchestrator drives:
+        analyze → solve champion → mandate-check → paper-trade → log.</p>
+      <div class="card">
+        <div class="toggle-line"><label class="switch"><input type="checkbox" id="apDry"><span class="slider-sw"></span></label>
+          <span>Dry run (analyze &amp; propose, do <b>not</b> trade)</span></div>
+        <div class="toggle-line" style="margin-top:8px"><label class="switch"><input type="checkbox" id="apQaoa"><span class="slider-sw"></span></label>
+          <span>Include the QAOA comparison</span></div>
+        <div class="btnrow">
+          <button class="btn primary" id="apRun">Run once</button>
+          <button class="btn" id="apDaily">Daily-ops heartbeat (never trades)</button>
+        </div>
+      </div>
+      <div id="apOut"></div>
+    </section>
+
+    <!-- EXPERIMENT -->
+    <section data-panel="experiment">
+      <h1>Experiment matrix</h1>
+      <p class="sub">The reproducible ablation — one objective/solver per arm, everything else held
+        constant. Benchmarks (60/40, 1/N, HRP, ERC), classical (min-var, CVaR, MVSK), and quantum.</p>
+      <div class="card">
+        <div class="toggle-line"><label class="switch"><input type="checkbox" id="expQaoa"><span class="slider-sw"></span></label>
+          <span>Include quantum arms (resource count + gaps)</span></div>
+        <div class="btnrow"><button class="btn primary" id="expRun">Run ablation</button>
+          <span class="muted" style="align-self:center">~6 arms, 2016–2022 window (a few seconds offline)</span></div>
+      </div>
+      <div id="expOut"></div>
+    </section>
+
+    <!-- QUANTUM -->
+    <section data-panel="quantum">
+      <h1>Quantum</h1>
+      <p class="sub">Where the physics fits: continuous higher-moment optimization vs gate-model
+        binary problems — and the resource count that is the whole architecture argument.</p>
+      <div class="card">
+        <h3>MVSK → QUBO resource count</h3>
+        <div class="row">
+          <div><label class="f">Assets n <span class="rangeval" id="qnV">7</span></label>
+            <input type="range" id="qn" min="2" max="12" step="1" value="7"></div>
+          <div><label class="f">Resolution bits r <span class="rangeval" id="qrV">4</span></label>
+            <input type="range" id="qr" min="1" max="6" step="1" value="4"></div>
+        </div>
+        <div class="vs" style="margin-top:18px">
+          <div class="vsbox gate"><div class="big" id="qGate">434</div>
+            <div class="cap">logical qubits on gate hardware<br><span id="qGadgets"></span></div></div>
+          <div class="mid">vs</div>
+          <div class="vsbox cont"><div class="big" id="qCont">7</div>
+            <div class="cap">continuous variables on Dirac-3<br>native sum-to-R budget</div></div>
+        </div>
+        <div id="qBreak" class="tiles" style="margin-top:8px"></div>
+        <div class="note-line">Degree-4 MVSK binarized at r bits then quadratized into an Ising
+          Hamiltonian — infeasible on 156-qubit Heron. Dirac-3 takes it in n continuous variables
+          natively. This count is built and verified, not asserted.</div>
+      </div>
+      <div class="card">
+        <h3>Classical vs quantum on the same covariance</h3>
+        <div class="row">
+          <div><label class="f">As of</label><input type="date" id="qDate"></div>
+          <div><label class="f">Universe</label><select id="qUni">
+            <option value="core">core</option><option value="candidates">candidates</option></select></div>
+          <div style="flex:0"><button class="btn primary" id="qCompare" style="white-space:nowrap">Compare</button></div>
+        </div>
+        <div id="qCompareOut" style="margin-top:16px"></div>
+      </div>
+    </section>
+
+    <!-- REGISTRY -->
+    <section data-panel="registry">
+      <h1>Registry</h1>
+      <p class="sub">Everything is a run. Content-hashed provenance, plus the decision log that the
+        reflection loop scores against realized outcomes.</p>
+      <div class="btnrow" style="margin-top:0"><button class="btn" id="regRefresh">Refresh</button></div>
+      <div class="grid g2" style="margin-top:16px">
+        <div class="card"><h3>Recent runs</h3><div id="regRuns" class="empty">—</div></div>
+        <div class="card"><h3>Decisions &amp; reflections</h3><div id="regDecisions" class="empty">—</div></div>
+      </div>
+    </section>
+
+    <!-- ABOUT -->
+    <section data-panel="about">
+      <h1>About &amp; governance</h1>
+      <p class="sub">The org chart is legible on purpose. Judgment is scaffolded by agents;
+        rigor is enforced by machines.</p>
+      <div class="grid g2">
+        <div class="card"><h3>The org chart (least-privilege subagents)</h3><div id="aboutAgents"></div></div>
+        <div class="card"><h3>Mandate (enforced in code)</h3><div id="aboutMandate"></div>
+          <div class="note-line">No agent has a raw order tool. The trader exposes only
+            <span class="mono">propose_rebalance</span> / <span class="mono">execute_plan</span>,
+            two-phase and idempotent, gated by these limits.</div></div>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+let BOOT=null;
+const OFF=()=>$('#offlineToggle').checked;
+
+async function api(method,path,body){
+  const opt={method,headers:{'Content-Type':'application/json'}};
+  if(method==='POST') opt.body=JSON.stringify(body||{});
+  const r=await fetch(path,opt);
+  const j=await r.json();
+  if(j&&j.error) throw new Error(j.error);
+  return j;
+}
+function toast(msg,err){const t=document.createElement('div');t.className='toast'+(err?' err':'');
+  t.textContent=msg;$('#toast').appendChild(t);setTimeout(()=>t.remove(),4200);}
+async function run(btn,fn){const o=btn.innerHTML;btn.disabled=true;
+  btn.innerHTML='<span class="spin"></span> working…';
+  try{await fn();}catch(e){toast(e.message||String(e),true);}finally{btn.disabled=false;btn.innerHTML=o;}}
+const money=v=>'$'+(v??0).toLocaleString(undefined,{maximumFractionDigits:0});
+const pct=v=>((v??0)*100).toFixed(1)+'%';
+const num=(v,d=4)=>v==null?'—':(+v).toFixed(d);
+function bars(obj,cls){const e=Object.entries(obj||{}).filter(([,v])=>v>1e-4).sort((a,b)=>b[1]-a[1]);
+  if(!e.length)return '<div class="empty">—</div>';const mx=Math.max(...e.map(x=>x[1]));
+  return '<div class="bars">'+e.map(([t,v])=>`<div class="bar"><span class="tk">${t}</span>
+    <div class="track"><div class="fill ${cls||''}" style="width:${(v/mx*100).toFixed(1)}%"></div></div>
+    <span class="pc">${pct(v)}</span></div>`).join('')+'</div>';}
+function badge(txt,kind){return `<span class="badge ${kind||''}">${txt}</span>`;}
+
+/* ---- nav ---- */
+$$('nav button[data-nav]').forEach(b=>b.onclick=()=>{
+  $$('nav button[data-nav]').forEach(x=>x.classList.remove('active'));b.classList.add('active');
+  $$('section[data-panel]').forEach(s=>s.classList.remove('show'));
+  $(`section[data-panel="${b.dataset.nav}"]`).classList.add('show');
+});
+$('#offlineToggle').onchange=()=>{const on=OFF();$('#modeDot').classList.toggle('off',!on);
+  $('#modeText').textContent=on?'offline (synthetic)':'live (yfinance)';};
+
+/* ---- bootstrap ---- */
+async function boot(){
+  BOOT=await api('GET','/api/bootstrap');
+  const t=new Date().toISOString().slice(0,10);
+  ['#recDate','#qDate'].forEach(s=>$(s).value=BOOT.today||t);
+  $('#capitalPill').textContent=money(BOOT.mandate.paper_capital)+' paper';
+  renderPortfolio(BOOT.portfolio);
+  renderAgents(BOOT.agents);renderMandate(BOOT.mandate);
+  loadResource();$('#offlineToggle').onchange();
+}
+function renderPortfolio(p){
+  const halted=p.halted?badge('HALTED','bad'):badge('active','good');
+  $('#dashTiles').innerHTML=[
+    ['Equity',money(p.equity),'mark-to-market'],
+    ['Cash',money(p.cash),''],
+    ['Drawdown',pct(p.drawdown),'from high-water'],
+    ['Kill-switch',pct(p.kill_switch_distance),'headroom @ '+pct(p.kill_switch_at)],
+    ['Status',halted,p.broker]
+  ].map(([l,v,s])=>`<div class="tile"><div class="lbl">${l}</div>
+    <div class="val ${(''+v).length>8?'sm':''}">${v}</div><div class="sub muted">${s}</div></div>`).join('');
+  $('#dashTargets').innerHTML=Object.keys(p.target_weights||{}).length?bars(p.target_weights)
+    :'<div class="empty">Run a recommendation or the autopilot to set targets.</div>';
+  const pos=Object.entries(p.positions||{});
+  $('#dashPositions').innerHTML=pos.length?`<table><tr><th>Ticker</th><th>Qty</th><th>Price</th>
+    <th>Value</th><th>Weight</th></tr>${pos.map(([t,x])=>`<tr><td class="mono">${t}</td>
+    <td class="mono">${x.qty.toFixed(2)}</td><td class="mono">${money(x.price)}</td>
+    <td class="mono">${money(x.value)}</td><td class="mono">${pct(p.weights[t])}</td></tr>`).join('')}</table>`
+    :'<div class="empty">No positions yet.</div>';
+}
+async function refreshPortfolio(){const p=await api('GET','/api/portfolio?offline='+OFF());renderPortfolio(p);}
+
+/* ---- dashboard actions ---- */
+$('#dashRefresh').onclick=e=>run(e.target,refreshPortfolio);
+$('#dashReset').onclick=e=>run(e.target,async()=>{await api('POST','/api/reset',{});await refreshPortfolio();toast('Paper book reset to starting capital.');});
+$('#dashDeploy').onclick=e=>run(e.target,async()=>{const s=await api('POST','/api/run_once',{offline:OFF(),execute:true});renderPortfolio(await api('GET','/api/portfolio?offline='+OFF()));
+  if($('#regimeBadge')){const r=s.regime?.regime;$('#regimeBadge').className='badge '+(r==='stress'?'warn':'good');$('#regimeBadge').textContent=r||'';}
+  toast(s.trade?.executed?`Rebalanced: ${s.trade.fills.length} legs filled.`:(s.trade?.mandate_violation||'No trade.'),!s.trade?.executed);});
+$('#dashHeartbeat').onclick=e=>run(e.target,async()=>{const r=await api('POST','/api/daily_ops',{offline:OFF()});
+  toast('Heartbeat: '+(r.triggers.length?('triggers → '+r.triggers.join(', ')):'no triggers.'));});
+
+/* ---- recommend ---- */
+$('#recSkew').oninput=e=>$('#recSkewV').textContent=(+e.target.value).toFixed(1);
+$('#recKurt').oninput=e=>$('#recKurtV').textContent=(+e.target.value).toFixed(1);
+$('#recRun').onclick=e=>run(e.target,async()=>{
+  const rec=await api('POST','/api/recommend',{as_of:$('#recDate').value,universe:$('#recUni').value,
+    skew:+$('#recSkew').value,kurt:+$('#recKurt').value,qaoa:$('#recQaoa').checked,offline:OFF()});
+  const d=rec.diagnostics||{},ms=d.moments||{};
+  $('#recOut').innerHTML=`
+   <div class="grid g2">
+    <div class="card"><h3>Recommended weights ${badge('arm '+rec.champion_arm,'')}
+      ${badge('regime: '+(d['regime']||ms['regime']||'—'),'')}</h3>${bars(rec.recommended_weights)}
+      <div class="note-line">MVSK champion under the mandate cap. Paper capital only.</div></div>
+    <div class="card"><h3>Estimator diagnostics</h3>
+      <div class="kv"><span class="k">shrinkage intensity</span><span class="v">${num(ms.shrinkage_intensity,3)}</span></div>
+      <div class="kv"><span class="k">avg correlation</span><span class="v">${num(ms.avg_corr,3)}</span></div>
+      <div class="kv"><span class="k">avg volatility (daily)</span><span class="v">${num(ms.avg_vol,4)}</span></div>
+      <div class="kv"><span class="k">condition number</span><span class="v">${num(ms.condition_number,1)}</span></div>
+      <div class="kv"><span class="k">lookback (days)</span><span class="v">${ms.lookback_days||'—'}</span></div>
+    </div></div>${compareCard(rec.classical_vs_quantum)}`;
+});
+function compareCard(c){if(!c)return '';const q=c.quantum||{};
+  const qbody=q.objective_value!=null?`<div class="tile"><div class="lbl">Quantum (QAOA)</div>
+      <div class="val sm">${(+q.objective_value).toExponential(2)}</div>
+      <div class="sub muted">${q.wall_clock_s?.toFixed(2)||'?'}s · ${q.diagnostics?.n_qubits||'?'} qubits${q.diagnostics?.optimality_gap!=null?' · gap '+pct(q.diagnostics.optimality_gap):''}</div></div>`
+    :`<div class="tile"><div class="lbl">Quantum (QAOA)</div><div class="val sm muted">not run</div>
+      <div class="sub muted">${q.note||'enable the QAOA toggle'}</div></div>`;
+  return `<div class="card"><h3>Classical vs quantum ${badge('same covariance','q')}</h3><div class="tiles">
+    <div class="tile"><div class="lbl">Classical (min-var)</div>
+      <div class="val sm">${(+c.classical.objective_value).toExponential(2)}</div>
+      <div class="sub muted">${c.classical.wall_clock_s?.toFixed(2)}s · SLSQP</div></div>${qbody}</div></div>`;}
+
+/* ---- autopilot ---- */
+$('#apRun').onclick=e=>run(e.target,async()=>{
+  const s=await api('POST','/api/run_once',{offline:OFF(),execute:!$('#apDry').checked,qaoa:$('#apQaoa').checked});
+  renderAp(s);renderPortfolio(await api('GET','/api/portfolio?offline='+OFF()));});
+$('#apDaily').onclick=e=>run(e.target,async()=>{const r=await api('POST','/api/daily_ops',{offline:OFF()});
+  $('#apOut').innerHTML=`<div class="card"><h3>Daily-ops heartbeat ${badge('never trades','good')}</h3>
+    <div class="kv"><span class="k">equity</span><span class="v">${money(r.equity)}</span></div>
+    <div class="kv"><span class="k">regime</span><span class="v">${r.regime}</span></div>
+    <div class="kv"><span class="k">rebalance recommended</span><span class="v">${r.rebalance_recommended}</span></div>
+    <div class="kv"><span class="k">triggers</span><span class="v">${r.triggers.length?r.triggers.join(', '):'none'}</span></div></div>`;});
+function renderAp(s){const tr=s.trade||{};
+  const st=tr.executed?badge(`executed ${tr.fills.length} legs`,'good')
+    :tr.mandate_violation?badge('BLOCKED by mandate','bad'):badge('dry run — not traded','warn');
+  $('#apOut').innerHTML=`<div class="grid g2">
+    <div class="card"><h3>Targets ${badge('regime: '+s.regime.regime,s.regime.regime==='stress'?'warn':'good')}</h3>
+      ${bars(s.targets)}</div>
+    <div class="card"><h3>Outcome ${st}</h3>
+      <div class="kv"><span class="k">equity</span><span class="v">${money(s.equity_before)} → ${money(s.equity_after)}</span></div>
+      <div class="kv"><span class="k">decision id</span><span class="v">${s.decision_id?.slice(0,10)}</span></div>
+      ${tr.mandate_violation?`<div class="kv"><span class="k">reason</span><span class="v" style="color:var(--bad)">${tr.mandate_violation}</span></div>`:''}
+      <div class="note-line">${s.diagnostics?.fallback?('note: '+s.diagnostics.fallback):'MVSK champion solved under mandate.'}</div>
+    </div></div>${compareCard(s.classical_vs_quantum)}`;}
+
+/* ---- experiment ---- */
+$('#expRun').onclick=e=>run(e.target,async()=>{
+  const rep=await api('POST','/api/batch',{offline:OFF(),qaoa:$('#expQaoa').checked});
+  const arms=rep.arms||{},rank=rep.ranking||[];
+  let rows=rank.map((r,i)=>{const a=arms[r.arm]||{},m=a.metrics||{};
+    return `<tr class="${i===0?'best':''}"><td class="mono">${r.arm}</td><td>${a.objective||''}</td>
+      <td class="muted">${a.solver||''}</td><td class="mono">${num(m.sortino,2)}</td>
+      <td class="mono">${num(m.ann_vol,3)}</td><td class="mono">${num(m.max_drawdown,3)}</td>
+      <td class="mono">${num(m.deflated_sharpe,2)}</td><td class="mono">${num(a.total_turnover,1)}</td></tr>`;}).join('');
+  let q='';const qa=rep.quantum||{};
+  if(qa.QC) q=`<div class="card"><h3>Q-C · the architecture count ${badge('measured','q')}</h3>
+    <div class="vs"><div class="vsbox gate"><div class="big">${qa.QC.total_logical_qubits}</div>
+      <div class="cap">logical qubits (gate)</div></div><div class="mid">vs</div>
+      <div class="vsbox cont"><div class="big">${qa.QC.dirac3_continuous_variables}</div>
+      <div class="cap">continuous vars (Dirac-3)</div></div></div></div>`;
+  $('#expOut').innerHTML=`<div class="card"><h3>Ablation ranking ${badge('run '+(rep.run_id||'').slice(0,8),'')}
+      ${badge('best by Sortino','good')}</h3>
+    <table><tr><th>Arm</th><th>Objective</th><th>Solver</th><th>Sortino</th><th>Ann vol</th>
+      <th>Max DD</th><th>dSharpe</th><th>Turnover</th></tr>${rows}</table>
+    <div class="note-line">Content-hashed → reproduces bit-for-bit. HRP (B2) is the real bar;
+      scenario-CVaR (A2) is the arm that could falsify the thesis.</div></div>${q}`;});
+
+/* ---- quantum ---- */
+$('#qn').oninput=e=>{$('#qnV').textContent=e.target.value;loadResource();};
+$('#qr').oninput=e=>{$('#qrV').textContent=e.target.value;loadResource();};
+async function loadResource(){const n=$('#qn').value,r=$('#qr').value;
+  const rc=await api('GET',`/api/resource_count?n=${n}&r=${r}`);
+  $('#qGate').textContent=rc.total_logical_qubits;$('#qCont').textContent=rc.dirac3_continuous_variables;
+  $('#qGadgets').textContent=rc.penalty_gadgets+' penalty gadgets';
+  $('#qBreak').innerHTML=[
+    ['Weight qubits',rc.weight_qubits],['Auxiliary qubits',rc.auxiliary_qubits],
+    ['Coskew entries',rc.coskew_entries],['Cokurt entries',rc.cokurt_entries],
+    ['Degree-4 monomials',rc.degree4_monomials.toLocaleString()]
+  ].map(([l,v])=>`<div class="tile"><div class="lbl">${l}</div><div class="val sm">${v}</div></div>`).join('');}
+$('#qCompare').onclick=e=>run(e.target,async()=>{
+  const c=await api('POST','/api/compare',{as_of:$('#qDate').value,universe:$('#qUni').value,qaoa:true,offline:OFF()});
+  $('#qCompareOut').innerHTML=compareCard(c);});
+
+/* ---- registry ---- */
+$('#regRefresh').onclick=e=>run(e.target,loadRegistry);
+async function loadRegistry(){
+  const [r,d]=await Promise.all([api('GET','/api/runs'),api('GET','/api/decisions')]);
+  $('#regRuns').innerHTML=r.runs.length?`<table><tr><th>Kind</th><th>Run id</th><th>Created</th></tr>
+    ${r.runs.map(x=>`<tr><td>${x.kind}</td><td class="mono">${x.run_id.slice(0,10)}</td>
+    <td class="muted">${(x.created_at||'').slice(0,19).replace('T',' ')}</td></tr>`).join('')}</table>`:'<div class="empty">No runs yet.</div>';
+  $('#regDecisions').innerHTML=d.decisions.length?d.decisions.map(x=>`<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+    <div>${badge(x.kind,'')} <span class="muted">${x.as_of}</span></div>
+    <div style="font-size:12.5px;margin-top:4px">${x.rationale||''}</div>
+    ${x.reflection?`<div class="muted" style="font-size:12px;margin-top:3px">↩ ${x.reflection}</div>`:''}</div>`).join('')
+    :'<div class="empty">No decisions yet — run the autopilot.</div>';}
+
+/* ---- about ---- */
+function renderAgents(agents){$('#aboutAgents').innerHTML=agents.map((a,i)=>`<div class="agent">
+  <div class="num">${i+1}</div><div><div class="nm">${a.name}</div><div class="ds">${a.description}</div>
+  <div class="sc">${a.servers.map(s=>badge(s,'q')).join('')}
+    ${badge(a.n_tools+' tools','')}</div></div></div>`).join('');}
+function renderMandate(m){$('#aboutMandate').innerHTML=[
+  ['Paper capital',money(m.paper_capital)],['Universe',m.whitelist.length+' ETFs (whitelist)'],
+  ['Max weight / asset',pct(m.max_weight_per_asset)],['Max turnover / rebalance',pct(m.max_turnover_per_rebalance)],
+  ['Trailing-drawdown kill-switch',pct(m.trailing_drawdown_pct)],['Rebalance cadence',m.cadence],
+  ['Order type',m.order_type]
+].map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');}
+
+/* lazy-load registry when its tab is opened */
+$('nav [data-nav="registry"]').addEventListener('click',loadRegistry);
+boot();
+</script>
+</body>
+</html>

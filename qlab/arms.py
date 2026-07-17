@@ -36,6 +36,7 @@ class MomentsConfig:
     denoise: str | None = "marchenko_pastur"
     comoment_shrinkage: float | str = 0.5
     comoment_target: str = "isserlis"
+    regime_conditional: bool = False
 
 
 @dataclass
@@ -53,7 +54,7 @@ class Arm:
 # estimation + single-shot solve
 # ---------------------------------------------------------------------------
 def estimate(snapshot: DataSnapshot, cfg: MomentsConfig, *, higher: bool) -> MomentSet:
-    return estimate_moments(
+    ms = estimate_moments(
         snapshot,
         lookback_days=cfg.lookback_days,
         shrinkage=cfg.shrinkage,
@@ -63,6 +64,17 @@ def estimate(snapshot: DataSnapshot, cfg: MomentsConfig, *, higher: bool) -> Mom
         include_mu=False,
         higher_moments=higher,
     )
+    if cfg.regime_conditional:
+        from qlab.signals.condition import condition_covariance, regime_labels
+        from qlab.signals.hard import composite_regime
+
+        rets = snapshot.log_returns(cfg.lookback_days).dropna(how="any")
+        X = rets.to_numpy(dtype=float)
+        reg = composite_regime(snapshot)
+        ms.cov = condition_covariance(X, regime_labels(rets), reg["regime_lambda"])
+        ms.diagnostics["regime_lambda"] = reg["regime_lambda"]
+        ms.diagnostics["regime"] = reg["regime"]
+    return ms
 
 
 def solve_arm(
@@ -74,6 +86,9 @@ def solve_arm(
 ) -> tuple[Weights, dict]:
     """Solve one arm at one point in time. Returns (weights, diagnostics)."""
     moments = moments or MomentsConfig()
+    if "regime_conditional" in arm.params:
+        from dataclasses import replace
+        moments = replace(moments, regime_conditional=bool(arm.params["regime_conditional"]))
     constraints = constraints or Constraints()
 
     # -- benchmarks: no estimation, no solve --------------------------------

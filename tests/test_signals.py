@@ -78,3 +78,28 @@ def test_composite_regime_drops_degenerate_absorption():
     assert ("absorption_pct" not in comps) or (
         comps["absorption_pct"] < 1.0), "degenerate absorption must not pin lambda"
     assert 0.0 <= out["regime_lambda"] <= 1.0
+
+
+def test_conditioned_covariance_scales_with_lambda():
+    from qlab.signals.condition import condition_covariance, regime_labels
+    r = _two_regime_returns()
+    X = r.to_numpy()
+    labels = regime_labels(r)
+    cov0 = condition_covariance(X, labels, 0.0)
+    cov1 = condition_covariance(X, labels, 1.0)
+    assert np.trace(cov1) > 1.5 * np.trace(cov0)          # stress cov is hotter
+    for c in (cov0, cov1):
+        assert np.all(np.linalg.eigvalsh(c) > -1e-10)     # PSD
+
+
+def test_b4_arm_runs_regime_conditional():
+    from datetime import date
+    from qlab.arms import Arm, MomentsConfig, solve_arm
+    from qlab.core.types import DataSnapshot
+    r = _two_regime_returns()
+    px = (1 + r).cumprod() * 100
+    snap = DataSnapshot(list(px.columns), px, px.index[-1].date())
+    arm = Arm("B4", "min_variance", "classical", {"regime_conditional": True})
+    w, diag = solve_arm(arm, snap, moments=MomentsConfig(lookback_days=750))
+    assert abs(sum(w.values) - 1.0) < 1e-6
+    assert diag["moments"].get("regime_lambda") is not None

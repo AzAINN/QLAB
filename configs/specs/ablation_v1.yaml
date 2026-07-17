@@ -51,6 +51,10 @@ arms:
   - id: A1                  # classical min-variance baseline
     objective: min_variance
     solver: classical
+  - id: B4                  # regime-conditional min-variance (lambda-mixed cov)
+    objective: min_variance
+    solver: classical
+    params: { regime_conditional: true }
   - id: A2                  # THE FALSIFIABLE RIVAL — uses the distribution directly
     objective: scenario_cvar
     solver: cvar_lp

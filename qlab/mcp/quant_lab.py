@@ -130,7 +130,17 @@ def build_server(state: LabState | None = None):
     def solve_qubo_resource_count(n: int = 7, resolution_bits: int = 4) -> dict:
         """The 434-vs-7 argument, as a count: MVSK->QUBO->Ising resources."""
         st.budget.charge("solve.qubo_resource_count")
-        return mvsk_qubo_resource_count(n, resolution_bits)
+        out = mvsk_qubo_resource_count(n, resolution_bits)
+        out["note"] = ("worst-case closed form; run objective.build + "
+                       "solve.constructed_resource_count for measured counts")
+        return out
+
+    @app.tool(name="solve.constructed_resource_count")
+    def solve_constructed_resource_count(objective_id: str, resolution_bits: int = 4) -> dict:
+        """Measured MVSK->QUBO->Ising resources from an actual construction."""
+        st.budget.charge("solve.constructed_resource_count")
+        from qlab.solvers.ising_encoder import resource_report
+        return resource_report(st.get_objective(objective_id), resolution_bits)
 
     # -- backtest -----------------------------------------------------------
     @app.tool(name="backtest.run")

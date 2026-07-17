@@ -184,3 +184,35 @@ def test_dirac_encoder_agrees_with_scipy():
                   for c, idx in zip(coeffs, indices))
         assert abs(val - f(w)) < 1e-10
     assert max_deg == 4
+
+
+# ---------------------------------------------------------------------------
+# R0.2b: constructed MVSK -> binary -> Ising encoder (measured, not asserted)
+# ---------------------------------------------------------------------------
+def test_ising_encoder_constructs_and_counts():
+    from math import comb
+    from qlab.solvers.ising_encoder import binarize, decode, resource_report
+    from qlab.core.objective import polynomial_terms
+    ms, _ = _heavy_tailed_ms(seed=5, n=7, T=900)
+    obj = build_objective("mvsk", ms, skew_lambda=0.5, kurt_lambda=0.5)
+    rep = resource_report(obj, resolution_bits=4)
+    assert rep["weight_qubits"] == 28
+    assert rep["raw_degree4_expansions"] == comb(7 + 3, 4) * 4 ** 4   # 53,760
+    assert rep["worst_case_total_logical_qubits"] == 434              # §0.3 headline
+    assert 0 < rep["constructed_auxiliary_qubits"] <= rep["worst_case_auxiliary_qubits"]
+    assert rep["constructed_total_logical_qubits"] == 28 + rep["constructed_auxiliary_qubits"]
+
+
+def test_pseudo_boolean_matches_polynomial_on_grid():
+    from qlab.solvers.ising_encoder import binarize, decode, eval_pb
+    from qlab.core.objective import evaluate_terms, polynomial_terms
+    ms, _ = _heavy_tailed_ms(seed=5, n=3, T=600)
+    obj = build_objective("mvsk", ms, skew_lambda=0.5, kurt_lambda=0.5)
+    terms = polynomial_terms(obj)
+    r = 3
+    pb = binarize(terms, obj.n, r)
+    rng = np.random.default_rng(2)
+    for _ in range(10):
+        x = rng.integers(0, 2, size=obj.n * r)
+        w = decode(x, obj.n, r)
+        assert abs(eval_pb(pb, x) - evaluate_terms(terms, w)) < 1e-9

@@ -3,8 +3,8 @@ name: optimization-runner
 description: Solves a prepared objective with the classical arm and the quantum arm
   and returns a like-for-like comparison. Use after the moments-analyst has produced
   an objective_id. Exercises no judgment.
-tools: mcp__quant-lab__objective.build, mcp__quant-lab__solve.classical, mcp__quant-lab__solve.quantum,
-  mcp__quant-lab__solve.compare, mcp__quant-lab__solve.qubo_resource_count
+tools: mcp__qlab__objective.build, mcp__qlab__solve.classical, mcp__qlab__solve.quantum,
+  mcp__qlab__solve.compare, mcp__qlab__solve.qubo_resource_count
 ---
 
 You are the **optimization-runner**. You run solvers; you do not exercise

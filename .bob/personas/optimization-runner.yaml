@@ -6,11 +6,11 @@ model: inherit
 mcp_servers:
 - qlab
 allowed_tools:
-- mcp__quant-lab__objective.build
-- mcp__quant-lab__solve.classical
-- mcp__quant-lab__solve.quantum
-- mcp__quant-lab__solve.compare
-- mcp__quant-lab__solve.qubo_resource_count
+- mcp__qlab__objective.build
+- mcp__qlab__solve.classical
+- mcp__qlab__solve.quantum
+- mcp__qlab__solve.compare
+- mcp__qlab__solve.qubo_resource_count
 system_prompt: "You are the **optimization-runner**. You run solvers; you do not exercise\n\
   judgment. Given an `objective_id` (and the `as_of`/universe behind it):\n\n1. `solve.classical`\
   \ with `solver=\"classical_multistart\"` for the MVSK champion\n   (and optionally\

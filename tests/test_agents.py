@@ -4,11 +4,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qlab.agents.loader import load_agents, sync
+import yaml
+
+from qlab.agents.loader import (
+    TRADER_TOOLS,
+    load_agents,
+    role_scopes,
+    sync,
+    tool_base_name,
+)
+
+_GENERATED_CLAUDE = Path(__file__).resolve().parents[1] / ".claude" / "agents"
 
 
 def _by_name():
     return {a.name: a for a in load_agents()}
+
+
+def _generated_claude_tool_ids(md_path: Path) -> list[str]:
+    """The mcp tool identifiers listed in a generated Claude adapter's tools."""
+    text = md_path.read_text(encoding="utf-8")
+    _, fm, _ = text.split("---", 2)
+    meta = yaml.safe_load(fm) or {}
+    raw = meta.get("tools", "") or ""
+    return [t.strip() for t in raw.split(",") if t.strip()]
 
 
 def test_all_five_roles_present():
@@ -18,26 +37,52 @@ def test_all_five_roles_present():
 
 
 def test_least_privilege_separation():
+    """Least-privilege keys off tool *base names* (TRADER_TOOLS), not the server
+    prefix — every tool now lives behind the single ``qlab`` runtime server."""
     a = _by_name()
-    # moments-analyst judges; it cannot run solvers
-    assert not any("solve." in t for t in a["moments-analyst"].tools)
-    # optimization-runner solves; it cannot author decisions or trade
-    assert any("solve." in t for t in a["optimization-runner"].tools)
-    assert not any("log_decision" in t for t in a["optimization-runner"].tools)
-    assert "quant-trader" not in a["optimization-runner"].server_scopes
-    # referee is read-only: no trader access, no solve.classical
-    assert "quant-trader" not in a["referee"].server_scopes
-    assert not any("propose_rebalance" in t or "execute_plan" in t
-                   for t in a["referee"].tools)
-    # reporter is the only role that can touch the execution gateway
-    assert "quant-trader" in a["reporter"].server_scopes
-    assert any("execute_plan" in t for t in a["reporter"].tools)
+
+    # moments-analyst judges; it runs no solver and cannot touch the book.
+    ma = role_scopes(a["moments-analyst"].tools)
+    assert not any(base.startswith("solve.") for base in ma["lab"])
+    assert ma["trader"] == set()
+
+    # optimization-runner solves; it cannot author decisions and cannot trade.
+    orun = role_scopes(a["optimization-runner"].tools)
+    assert any(base.startswith("solve.") for base in orun["lab"])
+    assert "registry.log_decision" not in orun["lab"]
+    assert orun["trader"] == set()
+
+    # referee is read-only w.r.t. the book: no execution-gateway tools at all.
+    assert role_scopes(a["referee"].tools)["trader"] == set()
+
+    # reporter is the ONLY role whose tools intersect the execution gateway.
+    with_trader = {name for name, ag in a.items()
+                   if role_scopes(ag.tools)["trader"]}
+    assert with_trader == {"reporter"}
+    reporter_trader = role_scopes(a["reporter"].tools)["trader"]
+    assert reporter_trader and reporter_trader <= TRADER_TOOLS
 
 
-def test_no_agent_has_a_raw_order_tool():
-    for a in load_agents():
-        assert not any("place_order" in t or "place_stock_order" in t
-                       for t in a.tools)
+def test_no_role_has_a_raw_order_tool():
+    """No role may hold any tool whose base name references an order."""
+    for ag in load_agents():
+        for t in ag.tools:
+            assert "order" not in tool_base_name(t), (ag.name, t)
+
+
+def test_generated_claude_adapters_use_qlab_prefix():
+    """Every mcp tool identifier in every generated .claude adapter must be
+    namespaced under the single runtime server ``mcp__qlab__``. This locks the
+    generated adapters against drift back to the retired ``quant-lab`` /
+    ``quant-trader`` prefixes (which resolve to zero live MCP tools)."""
+    files = sorted(_GENERATED_CLAUDE.glob("*.md"))
+    assert files, "no generated .claude/agents adapters found"
+    for md in files:
+        tool_ids = _generated_claude_tool_ids(md)
+        assert tool_ids, f"{md.name} has no tools front-matter"
+        for tool_id in tool_ids:
+            if tool_id.startswith("mcp__"):
+                assert tool_id.startswith("mcp__qlab__"), (md.name, tool_id)
 
 
 def test_sync_writes_both_adapters(tmp_path: Path):

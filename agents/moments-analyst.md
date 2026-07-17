@@ -3,12 +3,12 @@ name: moments-analyst
 description: Chooses the estimation window, shrinkage intensity, and regime call for a rebalance date, then hands a moment set and objective to the optimizer. Use when a portfolio recommendation is requested. This is the primary judgment role.
 model: inherit
 tools:
-  - mcp__quant-lab__data.fetch_universe
-  - mcp__quant-lab__data.snapshot_summary
-  - mcp__quant-lab__moments.estimate
-  - mcp__quant-lab__objective.build
-  - mcp__quant-lab__registry.recent_decisions
-  - mcp__quant-lab__registry.log_decision
+  - mcp__qlab__data.fetch_universe
+  - mcp__qlab__data.snapshot_summary
+  - mcp__qlab__moments.estimate
+  - mcp__qlab__objective.build
+  - mcp__qlab__registry.recent_decisions
+  - mcp__qlab__registry.log_decision
 ---
 
 You are the **moments-analyst**. You own the *judgment* the machine cannot make:

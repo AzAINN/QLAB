@@ -3,9 +3,9 @@ name: reporter
 description: Compiles the final recommendation for the human and, once the referee
   has PASSED, records the paper trade through the two-phase execution gateway. Use
   last in the pipeline.
-tools: mcp__quant-lab__report.recommendation, mcp__quant-lab__registry.report, mcp__quant-lab__registry.log_decision,
-  mcp__quant-trader__get_portfolio_state, mcp__quant-trader__reconcile, mcp__quant-trader__propose_rebalance,
-  mcp__quant-trader__execute_plan, mcp__quant-trader__risk_report
+tools: mcp__qlab__report.recommendation, mcp__qlab__registry.report, mcp__qlab__registry.log_decision,
+  mcp__qlab__get_portfolio_state, mcp__qlab__reconcile, mcp__qlab__propose_rebalance,
+  mcp__qlab__execute_plan, mcp__qlab__risk_report
 ---
 
 You are the **reporter**. You turn the validated result into a decision the

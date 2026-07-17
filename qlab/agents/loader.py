@@ -12,6 +12,7 @@ orchestrators from drifting apart.
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,12 +23,50 @@ _SRC = _REPO_ROOT / "agents"
 _CLAUDE_OUT = _REPO_ROOT / ".claude" / "agents"
 _BOB_OUT = _REPO_ROOT / ".bob" / "personas"
 
-# The lab and trader namespaces now live in one combined MCP process
+# The lab and trader tool namespaces now live in one combined MCP process
 # (qlab.mcp.server) so a single DuckDB writer owns the book. Every persona
-# therefore connects to this one server; least-privilege still lives in the
-# per-agent tool allowlist (``server_scopes`` distinguishes lab vs trader
-# tools), not in a process boundary.
+# therefore connects to this one runtime server; least-privilege is NOT a
+# process boundary but the per-agent tool allowlist, split into lab vs trader
+# *tool sets* by ``role_scopes`` (keyed off ``TRADER_TOOLS``, not a prefix).
 SERVER_NAME = "qlab"
+
+# The execution-gateway ("trader") tools, by base name. Every tool not in this
+# set is a research-lab tool. This is the least-privilege boundary now that both
+# roles share the one ``qlab`` server: a role whose tools intersect this set can
+# move the paper book; a role that touches none of them is research-only.
+TRADER_TOOLS = {
+    "get_portfolio_state",
+    "reconcile",
+    "propose_rebalance",
+    "execute_plan",
+    "halt",
+    "resume",
+    "risk_report",
+}
+
+
+def tool_base_name(tool: str) -> str:
+    """A tool's base name: the segment after the last ``__`` separator.
+
+    ``mcp__qlab__solve.classical`` -> ``solve.classical``.
+    """
+    return tool.rsplit("__", 1)[-1]
+
+
+def role_scopes(tools: Iterable[str]) -> dict[str, set[str]]:
+    """Split tool base names into least-privilege roles.
+
+    Returns ``{"lab": {...}, "trader": {...}}`` of base names. The split is by
+    tool identity (``TRADER_TOOLS``), NOT by any server-name prefix: all tools
+    are served by the single ``qlab`` process, so the prefix no longer carries
+    role information.
+    """
+    lab: set[str] = set()
+    trader: set[str] = set()
+    for t in tools:
+        base = tool_base_name(t)
+        (trader if base in TRADER_TOOLS else lab).add(base)
+    return {"lab": lab, "trader": trader}
 
 
 @dataclass
@@ -40,13 +79,13 @@ class AgentDef:
 
     @property
     def server_scopes(self) -> set[str]:
-        """The MCP servers this agent may touch (from its tool allowlist)."""
-        scopes = set()
-        for t in self.tools:
-            parts = t.split("__")
-            if len(parts) >= 2:
-                scopes.add(parts[1])
-        return scopes
+        """The runtime MCP servers this agent connects to (for ``mcp_servers``
+        emission). Both lab and trader tools live in the one combined ``qlab``
+        process, so any agent with tools connects to exactly ``{"qlab"}``.
+        Least-privilege reasoning lives in ``role_scopes(self.tools)``, not in a
+        server prefix.
+        """
+        return {SERVER_NAME} if self.tools else set()
 
 
 def parse_agent(path: Path) -> AgentDef:
@@ -91,7 +130,7 @@ def _write_bob(agent: AgentDef, out_dir: Path) -> Path:
         "persona": agent.name,
         "description": agent.description,
         "model": agent.model,
-        "mcp_servers": [SERVER_NAME],
+        "mcp_servers": sorted(agent.server_scopes),
         "allowed_tools": agent.tools,
         "system_prompt": agent.body,
         "governance": {
@@ -122,7 +161,9 @@ def main(argv: list[str] | None = None) -> int:
     cmd = argv[0] if argv else "sync"
     if cmd == "list":
         for a in load_agents():
+            roles = role_scopes(a.tools)
             print(f"{a.name:20} model={a.model:8} servers={sorted(a.server_scopes)} "
+                  f"lab={len(roles['lab'])} trader={len(roles['trader'])} "
                   f"({len(a.tools)} tools)")
     elif cmd == "sync":
         written = sync()

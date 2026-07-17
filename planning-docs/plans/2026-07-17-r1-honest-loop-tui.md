@@ -20,6 +20,8 @@
 
 ### Task 1: Combined MCP server — one process owns the DuckDB book
 
+> **[AMENDED 2026-07-17 after commit a28f333]** The TUI slice establishes the UI runtime (`UISession`) as the single paper-book owner while it runs, with `qlab/mcp/tui_proxy.py` as the HTTP-proxy MCP for governed sessions. The combined server below is for **headless orchestrator use** (no UI runtime alive) and MUST add a startup guard: probe the owner port (default 8765, `GET /api/system`); if it responds, exit with a clear message directing to the `qlab-operator` proxy instead of opening DuckDB — never two writers. Add a `--port` env override (`QLAB_UI_PORT`).
+
 **Files:**
 - Modify: `qlab/mcp/quant_lab.py`, `qlab/mcp/quant_trader.py` (extract `register_*_tools(app, st)`), `qlab/agents/loader.py` (single server name), `.mcp.json`
 - Create: `qlab/mcp/server.py`
@@ -593,6 +595,8 @@ def build_policy(arm, *, moments=None, constraints=None):
 ---
 
 ### Task 5: Textual TUI — the operator console
+
+> **[SUPERSEDED 2026-07-17 by commit a28f333]** The concurrent session shipped a more complete console (`planning-docs/plans/2026-07-17-quiet-workstation-tui.md`): spine/canvas/agent-rail shell, HTTP-only observer invariant, command surface (`rebalance dry|paper`, `daily`, `batch`, `ask`, `governed`), paper-confirm modal, `qlab tui` with owned-server startup, and propose-only governed Claude via the `qlab-operator` proxy. **Skip this task entirely.** Follow-up captured elsewhere: surface referee verdicts in the audit view once R0-T6 lands (small `tui_snapshot` field addition — fold into R1 Task 6).
 
 **Files:**
 - Create: `qlab/tui/__init__.py`, `qlab/tui/client.py`, `qlab/tui/app.py`

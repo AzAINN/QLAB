@@ -1097,6 +1097,8 @@ and include `"est_vol": est_vol` in `decision.choice`. In `daily_ops`, call `res
 
 ### Task 10: Events read API + emission at the MCP tool boundary
 
+> **[RESCOPED 2026-07-17 after commit a28f333]** The concurrent TUI session delivered `Registry.read_events` (with cursor + limit clamp, tested) and the `/api/events` route. **Remaining scope: only the `CallBudget` on-charge hook + `LabState` wiring + `test_tool_calls_emit_events`.** Skip the registry `read_events` implementation, its test, and the ui/server route below — they exist. Note for the final review: `read_events(after=…)` uses strict `ts > ?` which can skip same-timestamp events (latent, low severity).
+
 **Files:**
 - Modify: `qlab/state/registry.py` (`read_events`), `qlab/mcp/guardrails.py` (`CallBudget` on-charge callback; `LabState` wires it), `qlab/ui/server.py` (`GET /api/events` route)
 - Test: `tests/test_registry.py`, `tests/test_ui.py`

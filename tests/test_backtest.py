@@ -120,3 +120,21 @@ def test_sortino_stat_nan_on_all_positive():
     import numpy as np, pandas as pd
     from qlab.experiment import _sortino_stat
     assert np.isnan(_sortino_stat(pd.Series([0.01, 0.02, 0.015, 0.03])))
+
+
+def test_vol_target_overlay_reduces_realized_vol():
+    from qlab.arms import Arm, MomentsConfig, build_policy
+    from qlab.core.backtest import run_backtest
+    from qlab.core import data as market
+    px = market.get_prices(["ACWI", "BNDW", "GSG", "GLD", "VNQ"],
+                           "2015-01-01", "2021-12-31", offline=True, seed=7)
+    raw = Arm("A3", "mvsk", "classical_multistart",
+              {"skew_lambda": 0.5, "kurt_lambda": 0.5})
+    tgt = Arm("A3t", "mvsk", "classical_multistart",
+              {"skew_lambda": 0.5, "kurt_lambda": 0.5, "target_vol": 0.06})
+    cfg = MomentsConfig(lookback_days=504)
+    m_raw = run_backtest(px, build_policy(raw, moments=cfg), cadence="quarterly",
+                         lookback_days=504).metrics
+    m_tgt = run_backtest(px, build_policy(tgt, moments=cfg), cadence="quarterly",
+                         lookback_days=504).metrics
+    assert m_tgt["ann_vol"] < m_raw["ann_vol"]

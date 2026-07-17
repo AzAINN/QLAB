@@ -58,6 +58,8 @@ def estimate_moments(
     # --- covariance + shrinkage + denoise -----------------------------------
     if shrinkage == "ledoit_wolf":
         cov, delta = ledoit_wolf(X)
+    elif shrinkage == "nonlinear":
+        cov, delta = nonlinear_shrinkage(X)
     elif shrinkage in (None, "none", "sample"):
         cov, delta = np.cov(X, rowvar=False, bias=True), 0.0
     else:
@@ -137,6 +139,82 @@ def ledoit_wolf(X: np.ndarray) -> tuple[np.ndarray, float]:
     intensity = b2 / d2
     shrunk = intensity * m * np.eye(n) + (a2 / d2) * S
     return shrunk, float(intensity)
+
+
+# ---------------------------------------------------------------------------
+# Ledoit–Wolf (2020) analytical *nonlinear* shrinkage
+# ---------------------------------------------------------------------------
+def nonlinear_shrinkage(X: np.ndarray) -> tuple[np.ndarray, float]:
+    """Ledoit–Wolf (2020) *analytical* nonlinear shrinkage of the covariance.
+
+    An Epanechnikov-kernel estimate of the sample spectral density and its
+    Hilbert transform give a *per-eigenvalue* shrinkage that strictly dominates
+    linear Ledoit–Wolf as ``n`` grows with ``T`` (Ledoit & Wolf 2020,
+    *Analytical Nonlinear Shrinkage of Large-Dimensional Covariance Matrices*).
+
+    ``X`` is ``(T, n)`` (observations × assets). Returns ``(cov, shift)`` where
+    ``shift`` is the mean absolute eigenvalue displacement normalised by the
+    mean sample eigenvalue — an "intensity" diagnostic analogous to the linear
+    shrinkage weight, logged like every other estimator judgment.
+
+    Faithful port of the published ``analytical_shrinkage`` reference: the
+    bandwidth is *per-eigenvalue* (``H = h·λ_j`` with ``h = T**(-1/3)``) and the
+    Hilbert-transform term carries the ``1/π`` factor (their Eqs. 4.7/4.8/4.3,
+    with the ``n > T`` rank-deficient limit from Eqs. C.4/C.5/C.8). A tiny
+    relative eigenvalue floor guards the degenerate case (demeaning drops the
+    rank by one) so the bandwidth ``H`` never vanishes and the result stays
+    finite, symmetric and PSD.
+    """
+    T, n = X.shape
+    Xc = X - X.mean(axis=0, keepdims=True)
+    S = (Xc.T @ Xc) / T
+    lam, U = np.linalg.eigh(S)
+    order = np.argsort(lam)
+    lam = np.clip(lam[order], 0.0, None)
+    U = U[:, order]
+
+    # the min(n, T) potentially-nonzero eigenvalues (drop the structural zeros)
+    lam_keep = lam[max(0, n - T):]
+    m = lam_keep.shape[0]                           # = min(n, T)
+    floor = max(float(lam_keep.max()), 1e-300) * 1e-12
+    lam_keep = np.clip(lam_keep, floor, None)
+
+    h = T ** (-1.0 / 3.0)                           # bandwidth (Eq. 4.9)
+    L = np.tile(lam_keep.reshape(-1, 1), (1, m))    # L[i, j] = λ_i
+    H = h * L.T                                     # H[i, j] = h·λ_j
+    x = (L - L.T) / H
+
+    # Epanechnikov density estimate f̃ (Eq. 4.7) and its Hilbert transform (4.8)
+    sqrt5 = np.sqrt(5.0)
+    ftilde = (3.0 / 4.0 / sqrt5) * np.mean(
+        np.maximum(1.0 - x ** 2 / 5.0, 0.0) / H, axis=1)
+    Hftemp = ((-3.0 / 10.0 / np.pi) * x
+              + (3.0 / 4.0 / sqrt5 / np.pi) * (1.0 - x ** 2 / 5.0)
+              * np.log(np.abs((sqrt5 - x) / (sqrt5 + x))))
+    boundary = np.abs(x) == sqrt5                   # log term vanishes there
+    Hftemp[boundary] = (-3.0 / 10.0 / np.pi) * x[boundary]
+    Hftilde = np.mean(Hftemp / H, axis=1)
+
+    q = n / T
+    if n <= T:                                      # Eq. 4.3
+        dtilde = lam_keep / ((np.pi * q * lam_keep * ftilde) ** 2
+                             + (1.0 - q - np.pi * q * lam_keep * Hftilde) ** 2)
+    else:                                           # Eqs. C.4/C.5/C.8
+        log_arg = (1.0 + sqrt5 * h) / max(1.0 - sqrt5 * h, 1e-12)
+        Hftilde0 = (1.0 / np.pi) * (
+            3.0 / 10.0 / h ** 2
+            + 3.0 / 4.0 / sqrt5 / h * (1.0 - 1.0 / 5.0 / h ** 2) * np.log(log_arg)
+        ) * np.mean(1.0 / lam_keep)
+        dtilde0 = 1.0 / (np.pi * (n - T) / T * Hftilde0)
+        dtilde1 = lam_keep / (np.pi ** 2 * lam_keep ** 2 * (ftilde ** 2 + Hftilde ** 2))
+        dtilde = np.concatenate([np.full(n - T, dtilde0), dtilde1])
+
+    dtilde = np.where(np.isfinite(dtilde), dtilde, floor)
+    dtilde = np.clip(dtilde, floor, None)
+    cov = (U * dtilde) @ U.T
+    cov = (cov + cov.T) / 2.0
+    shift = float(np.mean(np.abs(dtilde - lam)) / max(float(np.mean(lam)), 1e-18))
+    return cov, shift
 
 
 # ---------------------------------------------------------------------------

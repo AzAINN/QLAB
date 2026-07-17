@@ -165,11 +165,31 @@ def _dispatch_solver(arm, obj, constraints, context) -> tuple[SolveResult, str |
 # ---------------------------------------------------------------------------
 def build_policy(arm: Arm, *, moments: MomentsConfig | None = None,
                  constraints: Constraints | None = None):
-    """Return a ``policy(snapshot) -> Weights`` for the backtest engine."""
+    """Return a ``policy(snapshot) -> Weights`` for the backtest engine.
+
+    When ``arm.params["target_vol"]`` is set the arm's weights are scaled by
+    ``min(1, target_vol / est_vol)`` — a long-only volatility-targeting overlay
+    that only ever *de-risks* (no leverage), with the un-invested remainder held
+    implicitly in cash so the weights sum below 1. ``est_vol`` is the trailing
+    annualised realised vol of the *decided* portfolio, so the overlay is
+    strictly backward-looking. This is a **research-only** construct: it breaks
+    the fully-invested mandate, so such arms cannot reach the live trader.
+    """
+    target_vol = arm.params.get("target_vol")
 
     def policy(snapshot: DataSnapshot) -> Weights:
         w, _diag = solve_arm(arm, snapshot, moments=moments, constraints=constraints)
-        return w
+        if not target_vol:
+            return w
+        # trailing realised vol of the decided portfolio (backward-looking only)
+        cfg = moments or MomentsConfig()
+        rets = snapshot.log_returns(min(cfg.lookback_days, 252)).dropna(how="any")
+        arr = w.as_series().reindex(rets.columns).fillna(0.0).to_numpy()
+        port = rets.to_numpy() @ arr
+        est_vol = float(np.std(port, ddof=1) * np.sqrt(252))
+        scale = min(1.0, float(target_vol) / max(est_vol, 1e-9))   # de-risk only
+        return Weights(tickers=w.tickers,
+                       values=[float(v * scale) for v in w.values])
 
     policy.__name__ = f"policy_{arm.id}"
     return policy

@@ -66,6 +66,14 @@ arms:
     objective: mvsk
     solver: dirac3          # requires QCI account; falls back to classical_multistart
     params: { skew_lambda: 0.5, kurt_lambda: 0.5 }
+  - id: A3t                 # RESEARCH-ONLY — A3 + volatility-targeting overlay.
+    # target_vol scales exposure by min(1, target_vol/est_vol): long-only, no
+    # leverage, un-invested remainder is implicit cash (weights sum < 1). This
+    # breaks the fully-invested mandate on purpose, so A3t CANNOT reach the
+    # trader — it exists to measure the overlay's effect on realised vol only.
+    objective: mvsk
+    solver: classical_multistart
+    params: { skew_lambda: 0.5, kurt_lambda: 0.5, target_vol: 0.08 }
 
 # Quantum arms (Aer simulator by default; IBM QPU if IBM_QUANTUM_TOKEN set).
 quantum_arms:

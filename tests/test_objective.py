@@ -101,6 +101,12 @@ def test_auto_scaled_terms_are_comparable():
     assert 0.05 * c["variance"] < abs(c["kurt_term"]) < 5.0 * c["variance"]
     assert obj.extra["lambda_scale"] == "auto"
     assert obj.extra["skew_lambda_raw"] == 0.5
+    # Exact identity: for this data the equal-weight contraction is well away
+    # from zero (verified: m3/m4 both exceed their norm-based floors — see
+    # objective.py's build_objective docstring), so the auto-scale formula's
+    # construction gives |term| == lambda_raw * variance exactly at w0.
+    assert abs(c["skew_term"]) == pytest.approx(0.5 * c["variance"], rel=1e-6)
+    assert abs(c["kurt_term"]) == pytest.approx(0.5 * c["variance"], rel=1e-6)
 
 
 def test_raw_scale_preserves_old_behavior():
@@ -108,6 +114,34 @@ def test_raw_scale_preserves_old_behavior():
     obj = build_objective("mvsk", ms, skew_lambda=0.5, kurt_lambda=0.5,
                           lambda_scale="raw")
     assert obj.skew_lambda == 0.5 and obj.kurt_lambda == 0.5
+
+
+def test_auto_scale_degenerate_tensors_do_not_blow_up():
+    # If the m3/m4 denominators floor at a bare epsilon (1e-30) instead of a
+    # norm-based floor, a large-but-cancelling tensor sends lambda_eff to
+    # meaningless values. Zero tensors are the extreme case: contraction is
+    # exactly zero, so lambda_eff would explode under a naive epsilon floor.
+    n = 4
+    cov = np.eye(n) * 1e-4
+    ms = MomentSet(
+        tickers=[f"A{i}" for i in range(n)], as_of=date(2020, 1, 1),
+        cov=cov, coskew=np.zeros((n, n, n)), cokurt=np.zeros((n, n, n, n)),
+    )
+    obj = build_objective("mvsk", ms, skew_lambda=0.5, kurt_lambda=0.5)
+    assert np.isfinite(obj.skew_lambda)
+    assert np.isfinite(obj.kurt_lambda)
+    f, _ = compile_scipy(obj)
+    assert np.isfinite(f(np.full(n, 0.25)))
+
+    # coskew/cokurt entirely absent: the auto branch must not divide by
+    # anything at all for these terms, and lambdas pass through untouched.
+    ms_none = MomentSet(
+        tickers=[f"A{i}" for i in range(n)], as_of=date(2020, 1, 1),
+        cov=cov, coskew=None, cokurt=None,
+    )
+    obj_none = build_objective("mvsk", ms_none, skew_lambda=0.5, kurt_lambda=0.5)
+    assert np.isfinite(obj_none.skew_lambda)
+    assert np.isfinite(obj_none.kurt_lambda)
 
 
 def test_mvsk_diverges_from_min_variance_when_scaled():

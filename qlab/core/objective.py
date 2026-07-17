@@ -52,10 +52,19 @@ def build_objective(
     variance term at the equal-weight portfolio"* — units-invariant, so the
     higher moments actually contribute. ``lambda_scale="raw"`` preserves the
     old literal-coefficient behavior.
+
+    The auto-scale denominator is a *norm-based* floor, not a bare epsilon:
+    the equal-weight contraction ``m3 = |S:w0w0w0|`` (resp. ``m4``) can cancel
+    near zero even when the tensor itself is large, which would otherwise send
+    λ_eff to (numerically finite but meaningless) huge values. Flooring at a
+    fraction of the Frobenius-norm-implied scale keeps λ_eff bounded relative
+    to the tensor's actual magnitude under total contraction cancellation.
     """
+    if lambda_scale not in ("auto", "raw"):
+        raise ValueError(f"lambda_scale must be 'auto' or 'raw', got {lambda_scale!r}")
     extra = dict(extra or {})
     l3, l4 = float(skew_lambda), float(kurt_lambda)
-    if form == "mvsk" and lambda_scale == "auto" and (l3 or l4):
+    if form == "mvsk" and lambda_scale == "auto":
         n = ms.n
         w0 = np.full(n, 1.0 / n)
         var0 = float(w0 @ ms.cov @ w0)
@@ -63,10 +72,15 @@ def build_objective(
                       "skew_lambda_raw": l3, "kurt_lambda_raw": l4})
         if ms.coskew is not None and l3:
             m3 = abs(float(np.einsum("ijk,i,j,k->", ms.coskew, w0, w0, w0)))
-            l3 = l3 * var0 / max(m3, 1e-30)
+            # |S:w0^3| <= ||S||_F * ||w0||^3 = ||S||_F * n^-1.5; floor caps
+            # lambda_eff at 100x that norm-implied scale under cancellation.
+            m3_floor = 1e-2 * float(np.linalg.norm(ms.coskew.ravel())) * n ** -1.5
+            l3 = l3 * var0 / max(m3, m3_floor, 1e-30)
         if ms.cokurt is not None and l4:
             m4 = abs(float(np.einsum("ijkl,i,j,k,l->", ms.cokurt, w0, w0, w0, w0)))
-            l4 = l4 * var0 / max(m4, 1e-30)
+            # |K:w0^4| <= ||K||_F * ||w0||^4 = ||K||_F * n^-2; same rationale.
+            m4_floor = 1e-2 * float(np.linalg.norm(ms.cokurt.ravel())) * n ** -2.0
+            l4 = l4 * var0 / max(m4, m4_floor, 1e-30)
     elif form == "mvsk":
         extra.setdefault("lambda_scale", lambda_scale)
     return Objective(

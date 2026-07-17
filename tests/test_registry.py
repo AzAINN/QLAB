@@ -61,3 +61,10 @@ def test_events_are_read_in_display_order_with_cursor(reg):
 
     later = reg.read_events(after=initial[0]["ts"])
     assert any(row["event_id"] == second for row in later)
+
+
+def test_backtest_trial_count_counts_distinct_arms(reg):
+    reg.log_backtest("run1", "A1", {"sharpe": 0.5})
+    reg.log_backtest("run1", "A2", {"sharpe": 0.6})
+    reg.log_backtest("run2", "A1", {"sharpe": 0.7})   # same arm, different run
+    assert reg.backtest_trial_count() == 2

@@ -25,7 +25,8 @@ import yaml
 
 from qlab.arms import Arm, MomentsConfig, build_policy, estimate, solve_arm
 from qlab.core import data as market
-from qlab.core.backtest import run_backtest
+from qlab.core.backtest import BacktestResult, run_backtest
+from qlab.core.metrics import block_bootstrap_ci, deflated_sharpe
 from qlab.core.objective import build_objective, compile_scipy
 from qlab.core.types import DataSnapshot
 from qlab.core.universe import load_universe
@@ -70,6 +71,7 @@ def run_ablation(
 
     results: dict[str, Any] = {"run_id": run_id, "arms": {}, "quantum": {}}
 
+    bt_results: dict[str, BacktestResult] = {}
     for arm in arms:
         try:
             res = run_backtest(
@@ -78,13 +80,29 @@ def run_ablation(
                 lookback_days=moments_cfg.lookback_days,
                 cost_bps=float(bt.get("cost_bps", 5)), n_trials=n_trials,
             )
-            reg.log_backtest(run_id, arm.id, res.metrics)
-            results["arms"][arm.id] = {
-                "objective": arm.objective, "solver": arm.solver,
-                "metrics": res.metrics, "total_turnover": res.total_turnover,
-            }
+            bt_results[arm.id] = res
         except Exception as exc:  # keep the ablation resilient arm-by-arm
             results["arms"][arm.id] = {"error": repr(exc)}
+
+    # cross-trial Sharpe variance + registry-counted trials -> honest DSR + CIs
+    def _psr(r):
+        sd = r.std(ddof=1)
+        return float(r.mean() / sd) if sd > 0 else 0.0
+
+    psrs = [_psr(r.returns) for r in bt_results.values()]
+    v_sr = float(np.var(psrs, ddof=1)) if len(psrs) > 1 else 0.0
+    for arm_id, res in bt_results.items():
+        res.metrics["deflated_sharpe"] = deflated_sharpe(
+            res.returns, _psr(res.returns),
+            n_trials=max(len(bt_results), 2), trial_sharpe_var=v_sr)
+        for name, fn in (("sharpe_ci", _psr), ("sortino_ci", _sortino_stat)):
+            res.metrics[name] = list(block_bootstrap_ci(res.returns, fn))
+        reg.log_backtest(run_id, arm_id, res.metrics)
+        results["arms"][arm_id] = {
+            "objective": next(a.objective for a in arms if a.id == arm_id),
+            "solver": next(a.solver for a in arms if a.id == arm_id),
+            "metrics": res.metrics, "total_turnover": res.total_turnover}
+    results["n_trials_registry"] = reg.backtest_trial_count()
 
     # quantum arms — single-shot at the latest snapshot
     for qa in spec.get("quantum_arms", []):
@@ -188,6 +206,12 @@ def compare_classical_quantum(
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+def _sortino_stat(r) -> float:
+    downside = r[r < 0]
+    dv = downside.std(ddof=1) if len(downside) > 1 else 0.0
+    return float(r.mean() / dv) if dv > 0 else 0.0
+
+
 def _rank(arms: dict) -> list[dict]:
     scored = []
     for aid, a in arms.items():

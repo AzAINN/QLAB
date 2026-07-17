@@ -192,6 +192,10 @@ class Registry:
             r = self.con.execute("SELECT COUNT(*) FROM solutions").fetchone()
         return int(r[0]) if r else 0
 
+    def backtest_trial_count(self) -> int:
+        r = self.con.execute("SELECT COUNT(DISTINCT arm_id) FROM backtests").fetchone()
+        return int(r[0]) if r else 0
+
     # -- reporting ----------------------------------------------------------
     def list_runs(self, limit: int = 20) -> list[dict]:
         return self._rows("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", [limit])

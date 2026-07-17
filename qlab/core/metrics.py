@@ -28,6 +28,7 @@ def compute_metrics(
     periods_per_year: int = _TRADING_DAYS,
     turnover: float | None = None,
     n_trials: int = 1,
+    trial_sharpe_var: float | None = None,
 ) -> dict[str, float]:
     """Compute the standard metric bundle for a return series.
 
@@ -55,7 +56,10 @@ def compute_metrics(
         "cvar_95": cvar(r, 0.95),
         "realized_skew": float(stats.skew(r, bias=False)) if len(r) > 3 else 0.0,
         "realized_kurtosis": float(stats.kurtosis(r, fisher=True, bias=False)) if len(r) > 3 else 0.0,
-        "deflated_sharpe": deflated_sharpe(r, sharpe_periodic=_periodic_sharpe(r), n_trials=n_trials),
+        "deflated_sharpe": deflated_sharpe(
+            r, sharpe_periodic=_periodic_sharpe(r), n_trials=n_trials,
+            trial_sharpe_var=trial_sharpe_var,
+        ),
     }
     if turnover is not None:
         out["turnover"] = float(turnover)
@@ -83,28 +87,37 @@ def _periodic_sharpe(r: pd.Series) -> float:
 
 
 def deflated_sharpe(
-    returns: pd.Series, sharpe_periodic: float, n_trials: int = 1
+    returns: pd.Series, sharpe_periodic: float, n_trials: int = 1,
+    trial_sharpe_var: float | None = None,
 ) -> float:
     """Deflated Sharpe ratio (Bailey & López de Prado).
 
     Adjusts the observed Sharpe for the number of trials that were run (the
     registry's trial count), the sample length, and the return distribution's
     own skew/kurtosis. Reported as a probability the true Sharpe exceeds 0.
+
+    The null benchmark ``SR0`` is ``sqrt(V[SR_trials]) * E[max Z_N]`` — the
+    expected maximum Sharpe from ``n_trials`` draws of pure noise, scaled by
+    the *actual* cross-trial Sharpe variance (falling back to the
+    theoretical variance of the Sharpe estimator when unknown). Comparing
+    that scaled benchmark against the observed periodic Sharpe is what keeps
+    DSR calibrated instead of comparing a raw z-score to a tiny per-period
+    Sharpe.
     """
     n = len(returns)
     if n < 4 or sharpe_periodic == 0:
         return 0.0
     g3 = float(stats.skew(returns, bias=False))
     g4 = float(stats.kurtosis(returns, fisher=False, bias=False))  # non-excess
-
-    # Expected maximum Sharpe from N independent trials of pure noise.
     if n_trials > 1:
+        # Bailey & Lopez de Prado (2014): SR0 = sqrt(V[SR_trials]) * E[max Z_N]
+        if trial_sharpe_var is None or trial_sharpe_var <= 0:
+            trial_sharpe_var = (1 + 0.5 * sharpe_periodic ** 2) / max(n - 1, 1)
         e_max = (1 - np.euler_gamma) * stats.norm.ppf(1 - 1.0 / n_trials) + \
             np.euler_gamma * stats.norm.ppf(1 - 1.0 / (n_trials * np.e))
+        sr0 = float(np.sqrt(trial_sharpe_var) * e_max)
     else:
-        e_max = 0.0
-    sr0 = e_max  # benchmark Sharpe under the null after trial adjustment
-
+        sr0 = 0.0
     denom = np.sqrt(
         max(1e-12, 1 - g3 * sharpe_periodic + (g4 - 1) / 4.0 * sharpe_periodic ** 2)
     )

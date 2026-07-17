@@ -17,6 +17,7 @@ Design commitments:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -28,6 +29,17 @@ import duckdb
 from qlab.core.types import Decision, MomentSet, Objective, SolveResult, _jsonable
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def targets_hash(targets: dict[str, float]) -> str:
+    """Canonical content hash of a target-weights dict.
+
+    THE canonical definition — both verdict writers (the referee) and verdict
+    checkers (``execute_plan``) must import this, so a PASS can never be
+    silently applied to a different set of targets than the one reviewed.
+    """
+    key = ",".join(f"{k}:{float(v):.6f}" for k, v in sorted(targets.items()))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -63,9 +75,11 @@ CREATE TABLE IF NOT EXISTS orders (
     side VARCHAR, notional DOUBLE, state VARCHAR, created_at VARCHAR);
 CREATE TABLE IF NOT EXISTS events (
     event_id VARCHAR PRIMARY KEY, ts VARCHAR, kind VARCHAR, payload JSON);
+CREATE SEQUENCE IF NOT EXISTS verdict_seq;
 CREATE TABLE IF NOT EXISTS verdicts (
     verdict_id VARCHAR PRIMARY KEY, decision_id VARCHAR, verdict VARCHAR,
-    reasons JSON, source VARCHAR, created_at VARCHAR);
+    reasons JSON, source VARCHAR, created_at VARCHAR, targets_hash VARCHAR,
+    seq BIGINT);
 """
 
 
@@ -94,6 +108,10 @@ class Registry:
         self.con = duckdb.connect(self.path)
         self.con.execute(_SCHEMA)
         self.con.execute("ALTER TABLE backtests ADD COLUMN IF NOT EXISTS objective VARCHAR")
+        # existing dev DBs may predate these columns; _SCHEMA alone won't add
+        # them to an already-created table, hence the explicit ALTERs here.
+        self.con.execute("ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS targets_hash VARCHAR")
+        self.con.execute("ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS seq BIGINT")
 
     def close(self) -> None:
         self.con.close()
@@ -106,8 +124,6 @@ class Registry:
 
     # -- runs ---------------------------------------------------------------
     def log_run(self, kind: str, spec: dict) -> str:
-        import hashlib
-
         run_id = hashlib.sha256(_j({"kind": kind, "spec": spec}).encode()).hexdigest()[:16]
         self.con.execute(
             "INSERT INTO runs VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
@@ -305,17 +321,24 @@ class Registry:
 
     # -- referee verdicts -----------------------------------------------------
     def log_verdict(self, decision_id: str, verdict: str, reasons: list[str],
-                    source: str = "deterministic") -> str:
+                    source: str = "deterministic", targets: dict | None = None) -> str:
         vid = uuid.uuid4().hex[:16]
-        self.con.execute("INSERT INTO verdicts VALUES (?,?,?,?,?,?)",
-                         [vid, decision_id, verdict, _j(reasons), source, _now()])
+        th = targets_hash(targets) if targets else ""
+        self.con.execute(
+            "INSERT INTO verdicts (verdict_id, decision_id, verdict, reasons, "
+            "source, created_at, targets_hash, seq) "
+            "VALUES (?,?,?,?,?,?,?, nextval('verdict_seq'))",
+            [vid, decision_id, verdict, _j(reasons), source, _now(), th])
         self.record_event("referee_verdict",
                           {"decision_id": decision_id, "verdict": verdict})
         return vid
 
     def get_verdict(self, decision_id: str) -> dict | None:
+        # ORDER BY seq (not created_at): timestamps can collide within the
+        # same tight loop, but the sequence is monotonic and gives us a
+        # reliable "latest" regardless.
         r = self._rows("SELECT * FROM verdicts WHERE decision_id=? "
-                       "ORDER BY created_at DESC LIMIT 1", [decision_id])
+                       "ORDER BY seq DESC LIMIT 1", [decision_id])
         return r[0] if r else None
 
     # -- events -------------------------------------------------------------

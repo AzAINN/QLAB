@@ -191,12 +191,19 @@ def build_server(state: LabState | None = None):
         return st.registry.recent_decisions(kind or None, limit)
 
     @app.tool(name="registry.log_verdict")
-    def registry_log_verdict(decision_id: str, verdict: str, reasons: list = []) -> dict:
-        """Referee-only: record PASS/FAIL for a decision. Trading requires PASS."""
+    def registry_log_verdict(decision_id: str, verdict: str, targets: dict,
+                             reasons: list | None = None) -> dict:
+        """Referee-only: record PASS/FAIL for a decision. Trading requires PASS.
+
+        ``targets`` must be the exact targets the referee reviewed — the
+        verdict is bound to their content hash, so it never transfers to a
+        different (even superficially similar) target set.
+        """
         st.budget.charge("registry.log_verdict")
         if verdict not in ("PASS", "FAIL"):
             raise ValueError("verdict must be PASS or FAIL")
-        vid = st.registry.log_verdict(decision_id, verdict, list(reasons), source="referee-agent")
+        vid = st.registry.log_verdict(decision_id, verdict, list(reasons or []),
+                                      source="referee-agent", targets=targets)
         return {"verdict_id": vid, "decision_id": decision_id, "verdict": verdict}
 
     # -- report -------------------------------------------------------------

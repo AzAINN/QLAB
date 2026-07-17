@@ -36,7 +36,7 @@ def test_initial_deployment_conserves_equity(reg):
     plan = build_plan(reg, broker, m, targets, "d1")
     assert plan.state == "checked"
     assert plan.pre_trade["initial_deployment"] is True
-    reg.log_verdict("d1", "PASS", [], "deterministic")
+    reg.log_verdict("d1", "PASS", [], "deterministic", targets=targets)
     execute_plan(reg, broker, plan)
     state = broker.portfolio_state(CORE)
     assert abs(state["equity"] - 10000.0) < 1.0     # only tiny cost drag
@@ -76,10 +76,10 @@ def test_execute_requires_referee_pass(reg_and_broker):     # use existing fixtu
     plan = build_plan(reg, broker, mandate, targets, "dec1")
     with pytest.raises(MandateViolation, match="referee"):
         execute_plan(reg, broker, plan)
-    reg.log_verdict("dec1", "FAIL", ["planted flaw"], "deterministic")
+    reg.log_verdict("dec1", "FAIL", ["planted flaw"], "deterministic", targets=targets)
     with pytest.raises(MandateViolation, match="referee"):
         execute_plan(reg, broker, plan)
-    reg.log_verdict("dec1", "PASS", [], "deterministic")
+    reg.log_verdict("dec1", "PASS", [], "deterministic", targets=targets)
     out = execute_plan(reg, broker, plan)
     assert out["state"] == "reconciled"
 
@@ -94,3 +94,61 @@ def test_deterministic_referee_catches_planted_flaw():
     assert verdict == "FAIL" and any("cap" in r or "weight" in r for r in reasons)
     good = {t: 1.0 / len(m.universe_whitelist) for t in m.universe_whitelist}
     assert deterministic_referee(good, m, date(2020, 1, 1))[0] == "PASS"
+
+
+def test_deterministic_referee_flags_ill_conditioned_covariance():
+    from datetime import date
+    from qlab.governance.referee import deterministic_referee
+    from qlab.trader.mandate import load_mandate
+    m = load_mandate()
+    good = {t: 1.0 / len(m.universe_whitelist) for t in m.universe_whitelist}
+    verdict, reasons = deterministic_referee(
+        good, m, date(2020, 1, 1), moments_summary={"condition_number": 1e9})
+    assert verdict == "FAIL"
+    assert any("ill-conditioned" in r for r in reasons)
+
+
+def test_verdict_does_not_transfer_to_different_targets(reg_and_broker):
+    reg, broker = reg_and_broker
+    mandate = load_mandate()
+    tickers = mandate.universe_whitelist
+    targets_a = {t: 1.0 / len(tickers) for t in tickers}
+    reg.log_verdict("adhoc", "PASS", [], "deterministic", targets=targets_a)
+
+    # A genuinely different (but still mandate-legal) target set under the
+    # SAME decision_id - the old bug let a stale PASS cover this silently.
+    targets_b = dict(targets_a)
+    targets_b[tickers[0]] += 0.05
+    targets_b[tickers[1]] -= 0.05
+
+    plan_b = build_plan(reg, broker, mandate, targets_b, "adhoc")
+    with pytest.raises(MandateViolation, match="does not cover"):
+        execute_plan(reg, broker, plan_b)
+
+    reg.log_verdict("adhoc", "PASS", [], "deterministic", targets=targets_b)
+    out = execute_plan(reg, broker, plan_b)
+    assert out["state"] == "reconciled"
+
+
+def test_latest_verdict_wins_when_timestamps_collide(reg_and_broker, monkeypatch):
+    """Same-timestamp risk: two verdicts logged in a tight loop must still be
+    ordered correctly by the monotonic ``seq`` column, not ``created_at``."""
+    import qlab.state.registry as registry_mod
+    reg, broker = reg_and_broker
+    mandate = load_mandate()
+    tickers = mandate.universe_whitelist
+    targets = {t: 1.0 / len(tickers) for t in tickers}
+
+    frozen = "2024-01-01T00:00:00+00:00"
+    monkeypatch.setattr(registry_mod, "_now", lambda: frozen)
+
+    reg.log_verdict("dec-seq", "PASS", [], "deterministic", targets=targets)
+    reg.log_verdict("dec-seq", "FAIL", ["reversed"], "deterministic", targets=targets)
+
+    v = reg.get_verdict("dec-seq")
+    assert v["created_at"] == frozen        # confirms the timestamps really collided
+    assert v["verdict"] == "FAIL"           # the later verdict, not the earlier PASS
+
+    plan = build_plan(reg, broker, mandate, targets, "dec-seq")
+    with pytest.raises(MandateViolation, match="referee"):
+        execute_plan(reg, broker, plan)

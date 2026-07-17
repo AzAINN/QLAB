@@ -92,7 +92,7 @@ def run_once(
     # 3b. referee gate + reconcile (must run before any trade; research-plan §3) --
     verdict, reasons = deterministic_referee(targets, mandate, _as_date(as_of),
                                              moments_summary=diag.get("moments"))
-    reg.log_verdict(decision_id, verdict, reasons, source="deterministic")
+    reg.log_verdict(decision_id, verdict, reasons, source="deterministic", targets=targets)
     rec = reconcile(reg, broker, tickers)
 
     # 4. propose + execute (two-phase, mandate-checked) ----------------------

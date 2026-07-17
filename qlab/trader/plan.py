@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from qlab.trader.broker import Broker
 from qlab.trader.mandate import Mandate, MandateViolation
-from qlab.state.registry import Registry
+from qlab.state.registry import Registry, targets_hash
 
 _MIN_LEG_NOTIONAL = 1.0  # ignore dust legs
 
@@ -131,6 +131,10 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan) -> dict:
         raise MandateViolation(
             f"no referee PASS for decision {plan.decision_id!r}; "
             "log_verdict must record PASS before execution")
+    if v.get("targets_hash") != targets_hash(plan.targets):
+        raise MandateViolation(
+            f"referee PASS for decision {plan.decision_id!r} does not cover these "
+            "targets; re-review required")
 
     registry.set_plan_state(plan.plan_id, "submitted")
     fills = []

@@ -221,6 +221,12 @@ def test_ablation_spec_solvers_resolve_and_b3_is_real_risk_parity():
     (c) B3's solved weights must genuinely differ from A1's on the same
         snapshot -- confirming the ERC solver is doing real work, not just
         that the YAML string changed.
+    (d) B3's solved weights must also differ from equal-weight -- the ERC
+        objective is dimensionful at daily-return covariance scale (its value
+        at the equal-weight start is ~1e-11, below SLSQP's ftol resolution),
+        so a naive implementation exits at x0 and silently returns 1/N. A1
+        (min-variance) differing from B3 doesn't rule that out, since A1 need
+        not equal 1/N either -- this pins down that B3 itself moved.
     """
     spec = _load_spec(str(_ABLATION_SPEC_PATH))
 
@@ -252,3 +258,7 @@ def test_ablation_spec_solvers_resolve_and_b3_is_real_risk_parity():
     w_a1, _ = solve_arm(a1, snap, moments=cfg)
     l1 = float((w_b3.as_series() - w_a1.as_series()).abs().sum())
     assert l1 > 0.01, f"B3 (risk parity) is bit-identical to A1 (min-variance): L1={l1}"
+
+    w_eq = pd.Series(1.0 / len(w_b3.tickers), index=w_b3.tickers, dtype=float)
+    l1_eq = float((w_b3.as_series() - w_eq).abs().sum())
+    assert l1_eq > 0.05, f"B3 (risk parity) collapsed to equal-weight: L1={l1_eq}"

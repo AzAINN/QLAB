@@ -114,17 +114,17 @@ class RiskParitySolver(Solver):
         n = objective.n
 
         def erc_obj(w: np.ndarray) -> float:
-            port_var = w @ Sigma @ w
-            mrc = Sigma @ w                    # marginal risk contribution
-            rc = w * mrc                        # risk contribution
-            target = port_var / n
-            return float(np.sum((rc - target) ** 2))
+            port_var = float(w @ Sigma @ w)
+            if port_var <= 1e-18:
+                return 0.0
+            rc = (w * (Sigma @ w)) / port_var          # relative risk contributions, sum to 1
+            return float(np.sum((rc - 1.0 / n) ** 2))
 
         x0 = np.full(n, constraints.budget / n)
         res = minimize(
             erc_obj, x0, method="SLSQP", bounds=constraints.bounds(n),
             constraints=[_budget_constraint(constraints.budget)],
-            options={"maxiter": 500, "ftol": 1e-12},
+            options={"maxiter": 500, "ftol": 1e-14},
         )
         w = finalize_weights(res.x, constraints)
         constraints.validate(w)

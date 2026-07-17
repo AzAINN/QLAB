@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import numpy as np
 import pytest
 
 from qlab.core.objective import build_objective
+from qlab.core.types import MomentSet
 from qlab.solvers.base import Constraints, get_solver, project_capped_simplex
 
 
@@ -52,6 +55,38 @@ def test_capped_simplex_respects_cap():
     w = project_capped_simplex(v, budget=1.0, cap=0.4)
     assert abs(w.sum() - 1.0) < 1e-9
     assert w.max() <= 0.4 + 1e-9
+
+
+def test_risk_parity_is_not_equal_weight_on_heterogeneous_assets():
+    """B3's ERC objective must be dimensionless (relative risk contributions),
+    not the raw ``sum((rc - port_var/n)**2)`` form: at daily-return covariance
+    scale (~1e-4 entries) the latter is ~1e-11 at the equal-weight start,
+    below SLSQP's ftol resolution, so the optimizer exits immediately at x0
+    and silently returns 1/N regardless of how heterogeneous the assets are.
+    """
+    tickers = ["HIVOL", "B", "C", "D"]
+    n = len(tickers)
+    vols = np.array([0.02, 0.005, 0.005, 0.005])  # asset 0 has 4x the vol
+    corr = 0.2
+    corr_mat = np.full((n, n), corr)
+    np.fill_diagonal(corr_mat, 1.0)
+    cov = np.outer(vols, vols) * corr_mat
+
+    ms = MomentSet(tickers=tickers, as_of=date(2022, 6, 30), cov=cov)
+    obj = build_objective("min_variance", ms)
+    c = Constraints()
+    res = get_solver("risk_parity").solve(obj, c)
+    w = res.weights.as_array()
+
+    w_eq = np.full(n, 1.0 / n)
+    l1 = float(np.abs(w - w_eq).sum())
+    assert l1 > 0.05, f"ERC weights collapsed to equal-weight: {w}"
+    assert np.argmin(w) == 0, f"high-vol asset should get the smallest weight: {w}"
+
+    Sigma = obj.cov
+    port_var = float(w @ Sigma @ w)
+    rc = w * (Sigma @ w) / port_var
+    assert np.max(np.abs(rc - 1.0 / n)) < 0.02, f"relative risk contributions not equalized: {rc}"
 
 
 def test_dirac3_unavailable_without_credentials(moment_set, monkeypatch):

@@ -152,3 +152,35 @@ def test_mvsk_diverges_from_min_variance_when_scaled():
     w_mvsk = get_solver("classical_multistart").solve(
         build_objective("mvsk", ms, skew_lambda=1.0, kurt_lambda=1.0), c).weights.as_array()
     assert np.abs(w_mv - w_mvsk).sum() > 0.02
+
+
+# ---------------------------------------------------------------------------
+# R0.2a: canonical polynomial terms — single source of truth (invariant 4)
+# ---------------------------------------------------------------------------
+def test_polynomial_terms_match_scipy_compiler():
+    from qlab.core.objective import evaluate_terms, polynomial_terms
+    ms, _ = _heavy_tailed_ms(seed=11, n=4, T=600)
+    obj = build_objective("mvsk", ms, skew_lambda=0.7, kurt_lambda=0.3)
+    f, _g = compile_scipy(obj)
+    terms = polynomial_terms(obj)
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        w = rng.dirichlet(np.ones(obj.n))
+        assert abs(evaluate_terms(terms, w) - f(w)) < 1e-10
+
+
+def test_dirac_encoder_agrees_with_scipy():
+    from qlab.core.objective import polynomial_terms
+    from qlab.solvers.dirac3 import _mvsk_polynomial
+    ms, _ = _heavy_tailed_ms(seed=11, n=4, T=600)
+    obj = build_objective("mvsk", ms, skew_lambda=0.7, kurt_lambda=0.3)
+    f, _g = compile_scipy(obj)
+    coeffs, indices = _mvsk_polynomial(obj)
+    max_deg = max(len([i for i in idx if i > 0]) for idx in indices)
+    rng = np.random.default_rng(1)
+    for _ in range(10):
+        w = rng.dirichlet(np.ones(obj.n))
+        val = sum(c * np.prod([w[i - 1] for i in idx if i > 0])
+                  for c, idx in zip(coeffs, indices))
+        assert abs(val - f(w)) < 1e-10
+    assert max_deg == 4

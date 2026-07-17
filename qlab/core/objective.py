@@ -21,7 +21,9 @@ argument (§0.3), made reproducible instead of asserted.
 
 from __future__ import annotations
 
-from math import comb
+from collections import Counter
+from itertools import combinations_with_replacement
+from math import comb, factorial
 from typing import Callable
 
 import numpy as np
@@ -173,6 +175,50 @@ def evaluate(obj: Objective, w: np.ndarray) -> float:
     # portfolio variance so arms remain loosely comparable.
     w = np.asarray(w, dtype=float)
     return float(w @ obj.cov @ w)
+
+
+# ---------------------------------------------------------------------------
+# Canonical polynomial terms — the single source of truth (invariant 4)
+# ---------------------------------------------------------------------------
+def _perm_multiplicity(idx: tuple[int, ...]) -> int:
+    c = Counter(idx)
+    m = factorial(len(idx))
+    for v in c.values():
+        m //= factorial(v)
+    return m
+
+
+def polynomial_terms(obj: Objective) -> list[tuple[float, tuple[int, ...]]]:
+    """The one polynomial, as unique sorted-index terms (invariant 4).
+
+    ``sum(c * prod(w[i] for i in idx))`` over the returned terms equals
+    ``compile_scipy(obj)[0](w)`` exactly — property-tested, and consumed by the
+    Dirac-3 and Ising encoders so all arms share one coefficient source.
+    """
+    if obj.form not in ("min_variance", "mvsk"):
+        raise ValueError(f"no polynomial form for {obj.form!r}")
+    terms: list[tuple[float, tuple[int, ...]]] = []
+    n = obj.n
+    for idx in combinations_with_replacement(range(n), 2):
+        c = float(obj.cov[idx]) * _perm_multiplicity(idx)
+        if c:
+            terms.append((c, idx))
+    if obj.form == "mvsk" and obj.coskew is not None and obj.skew_lambda:
+        for idx in combinations_with_replacement(range(n), 3):
+            c = -obj.skew_lambda * float(obj.coskew[idx]) * _perm_multiplicity(idx)
+            if c:
+                terms.append((c, idx))
+    if obj.form == "mvsk" and obj.cokurt is not None and obj.kurt_lambda:
+        for idx in combinations_with_replacement(range(n), 4):
+            c = obj.kurt_lambda * float(obj.cokurt[idx]) * _perm_multiplicity(idx)
+            if c:
+                terms.append((c, idx))
+    return terms
+
+
+def evaluate_terms(terms, w) -> float:
+    w = np.asarray(w, dtype=float)
+    return float(sum(c * np.prod(w[list(idx)]) for c, idx in terms))
 
 
 # ---------------------------------------------------------------------------

@@ -106,32 +106,17 @@ class Dirac3Solver(Solver):
 
 
 def _mvsk_polynomial(obj: Objective) -> tuple[list[float], list[list[int]]]:
-    """Flatten Σ / coskew / cokurt into (coeff, index-tuple) polynomial terms.
+    """Flatten the canonical polynomial into eqc-models (coeffs, indices) form.
 
-    Indices are 1-based with 0 as the padding sentinel, matching QCI's fixed-
-    degree polynomial convention (degree 4 → 4-length index tuples).
+    Single source of truth: qlab.core.objective.polynomial_terms. Indices are
+    1-based and left-padded with 0 to the max degree, per PolynomialModel.
     """
-    n = obj.n
-    coeffs: list[float] = []
-    indices: list[list[int]] = []
-
-    def add(coef: float, idx: list[int]):
-        if abs(coef) < 1e-15:
-            return
-        pad = [0] * (4 - len(idx)) + [i + 1 for i in idx]
-        coeffs.append(float(coef))
-        indices.append(pad)
-
-    for i in range(n):
-        for j in range(n):
-            add(obj.cov[i, j], [i, j])
-    if obj.coskew is not None and obj.skew_lambda:
-        for i in range(n):
-            for j in range(n):
-                for k in range(n):
-                    add(-obj.skew_lambda * obj.coskew[i, j, k], [i, j, k])
-    if obj.cokurt is not None and obj.kurt_lambda:
-        it = np.ndindex(n, n, n, n)
-        for (i, j, k, l) in it:
-            add(obj.kurt_lambda * obj.cokurt[i, j, k, l], [i, j, k, l])
+    from qlab.core.objective import polynomial_terms
+    terms = polynomial_terms(obj)
+    max_deg = max(len(idx) for _, idx in terms)
+    coeffs, indices = [], []
+    for c, idx in terms:
+        coeffs.append(float(c))
+        padded = (0,) * (max_deg - len(idx)) + tuple(i + 1 for i in idx)
+        indices.append(list(padded))
     return coeffs, indices

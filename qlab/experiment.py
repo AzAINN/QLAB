@@ -86,8 +86,14 @@ def run_ablation(
         except Exception as exc:  # keep the ablation resilient arm-by-arm
             results["arms"][arm.id] = {"error": repr(exc)}
 
-    # cross-trial Sharpe variance + registry-counted trials -> honest DSR + CIs
-    candidates = [aid for aid in bt_results if arm_by_id[aid].objective != "sixty_forty"]
+    # cross-trial Sharpe variance + registry-counted trials -> honest DSR + CIs.
+    # research_only arms (e.g. the vol-target overlay, A3t) get a full backtest
+    # and are reported, but must not inflate the trial count: they cannot
+    # reach the live trader, so counting them as trials would understate the
+    # deflated Sharpe of every real candidate.
+    candidates = [aid for aid in bt_results
+                  if arm_by_id[aid].objective != "sixty_forty"
+                  and not arm_by_id[aid].params.get("research_only")]
     psrs = [periodic_sharpe(bt_results[aid].returns) for aid in candidates]
     v_sr = float(np.var(psrs, ddof=1)) if len(psrs) > 1 else 0.0
     # cumulative, registry-wide count of non-benchmark arms (this run's candidates
@@ -100,8 +106,12 @@ def run_ablation(
             n_trials=n_trials_dsr, trial_sharpe_var=v_sr)
         for name, fn in (("sharpe_ci", periodic_sharpe), ("sortino_ci", _sortino_stat)):
             res.metrics[name] = list(block_bootstrap_ci(res.returns, fn))
-        reg.log_backtest(run_id, arm_id, res.metrics,
-                         objective=arm_by_id[arm_id].objective)
+        arm = arm_by_id[arm_id]
+        # tag research_only arms' persisted objective so a future run's trial
+        # count (Registry.backtest_arm_ids) can exclude them too.
+        logged_objective = (f"{arm.objective}:research"
+                           if arm.params.get("research_only") else arm.objective)
+        reg.log_backtest(run_id, arm_id, res.metrics, objective=logged_objective)
         results["arms"][arm_id] = {
             "objective": arm_by_id[arm_id].objective,
             "solver": arm_by_id[arm_id].solver,

@@ -172,8 +172,14 @@ def build_policy(arm: Arm, *, moments: MomentsConfig | None = None,
     that only ever *de-risks* (no leverage), with the un-invested remainder held
     implicitly in cash so the weights sum below 1. ``est_vol`` is the trailing
     annualised realised vol of the *decided* portfolio, so the overlay is
-    strictly backward-looking. This is a **research-only** construct: it breaks
-    the fully-invested mandate, so such arms cannot reach the live trader.
+    strictly backward-looking. The backtest engine's drift loop (see
+    ``run_backtest``) genuinely carries that cash share through each holding
+    period — cash earns zero and is not renormalized back to full investment
+    day over day — so the overlay's de-risking is real in the realised vol,
+    not just in the initial target weights. This is a **research-only**
+    construct: it breaks the fully-invested mandate, so such arms cannot
+    reach the live trader, and setting ``arm.params["research_only"] = True``
+    also excludes them from the DSR trial count (see ``run_ablation``).
     """
     target_vol = arm.params.get("target_vol")
 

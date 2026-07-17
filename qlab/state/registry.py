@@ -246,10 +246,19 @@ class Registry:
         return int(r[0]) if r else 0
 
     def backtest_arm_ids(self, exclude_objectives: tuple[str, ...] = ("sixty_forty",)) -> set[str]:
+        """Distinct arm ids counted as DSR trials.
+
+        Excludes benchmark objectives (``exclude_objectives``) and any arm
+        whose persisted objective carries the ``:research`` suffix — those are
+        ``research_only`` arms (e.g. the vol-target overlay) that get a full
+        backtest but can never reach the live trader, so they must not
+        inflate the trial count.
+        """
         ph = ",".join("?" for _ in exclude_objectives) or "''"
         rows = self.con.execute(
             f"SELECT DISTINCT arm_id FROM backtests "
-            f"WHERE COALESCE(objective, '') NOT IN ({ph})",
+            f"WHERE COALESCE(objective, '') NOT IN ({ph}) "
+            f"AND COALESCE(objective,'') NOT LIKE '%:research'",
             list(exclude_objectives)).fetchall()
         return {r[0] for r in rows}
 

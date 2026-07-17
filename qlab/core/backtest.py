@@ -114,9 +114,17 @@ def run_backtest(
             r_day = R.loc[day, tickers].fillna(0.0)
             gross = float((w.values * r_day.values).sum())
             daily_returns[day] = gross - (cost if i == 0 else 0.0)
+            # Grow by the *portfolio's* growth factor (1 + gross), not by
+            # renormalizing the drifted weights to sum back to 1.0. Cash
+            # earns 0 and is already reflected in `gross` as drag, so this
+            # divisor preserves the un-invested (cash) share 1 - sum(w)
+            # through the period instead of silently re-levering a
+            # sub-1 (cash-carrying) weight vector back to full investment
+            # after one day. When sum(w) == 1 exactly, denom == grown.sum(),
+            # so fully-invested arms are bit-identical to the old behavior.
+            denom = 1.0 + gross
             grown = w.values * (1.0 + r_day.values)
-            s = grown.sum()
-            w = pd.Series(grown / s if s > 0 else grown, index=tickers)
+            w = pd.Series(grown / denom if denom > 0 else grown, index=tickers)
         held_w = w
 
     ret_series = pd.Series(daily_returns).sort_index()

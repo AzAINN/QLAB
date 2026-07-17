@@ -122,6 +122,32 @@ def test_sortino_stat_nan_on_all_positive():
     assert np.isnan(_sortino_stat(pd.Series([0.01, 0.02, 0.015, 0.03])))
 
 
+def test_research_only_arm_excluded_from_dsr_trial_count():
+    """A research_only arm must still get a full backtest and appear in the
+    report, but must not inflate the DSR trial count — it's a diagnostic
+    arm (e.g. the vol-target overlay) that cannot reach the live trader, so
+    counting it as a trial would understate the deflated Sharpe of every
+    real candidate.
+    """
+    from qlab.experiment import run_ablation
+    from qlab.state.registry import Registry
+    reg = Registry(":memory:")
+    spec = {"name": "t3", "seed": 7,
+            "data": {"universe": "core", "start": "2017-01-01", "end": "2020-12-31"},
+            "backtest": {"rebalance": "quarterly", "lookback_days": 504, "cost_bps": 5},
+            "moments": {}, "arms": [
+                {"id": "B1", "objective": "equal_weight", "solver": "none"},
+                {"id": "A1", "objective": "min_variance", "solver": "classical"},
+                {"id": "RM", "objective": "min_variance", "solver": "classical",
+                 "params": {"research_only": True}}]}
+    out = run_ablation(spec, registry=reg, offline=True, run_qaoa=False)
+    assert "RM" in out["arms"]                            # still reported
+    assert out["n_trials_dsr"] == 2                        # but not counted as a trial
+    spec2 = dict(spec, arms=[{"id": "B3", "objective": "risk_parity", "solver": "risk_parity"}])
+    out2 = run_ablation(spec2, registry=reg, offline=True, run_qaoa=False)
+    assert out2["n_trials_dsr"] == 3                       # accumulates B1, A1, B3; RM still excluded
+
+
 def test_vol_target_overlay_reduces_realized_vol():
     from qlab.arms import Arm, MomentsConfig, build_policy
     from qlab.core.backtest import run_backtest
@@ -138,3 +164,36 @@ def test_vol_target_overlay_reduces_realized_vol():
     m_tgt = run_backtest(px, build_policy(tgt, moments=cfg), cadence="quarterly",
                          lookback_days=504).metrics
     assert m_tgt["ann_vol"] < m_raw["ann_vol"]
+    # magnitude check: with correct cash-carry through the drift loop, the
+    # de-risked book's realised vol should track its cash share (~0.73 of
+    # raw at target_vol=0.06 vs raw ~0.082), not merely be "somewhat lower".
+    # A buggy drift loop that renormalizes to sum 1.0 daily silently re-levers
+    # the cash-carrying weight vector back to full investment after one day,
+    # which this stricter bound catches.
+    assert m_tgt["ann_vol"] < 0.85 * m_raw["ann_vol"]
+
+
+def test_drift_preserves_cash_share():
+    """Half-invested and fully-invested twins should differ in realised vol
+    by roughly the ratio of their invested shares (0.5), not converge to the
+    same vol because the drift loop silently re-levers back to full exposure.
+    """
+    from qlab.core.types import Weights
+
+    px = market.get_prices(["ACWI", "BNDW", "GSG", "GLD", "VNQ"],
+                           "2015-01-01", "2021-12-31", offline=True, seed=7)
+
+    def half_invested(snap):
+        vals = [0.25, 0.25] + [0.0] * (len(snap.tickers) - 2)
+        return Weights(tickers=snap.tickers, values=vals)
+
+    def fully_invested(snap):
+        vals = [0.5, 0.5] + [0.0] * (len(snap.tickers) - 2)
+        return Weights(tickers=snap.tickers, values=vals)
+
+    m_half = run_backtest(px, half_invested, arm_id="half", cadence="quarterly",
+                          lookback_days=504).metrics
+    m_full = run_backtest(px, fully_invested, arm_id="full", cadence="quarterly",
+                          lookback_days=504).metrics
+    ratio = m_half["ann_vol"] / m_full["ann_vol"]
+    assert 0.4 <= ratio <= 0.6

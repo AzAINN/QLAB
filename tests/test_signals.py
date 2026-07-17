@@ -59,8 +59,22 @@ def test_composite_regime_lambda_higher_in_stress():
     stress_snap = DataSnapshot(list(px.columns), px, px.index[-1].date())
     lam_calm = composite_regime(calm_snap, offline=True)["regime_lambda"]
     lam_stress = composite_regime(stress_snap, offline=True)["regime_lambda"]
-    # Measured deterministic gap is ~0.18: turbulence + trailing-vol percentiles
-    # separate the regimes cleanly, while absorption_pct saturates on the short
-    # calm-snapshot window (only ~480 rows) and compresses the spread slightly.
-    assert lam_stress > lam_calm + 0.15
+    # Measured deterministic gap is ~0.51: turbulence + trailing-vol percentiles
+    # separate the regimes cleanly, and absorption_pct no longer degenerates
+    # (window shrinks with history length, so both snapshots get a real
+    # absorption series instead of the old near-1-point degenerate case).
+    assert lam_stress > lam_calm + 0.2
     assert composite_regime(stress_snap, offline=True)["regime"] == "stress"
+
+
+def test_composite_regime_drops_degenerate_absorption():
+    from qlab.signals.hard import composite_regime
+    from qlab.core.types import DataSnapshot
+    r = _two_regime_returns().iloc[:400]          # short history band
+    px = (1 + r).cumprod() * 100
+    snap = DataSnapshot(list(px.columns), px, px.index[-1].date())
+    out = composite_regime(snap, offline=True)
+    comps = out["components"]
+    assert ("absorption_pct" not in comps) or (
+        comps["absorption_pct"] < 1.0), "degenerate absorption must not pin lambda"
+    assert 0.0 <= out["regime_lambda"] <= 1.0

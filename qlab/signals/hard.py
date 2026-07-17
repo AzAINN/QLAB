@@ -72,19 +72,27 @@ def composite_regime(snapshot: DataSnapshot, *, offline: bool = False) -> dict:
     percentile), each computed against the snapshot's own history. VIX-family
     series can sharpen this when cached; the price-only version is always
     available and is the referee-auditable floor.
+
+    ``absorption_pct`` is only included (and thus only enters the mean) when
+    its underlying series has at least 10 points — with fewer points the
+    ``(absr <= absr.iloc[-1]).mean()`` percentile degenerates (often to a
+    trivial 1.0), which would pin lambda high regardless of actual factor
+    concentration.
     """
     rets = snapshot.log_returns().dropna(how="any")
     if len(rets) < 300:
         return {"regime": "calm", "regime_lambda": 0.0,
                 "components": {}, "method": "insufficient_data"}
     turb = turbulence(rets, lookback=252)
-    absr = absorption_ratio(rets, window=min(500, len(rets) - 5))
+    window = min(500, max(150, len(rets) // 2))
+    absr = absorption_ratio(rets, window=window)
     vol = rets.mean(axis=1).rolling(63).std().dropna() * np.sqrt(_TRADING_DAYS)
     comp = {
         "turbulence_pct": float((turb <= turb.iloc[-1]).mean()),
-        "absorption_pct": float((absr <= absr.iloc[-1]).mean()),
         "vol_pct": float((vol <= vol.iloc[-1]).mean()),
     }
+    if len(absr) >= 10:
+        comp["absorption_pct"] = float((absr <= absr.iloc[-1]).mean())
     lam = float(np.clip(np.mean(list(comp.values())), 0.0, 1.0))
     return {"regime": "stress" if lam > 0.6 else "calm",
             "regime_lambda": lam, "components": comp, "method": "composite_v1"}

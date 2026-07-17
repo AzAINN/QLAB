@@ -190,6 +190,15 @@ def build_server(state: LabState | None = None):
         st.budget.charge("registry.recent_decisions")
         return st.registry.recent_decisions(kind or None, limit)
 
+    @app.tool(name="registry.log_verdict")
+    def registry_log_verdict(decision_id: str, verdict: str, reasons: list = []) -> dict:
+        """Referee-only: record PASS/FAIL for a decision. Trading requires PASS."""
+        st.budget.charge("registry.log_verdict")
+        if verdict not in ("PASS", "FAIL"):
+            raise ValueError("verdict must be PASS or FAIL")
+        vid = st.registry.log_verdict(decision_id, verdict, list(reasons), source="referee-agent")
+        return {"verdict_id": vid, "decision_id": decision_id, "verdict": verdict}
+
     # -- report -------------------------------------------------------------
     @app.tool(name="report.recommendation")
     def report_recommendation(as_of: str, universe: str = "core",

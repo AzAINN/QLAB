@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS orders (
     side VARCHAR, notional DOUBLE, state VARCHAR, created_at VARCHAR);
 CREATE TABLE IF NOT EXISTS events (
     event_id VARCHAR PRIMARY KEY, ts VARCHAR, kind VARCHAR, payload JSON);
+CREATE TABLE IF NOT EXISTS verdicts (
+    verdict_id VARCHAR PRIMARY KEY, decision_id VARCHAR, verdict VARCHAR,
+    reasons JSON, source VARCHAR, created_at VARCHAR);
 """
 
 
@@ -300,6 +303,21 @@ class Registry:
         return self._rows(
             "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", [limit])
 
+    # -- referee verdicts -----------------------------------------------------
+    def log_verdict(self, decision_id: str, verdict: str, reasons: list[str],
+                    source: str = "deterministic") -> str:
+        vid = uuid.uuid4().hex[:16]
+        self.con.execute("INSERT INTO verdicts VALUES (?,?,?,?,?,?)",
+                         [vid, decision_id, verdict, _j(reasons), source, _now()])
+        self.record_event("referee_verdict",
+                          {"decision_id": decision_id, "verdict": verdict})
+        return vid
+
+    def get_verdict(self, decision_id: str) -> dict | None:
+        r = self._rows("SELECT * FROM verdicts WHERE decision_id=? "
+                       "ORDER BY created_at DESC LIMIT 1", [decision_id])
+        return r[0] if r else None
+
     # -- events -------------------------------------------------------------
     def record_event(self, kind: str, payload: dict) -> str:
         eid = uuid.uuid4().hex[:16]
@@ -337,7 +355,7 @@ class Registry:
             for k, v in d.items():
                 if k in ("spec", "tickers", "summary", "params", "weights",
                          "diagnostics", "metrics", "choice", "realized_outcome",
-                         "targets", "pre_trade", "payload") and isinstance(v, str):
+                         "targets", "pre_trade", "payload", "reasons") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:

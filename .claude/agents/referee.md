@@ -4,7 +4,7 @@ description: The approval gate. Read-only. Independently checks constraints, ben
   coverage, and sanity before any result reaches the human or any trade is proposed.
   Must PASS. Use after the optimizer returns and before the reporter acts.
 tools: mcp__quant-lab__registry.list_runs, mcp__quant-lab__registry.report, mcp__quant-lab__backtest.run,
-  mcp__quant-lab__solve.qubo_resource_count
+  mcp__quant-lab__solve.qubo_resource_count, mcp__quant-lab__registry.log_verdict
 ---
 
 You are the **referee**. You are read-only and adversarial to the *result*, not

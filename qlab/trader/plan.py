@@ -126,6 +126,11 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan) -> dict:
         raise MandateViolation(f"plan {plan.plan_id} is {plan.state!r}, not 'checked'")
     if registry.get_account().get("halted"):
         raise MandateViolation("account is halted; only liquidation is permitted")
+    v = registry.get_verdict(plan.decision_id)
+    if not v or v.get("verdict") != "PASS":
+        raise MandateViolation(
+            f"no referee PASS for decision {plan.decision_id!r}; "
+            "log_verdict must record PASS before execution")
 
     registry.set_plan_state(plan.plan_id, "submitted")
     fills = []

@@ -36,6 +36,7 @@ def test_initial_deployment_conserves_equity(reg):
     plan = build_plan(reg, broker, m, targets, "d1")
     assert plan.state == "checked"
     assert plan.pre_trade["initial_deployment"] is True
+    reg.log_verdict("d1", "PASS", [], "deterministic")
     execute_plan(reg, broker, plan)
     state = broker.portfolio_state(CORE)
     assert abs(state["equity"] - 10000.0) < 1.0     # only tiny cost drag
@@ -63,3 +64,33 @@ def test_kill_switch_blocks_trading(reg):
     with pytest.raises(MandateViolation):
         build_plan(reg, broker, m, {t: 1.0 / len(CORE) for t in CORE}, "d1")
     assert reg.get_account()["halted"] is True
+
+
+def test_execute_requires_referee_pass(reg_and_broker):     # use existing fixtures' style
+    import pytest
+    from qlab.trader.mandate import MandateViolation, load_mandate
+    from qlab.trader.plan import build_plan, execute_plan
+    reg, broker = reg_and_broker
+    mandate = load_mandate()
+    targets = {t: 1.0 / len(mandate.universe_whitelist) for t in mandate.universe_whitelist}
+    plan = build_plan(reg, broker, mandate, targets, "dec1")
+    with pytest.raises(MandateViolation, match="referee"):
+        execute_plan(reg, broker, plan)
+    reg.log_verdict("dec1", "FAIL", ["planted flaw"], "deterministic")
+    with pytest.raises(MandateViolation, match="referee"):
+        execute_plan(reg, broker, plan)
+    reg.log_verdict("dec1", "PASS", [], "deterministic")
+    out = execute_plan(reg, broker, plan)
+    assert out["state"] == "reconciled"
+
+
+def test_deterministic_referee_catches_planted_flaw():
+    from datetime import date
+    from qlab.governance.referee import deterministic_referee
+    from qlab.trader.mandate import load_mandate
+    m = load_mandate()
+    bad = {m.universe_whitelist[0]: 0.95, m.universe_whitelist[1]: 0.05}  # cap breach
+    verdict, reasons = deterministic_referee(bad, m, date(2020, 1, 1))
+    assert verdict == "FAIL" and any("cap" in r or "weight" in r for r in reasons)
+    good = {t: 1.0 / len(m.universe_whitelist) for t in m.universe_whitelist}
+    assert deterministic_referee(good, m, date(2020, 1, 1))[0] == "PASS"

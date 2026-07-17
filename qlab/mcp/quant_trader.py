@@ -24,6 +24,7 @@ from qlab.mcp.guardrails import require_fastmcp
 from qlab.trader.broker import get_broker
 from qlab.trader.mandate import MandateViolation, load_mandate
 from qlab.trader.plan import OrderLeg, OrderPlan, build_plan, execute_plan
+from qlab.trader.reconcile import reconcile as _reconcile
 from qlab.state.registry import Registry
 
 
@@ -62,15 +63,7 @@ def build_server(state: TraderState | None = None):
     @app.tool(name="reconcile")
     def reconcile() -> dict:
         """Diff the registry ledger against broker truth. Must be clean before trading."""
-        broker_pos = st.broker.portfolio_state(st.tickers)["positions"]
-        ledger_pos = st.registry.get_positions()
-        diffs = {}
-        for t in set(list(broker_pos) + list(ledger_pos)):
-            bq = broker_pos.get(t, {}).get("qty", 0.0)
-            lq = ledger_pos.get(t, {}).get("qty", 0.0)
-            if abs(bq - lq) > 1e-6:
-                diffs[t] = {"broker_qty": bq, "ledger_qty": lq}
-        return {"clean": not diffs, "diffs": diffs}
+        return _reconcile(st.registry, st.broker, st.tickers)
 
     @app.tool(name="propose_rebalance")
     def propose_rebalance(targets: dict, decision_id: str = "adhoc") -> dict:

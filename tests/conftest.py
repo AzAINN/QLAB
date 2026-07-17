@@ -14,6 +14,8 @@ from qlab.arms import MomentsConfig
 from qlab.core import data as market
 from qlab.core.moments import estimate_moments
 from qlab.state.registry import Registry
+from qlab.trader.broker import SimulatedPaperBroker, default_price_provider
+from qlab.trader.mandate import load_mandate
 
 warnings.filterwarnings("ignore")
 
@@ -25,6 +27,22 @@ def reg() -> Registry:
     r = Registry(":memory:")
     yield r
     r.close()
+
+
+@pytest.fixture
+def tmp_registry() -> Registry:
+    r = Registry(":memory:")
+    yield r
+    r.close()
+
+
+@pytest.fixture
+def reg_and_broker(tmp_registry):
+    mandate = load_mandate()
+    broker = SimulatedPaperBroker(
+        tmp_registry, default_price_provider(offline=True),
+        mandate.paper_capital, universe=mandate.universe_whitelist)
+    return tmp_registry, broker
 
 
 @pytest.fixture

@@ -23,10 +23,12 @@ from qlab.core import data as market
 from qlab.core.moments import detect_regime
 from qlab.core.types import Decision
 from qlab.experiment import compare_classical_quantum
+from qlab.governance.referee import deterministic_referee
 from qlab.solvers.base import Constraints
 from qlab.trader.broker import get_broker
 from qlab.trader.mandate import Mandate, MandateViolation, load_mandate
 from qlab.trader.plan import build_plan, execute_plan
+from qlab.trader.reconcile import reconcile
 from qlab.state.registry import Registry
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -87,21 +89,33 @@ def run_once(
     )
     decision_id = reg.log_decision(decision)
 
+    # 3b. referee gate + reconcile (must run before any trade; research-plan §3) --
+    verdict, reasons = deterministic_referee(targets, mandate, _as_date(as_of),
+                                             moments_summary=diag.get("moments"))
+    reg.log_verdict(decision_id, verdict, reasons, source="deterministic")
+    rec = reconcile(reg, broker, tickers)
+
     # 4. propose + execute (two-phase, mandate-checked) ----------------------
     state_before = broker.portfolio_state(tickers)
     trade_result: dict = {"executed": False}
-    try:
-        plan = build_plan(reg, broker, mandate, targets, decision_id,
-                          cost_bps=5.0)
-        if execute:
-            trade_result = execute_plan(reg, broker, plan)
-            trade_result["executed"] = True
-        else:
-            trade_result = {"executed": False, "plan": plan.to_dict(),
-                            "note": "execute=False (dry run)"}
-    except MandateViolation as exc:
-        trade_result = {"executed": False, "mandate_violation": str(exc)}
-        reg.record_event("mandate_violation", {"error": str(exc)})
+    if verdict != "PASS":
+        trade_result = {"executed": False, "blocked_by": "referee", "reasons": reasons}
+    elif not rec["clean"]:
+        trade_result = {"executed": False, "blocked_by": "reconcile", "diffs": rec["diffs"]}
+        reg.record_event("reconcile_dirty", rec)
+    else:
+        try:
+            plan = build_plan(reg, broker, mandate, targets, decision_id,
+                              cost_bps=5.0)
+            if execute:
+                trade_result = execute_plan(reg, broker, plan)
+                trade_result["executed"] = True
+            else:
+                trade_result = {"executed": False, "plan": plan.to_dict(),
+                                "note": "execute=False (dry run)"}
+        except MandateViolation as exc:
+            trade_result = {"executed": False, "mandate_violation": str(exc)}
+            reg.record_event("mandate_violation", {"error": str(exc)})
 
     state_after = broker.portfolio_state(tickers)
 
@@ -111,6 +125,7 @@ def run_once(
         "equity_before": state_before["equity"], "equity_after": state_after["equity"],
         "trade": trade_result, "diagnostics": {k: v for k, v in diag.items()
                                                if k not in ("moments",)},
+        "referee": {"verdict": verdict, "reasons": reasons}, "reconcile": rec,
         "broker": broker.name, "offline": offline,
     }
     _write_summary(summary)
@@ -137,6 +152,7 @@ def daily_ops(
                         seed=seed, universe=tickers)
 
     state = broker.portfolio_state(tickers)
+    rec = reconcile(reg, broker, tickers)
     snap = market.snapshot(tickers, date.today().isoformat(), offline=offline, seed=seed)
     regime = detect_regime(snap)
 
@@ -161,7 +177,7 @@ def daily_ops(
     result = {
         "kind": "daily_ops", "equity": state["equity"], "regime": regime["regime"],
         "triggers": triggers, "rebalance_recommended": bool(triggers),
-        "halted": state["halted"] or dd_breached,
+        "halted": state["halted"] or dd_breached, "reconcile": rec,
     }
     reg.record_event("daily_ops", result)
     _write_summary(result, prefix="dailyops")

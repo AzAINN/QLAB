@@ -295,7 +295,10 @@ reconciliation, mandate, and idempotency gates are now enforced in code. See
 
 ### 1. Interactive (orchestrator + subagents)
 
-The two servers are registered in [`.mcp.json`](.mcp.json). Five subagents live
+A single combined `qlab` MCP server (`python -m qlab.mcp.server` — both tool
+namespaces, one DuckDB writer) is registered in [`.mcp.json`](.mcp.json); it
+refuses to start while the UI runtime owns the book (use the `qlab-operator`
+proxy in that case). Five subagents live
 in [`agents/`](agents/) as the **orchestrator-agnostic source of truth**; the
 loader emits both Claude Code and IBM Bob adapters:
 
@@ -443,7 +446,11 @@ qlab/
   solvers/    base (Solver protocol + registry) · classical · hrp · cvar ·
               quantum (Aer QAOA) · dirac3 (QCI adapter) · mock
   state/      registry (DuckDB) · artifacts (content-addressed JSON)
-  mcp/        guardrails · quant_lab · quant_trader
+  mcp/        guardrails · quant_lab · quant_trader · server (combined,
+              single-writer + owner-port guard) · tui_proxy (qlab-operator)
+  signals/    hard (turbulence · absorption · FRED · composite regime) ·
+              condition (regime-conditional Σ)
+  governance/ referee (deterministic gate) · reflection (pending→resolved)
   trader/     mandate · broker (simulated paper + Alpaca) · plan (state machine)
   agents/     loader (neutral agents/*.md → Claude + Bob adapters)
   ui/         server (stdlib HTTP + JSON API) · index.html (single-page app)

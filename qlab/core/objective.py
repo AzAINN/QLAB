@@ -40,8 +40,35 @@ def build_objective(
     kurt_lambda: float = 0.0,
     risk_aversion: float = 1.0,
     extra: dict | None = None,
+    lambda_scale: str = "auto",
 ) -> Objective:
-    """Construct an :class:`Objective` from an estimated :class:`MomentSet`."""
+    """Construct an :class:`Objective` from an estimated :class:`MomentSet`.
+
+    R0.1: daily-return coskew/cokurt tensors are 4-6 orders of magnitude below
+    the variance term, so a literal ``λ₃ · (S:www)`` at ``λ=0.5`` was silently
+    negligible next to ``wᵀΣw`` — MVSK collapsed to min-variance regardless of
+    λ. With ``lambda_scale="auto"`` (the default), ``skew_lambda``/``kurt_lambda``
+    are reinterpreted as *"this term is worth this many multiples of the
+    variance term at the equal-weight portfolio"* — units-invariant, so the
+    higher moments actually contribute. ``lambda_scale="raw"`` preserves the
+    old literal-coefficient behavior.
+    """
+    extra = dict(extra or {})
+    l3, l4 = float(skew_lambda), float(kurt_lambda)
+    if form == "mvsk" and lambda_scale == "auto" and (l3 or l4):
+        n = ms.n
+        w0 = np.full(n, 1.0 / n)
+        var0 = float(w0 @ ms.cov @ w0)
+        extra.update({"lambda_scale": "auto",
+                      "skew_lambda_raw": l3, "kurt_lambda_raw": l4})
+        if ms.coskew is not None and l3:
+            m3 = abs(float(np.einsum("ijk,i,j,k->", ms.coskew, w0, w0, w0)))
+            l3 = l3 * var0 / max(m3, 1e-30)
+        if ms.cokurt is not None and l4:
+            m4 = abs(float(np.einsum("ijkl,i,j,k,l->", ms.cokurt, w0, w0, w0, w0)))
+            l4 = l4 * var0 / max(m4, 1e-30)
+    elif form == "mvsk":
+        extra.setdefault("lambda_scale", lambda_scale)
     return Objective(
         form=form,                       # type: ignore[arg-type]
         tickers=ms.tickers,
@@ -49,11 +76,24 @@ def build_objective(
         mu=ms.mu,
         coskew=ms.coskew,
         cokurt=ms.cokurt,
-        skew_lambda=skew_lambda,
-        kurt_lambda=kurt_lambda,
+        skew_lambda=l3,
+        kurt_lambda=l4,
         risk_aversion=risk_aversion,
-        extra=extra or {},
+        extra=extra,
     )
+
+
+def term_contributions(obj: Objective, w: np.ndarray) -> dict[str, float]:
+    """Per-term magnitudes at ``w`` — the R0.1 diagnostic (logged with solves)."""
+    w = np.asarray(w, dtype=float)
+    out = {"variance": float(w @ obj.cov @ w), "skew_term": 0.0, "kurt_term": 0.0}
+    if obj.coskew is not None and obj.skew_lambda:
+        out["skew_term"] = -obj.skew_lambda * float(
+            np.einsum("ijk,i,j,k->", obj.coskew, w, w, w))
+    if obj.cokurt is not None and obj.kurt_lambda:
+        out["kurt_term"] = obj.kurt_lambda * float(
+            np.einsum("ijkl,i,j,k,l->", obj.cokurt, w, w, w, w))
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -76,9 +76,9 @@ class PaperConfirmScreen(ModalScreen[bool]):
         with Vertical(id="paper-dialog"):
             yield Static("EXECUTE PAPER REBALANCE", id="paper-dialog-title")
             yield Static(
-                "Paper capital only. The deterministic mandate is enforced, but "
-                "this branch does not yet contain the R0 code-enforced referee gate. "
-                "The action will be recorded in the audit trail.",
+                "Paper capital only. The deterministic mandate, decision-bound "
+                "referee PASS, reconciliation, and idempotent order path are "
+                "enforced. Human confirmation and the full action trail remain.",
                 id="paper-dialog-copy",
             )
             with Horizontal(id="paper-dialog-actions"):

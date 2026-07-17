@@ -101,8 +101,6 @@ class SimulatedPaperBroker(Broker):
         dqty = qty if side == "buy" else -qty
         cash_delta = -notional if side == "buy" else notional
         self.reg.apply_fill(ticker, dqty, price, cash_delta)
-        self.reg.add_order(client_order_id, plan_id="", ticker=ticker, side=side,
-                           notional=notional, state="filled")
         return {"client_order_id": client_order_id, "ticker": ticker, "side": side,
                 "qty": qty, "price": price, "notional": notional, "state": "filled"}
 

@@ -39,6 +39,55 @@ def test_run_once_logs_verdict_and_reconciles(tmp_registry):
     assert summary["reconcile"]["clean"] is True
 
 
+def test_run_once_records_challenger_view(tmp_registry):
+    summary = run_once(
+        registry=tmp_registry,
+        offline=True,
+        execute=False,
+        as_of="2021-06-30",
+    )
+    decision = tmp_registry.recent_decisions(limit=1)[0]
+    assert decision["challenger_view"]
+    assert "window" in decision["challenger_view"]
+    assert decision["choice"]["est_vol"] > 0
+    assert summary["challenger_view"] == decision["challenger_view"]
+
+
+def test_reflection_loop_resolves_pending_decisions(tmp_registry):
+    from datetime import date
+
+    from qlab.core import data as market
+    from qlab.core.types import Decision
+    from qlab.governance.reflection import resolve_pending
+    from qlab.trader.mandate import load_mandate
+
+    tickers = load_mandate().universe_whitelist
+    prices = market.get_prices(
+        tickers,
+        "2019-01-01",
+        "2021-12-31",
+        offline=True,
+        seed=7,
+    )
+    count = len(tickers)
+    tmp_registry.log_decision(Decision(
+        as_of=date(2020, 6, 30),
+        kind="regime",
+        choice={
+            "targets": {ticker: 1.0 / count for ticker in tickers},
+            "regime": "calm",
+            "est_vol": 0.10,
+        },
+        rationale="reflection regression fixture",
+    ))
+
+    assert resolve_pending(tmp_registry, prices, horizon_days=63) == 1
+    decision = tmp_registry.recent_decisions(limit=1)[0]
+    assert decision["realized_outcome"]["realized_vol"] > 0
+    assert "vol" in decision["reflection"].lower()
+    assert resolve_pending(tmp_registry, prices, horizon_days=63) == 0
+
+
 def test_run_once_refuses_dirty_ledger(tmp_registry, monkeypatch):
     # SimulatedPaperBroker reads positions from the same registry as the ledger,
     # so a genuine mismatch is unreachable in-process - stub the reconcile result.

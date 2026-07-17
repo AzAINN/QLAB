@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import date
 from functools import lru_cache
+from typing import Callable
 
 from qlab.arms import MomentsConfig
 from qlab.core.types import MomentSet, Objective
@@ -29,8 +30,10 @@ class BudgetExceeded(RuntimeError):
 
 
 class CallBudget:
-    def __init__(self, max_calls: int = 200):
+    def __init__(self, max_calls: int = 200,
+                 on_charge: Callable[[str], None] | None = None):
         self.max_calls = max_calls
+        self.on_charge = on_charge
         self.used = 0
         self.by_tool: dict[str, int] = {}
 
@@ -40,6 +43,8 @@ class CallBudget:
         if self.used > self.max_calls:
             raise BudgetExceeded(
                 f"tool-call budget of {self.max_calls} exhausted (last: {tool})")
+        if self.on_charge is not None:
+            self.on_charge(tool)
 
 
 def check_as_of(as_of: str | date) -> date:
@@ -65,7 +70,12 @@ class LabState:
     def __init__(self, registry: Registry | None = None, max_calls: int = 200,
                  offline: bool = False, seed: int = 7):
         self.registry = registry or Registry()
-        self.budget = CallBudget(max_calls)
+        self.budget = CallBudget(
+            max_calls,
+            on_charge=lambda tool: self.registry.record_event(
+                "tool_call", {"tool": tool},
+            ),
+        )
         self.offline = offline
         self.seed = seed
         self.moment_sets: dict[str, MomentSet] = {}

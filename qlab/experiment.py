@@ -64,7 +64,8 @@ def run_ablation(
         lookback_days=int(bt.get("lookback_days", 756)),
         shrinkage=m.get("shrinkage", "ledoit_wolf"),
         denoise=m.get("denoise", "marchenko_pastur"),
-        comoment_shrinkage=float(m.get("comoment_shrinkage", 0.5)),
+        comoment_shrinkage=m.get("comoment_shrinkage", 0.5),
+        comoment_target=m.get("comoment_target", "isserlis"),
     )
     arms = [Arm(**_arm_kwargs(a)) for a in spec.get("arms", [])]
     arm_by_id = {a.id: a for a in arms}

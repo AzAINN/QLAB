@@ -53,6 +53,46 @@ def test_comoment_tensor_shapes_and_gaussian_shrink():
     assert np.allclose(cokurt, isserlis)
 
 
+def test_auto_comoment_shrinkage_decreases_with_sample_size():
+    rng = np.random.default_rng(4)
+    n_assets = 5
+    delta4 = []
+    for observations in (150, 3000):
+        returns = rng.standard_t(5, (observations, n_assets)) * 0.01
+        covariance, _ = ledoit_wolf(returns)
+        co_moments(returns, covariance, comoment_shrinkage="auto")
+        delta4.append(co_moments.last_deltas["delta4"])
+
+    assert delta4[1] < delta4[0]
+    assert 0.2 <= delta4[0] <= 0.9
+
+
+def test_one_factor_target_tracks_factor_skew():
+    rng = np.random.default_rng(9)
+    observations, n_assets = 2000, 4
+    factor = rng.gamma(2.0, 1.0, observations) - 2.0
+    returns = (
+        np.outer(factor, np.ones(n_assets)) * 0.01
+        + rng.normal(0, 0.001, (observations, n_assets))
+    )
+    covariance, _ = ledoit_wolf(returns)
+
+    factor_coskew, _ = co_moments(
+        returns,
+        covariance,
+        comoment_shrinkage=1.0,
+        target="one_factor",
+    )
+    gaussian_coskew, _ = co_moments(
+        returns,
+        covariance,
+        comoment_shrinkage=1.0,
+        target="isserlis",
+    )
+    assert np.abs(factor_coskew).max() > 0
+    assert np.abs(gaussian_coskew).max() == 0
+
+
 def test_portfolio_moments_match_direct(moment_set):
     n = moment_set.n
     w = np.full(n, 1.0 / n)

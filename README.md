@@ -289,8 +289,8 @@ Claude `ask` turns stream into the agent work rail with tools disabled. The
 `qlab.mcp.tui_proxy`. That proxy never opens DuckDB: it calls the owner API and
 can inspect market/portfolio state, read audit history, run daily ops/research,
 and produce a dry rebalance proposal. It intentionally has no paper-execution
-tool; execution stays human-confirmed until the R0 referee gate is enforced in
-code. See
+tool; execution stays human-confirmed even though the decision-bound referee,
+reconciliation, mandate, and idempotency gates are now enforced in code. See
 [`planning-docs/plans/2026-07-17-quiet-workstation-tui.md`](planning-docs/plans/2026-07-17-quiet-workstation-tui.md).
 
 ### 1. Interactive (orchestrator + subagents)

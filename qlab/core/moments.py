@@ -20,6 +20,8 @@ objective relies on.
 
 from __future__ import annotations
 
+from math import comb
+
 import numpy as np
 import pandas as pd
 
@@ -37,7 +39,8 @@ def estimate_moments(
     lookback_days: int = 756,
     shrinkage: str = "ledoit_wolf",
     denoise: str | None = "marchenko_pastur",
-    comoment_shrinkage: float = 0.5,
+    comoment_shrinkage: float | str = 0.5,
+    comoment_target: str = "isserlis",
     include_mu: bool = False,
     higher_moments: bool = True,
 ) -> MomentSet:
@@ -75,8 +78,18 @@ def estimate_moments(
 
     coskew = cokurt = None
     if higher_moments:
-        coskew, cokurt = co_moments(X, cov, comoment_shrinkage=comoment_shrinkage)
-        diagnostics["comoment_shrinkage"] = float(comoment_shrinkage)
+        coskew, cokurt = co_moments(
+            X,
+            cov,
+            comoment_shrinkage=comoment_shrinkage,
+            target=comoment_target,
+        )
+        diagnostics.update({
+            "comoment_shrinkage": comoment_shrinkage,
+            "comoment_target": comoment_target,
+            "comoment_delta3": co_moments.last_deltas["delta3"],
+            "comoment_delta4": co_moments.last_deltas["delta4"],
+        })
 
     mu = shrunk_mean(X) if include_mu else None
 
@@ -169,30 +182,67 @@ def marchenko_pastur_denoise(cov: np.ndarray, T: int) -> np.ndarray:
 # Higher co-moments with structured shrinkage
 # ---------------------------------------------------------------------------
 def co_moments(
-    X: np.ndarray, cov: np.ndarray, *, comoment_shrinkage: float = 0.5
+    X: np.ndarray,
+    cov: np.ndarray,
+    *,
+    comoment_shrinkage: float | str = 0.5,
+    target: str = "isserlis",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Central coskewness (n,n,n) and cokurtosis (n,n,n,n) with Gaussian shrink.
+    """Central co-moments with structured, optionally automatic shrinkage.
 
-    ``coskew`` is shrunk toward 0 and ``cokurt`` toward the Isserlis tensor
-    ``Σ_ij Σ_kl + Σ_ik Σ_jl + Σ_il Σ_jk`` implied by a multivariate normal.
+    ``comoment_shrinkage`` is either a fixed convex weight or ``"auto"``, which
+    derives separate third- and fourth-order weights from the ratio of unique
+    tensor parameters to observations. ``target`` is ``"isserlis"`` (Gaussian)
+    or ``"one_factor"`` (an equal-weight common-factor target that retains
+    systematic skew and excess kurtosis while shrinking idiosyncratic noise).
     """
     Xc = X - X.mean(axis=0, keepdims=True)
-    T = Xc.shape[0]
+    T, n = Xc.shape
 
     coskew = np.einsum("ti,tj,tk->ijk", Xc, Xc, Xc) / T
     cokurt = np.einsum("ti,tj,tk,tl->ijkl", Xc, Xc, Xc, Xc) / T
 
-    delta = float(np.clip(comoment_shrinkage, 0.0, 1.0))
-    if delta > 0:
-        # Gaussian targets
+    if isinstance(comoment_shrinkage, str):
+        if comoment_shrinkage != "auto":
+            raise ValueError(
+                "comoment_shrinkage must be a number in [0, 1] or 'auto'"
+            )
+        rho3 = comb(n + 2, 3) / T
+        rho4 = comb(n + 3, 4) / T
+        delta3 = float(np.clip(rho3 / (1.0 + rho3), 0.2, 0.9))
+        delta4 = float(np.clip(rho4 / (1.0 + rho4), 0.2, 0.9))
+    else:
+        delta3 = delta4 = float(np.clip(comoment_shrinkage, 0.0, 1.0))
+    co_moments.last_deltas = {"delta3": delta3, "delta4": delta4}
+
+    isserlis_target = (
+        np.einsum("ij,kl->ijkl", cov, cov)
+        + np.einsum("ik,jl->ijkl", cov, cov)
+        + np.einsum("il,jk->ijkl", cov, cov)
+    )
+    if target == "isserlis":
         coskew_target = np.zeros_like(coskew)
-        cokurt_target = (
-            np.einsum("ij,kl->ijkl", cov, cov)
-            + np.einsum("ik,jl->ijkl", cov, cov)
-            + np.einsum("il,jk->ijkl", cov, cov)
+        cokurt_target = isserlis_target
+    elif target == "one_factor":
+        factor = Xc.mean(axis=1)
+        factor_variance = max(float(np.var(factor)), 1e-18)
+        betas = (Xc.T @ factor) / (T * factor_variance)
+        factor_m3 = float(np.mean(factor ** 3))
+        factor_m4 = float(np.mean(factor ** 4))
+        coskew_target = factor_m3 * np.einsum(
+            "i,j,k->ijk", betas, betas, betas,
         )
-        coskew = (1 - delta) * coskew + delta * coskew_target
-        cokurt = (1 - delta) * cokurt + delta * cokurt_target
+        factor_excess_m4 = factor_m4 - 3.0 * factor_variance ** 2
+        cokurt_target = isserlis_target + factor_excess_m4 * np.einsum(
+            "i,j,k,l->ijkl", betas, betas, betas, betas,
+        )
+    else:
+        raise ValueError(f"unknown comoment target {target!r}")
+
+    if delta3 > 0:
+        coskew = (1.0 - delta3) * coskew + delta3 * coskew_target
+    if delta4 > 0:
+        cokurt = (1.0 - delta4) * cokurt + delta4 * cokurt_target
     return coskew, cokurt
 
 

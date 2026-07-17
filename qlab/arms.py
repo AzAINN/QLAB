@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from qlab.core.moments import estimate_moments
+from qlab.core.moments import estimate_moments, portfolio_moments
 from qlab.core.objective import build_objective
 from qlab.core.types import DataSnapshot, MomentSet, SolveResult, Weights
 from qlab.core.universe import load_universe
@@ -34,7 +34,8 @@ class MomentsConfig:
     lookback_days: int = 756
     shrinkage: str = "ledoit_wolf"
     denoise: str | None = "marchenko_pastur"
-    comoment_shrinkage: float = 0.5
+    comoment_shrinkage: float | str = 0.5
+    comoment_target: str = "isserlis"
 
 
 @dataclass
@@ -58,6 +59,7 @@ def estimate(snapshot: DataSnapshot, cfg: MomentsConfig, *, higher: bool) -> Mom
         shrinkage=cfg.shrinkage,
         denoise=cfg.denoise,
         comoment_shrinkage=cfg.comoment_shrinkage,
+        comoment_target=cfg.comoment_target,
         include_mu=False,
         higher_moments=higher,
     )
@@ -103,6 +105,9 @@ def solve_arm(
     if note:
         diag["fallback"] = note
     diag["moments"] = ms.summary()
+    diag["portfolio_moments"] = portfolio_moments(
+        result.weights.as_array(), ms,
+    )
     return result.weights, diag
 
 

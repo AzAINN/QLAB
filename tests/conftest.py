@@ -22,6 +22,12 @@ warnings.filterwarnings("ignore")
 CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 
 
+@pytest.fixture(autouse=True)
+def isolated_market_cache(tmp_path, monkeypatch):
+    """Keep offline tests independent of the operator's real-data cache."""
+    monkeypatch.setattr(market, "_CACHE_DIR", tmp_path / "market-cache")
+
+
 @pytest.fixture
 def reg() -> Registry:
     r = Registry(":memory:")

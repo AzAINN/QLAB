@@ -1,5 +1,42 @@
 # R0 — Merge + Trust Repair Implementation Plan
 
+> **Implementation update — 2026-07-17:** Tasks 1–11 and the Task 12 code/
+> validation gate are complete in the working tree. The historical step
+> checkboxes below are preserved as the original implementation recipe; this
+> status block is the current source of truth. Local commit/tag/push release
+> actions remain intentionally pending explicit operator authorization.
+
+| Task | Verified state |
+|---|---|
+| 1 — merge and promote | Complete in repository history |
+| 2 — objective scaling | Complete; unit and divergence tests pass |
+| 3 — canonical polynomial | Complete; compiler parity tests pass |
+| 4 — constructed Ising resources | Complete; measured resource tests pass |
+| 5 — DSR and confidence intervals | Complete; calibrated metrics tests pass |
+| 6 — referee and reconciliation | Complete; verdict is target-bound and latest-wins |
+| 7 — leg idempotency | Complete; replay and injected mid-fill crash tests pass |
+| 8 — challenger | Complete; every autopilot decision records alternate-window divergence |
+| 9 — reflection | Complete; eligible decisions resolve once against realized volatility |
+| 10 — events | Complete; read API exists and successful tool charges emit events |
+| 11 — co-moment shrinkage | Complete; auto deltas and one-factor target are wired through specs/MCP |
+| 12 — exit gate | Complete; 89 tests pass, offline governed dry-run passes, and real Yahoo ablation has no arm errors |
+
+Exit evidence:
+
+- `python -m pytest tests/ -q`: **89 passed**.
+- Offline isolated dry-run: referee `PASS`, reconciliation clean, a checked
+  seven-leg proposal, and challenger L1 divergence `0.172`.
+- Real source prewarm: core and 19-candidate caches report `source=yfinance`;
+  the core panel contains 1,974 complete rows from 2018-09-06 through
+  2026-07-16.
+- Real-data ablation: no arm errors, all eight arms include `sharpe_ci`, and
+  deflated Sharpe values range from `0.2433` to `0.8217` rather than collapsing
+  to zero or one.
+- Real-data latest-snapshot A3 versus A1 weight L1 divergence: `1.6914`.
+- The default CLI could not open `.lab/registry.duckdb` while the active TUI
+  owner process held the expected DuckDB writer lock; the same code paths were
+  validated with an isolated registry rather than terminating user state.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Merge the `barbara-feature` branch to repo root and repair the five defects that currently invalidate every number the system produces.

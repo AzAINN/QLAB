@@ -54,6 +54,80 @@ def test_execution_is_idempotent(reg):
     assert {leg.client_order_id for leg in plan2.legs} == coids
 
 
+def test_replayed_plan_does_not_double_fill(reg_and_broker):
+    reg, broker = reg_and_broker
+    mandate = load_mandate()
+    targets = {
+        ticker: 1.0 / len(mandate.universe_whitelist)
+        for ticker in mandate.universe_whitelist
+    }
+    plan = build_plan(reg, broker, mandate, targets, "dec-replay")
+    reg.log_verdict(
+        "dec-replay", "PASS", [], "deterministic", targets=targets,
+    )
+
+    execute_plan(reg, broker, plan)
+    positions_after_first = {
+        ticker: position["qty"]
+        for ticker, position in reg.get_positions().items()
+    }
+    cash_after_first = reg.get_account()["cash"]
+
+    # Simulate resuming from a session that still presents the checked plan.
+    plan.state = "checked"
+    reg.set_plan_state(plan.plan_id, "checked")
+    replay = execute_plan(reg, broker, plan)
+
+    positions_after_replay = {
+        ticker: position["qty"]
+        for ticker, position in reg.get_positions().items()
+    }
+    assert positions_after_replay == positions_after_first
+    assert abs(reg.get_account()["cash"] - cash_after_first) < 1e-9
+    assert replay["fills"]
+    assert all(fill.get("replayed") for fill in replay["fills"])
+
+    orders = reg.list_orders()
+    assert len(orders) == len(plan.legs)
+    assert all(order["plan_id"] == plan.plan_id for order in orders)
+
+
+def test_simulated_fill_rolls_back_if_leg_crashes(reg_and_broker):
+    reg, healthy_broker = reg_and_broker
+    mandate = load_mandate()
+    targets = {
+        ticker: 1.0 / len(mandate.universe_whitelist)
+        for ticker in mandate.universe_whitelist
+    }
+    plan = build_plan(reg, healthy_broker, mandate, targets, "dec-crash")
+    reg.log_verdict(
+        "dec-crash", "PASS", [], "deterministic", targets=targets,
+    )
+
+    class CrashAfterBookingBroker(SimulatedPaperBroker):
+        def submit_notional(self, client_order_id, ticker, side, notional):
+            super().submit_notional(client_order_id, ticker, side, notional)
+            raise RuntimeError("injected crash after local booking")
+
+    crashing_broker = CrashAfterBookingBroker(
+        reg,
+        default_price_provider(offline=True, seed=7),
+        starting_cash=mandate.paper_capital,
+        universe=mandate.universe_whitelist,
+    )
+    with pytest.raises(RuntimeError, match="injected crash"):
+        execute_plan(reg, crashing_broker, plan)
+
+    assert reg.get_positions() == {}
+    assert reg.get_account()["cash"] == mandate.paper_capital
+    assert reg.list_orders() == []
+
+    # The same stable plan can now resume normally and applies each leg once.
+    resumed = execute_plan(reg, healthy_broker, plan)
+    assert resumed["state"] == "reconciled"
+    assert len(reg.list_orders()) == len(plan.legs)
+
+
 def test_kill_switch_blocks_trading(reg):
     m = Mandate(paper_capital=10000.0, universe_whitelist=CORE,
                 max_weight_per_asset=1.0, trailing_drawdown_pct=0.10)

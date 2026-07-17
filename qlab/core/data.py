@@ -41,6 +41,7 @@ def get_prices(
     offline: bool = False,
     seed: int = 7,
     cache_dir: Path | None = None,
+    refresh: bool = False,
 ) -> pd.DataFrame:
     """Return an adjusted-close panel (index = dates, columns = ``tickers``).
 
@@ -53,7 +54,14 @@ def get_prices(
     cache_path = cache_dir / f"{key}.parquet"
 
     cached = _read_cache(cache_path)
-    if cached is not None:
+    cached_is_synthetic = bool(
+        cached is not None and cached.attrs.get("synthetic", False)
+    )
+    # Offline mode may consume any cache. Online mode may consume a real-data
+    # cache, but a synthetic fallback must never masquerade as a live prewarm.
+    if cached is not None and (
+        offline or (not refresh and not cached_is_synthetic)
+    ):
         return cached
 
     df: pd.DataFrame | None = None
@@ -61,6 +69,15 @@ def get_prices(
         df = _fetch_yfinance(tickers, str(start), str(end))
 
     if df is None or df.empty:
+        if cached is not None:
+            source = cached.attrs.get(
+                "source", "synthetic" if cached_is_synthetic else "cache",
+            )
+            warnings.warn(
+                f"market fetch unavailable - serving cached {source} data",
+                stacklevel=2,
+            )
+            return cached
         if offline:
             warnings.warn(
                 "offline=True and no cache - serving deterministic synthetic data",
@@ -72,6 +89,9 @@ def get_prices(
                 stacklevel=2,
             )
         df = synthetic_prices(tickers, start, end, seed=seed)
+    else:
+        df.attrs["source"] = "yfinance"
+        df.attrs["synthetic"] = False
 
     _write_cache(cache_path, df)
     return df
@@ -93,7 +113,9 @@ def snapshot(
     """
     as_of_d = _as_date(as_of)
     prices = get_prices(tickers, start=start, end=as_of_d, offline=offline, seed=seed)
-    source = "synthetic" if prices.attrs.get("synthetic") else "yfinance"
+    source = prices.attrs.get(
+        "source", "synthetic" if prices.attrs.get("synthetic") else "yfinance",
+    )
     snap = DataSnapshot(tickers=list(tickers), prices=prices, as_of=as_of_d,
                         source=source)
     if lookback_days is not None:
@@ -127,7 +149,10 @@ def _fetch_yfinance(tickers: list[str], start: str, end: str) -> pd.DataFrame | 
             close = raw[["Close"]].rename(columns={"Close": tickers[0]})
         close = close.reindex(columns=tickers)
         close.index = pd.to_datetime(close.index)
-        return close.dropna(how="all").ffill().dropna(how="any")
+        close = close.dropna(how="all").ffill().dropna(how="any")
+        close.attrs["source"] = "yfinance"
+        close.attrs["synthetic"] = False
+        return close
     except Exception as exc:  # network / parse / rate-limit — degrade gracefully
         warnings.warn(f"yfinance fetch failed ({exc!r})", stacklevel=2)
         return None
@@ -203,7 +228,7 @@ def synthetic_prices(
     prices = 100.0 * np.cumprod(1.0 + returns, axis=0)
     df = pd.DataFrame(prices, index=dates, columns=list(tickers))
     df.attrs["synthetic"] = True
-    df.attrs["regime"] = regime
+    df.attrs["source"] = "synthetic"
     return df
 
 

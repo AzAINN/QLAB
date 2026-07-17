@@ -20,6 +20,52 @@ def test_synthetic_is_deterministic_across_calls():
     assert np.allclose(a.to_numpy(), b.to_numpy())
 
 
+def test_online_mode_refreshes_a_synthetic_cache(tmp_path, monkeypatch):
+    tickers = ["A", "B"]
+    start, end = "2020-01-01", "2020-01-10"
+    cached = market.get_prices(
+        tickers,
+        start,
+        end,
+        offline=True,
+        cache_dir=tmp_path,
+    )
+    assert cached.attrs["source"] == "synthetic"
+    cached_roundtrip = market.get_prices(
+        tickers,
+        start,
+        end,
+        offline=True,
+        cache_dir=tmp_path,
+    )
+    assert cached_roundtrip.attrs["source"] == "synthetic"
+    assert cached_roundtrip.attrs["synthetic"] is True
+
+    calls = []
+    live = pd.DataFrame(
+        {"A": [10.0, 11.0], "B": [20.0, 21.0]},
+        index=pd.to_datetime(["2020-01-02", "2020-01-03"]),
+    )
+
+    def fake_fetch(requested_tickers, requested_start, requested_end):
+        calls.append((requested_tickers, requested_start, requested_end))
+        return live.copy()
+
+    monkeypatch.setattr(market, "_fetch_yfinance", fake_fetch)
+    refreshed = market.get_prices(
+        tickers,
+        start,
+        end,
+        offline=False,
+        cache_dir=tmp_path,
+    )
+
+    assert calls
+    assert refreshed.attrs["source"] == "yfinance"
+    assert refreshed.attrs["synthetic"] is False
+    assert refreshed.equals(live)
+
+
 def test_snapshot_cannot_look_ahead():
     prices = market.synthetic_prices(CORE, "2015-01-01", "2020-01-01", seed=7)
     snap = DataSnapshot(CORE, prices, date(2017, 6, 30))

@@ -31,7 +31,8 @@ backtest:
 moments:
   shrinkage: ledoit_wolf    # covariance shrinkage target
   denoise: marchenko_pastur # RMT eigenvalue cleaning
-  comoment_shrinkage: 0.5   # structured shrink of coskew/cokurt toward MVN target
+  comoment_shrinkage: auto  # tensor-size/sample-size driven delta3 and delta4
+  comoment_target: one_factor # preserve common-factor skew and excess kurtosis
 
 # The experiment matrix (research-plan §6). Each arm = one (objective, solver).
 arms:

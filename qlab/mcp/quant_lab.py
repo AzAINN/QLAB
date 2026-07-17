@@ -62,7 +62,8 @@ def build_server(state: LabState | None = None):
     def moments_estimate(as_of: str, universe: str = "core", lookback_days: int = 756,
                          shrinkage: str = "ledoit_wolf",
                          denoise: str = "marchenko_pastur",
-                         comoment_shrinkage: float = 0.5,
+                         comoment_shrinkage: float | str = 0.5,
+                         comoment_target: str = "isserlis",
                          higher_moments: bool = True) -> dict:
         """Estimate co-moments. Returns a moment_set_id + a safe summary."""
         st.budget.charge("moments.estimate")
@@ -73,6 +74,7 @@ def build_server(state: LabState | None = None):
         snap = market.snapshot(tickers, d, offline=st.offline, seed=st.seed)
         ms = estimate_moments(snap, lookback_days=lookback_days, shrinkage=shrinkage,
                               denoise=denoise, comoment_shrinkage=comoment_shrinkage,
+                              comoment_target=comoment_target,
                               higher_moments=higher_moments)
         mid = st.put_moment_set(ms)
         return {"moment_set_id": mid, "summary": ms.summary()}

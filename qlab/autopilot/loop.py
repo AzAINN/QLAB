@@ -18,12 +18,15 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 
+import numpy as np
+
 from qlab.arms import Arm, MomentsConfig, solve_arm
 from qlab.core import data as market
 from qlab.core.moments import detect_regime
 from qlab.core.types import Decision
 from qlab.experiment import compare_classical_quantum
 from qlab.governance.referee import deterministic_referee
+from qlab.governance.reflection import resolve_pending
 from qlab.solvers.base import Constraints
 from qlab.trader.broker import get_broker
 from qlab.trader.mandate import Mandate, MandateViolation, load_mandate
@@ -67,6 +70,7 @@ def run_once(
 
     # 1. analyze --------------------------------------------------------------
     snap = market.snapshot(tickers, as_of, offline=offline, seed=seed)
+    reflections_resolved = resolve_pending(reg, snap.prices)
     regime = detect_regime(snap)
 
     # 2. solve the champion policy under the mandate --------------------------
@@ -75,16 +79,45 @@ def run_once(
     weights, diag = solve_arm(champion, snap, moments=MomentsConfig(lookback_days=lookback_days),
                               constraints=constraints)
     targets = {t: float(v) for t, v in zip(weights.tickers, weights.values)}
+    est_vol = float(diag["portfolio_moments"]["vol"]) * np.sqrt(252)
+
+    alt_lookback = 252 if lookback_days != 252 else 504
+    alternate_weights, _alternate_diag = solve_arm(
+        champion,
+        snap,
+        moments=MomentsConfig(lookback_days=alt_lookback),
+        constraints=constraints,
+    )
+    weight_divergence = float(
+        np.abs(alternate_weights.as_array() - weights.as_array()).sum()
+    )
+    if weight_divergence > 0.10:
+        challenger_assessment = (
+            "Material—the window choice is driving the allocation and must be "
+            "defended explicitly."
+        )
+    else:
+        challenger_assessment = (
+            "Immaterial—the allocation is robust to this alternate window."
+        )
+    challenger_view = (
+        f"Challenger (window={alt_lookback}d versus {lookback_days}d): "
+        f"weight divergence L1={weight_divergence:.3f}. "
+        f"{challenger_assessment}"
+    )
     compare = compare_classical_quantum(snap, MomentsConfig(lookback_days=lookback_days),
                                         constraints, run_qaoa=run_qaoa)
 
     # 3. log the decision (the judgment record) ------------------------------
     decision = Decision(
         as_of=_as_date(as_of), kind="regime",
-        choice={"targets": targets, "regime": regime["regime"], "arm": champion.id},
+        choice={"targets": targets, "regime": regime["regime"],
+                "arm": champion.id, "est_vol": est_vol,
+                "lookback_days": lookback_days},
         rationale=(f"Regime={regime['regime']} (signal={regime.get('signal', 0):.3f}). "
                    f"MVSK champion (λ_skew={skew_lambda}, λ_kurt={kurt_lambda}) solved "
                    f"under mandate caps; classical vs quantum compared on the same cov."),
+        challenger_view=challenger_view,
         alternatives_considered=["min_variance", "hrp", "scenario_cvar"],
     )
     decision_id = reg.log_decision(decision)
@@ -126,6 +159,8 @@ def run_once(
         "trade": trade_result, "diagnostics": {k: v for k, v in diag.items()
                                                if k not in ("moments",)},
         "referee": {"verdict": verdict, "reasons": reasons}, "reconcile": rec,
+        "challenger_view": challenger_view,
+        "reflections_resolved": reflections_resolved,
         "broker": broker.name, "offline": offline,
     }
     _write_summary(summary)
@@ -154,6 +189,7 @@ def daily_ops(
     state = broker.portfolio_state(tickers)
     rec = reconcile(reg, broker, tickers)
     snap = market.snapshot(tickers, date.today().isoformat(), offline=offline, seed=seed)
+    reflections_resolved = resolve_pending(reg, snap.prices)
     regime = detect_regime(snap)
 
     # drift vs the last logged decision's targets
@@ -178,6 +214,7 @@ def daily_ops(
         "kind": "daily_ops", "equity": state["equity"], "regime": regime["regime"],
         "triggers": triggers, "rebalance_recommended": bool(triggers),
         "halted": state["halted"] or dd_breached, "reconcile": rec,
+        "reflections_resolved": reflections_resolved,
     }
     reg.record_event("daily_ops", result)
     _write_summary(result, prefix="dailyops")

@@ -20,9 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import duckdb
 
@@ -122,6 +123,18 @@ class Registry:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Commit a small registry mutation atomically, rolling back on error."""
+        self.con.execute("BEGIN TRANSACTION")
+        try:
+            yield
+        except BaseException:
+            self.con.execute("ROLLBACK")
+            raise
+        else:
+            self.con.execute("COMMIT")
+
     # -- runs ---------------------------------------------------------------
     def log_run(self, kind: str, spec: dict) -> str:
         run_id = hashlib.sha256(_j({"kind": kind, "spec": spec}).encode()).hexdigest()[:16]
@@ -201,6 +214,21 @@ class Registry:
         q += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         return self._rows(q, params)
+
+    def pending_decisions(self) -> list[dict]:
+        """Return unresolved judgments in chronological decision order.
+
+        ``log_decision`` stores a missing outcome as the JSON literal ``null``;
+        older registries may contain SQL ``NULL`` instead. Both represent the
+        same pending state.
+        """
+        return self._rows(
+            "SELECT * FROM decisions "
+            "WHERE realized_outcome IS NULL "
+            "OR CAST(realized_outcome AS VARCHAR) = 'null' "
+            "ORDER BY as_of, created_at",
+            [],
+        )
 
     # -- trial counting (deflated Sharpe) -----------------------------------
     def trial_count(self, objective_form: str | None = None) -> int:
@@ -313,6 +341,21 @@ class Registry:
         self.con.execute(
             "INSERT INTO orders VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
             [client_order_id, plan_id, ticker, side, notional, state, _now()])
+
+    def get_order(self, client_order_id: str) -> dict | None:
+        """Return one execution leg by its stable idempotency key."""
+        rows = self._rows(
+            "SELECT * FROM orders WHERE client_order_id=?",
+            [client_order_id],
+        )
+        return rows[0] if rows else None
+
+    def update_order_state(self, client_order_id: str, state: str) -> None:
+        """Advance the locally recorded state of an existing execution leg."""
+        self.con.execute(
+            "UPDATE orders SET state=? WHERE client_order_id=?",
+            [state, client_order_id],
+        )
 
     def list_orders(self, limit: int = 50) -> list[dict]:
         """Return recent order records for the audit surface."""

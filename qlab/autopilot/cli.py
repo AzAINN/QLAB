@@ -166,9 +166,24 @@ def _cmd_prewarm(args) -> int:
 
     uni = load_universe()
     tickers = uni.tickers(args.universe)
-    df = market.get_prices(tickers, "2008-01-01", offline=args.offline)
+    df = market.get_prices(
+        tickers,
+        "2008-01-01",
+        offline=args.offline,
+        refresh=not args.offline,
+    )
+    source = df.attrs.get(
+        "source", "synthetic" if df.attrs.get("synthetic") else "unknown",
+    )
     print(f"[qlab] cached {df.shape[0]} rows x {df.shape[1]} tickers "
-          f"({args.universe}); demo is now network-independent.")
+          f"({args.universe}, source={source}); demo is now network-independent.")
+    if not args.offline and source == "synthetic":
+        print(
+            "[qlab] real-data prewarm failed; synthetic fallback is cached but "
+            "does not satisfy the online data gate.",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

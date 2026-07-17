@@ -139,13 +139,45 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan) -> dict:
     registry.set_plan_state(plan.plan_id, "submitted")
     fills = []
     for leg in plan.legs:
-        fill = broker.submit_notional(leg.client_order_id, leg.ticker, leg.side,
-                                      leg.notional)
-        registry.add_order(leg.client_order_id, plan.plan_id, leg.ticker, leg.side,
-                           leg.notional, state=fill.get("state", "filled"))
+        existing = registry.get_order(leg.client_order_id)
+        if existing and existing["state"] == "filled":
+            fills.append({
+                "client_order_id": leg.client_order_id,
+                "ticker": leg.ticker,
+                "side": leg.side,
+                "notional": leg.notional,
+                "state": "filled",
+                "replayed": True,
+            })
+            continue
+        # The simulator books cash/positions through this same registry, so the
+        # ledger row, fill, and terminal state commit as one unit. External
+        # paper brokers provide the corresponding guarantee through the stable
+        # client_order_id.
+        with registry.transaction():
+            registry.add_order(
+                leg.client_order_id,
+                plan.plan_id,
+                leg.ticker,
+                leg.side,
+                leg.notional,
+                state="submitted",
+            )
+            fill = broker.submit_notional(
+                leg.client_order_id,
+                leg.ticker,
+                leg.side,
+                leg.notional,
+            )
+            registry.update_order_state(
+                leg.client_order_id,
+                fill.get("state", "filled"),
+            )
         fills.append(fill)
     registry.set_plan_state(plan.plan_id, "filled")
     registry.set_plan_state(plan.plan_id, "reconciled")
     registry.record_event("plan_executed",
-                          {"plan_id": plan.plan_id, "n_fills": len(fills)})
+                          {"plan_id": plan.plan_id,
+                           "n_fills": sum(not f.get("replayed", False) for f in fills),
+                           "n_replayed": sum(bool(f.get("replayed")) for f in fills)})
     return {"plan_id": plan.plan_id, "state": "reconciled", "fills": fills}

@@ -170,8 +170,8 @@ class UISession:
             "governed_available": proxy_available and bool(shutil.which("claude")),
             "governed_authority": "propose_only",
             "governed_lock_reason": (
-                "paper execution remains human-confirmed until the R0 referee "
-                "gate is enforced in code"
+                "agent authority is intentionally propose-only; paper execution "
+                "requires explicit human confirmation"
             ),
         }
 

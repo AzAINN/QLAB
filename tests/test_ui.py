@@ -68,6 +68,7 @@ def test_tui_snapshot_is_provenance_first(session):
     assert status == 200
     assert snap["system"]["mode"] == "paper"
     assert snap["system"]["governed_authority"] == "propose_only"
+    assert "human confirmation" in snap["system"]["governed_lock_reason"]
     assert snap["market"]["frequency"] == "daily"
     assert snap["market"]["source"] in {"synthetic", "yfinance"}
     assert len(snap["market"]["assets"]) == 7

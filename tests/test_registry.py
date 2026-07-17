@@ -63,6 +63,20 @@ def test_events_are_read_in_display_order_with_cursor(reg):
     assert any(row["event_id"] == second for row in later)
 
 
+def test_tool_calls_emit_events(reg):
+    from qlab.mcp.guardrails import LabState
+
+    state = LabState(offline=True, registry=reg)
+    state.budget.charge("data.fetch_universe")
+
+    events = reg.read_events(10)
+    assert any(
+        event["kind"] == "tool_call"
+        and event["payload"] == {"tool": "data.fetch_universe"}
+        for event in events
+    )
+
+
 def test_backtest_trial_count_counts_distinct_arms(reg):
     reg.log_backtest("run1", "A1", {"sharpe": 0.5})
     reg.log_backtest("run1", "A2", {"sharpe": 0.6})

@@ -82,14 +82,26 @@ def register_trader_tools(app, st: TraderState) -> None:
 
     @app.tool(name="execute_plan")
     def execute_plan_tool(plan_id: str) -> dict:
-        """Phase 2: execute a checked plan. Idempotent; refuses anything else."""
+        """Phase 2: execute a checked (or resumed submitted) plan. Idempotent;
+        refuses anything else.
+
+        A fresh session (``st.plans`` empty after a restart) rebuilds the plan
+        from the registry-persisted row, including its real order legs -- a
+        legacy row with no persisted legs is refused rather than silently
+        "executed" with zero legs.
+        """
         plan = st.plans.get(plan_id)
         if plan is None:
             stored = st.registry.get_plan(plan_id)
             if not stored:
                 return {"executed": False, "error": f"unknown plan_id {plan_id!r}"}
+            stored_legs = stored.get("legs") or []
+            if not stored_legs:
+                return {"executed": False,
+                        "error": f"plan {plan_id!r} has no persisted legs; re-propose"}
+            legs = [OrderLeg(**leg) for leg in stored_legs]
             plan = OrderPlan(plan_id, stored["decision_id"], stored["targets"],
-                             [], stored["pre_trade"], state=stored["state"])
+                             legs, stored["pre_trade"], state=stored["state"])
         try:
             result = execute_plan(st.registry, st.broker, plan)
             return {"executed": True, **result}

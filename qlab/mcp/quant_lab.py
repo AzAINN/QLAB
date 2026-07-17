@@ -5,9 +5,11 @@ Namespaced, ref-passing tools the orchestrator's subagents call:
     data.*       fetch the universe, summarize a point-in-time snapshot
     moments.*    estimate co-moments (returns a moment_set_id + summary)
     objective.*  build the one-true objective (returns an objective_id)
-    solve.*       classical / quantum / compare / qubo_resource_count
+    solve.*       classical / quantum / compare / qubo_resource_count /
+                  constructed_resource_count
     backtest.*   walk-forward an arm and return metrics
-    registry.*   list runs, fetch a report, log a decision (reflection loop)
+    registry.*   list runs, fetch a report, log a decision (reflection loop),
+                  log_verdict (referee gate)
     report.*     compile a full recommendation
 
 Run standalone:  ``python -m qlab.mcp.quant_lab``  (needs ``pip install qlab[mcp]``)

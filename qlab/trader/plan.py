@@ -114,16 +114,26 @@ def build_plan(
     pre_trade["mandate_ok"] = True
 
     plan = OrderPlan(plan_id, decision_id, targets, legs, pre_trade, state="checked")
-    registry.create_plan(plan_id, decision_id, targets, pre_trade)
+    registry.create_plan(plan_id, decision_id, targets, pre_trade,
+                         legs=[vars(l) for l in legs])
     registry.set_plan_state(plan_id, "checked")
     registry.record_event("plan_checked", {"plan_id": plan_id, "turnover": turnover})
     return plan
 
 
 def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan) -> dict:
-    """Execute a *checked* plan. Idempotent per leg; advances the state machine."""
-    if plan.state != "checked":
-        raise MandateViolation(f"plan {plan.plan_id} is {plan.state!r}, not 'checked'")
+    """Execute a *checked* (or resumed *submitted*) plan. Idempotent per leg;
+    advances the state machine.
+
+    A process that dies mid-execution persists the plan as ``submitted``
+    (``execute_plan`` sets that state before iterating legs, below). Resuming
+    such a plan is safe: the referee-PASS + targets-hash gate still applies,
+    and each leg replays through its stable ``client_order_id`` if it was
+    already filled, so re-running never double-books a leg.
+    """
+    if plan.state not in ("checked", "submitted"):
+        raise MandateViolation(
+            f"plan {plan.plan_id} is {plan.state!r}, not 'checked' or 'submitted'")
     if registry.get_account().get("halted"):
         raise MandateViolation("account is halted; only liquidation is permitted")
     v = registry.get_verdict(plan.decision_id)

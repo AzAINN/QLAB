@@ -47,7 +47,7 @@ arms:
     solver: hrp
   - id: B3                  # practitioner benchmark
     objective: risk_parity
-    solver: classical
+    solver: risk_parity
   - id: A1                  # classical min-variance baseline
     objective: min_variance
     solver: classical

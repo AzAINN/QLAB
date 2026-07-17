@@ -141,9 +141,9 @@ flowchart TB
     end
     Orch --> AGENTS
 
-    subgraph MCP["Two MCP servers — the 'referee of facts', validating every call"]
-        LAB["🔬 quant-lab — the research lab<br/>data · risk · solve · backtest · report"]
-        TRD["🛡️ quant-trader — the autopilot<br/>portfolio · propose then execute<br/>no raw 'place order' button"]
+    subgraph MCP["qlab MCP server + qlab-operator proxy — the 'referee of facts', validating every call"]
+        LAB["🔬 qlab MCP server (lab + trader namespaces, one DuckDB writer)<br/>data · risk · solve · backtest · report · portfolio · propose/execute"]
+        TRD["🛡️ qlab-operator proxy (HTTP, propose-only)<br/>portfolio · dry rebalance proposals<br/>no raw 'place order' button, no execute"]
     end
     AGENTS -->|MCP tool calls| LAB
     AGENTS -->|MCP tool calls| TRD
@@ -460,7 +460,7 @@ qlab/
 agents/       the 5 subagent definitions (source of truth)
 configs/      universe.yaml · specs/ablation_v1.yaml
 scripts/      prewarm_cache.py · scaling_chart.py
-tests/        52 tests, all offline
+tests/        110+ tests, all offline
 ```
 
 ---
@@ -468,7 +468,7 @@ tests/        52 tests, all offline
 ## Reproducibility & testing
 
 ```bash
-python -m pytest        # 52 tests, fully offline (synthetic data + in-memory DuckDB)
+python -m pytest        # 110+ tests, fully offline (synthetic data + in-memory DuckDB)
 ```
 
 Determinism is a first-class invariant: the synthetic feed seeds off a **stable

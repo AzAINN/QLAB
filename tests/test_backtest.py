@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import pytest
 
-from qlab.arms import Arm, MomentsConfig, build_policy
+from qlab.arms import Arm, MomentsConfig, build_policy, solve_arm
 from qlab.core import data as market
 from qlab.core.backtest import rebalance_dates, run_backtest
 from qlab.core.metrics import block_bootstrap_ci, deflated_sharpe
-from qlab.experiment import run_ablation
+from qlab.experiment import _arm_kwargs, _load_spec, run_ablation
+from qlab.solvers.base import get_solver
 from qlab.state.registry import Registry
+
+_ABLATION_SPEC_PATH = Path(__file__).resolve().parents[1] / "configs" / "specs" / "ablation_v1.yaml"
 
 CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 
@@ -197,3 +203,52 @@ def test_drift_preserves_cash_share():
                           lookback_days=504).metrics
     ratio = m_half["ann_vol"] / m_full["ann_vol"]
     assert 0.4 <= ratio <= 0.6
+
+
+def test_ablation_spec_solvers_resolve_and_b3_is_real_risk_parity():
+    """Spec integrity for the real ``configs/specs/ablation_v1.yaml``.
+
+    (a) every arm's ``solver`` must exist in the solver registry (``none`` is
+        the documented benchmark sentinel that ``solve_arm`` never routes
+        through ``get_solver`` for, so it's skipped rather than treated as a
+        registry miss); solvers behind an optional dependency (qiskit, a QCI
+        SDK) degrade to a skip instead of a hard failure.
+    (b) B3 (the practitioner risk-parity benchmark) must actually declare the
+        ``risk_parity`` solver -- not ``classical``, which would silently
+        collapse it onto A1's min-variance solve (both share
+        ``_objective_form("risk_parity") == "min_variance"``), making the
+        two arms of the ablation matrix bit-identical.
+    (c) B3's solved weights must genuinely differ from A1's on the same
+        snapshot -- confirming the ERC solver is doing real work, not just
+        that the YAML string changed.
+    """
+    spec = _load_spec(str(_ABLATION_SPEC_PATH))
+
+    for arm_dict in list(spec["arms"]) + list(spec.get("quantum_arms", [])):
+        solver_name = arm_dict["solver"]
+        if solver_name == "none":
+            continue  # benchmark sentinel; solve_arm bypasses get_solver entirely
+        try:
+            get_solver(solver_name)
+        except KeyError as exc:
+            pytest.fail(
+                f"arm {arm_dict['id']!r}: solver {solver_name!r} does not "
+                f"resolve via qlab.solvers.base.get_solver: {exc}"
+            )
+        except ImportError:
+            pytest.skip(
+                f"arm {arm_dict['id']!r}: solver {solver_name!r} needs an "
+                "optional dependency that isn't installed"
+            )
+
+    by_id = {a["id"]: a for a in spec["arms"]}
+    assert by_id["B3"]["solver"] == "risk_parity"
+
+    b3 = Arm(**_arm_kwargs(by_id["B3"]))
+    a1 = Arm(**_arm_kwargs(by_id["A1"]))
+    snap = market.snapshot(CORE, "2020-06-30", offline=True, seed=7)
+    cfg = MomentsConfig(lookback_days=252)
+    w_b3, _ = solve_arm(b3, snap, moments=cfg)
+    w_a1, _ = solve_arm(a1, snap, moments=cfg)
+    l1 = float((w_b3.as_series() - w_a1.as_series()).abs().sum())
+    assert l1 > 0.01, f"B3 (risk parity) is bit-identical to A1 (min-variance): L1={l1}"

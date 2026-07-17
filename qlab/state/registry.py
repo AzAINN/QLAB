@@ -113,6 +113,7 @@ class Registry:
         # them to an already-created table, hence the explicit ALTERs here.
         self.con.execute("ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS targets_hash VARCHAR")
         self.con.execute("ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS seq BIGINT")
+        self.con.execute("ALTER TABLE plans ADD COLUMN IF NOT EXISTS legs VARCHAR")
 
     def close(self) -> None:
         self.con.close()
@@ -328,10 +329,13 @@ class Registry:
 
     # -- order plans (state machine) ---------------------------------------
     def create_plan(self, plan_id: str, decision_id: str, targets: dict,
-                    pre_trade: dict) -> None:
+                    pre_trade: dict, legs: list | None = None) -> None:
         self.con.execute(
-            "INSERT INTO plans VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
-            [plan_id, decision_id, "proposed", _j(targets), _j(pre_trade), _now()])
+            "INSERT INTO plans (plan_id, decision_id, state, targets, "
+            "pre_trade, created_at, legs) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT DO NOTHING",
+            [plan_id, decision_id, "proposed", _j(targets), _j(pre_trade),
+             _now(), _j(legs or [])])
 
     def set_plan_state(self, plan_id: str, state: str) -> None:
         self.con.execute("UPDATE plans SET state=? WHERE plan_id=?", [state, plan_id])
@@ -457,7 +461,8 @@ class Registry:
             for k, v in d.items():
                 if k in ("spec", "tickers", "summary", "params", "weights",
                          "diagnostics", "metrics", "choice", "realized_outcome",
-                         "targets", "pre_trade", "payload", "reasons") and isinstance(v, str):
+                         "targets", "pre_trade", "payload", "reasons",
+                         "legs") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:

@@ -11,6 +11,23 @@ from qlab.trader.plan import build_plan, execute_plan
 CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 
 
+class _StubApp:
+    """A framework-independent stand-in for FastMCP: records tool functions by
+    name (mirrors ``tests/test_mcp_server.py::StubApp``) so ``execute_plan``
+    can be exercised through the real MCP wiring without a live FastMCP app.
+    """
+
+    def __init__(self):
+        self.tools = {}
+
+    def tool(self, name: str):
+        def deco(fn):
+            self.tools[name] = fn
+            return fn
+
+        return deco
+
+
 def _broker(reg):
     return SimulatedPaperBroker(
         reg, default_price_provider(offline=True, seed=7),
@@ -226,3 +243,106 @@ def test_latest_verdict_wins_when_timestamps_collide(reg_and_broker, monkeypatch
     plan = build_plan(reg, broker, mandate, targets, "dec-seq")
     with pytest.raises(MandateViolation, match="referee"):
         execute_plan(reg, broker, plan)
+
+
+def test_execute_plan_tool_resumes_cross_session_from_registry_only(tmp_registry):
+    """A resumed session (fresh ``TraderState``, empty in-memory ``st.plans``)
+    must rebuild REAL legs from the persisted plan row -- not silently execute
+    a plan with zero legs, which used to record a bogus 'reconciled' with 0
+    fills and never move a single position.
+    """
+    from qlab.mcp.quant_trader import TraderState, register_trader_tools
+
+    reg = tmp_registry
+    st1 = TraderState(registry=reg, offline=True)
+    targets = {t: 1.0 / len(st1.mandate.universe_whitelist)
+               for t in st1.mandate.universe_whitelist}
+    plan = build_plan(reg, st1.broker, st1.mandate, targets, "dec-cross-session")
+    assert len(plan.legs) > 0
+    reg.log_verdict("dec-cross-session", "PASS", [], "deterministic", targets=targets)
+
+    # Simulate a fresh process: a brand-new TraderState/app sharing only the
+    # registry -- exactly what execute_plan_tool sees when st.plans.get(plan_id)
+    # misses because the process restarted.
+    st2 = TraderState(registry=reg, offline=True)
+    app = _StubApp()
+    register_trader_tools(app, st2)
+    execute_plan_tool = app.tools["execute_plan"]
+
+    result = execute_plan_tool(plan.plan_id)
+    assert result["executed"] is True
+    assert len(result["fills"]) == len(plan.legs)
+    positions = reg.get_positions()
+    assert positions
+    assert all(abs(p["qty"]) > 0 for p in positions.values())
+
+
+def test_execute_plan_tool_resumes_mid_execution_submitted_plan(tmp_registry):
+    """A plan that crashed mid-execution is persisted as 'submitted' (one leg
+    already booked). Resuming it must fill only the remaining legs, replay the
+    already-filled leg without re-applying its cash/position delta, and reach
+    'reconciled' -- not brick forever because it isn't 'checked' anymore.
+    """
+    from qlab.mcp.quant_trader import TraderState, register_trader_tools
+
+    reg = tmp_registry
+    st1 = TraderState(registry=reg, offline=True)
+    targets = {t: 1.0 / len(st1.mandate.universe_whitelist)
+               for t in st1.mandate.universe_whitelist}
+    plan = build_plan(reg, st1.broker, st1.mandate, targets, "dec-mid-exec")
+    assert len(plan.legs) >= 2
+    reg.log_verdict("dec-mid-exec", "PASS", [], "deterministic", targets=targets)
+
+    # Simulate a crash right after the FIRST leg was booked, before the plan
+    # advanced past "submitted".
+    first_leg = plan.legs[0]
+    reg.set_plan_state(plan.plan_id, "submitted")
+    reg.add_order(first_leg.client_order_id, plan.plan_id, first_leg.ticker,
+                  first_leg.side, first_leg.notional, state="submitted")
+    fill = st1.broker.submit_notional(first_leg.client_order_id, first_leg.ticker,
+                                      first_leg.side, first_leg.notional)
+    reg.update_order_state(first_leg.client_order_id, fill.get("state", "filled"))
+    qty_after_prefill = reg.get_positions()[first_leg.ticker]["qty"]
+    cash_after_prefill = reg.get_account()["cash"]
+
+    # Fresh session resumes purely from the registry-persisted "submitted" plan.
+    st2 = TraderState(registry=reg, offline=True)
+    app = _StubApp()
+    register_trader_tools(app, st2)
+    execute_plan_tool = app.tools["execute_plan"]
+
+    result = execute_plan_tool(plan.plan_id)
+    assert result["executed"] is True
+    assert result["state"] == "reconciled"
+    fills = result["fills"]
+    assert len(fills) == len(plan.legs)
+    by_coid = {f["client_order_id"]: f for f in fills}
+    assert by_coid[first_leg.client_order_id]["replayed"] is True
+    assert all(not by_coid[l.client_order_id].get("replayed")
+               for l in plan.legs[1:])
+
+    # no double-apply of the pre-filled leg's cash/position delta
+    assert reg.get_positions()[first_leg.ticker]["qty"] == pytest.approx(qty_after_prefill)
+    assert reg.get_account()["cash"] != pytest.approx(cash_after_prefill)
+
+
+def test_execute_plan_tool_refuses_legacy_plan_with_no_persisted_legs(tmp_registry):
+    """A plan row from before the ``legs`` column existed (or any row somehow
+    missing persisted legs) must never silently 'execute' zero legs -- it must
+    refuse and point the caller at re-proposing.
+    """
+    from qlab.mcp.quant_trader import TraderState, register_trader_tools
+
+    reg = tmp_registry
+    reg.create_plan("legacy-plan-1", "dec-legacy", {"ACWI": 1.0}, {"n_legs": 1})
+    reg.set_plan_state("legacy-plan-1", "checked")
+    reg.log_verdict("dec-legacy", "PASS", [], "deterministic", targets={"ACWI": 1.0})
+
+    st = TraderState(registry=reg, offline=True)
+    app = _StubApp()
+    register_trader_tools(app, st)
+    execute_plan_tool = app.tools["execute_plan"]
+
+    result = execute_plan_tool("legacy-plan-1")
+    assert result["executed"] is False
+    assert "re-propose" in result["error"]

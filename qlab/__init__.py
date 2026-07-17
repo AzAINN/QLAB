@@ -19,7 +19,7 @@ Package map
 ``qlab.solvers``   one ``Solver`` protocol, N implementations (classical, HRP,
                    CVaR-LP, QAOA, Dirac-3, mock)
 ``qlab.state``     DuckDB registry + content-addressed artifact store
-``qlab.mcp``       the two MCP servers (quant-lab research + quant-trader gateway)
+``qlab.mcp``       a combined qlab MCP server (plus the qlab-operator HTTP proxy)
 ``qlab.trader``    mandate enforcement + broker gateway + order-plan state machine
 ``qlab.agents``    orchestrator-agnostic agent definitions + adapter loader
 ``qlab.autopilot`` the standalone poll->analyze->solve->trade->log loop + CLI

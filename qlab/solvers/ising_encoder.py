@@ -1,11 +1,10 @@
-"""MVSK -> binary pseudo-Boolean -> quadratized Ising: the Q-C artifact, built.
+"""Offline MVSK -> binary pseudo-Boolean -> quadratized Ising construction.
 
-research-plan §0.3 asserted ~434 logical qubits from a closed-form count.  This
-module *constructs* the encoding from the canonical polynomial so the count is a
-measured property of an actual Hamiltonian: binarize each weight at ``r`` bits
-(w_i = sum_b 2^b/(2^r - 1) * x_{i,b}), expand every polynomial term, reduce by
-idempotence (x^2 = x), then Rosenberg-quadratize, counting the auxiliaries the
-construction actually needs alongside the all-pairs worst case.
+This module constructs an encoding from the canonical polynomial: binarize each
+weight at ``r`` bits (w_i = sum_b 2^b/(2^r - 1) * x_{i,b}), expand every
+polynomial term, reduce by idempotence (x^2 = x), then Rosenberg-quadratize.
+Reported dimensions describe this construction and an all-pairs upper bound;
+they do not establish hardware applicability.
 """
 from __future__ import annotations
 

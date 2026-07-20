@@ -1,8 +1,8 @@
 """qlab.solvers — one Solver protocol, N implementations.
 
-Concrete solvers register themselves on import. Use :func:`get_solver` to
-obtain one by name; heavy/optional backends (Qiskit QAOA, Dirac-3) are imported
-lazily so the light core never has to pay for them.
+Concrete staged solvers register themselves on import. Use :func:`get_solver`
+to obtain one by name. Offline adapters require their explicit algorithm-module
+entry point and never appear in :func:`available_solvers`.
 """
 
 from qlab.solvers.base import (

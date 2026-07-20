@@ -6,7 +6,7 @@ historical ``as_of``; live, the clock is real. Either way a ``policy`` maps a
 point-in-time :class:`DataSnapshot` to target weights, look-ahead is
 structurally impossible, and the same decision log is written.
 
-The engine is solver-agnostic: benchmarks, classical, quantum and mock arms all
+The engine is solver-agnostic: benchmarks, staged algorithms, and mock arms all
 plug in as a ``policy`` callable, so the ablation holds *everything* constant and
 varies exactly one thing.
 """

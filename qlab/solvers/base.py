@@ -1,8 +1,8 @@
 """The one ``Solver`` contract and a small adapter registry.
 
 Invariant (research-plan §2.1): ``qlab.solvers`` owns *one ``Solver`` protocol,
-N implementations* and knows nothing about the registry or agents. Every arm —
-classical multistart, HRP, scenario-CVaR LP, QAOA on Aer, Dirac-3, mock — takes
+N implementations* and knows nothing about the registry or agents. Every staged
+arm — classical multistart, HRP, scenario-CVaR LP, Dirac-3, mock — takes
 an :class:`~qlab.core.types.Objective` plus :class:`Constraints` and returns a
 uniform :class:`~qlab.core.types.SolveResult`. That parity is what makes the
 ablation an apples-to-apples comparison rather than a measurement of encoding
@@ -63,6 +63,7 @@ class Solver(ABC):
 # registry
 # ---------------------------------------------------------------------------
 _REGISTRY: dict[str, Callable[..., Solver]] = {}
+_OFFLINE_SOLVERS = {"qaoa", "qubo_resource_count"}
 
 
 def register_solver(name: str) -> Callable[[type[Solver]], type[Solver]]:
@@ -74,8 +75,12 @@ def register_solver(name: str) -> Callable[[type[Solver]], type[Solver]]:
 
 
 def get_solver(name: str, **kwargs: Any) -> Solver:
-    """Instantiate a registered solver by name. Imports arms lazily so optional
-    heavy deps (qiskit, cvxpy) are only required when that arm is used."""
+    """Instantiate a staged implementation, importing optional adapters lazily."""
+    if name in _OFFLINE_SOLVERS:
+        raise KeyError(
+            f"solver {name!r} is offline research; use "
+            "qlab.algorithms.offline.get_offline_quantum_solver explicitly"
+        )
     if name not in _REGISTRY:
         _import_all_solvers()
     if name not in _REGISTRY:
@@ -83,18 +88,21 @@ def get_solver(name: str, **kwargs: Any) -> Solver:
     return _REGISTRY[name](**kwargs)
 
 
+def _get_registered_solver(name: str, **kwargs: Any) -> Solver:
+    """Instantiate an already registered adapter, including offline research."""
+    if name not in _REGISTRY:
+        raise KeyError(f"solver {name!r} has not been registered")
+    return _REGISTRY[name](**kwargs)
+
+
 def available_solvers() -> list[str]:
     _import_all_solvers()
-    return sorted(_REGISTRY)
+    return sorted(name for name in _REGISTRY if name not in _OFFLINE_SOLVERS)
 
 
 def _import_all_solvers() -> None:
     # importing the modules triggers their @register_solver decorators
     from qlab.solvers import classical, cvar, hrp, mock  # noqa: F401
-    try:
-        from qlab.solvers import quantum  # noqa: F401  (needs qiskit)
-    except Exception:
-        pass
     try:
         from qlab.solvers import dirac3  # noqa: F401
     except Exception:

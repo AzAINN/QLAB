@@ -18,10 +18,7 @@ from pathlib import Path
 
 import yaml
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SRC = _REPO_ROOT / "agents"
-_CLAUDE_OUT = _REPO_ROOT / ".claude" / "agents"
-_BOB_OUT = _REPO_ROOT / ".bob" / "personas"
+from qlab.paths import data_path, workspace_root
 
 # The lab and trader tool namespaces now live in one combined MCP process
 # (qlab.mcp.server) so a single DuckDB writer owns the book. Every persona
@@ -104,7 +101,7 @@ def parse_agent(path: Path) -> AgentDef:
 
 
 def load_agents(src: Path | None = None) -> list[AgentDef]:
-    src = src or _SRC
+    src = src or data_path("agents")
     return [parse_agent(p) for p in sorted(src.glob("*.md"))]
 
 
@@ -147,8 +144,8 @@ def sync(src: Path | None = None, claude_out: Path | None = None,
          bob_out: Path | None = None) -> dict:
     """Regenerate both adapter directories from the neutral source."""
     agents = load_agents(src)
-    claude_out = claude_out or _CLAUDE_OUT
-    bob_out = bob_out or _BOB_OUT
+    claude_out = claude_out or workspace_root() / ".claude" / "agents"
+    bob_out = bob_out or workspace_root() / ".bob" / "personas"
     written = {"claude": [], "bob": []}
     for a in agents:
         written["claude"].append(str(_write_claude(a, claude_out)))

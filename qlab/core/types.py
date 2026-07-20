@@ -216,9 +216,10 @@ class Objective:
     """The *one polynomial source of truth* (research-plan §2.2, invariant 4).
 
     An objective is built once as coefficient tensors and can be compiled to
-    (a) a scipy callable, (b) a QUBO/Ising resource count for gate hardware, and
-    (c) a Dirac-3 continuous-HUBO payload — so any divergence between solver
-    arms is encoding drift, not solver quality. See :mod:`qlab.core.objective`.
+    (a) a scipy callable, (b) an offline pseudo-Boolean/Ising construction
+    report, and (c) a Dirac-3 continuous-HUBO payload — so any divergence
+    between representations is encoding drift, not solver quality. See
+    :mod:`qlab.core.objective`.
 
     ``form`` selects which terms are active. ``sense='min'`` throughout: we
     minimise variance, minus a coskew reward, plus a cokurt penalty.
@@ -261,7 +262,7 @@ class Objective:
 
 @dataclass
 class SolveResult:
-    """Output of any solver — uniform across classical, quantum and mock arms."""
+    """Uniform output shared by every algorithm adapter."""
 
     weights: Weights
     objective_value: float

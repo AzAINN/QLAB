@@ -6,6 +6,13 @@ that one source, so the same org chart runs on either orchestrator (research-pla
 §0.1). Build with whichever you prefer; the submitted system runs on Bob.
 """
 
-from qlab.agents.loader import AgentDef, load_agents, sync
-
 __all__ = ["AgentDef", "load_agents", "sync"]
+
+
+def __getattr__(name):
+    """Keep package import light and avoid preloading loader for ``python -m``."""
+    if name in __all__:
+        from qlab.agents import loader
+
+        return getattr(loader, name)
+    raise AttributeError(name)

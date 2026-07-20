@@ -12,7 +12,8 @@ def test_run_once_deploys_and_conserves_equity():
     summary = run_once(registry=reg, offline=True, as_of="2026-07-13")
     assert summary["trade"]["executed"] is True
     assert abs(summary["equity_after"] - 10000.0) < 5.0
-    assert summary["classical_vs_quantum"]["classical"]["objective_value"] >= 0
+    assert summary["algorithm_id"] == "hrp"
+    assert summary["operational_policy"]["id"] == "hrp"
     reg.close()
 
 
@@ -27,8 +28,8 @@ def test_daily_ops_never_trades_and_reports_triggers():
 
 
 def test_recommendation_is_reproducible():
-    a = recommend(as_of="2026-07-13", offline=True, run_qaoa=False)
-    b = recommend(as_of="2026-07-13", offline=True, run_qaoa=False)
+    a = recommend(as_of="2026-07-13", offline=True)
+    b = recommend(as_of="2026-07-13", offline=True)
     assert a["recommended_weights"] == b["recommended_weights"]
 
 

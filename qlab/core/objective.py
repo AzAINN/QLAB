@@ -1,8 +1,8 @@
-"""The one true objective, and its three compilers.
+"""The canonical portfolio objective and its staged compilers.
 
 Invariant 4 (research-plan §2.2): *the objective is built once as a coefficient
-tensor and compiled to (a) a scipy callable, (b) the Qiskit QUBO/Ising encoding,
-and (c) the Dirac-3 continuous-HUBO encoding.* Property-tested for agreement, so
+tensor and compiled to a scipy callable and an optional Dirac-3 continuous-HUBO
+payload.* Property-tested for agreement, so
 any divergence between solver arms is encoding drift, not solver quality.
 
 The **primary objective is risk-only MVSK** — minimize variance, reward
@@ -14,16 +14,15 @@ forecast") and still fully exercises the higher-order polynomial:
 
 subject to the long-only, fully-invested budget ``Σ wᵢ = 1``, ``w ≥ 0``.
 
-The QUBO compiler does not *solve* MVSK — it **counts the resources** required to
-put degree-4 MVSK on gate hardware. That count *is* the quantum-architecture
-argument (§0.3), made reproducible instead of asserted.
+Offline encoding experiments consume the same polynomial terms through the
+explicit :mod:`qlab.algorithms.offline` boundary; they are not staged here.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from itertools import combinations_with_replacement
-from math import comb, factorial
+from math import factorial
 from typing import Callable
 
 import numpy as np
@@ -222,53 +221,7 @@ def evaluate_terms(terms, w) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Compiler (b): Qiskit QUBO/Ising RESOURCE COUNT (Slot Q-C — count, don't run)
-# ---------------------------------------------------------------------------
-def mvsk_qubo_resource_count(n: int, resolution_bits: int) -> dict[str, int]:
-    """Count the resources to put degree-4 MVSK on a gate-model machine.
-
-    Reproduces research-plan §0.3 exactly. To binarize the weights at ``r``
-    bits and quadratize the resulting degree-4 pseudo-Boolean polynomial into an
-    Ising Hamiltonian:
-
-    * weight vector → ``N = n·r`` binary variables;
-    * coskewness has ``C(n+2, 3)`` unique entries, each expanding to ``r³``
-      degree-3 monomials;
-    * cokurtosis has ``C(n+3, 4)`` unique entries, each expanding to ``r⁴``
-      degree-4 monomials;
-    * efficient (Rosenberg) quadratization adds one auxiliary per distinct
-      binary product: ``C(N, 2) + N`` auxiliaries, each an AND-gadget penalty.
-
-    At ``n=7, r=4`` this returns **434 logical qubits, 406 penalty gadgets** —
-    versus **7 continuous variables** on Dirac-3. That single comparison is the
-    whole quantum-architecture argument, and it is only credible because the
-    encoder was built and the resources counted.
-    """
-    r = resolution_bits
-    N = n * r
-    coskew_entries = comb(n + 2, 3)
-    cokurt_entries = comb(n + 3, 4)
-    deg3_monomials = coskew_entries * (r ** 3)
-    deg4_monomials = cokurt_entries * (r ** 4)
-    aux_qubits = comb(N, 2) + N
-    return {
-        "n_assets": n,
-        "resolution_bits": r,
-        "weight_qubits": N,
-        "coskew_entries": coskew_entries,
-        "cokurt_entries": cokurt_entries,
-        "degree3_monomials": deg3_monomials,
-        "degree4_monomials": deg4_monomials,
-        "auxiliary_qubits": aux_qubits,
-        "penalty_gadgets": aux_qubits,
-        "total_logical_qubits": N + aux_qubits,
-        "dirac3_continuous_variables": n,     # the structural comparison
-        "heron_hardware_qubits": 156,         # for context
-    }
-
-
-# ---------------------------------------------------------------------------
-# Compiler (c): Dirac-3 continuous-HUBO payload
+# Compiler (b): Dirac-3 continuous-HUBO payload
 # ---------------------------------------------------------------------------
 def compile_dirac_hubo(obj: Objective, budget: float = 1.0) -> dict:
     """Emit the continuous-HUBO payload Dirac-3 would take *natively*.
@@ -283,7 +236,11 @@ def compile_dirac_hubo(obj: Objective, budget: float = 1.0) -> dict:
     payload: dict = {
         "n_variables": n,
         "variable_type": "continuous",
-        "max_degree": 4 if (obj.cokurt is not None and obj.kurt_lambda) else 2,
+        "max_degree": (
+            4 if (obj.cokurt is not None and obj.kurt_lambda)
+            else 3 if (obj.coskew is not None and obj.skew_lambda)
+            else 2
+        ),
         "sum_constraint": {"variables": list(range(n)), "equals": budget},
         "nonneg": True,
         "terms": {

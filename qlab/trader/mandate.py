@@ -13,8 +13,7 @@ from pathlib import Path
 
 import yaml
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_MANDATE = _REPO_ROOT / "mandate.yaml"
+from qlab.paths import data_path
 
 
 class MandateViolation(Exception):
@@ -38,6 +37,7 @@ class Mandate:
     cadence: str = "quarterly"
     regime_triggered: bool = True
     allow_fractional: bool = True
+    operational_policy: str = "hrp"
 
     # -- checks -------------------------------------------------------------
     def check_targets(self, targets: dict[str, float], tol: float = 1e-4) -> None:
@@ -77,7 +77,7 @@ class Mandate:
 
 def load_mandate(path: str | Path | None = None) -> Mandate:
     """Load and flatten ``mandate.yaml`` into a :class:`Mandate`."""
-    p = Path(path) if path else _DEFAULT_MANDATE
+    p = Path(path) if path else data_path("mandate.yaml")
     with open(p, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     acct = raw.get("account", {})
@@ -85,6 +85,7 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     ks = raw.get("kill_switch", {})
     rb = raw.get("rebalance", {})
     ex = raw.get("execution", {})
+    allocation = raw.get("allocation", {})
     return Mandate(
         paper_capital=float(acct.get("paper_capital", 10000.0)),
         base_currency=acct.get("base_currency", "USD"),
@@ -101,4 +102,5 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
         cadence=rb.get("cadence", "quarterly"),
         regime_triggered=bool(rb.get("regime_triggered", True)),
         allow_fractional=bool(ex.get("allow_fractional", True)),
+        operational_policy=str(allocation.get("operational_policy", "hrp")),
     )

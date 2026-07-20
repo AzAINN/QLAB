@@ -3,7 +3,7 @@
 Two session types, mirroring research-plan §8.2:
 
 * :func:`run_once` — a **rebalance session**: analyze (moments + regime) → solve
-  the champion policy under the mandate → log the decision → propose → execute →
+  the configured operational policy under the mandate → log the decision → propose → execute →
   write a memo. Runs the identical pipeline the interactive orchestrator drives.
 * :func:`daily_ops` — a **small, cheap heartbeat**: reconcile, risk report, check
   drift/regime triggers. Its tool set does **not** include execution — it cannot
@@ -20,23 +20,20 @@ from pathlib import Path
 
 import numpy as np
 
-from qlab.arms import Arm, MomentsConfig, solve_arm
+from qlab.arms import MomentsConfig, solve_arm
+from qlab.algorithms import get_operational_policy
 from qlab.core import data as market
 from qlab.core.moments import detect_regime
 from qlab.core.types import Decision
-from qlab.experiment import compare_classical_quantum
 from qlab.governance.referee import deterministic_referee
 from qlab.governance.reflection import resolve_pending
+from qlab.paths import state_path
 from qlab.solvers.base import Constraints
 from qlab.trader.broker import get_broker
 from qlab.trader.mandate import Mandate, MandateViolation, load_mandate
 from qlab.trader.plan import build_plan, execute_plan
 from qlab.trader.reconcile import reconcile
 from qlab.state.registry import Registry
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SUMMARY_DIR = _REPO_ROOT / ".lab" / "summaries"
-
 
 def constraints_from_mandate(m: Mandate) -> Constraints:
     return Constraints(long_only=m.long_only, budget=1.0, min_weight=m.min_weight_per_asset,
@@ -55,7 +52,6 @@ def run_once(
     skew_lambda: float = 0.5,
     kurt_lambda: float = 0.5,
     lookback_days: int = 756,
-    run_qaoa: bool = False,
     seed: int = 7,
     as_of: str | None = None,
 ) -> dict:
@@ -73,9 +69,9 @@ def run_once(
     reflections_resolved = resolve_pending(reg, snap.prices)
     regime = detect_regime(snap)
 
-    # 2. solve the champion policy under the mandate --------------------------
-    champion = Arm("A3", "mvsk", "classical_multistart",
-                   {"skew_lambda": skew_lambda, "kurt_lambda": kurt_lambda})
+    # 2. solve the configured operational policy under the mandate ------------
+    policy = get_operational_policy(mandate.operational_policy)
+    champion = policy.arm()
     weights, diag = solve_arm(champion, snap, moments=MomentsConfig(lookback_days=lookback_days),
                               constraints=constraints)
     targets = {t: float(v) for t, v in zip(weights.tickers, weights.values)}
@@ -105,9 +101,6 @@ def run_once(
         f"weight divergence L1={weight_divergence:.3f}. "
         f"{challenger_assessment}"
     )
-    compare = compare_classical_quantum(snap, MomentsConfig(lookback_days=lookback_days),
-                                        constraints, run_qaoa=run_qaoa)
-
     # 3. log the decision (the judgment record) ------------------------------
     decision = Decision(
         as_of=_as_date(as_of), kind="regime",
@@ -115,10 +108,12 @@ def run_once(
                 "arm": champion.id, "est_vol": est_vol,
                 "lookback_days": lookback_days},
         rationale=(f"Regime={regime['regime']} (signal={regime.get('signal', 0):.3f}). "
-                   f"MVSK champion (λ_skew={skew_lambda}, λ_kurt={kurt_lambda}) solved "
-                   f"under mandate caps; classical vs quantum compared on the same cov."),
+                   f"Configured operational policy={policy.id} ({policy.label}) solved "
+                   f"under mandate caps. {policy.rationale}"),
         challenger_view=challenger_view,
-        alternatives_considered=["min_variance", "hrp", "scenario_cvar"],
+        alternatives_considered=[
+            "min_variance", "risk_parity", "scenario_cvar", "mvsk (research only)"
+        ],
     )
     decision_id = reg.log_decision(decision)
 
@@ -154,7 +149,8 @@ def run_once(
 
     summary = {
         "as_of": as_of, "regime": regime, "targets": targets,
-        "decision_id": decision_id, "classical_vs_quantum": compare,
+        "decision_id": decision_id, "algorithm_id": policy.algorithm_id,
+        "operational_policy": policy.to_dict(),
         "equity_before": state_before["equity"], "equity_after": state_after["equity"],
         "trade": trade_result, "diagnostics": {k: v for k, v in diag.items()
                                                if k not in ("moments",)},
@@ -232,16 +228,8 @@ def render_summary(summary: dict) -> str:
     if "targets" in summary:
         top = sorted(summary["targets"].items(), key=lambda x: -x[1])[:5]
         lines.append("Targets     : " + ", ".join(f"{t} {w:.0%}" for t, w in top))
-    if "classical_vs_quantum" in summary:
-        c = summary["classical_vs_quantum"].get("classical", {})
-        q = summary["classical_vs_quantum"].get("quantum", {})
-        lines.append(f"Classical   : obj={c.get('objective_value'):.3e} "
-                     f"({c.get('wall_clock_s', 0):.2f}s)")
-        if "objective_value" in q:
-            lines.append(f"Quantum     : obj={q.get('objective_value'):.3e} "
-                         f"({q.get('wall_clock_s', 0):.2f}s)")
-        elif q:
-            lines.append("Quantum     : unavailable (install qlab[quantum])")
+    if summary.get("algorithm_id"):
+        lines.append(f"Algorithm   : {summary['algorithm_id']}")
     if "equity_after" in summary:
         lines.append(f"Equity      : {summary.get('equity_before', 0):.2f} -> "
                      f"{summary['equity_after']:.2f}")
@@ -261,9 +249,10 @@ def render_summary(summary: dict) -> str:
 
 
 def _write_summary(summary: dict, prefix: str = "run") -> Path:
-    _SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
+    summary_dir = state_path("summaries")
+    summary_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = _SUMMARY_DIR / f"{prefix}_{stamp}.txt"
+    path = summary_dir / f"{prefix}_{stamp}.txt"
     path.write_text(render_summary(summary), encoding="utf-8")
     return path
 

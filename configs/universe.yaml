@@ -2,14 +2,11 @@
 # Investable universe.
 #
 # The core universe is ~7 CROSS-ASSET ETFs, not sector SPDRs. Sector SPDRs are
-# all equity beta — a wall of positive correlations. A cross-asset basket has
-# genuinely mixed, regime-flipping correlation signs — the "frustrated
-# landscape" that makes the higher-moment / quantum-tunneling argument
-# physical rather than decorative (research-plan §4, Fang call).
+# dominated by shared equity beta; the cross-asset basket supplies more varied
+# correlation and regime behavior for allocation research.
 #
-# The `candidates` set (~19 ETFs) is the larger pool the asset-SELECTION QUBO
-# (arm Q-A) picks k≈7 from. That is the layer where the problem is genuinely
-# binary, and where a 19-qubit QAOA is enumerable/exact-checkable.
+# The `candidates` set (~19 ETFs) supports wider-universe stress tests and an
+# explicitly offline asset-selection experiment.
 # ---------------------------------------------------------------------------
 
 # Benchmark definitions (arms B0 / B1).
@@ -19,7 +16,7 @@ benchmarks:
     BNDW: 0.40            # global bonds
   # B1 (equal-weight 1/N) is derived from `core` at runtime.
 
-# The primary ~7-asset cross-asset core (arms A1–A4, B1–B3, Q-B, Q-C output).
+# The primary ~7-asset cross-asset core for staged allocation experiments.
 core:
   - ticker: ACWI          # global equities
     name: iShares MSCI ACWI
@@ -43,7 +40,7 @@ core:
     name: iShares JPM USD EM Bond
     asset_class: em_bonds
 
-# The ~19-ETF candidate pool for the selection QUBO (arm Q-A).
+# The ~19-ETF candidate pool for wider-universe and offline selection research.
 # `core` tickers are a subset; the selector should be able to (re)discover
 # a well-diversified k≈7 basket out of the wider set.
 candidates:
@@ -67,5 +64,5 @@ candidates:
   - IGF     # infrastructure
   - USO     # oil
 
-# Target cardinality for the selection QUBO.
+# Target cardinality retained for the offline selection experiment.
 selection_k: 7

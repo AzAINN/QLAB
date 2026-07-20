@@ -2,8 +2,9 @@
 
 Unlike the original quant-lab / quant-trader stdio servers, this process never
 opens DuckDB. Every tool delegates to the already-running owner API. Its
-authority is intentionally capped at observation, research, daily operations,
-and dry rebalance previews; paper execution remains a human-confirmed TUI action.
+authority is intentionally capped at observation, research, durable workforce
+coordination, daily operations, and dry rebalance previews; paper execution
+remains a human-confirmed TUI action.
 """
 
 from __future__ import annotations
@@ -39,6 +40,11 @@ class RuntimeClient:
 def register_proxy_tools(app, client: RuntimeClient) -> None:
     """Register the bounded owner-API surface on a FastMCP-like app."""
 
+    def lab(name: str, args: dict) -> Any:
+        payload = dict(args)
+        payload["offline"] = client.offline
+        return client.post(f"/api/lab/{name}", payload).get("result")
+
     @app.tool(name="portfolio.state")
     def portfolio_state() -> dict:
         """Current paper portfolio, exposure, drawdown, and target weights."""
@@ -48,6 +54,11 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
     def market_snapshot() -> dict:
         """Daily-bar market snapshot with source, age, volatility, and regime."""
         return client.get("/api/market", offline=int(client.offline))
+
+    @app.tool(name="policy.current")
+    def policy_current() -> dict:
+        """Configured operational allocation policy and evidence rationale."""
+        return client.get("/api/policy")
 
     @app.tool(name="audit.events")
     def audit_events(limit: int = 50) -> list[dict]:
@@ -65,12 +76,11 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         return client.get("/api/decisions").get("decisions", [])
 
     @app.tool(name="workflow.rebalance_preview")
-    def rebalance_preview(qaoa: bool = False) -> dict:
-        """Compute and record a dry paper rebalance proposal; never execute it."""
-        return client.post("/api/run_once", {
-            "offline": client.offline,
-            "execute": False,
-            "qaoa": bool(qaoa),
+    def rebalance_preview(targets: dict, decision_id: str) -> dict:
+        """Build a dry plan from the optimizer's exact referee-reviewed targets."""
+        return client.post("/api/rebalance_preview", {
+            "offline": client.offline, "targets": targets,
+            "decision_id": decision_id,
         })
 
     @app.tool(name="workflow.daily_ops")
@@ -83,8 +93,195 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         """Run the compact offline ablation through the owner runtime."""
         return client.post("/api/batch", {
             "offline": client.offline,
-            "qaoa": False,
         })
+
+    # -- owner-backed research lab ----------------------------------------
+    @app.tool(name="data.fetch_universe")
+    def data_fetch_universe(which: str = "core") -> dict:
+        """List the investable universe without opening a second registry."""
+        return lab("data.fetch_universe", {"which": which})
+
+    @app.tool(name="data.snapshot_summary")
+    def data_snapshot_summary(as_of: str, universe: str = "core",
+                              lookback_days: int = 756) -> dict:
+        """Point-in-time data provenance, span, and regime summary."""
+        return lab("data.snapshot_summary", {
+            "as_of": as_of, "universe": universe, "lookback_days": lookback_days,
+        })
+
+    @app.tool(name="moments.estimate")
+    def moments_estimate(as_of: str, universe: str = "core",
+                         lookback_days: int = 756,
+                         shrinkage: str = "ledoit_wolf",
+                         denoise: str = "marchenko_pastur",
+                         comoment_shrinkage: float | str = 0.5,
+                         comoment_target: str = "isserlis",
+                         higher_moments: bool = False) -> dict:
+        """Estimate owner-held moments and return only an id plus diagnostics."""
+        return lab("moments.estimate", {
+            "as_of": as_of, "universe": universe, "lookback_days": lookback_days,
+            "shrinkage": shrinkage, "denoise": denoise,
+            "comoment_shrinkage": comoment_shrinkage,
+            "comoment_target": comoment_target,
+            "higher_moments": higher_moments,
+        })
+
+    @app.tool(name="objective.build")
+    def objective_build(moment_set_id: str, form: str = "min_variance",
+                        skew_lambda: float = 0.5,
+                        kurt_lambda: float = 0.5) -> dict:
+        """Build an owner-held objective from a prior moment-set id."""
+        return lab("objective.build", {
+            "moment_set_id": moment_set_id, "form": form,
+            "skew_lambda": skew_lambda, "kurt_lambda": kurt_lambda,
+        })
+
+    @app.tool(name="algorithms.list")
+    def algorithms_list(category: str = "", stage: str = "operational") -> dict:
+        """List algorithm catalog entries by category and deployment stage."""
+        return lab("algorithms.list", {"category": category, "stage": stage})
+
+    @app.tool(name="algorithms.describe")
+    def algorithms_describe(algorithm_id: str) -> dict:
+        """Describe one cataloged algorithm and its permitted deployment stage."""
+        return lab("algorithms.describe", {"algorithm_id": algorithm_id})
+
+    @app.tool(name="algorithms.solve")
+    def algorithms_solve(objective_id: str, algorithm_id: str,
+                         max_weight: float = 1.0, run_id: str = "") -> dict:
+        """Run one operational algorithm against an owner-held objective."""
+        return lab("algorithms.solve", {
+            "objective_id": objective_id, "algorithm_id": algorithm_id,
+            "max_weight": max_weight, "run_id": run_id,
+        })
+
+    @app.tool(name="solve.classical")
+    def solve_classical(objective_id: str, solver: str = "classical",
+                        max_weight: float = 1.0, run_id: str = "") -> dict:
+        """Compatibility route through the staged operational catalog."""
+        return lab("solve.classical", {
+            "objective_id": objective_id, "solver": solver,
+            "max_weight": max_weight, "run_id": run_id,
+        })
+
+    @app.tool(name="backtest.run")
+    def backtest_run(objective: str, solver: str, universe: str = "core",
+                     start: str = "2010-01-01", end: str = "",
+                     cadence: str = "quarterly", lookback_days: int = 756,
+                     cost_bps: float = 5.0, skew_lambda: float = 0.5,
+                     kurt_lambda: float = 0.5) -> dict:
+        """Run and record a walk-forward backtest through the owner."""
+        return lab("backtest.run", {
+            "objective": objective, "solver": solver, "universe": universe,
+            "start": start, "end": end, "cadence": cadence,
+            "lookback_days": lookback_days, "cost_bps": cost_bps,
+            "skew_lambda": skew_lambda, "kurt_lambda": kurt_lambda,
+        })
+
+    @app.tool(name="registry.list_runs")
+    def registry_list_runs(limit: int = 20) -> list:
+        """List recent research runs from the owner registry."""
+        return lab("registry.list_runs", {"limit": limit})
+
+    @app.tool(name="registry.report")
+    def registry_report(run_id: str) -> dict:
+        """Fetch a persisted research report by run id."""
+        return lab("registry.report", {"run_id": run_id})
+
+    @app.tool(name="registry.log_decision")
+    def registry_log_decision(as_of: str, kind: str, choice: dict,
+                              rationale: str, challenger_view: str = "") -> dict:
+        """Record one governed judgment and its rationale."""
+        return lab("registry.log_decision", {
+            "as_of": as_of, "kind": kind, "choice": choice,
+            "rationale": rationale, "challenger_view": challenger_view,
+        })
+
+    @app.tool(name="registry.recent_decisions")
+    def registry_recent_decisions(kind: str = "", limit: int = 10) -> list:
+        """Read prior judgments and realized reflections."""
+        return lab("registry.recent_decisions", {"kind": kind, "limit": limit})
+
+    @app.tool(name="registry.attach_challenge")
+    def registry_attach_challenge(decision_id: str, challenger_view: str) -> dict:
+        """Attach the challenger evidence to the analyst's persisted judgment."""
+        return lab("registry.attach_challenge", {
+            "decision_id": decision_id, "challenger_view": challenger_view,
+        })
+
+    @app.tool(name="registry.log_verdict")
+    def registry_log_verdict(decision_id: str, verdict: str, targets: dict,
+                             reasons: list | None = None) -> dict:
+        """Record the referee PASS or FAIL bound to exact target weights."""
+        return lab("registry.log_verdict", {
+            "decision_id": decision_id, "verdict": verdict, "targets": targets,
+            "reasons": reasons or [],
+        })
+
+    @app.tool(name="report.recommendation")
+    def report_recommendation(as_of: str, universe: str = "core",
+                              skew_lambda: float = 0.5,
+                              kurt_lambda: float = 0.5) -> dict:
+        """Compile a human-facing staged recommendation through the owner."""
+        return lab("report.recommendation", {
+            "as_of": as_of, "universe": universe,
+            "skew_lambda": skew_lambda, "kurt_lambda": kurt_lambda,
+        })
+
+    # -- durable workforce control ----------------------------------------
+    @app.tool(name="workflow.start")
+    def workflow_start(goal: str, as_of: str = "", universe: str = "core") -> dict:
+        """Create a durable five-phase workforce run and return its id."""
+        return client.post("/api/workflows/start", {
+            "goal": goal, "as_of": as_of, "universe": universe,
+            "offline": client.offline,
+        })
+
+    @app.tool(name="workflow.status")
+    def workflow_status(workflow_id: str = "", limit: int = 10) -> dict:
+        """Inspect one workforce run, or list recent runs when id is omitted."""
+        if workflow_id:
+            if not workflow_id.replace("-", "").isalnum():
+                raise ValueError("invalid workflow_id")
+            return client.get(f"/api/workflows/{workflow_id}")
+        return client.get("/api/workflows", limit=max(1, min(limit, 50)))
+
+    def phase_update(phase: str, workflow_id: str, status: str,
+                     summary: str, artifacts: dict | None) -> dict:
+        return client.post(f"/api/workflows/{phase}", {
+            "workflow_id": workflow_id, "status": status,
+            "summary": summary, "artifacts": artifacts or {},
+        })
+
+    @app.tool(name="workflow.analyst")
+    def workflow_analyst(workflow_id: str, status: str,
+                         summary: str = "", artifacts: dict | None = None) -> dict:
+        """Moments analyst only: persist analyst phase progress or completion."""
+        return phase_update("analyst", workflow_id, status, summary, artifacts)
+
+    @app.tool(name="workflow.challenger")
+    def workflow_challenger(workflow_id: str, status: str,
+                            summary: str = "", artifacts: dict | None = None) -> dict:
+        """Challenger only: persist challenger phase progress or completion."""
+        return phase_update("challenger", workflow_id, status, summary, artifacts)
+
+    @app.tool(name="workflow.optimizer")
+    def workflow_optimizer(workflow_id: str, status: str,
+                           summary: str = "", artifacts: dict | None = None) -> dict:
+        """Optimization runner only: persist optimizer phase progress."""
+        return phase_update("optimizer", workflow_id, status, summary, artifacts)
+
+    @app.tool(name="workflow.referee")
+    def workflow_referee(workflow_id: str, status: str,
+                         summary: str = "", artifacts: dict | None = None) -> dict:
+        """Referee only: persist gate progress, PASS, or FAIL evidence."""
+        return phase_update("referee", workflow_id, status, summary, artifacts)
+
+    @app.tool(name="workflow.reporter")
+    def workflow_reporter(workflow_id: str, status: str,
+                          summary: str = "", artifacts: dict | None = None) -> dict:
+        """Reporter only: persist the final human-facing proposal phase."""
+        return phase_update("reporter", workflow_id, status, summary, artifacts)
 
 
 def build_server(client: RuntimeClient | None = None):

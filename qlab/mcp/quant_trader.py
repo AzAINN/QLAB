@@ -13,7 +13,8 @@ deterministic code inside ``propose_rebalance``/``execute_plan``, so it cannot b
 bypassed by a prompt. This is why we do not mount a broker's generic
 ``place_order`` MCP for the autonomous loop. Paper mode is hard-coded.
 
-Run standalone:  ``python -m qlab.mcp.quant_trader``  (needs ``pip install qlab[mcp]``)
+``python -m qlab.mcp.quant_trader`` delegates to the guarded combined server;
+the retired two-process topology is not an executable path.
 """
 
 from __future__ import annotations
@@ -139,7 +140,11 @@ def register_trader_tools(app, st: TraderState) -> None:
 
 
 def build_server(state: TraderState | None = None):
-    """Standalone quant-trader server (own app + state). Kept for direct use."""
+    """Build an isolated trader app for embedding and tests.
+
+    The executable module path delegates to :mod:`qlab.mcp.server` so normal
+    users always receive the owner-runtime guard and one-writer topology.
+    """
     FastMCP = require_fastmcp()
     st = state or TraderState(offline=os.environ.get("QLAB_OFFLINE") == "1")
     app = FastMCP("quant-trader")
@@ -148,7 +153,9 @@ def build_server(state: TraderState | None = None):
 
 
 def main() -> None:  # pragma: no cover
-    build_server().run()
+    from qlab.mcp.server import main as combined_main
+
+    combined_main()
 
 
 if __name__ == "__main__":  # pragma: no cover

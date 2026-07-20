@@ -20,7 +20,8 @@ def test_index_html_is_self_contained():
     # no external CDN dependencies — must work fully offline
     assert "http://" not in html.split("<script>")[0] or "127.0.0.1" not in html
     assert "cdn" not in html.lower()
-    assert 'data-nav="quantum"' in html
+    assert 'data-nav="algorithms"' in html
+    assert "434" not in html
 
 
 def test_bootstrap_has_everything_the_ui_needs(session):
@@ -32,17 +33,27 @@ def test_bootstrap_has_everything_the_ui_needs(session):
     assert "mock" in boot["solvers"]
 
 
-def test_resource_count_endpoint_returns_headline(session):
-    status, rc = handle_api(session, "GET", "/api/resource_count",
-                            {"n": ["7"], "r": ["4"]}, {})
+def test_algorithm_catalog_endpoint_marks_offline_methods_non_runnable(session):
+    status, result = handle_api(session, "GET", "/api/algorithms", {}, {})
     assert status == 200
-    assert rc["total_logical_qubits"] == 434
-    assert rc["dirac3_continuous_variables"] == 7
+    offline = [row for row in result["algorithms"] if row["stage"] == "offline"]
+    assert offline
+    assert not any(row["agent_usable"] for row in offline)
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/api/resource_count"),
+    ("POST", "/api/compare"),
+])
+def test_offline_quantum_routes_are_not_staged(session, method, path):
+    status, result = handle_api(session, method, path, {}, {})
+    assert status == 404
+    assert "no route" in result["error"]
 
 
 def test_recommend_and_run_once_and_reset(session):
     status, rec = handle_api(session, "POST", "/api/recommend", {},
-                             {"as_of": "2026-07-13", "offline": True, "qaoa": False})
+                             {"as_of": "2026-07-13", "offline": True})
     assert status == 200 and abs(sum(rec["recommended_weights"].values()) - 1.0) < 1e-2
 
     status, summ = handle_api(session, "POST", "/api/run_once", {}, {"offline": True})
@@ -76,6 +87,73 @@ def test_tui_snapshot_is_provenance_first(session):
     assert {agent["name"] for agent in snap["agents"]} == {
         "moments-analyst", "challenger", "optimization-runner", "referee", "reporter"
     }
+    assert snap["policy"]["id"] == "hrp"
+    assert snap["workflows"] == []
+
+
+def test_owner_exposes_safe_lab_tools_and_durable_workflows(session):
+    status, result = handle_api(
+        session, "POST", "/api/lab/data.fetch_universe", {},
+        {"which": "core", "offline": True},
+    )
+    assert status == 200 and len(result["result"]["tickers"]) == 7
+
+    status, workflow = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"goal": "review the paper portfolio", "offline": True},
+    )
+    assert status == 200 and workflow["current_phase"] == "analyst"
+    workflow_id = workflow["workflow_id"]
+
+    status, workflow = handle_api(
+        session, "POST", "/api/workflows/analyst", {},
+        {"workflow_id": workflow_id, "status": "working"},
+    )
+    assert status == 200 and workflow["steps"][0]["status"] == "working"
+
+    status, fetched = handle_api(
+        session, "GET", f"/api/workflows/{workflow_id}", {}, {},
+    )
+    assert status == 200 and fetched["workflow_id"] == workflow_id
+
+
+def test_owner_preview_uses_exact_referee_reviewed_targets(session):
+    from datetime import date
+
+    from qlab.core.types import Decision
+
+    tickers = session.mandate.universe_whitelist
+    targets = {ticker: 1.0 / len(tickers) for ticker in tickers}
+    decision_id = session.registry.log_decision(Decision(
+        as_of=date.today(), kind="rebalance_gate",
+        choice={"targets": targets}, rationale="configured HRP policy",
+    ))
+    session.registry.log_verdict(
+        decision_id, "PASS", ["within mandate"], source="referee-agent",
+        targets=targets,
+    )
+
+    status, preview = handle_api(
+        session, "POST", "/api/rebalance_preview", {},
+        {"offline": True, "decision_id": decision_id, "targets": targets},
+    )
+    assert status == 200 and preview["accepted"] is True
+    assert preview["state"] == "checked"
+
+    changed = dict(targets)
+    changed[tickers[0]] += 0.01
+    status, rejected = handle_api(
+        session, "POST", "/api/rebalance_preview", {},
+        {"offline": True, "decision_id": decision_id, "targets": changed},
+    )
+    assert status == 200 and rejected["blocked_by"] == "referee"
+
+    status, executed = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": preview["plan_id"], "human_confirmed": True},
+    )
+    assert status == 200 and executed["executed"] is True
+    assert executed["plan_id"] == preview["plan_id"]
 
 
 def test_tui_snapshot_surfaces_verdicts_and_data_provenance(session):

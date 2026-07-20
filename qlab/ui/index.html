@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>qlab — Quantum Quant Research Desk</title>
+<title>qlab — Governed Quant Research Desk</title>
 <style>
   :root{
     --bg:#0a0e16; --panel:#111826; --panel2:#182231; --border:#25324a;
     --text:#e7eef8; --muted:#8595ab; --accent:#4589ff; --accent2:#0f62fe;
-    --good:#42be65; --warn:#f1c21b; --bad:#fa4d56; --quantum:#a56eff;
+    --good:#42be65; --warn:#f1c21b; --bad:#fa4d56; --violet:#a56eff;
     --radius:12px; --mono:"SF Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   }
@@ -22,7 +22,7 @@
     backdrop-filter:blur(8px);position:sticky;top:0;z-index:20}
   .brand{display:flex;align-items:center;gap:11px;font-weight:700;letter-spacing:.2px}
   .logo{width:30px;height:30px;border-radius:8px;background:
-    conic-gradient(from 200deg,var(--accent),var(--quantum),var(--accent));
+    conic-gradient(from 200deg,var(--accent),var(--violet),var(--accent));
     box-shadow:0 0 18px rgba(69,137,255,.5)}
   .brand small{display:block;font-weight:400;color:var(--muted);font-size:11px;letter-spacing:.3px}
   .spacer{flex:1}
@@ -95,7 +95,7 @@
   .bar .track{height:20px;background:var(--panel2);border-radius:6px;overflow:hidden;border:1px solid var(--border)}
   .bar .fill{height:100%;border-radius:6px 0 0 6px;
     background:linear-gradient(90deg,var(--accent2),var(--accent));min-width:2px;transition:width .5s}
-  .bar .fill.q{background:linear-gradient(90deg,#6929c4,var(--quantum))}
+  .bar .fill.q{background:linear-gradient(90deg,#6929c4,var(--violet))}
   .bar .pc{font-family:var(--mono);text-align:right}
   /* ---- table ---- */
   table{width:100%;border-collapse:collapse;font-size:12.5px}
@@ -110,14 +110,14 @@
   .badge.good{color:var(--good);border-color:rgba(66,190,101,.4);background:rgba(66,190,101,.1)}
   .badge.warn{color:var(--warn);border-color:rgba(241,194,27,.4);background:rgba(241,194,27,.1)}
   .badge.bad{color:var(--bad);border-color:rgba(250,77,86,.4);background:rgba(250,77,86,.1)}
-  .badge.q{color:var(--quantum);border-color:rgba(165,110,255,.4);background:rgba(165,110,255,.1)}
+  .badge.q{color:var(--violet);border-color:rgba(165,110,255,.4);background:rgba(165,110,255,.1)}
   /* ---- vs viz ---- */
   .vs{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:18px;margin:6px 0}
   .vsbox{text-align:center;padding:22px;border-radius:12px;border:1px solid var(--border)}
   .vsbox.gate{background:linear-gradient(180deg,rgba(250,77,86,.09),transparent);border-color:rgba(250,77,86,.3)}
   .vsbox.cont{background:linear-gradient(180deg,rgba(165,110,255,.1),transparent);border-color:rgba(165,110,255,.35)}
   .vsbox .big{font-family:var(--mono);font-size:44px;font-weight:700;line-height:1}
-  .vsbox.gate .big{color:var(--bad)}.vsbox.cont .big{color:var(--quantum)}
+  .vsbox.gate .big{color:var(--bad)}.vsbox.cont .big{color:var(--violet)}
   .vsbox .cap{color:var(--muted);font-size:12px;margin-top:8px}
   .vs .mid{font-size:20px;color:var(--muted);font-weight:700}
   /* ---- misc ---- */
@@ -146,7 +146,7 @@
 <body>
 <header>
   <div class="brand"><div class="logo"></div>
-    <div>qlab<small>quantum quant research desk</small></div></div>
+    <div>qlab<small>governed quant research desk</small></div></div>
   <div class="spacer"></div>
   <span class="pill"><span class="dot" id="modeDot"></span><span id="modeText">offline</span></span>
   <div class="toggle-line" title="Offline serves the deterministic synthetic feed">
@@ -162,7 +162,7 @@
     <button data-nav="recommend"><span class="ic">✦</span>Recommend</button>
     <button data-nav="autopilot"><span class="ic">◐</span>Autopilot</button>
     <button data-nav="experiment"><span class="ic">▤</span>Experiment</button>
-    <button data-nav="quantum"><span class="ic">⚛</span>Quantum</button>
+    <button data-nav="algorithms"><span class="ic">⌘</span>Algorithms</button>
     <button data-nav="registry"><span class="ic">❏</span>Registry</button>
     <div class="sep"></div>
     <button data-nav="about"><span class="ic">◇</span>About &amp; Governance</button>
@@ -192,8 +192,8 @@
     <!-- RECOMMEND -->
     <section data-panel="recommend">
       <h1>Recommend an allocation</h1>
-      <p class="sub">The MVSK champion under the mandate, with a real classical-vs-quantum comparison.
-        The LLM would pick the window &amp; shrinkage; here you set them directly.</p>
+      <p class="sub">The mandate-configured operational policy. MVSK remains a
+        visible research arm, not the assumed paper champion.</p>
       <div class="card">
         <div class="row">
           <div><label class="f">As of</label><input type="date" id="recDate"></div>
@@ -201,15 +201,6 @@
             <option value="core">core (7 cross-asset ETFs)</option>
             <option value="candidates">candidates (19 ETFs)</option></select></div>
         </div>
-        <div class="row" style="margin-top:14px">
-          <div><label class="f">Skew reward λ₃ <span class="rangeval" id="recSkewV">0.5</span></label>
-            <input type="range" id="recSkew" min="0" max="2" step="0.1" value="0.5"></div>
-          <div><label class="f">Kurtosis penalty λ₄ <span class="rangeval" id="recKurtV">0.5</span></label>
-            <input type="range" id="recKurt" min="0" max="2" step="0.1" value="0.5"></div>
-        </div>
-        <div class="toggle-line" style="margin-top:14px">
-          <label class="switch"><input type="checkbox" id="recQaoa"><span class="slider-sw"></span></label>
-          <span>Run the Aer QAOA arm in the comparison (slower)</span></div>
         <div class="btnrow"><button class="btn primary" id="recRun">Get recommendation</button></div>
       </div>
       <div id="recOut"></div>
@@ -219,12 +210,10 @@
     <section data-panel="autopilot">
       <h1>Autopilot</h1>
       <p class="sub">One cold-boot iteration of the same pipeline the orchestrator drives:
-        analyze → solve champion → mandate-check → paper-trade → log.</p>
+        analyze → solve configured policy → mandate-check → paper-trade → log.</p>
       <div class="card">
         <div class="toggle-line"><label class="switch"><input type="checkbox" id="apDry"><span class="slider-sw"></span></label>
           <span>Dry run (analyze &amp; propose, do <b>not</b> trade)</span></div>
-        <div class="toggle-line" style="margin-top:8px"><label class="switch"><input type="checkbox" id="apQaoa"><span class="slider-sw"></span></label>
-          <span>Include the QAOA comparison</span></div>
         <div class="btnrow">
           <button class="btn primary" id="apRun">Run once</button>
           <button class="btn" id="apDaily">Daily-ops heartbeat (never trades)</button>
@@ -237,50 +226,25 @@
     <section data-panel="experiment">
       <h1>Experiment matrix</h1>
       <p class="sub">The reproducible ablation — one objective/solver per arm, everything else held
-        constant. Benchmarks (60/40, 1/N, HRP, ERC), classical (min-var, CVaR, MVSK), and quantum.</p>
+        constant. Benchmarks (60/40, 1/N, HRP, ERC) and staged optimization methods
+        (min-var, CVaR, MVSK).</p>
       <div class="card">
-        <div class="toggle-line"><label class="switch"><input type="checkbox" id="expQaoa"><span class="slider-sw"></span></label>
-          <span>Include quantum arms (resource count + gaps)</span></div>
         <div class="btnrow"><button class="btn primary" id="expRun">Run ablation</button>
           <span class="muted" style="align-self:center">~6 arms, 2016–2022 window (a few seconds offline)</span></div>
       </div>
       <div id="expOut"></div>
     </section>
 
-    <!-- QUANTUM -->
-    <section data-panel="quantum">
-      <h1>Quantum</h1>
-      <p class="sub">Where the physics fits: continuous higher-moment optimization vs gate-model
-        binary problems — and the resource count that is the whole architecture argument.</p>
-      <div class="card">
-        <h3>MVSK → QUBO resource count</h3>
-        <div class="row">
-          <div><label class="f">Assets n <span class="rangeval" id="qnV">7</span></label>
-            <input type="range" id="qn" min="2" max="12" step="1" value="7"></div>
-          <div><label class="f">Resolution bits r <span class="rangeval" id="qrV">4</span></label>
-            <input type="range" id="qr" min="1" max="6" step="1" value="4"></div>
-        </div>
-        <div class="vs" style="margin-top:18px">
-          <div class="vsbox gate"><div class="big" id="qGate">434</div>
-            <div class="cap">logical qubits on gate hardware<br><span id="qGadgets"></span></div></div>
-          <div class="mid">vs</div>
-          <div class="vsbox cont"><div class="big" id="qCont">7</div>
-            <div class="cap">continuous variables on Dirac-3<br>native sum-to-R budget</div></div>
-        </div>
-        <div id="qBreak" class="tiles" style="margin-top:8px"></div>
-        <div class="note-line">Degree-4 MVSK binarized at r bits then quadratized into an Ising
-          Hamiltonian — infeasible on 156-qubit Heron. Dirac-3 takes it in n continuous variables
-          natively. This count is built and verified, not asserted.</div>
-      </div>
-      <div class="card">
-        <h3>Classical vs quantum on the same covariance</h3>
-        <div class="row">
-          <div><label class="f">As of</label><input type="date" id="qDate"></div>
-          <div><label class="f">Universe</label><select id="qUni">
-            <option value="core">core</option><option value="candidates">candidates</option></select></div>
-          <div style="flex:0"><button class="btn primary" id="qCompare" style="white-space:nowrap">Compare</button></div>
-        </div>
-        <div id="qCompareOut" style="margin-top:16px"></div>
+    <!-- ALGORITHMS -->
+    <section data-panel="algorithms">
+      <h1>Algorithm catalog</h1>
+      <p class="sub">One deployment inventory for operators and AI agents. Operational
+        methods can run through the qlab MCP server; research and offline entries are visible
+        but cannot be invoked from the staged agent surface.</p>
+      <div id="algorithmSummary" class="tiles"></div>
+      <div class="card" style="margin-top:18px">
+        <h3>Methods</h3>
+        <div id="algorithmRows" class="empty">Loading catalog…</div>
       </div>
     </section>
 
@@ -354,11 +318,11 @@ $('#offlineToggle').onchange=()=>{const on=OFF();$('#modeDot').classList.toggle(
 async function boot(){
   BOOT=await api('GET','/api/bootstrap');
   const t=new Date().toISOString().slice(0,10);
-  ['#recDate','#qDate'].forEach(s=>$(s).value=BOOT.today||t);
+  $('#recDate').value=BOOT.today||t;
   $('#capitalPill').textContent=money(BOOT.mandate.paper_capital)+' paper';
   renderPortfolio(BOOT.portfolio);
   renderAgents(BOOT.agents);renderMandate(BOOT.mandate);
-  loadResource();$('#offlineToggle').onchange();
+  renderAlgorithms(BOOT.algorithms||[]);$('#offlineToggle').onchange();
 }
 function renderPortfolio(p){
   const halted=p.halted?badge('HALTED','bad'):badge('active','good');
@@ -391,39 +355,27 @@ $('#dashHeartbeat').onclick=e=>run(e.target,async()=>{const r=await api('POST','
   toast('Heartbeat: '+(r.triggers.length?('triggers → '+r.triggers.join(', ')):'no triggers.'));});
 
 /* ---- recommend ---- */
-$('#recSkew').oninput=e=>$('#recSkewV').textContent=(+e.target.value).toFixed(1);
-$('#recKurt').oninput=e=>$('#recKurtV').textContent=(+e.target.value).toFixed(1);
 $('#recRun').onclick=e=>run(e.target,async()=>{
   const rec=await api('POST','/api/recommend',{as_of:$('#recDate').value,universe:$('#recUni').value,
-    skew:+$('#recSkew').value,kurt:+$('#recKurt').value,qaoa:$('#recQaoa').checked,offline:OFF()});
+    offline:OFF()});
   const d=rec.diagnostics||{},ms=d.moments||{};
   $('#recOut').innerHTML=`
    <div class="grid g2">
     <div class="card"><h3>Recommended weights ${badge('arm '+rec.champion_arm,'')}
       ${badge('regime: '+(d['regime']||ms['regime']||'—'),'')}</h3>${bars(rec.recommended_weights)}
-      <div class="note-line">MVSK champion under the mandate cap. Paper capital only.</div></div>
+      <div class="note-line">${rec.operational_policy?.label||rec.algorithm?.label||'Configured policy'} under the mandate cap. MVSK stays research-only.</div></div>
     <div class="card"><h3>Estimator diagnostics</h3>
       <div class="kv"><span class="k">shrinkage intensity</span><span class="v">${num(ms.shrinkage_intensity,3)}</span></div>
       <div class="kv"><span class="k">avg correlation</span><span class="v">${num(ms.avg_corr,3)}</span></div>
       <div class="kv"><span class="k">avg volatility (daily)</span><span class="v">${num(ms.avg_vol,4)}</span></div>
       <div class="kv"><span class="k">condition number</span><span class="v">${num(ms.condition_number,1)}</span></div>
       <div class="kv"><span class="k">lookback (days)</span><span class="v">${ms.lookback_days||'—'}</span></div>
-    </div></div>${compareCard(rec.classical_vs_quantum)}`;
+    </div></div>`;
 });
-function compareCard(c){if(!c)return '';const q=c.quantum||{};
-  const qbody=q.objective_value!=null?`<div class="tile"><div class="lbl">Quantum (QAOA)</div>
-      <div class="val sm">${(+q.objective_value).toExponential(2)}</div>
-      <div class="sub muted">${q.wall_clock_s?.toFixed(2)||'?'}s · ${q.diagnostics?.n_qubits||'?'} qubits${q.diagnostics?.optimality_gap!=null?' · gap '+pct(q.diagnostics.optimality_gap):''}</div></div>`
-    :`<div class="tile"><div class="lbl">Quantum (QAOA)</div><div class="val sm muted">not run</div>
-      <div class="sub muted">${q.note||'enable the QAOA toggle'}</div></div>`;
-  return `<div class="card"><h3>Classical vs quantum ${badge('same covariance','q')}</h3><div class="tiles">
-    <div class="tile"><div class="lbl">Classical (min-var)</div>
-      <div class="val sm">${(+c.classical.objective_value).toExponential(2)}</div>
-      <div class="sub muted">${c.classical.wall_clock_s?.toFixed(2)}s · SLSQP</div></div>${qbody}</div></div>`;}
 
 /* ---- autopilot ---- */
 $('#apRun').onclick=e=>run(e.target,async()=>{
-  const s=await api('POST','/api/run_once',{offline:OFF(),execute:!$('#apDry').checked,qaoa:$('#apQaoa').checked});
+  const s=await api('POST','/api/run_once',{offline:OFF(),execute:!$('#apDry').checked});
   renderAp(s);renderPortfolio(await api('GET','/api/portfolio?offline='+OFF()));});
 $('#apDaily').onclick=e=>run(e.target,async()=>{const r=await api('POST','/api/daily_ops',{offline:OFF()});
   $('#apOut').innerHTML=`<div class="card"><h3>Daily-ops heartbeat ${badge('never trades','good')}</h3>
@@ -441,46 +393,38 @@ function renderAp(s){const tr=s.trade||{};
       <div class="kv"><span class="k">equity</span><span class="v">${money(s.equity_before)} → ${money(s.equity_after)}</span></div>
       <div class="kv"><span class="k">decision id</span><span class="v">${s.decision_id?.slice(0,10)}</span></div>
       ${tr.mandate_violation?`<div class="kv"><span class="k">reason</span><span class="v" style="color:var(--bad)">${tr.mandate_violation}</span></div>`:''}
-      <div class="note-line">${s.diagnostics?.fallback?('note: '+s.diagnostics.fallback):'MVSK champion solved under mandate.'}</div>
-    </div></div>${compareCard(s.classical_vs_quantum)}`;}
+      <div class="note-line">${s.diagnostics?.fallback?('note: '+s.diagnostics.fallback):((s.operational_policy?.label||s.algorithm_id)+' solved under mandate.')}</div>
+    </div></div>`;}
 
 /* ---- experiment ---- */
 $('#expRun').onclick=e=>run(e.target,async()=>{
-  const rep=await api('POST','/api/batch',{offline:OFF(),qaoa:$('#expQaoa').checked});
+  const rep=await api('POST','/api/batch',{offline:OFF()});
   const arms=rep.arms||{},rank=rep.ranking||[];
   let rows=rank.map((r,i)=>{const a=arms[r.arm]||{},m=a.metrics||{};
     return `<tr class="${i===0?'best':''}"><td class="mono">${r.arm}</td><td>${a.objective||''}</td>
       <td class="muted">${a.solver||''}</td><td class="mono">${num(m.sortino,2)}</td>
       <td class="mono">${num(m.ann_vol,3)}</td><td class="mono">${num(m.max_drawdown,3)}</td>
       <td class="mono">${num(m.deflated_sharpe,2)}</td><td class="mono">${num(a.total_turnover,1)}</td></tr>`;}).join('');
-  let q='';const qa=rep.quantum||{};
-  if(qa.QC) q=`<div class="card"><h3>Q-C · the architecture count ${badge('measured','q')}</h3>
-    <div class="vs"><div class="vsbox gate"><div class="big">${qa.QC.total_logical_qubits}</div>
-      <div class="cap">logical qubits (gate)</div></div><div class="mid">vs</div>
-      <div class="vsbox cont"><div class="big">${qa.QC.dirac3_continuous_variables}</div>
-      <div class="cap">continuous vars (Dirac-3)</div></div></div></div>`;
   $('#expOut').innerHTML=`<div class="card"><h3>Ablation ranking ${badge('run '+(rep.run_id||'').slice(0,8),'')}
       ${badge('best by Sortino','good')}</h3>
     <table><tr><th>Arm</th><th>Objective</th><th>Solver</th><th>Sortino</th><th>Ann vol</th>
       <th>Max DD</th><th>dSharpe</th><th>Turnover</th></tr>${rows}</table>
     <div class="note-line">Content-hashed → reproduces bit-for-bit. HRP (B2) is the real bar;
-      scenario-CVaR (A2) is the arm that could falsify the thesis.</div></div>${q}`;});
+      scenario-CVaR (A2) is the arm that could falsify the thesis.</div></div>`;});
 
-/* ---- quantum ---- */
-$('#qn').oninput=e=>{$('#qnV').textContent=e.target.value;loadResource();};
-$('#qr').oninput=e=>{$('#qrV').textContent=e.target.value;loadResource();};
-async function loadResource(){const n=$('#qn').value,r=$('#qr').value;
-  const rc=await api('GET',`/api/resource_count?n=${n}&r=${r}`);
-  $('#qGate').textContent=rc.total_logical_qubits;$('#qCont').textContent=rc.dirac3_continuous_variables;
-  $('#qGadgets').textContent=rc.penalty_gadgets+' penalty gadgets';
-  $('#qBreak').innerHTML=[
-    ['Weight qubits',rc.weight_qubits],['Auxiliary qubits',rc.auxiliary_qubits],
-    ['Coskew entries',rc.coskew_entries],['Cokurt entries',rc.cokurt_entries],
-    ['Degree-4 monomials',rc.degree4_monomials.toLocaleString()]
-  ].map(([l,v])=>`<div class="tile"><div class="lbl">${l}</div><div class="val sm">${v}</div></div>`).join('');}
-$('#qCompare').onclick=e=>run(e.target,async()=>{
-  const c=await api('POST','/api/compare',{as_of:$('#qDate').value,universe:$('#qUni').value,qaoa:true,offline:OFF()});
-  $('#qCompareOut').innerHTML=compareCard(c);});
+/* ---- algorithm catalog ---- */
+function renderAlgorithms(rows){
+  const stages=['operational','research','offline'];
+  $('#algorithmSummary').innerHTML=stages.map(stage=>{
+    const count=rows.filter(row=>row.stage===stage).length;
+    return `<div class="tile"><div class="lbl">${stage}</div><div class="val">${count}</div>
+      <div class="sub muted">${stage==='operational'?'agent-runnable':stage==='research'?'evaluation only':'isolated code path'}</div></div>`;
+  }).join('');
+  $('#algorithmRows').innerHTML=`<table><tr><th>Method</th><th>Category</th><th>Stage</th><th>Agent tool</th></tr>
+    ${rows.map(row=>`<tr><td><b>${row.label}</b><div class="muted">${row.description}</div></td>
+      <td>${row.category}</td><td>${badge(row.stage,row.stage==='operational'?'good':row.stage==='research'?'warn':'')}</td>
+      <td class="mono">${row.agent_tool||'—'}</td></tr>`).join('')}</table>`;
+}
 
 /* ---- registry ---- */
 $('#regRefresh').onclick=e=>run(e.target,loadRegistry);

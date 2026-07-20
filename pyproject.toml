@@ -1,22 +1,23 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "qlab"
 version = "0.1.0"
-description = "An agentic quant research lab that promotes its own validated policy into a mandated paper-trading autopilot. Quantum applied only where its structure fits; the LLM applied only where judgment is required; deterministic code owns rigor."
+description = "A governed quantitative research lab and mandated paper-trading workstation with a staged algorithm catalog and propose-only agent workflows."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Quant Lab" }]
-keywords = ["quant", "portfolio-optimization", "quantum", "qiskit", "agents", "mcp"]
+keywords = ["quant", "portfolio-optimization", "governance", "algorithm-catalog", "agents", "mcp"]
 
 # ---------------------------------------------------------------------------
 # Core dependencies are intentionally LIGHT and reliable.  The pure-Python
-# quant core, DuckDB registry, mock/classical solvers, backtester and the
-# autopilot all run with only these.  Everything heavy (Qiskit, CVXPY,
-# yfinance, Alpaca, FastMCP) is an *optional extra* that is imported lazily,
+# quant core, DuckDB registry, classical solvers, backtester and the autopilot
+# all run with only these. Everything heavy (CVXPY, yfinance, Alpaca, FastMCP)
+# is an *optional extra* that is imported lazily,
 # so the system degrades gracefully and the offline demo cannot be taken
 # down by a missing wheel or a rate-limited data feed.
 # ---------------------------------------------------------------------------
@@ -37,9 +38,9 @@ data = ["yfinance>=0.2.40", "pyarrow>=15.0"]
 # Classical convex solver path (faster / cleaner than the scipy fallback).
 optimize = ["cvxpy>=1.4"]
 
-# Quantum research arm. Pinned to the version set the spec found to work
-# together; Aer's V2 primitives + qiskit-algorithms 0.4 + optimization 0.7.
-quantum = [
+# Offline quantum research only. These dependencies are intentionally excluded
+# from the staged runtime and the all extra; opt in for isolated experiments.
+offline-quantum = [
     "qiskit>=1.2",
     "qiskit-aer>=0.15",
     "qiskit-algorithms>=0.3",
@@ -64,7 +65,7 @@ viz = ["matplotlib>=3.8"]
 dev = ["pytest>=8.0", "pytest-cov>=4.1"]
 
 all = [
-    "qlab[data,optimize,quantum,mcp,trader,viz,tui,dev]",
+    "qlab[data,optimize,mcp,trader,viz,tui,dev]",
 ]
 
 [project.scripts]
@@ -76,6 +77,12 @@ include = ["qlab*"]
 
 [tool.setuptools.package-data]
 "qlab.ui" = ["index.html"]
+
+[tool.setuptools.data-files]
+"share/qlab" = ["mandate.yaml"]
+"share/qlab/configs" = ["configs/universe.yaml"]
+"share/qlab/configs/specs" = ["configs/specs/*.yaml"]
+"share/qlab/agents" = ["agents/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from qlab.core.types import DataSnapshot
+from qlab.paths import state_path
 
 _TRADING_DAYS = 252
 
@@ -43,9 +44,10 @@ def absorption_ratio(returns: pd.DataFrame, window: int = 500,
 
 
 def fred_series(series_id: str, start: str = "2008-01-01", *,
-                cache_dir=".lab/cache", offline: bool = False,
+                cache_dir: str | Path | None = None, offline: bool = False,
                 seed: int = 7) -> pd.Series:
-    cache = Path(cache_dir) / f"fred_{series_id}.parquet"
+    root = Path(cache_dir) if cache_dir else state_path("cache")
+    cache = root / f"fred_{series_id}.parquet"
     if cache.exists():
         return pd.read_parquet(cache)["value"]
     if offline:

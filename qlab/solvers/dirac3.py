@@ -1,11 +1,8 @@
-"""QCI Dirac-3 adapter — the continuous MVSK solver (arm A4).
+"""Optional QCI Dirac-3 research adapter for continuous MVSK (arm A4).
 
-This is the *structural* quantum fit (research-plan §5.1): Dirac-3 takes the
-degree-4 MVSK objective in **7 continuous variables** natively — all-to-all
-connectivity, native sum-to-R constraint that *is* the long-only fully-invested
-budget — with no binarization, no quadratization, no penalty gadgets. Contrast
-the ~434 logical qubits the same objective needs on gate hardware (see
-:func:`qlab.core.objective.mvsk_qubo_resource_count`).
+Dirac-3 consumes the degree-4 objective in continuous variables with a native
+sum-to-R constraint. It is cataloged as research, not exposed by the staged
+agent solver tool, and falls back during controlled batch evaluation.
 
 Running it requires a QCI account (``QCI_API_TOKEN`` / ``QCI_API_URL``). Without
 credentials this adapter raises :class:`Dirac3Unavailable`, which the arm layer

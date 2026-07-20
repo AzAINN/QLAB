@@ -1,13 +1,12 @@
 """Classical solvers: min-variance, MVSK multistart, risk parity (ERC).
 
 These are the deterministic, open-source arms (A1, A3, B3). They use scipy's
-SLSQP on the compiled objective, so they share the *exact same* polynomial the
-quantum arms are compiled from — no divergence in what is being optimized.
+SLSQP on the canonical compiled objective, so every classical arm evaluates the
+same polynomial.
 
 * ``classical``            → min-variance (A1) or max-utility, single SLSQP.
 * ``classical_multistart`` → MVSK (A3): multistart SLSQP that explores the
-  frustrated landscape; at larger n it genuinely struggles, which is the whole
-  point of the "solver claim" (research-plan §4, §6).
+  non-convex landscape under deterministic seeded restarts.
 * ``risk_parity``          → equal-risk-contribution (B3).
 
 An optional CVXPY fast path is used for the convex min-variance problem when the
@@ -67,8 +66,7 @@ class MultistartMVSKSolver(Solver):
 
     Random Dirichlet starts explore the frustrated landscape; the best local
     optimum is returned. A ``parallel_tempering`` seed jitter is applied between
-    restarts to escape shallow basins. This arm is *expected* to tie the quantum
-    solver at n=7 and to fall behind at 15–19 assets — reported plainly.
+    restarts to escape shallow basins.
     """
 
     def __init__(self, n_starts: int | None = None, seed: int = 7):

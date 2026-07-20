@@ -66,7 +66,7 @@ def _snapshot():
             {"name": "challenger", "state": "idle", "authority": "CHALLENGE"},
             {"name": "optimization-runner", "state": "idle", "authority": "SOLVE"},
             {"name": "referee", "state": "idle", "authority": "VETO"},
-            {"name": "reporter", "state": "idle", "authority": "PAPER"},
+            {"name": "reporter", "state": "idle", "authority": "PROPOSE"},
         ],
         "decisions": [],
         "runs": [],
@@ -81,7 +81,14 @@ def _snapshot():
             "governed_available": False,
             "governed_lock_reason": "single-owner runtime required",
         },
-        "quantum": {"total_logical_qubits": 434, "dirac3_continuous_variables": 7},
+        "algorithms": [
+            {"id": "hrp", "stage": "operational"},
+            {"id": "mvsk_multistart", "stage": "research"},
+            {"id": "dirac3_mvsk", "stage": "research"},
+            {"id": "qaoa_selection", "stage": "offline"},
+        ],
+        "policy": {"id": "hrp", "label": "Hierarchical risk parity"},
+        "workflows": [],
     }
 
 
@@ -108,7 +115,9 @@ def test_gather_snapshot_uses_single_tui_contract():
     snapshot = gather_snapshot(InProcessClient(), offline=True)
     assert snapshot["system"]["mode"] == "paper"
     assert snapshot["market"]["frequency"] == "daily"
-    assert snapshot["quantum"]["total_logical_qubits"] == 434
+    assert {row["stage"] for row in snapshot["algorithms"]} == {
+        "operational", "research", "offline"
+    }
 
 
 def test_claude_stream_parser_emits_text_and_hides_thinking():
@@ -133,7 +142,7 @@ def test_claude_stream_parser_emits_text_and_hides_thinking():
     assert tool[0].tool == "mcp__qlab__moments.estimate"
 
 
-def test_governed_claude_command_loads_only_propose_proxy():
+def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
     from qlab.tui.claude import build_claude_argv
 
     argv = build_claude_argv(
@@ -149,7 +158,40 @@ def test_governed_claude_command_loads_only_propose_proxy():
     assert server["env"]["QLAB_RUNTIME_URL"] == "http://127.0.0.1:9999"
     assert "workflow.rebalance_preview" in allowed
     assert "execute" not in allowed and "order" not in allowed
-    assert argv[argv.index("--tools") + 1] == ""
+    assert argv[argv.index("--tools") + 1] == "Agent"
+    assert argv[argv.index("--agent") + 1] == "qlab-coordinator"
+    assert "--forward-subagent-text" in argv
+
+    agents = json.loads(argv[argv.index("--agents") + 1])
+    assert set(agents) == {
+        "qlab-coordinator", "moments-analyst", "challenger",
+        "optimization-runner", "referee", "reporter",
+    }
+    assert agents["qlab-coordinator"]["tools"] == [
+        "Agent(moments-analyst,challenger,optimization-runner,referee,reporter)",
+        "mcp__qlab-operator__workflow.start",
+        "mcp__qlab-operator__workflow.status",
+    ]
+    all_role_tools = {
+        tool for name, definition in agents.items() if name != "qlab-coordinator"
+        for tool in definition["tools"]
+    }
+    assert not ({"Read", "Write", "Edit", "Bash"} & all_role_tools)
+    assert not any("execute" in tool or "order" in tool for tool in all_role_tools)
+
+
+def test_claude_parser_identifies_spawned_workforce_agent():
+    from qlab.tui.claude import parse_stream_line
+
+    events = parse_stream_line(json.dumps({
+        "type": "assistant",
+        "message": {"content": [{
+            "type": "tool_use", "name": "Agent",
+            "input": {"subagent_type": "referee"},
+        }]},
+    }))
+    assert events[0].tool == "Agent"
+    assert events[0].agent == "referee"
 
 
 def test_headless_shell_has_no_header_and_switches_context():
@@ -171,6 +213,67 @@ def test_headless_shell_has_no_header_and_switches_context():
 
             await pilot.press("~")
             assert app.query_one("#timeline").styles.display == "block"
+
+    asyncio.run(run())
+
+
+class WorkforceReadyClient(StubClient):
+    def get(self, path, **params):
+        snap = _snapshot()
+        snap["system"]["workforce_available"] = True
+        snap["system"]["mcp_proxy_available"] = True
+        return snap
+
+
+def test_tui_offers_constrained_claude_workforce_once():
+    from qlab.tui.app import ClaudeWorkforceScreen, QlabTui
+
+    async def run():
+        app = QlabTui(
+            WorkforceReadyClient(), refresh_interval=0, claude_start="offer"
+        )
+        async with app.run_test(size=(140, 42)) as pilot:
+            for _ in range(20):
+                if isinstance(app.screen, ClaudeWorkforceScreen):
+                    break
+                await pilot.pause(0.05)
+            assert isinstance(app.screen, ClaudeWorkforceScreen)
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+            assert not isinstance(app.screen, ClaudeWorkforceScreen)
+
+    asyncio.run(run())
+
+
+def test_workforce_view_renders_durable_phase_progress():
+    from qlab.tui.app import QlabTui
+
+    class WorkflowClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wf123", "kind": "portfolio_review",
+                "status": "running", "current_phase": "challenger",
+                "request": {"goal": "review risk", "as_of": "2026-07-19",
+                            "universe": "core"},
+                "steps": [
+                    {"phase": "analyst", "agent": "moments-analyst",
+                     "status": "done", "summary": "covariance ready"},
+                    {"phase": "challenger", "agent": "challenger",
+                     "status": "working", "summary": ""},
+                ],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(WorkflowClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            content = str(app.query_one("#workforce-content").content)
+            assert app.active_view == "workforce"
+            assert "wf123" in content
+            assert "covariance ready" in content
 
     asyncio.run(run())
 
@@ -238,7 +341,7 @@ def test_dry_rebalance_routes_through_owner_api():
                 await pilot.pause(0.05)
             assert client.posts == [(
                 "/api/run_once",
-                {"offline": True, "execute": False, "qaoa": False},
+                {"offline": True, "execute": False},
             )]
 
     asyncio.run(run())
@@ -247,9 +350,10 @@ def test_dry_rebalance_routes_through_owner_api():
 def test_tui_cli_entry_is_registered():
     from qlab.autopilot.cli import build_parser
 
-    args = build_parser().parse_args(["tui", "--refresh", "1.5"])
+    args = build_parser().parse_args(["tui", "--refresh", "1.5", "--claude", "auto"])
     assert args.command == "tui"
     assert args.refresh == 1.5
+    assert args.claude == "auto"
 
 
 def test_operator_mcp_proxy_is_propose_only_and_never_executes():
@@ -283,9 +387,12 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
     register_proxy_tools(app, client)
 
     assert "workflow.rebalance_preview" in app.tools
+    assert {"workflow.start", "workflow.status", "workflow.analyst",
+            "workflow.challenger", "workflow.optimizer", "workflow.referee",
+            "workflow.reporter"} <= set(app.tools)
     assert not any("execute" in name or "order" in name for name in app.tools)
-    app.tools["workflow.rebalance_preview"]()
+    app.tools["workflow.rebalance_preview"]({"GLD": 1.0}, "decision-1")
     assert client.calls[-1] == (
-        "POST", "/api/run_once",
-        {"offline": True, "execute": False, "qaoa": False},
+        "POST", "/api/rebalance_preview",
+        {"offline": True, "targets": {"GLD": 1.0}, "decision_id": "decision-1"},
     )

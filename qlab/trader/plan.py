@@ -85,6 +85,17 @@ def build_plan(
     is_initial_deployment = sum(current_w.values()) < 0.01
 
     plan_id = _plan_id(decision_id, targets)
+    stored = registry.get_plan(plan_id)
+    if stored is not None:
+        stored_legs = [OrderLeg(**leg) for leg in (stored.get("legs") or [])]
+        return OrderPlan(
+            plan_id=stored["plan_id"],
+            decision_id=stored["decision_id"],
+            targets=stored["targets"],
+            legs=stored_legs,
+            pre_trade=stored["pre_trade"],
+            state=stored["state"],
+        )
     legs: list[OrderLeg] = []
     turnover = 0.0
     for t in tickers:

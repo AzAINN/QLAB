@@ -1,177 +1,127 @@
-# UI Validity Analysis
+# UI validity and deployment boundary
 
-An honest, tab-by-tab assessment of **what the numbers in the `qlab ui` app
-actually mean** — what is rigorous, what is a simulation artifact, and what is a
-data-independent fact. Read this before quoting any figure from the UI.
+> Updated 2026-07-19. This document describes the current owner-backed TUI and
+> web UI. The former staged Quantum panel and QAOA comparison were removed.
 
-## The one distinction that governs everything: data source vs. machinery
+Use `qlab tui` for the primary quiet-workstation interface or `qlab ui` for the
+secondary browser client. Both talk to one owner process that exclusively holds
+the DuckDB research registry and paper book.
 
-The UI runs the *same code* in two modes:
+## Interpret every number in context
 
-- **Offline (default, `qlab ui`)** — prices come from a **deterministic synthetic
-  generator** ([`qlab/core/data.py:synthetic_prices`](qlab/core/data.py)). It is
-  seeded, reproducible, and deliberately built with a factor structure, a
-  calm/stress regime, Student-t shocks, and asymmetric downside jumps so that
-  correlations flip sign and the return distribution has **genuine negative skew
-  and fat tails** — i.e. enough structure for the higher-moment machinery to have
-  something real to chew on. **But every return, Sortino, drawdown and weight it
-  produces is a property of that generator, not of any real market.**
-- **Online (`qlab ui --online`)** — the identical pipeline runs on **live
-  yfinance** adjusted-close data. Same optimizers, same backtest, same mandate.
+There are three separate questions:
 
-**So the split is:**
+1. **Is the implementation internally checked?** Property and regression tests
+   cover objective representations, point-in-time data access, mandate checks,
+   idempotent execution, accounting, and API boundaries.
+2. **Does a displayed number describe real market history?** Only when its
+   provenance says the data came from the online/cache path. Offline synthetic
+   results are deterministic fixtures, not investment evidence.
+3. **Is a method deployed?** The Algorithms panel is authoritative. Visibility
+   does not imply execution authority: only `operational` entries can run through
+   staged agent tools.
 
-| Category | Depends on data? | Validity |
+Implementation tests establish behavior against the encoded specification. They
+do not, by themselves, establish economic usefulness or future performance.
+
+## Data and execution modes
+
+| Mode | Prices | What conclusions are valid? |
 |---|---|---|
-| The **machinery** (optimizers, estimators, backtest, mandate, QAOA) | No — it is correct either way | **Rigorous / correct implementation** |
-| The **market numbers** (returns, Sortino, drawdown, specific weights) | Yes | **Real only with `--online`; otherwise a reproducible simulation** |
-| **Data-independent facts** (QUBO resource count, QAOA optimality gap) | No | **Fully rigorous regardless of data** |
+| Offline with cache | Previously cached daily bars | Historical only, with the displayed as-of and staleness metadata |
+| Offline without cache | Deterministic synthetic fixture | Pipeline behavior and reproducibility only |
+| Online | Daily yfinance history refreshed into cache | Historical research only; this is not a streaming quote feed |
 
-Three things in the app are **rigorous no matter what data feeds it**, and are the
-figures you can quote without qualification:
+The default broker is simulated paper accounting. Alpaca support is paper-only
+and partial: it does not yet provide a complete streaming market-data and order-
+lifecycle integration. No current surface is authorized for live-money trading.
 
-1. **The QUBO resource count** (Quantum tab): exact combinatorics.
-2. **The QAOA optimality gap** (Quantum tab): measured against the *exact*
-   ground state, which is enumerable at ≤ 21 qubits.
-3. **The paper-book accounting and mandate enforcement**: deterministic and
-   exact (equity is conserved on deployment to floating-point; every mandate
-   limit is checked in code).
-
----
-
-## Tab-by-tab
+## Surface-by-surface validity
 
 ### Dashboard
-**Shows:** equity, cash, drawdown, kill-switch headroom, positions, target weights.
 
-- **Method:** `broker.portfolio_state()` marks each held position at the latest
-  available price and sums to equity; drawdown is measured against a running
-  high-water mark; the kill-switch distance is `mandate.trailing_drawdown_pct − drawdown`.
-- **Valid & exact:** the accounting. `cash + Σ(qty·price) = equity`, conserved at
-  deployment net only of the modeled cost drag; fills update cash and positions
-  by double entry; the kill-switch arithmetic is correct.
-- **Simulation artifact (offline):** the *price marks* are synthetic, so equity
-  movements reflect the synthetic path, not real P&L. Positions/weights are real
-  bookkeeping; their dollar value is only as real as the marks.
-- **Quote-able:** "the book is internally consistent and the mandate is enforced."
-  **Not quote-able:** "the strategy made X% " (unless `--online`, and even then
-  see the small-sample caveats under Experiment).
+The dashboard shows the marked paper book, current targets, risk headroom, and
+positions. Cash and position values come from the owner process. Their accounting
+is deterministic, but their economic value is only as current and real as the
+displayed market-data provenance.
+
+Paper deployment is a human-facing action. The TUI requires an explicit
+confirmation; agents attached through the owner proxy can only inspect state and
+request a dry preview.
 
 ### Recommend
-**Shows:** MVSK champion weights, estimator diagnostics, classical-vs-quantum compare.
 
-- **Method:** `estimate_moments` (Ledoit–Wolf covariance shrinkage → Marchenko–
-  Pastur eigenvalue denoising → structured coskew/cokurt shrinkage toward the
-  Gaussian tensor) → `build_objective("mvsk")` → `classical_multistart` SLSQP
-  under the mandate box constraints. The comparison solves min-variance
-  classically and discretized-MV via QAOA **on the same covariance**.
-- **Valid & correct:** the optimization is a faithful implementation of the
-  **risk-only MVSK** objective (minimize variance − λ₃·coskew + λ₄·cokurt, no
-  expected-return term). The scipy objective is **property-tested** against a
-  brute-force polynomial ([`tests/test_objective.py`](tests/test_objective.py)),
-  so the classical and quantum arms provably optimize the *same* function and
-  their objective values are directly comparable. The diagnostics (shrinkage
-  intensity, condition number, avg correlation) are the estimator's real outputs.
-- **Simulation artifact (offline):** the *specific weights* reflect the synthetic
-  co-moments. The result is a **methodological demonstration**, not a live
-  investment recommendation. Return forecasting is deliberately out of scope, so
-  this is a risk-shape recommendation only.
-- **Note:** the QAOA arm (when toggled on) genuinely runs on the Aer simulator
-  and can take ~30–45 s for 21 qubits — that latency is real computation, not a
-  hang.
+Recommend estimates moments, builds the configured objective, and runs the
+operational catalog method under the mandate constraints. Its diagnostics are
+the actual estimator and optimizer outputs for that snapshot.
+
+The returned weights are a research allocation, not a forecast. Synthetic input
+produces a methodological fixture. Historical input produces a historical
+result with the usual estimation and sample-size uncertainty.
+
+There is no staged QAOA comparison on this surface.
 
 ### Autopilot
-**Shows:** one pipeline iteration — regime, targets, trade outcome, equity change.
 
-- **Method:** analyze regime → solve the champion under the mandate → `build_plan`
-  (mandate-checked, two-phase) → `execute_plan` (idempotent) → `log_decision`.
-- **Valid & correct:** mandate enforcement is deterministic — universe whitelist,
-  per-asset cap, turnover cap (with the first-deployment exemption), daily order
-  cap, and the trailing-drawdown kill-switch are all checked in code before a
-  plan can reach `checked`. Execution is idempotent
-  (`client_order_id = hash(plan_id, leg)`). Regime detection is an honest
-  realized-vol threshold with **no return prediction**.
-- **Simulation artifact (offline):** the regime call and targets are computed on
-  synthetic data; trades are paper only and never touch a real venue.
-- **Quote-able:** "the loop respects its mandate, is idempotent, and logs its
-  reasoning." That is a property of the code, true in both modes.
+One iteration analyzes the regime, solves the operational champion, records a
+challenger view and referee result, builds a mandate-checked plan, and either
+previews or books paper legs. Plans are persisted and leg-idempotent so an
+interrupted paper rebalance can resume without duplicating completed legs.
+
+These controls make the paper workflow auditable; they do not turn its allocation
+policy into a validated source of alpha.
 
 ### Experiment
-**Shows:** the ablation ranking table + the Q-C architecture card.
 
-- **Method:** `run_ablation` walk-forward-backtests each arm (point-in-time
-  snapshots, no look-ahead, weight drift between rebalances, transaction costs),
-  ranks by Sortino, content-hashes the run, and computes deflated Sharpe from the
-  registry trial count.
-- **Valid & correct:** the **backtest engine and metrics are correct** — the
-  look-ahead tripwire is structural, the metric formulas (Sortino, max drawdown,
-  CVaR, realized skew/kurtosis, deflated Sharpe) are standard, and the run is
-  reproducible bit-for-bit.
-- **⚠ The biggest caveat in the app:** on the **default offline synthetic data**,
-  the *ranking itself* (e.g. "MVSK/A3 beats HRP") is a **property of the synthetic
-  generator, not an empirical market finding.** The generator is built with real
-  higher-moment structure so MVSK *can* win, but that is a demonstration that the
-  pipeline detects and exploits the structure — **it is not evidence about real
-  markets.** Additionally, the UI's *quick* spec is a short window (2016–2022, 6
-  arms) — an even smaller sample than the full study. Real conclusions require
-  `--online` data, the full [`configs/specs/ablation_v1.yaml`](configs/specs/ablation_v1.yaml)
-  (2008–2024), and the stated small-sample discipline: ~70 quarterly points,
-  deflated Sharpe, and block-bootstrap intervals rather than point estimates.
-- **Bottom line:** treat the Experiment tab as **"does the machinery produce a
-  sane, reproducible ablation?"** (yes) — not as **"is MVSK a better strategy?"**
-  (unanswerable from a synthetic demo).
+The experiment matrix runs point-in-time walk-forward arms, carries cash between
+rebalances, applies configured costs, and stores metrics and provenance. Deflated
+Sharpe uses cumulative research-trial counts, and bootstrap intervals expose
+sampling uncertainty.
 
-### Quantum
-**Shows:** the 434-vs-7 resource count + a classical-vs-QAOA comparison.
+The quick UI experiment is a workflow smoke test. Scientific conclusions should
+use the full specification, inspect intervals and failure modes, and preserve the
+current honest result: tested benchmarks still beat MVSK out of sample.
 
-- **Resource count — fully rigorous, data-independent.** `mvsk_qubo_resource_count`
-  is exact combinatorics: `N = n·r` weight qubits, `C(n+2,3)` coskew and
-  `C(n+3,4)` cokurt entries, `C(N,2)+N` auxiliaries/penalty gadgets. At n=7, r=4
-  it returns **434 logical qubits, 406 penalty gadgets, vs 7 continuous
-  variables** — pinned in [`tests/test_objective.py`](tests/test_objective.py).
-  This is the single most rigorous number in the app and is true independent of
-  any market data or hardware.
-- **QAOA optimality gap — a genuine measurement.** The QAOA runs on the **Aer
-  noiseless statevector simulator** and its energy is compared to the **exact
-  ground state** (`NumPyMinimumEigensolver`), which is enumerable at ≤ 21 qubits.
-  The reported gap (e.g. ~5–6% for discretized MV, ~0% for the selection QUBO) is
-  therefore a **real, measured optimality gap**, not an estimate.
-- **Caveats:** Aer is a *simulator* — device noise is **not** modeled. Running on
-  real IBM hardware (set `IBM_QUANTUM_TOKEN`) would add a measurable
-  simulator-vs-hardware gap. The 434-qubit figure is what gate hardware *would*
-  require; it is **counted, not run** (that is the whole point).
+### Algorithms
+
+The catalog separates method availability from authority:
+
+| Stage | Meaning |
+|---|---|
+| `operational` | May run through its declared staged tool |
+| `research` | May be evaluated in controlled experiments but is not directly agent-runnable |
+| `offline` | Retained outside the desk with no CLI, HTTP, TUI, default-ablation, or MCP execution path |
+
+Offline QAOA and Ising-construction work is retained for isolated research. Its
+parameterized construction reports are not hardware-fit claims, and no IBM
+hardware adapter is implemented.
 
 ### Registry
-**Shows:** recent runs and the decision/reflection log.
 
-- **Valid & correct:** an accurate provenance record. Runs are content-hashed
-  (idempotent), solutions/backtests/decisions are persisted verbatim, and the
-  trial count that feeds deflated Sharpe is a real column, not a guess.
-- **Caveat:** the `reflection` field is populated by the reflection loop when a
-  period resolves; in a short demo session it may be empty.
+The registry is the provenance and audit surface for runs, decisions,
+reflections, paper plans, and fills. Empty reflections normally mean their
+evaluation horizon has not resolved yet; they should not be read as successful
+outcomes.
 
-### About & Governance
-**Shows:** the five-agent org chart with tool scopes, and the mandate limits.
+### About and governance
 
-- **Valid & correct:** parsed directly from the source of truth — `agents/*.md`
-  (real least-privilege tool allowlists, checked in
-  [`tests/test_agents.py`](tests/test_agents.py)) and `mandate.yaml`. It is an
-  accurate description of the system's governance, not a marketing diagram.
+Agent roles are generated from the neutral definitions in `agents/`, and the
+mandate is loaded from `mandate.yaml`. Tool allowlists constrain each role. The
+server also enforces algorithm stages and execution boundaries, so authority is
+not prompt-only.
 
----
+## Claims the current UI supports
 
-## Summary: what you can and cannot claim
-
-| Claim | Supported by the UI? |
+| Claim | Supported? |
 |---|---|
-| "The optimizers/estimators/backtest/mandate are correctly implemented." | ✅ Yes (property-tested; correct in both modes). |
-| "Gate-model MVSK needs ~434 logical qubits vs 7 continuous variables." | ✅ Yes — exact count, data-independent. |
-| "QAOA reaches within X% of the exact optimum on the simulator." | ✅ Yes — measured against the enumerable ground state. |
-| "The paper book is consistent and the mandate is enforced." | ✅ Yes — deterministic accounting. |
-| "MVSK beats HRP / this allocation is good." | ❌ Not from the offline demo — that number is a synthetic-generator property. Needs `--online`, the full spec, and small-sample discipline. |
-| "The strategy earned N% / has Sharpe S." | ❌ Offline: a simulation artifact. Online: real but statistically underpowered on ~70 quarterly points — report intervals, not point estimates. |
+| The paper book and mandate checks follow the encoded deterministic rules | Yes, with regression coverage |
+| A displayed run used a specific data snapshot and configuration | Yes, through persisted provenance |
+| An operational method is available to staged agents | Yes, when the catalog declares its tool |
+| Offline QAOA is a deployed trading capability | No |
+| A constructed Ising dimension proves quantum hardware applicability | No |
+| MVSK beats the benchmarks | No; the current tested result is the opposite |
+| Historical or synthetic performance predicts live returns | No |
 
-**In one line:** the UI faithfully demonstrates that the *system works and its
-quantum/architecture claims are measured facts; the market performance figures
-are a reproducible simulation until you run it `--online`, and even then carry
-the honest small-sample caveats the project states up front.*
+The short version: trust the UI as an auditable paper-research workstation, read
+every market number with its provenance, and treat the algorithm catalog—not an
+implementation's mere presence—as the deployment boundary.

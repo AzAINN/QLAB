@@ -1,20 +1,34 @@
-"""A dependency-free HTTP server exposing every qlab operation as a JSON API.
+"""A dependency-free HTTP owner runtime exposing qlab operations as JSON.
 
-Single-threaded on purpose: requests execute on the main thread, so the Qiskit
-QAOA arm runs where Aer's BLAS internals expect it. One shared DuckDB registry is
-the paper book, so the UI, the CLI, and the autopilot all see the same portfolio.
+The socket server is threaded so parallel browser connections stay responsive;
+all dispatch is serialized under one lock because the shared DuckDB registry is
+the paper book. The UI, CLI, TUI, and autopilot therefore see one owner state.
 
 Routes
 ------
 GET  /                         the single-page app
 GET  /api/bootstrap            universe, mandate, agents, portfolio, defaults
 GET  /api/portfolio            broker-truth positions + risk report
-POST /api/recommend            an allocation + classical-vs-quantum compare
+GET  /api/market               provenance-tagged daily market snapshot
+GET  /api/system               runtime health and authority state
+GET  /api/events               event stream with cursor and limit
+GET  /api/plans                recent order plans
+GET  /api/orders               recent orders
+GET  /api/agents               deployed agent definitions
+GET  /api/algorithms           categorized algorithm deployment catalog
+GET  /api/policy               configured operational allocation policy
+GET  /api/workflows            durable Claude-workforce runs and phase state
+GET  /api/workflows/<id>       one durable workflow and its ordered steps
+GET  /api/tui                  one consistent terminal snapshot
+POST /api/lab/<tool>           bounded research tool executed by this owner
+POST /api/workflows/start      begin a five-role workforce run
+POST /api/workflows/<phase>    update one role-bound workflow phase
+POST /api/rebalance_preview    build an exact, referee-bound checked plan
+POST /api/plans/execute        human-confirm one existing checked paper plan
+POST /api/recommend            an operational allocation recommendation
 POST /api/run_once             one autopilot iteration (analyze -> solve -> trade)
 POST /api/daily_ops            heartbeat (reconcile/risk/triggers; never trades)
 POST /api/batch                the reproducible ablation
-POST /api/compare              classical vs quantum on the same covariance
-GET  /api/resource_count       the MVSK->QUBO 434-vs-7 count
 GET  /api/runs                 recent registry runs
 GET  /api/decisions            recent decisions (the reflection loop)
 POST /api/reset                reset the paper book to starting capital
@@ -33,17 +47,55 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from qlab.core.types import _jsonable
+from qlab.paths import workspace_root
 
 _HERE = Path(__file__).resolve().parent
 _INDEX = _HERE / "index.html"
-_REPO_ROOT = _HERE.parents[1]
 
 # A ThreadingHTTPServer keeps the browser's parallel/keep-alive connections
-# responsive, but the shared DuckDB connection is not thread-safe and Qiskit's
-# Aer internals want serial execution — so every dispatch runs under this lock.
+# responsive, but the shared DuckDB connection is not thread-safe, so every
+# dispatch runs under this lock.
 # Effectively one request computes at a time (fine for a local single user),
 # while the socket layer never stalls.
 _LOCK = threading.Lock()
+
+
+# These research operations may be reached through the TUI's stateless MCP
+# proxy. They can write research/audit rows, but none can mutate the paper book
+# or submit an order. The allowlist is enforced again here at the owner boundary.
+OWNER_LAB_TOOLS = frozenset({
+    "data.fetch_universe",
+    "data.snapshot_summary",
+    "moments.estimate",
+    "objective.build",
+    "algorithms.list",
+    "algorithms.describe",
+    "policy.current",
+    "algorithms.solve",
+    "solve.classical",
+    "backtest.run",
+    "registry.list_runs",
+    "registry.report",
+    "registry.log_decision",
+    "registry.recent_decisions",
+    "registry.attach_challenge",
+    "registry.log_verdict",
+    "report.recommendation",
+})
+
+
+class _OwnerToolApp:
+    """Minimal decorator target used to mount the existing lab tool functions."""
+
+    def __init__(self):
+        self.tools: dict[str, object] = {}
+
+    def tool(self, *, name: str):
+        def register(fn):
+            self.tools[name] = fn
+            return fn
+
+        return register
 
 
 class UISession:
@@ -51,6 +103,8 @@ class UISession:
 
     def __init__(self, offline_default: bool = True, seed: int = 7, registry=None):
         from qlab.trader.mandate import load_mandate
+        from qlab.mcp.guardrails import LabState
+        from qlab.mcp.quant_lab import register_lab_tools
         from qlab.state.registry import Registry
 
         self.registry = registry or Registry()
@@ -58,6 +112,139 @@ class UISession:
         self.offline_default = offline_default
         self.seed = seed
         self.registry.init_account(self.mandate.paper_capital)
+        self.lab_state = LabState(
+            registry=self.registry, max_calls=200,
+            offline=offline_default, seed=seed,
+        )
+        owner_tools = _OwnerToolApp()
+        register_lab_tools(owner_tools, self.lab_state)
+        self._lab_tools = owner_tools.tools
+
+    # -- Claude workforce --------------------------------------------------
+    def call_lab_tool(self, name: str, body: dict, offline: bool) -> object:
+        """Run a safe research tool in-process so this owner keeps DuckDB."""
+        if name not in OWNER_LAB_TOOLS or name not in self._lab_tools:
+            raise PermissionError(f"lab tool {name!r} is not exposed by the owner")
+        self.lab_state.offline = offline
+        args = {key: value for key, value in body.items() if key != "offline"}
+        return self._lab_tools[name](**args)  # type: ignore[operator]
+
+    def start_workflow(self, body: dict) -> dict:
+        """Start a durable portfolio/research workforce run."""
+        from qlab.mcp.guardrails import CallBudget
+
+        self.lab_state.budget = CallBudget(
+            200,
+            on_charge=lambda tool: self.registry.record_event(
+                "tool_call", {"tool": tool},
+            ),
+        )
+        request = {
+            "goal": str(
+                body.get("goal") or "Prepare a governed portfolio review."
+            )[:4000],
+            "as_of": str(body.get("as_of") or date.today().isoformat()),
+            "universe": str(body.get("universe") or "core"),
+            "offline": bool(body.get("offline", self.offline_default)),
+        }
+        return self.registry.start_workflow(
+            str(body.get("kind") or "portfolio_review"), request,
+        )
+
+    def update_workflow(self, phase: str, body: dict) -> dict:
+        return self.registry.update_workflow_phase(
+            str(body.get("workflow_id") or ""),
+            phase,
+            str(body.get("status") or "working"),
+            str(body.get("summary") or ""),
+            body.get("artifacts") if isinstance(body.get("artifacts"), dict) else {},
+        )
+
+    def rebalance_preview(self, body: dict, offline: bool) -> dict:
+        """Build a checked plan from the optimizer's exact reviewed targets."""
+        from qlab.state.registry import targets_hash
+        from qlab.trader.broker import get_broker
+        from qlab.trader.mandate import MandateViolation
+        from qlab.trader.plan import build_plan
+        from qlab.trader.reconcile import reconcile
+
+        decision_id = str(body.get("decision_id") or "")
+        raw_targets = body.get("targets")
+        if not decision_id or not isinstance(raw_targets, dict) or not raw_targets:
+            raise ValueError("decision_id and non-empty targets are required")
+        targets = {str(ticker): float(weight) for ticker, weight in raw_targets.items()}
+        if self.registry.get_decision(decision_id) is None:
+            return {
+                "accepted": False, "blocked_by": "decision",
+                "reason": f"unknown decision {decision_id!r}",
+            }
+        verdict = self.registry.get_verdict(decision_id)
+        if not verdict or verdict.get("verdict") != "PASS":
+            return {
+                "accepted": False, "blocked_by": "referee",
+                "reason": f"no PASS for decision {decision_id!r}",
+            }
+        if verdict.get("targets_hash") != targets_hash(targets):
+            return {
+                "accepted": False, "blocked_by": "referee",
+                "reason": "PASS does not cover these exact targets",
+            }
+        broker = get_broker(
+            self.registry, offline=offline,
+            starting_cash=self.mandate.paper_capital, seed=self.seed,
+            universe=self.mandate.universe_whitelist,
+        )
+        rec = reconcile(
+            self.registry, broker, self.mandate.universe_whitelist,
+        )
+        if not rec["clean"]:
+            return {"accepted": False, "blocked_by": "reconcile", "reconcile": rec}
+        try:
+            plan = build_plan(
+                self.registry, broker, self.mandate, targets, decision_id,
+            )
+        except MandateViolation as exc:
+            return {"accepted": False, "mandate_violation": str(exc)}
+        return {
+            "accepted": True, "plan_id": plan.plan_id, "state": plan.state,
+            "pre_trade": plan.pre_trade, "n_legs": len(plan.legs),
+            "decision_id": decision_id, "targets_hash": targets_hash(targets),
+            "note": "checked dry preview only; Claude cannot execute it",
+        }
+
+    def execute_checked_plan(self, body: dict, offline: bool) -> dict:
+        """Execute one persisted checked plan after an explicit TUI confirmation."""
+        from qlab.trader.broker import get_broker
+        from qlab.trader.mandate import MandateViolation
+        from qlab.trader.plan import OrderLeg, OrderPlan, execute_plan
+
+        if body.get("human_confirmed") is not True:
+            raise PermissionError("human_confirmed=true is required")
+        plan_id = str(body.get("plan_id") or "")
+        stored = self.registry.get_plan(plan_id)
+        if stored is None:
+            raise KeyError(f"unknown plan_id {plan_id!r}")
+        legs = [OrderLeg(**leg) for leg in (stored.get("legs") or [])]
+        expected_legs = int((stored.get("pre_trade") or {}).get("n_legs", 0))
+        if len(legs) != expected_legs:
+            raise RuntimeError(
+                f"plan {plan_id!r} has incomplete persisted legs; re-propose"
+            )
+        plan = OrderPlan(
+            plan_id=stored["plan_id"], decision_id=stored["decision_id"],
+            targets=stored["targets"], legs=legs,
+            pre_trade=stored["pre_trade"], state=stored["state"],
+        )
+        broker = get_broker(
+            self.registry, offline=offline,
+            starting_cash=self.mandate.paper_capital, seed=self.seed,
+            universe=self.mandate.universe_whitelist,
+        )
+        try:
+            result = execute_plan(self.registry, broker, plan)
+        except MandateViolation as exc:
+            return {"executed": False, "mandate_violation": str(exc)}
+        return {"executed": True, **result}
 
     # -- portfolio view -----------------------------------------------------
     def portfolio(self, offline: bool) -> dict:
@@ -127,25 +314,26 @@ class UISession:
         """Agent definitions shaped for the persistent work rail."""
         from qlab.agents.loader import load_agents
 
+        latest = self.registry.list_workflows(limit=1)
+        step_states = {
+            step["agent"]: step["status"]
+            for step in (latest[0]["steps"] if latest else [])
+        }
         rows = []
         for agent in load_agents():
-            tools = agent.tools
-            if any("execute_plan" in tool for tool in tools):
-                authority = "PAPER"
-            elif agent.name == "referee":
-                authority = "VETO"
-            elif any("solve." in tool for tool in tools):
-                authority = "SOLVE"
-            elif agent.name == "challenger":
-                authority = "CHALLENGE"
-            else:
-                authority = "RESEARCH"
+            authority = {
+                "moments-analyst": "RESEARCH",
+                "challenger": "CHALLENGE",
+                "optimization-runner": "SOLVE",
+                "referee": "VETO",
+                "reporter": "PROPOSE",
+            }.get(agent.name, "OBSERVE")
             rows.append({
                 "name": agent.name,
                 "description": agent.description,
                 "authority": authority,
-                "state": "idle",
-                "tools": tools,
+                "state": step_states.get(agent.name, "idle"),
+                "tools": agent.tools,
             })
         return rows
 
@@ -153,7 +341,7 @@ class UISession:
         """Health and authority facts shown quietly at the bottom edge."""
         from qlab.core import data
 
-        config_path = _REPO_ROOT / ".mcp.json"
+        config_path = workspace_root() / ".mcp.json"
         servers: list[str] = []
         if config_path.exists():
             try:
@@ -173,6 +361,8 @@ class UISession:
             "mcp_proxy_available": proxy_available,
             "governed_available": proxy_available and bool(shutil.which("claude")),
             "governed_authority": "propose_only",
+            "claude_role": "workforce_orchestrator",
+            "workforce_available": proxy_available and bool(shutil.which("claude")),
             "governed_lock_reason": (
                 "agent authority is intentionally propose-only; paper execution "
                 "requires explicit human confirmation"
@@ -181,9 +371,21 @@ class UISession:
             "data_age_days": provenance[1] if provenance else None,
         }
 
+    def allocation_policy(self) -> dict:
+        from qlab.algorithms import get_operational_policy
+
+        policy = get_operational_policy(self.mandate.operational_policy).to_dict()
+        policy["constraints"] = {
+            "long_only": self.mandate.long_only,
+            "budget": 1.0,
+            "min_weight": self.mandate.min_weight_per_asset,
+            "max_weight": self.mandate.max_weight_per_asset,
+        }
+        return policy
+
     def tui_snapshot(self, offline: bool, event_limit: int = 100) -> dict:
         """One consistent payload for a complete TUI refresh."""
-        from qlab.core.objective import mvsk_qubo_resource_count
+        from qlab.algorithms import list_algorithms
 
         plans = self.registry.list_plans(20)
         decisions = self.registry.recent_decisions(limit=30)
@@ -201,7 +403,9 @@ class UISession:
             "orders": self.registry.list_orders(50),
             "events": self.registry.read_events(event_limit),
             "system": self.system_status(offline),
-            "quantum": mvsk_qubo_resource_count(7, 4),
+            "algorithms": list_algorithms(),
+            "policy": self.allocation_policy(),
+            "workflows": self.registry.list_workflows(10),
         }
 
 
@@ -225,6 +429,30 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/agents":
         return 200, {"agents": session.agents()}
 
+    if method == "GET" and path == "/api/algorithms":
+        from qlab.algorithms import list_algorithms
+
+        category = query.get("category", [None])[0]
+        stage = query.get("stage", [None])[0]
+        if stage not in (None, "operational", "research", "offline"):
+            return 400, {"error": "stage must be operational, research, or offline"}
+        rows = list_algorithms(category=category, stage=stage)
+        return 200, {"algorithms": rows, "count": len(rows)}
+
+    if method == "GET" and path == "/api/policy":
+        return 200, session.allocation_policy()
+
+    if method == "GET" and path == "/api/workflows":
+        limit = max(1, min(int(query.get("limit", ["10"])[0]), 50))
+        return 200, {"workflows": session.registry.list_workflows(limit)}
+
+    if method == "GET" and path.startswith("/api/workflows/"):
+        workflow_id = path.removeprefix("/api/workflows/")
+        workflow = session.registry.get_workflow(workflow_id)
+        if workflow is None:
+            return 404, {"error": f"unknown workflow_id {workflow_id!r}"}
+        return 200, workflow
+
     if method == "GET" and path == "/api/system":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.system_status(offline)
@@ -245,13 +473,6 @@ def handle_api(session: UISession, method: str, path: str,
         limit = int(query.get("event_limit", ["100"])[0])
         return 200, session.tui_snapshot(offline, limit)
 
-    if method == "GET" and path == "/api/resource_count":
-        from qlab.core.objective import mvsk_qubo_resource_count
-
-        n = int(query.get("n", ["7"])[0])
-        r = int(query.get("r", ["4"])[0])
-        return 200, mvsk_qubo_resource_count(max(2, min(n, 12)), max(1, min(r, 6)))
-
     if method == "GET" and path == "/api/runs":
         return 200, {"runs": session.registry.list_runs(20)}
 
@@ -265,8 +486,28 @@ def handle_api(session: UISession, method: str, path: str,
             as_of=body.get("as_of") or None, universe=body.get("universe", "core"),
             skew_lambda=float(body.get("skew", 0.5)),
             kurt_lambda=float(body.get("kurt", 0.5)),
-            offline=off, run_qaoa=bool(body.get("qaoa", False)), seed=session.seed)
+            offline=off, seed=session.seed,
+            policy_id=session.mandate.operational_policy)
         return 200, rec
+
+    if method == "POST" and path.startswith("/api/lab/"):
+        name = path.removeprefix("/api/lab/")
+        return 200, {"result": session.call_lab_tool(name, body, off)}
+
+    if method == "POST" and path == "/api/workflows/start":
+        return 200, session.start_workflow(body)
+
+    if method == "POST" and path == "/api/rebalance_preview":
+        return 200, session.rebalance_preview(body, off)
+
+    if method == "POST" and path == "/api/plans/execute":
+        return 200, session.execute_checked_plan(body, off)
+
+    if method == "POST" and path.startswith("/api/workflows/"):
+        phase = path.removeprefix("/api/workflows/")
+        if phase not in {"analyst", "challenger", "optimizer", "referee", "reporter"}:
+            return 404, {"error": f"unknown workforce phase {phase!r}"}
+        return 200, session.update_workflow(phase, body)
 
     if method == "POST" and path == "/api/run_once":
         from qlab.autopilot.loop import run_once
@@ -276,7 +517,6 @@ def handle_api(session: UISession, method: str, path: str,
             execute=bool(body.get("execute", True)),
             skew_lambda=float(body.get("skew", 0.5)),
             kurt_lambda=float(body.get("kurt", 0.5)),
-            run_qaoa=bool(body.get("qaoa", False)),
             as_of=body.get("as_of") or None, seed=session.seed)
         return 200, summary
 
@@ -290,23 +530,8 @@ def handle_api(session: UISession, method: str, path: str,
         from qlab.experiment import run_ablation
 
         spec = body.get("spec") or _default_ui_spec()
-        report = run_ablation(spec, registry=session.registry, offline=off,
-                             run_qaoa=bool(body.get("qaoa", False)))
+        report = run_ablation(spec, registry=session.registry, offline=off)
         return 200, report
-
-    if method == "POST" and path == "/api/compare":
-        from qlab.arms import MomentsConfig
-        from qlab.core import data as market
-        from qlab.core.universe import load_universe
-        from qlab.experiment import compare_classical_quantum
-        from qlab.solvers.base import Constraints
-
-        tickers = load_universe().tickers(body.get("universe", "core"))
-        snap = market.snapshot(tickers, body.get("as_of") or date.today().isoformat(),
-                               offline=off, seed=session.seed)
-        return 200, compare_classical_quantum(
-            snap, MomentsConfig(), Constraints(),
-            run_qaoa=bool(body.get("qaoa", True)))
 
     if method == "POST" and path == "/api/reset":
         session.registry.reset_book(session.mandate.paper_capital)
@@ -316,6 +541,7 @@ def handle_api(session: UISession, method: str, path: str,
 
 
 def _bootstrap(session: UISession) -> dict:
+    from qlab.algorithms import list_algorithms
     from qlab.agents.loader import load_agents
     from qlab.core.universe import load_universe
     from qlab.solvers.base import available_solvers
@@ -339,15 +565,17 @@ def _bootstrap(session: UISession) -> dict:
             "max_turnover_per_rebalance": m.max_turnover_per_rebalance,
             "trailing_drawdown_pct": m.trailing_drawdown_pct,
             "cadence": m.cadence, "order_type": m.order_type,
+            "operational_policy": m.operational_policy,
         },
         "agents": agents,
+        "algorithms": list_algorithms(),
         "solvers": available_solvers(),
         "portfolio": session.portfolio(session.offline_default),
     }
 
 
 def _default_ui_spec() -> dict:
-    """A compact, fast ablation for the UI (short window, key arms + QC)."""
+    """A compact staged ablation for the UI (short window, key arms)."""
     return {
         "name": "ui_quick", "seed": 7,
         "data": {"universe": "core", "start": "2016-01-01", "end": "2022-12-31"},
@@ -362,10 +590,6 @@ def _default_ui_spec() -> dict:
             {"id": "A2", "objective": "scenario_cvar", "solver": "cvar_lp"},
             {"id": "A3", "objective": "mvsk", "solver": "classical_multistart",
              "params": {"skew_lambda": 0.5, "kurt_lambda": 0.5}},
-        ],
-        "quantum_arms": [
-            {"id": "QC", "objective": "mvsk", "solver": "qubo_resource_count",
-             "params": {"resolution_bits": 4}},
         ],
     }
 

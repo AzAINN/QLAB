@@ -51,15 +51,20 @@ def test_ablation_runs_and_ranks(reg):
             {"id": "B1", "objective": "equal_weight", "solver": "none"},
             {"id": "A1", "objective": "min_variance", "solver": "classical"},
         ],
-        "quantum_arms": [
-            {"id": "QC", "objective": "mvsk", "solver": "qubo_resource_count",
-             "params": {"resolution_bits": 4}},
-        ],
     }
-    report = run_ablation(spec, registry=reg, offline=True, run_qaoa=False)
+    report = run_ablation(spec, registry=reg, offline=True)
     assert set(report["arms"]) == {"B1", "A1"}
-    assert report["quantum"]["QC"]["total_logical_qubits"] == 434
     assert len(report["ranking"]) == 2
+
+
+def test_staged_ablation_rejects_offline_quantum_arms(reg):
+    spec = {
+        "name": "offline-not-staged",
+        "arms": [],
+        "quantum_arms": [{"id": "QA", "objective": "selection_qubo", "solver": "qaoa"}],
+    }
+    with pytest.raises(ValueError, match="offline research"):
+        run_ablation(spec, registry=reg, offline=True)
 
 
 def _noise(seed, n=1000, mu=0.0):
@@ -97,7 +102,7 @@ def test_ablation_reports_cis_and_registry_trials(tmp_path):
             "moments": {}, "arms": [
                 {"id": "B1", "objective": "equal_weight", "solver": "none"},
                 {"id": "A1", "objective": "min_variance", "solver": "classical"}]}
-    out = run_ablation(spec, registry=reg, offline=True, run_qaoa=False)
+    out = run_ablation(spec, registry=reg, offline=True)
     m = out["arms"]["A1"]["metrics"]
     assert "sharpe_ci" in m and m["sharpe_ci"][0] <= m["sharpe_ci"][1]
     assert "sortino_ci" in m
@@ -115,10 +120,10 @@ def test_dsr_trial_count_excludes_benchmark_and_accumulates():
                 {"id": "B0", "objective": "sixty_forty", "solver": "none"},
                 {"id": "B1", "objective": "equal_weight", "solver": "none"},
                 {"id": "A1", "objective": "min_variance", "solver": "classical"}]}
-    out = run_ablation(spec, registry=reg, offline=True, run_qaoa=False)
+    out = run_ablation(spec, registry=reg, offline=True)
     assert out["n_trials_dsr"] == 2                      # B0 excluded; B1+A1 count
     spec2 = dict(spec, arms=[{"id": "B3", "objective": "risk_parity", "solver": "risk_parity"}])
-    out2 = run_ablation(spec2, registry=reg, offline=True, run_qaoa=False)
+    out2 = run_ablation(spec2, registry=reg, offline=True)
     assert out2["n_trials_dsr"] == 3                     # accumulates: B1, A1, B3
 
 
@@ -146,11 +151,11 @@ def test_research_only_arm_excluded_from_dsr_trial_count():
                 {"id": "A1", "objective": "min_variance", "solver": "classical"},
                 {"id": "RM", "objective": "min_variance", "solver": "classical",
                  "params": {"research_only": True}}]}
-    out = run_ablation(spec, registry=reg, offline=True, run_qaoa=False)
+    out = run_ablation(spec, registry=reg, offline=True)
     assert "RM" in out["arms"]                            # still reported
     assert out["n_trials_dsr"] == 2                        # but not counted as a trial
     spec2 = dict(spec, arms=[{"id": "B3", "objective": "risk_parity", "solver": "risk_parity"}])
-    out2 = run_ablation(spec2, registry=reg, offline=True, run_qaoa=False)
+    out2 = run_ablation(spec2, registry=reg, offline=True)
     assert out2["n_trials_dsr"] == 3                       # accumulates B1, A1, B3; RM still excluded
 
 
@@ -230,7 +235,7 @@ def test_ablation_spec_solvers_resolve_and_b3_is_real_risk_parity():
     """
     spec = _load_spec(str(_ABLATION_SPEC_PATH))
 
-    for arm_dict in list(spec["arms"]) + list(spec.get("quantum_arms", [])):
+    for arm_dict in spec["arms"]:
         solver_name = arm_dict["solver"]
         if solver_name == "none":
             continue  # benchmark sentinel; solve_arm bypasses get_solver entirely

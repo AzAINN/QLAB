@@ -101,3 +101,145 @@ def test_verdicts_for_returns_latest_verdict_per_decision(reg):
 
     assert reg.verdicts_for([]) == {}                     # empty input → {}
     assert reg.verdicts_for(["unknown"]) == {}            # no verdict → absent
+
+
+def test_workforce_is_durable_ordered_and_role_bound(reg):
+    workflow = reg.start_workflow("portfolio_review", {"goal": "review"})
+    workflow_id = workflow["workflow_id"]
+    assert [step["phase"] for step in workflow["steps"]] == [
+        "analyst", "challenger", "optimizer", "referee", "reporter"
+    ]
+    assert workflow["steps"][0]["agent"] == "moments-analyst"
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="cannot start"):
+        reg.update_workflow_phase(workflow_id, "optimizer", "working")
+
+    targets = {"GLD": 1.0}
+    verdict_id = reg.log_verdict("d1", "PASS", ["within mandate"], targets=targets)
+    artifacts = {
+        "analyst": {"moment_set_id": "m1", "objective_id": "o1",
+                    "decision_id": "d1"},
+        "challenger": {"challenger_view": "shorter window may react faster"},
+        "optimizer": {"targets": targets, "algorithm_id": "hrp"},
+        "referee": {"verdict": "PASS", "verdict_id": verdict_id,
+                    "targets": targets},
+        "reporter": {"recommendation": "hold reviewed HRP targets"},
+    }
+    for phase in ("analyst", "challenger", "optimizer", "referee", "reporter"):
+        reg.update_workflow_phase(workflow_id, phase, "working")
+        workflow = reg.update_workflow_phase(
+            workflow_id, phase, "done", summary=f"{phase} complete",
+            artifacts=artifacts[phase],
+        )
+
+    assert workflow["status"] == "complete"
+    assert workflow["result"] == {
+        "final_summary": "reporter complete",
+        "artifacts": artifacts["reporter"],
+    }
+    assert reg.get_workflow(workflow_id)["steps"][-1]["status"] == "done"
+
+    # A retried/replayed "done" on a finished workflow is an idempotent no-op:
+    # it must not flip the workflow back to running or wipe the result.
+    replay = reg.update_workflow_phase(
+        workflow_id, "referee", "done", summary="replayed",
+        artifacts=artifacts["referee"],
+    )
+    assert replay["status"] == "complete"
+    assert replay["result"]["final_summary"] == "reporter complete"
+
+
+def test_workforce_refuses_unstructured_completion_and_referee_fail(reg):
+    import pytest
+
+    workflow = reg.start_workflow("portfolio_review", {"goal": "review"})
+    workflow_id = workflow["workflow_id"]
+    reg.update_workflow_phase(workflow_id, "analyst", "working")
+    with pytest.raises(ValueError, match="cannot complete without artifacts"):
+        reg.update_workflow_phase(workflow_id, "analyst", "done")
+
+    reg.update_workflow_phase(
+        workflow_id, "analyst", "done",
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+    )
+    reg.update_workflow_phase(
+        workflow_id, "challenger", "done",
+        artifacts={"challenger_view": "challenge"},
+    )
+    reg.update_workflow_phase(
+        workflow_id, "optimizer", "done",
+        artifacts={"targets": {"GLD": 1.0}, "algorithm_id": "hrp"},
+    )
+    with pytest.raises(ValueError, match="use blocked for FAIL"):
+        reg.update_workflow_phase(
+            workflow_id, "referee", "done",
+            artifacts={"verdict": "FAIL", "verdict_id": "v1",
+                       "targets": {"GLD": 1.0}},
+        )
+
+
+def test_workforce_referee_pass_is_bound_to_optimizer_targets(reg):
+    """A PASS whose targets differ from the optimizer's cannot complete."""
+    import pytest
+
+    workflow = reg.start_workflow("portfolio_review", {"goal": "review"})
+    workflow_id = workflow["workflow_id"]
+    reg.update_workflow_phase(
+        workflow_id, "analyst", "done",
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+    )
+    reg.update_workflow_phase(
+        workflow_id, "challenger", "done", artifacts={"challenger_view": "c"},
+    )
+    optimizer_targets = {"GLD": 0.5, "EMB": 0.5}
+    reg.update_workflow_phase(
+        workflow_id, "optimizer", "done",
+        artifacts={"targets": optimizer_targets, "algorithm_id": "hrp"},
+    )
+
+    # PASS logged for a different, still-in-mandate vector: refuse completion.
+    rogue = {"GLD": 1.0}
+    rogue_vid = reg.log_verdict("d1", "PASS", ["looks fine"], targets=rogue)
+    with pytest.raises(ValueError, match="do not match the optimizer"):
+        reg.update_workflow_phase(
+            workflow_id, "referee", "done",
+            artifacts={"verdict": "PASS", "verdict_id": rogue_vid, "targets": rogue},
+        )
+
+    # Referee claims the optimizer's targets but its verdict row is bound to
+    # a different hash: refuse.
+    with pytest.raises(ValueError, match="persisted PASS bound"):
+        reg.update_workflow_phase(
+            workflow_id, "referee", "done",
+            artifacts={"verdict": "PASS", "verdict_id": rogue_vid,
+                       "targets": optimizer_targets},
+        )
+
+    # A fabricated verdict_id with no persisted row: refuse.
+    with pytest.raises(ValueError, match="persisted PASS bound"):
+        reg.update_workflow_phase(
+            workflow_id, "referee", "done",
+            artifacts={"verdict": "PASS", "verdict_id": "nope",
+                       "targets": optimizer_targets},
+        )
+
+    good_vid = reg.log_verdict(
+        "d1", "PASS", ["within mandate"], targets=optimizer_targets)
+    done = reg.update_workflow_phase(
+        workflow_id, "referee", "done",
+        artifacts={"verdict": "PASS", "verdict_id": good_vid,
+                   "targets": optimizer_targets},
+    )
+    assert done["current_phase"] == "reporter"
+
+
+def test_challenger_view_attaches_to_existing_decision(reg):
+    dec = Decision(
+        as_of=date(2022, 6, 30), kind="estimation_window",
+        choice={"window": 504}, rationale="stable covariance",
+    )
+    decision_id = reg.log_decision(dec)
+    reg.attach_challenger_view(decision_id, "A shorter window may catch the regime.")
+    assert reg.recent_decisions(limit=1)[0]["challenger_view"].startswith("A shorter")

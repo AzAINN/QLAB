@@ -14,13 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from qlab.core.types import _jsonable
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+from qlab.paths import state_path
 
 
 class ArtifactStore:
     def __init__(self, root: str | Path | None = None):
-        self.root = Path(root) if root else _REPO_ROOT / ".lab" / "artifacts"
+        self.root = Path(root) if root else state_path("artifacts")
         self.root.mkdir(parents=True, exist_ok=True)
 
     def put(self, obj: Any) -> str:

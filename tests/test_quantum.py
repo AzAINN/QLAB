@@ -1,4 +1,4 @@
-"""Quantum arms on the Aer simulator (skipped if qiskit isn't installed).
+"""Offline quantum research on Aer (skipped if qiskit isn't installed).
 
 At these tiny sizes the exact ground state is enumerable, so the QAOA result is
 checked against it — a real optimality gap, not a vibe (research-plan §5.2).
@@ -15,7 +15,8 @@ pytest.importorskip("qiskit_optimization")
 
 from qlab.core.objective import build_objective
 from qlab.core.types import MomentSet
-from qlab.solvers.base import Constraints, get_solver
+from qlab.algorithms.offline import get_offline_quantum_solver
+from qlab.solvers.base import Constraints
 
 
 def _small_cov(n, seed=0):
@@ -31,7 +32,7 @@ def _ms(n, seed=0):
 
 def test_selection_qubo_picks_k_assets():
     obj = build_objective("selection_qubo", _ms(6), extra={"k": 3})
-    res = get_solver("qaoa", reps=1).solve(obj, Constraints(), k=3)
+    res = get_offline_quantum_solver("qaoa", reps=1).solve(obj, Constraints(), k=3)
     sel = res.diagnostics["selected"]
     assert len(sel) == 3
     assert res.diagnostics["n_qubits"] == 6
@@ -40,7 +41,7 @@ def test_selection_qubo_picks_k_assets():
 
 def test_discretized_mv_weights_are_feasible():
     obj = build_objective("discretized_mv", _ms(4), extra={"resolution_bits": 2})
-    res = get_solver("qaoa", reps=1).solve(obj, Constraints())
+    res = get_offline_quantum_solver("qaoa", reps=1).solve(obj, Constraints())
     w = res.weights.as_array()
     assert abs(w.sum() - 1.0) < 1e-6
     assert (w >= -1e-9).all()
@@ -48,6 +49,6 @@ def test_discretized_mv_weights_are_feasible():
 
 def test_qaoa_optimality_gap_is_nonnegative_when_reported():
     obj = build_objective("selection_qubo", _ms(5), extra={"k": 2})
-    res = get_solver("qaoa", reps=1).solve(obj, Constraints(), k=2)
+    res = get_offline_quantum_solver("qaoa", reps=1).solve(obj, Constraints(), k=2)
     if "optimality_gap" in res.diagnostics:
         assert res.diagnostics["optimality_gap"] >= -1e-9

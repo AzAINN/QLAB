@@ -1,12 +1,13 @@
 """``qlab`` command-line entrypoint — the standalone autopilot.
 
-    qlab run-once   [--offline] [--dry-run] [--qaoa]   one full pipeline iteration
+    qlab run-once   [--offline] [--dry-run]            one full pipeline iteration
     qlab watch      --interval 15m [--offline]         run run-once on a loop
     qlab daily-ops  [--offline]                        heartbeat (never trades)
-    qlab batch      <spec.yaml> [--offline] [--no-qaoa] the reproducible ablation
+    qlab batch      <spec.yaml> [--offline]            the reproducible ablation
     qlab recommend  [--as-of DATE] [--offline]         print an allocation, no trade
     qlab prewarm    [--universe core|candidates]       pre-fill the data cache
-    qlab tui        [--online]                         terminal operator console
+    qlab ui         [--no-browser] [--port N]          owner runtime + web client
+    qlab tui        [--claude offer|auto|off]          terminal operator console
 
 All of it runs with zero external accounts thanks to ``--offline`` and the
 simulated paper broker.
@@ -20,9 +21,9 @@ import socket
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 from qlab.autopilot.loop import daily_ops, render_summary, run_once
+from qlab.paths import workspace_root
 
 
 def _f(x) -> str:
@@ -39,7 +40,7 @@ def _parse_interval(s: str) -> int:
 
 
 def _cmd_run_once(args) -> int:
-    summary = run_once(offline=args.offline, execute=not args.dry_run, run_qaoa=args.qaoa)
+    summary = run_once(offline=args.offline, execute=not args.dry_run)
     print(render_summary(summary))
     return 0
 
@@ -50,8 +51,7 @@ def _cmd_watch(args) -> int:
           f"Paper capital only.")
     try:
         while True:
-            summary = run_once(offline=args.offline, execute=not args.dry_run,
-                               run_qaoa=args.qaoa)
+            summary = run_once(offline=args.offline, execute=not args.dry_run)
             print(render_summary(summary))
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -68,23 +68,22 @@ def _cmd_daily_ops(args) -> int:
 def _cmd_batch(args) -> int:
     from qlab.experiment import run_ablation
 
-    report = run_ablation(args.spec, offline=args.offline, run_qaoa=not args.no_qaoa)
+    report = run_ablation(args.spec, offline=args.offline)
     print(f"\nAblation run_id: {report['run_id']}")
     print(f"{'arm':>4}  {'sortino':>9}  {'ann_vol':>8}  {'maxDD':>8}  {'dSharpe':>8}")
     for row in report["ranking"]:
         print(f"{row['arm']:>4}  {_f(row.get('sortino')):>9}  "
               f"{_f(row.get('ann_vol')):>8}  {_f(row.get('max_drawdown')):>8}  "
               f"{_f(row.get('deflated_sharpe')):>8}")
-    for qid, diag in report.get("quantum", {}).items():
-        extra = diag.get("total_logical_qubits") or diag.get("optimality_gap")
-        print(f"  quantum {qid}: {extra if extra is not None else diag.get('selected', diag)}")
     return 0
 
 
 def _cmd_recommend(args) -> int:
     from qlab.experiment import recommend
+    from qlab.trader.mandate import load_mandate
 
-    rec = recommend(as_of=args.as_of, offline=args.offline, run_qaoa=args.qaoa)
+    rec = recommend(as_of=args.as_of, offline=args.offline,
+                    policy_id=load_mandate().operational_policy)
     print(json.dumps(rec, indent=2, default=str))
     return 0
 
@@ -123,7 +122,7 @@ def _cmd_tui(args) -> int:
             server_argv.append("--online")
         owner = subprocess.Popen(
             server_argv,
-            cwd=str(Path(__file__).resolve().parents[2]),
+            cwd=str(workspace_root()),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -156,6 +155,7 @@ def _cmd_tui(args) -> int:
         offline=not args.online,
         refresh_interval=args.refresh,
         owned_server=owner,
+        claude_start=args.claude,
     ).run()
     return 0
 
@@ -198,14 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
     ro = sub.add_parser("run-once", help="one full pipeline iteration")
     add_common(ro)
     ro.add_argument("--dry-run", action="store_true", help="analyze + propose, do not trade")
-    ro.add_argument("--qaoa", action="store_true", help="also run the Aer QAOA compare")
     ro.set_defaults(func=_cmd_run_once)
 
     w = sub.add_parser("watch", help="run run-once on an interval")
     add_common(w)
     w.add_argument("--interval", default="15m", help="e.g. 30s, 15m, 1h")
     w.add_argument("--dry-run", action="store_true")
-    w.add_argument("--qaoa", action="store_true")
     w.set_defaults(func=_cmd_watch)
 
     do = sub.add_parser("daily-ops", help="heartbeat; reconcile + risk, never trades")
@@ -215,13 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("batch", help="run the reproducible ablation from a spec")
     add_common(b)
     b.add_argument("spec", help="path to a spec YAML (configs/specs/ablation_v1.yaml)")
-    b.add_argument("--no-qaoa", action="store_true", help="skip quantum arms")
     b.set_defaults(func=_cmd_batch)
 
     r = sub.add_parser("recommend", help="print an allocation recommendation (no trade)")
     add_common(r)
     r.add_argument("--as-of", default=None, help="YYYY-MM-DD (default: today)")
-    r.add_argument("--qaoa", action="store_true")
     r.set_defaults(func=_cmd_recommend)
 
     pw = sub.add_parser("prewarm", help="pre-fill the data cache for demo resilience")
@@ -242,6 +238,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="use live/cached yfinance daily bars (default: offline synthetic)")
     tui.add_argument("--refresh", type=float, default=2.0,
                      help="snapshot refresh interval in seconds")
+    tui.add_argument(
+        "--claude", choices=["offer", "auto", "off"], default="offer",
+        help=("Claude workforce startup: prompt once (offer), launch automatically "
+              "(auto), or keep it off until requested (off)"),
+    )
     tui.set_defaults(func=_cmd_tui)
 
     return p

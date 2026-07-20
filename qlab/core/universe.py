@@ -8,10 +8,7 @@ from pathlib import Path
 import yaml
 
 from qlab.core.types import AssetMeta
-
-# Repo root = three levels up from this file (qlab/core/universe.py).
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_UNIVERSE = _REPO_ROOT / "configs" / "universe.yaml"
+from qlab.paths import data_path
 
 
 class Universe:
@@ -56,6 +53,6 @@ class Universe:
 @lru_cache(maxsize=4)
 def load_universe(path: str | Path | None = None) -> Universe:
     """Load the universe config (cached). Pass ``path`` to override the default."""
-    p = Path(path) if path else _DEFAULT_UNIVERSE
+    p = Path(path) if path else data_path("configs", "universe.yaml")
     with open(p, "r", encoding="utf-8") as f:
         return Universe(yaml.safe_load(f))

@@ -1,39 +1,35 @@
-"""Experiment orchestration — batch ablation and single-shot recommendation.
+"""Staged experiment orchestration — batch ablation and recommendations.
 
 The two operating modes (research-plan §2.3):
 
 * :func:`run_ablation` — **batch mode**. Executes a declarative spec end-to-end
   and writes every arm to the registry, so the submission numbers reproduce from
   ``git clone && qlab batch configs/specs/ablation_v1.yaml``.
-* :func:`recommend` — **stepped mode**. One point-in-time allocation with a real
-  classical-vs-quantum comparison, for the live demo narrative and the autopilot.
+* :func:`recommend` — **stepped mode**. One point-in-time allocation for the
+  governed operator desk and autopilot.
 
-Benchmark and classical arms get a full walk-forward backtest; quantum arms get a
-single-shot solve plus diagnostics (optimality gaps, qubit counts, the 434-qubit
-resource count) — their headline value is the *measured* comparison, not a
-16-year backtest of a selection vector.
+Only operational and declared research arms belong here. Offline quantum
+experiments live under :mod:`qlab.algorithms.offline` and are rejected by this
+staged runner.
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
 
-from qlab.arms import Arm, MomentsConfig, build_policy, estimate, solve_arm
+from qlab.algorithms import get_algorithm, get_operational_policy
+from qlab.arms import Arm, MomentsConfig, build_policy, solve_arm
 from qlab.core import data as market
 from qlab.core.backtest import BacktestResult, run_backtest
 from qlab.core.metrics import block_bootstrap_ci, deflated_sharpe, periodic_sharpe
-from qlab.core.objective import build_objective, compile_scipy
-from qlab.core.types import DataSnapshot
 from qlab.core.universe import load_universe
-from qlab.solvers.base import Constraints, get_solver
+from qlab.paths import data_root
+from qlab.solvers.base import Constraints
 from qlab.state.registry import Registry
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -44,10 +40,14 @@ def run_ablation(
     *,
     registry: Registry | None = None,
     offline: bool = False,
-    run_qaoa: bool = True,
 ) -> dict[str, Any]:
     """Run the full experiment matrix from a spec and persist it to the registry."""
     spec = _load_spec(spec)
+    if spec.get("quantum_arms"):
+        raise ValueError(
+            "quantum_arms are offline research and cannot run in the staged "
+            "ablation; use qlab.algorithms.offline explicitly"
+        )
     reg = registry or Registry()
     run_id = reg.log_run("ablation", spec)
 
@@ -71,7 +71,7 @@ def run_ablation(
     arm_by_id = {a.id: a for a in arms}
     n_trials = max(1, len([a for a in arms if a.objective not in ("sixty_forty",)]))
 
-    results: dict[str, Any] = {"run_id": run_id, "arms": {}, "quantum": {}}
+    results: dict[str, Any] = {"run_id": run_id, "arms": {}}
 
     bt_results: dict[str, BacktestResult] = {}
     for arm in arms:
@@ -119,19 +119,6 @@ def run_ablation(
     results["n_trials_registry"] = reg.backtest_trial_count()
     results["n_trials_dsr"] = n_trials_dsr
 
-    # quantum arms — single-shot at the latest snapshot
-    for qa in spec.get("quantum_arms", []):
-        arm = Arm(**_arm_kwargs(qa))
-        q_tickers = uni.tickers(arm.universe)
-        q_prices = market.get_prices(q_tickers, d.get("start", "2008-01-01"),
-                                     d.get("end"), offline=offline, seed=seed)
-        snap = DataSnapshot(q_tickers, q_prices, q_prices.index[-1].date())
-        weights, diag = solve_arm(arm, snap, moments=moments_cfg)
-        obj_form = diag.get("objective", arm.objective)
-        reg.log_solution(run_id, arm.id,
-                         _shim_result(weights, diag), objective_form=obj_form)
-        results["quantum"][arm.id] = diag
-
     reg.record_event("ablation_complete", {"run_id": run_id,
                                             "n_arms": len(arms)})
     results["ranking"] = _rank(results["arms"])
@@ -139,7 +126,7 @@ def run_ablation(
 
 
 # ---------------------------------------------------------------------------
-# Stepped mode — one recommendation with a classical vs quantum compare
+# Stepped mode — one staged recommendation
 # ---------------------------------------------------------------------------
 def recommend(
     *,
@@ -150,10 +137,10 @@ def recommend(
     moments_cfg: MomentsConfig | None = None,
     constraints: Constraints | None = None,
     offline: bool = False,
-    run_qaoa: bool = True,
     seed: int = 7,
+    policy_id: str = "hrp",
 ) -> dict[str, Any]:
-    """Produce one allocation recommendation (the demo/autopilot decision)."""
+    """Produce one allocation recommendation from an explicit deployed policy."""
     moments_cfg = moments_cfg or MomentsConfig()
     constraints = constraints or Constraints()
     uni = load_universe()
@@ -161,61 +148,22 @@ def recommend(
     as_of = as_of or _today()
     snap = market.snapshot(tickers, as_of, offline=offline, seed=seed)
 
-    champion = Arm(id="A3", objective="mvsk", solver="classical_multistart",
-                   params={"skew_lambda": skew_lambda, "kurt_lambda": kurt_lambda})
+    policy = get_operational_policy(policy_id)
+    champion = policy.arm()
     weights, diag = solve_arm(champion, snap, moments=moments_cfg,
                               constraints=constraints)
 
-    compare = compare_classical_quantum(snap, moments_cfg, constraints,
-                                        run_qaoa=run_qaoa)
     return {
         "as_of": str(as_of), "universe": universe, "tickers": tickers,
         "recommended_weights": dict(zip(weights.tickers, weights.values)),
         "champion_arm": champion.id, "diagnostics": diag,
-        "classical_vs_quantum": compare,
+        "algorithm": get_algorithm(policy.algorithm_id).to_dict(),
+        "operational_policy": policy.to_dict(),
+        "research_note": (
+            "MVSK remains in the ablation as a research hypothesis and is not "
+            "the configured paper allocation policy."
+        ),
     }
-
-
-def compare_classical_quantum(
-    snapshot: DataSnapshot,
-    moments_cfg: MomentsConfig,
-    constraints: Constraints,
-    *,
-    run_qaoa: bool = True,
-) -> dict[str, Any]:
-    """Run classical min-variance and the QAOA discretized-MV arm on the SAME cov.
-
-    Returns objective value, weights and wall-clock for both so the reporter can
-    present a real comparison (spec: ``optimize.compare``).
-    """
-    ms = estimate(snapshot, moments_cfg, higher=False)
-    obj = build_objective("min_variance", ms)
-    classical = get_solver("classical").solve(obj, constraints)
-
-    out: dict[str, Any] = {
-        "classical": {
-            "solver": classical.solver,
-            "objective_value": classical.objective_value,
-            "wall_clock_s": classical.wall_clock_s,
-            "weights": dict(zip(classical.weights.tickers, classical.weights.values)),
-        }
-    }
-    if run_qaoa:
-        try:
-            qobj = build_objective("discretized_mv", ms, extra={"resolution_bits": 3})
-            qres = get_solver("qaoa", reps=2).solve(qobj, constraints)
-            f, _ = compile_scipy(obj)
-            out["quantum"] = {
-                "solver": qres.solver,
-                "objective_value": float(f(qres.weights.as_array())),
-                "wall_clock_s": qres.wall_clock_s,
-                "weights": dict(zip(qres.weights.tickers, qres.weights.values)),
-                "diagnostics": qres.diagnostics,
-            }
-        except Exception as exc:
-            out["quantum"] = {"unavailable": repr(exc),
-                              "note": "install qlab[quantum] for the Aer QAOA arm"}
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +210,12 @@ def _shim_result(weights, diag):
 def _load_spec(spec) -> dict:
     if isinstance(spec, dict):
         return spec
-    with open(spec, "r", encoding="utf-8") as f:
+    path = Path(spec)
+    if not path.exists() and not path.is_absolute():
+        packaged = data_root() / path
+        if packaged.exists():
+            path = packaged
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

@@ -80,22 +80,6 @@ arms:
     solver: classical_multistart
     params: { skew_lambda: 0.5, kurt_lambda: 0.5, target_vol: 0.08, research_only: true }
 
-# Quantum arms (Aer simulator by default; IBM QPU if IBM_QUANTUM_TOKEN set).
-quantum_arms:
-  - id: QA                  # asset SELECTION QUBO (19 -> k≈7) — the real gate slot
-    objective: selection_qubo
-    solver: qaoa
-    universe: candidates
-    params: { k: 7, reps: 2 }
-  - id: QB                  # discretized MV via QAOA — the reality-check arm
-    objective: discretized_mv
-    solver: qaoa
-    params: { resolution_bits: 3, reps: 2 }
-  - id: QC                  # the 434-qubit MVSK->QUBO encoder — COUNT, don't run
-    objective: mvsk
-    solver: qubo_resource_count
-    params: { resolution_bits: 4 }
-
 metrics:
   - ann_return
   - ann_vol

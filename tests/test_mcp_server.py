@@ -44,9 +44,14 @@ def test_combined_registration_exposes_both_namespaces():
     register_lab_tools(app, LabState(offline=True, registry=reg))
     register_trader_tools(app, TraderState(registry=reg, offline=True))
     assert "moments.estimate" in app.names
+    assert {"algorithms.list", "algorithms.describe", "algorithms.solve"} <= set(app.names)
     assert "registry.log_verdict" in app.names
     assert "propose_rebalance" in app.names and "execute_plan" in app.names
     assert not any("place" in n and "order" in n for n in app.names)  # still no raw order tool
+    assert not any(n in app.names for n in (
+        "solve.quantum", "solve.compare", "solve.qubo_resource_count",
+        "solve.constructed_resource_count",
+    ))
 
 
 def test_lab_and_trader_share_one_registry():
@@ -101,3 +106,17 @@ def test_main_refuses_to_start_when_owner_runtime_alive(monkeypatch, capsys):
     assert excinfo.value.code == 3
     err = capsys.readouterr().err
     assert "qlab-operator" in err  # points operators at the proxy
+
+
+@pytest.mark.parametrize("module_name", ["quant_lab", "quant_trader"])
+def test_retired_standalone_module_mains_delegate_to_guarded_server(
+    module_name, monkeypatch
+):
+    import importlib
+    import qlab.mcp.server as server
+
+    called = []
+    monkeypatch.setattr(server, "main", lambda: called.append(True))
+    importlib.import_module(f"qlab.mcp.{module_name}").main()
+
+    assert called == [True]

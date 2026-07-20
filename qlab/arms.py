@@ -144,18 +144,6 @@ def _dispatch_solver(arm, obj, constraints, context) -> tuple[SolveResult, str |
             solver = get_solver("classical_multistart")
             return solver.solve(obj, constraints, **context), f"dirac3_unavailable: {exc}"
 
-    if arm.solver == "qaoa":
-        reps = int(arm.params.get("reps", 2))
-        try:
-            solver = get_solver("qaoa", reps=reps)
-            return solver.solve(obj, constraints, **context), None
-        except Exception as exc:  # qiskit missing / primitive mismatch
-            # graceful classical stand-in so the pipeline never breaks
-            fallback = "classical" if obj.form == "discretized_mv" else "mock"
-            solver = get_solver(fallback)
-            shim = build_objective("min_variance", _as_moment_shim(obj))
-            return solver.solve(shim, constraints, **context), f"qaoa_unavailable: {exc!r}"
-
     solver = get_solver(arm.solver)
     return solver.solve(obj, constraints, **context), None
 
@@ -230,8 +218,3 @@ def _objective_form(objective_name: str) -> str:
         "selection_qubo": "selection_qubo",
         "discretized_mv": "discretized_mv",
     }.get(objective_name, objective_name)
-
-
-def _as_moment_shim(obj) -> MomentSet:
-    return MomentSet(tickers=obj.tickers, as_of=__import__("datetime").date.today(),
-                     cov=obj.cov)

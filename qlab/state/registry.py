@@ -28,8 +28,17 @@ from typing import Any, Iterator
 import duckdb
 
 from qlab.core.types import Decision, MomentSet, Objective, SolveResult, _jsonable
+from qlab.paths import state_path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+WORKFORCE_PHASES = ("analyst", "challenger", "optimizer", "referee", "reporter")
+_WORKFORCE_REQUIRED_ARTIFACTS = {
+    "analyst": ("moment_set_id", "objective_id", "decision_id"),
+    "challenger": ("challenger_view",),
+    "optimizer": ("targets", "algorithm_id"),
+    "referee": ("verdict", "verdict_id", "targets"),
+    "reporter": ("recommendation",),
+}
 
 
 def targets_hash(targets: dict[str, float]) -> str:
@@ -81,6 +90,15 @@ CREATE TABLE IF NOT EXISTS verdicts (
     verdict_id VARCHAR PRIMARY KEY, decision_id VARCHAR, verdict VARCHAR,
     reasons JSON, source VARCHAR, created_at VARCHAR, targets_hash VARCHAR,
     seq BIGINT);
+CREATE TABLE IF NOT EXISTS workflows (
+    workflow_id VARCHAR PRIMARY KEY, kind VARCHAR, status VARCHAR,
+    current_phase VARCHAR, request JSON, result JSON,
+    created_at VARCHAR, updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    step_id VARCHAR PRIMARY KEY, workflow_id VARCHAR, seq INTEGER,
+    phase VARCHAR, agent VARCHAR, status VARCHAR, summary VARCHAR,
+    artifacts JSON, started_at VARCHAR, completed_at VARCHAR,
+    updated_at VARCHAR);
 """
 
 
@@ -103,7 +121,7 @@ class Registry:
         if path == ":memory:":
             self.path = ":memory:"
         else:
-            p = Path(path) if path else _REPO_ROOT / ".lab" / "registry.duckdb"
+            p = Path(path) if path else state_path("registry.duckdb")
             p.parent.mkdir(parents=True, exist_ok=True)
             self.path = str(p)
         self.con = duckdb.connect(self.path)
@@ -206,6 +224,22 @@ class Registry:
             [_j(realized_outcome), reflection, decision_id],
         )
 
+    def attach_challenger_view(self, decision_id: str, challenger_view: str) -> None:
+        """Attach the adversarial view after the analyst's initial judgment."""
+        view = challenger_view.strip()
+        if not view:
+            raise ValueError("challenger_view must not be empty")
+        exists = self._rows(
+            "SELECT decision_id FROM decisions WHERE decision_id=?", [decision_id]
+        )
+        if not exists:
+            raise KeyError(f"unknown decision_id {decision_id!r}")
+        self.con.execute(
+            "UPDATE decisions SET challenger_view=? WHERE decision_id=?",
+            [view, decision_id],
+        )
+        self.record_event("challenger_view_attached", {"decision_id": decision_id})
+
     def recent_decisions(self, kind: str | None = None, limit: int = 10) -> list[dict]:
         q = "SELECT * FROM decisions"
         params: list = []
@@ -215,6 +249,12 @@ class Registry:
         q += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         return self._rows(q, params)
+
+    def get_decision(self, decision_id: str) -> dict | None:
+        rows = self._rows(
+            "SELECT * FROM decisions WHERE decision_id=?", [decision_id]
+        )
+        return rows[0] if rows else None
 
     def pending_decisions(self) -> list[dict]:
         """Return unresolved judgments in chronological decision order.
@@ -424,6 +464,193 @@ class Registry:
                 }
         return out
 
+    # -- agent workforce ---------------------------------------------------
+    def start_workflow(
+        self,
+        kind: str,
+        request: dict,
+        phases: tuple[str, ...] = WORKFORCE_PHASES,
+    ) -> dict:
+        """Create one durable, phase-ordered Claude workforce run."""
+        if not phases or len(set(phases)) != len(phases):
+            raise ValueError("workflow phases must be non-empty and unique")
+        unknown = set(phases) - set(WORKFORCE_PHASES)
+        if unknown:
+            raise ValueError(f"unknown workforce phases: {sorted(unknown)}")
+
+        workflow_id = uuid.uuid4().hex[:16]
+        now = _now()
+        with self.transaction():
+            self.con.execute(
+                "INSERT INTO workflows VALUES (?,?,?,?,?,?,?,?)",
+                [workflow_id, kind, "running", phases[0], _j(request), _j({}), now, now],
+            )
+            for seq, phase in enumerate(phases):
+                self.con.execute(
+                    "INSERT INTO workflow_steps VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    [f"{workflow_id}:{phase}", workflow_id, seq, phase,
+                     _agent_for_phase(phase), "queued", "", _j({}), None, None, now],
+                )
+        self.record_event("workflow_started", {
+            "workflow_id": workflow_id, "kind": kind, "phases": list(phases),
+        })
+        return self.get_workflow(workflow_id) or {}
+
+    def update_workflow_phase(
+        self,
+        workflow_id: str,
+        phase: str,
+        status: str,
+        summary: str = "",
+        artifacts: dict | None = None,
+    ) -> dict:
+        """Advance one role-bound phase while enforcing dependency order."""
+        if phase not in WORKFORCE_PHASES:
+            raise ValueError(f"unknown workforce phase {phase!r}")
+        if status not in {"working", "done", "failed", "blocked"}:
+            raise ValueError("status must be working, done, failed, or blocked")
+        workflow = self.get_workflow(workflow_id)
+        if not workflow:
+            raise KeyError(f"unknown workflow_id {workflow_id!r}")
+        steps = workflow["steps"]
+        by_phase = {step["phase"]: step for step in steps}
+        if phase not in by_phase:
+            raise ValueError(f"phase {phase!r} is not part of workflow {workflow_id}")
+        step = by_phase[phase]
+        if step["status"] == "done":
+            if status == "done":
+                # Idempotent replay (e.g. a resumed coordinator retrying its
+                # last call) must not revert a complete workflow or wipe its
+                # persisted result.
+                return workflow
+            raise RuntimeError(f"completed phase {phase!r} cannot be reopened")
+        for previous in steps[: int(step["seq"])]:
+            if previous["status"] != "done":
+                raise RuntimeError(
+                    f"phase {phase!r} cannot start before {previous['phase']!r} is done"
+                )
+
+        artifacts = artifacts or {}
+        if len(summary) > 4000:
+            raise ValueError("workflow phase summary exceeds 4000 characters")
+        artifacts_json = _j(artifacts)
+        if len(artifacts_json.encode("utf-8")) > 32768:
+            raise ValueError("workflow phase artifacts exceed 32 KiB")
+        if status == "done":
+            missing = [
+                key for key in _WORKFORCE_REQUIRED_ARTIFACTS[phase]
+                if key not in artifacts or artifacts[key] in (None, "", {})
+            ]
+            if missing:
+                raise ValueError(
+                    f"phase {phase!r} cannot complete without artifacts {missing}"
+                )
+            if phase == "optimizer" and not isinstance(artifacts["targets"], dict):
+                raise ValueError("optimizer artifact 'targets' must be an object")
+            if phase == "referee":
+                if artifacts["verdict"] != "PASS":
+                    raise ValueError(
+                        "referee may complete only with PASS; use blocked for FAIL"
+                    )
+                self._check_referee_binding(by_phase, artifacts)
+
+        now = _now()
+        started_at = step.get("started_at") or now
+        completed_at = now if status in {"done", "failed", "blocked"} else None
+        with self.transaction():
+            self.con.execute(
+                "UPDATE workflow_steps SET status=?, summary=?, artifacts=?, "
+                "started_at=COALESCE(started_at, ?), completed_at=?, updated_at=? "
+                "WHERE step_id=?",
+                [status, summary, artifacts_json, started_at, completed_at, now,
+                 step["step_id"]],
+            )
+            if status == "done":
+                next_step = next(
+                    (candidate for candidate in steps
+                     if int(candidate["seq"]) == int(step["seq"]) + 1),
+                    None,
+                )
+                workflow_status = "complete" if next_step is None else "running"
+                current_phase = phase if next_step is None else next_step["phase"]
+            else:
+                workflow_status = status if status in {"failed", "blocked"} else "running"
+                current_phase = phase
+            result = (
+                {"final_summary": summary, "artifacts": artifacts}
+                if workflow_status == "complete" else {}
+            )
+            self.con.execute(
+                "UPDATE workflows SET status=?, current_phase=?, result=?, updated_at=? "
+                "WHERE workflow_id=?",
+                [workflow_status, current_phase, _j(result), now, workflow_id],
+            )
+        self.record_event("workflow_phase", {
+            "workflow_id": workflow_id, "phase": phase, "agent": _agent_for_phase(phase),
+            "status": status, "summary": summary[:240],
+        })
+        return self.get_workflow(workflow_id) or {}
+
+    def _check_referee_binding(self, by_phase: dict, artifacts: dict) -> None:
+        """Refuse a referee PASS that is not bound to the optimizer's targets.
+
+        The verdict table alone binds a PASS to *some* hash; without this
+        check a referee could log a PASS for an in-mandate vector the
+        optimizer never produced and the reporter would preview it. The
+        workflow is the only place both sides are persisted, so the equality
+        is enforced here, not in prompts.
+        """
+        referee_targets = artifacts.get("targets")
+        if not isinstance(referee_targets, dict) or not referee_targets:
+            raise ValueError(
+                "referee completion requires the reviewed 'targets' object"
+            )
+        reviewed_hash = targets_hash(referee_targets)
+        optimizer_step = by_phase.get("optimizer")
+        if optimizer_step is not None:
+            optimizer_targets = (optimizer_step.get("artifacts") or {}).get("targets")
+            if (
+                not isinstance(optimizer_targets, dict)
+                or targets_hash(optimizer_targets) != reviewed_hash
+            ):
+                raise ValueError(
+                    "referee 'targets' do not match the optimizer's persisted targets"
+                )
+        verdict_rows = self._rows(
+            "SELECT * FROM verdicts WHERE verdict_id=?",
+            [str(artifacts.get("verdict_id"))],
+        )
+        if (
+            not verdict_rows
+            or verdict_rows[0]["verdict"] != "PASS"
+            or verdict_rows[0]["targets_hash"] != reviewed_hash
+        ):
+            raise ValueError(
+                "verdict_id must reference a persisted PASS bound to these targets"
+            )
+
+    def get_workflow(self, workflow_id: str) -> dict | None:
+        rows = self._rows("SELECT * FROM workflows WHERE workflow_id=?", [workflow_id])
+        if not rows:
+            return None
+        workflow = rows[0]
+        workflow["steps"] = self._rows(
+            "SELECT * FROM workflow_steps WHERE workflow_id=? ORDER BY seq",
+            [workflow_id],
+        )
+        return workflow
+
+    def list_workflows(self, limit: int = 10) -> list[dict]:
+        rows = self._rows(
+            "SELECT * FROM workflows ORDER BY created_at DESC LIMIT ?", [limit]
+        )
+        for workflow in rows:
+            workflow["steps"] = self._rows(
+                "SELECT * FROM workflow_steps WHERE workflow_id=? ORDER BY seq",
+                [workflow["workflow_id"]],
+            )
+        return rows
+
     # -- events -------------------------------------------------------------
     def record_event(self, kind: str, payload: dict) -> str:
         eid = uuid.uuid4().hex[:16]
@@ -462,10 +689,20 @@ class Registry:
                 if k in ("spec", "tickers", "summary", "params", "weights",
                          "diagnostics", "metrics", "choice", "realized_outcome",
                          "targets", "pre_trade", "payload", "reasons",
-                         "legs") and isinstance(v, str):
+                         "legs", "request", "result", "artifacts") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:
                         pass
             out.append(d)
         return out
+
+
+def _agent_for_phase(phase: str) -> str:
+    return {
+        "analyst": "moments-analyst",
+        "challenger": "challenger",
+        "optimizer": "optimization-runner",
+        "referee": "referee",
+        "reporter": "reporter",
+    }[phase]

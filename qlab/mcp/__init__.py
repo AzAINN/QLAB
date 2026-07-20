@@ -22,4 +22,4 @@ FastMCP is an optional dependency (``pip install qlab[mcp]``); these modules
 import lazily so the rest of the package never depends on it.
 """
 
-__all__ = ["quant_lab", "quant_trader"]
+__all__ = ["quant_lab", "quant_trader", "server", "tui_proxy"]

@@ -6,7 +6,6 @@ import json
 import subprocess
 import threading
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from rich.markup import escape
@@ -30,11 +29,15 @@ from textual.widgets import (
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import money, pct, sparkline, weight_bar
+from qlab.paths import workspace_root
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
-_VIEWS = ("desk", "market", "research", "audit")
+_VIEWS = ("desk", "market", "workforce", "research", "audit")
+_AGENT_NAMES = (
+    "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
+)
 
 
 def _verdict_cell(verdict: dict | None) -> str:
@@ -87,11 +90,15 @@ class PaperConfirmScreen(ModalScreen[bool]):
     }
     """
 
+    def __init__(self, plan_id: str = ""):
+        super().__init__()
+        self.plan_id = plan_id
+
     def compose(self) -> ComposeResult:
         with Vertical(id="paper-dialog"):
             yield Static("EXECUTE PAPER REBALANCE", id="paper-dialog-title")
             yield Static(
-                "Paper capital only. The deterministic mandate, decision-bound "
+                f"Plan {self.plan_id or '—'}. Paper capital only. The deterministic mandate, decision-bound "
                 "referee PASS, reconciliation, and idempotent order path are "
                 "enforced. Human confirmation and the full action trail remain.",
                 id="paper-dialog-copy",
@@ -105,6 +112,62 @@ class PaperConfirmScreen(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "confirm-paper")
+
+
+class ClaudeWorkforceScreen(ModalScreen[bool]):
+    """One quiet startup choice: launch the constrained Claude workforce or wait."""
+
+    BINDINGS = [Binding("escape", "later", "Later", show=False)]
+
+    CSS = """
+    ClaudeWorkforceScreen {
+        align: center middle;
+        background: #070a0ecc;
+    }
+    #workforce-dialog {
+        width: 72;
+        height: auto;
+        padding: 2 3;
+        background: #111820;
+        border: solid #48677d;
+    }
+    #workforce-dialog-title {
+        color: #e7edf3;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #workforce-dialog-copy {
+        color: #aeb9c4;
+        margin-bottom: 2;
+    }
+    #workforce-dialog-actions {
+        height: 3;
+        align-horizontal: right;
+    }
+    #workforce-dialog-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="workforce-dialog"):
+            yield Static("START CLAUDE WORKFORCE?", id="workforce-dialog-title")
+            yield Static(
+                "qlab will launch the Claude CLI as a constrained coordinator. "
+                "It may deploy only the analyst, challenger, optimizer, referee, "
+                "and reporter through the owner-backed MCP proxy. It receives no "
+                "code, shell, filesystem, or paper-execution tools.",
+                id="workforce-dialog-copy",
+            )
+            with Horizontal(id="workforce-dialog-actions"):
+                yield Button("Later", id="workforce-later")
+                yield Button("Start workforce", id="workforce-start", variant="primary")
+
+    def action_later(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "workforce-start")
 
 
 class QlabTui(App[None]):
@@ -177,7 +240,7 @@ class QlabTui(App[None]):
         height: 2;
         color: #7d8995;
     }
-    #desk-content, #market-content {
+    #desk-content, #market-content, #workforce-content {
         height: 1fr;
     }
     #research-summary, #audit-summary {
@@ -291,9 +354,10 @@ class QlabTui(App[None]):
     BINDINGS = [
         Binding("1", "view('desk')", "Desk", show=False),
         Binding("2", "view('market')", "Market", show=False),
-        Binding("3", "view('research')", "Research", show=False),
-        Binding("4", "view('audit')", "Audit", show=False),
-        Binding("5", "agent_focus", "Agents", show=False),
+        Binding("3", "view('workforce')", "Workforce", show=False),
+        Binding("4", "view('research')", "Research", show=False),
+        Binding("5", "view('audit')", "Audit", show=False),
+        Binding("6", "agent_focus", "Agents", show=False),
         Binding("j", "next_symbol", "Next symbol", show=False),
         Binding("k", "previous_symbol", "Previous symbol", show=False),
         Binding("colon", "command", "Command", show=False),
@@ -310,6 +374,7 @@ class QlabTui(App[None]):
         offline: bool = True,
         refresh_interval: float = 2.0,
         owned_server: subprocess.Popen | None = None,
+        claude_start: str = "offer",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -317,8 +382,12 @@ class QlabTui(App[None]):
         self.offline = offline
         self.refresh_interval = refresh_interval
         self.owned_server = owned_server
+        self.claude_start = claude_start
         self.active_view = "desk"
-        self.active_ticker = _DEFAULT_TICKERS[0]
+        # Placeholder until the first snapshot; the owner's mandate universe
+        # (market.assets) replaces it so a config change never desyncs the TUI.
+        self.universe_tickers: list[str] = list(_DEFAULT_TICKERS)
+        self.active_ticker = self.universe_tickers[0]
         self.snapshot: dict[str, Any] = {}
         self._refreshing = False
         self._action_running = False
@@ -328,13 +397,13 @@ class QlabTui(App[None]):
         self._audit_decisions: dict[str, dict] = {}
         self._claude_buffer = ""
         self._claude_saw_delta = False
+        self._claude_offer_handled = False
+        self._pending_plan_id = ""
         self._agent_focus = False
-        self._agent_states = {ticker: "idle" for ticker in (
-            "moments-analyst", "challenger", "optimization-runner", "referee", "reporter"
-        )}
+        self._agent_states: dict[str, str] = {}
         self.claude = ClaudeSession(
             self._receive_claude_event,
-            cwd=_REPO_ROOT,
+            cwd=_WORKSPACE_ROOT,
             runtime_url=getattr(client, "base_url", "http://127.0.0.1:8765"),
             offline=offline,
         )
@@ -357,6 +426,9 @@ class QlabTui(App[None]):
                 with Vertical(id="market", classes="canvas-view"):
                     yield Static("MARKET", classes="canvas-title")
                     yield Static(id="market-content", markup=True)
+                with Vertical(id="workforce", classes="canvas-view"):
+                    yield Static("WORKFORCE", classes="canvas-title")
+                    yield Static(id="workforce-content", markup=True)
                 with Vertical(id="research", classes="canvas-view"):
                     yield Static("RESEARCH", classes="canvas-title")
                     yield Static(id="research-summary", markup=True)
@@ -371,8 +443,8 @@ class QlabTui(App[None]):
                 yield Static(id="agent-list", markup=True)
                 yield Static("SELECTED WORK", id="work-label")
                 yield Static(
-                    "No active Claude session.\n\nUse [bold]: ask PROMPT[/] for a safe, "
-                    "streaming read-only turn.",
+                    "No active workforce.\n\nUse [bold]: workforce GOAL[/] to let "
+                    "Claude coordinate the five governed qlab roles.",
                     id="selected-work",
                     markup=True,
                 )
@@ -410,7 +482,9 @@ class QlabTui(App[None]):
 
     # -- snapshot refresh -------------------------------------------------
     def _start_refresh(self) -> None:
-        if self._refreshing:
+        # A running owner action holds the owner's dispatch lock; polling
+        # /api/tui behind it would only pile up timeouts in the event strip.
+        if self._refreshing or self._action_running:
             return
         self._refreshing = True
 
@@ -432,21 +506,32 @@ class QlabTui(App[None]):
     def _apply_snapshot(self, snapshot: dict) -> None:
         self.snapshot = snapshot
         assets = snapshot.get("market", {}).get("assets", [])
+        self._sync_universe([row["ticker"] for row in assets])
         if assets and self.active_ticker not in {row["ticker"] for row in assets}:
             self.active_ticker = assets[0]["ticker"]
         self._render_nav()
         self._render_universe(assets)
         self._render_desk()
         self._render_market()
+        self._render_workforce()
         self._render_research()
         self._render_audit()
+        if not self._action_running:
+            self._agent_states = {
+                str(agent.get("name")): str(agent.get("state", "idle"))
+                for agent in snapshot.get("agents", [])
+            }
         self._render_agents()
         self._render_status()
         self._ingest_events(snapshot.get("events", []))
+        self._maybe_offer_workforce()
 
     # -- renderers --------------------------------------------------------
     def _render_nav(self) -> None:
-        labels = (("1", "desk"), ("2", "market"), ("3", "research"), ("4", "audit"))
+        labels = (
+            ("1", "desk"), ("2", "market"), ("3", "workforce"),
+            ("4", "research"), ("5", "audit"),
+        )
         lines = []
         for key, view in labels:
             if view == self.active_view:
@@ -455,10 +540,22 @@ class QlabTui(App[None]):
                 lines.append(f"[#7d8995]  {key}  {view.title()}[/]")
         self.query_one("#nav", Static).update("\n".join(lines))
 
+    def _sync_universe(self, tickers: list[str]) -> None:
+        """Adopt the owner's universe so the spine follows the mandate config."""
+        if not tickers or tickers == self.universe_tickers:
+            return
+        view = self.query_one("#universe", ListView)
+        index = view.index or 0
+        self.universe_tickers = list(tickers)
+        if len(view.children) != len(tickers):
+            view.remove_children()
+            view.mount(*(ListItem(Label(ticker)) for ticker in tickers))
+        view.index = min(index, len(tickers) - 1)
+
     def _render_universe(self, assets: list[dict]) -> None:
         by_ticker = {row["ticker"]: row for row in assets}
         view = self.query_one("#universe", ListView)
-        for ticker, item in zip(_DEFAULT_TICKERS, view.children):
+        for ticker, item in zip(self.universe_tickers, view.children):
             row = by_ticker.get(ticker)
             label = item.query_one(Label)
             if row:
@@ -487,7 +584,9 @@ class QlabTui(App[None]):
             "",
             "[#64717d]CURRENT ALLOCATION                         TARGET[/]",
         ]
-        for ticker in _DEFAULT_TICKERS:
+        held_outside = [t for t in current if t not in self.universe_tickers
+                        and abs(float(current[t])) > 0.0005]
+        for ticker in [*self.universe_tickers, *held_outside]:
             cur = float(current.get(ticker, 0.0))
             target = targets.get(ticker)
             target_text = "—" if target is None else f"{float(target):5.1%}"
@@ -523,8 +622,11 @@ class QlabTui(App[None]):
             ])
 
         source = str(market.get("source", "unknown")).upper()
+        policy = self.snapshot.get("policy") or {}
         lines.extend([
             "",
+            f"[#64717d]POLICY[/] {escape(str(policy.get('label', policy.get('id', '—'))))} "
+            "· MVSK research only",
             f"[#64717d]DATA[/] {source} · {market.get('frequency', 'unknown')} · "
             f"as of {market.get('as_of', '—')} · age {market.get('bar_age_days', '—')}d",
         ])
@@ -566,19 +668,106 @@ class QlabTui(App[None]):
         ])
         self.query_one("#market-content", Static).update(content)
 
+    def _render_workforce(self) -> None:
+        workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        if not workflows:
+            content = (
+                "[#64717d]NO DURABLE RUN[/]\n\n"
+                "Start one with [bold]: workforce GOAL[/]. Claude becomes the "
+                "coordinator and deploys the five role-bound agents in order.\n\n"
+                "The owner process persists every phase. Stopping Claude leaves "
+                "the run inspectable and resumable."
+            )
+            self.query_one("#workforce-content", Static).update(content)
+            return
+
+        workflow = workflows[0]
+        request = workflow.get("request") or {}
+        lines = [
+            f"[bold #edf3f7]{escape(str(workflow.get('workflow_id', '—')))}[/]   "
+            f"{escape(str(workflow.get('status', 'unknown')).upper())}",
+            f"[#64717d]{escape(str(workflow.get('kind', 'portfolio_review')))} · "
+            f"as of {escape(str(request.get('as_of', '—')))} · "
+            f"{escape(str(request.get('universe', 'core')))}[/]",
+            "",
+            f"{escape(str(request.get('goal', 'Governed portfolio review')))}",
+            "",
+            "[#64717d]PHASE                                      STATE[/]",
+        ]
+        for step in workflow.get("steps", []):
+            state = str(step.get("status", "queued"))
+            glyph, color = {
+                "working": ("●", "#6d9fbf"),
+                "queued": ("◐", "#b38b54"),
+                "done": ("✓", "#79a88b"),
+                "failed": ("×", "#c97878"),
+                "blocked": ("!", "#d0a45c"),
+            }.get(state, ("◌", "#5f6b76"))
+            lines.append(
+                f"[{color}]{glyph}[/] {escape(str(step.get('phase', ''))):<12}  "
+                f"{escape(str(step.get('agent', ''))):<22} {escape(state)}"
+            )
+            summary = str(step.get("summary") or "").strip()
+            if summary:
+                lines.append(f"   [#7d8995]{escape(summary[:140])}[/]")
+        earlier = workflows[1:5]
+        if earlier:
+            lines.extend(["", "[#64717d]EARLIER RUNS"
+                          "                (resume with : workforce resume ID)[/]"])
+            for row in earlier:
+                lines.append(
+                    f"{escape(str(row.get('workflow_id', '—')))}  "
+                    f"{escape(str(row.get('status', '')))}"
+                    f" · {escape(str(row.get('current_phase', '')))}"
+                )
+        lines.extend([
+            "",
+            "[#64717d]Claude is coordination only. Paper execution remains a "
+            "separate human-confirmed action.[/]",
+        ])
+        self.query_one("#workforce-content", Static).update("\n".join(lines))
+
+    def _maybe_offer_workforce(self) -> None:
+        if self._claude_offer_handled:
+            return
+        if self.claude_start == "off":
+            self._claude_offer_handled = True
+            return
+        # Not yet available (e.g. first snapshot raced readiness): leave the
+        # sentinel unset so a later snapshot can still make the one offer.
+        if not bool(self.snapshot.get("system", {}).get("workforce_available")):
+            return
+        self._claude_offer_handled = True
+        if self.claude_start == "auto":
+            self._start_workforce("")
+        elif self.claude_start == "offer":
+            self.push_screen(ClaudeWorkforceScreen(), self._workforce_start_choice)
+
+    def _workforce_start_choice(self, start: bool | None) -> None:
+        if start:
+            self._start_workforce("")
+        else:
+            self._set_selected_work(
+                "CLAUDE WORKFORCE READY\n\nStart later with : workforce GOAL"
+            )
+
     def _render_research(self) -> None:
         runs = self.snapshot.get("runs", [])
-        quantum = self.snapshot.get("quantum", {})
+        algorithms = self.snapshot.get("algorithms", [])
         summary = [
             "Experiments and solver evidence share the same registry as the paper book.",
             "",
         ]
-        if quantum:
+        if algorithms:
+            counts = {
+                stage: sum(row.get("stage") == stage for row in algorithms)
+                for stage in ("operational", "research", "offline")
+            }
             summary.append(
-                f"Gate-model MVSK  [bold]{quantum.get('total_logical_qubits', '—')} logical qubits[/]"
-                f"   ·   Dirac-3  [bold]{quantum.get('dirac3_continuous_variables', '—')} variables[/]"
+                f"Algorithms  [bold]{counts['operational']} operational[/]"
+                f"   ·   {counts['research']} research   ·   {counts['offline']} offline"
             )
-        summary.append("Run [bold]: batch[/] for the offline comparison suite.")
+        summary.append("Run [bold]: batch[/] for the staged comparison suite.")
         self.query_one("#research-summary", Static).update("\n".join(summary))
 
         signature = tuple((r.get("run_id"), r.get("created_at")) for r in runs)
@@ -677,7 +866,7 @@ class QlabTui(App[None]):
         if not agents:
             agents = [
                 {"name": name, "authority": "—", "state": "idle"}
-                for name in self._agent_states
+                for name in _AGENT_NAMES
             ]
         lines = []
         for agent in agents:
@@ -689,6 +878,7 @@ class QlabTui(App[None]):
                 "waiting": ("◐", "#b38b54"),
                 "done": ("✓", "#79a88b"),
                 "failed": ("×", "#c97878"),
+                "blocked": ("!", "#d0a45c"),
             }.get(state, ("◌", "#5f6b76"))
             lines.append(
                 f"[{color}]{glyph}[/] [bold]{escape(name)}[/]\n"
@@ -701,7 +891,7 @@ class QlabTui(App[None]):
         market = self.snapshot.get("market", {})
         source = str(market.get("source", "data")).upper()
         if system.get("mcp_proxy_available"):
-            mcp = "MCP PROPOSE"
+            mcp = "MCP WORKFORCE"
         elif system.get("mcp_configured"):
             mcp = "MCP LOCKED"
         else:
@@ -757,9 +947,10 @@ class QlabTui(App[None]):
         if isinstance(self.focused, Input):
             return
         view = self.query_one("#universe", ListView)
-        index = 0 if view.index is None else min(len(_DEFAULT_TICKERS) - 1, view.index + 1)
+        index = 0 if view.index is None else min(
+            len(self.universe_tickers) - 1, view.index + 1)
         view.index = index
-        self.active_ticker = _DEFAULT_TICKERS[index]
+        self.active_ticker = self.universe_tickers[index]
         self._render_market()
 
     def action_previous_symbol(self) -> None:
@@ -768,13 +959,15 @@ class QlabTui(App[None]):
         view = self.query_one("#universe", ListView)
         index = 0 if view.index is None else max(0, view.index - 1)
         view.index = index
-        self.active_ticker = _DEFAULT_TICKERS[index]
+        self.active_ticker = self.universe_tickers[index]
         self._render_market()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        if event.list_view.id != "universe" or event.list_view.index is None:
+        index = event.list_view.index
+        if event.list_view.id != "universe" or index is None:
             return
-        self.active_ticker = _DEFAULT_TICKERS[event.list_view.index]
+        if 0 <= index < len(self.universe_tickers):
+            self.active_ticker = self.universe_tickers[index]
         self.action_view("market")
         self._render_market()
 
@@ -815,9 +1008,10 @@ class QlabTui(App[None]):
             self.action_view(rest.lower())
         elif (command == "view" and rest.lower() == "agents") or command == "agents":
             self.action_agent_focus()
-        elif command == "symbol" and rest.upper() in _DEFAULT_TICKERS:
+        elif command == "symbol" and rest.upper() in self.universe_tickers:
             self.active_ticker = rest.upper()
-            self.query_one("#universe", ListView).index = _DEFAULT_TICKERS.index(self.active_ticker)
+            self.query_one("#universe", ListView).index = (
+                self.universe_tickers.index(self.active_ticker))
             self.action_view("market")
             self._render_market()
         elif command == "timeline":
@@ -825,44 +1019,67 @@ class QlabTui(App[None]):
         elif command == "help":
             self._set_selected_work(
                 "COMMANDS\n\n"
-                "view desk|market|research|audit\n"
+                "view desk|market|workforce|research|audit\n"
                 "view agents\n"
                 "symbol TICKER\n"
+                "workforce GOAL\n"
+                "workforce status\n"
+                "workforce resume ID\n"
+                "workforce stop\n"
                 "rebalance dry\n"
                 "rebalance paper\n"
                 "daily\n"
                 "batch\n"
-                "ask PROMPT\n"
-                "governed\n"
+                "ask PROMPT  (isolated, no tools)\n"
                 "timeline\n\n"
-                "1–4 switch views · j/k select instrument · Ctrl-Q quits"
+                "1–5 switch views · j/k select instrument · Ctrl-Q quits"
             )
         elif command == "ask" and rest:
             self._start_claude(rest, governed=False)
-        elif command == "governed":
+        elif command in {"workforce", "governed"}:
             system = self.snapshot.get("system", {})
-            if not system.get("governed_available"):
-                reason = system.get(
-                    "governed_lock_reason", "governed MCP runtime is not ready")
-                self._set_selected_work(f"GOVERNED SESSION LOCKED\n\n{reason}")
-                self._write_local_event("claude.governed_locked", {"reason": reason})
-            else:
-                prompt = rest or (
-                    "Inspect the current paper portfolio and market snapshot, read "
-                    "recent decisions and events, then run one dry rebalance preview. "
-                    "Summarize the proposed allocation, regime evidence, mandate "
-                    "status, data age, and what requires human approval. Do not run "
-                    "paper execution."
+            if rest.lower() == "status":
+                self.action_view("workforce")
+                self._render_workforce()
+            elif rest.lower() == "stop":
+                self.claude.stop()
+                self._set_selected_work(
+                    "CLAUDE WORKFORCE STOPPED\n\nThe owner kept its durable phase state. "
+                    "Use : workforce resume ID to continue."
                 )
-                self._start_claude(prompt, governed=True)
+                self._write_local_event("claude.workforce_stopped", {})
+            elif rest.lower().startswith("resume "):
+                workflow_id = rest.split(None, 1)[1].strip()
+                self._start_workforce("", workflow_id=workflow_id)
+            elif not system.get("workforce_available", system.get("governed_available")):
+                reason = system.get(
+                    "governed_lock_reason", "Claude workforce runtime is not ready")
+                self._set_selected_work(f"CLAUDE WORKFORCE LOCKED\n\n{reason}")
+                self._write_local_event("claude.workforce_locked", {"reason": reason})
+            else:
+                self._start_workforce(rest)
         elif command == "rebalance" and rest.lower() == "dry":
             self._run_api_action(
                 "rebalance dry", "/api/run_once",
-                {"offline": self.offline, "execute": False, "qaoa": False},
+                {"offline": self.offline, "execute": False},
                 active_agent="moments-analyst",
             )
         elif command == "rebalance" and rest.lower() == "paper":
-            self.push_screen(PaperConfirmScreen(), self._paper_confirmed)
+            plan = next(
+                (row for row in self.snapshot.get("plans", [])
+                 if row.get("state") in {"checked", "submitted"}),
+                None,
+            )
+            if plan is None:
+                self._set_selected_work(
+                    "NO CHECKED PLAN\n\nRun : rebalance dry or complete a workforce "
+                    "review before requesting paper execution."
+                )
+            else:
+                self._pending_plan_id = str(plan["plan_id"])
+                self.push_screen(
+                    PaperConfirmScreen(self._pending_plan_id), self._paper_confirmed
+                )
         elif command == "daily":
             self._run_api_action(
                 "daily ops", "/api/daily_ops", {"offline": self.offline},
@@ -872,7 +1089,7 @@ class QlabTui(App[None]):
             self.action_view("research")
             self._run_api_action(
                 "batch ablation", "/api/batch",
-                {"offline": self.offline, "qaoa": False},
+                {"offline": self.offline},
                 active_agent="optimization-runner",
             )
         else:
@@ -882,11 +1099,14 @@ class QlabTui(App[None]):
     def _paper_confirmed(self, confirmed: bool | None) -> None:
         if not confirmed:
             self._write_local_event("paper.cancelled", {})
+            self._pending_plan_id = ""
             return
+        plan_id = self._pending_plan_id
+        self._pending_plan_id = ""
         self._run_api_action(
-            "paper rebalance", "/api/run_once",
-            {"offline": self.offline, "execute": True, "qaoa": False},
-            active_agent="moments-analyst",
+            "paper plan execution", "/api/plans/execute",
+            {"offline": self.offline, "plan_id": plan_id, "human_confirmed": True},
+            active_agent="reporter",
         )
 
     def _run_api_action(self, label: str, path: str, body: dict, *, active_agent: str) -> None:
@@ -894,7 +1114,7 @@ class QlabTui(App[None]):
             self._write_local_event("action.rejected", {"reason": "another action is running"})
             return
         self._action_running = True
-        self._agent_states = {name: "queued" for name in self._agent_states}
+        self._agent_states = {name: "queued" for name in _AGENT_NAMES}
         self._agent_states[active_agent] = "working"
         self._render_agents()
         self._set_selected_work(f"{label.upper()}\n\nRunning through the owner API…")
@@ -932,6 +1152,10 @@ class QlabTui(App[None]):
                     lines.append(f"mandate violation  {trade['mandate_violation']}")
             if "run_id" in result:
                 lines.append(f"run       {result['run_id']}")
+            if "executed" in result:
+                lines.append(f"paper execution  {bool(result.get('executed'))}")
+            if result.get("plan_id"):
+                lines.append(f"plan      {result['plan_id']}")
             if "triggers" in result:
                 lines.append(f"triggers  {', '.join(result.get('triggers') or []) or 'none'}")
             self._set_selected_work("\n".join(lines))
@@ -940,20 +1164,42 @@ class QlabTui(App[None]):
         self._start_refresh()
 
     # -- Claude stream ----------------------------------------------------
+    def _start_workforce(self, goal: str, *, workflow_id: str = "") -> None:
+        goal = goal.strip() or (
+            "Review the current portfolio and market regime, challenge the "
+            "estimation choices, compare the operational allocation policy with "
+            "honest benchmarks, apply the referee gate, and prepare a dry human "
+            "recommendation. Preserve MVSK as research evidence; do not assume it wins."
+        )
+        if workflow_id:
+            if not workflow_id.replace("-", "").isalnum():
+                self._set_selected_work("Invalid workflow id.")
+                return
+            prompt = (
+                f"RESUME_WORKFLOW_ID: {workflow_id}\n"
+                "Inspect workflow.status first. Continue at the first non-done phase; "
+                "do not create a new workflow.\n"
+                f"GOAL: {goal}"
+            )
+        else:
+            prompt = f"GOAL: {goal}"
+        self.action_view("workforce")
+        self._start_claude(prompt, governed=True)
+
     def _start_claude(self, prompt: str, *, governed: bool) -> None:
         if self.claude.running:
             self._write_local_event("claude.rejected", {"reason": "session already running"})
             return
         self._claude_buffer = ""
         self._claude_saw_delta = False
-        mode = "PROPOSE ONLY" if governed else "READ-ONLY"
+        mode = "WORKFORCE" if governed else "READ-ONLY"
         self._set_selected_work(f"CLAUDE · {mode}\n\nStarting streaming session…")
         if not self.claude.start(prompt, governed=governed):
             self._set_selected_work("Claude Code is not available or a session is already running.")
             return
         self._write_local_event(
             "claude.started",
-            {"mode": "propose-only" if governed else "read-only", "prompt": prompt[:120]},
+            {"mode": "workforce" if governed else "read-only", "prompt": prompt[:120]},
         )
         self._render_status()
 
@@ -975,30 +1221,38 @@ class QlabTui(App[None]):
                 self._set_selected_work(
                     f"CLAUDE · {self.claude.mode.upper()}\n\n" + self._claude_buffer[-6000:])
         elif event.kind == "tool_start":
-            self._set_agent_from_tool(event.tool)
-            self._write_local_event("claude.tool", {"tool": event.tool})
+            self._set_agent_from_tool(event.tool, event.agent)
+            payload = {"tool": event.tool}
+            if event.agent:
+                payload["agent"] = event.agent
+            self._write_local_event("claude.tool", payload)
         elif event.kind == "error":
             self._set_selected_work("CLAUDE FAILED\n\n" + event.text[-4000:])
             self._write_local_event("claude.failed", {"error": event.text[-400:]})
+            self._start_refresh()
         elif event.kind == "result":
             if not self._claude_buffer and event.text:
                 self._set_selected_work(
                     f"CLAUDE · {self.claude.mode.upper()}\n\n" + event.text[-6000:])
             self._write_local_event("claude.completed", {})
-            self._agent_states = {name: "done" if state == "working" else state
-                                  for name, state in self._agent_states.items()}
-            self._render_agents()
+            self._start_refresh()
         self._render_status()
 
-    def _set_agent_from_tool(self, tool: str) -> None:
-        if "rebalance_preview" in tool or "market.snapshot" in tool:
+    def _set_agent_from_tool(self, tool: str, explicit_agent: str = "") -> None:
+        if explicit_agent in _AGENT_NAMES:
+            agent = explicit_agent
+        elif "workflow.analyst" in tool or "objective.build" in tool:
             agent = "moments-analyst"
-        elif "research.batch" in tool:
+        elif "workflow.challenger" in tool:
+            agent = "challenger"
+        elif "workflow.optimizer" in tool or "algorithms.solve" in tool:
             agent = "optimization-runner"
-        elif "daily_ops" in tool or "portfolio.state" in tool:
-            agent = "reporter"
-        elif "audit.events" in tool or "research.decisions" in tool:
+        elif "workflow.referee" in tool or "log_verdict" in tool or "backtest.run" in tool:
             agent = "referee"
+        elif ("workflow.reporter" in tool or "rebalance_preview" in tool
+              or "daily_ops" in tool or "portfolio.state" in tool
+              or "report.recommendation" in tool):
+            agent = "reporter"
         else:
             return
         self._agent_states[agent] = "working"

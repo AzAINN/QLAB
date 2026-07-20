@@ -24,9 +24,11 @@ import numpy as np
 import pandas as pd
 
 from qlab.core.types import DataSnapshot
+from qlab.paths import state_path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_CACHE_DIR = _REPO_ROOT / ".lab" / "cache"
+# Test/integration override kept as a module seam; normal runtime resolution is
+# dynamic so QLAB_STATE_DIR and an installed command's working directory work.
+_CACHE_DIR: Path | None = None
 _FETCH_TIMEOUT_S = 15  # hard timeout — a hung fetch must not stall the pipeline
 
 
@@ -49,7 +51,7 @@ def get_prices(
     The result is always cached so the next call (and any demo) is instant.
     """
     end = end or date.today().isoformat()
-    cache_dir = cache_dir or _CACHE_DIR
+    cache_dir = Path(cache_dir) if cache_dir else (_CACHE_DIR or state_path("cache"))
     key = _cache_key(tickers, start, end)
     cache_path = cache_dir / f"{key}.parquet"
 
@@ -140,7 +142,7 @@ def cached_provenance(
     cache exists for this panel (the caller renders that as "no data").
     """
     end = end or date.today().isoformat()
-    cache_dir = cache_dir or _CACHE_DIR
+    cache_dir = Path(cache_dir) if cache_dir else (_CACHE_DIR or state_path("cache"))
     cached = _read_cache(cache_dir / f"{_cache_key(tickers, start, end)}.parquet")
     if cached is None or cached.empty:
         return None

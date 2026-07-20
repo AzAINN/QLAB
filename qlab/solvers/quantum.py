@@ -1,17 +1,18 @@
-"""Quantum arms via Qiskit — the genuinely binary slots (research-plan §5.2).
+"""Offline Qiskit research arms — excluded from the staged runtime.
 
-Three jobs, three modalities:
+Retained experiments:
 
-* **Q-A — asset-selection QUBO** (``objective.form == 'selection_qubo'``): pick
+* **Asset-selection QUBO** (``objective.form == 'selection_qubo'``): pick
   k≈7 of ~19 candidate ETFs. A relevance/redundancy QUBO + cardinality penalty.
   At ≤19 qubits the exact ground state is *enumerable*, so we report a rigorous
   QAOA optimality gap rather than a vibe. This is the real gate-model slot and
-  it feeds the continuous MVSK stage — the headline hybrid pipeline.
-* **Q-B — discretized MV** (``objective.form == 'discretized_mv'``): the textbook
+  it remains an isolated selection experiment.
+* **Discretized MV** (``objective.form == 'discretized_mv'``): the textbook
   qiskit-finance formulation (n=7, r=3 → 21 qubits, covariance only). Reports two
   gaps: QAOA-vs-exact and best-discrete-vs-continuous.
-* **Q-C — the 434-qubit encoder** (``solver 'qubo_resource_count'``): builds the
-  MVSK→QUBO count and returns it. Count, don't run — the count *is* the argument.
+* **Parameterized MVSK encoding estimate** (``solver
+  'qubo_resource_count'``): reports construction dimensions for offline
+  architecture analysis. It is not evidence of hardware applicability.
 
 Integration notes (spec "Revisions"): Aer's deprecated V1 Sampler is
 incompatible with current qiskit-algorithms and the QAOA ansatz needs explicit
@@ -19,7 +20,9 @@ transpilation for Aer, so we (a) always compute the exact ground state via
 ``NumPyMinimumEigensolver`` (stable, enumerable), and (b) attempt the QAOA
 sample on top, degrading gracefully with a logged error if the primitive stack
 mismatches. Quantum tools must run on the **main thread** (no worker pool) — the
-MCP server enforces this.
+offline harness enforces this. Import through
+``qlab.algorithms.offline.get_offline_quantum_solver``; normal solver discovery
+and every MCP/HTTP/TUI path intentionally exclude these adapters.
 """
 
 from __future__ import annotations
@@ -28,7 +31,8 @@ import time
 
 import numpy as np
 
-from qlab.core.objective import evaluate, mvsk_qubo_resource_count
+from qlab.algorithms.offline.quantum import mvsk_qubo_resource_count
+from qlab.core.objective import evaluate
 from qlab.core.types import Objective, SolveResult, Weights
 from qlab.solvers.base import Constraints, Solver, register_solver
 
@@ -173,7 +177,7 @@ def _make_qaoa(reps: int):
 # ---------------------------------------------------------------------------
 @register_solver("qaoa")
 class QAOASolver(Solver):
-    """Dispatches on ``objective.form``: selection_qubo (Q-A) or discretized_mv (Q-B)."""
+    """Offline adapter for selection-QUBO and discretized-MV experiments."""
 
     def __init__(self, reps: int = 2, run_qaoa: bool = True):
         self.reps = reps
@@ -189,7 +193,7 @@ class QAOASolver(Solver):
             f"qaoa solver handles selection_qubo / discretized_mv, not {objective.form!r}"
         )
 
-    # -- Q-A ----------------------------------------------------------------
+    # -- asset-selection QUBO ------------------------------------------------
     def _solve_selection(self, obj, constraints, t0, *, k=None, **_):
         k = k or obj.extra.get("k", max(1, obj.n // 2))
         qp = build_selection_qubo(obj.cov, k)
@@ -211,7 +215,7 @@ class QAOASolver(Solver):
             wall_clock_s=time.perf_counter() - t0, diagnostics=diag,
         )
 
-    # -- Q-B ----------------------------------------------------------------
+    # -- discretized minimum variance ---------------------------------------
     def _solve_discretized(self, obj, constraints, t0, **_):
         r_bits = int(obj.extra.get("resolution_bits", 3))
         qp, B = build_discretized_mv_qp(obj.cov, r_bits)
@@ -235,11 +239,11 @@ class QAOASolver(Solver):
 
 @register_solver("qubo_resource_count")
 class QUBOResourceCountSolver(Solver):
-    """Q-C: build the MVSK→QUBO encoder and emit the resource count.
+    """Build a parameterized MVSK-to-QUBO construction estimate.
 
-    Returns no meaningful portfolio (placeholder equal weights); the value is the
-    diagnostics — the measured 434-qubits-vs-7-continuous-variables artifact.
-    Requires no qiskit runtime; it is a combinatorial count.
+    Returns no meaningful portfolio (placeholder equal weights). The diagnostics
+    are a combinatorial upper bound, not a staged solver or hardware-fit claim.
+    Requires no qiskit runtime.
     """
 
     def solve(self, objective: Objective, constraints: Constraints, **ctx) -> SolveResult:

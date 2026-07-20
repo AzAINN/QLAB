@@ -1,10 +1,10 @@
-"""Measure the discretized-MV QAOA arm (Q-B) vs universe size.
+"""Measure the offline discretized-MV QAOA experiment vs universe size.
 
-Turns "it works" into "we measured it" (spec "Revisions"): for n = 4..8 assets it
-runs the QAOA discretized min-variance on the Aer simulator, records the QAOA-vs-
-exact optimality gap and wall-clock, and the discretization cost (best-discrete
-vs the continuous optimum). Writes a table to ``.lab/reports/scaling.csv`` and a
-PNG if matplotlib is installed.
+For n = 4..8 assets it runs discretized minimum variance on the Aer simulator,
+records the QAOA-vs-exact optimality gap and wall-clock, and measures the
+discretization cost against the continuous optimum. This script is not part of
+the staged desk. It writes a table to ``.lab/reports/scaling.csv`` and a PNG if
+matplotlib is installed.
 
     python scripts/scaling_chart.py
     python scripts/scaling_chart.py --min 4 --max 8 --reps 1
@@ -21,7 +21,8 @@ import numpy as np
 
 from qlab.core.objective import build_objective
 from qlab.core.types import MomentSet
-from qlab.solvers.base import Constraints, get_solver
+from qlab.algorithms.offline import get_offline_quantum_solver
+from qlab.solvers.base import Constraints
 
 _OUT = Path(__file__).resolve().parents[1] / ".lab" / "reports"
 
@@ -46,7 +47,7 @@ def run(nmin: int, nmax: int, reps: int, resolution_bits: int) -> list[dict]:
         # discretized MV via QAOA
         obj = build_objective("discretized_mv", ms, extra={"resolution_bits": resolution_bits})
         t0 = time.perf_counter()
-        res = get_solver("qaoa", reps=reps).solve(obj, Constraints())
+        res = get_offline_quantum_solver("qaoa", reps=reps).solve(obj, Constraints())
         wall = time.perf_counter() - t0
         d = res.diagnostics
         row = {

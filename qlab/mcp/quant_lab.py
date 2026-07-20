@@ -5,14 +5,14 @@ Namespaced, ref-passing tools the orchestrator's subagents call:
     data.*       fetch the universe, summarize a point-in-time snapshot
     moments.*    estimate co-moments (returns a moment_set_id + summary)
     objective.*  build the one-true objective (returns an objective_id)
-    solve.*       classical / quantum / compare / qubo_resource_count /
-                  constructed_resource_count
+    algorithms.*  list, describe, and run staged algorithms
+    solve.*       compatibility alias for staged prepared-objective solvers
     backtest.*   walk-forward an arm and return metrics
     registry.*   list runs, fetch a report, log a decision (reflection loop),
                   log_verdict (referee gate)
     report.*     compile a full recommendation
 
-Run standalone:  ``python -m qlab.mcp.quant_lab``  (needs ``pip install qlab[mcp]``)
+The executable module delegates to the guarded combined server.
 Tools return **ids + diagnostics only** — never raw tensors (invariant 1).
 """
 
@@ -21,15 +21,22 @@ from __future__ import annotations
 import os
 
 from qlab.arms import Arm, MomentsConfig, build_policy
+from qlab.algorithms.catalog import (
+    get_algorithm,
+    list_algorithms,
+    operational_algorithm_for_solver,
+    operational_solver_names,
+    solve_prepared_objective,
+)
 from qlab.core import data as market
 from qlab.core.backtest import run_backtest
 from qlab.core.moments import detect_regime
-from qlab.core.objective import build_objective, mvsk_qubo_resource_count
+from qlab.core.objective import build_objective
 from qlab.core.types import DataSnapshot, Decision
 from qlab.core.universe import load_universe
-from qlab.experiment import compare_classical_quantum, recommend
+from qlab.experiment import recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
-from qlab.solvers.base import Constraints, get_solver
+from qlab.solvers.base import Constraints
 
 
 def register_lab_tools(app, st: LabState) -> None:
@@ -69,7 +76,7 @@ def register_lab_tools(app, st: LabState) -> None:
                          denoise: str = "marchenko_pastur",
                          comoment_shrinkage: float | str = 0.5,
                          comoment_target: str = "isserlis",
-                         higher_moments: bool = True) -> dict:
+                         higher_moments: bool = False) -> dict:
         """Estimate co-moments. Returns a moment_set_id + a safe summary."""
         st.budget.charge("moments.estimate")
         from qlab.core.moments import estimate_moments
@@ -86,7 +93,7 @@ def register_lab_tools(app, st: LabState) -> None:
 
     # -- objective ----------------------------------------------------------
     @app.tool(name="objective.build")
-    def objective_build(moment_set_id: str, form: str = "mvsk",
+    def objective_build(moment_set_id: str, form: str = "min_variance",
                         skew_lambda: float = 0.5, kurt_lambda: float = 0.5) -> dict:
         """Build the one-true objective from a moment set. Returns an objective_id."""
         st.budget.charge("objective.build")
@@ -95,59 +102,72 @@ def register_lab_tools(app, st: LabState) -> None:
         oid = st.put_objective(obj)
         return {"objective_id": oid, "form": form, "n": obj.n}
 
-    # -- solve --------------------------------------------------------------
+    # -- algorithm catalog + staged solve ----------------------------------
+    @app.tool(name="algorithms.list")
+    def algorithms_list(category: str = "", stage: str = "operational") -> dict:
+        """List categorized methods and their deployment stage."""
+        st.budget.charge("algorithms.list")
+        if stage not in ("operational", "research", "offline", "all"):
+            raise ValueError("stage must be operational, research, offline, or all")
+        rows = list_algorithms(
+            category=category or None,
+            stage=None if stage == "all" else stage,
+        )
+        return {"algorithms": rows, "count": len(rows)}
+
+    @app.tool(name="algorithms.describe")
+    def algorithms_describe(algorithm_id: str) -> dict:
+        """Describe one method, including whether agents may execute it."""
+        st.budget.charge("algorithms.describe")
+        return get_algorithm(algorithm_id).to_dict()
+
+    @app.tool(name="policy.current")
+    def policy_current() -> dict:
+        """Return the mandate-configured operational allocation policy."""
+        from qlab.algorithms import get_operational_policy
+        from qlab.trader.mandate import load_mandate
+
+        st.budget.charge("policy.current")
+        mandate = load_mandate()
+        policy = get_operational_policy(mandate.operational_policy).to_dict()
+        policy["constraints"] = {
+            "long_only": mandate.long_only,
+            "budget": 1.0,
+            "min_weight": mandate.min_weight_per_asset,
+            "max_weight": mandate.max_weight_per_asset,
+        }
+        return policy
+
+    @app.tool(name="algorithms.solve")
+    def algorithms_solve(objective_id: str, algorithm_id: str,
+                         max_weight: float = 1.0, run_id: str = "") -> dict:
+        """Run an operational catalog entry against a prepared objective."""
+        st.budget.charge("algorithms.solve")
+        obj = st.get_objective(objective_id)
+        res = solve_prepared_objective(
+            algorithm_id, obj, Constraints(max_weight=max_weight)
+        )
+        st.registry.log_solution(
+            run_id or "adhoc", algorithm_id, res,
+            objective_hash=objective_id, objective_form=obj.form,
+        )
+        return res.to_dict()
+
+    # Compatibility alias for older agents. It now routes through the same
+    # catalog boundary, so free-form solver names cannot reach offline code.
     @app.tool(name="solve.classical")
-    def solve_classical(objective_id: str, solver: str = "classical_multistart",
+    def solve_classical(objective_id: str, solver: str = "classical",
                         max_weight: float = 1.0, run_id: str = "") -> dict:
         """Solve an objective with a classical arm. Persists the solution."""
         st.budget.charge("solve.classical")
         obj = st.get_objective(objective_id)
-        c = Constraints(max_weight=max_weight)
-        res = get_solver(solver).solve(obj, c)
+        spec = operational_algorithm_for_solver(solver, obj.form)
+        res = solve_prepared_objective(
+            spec.id, obj, Constraints(max_weight=max_weight)
+        )
         st.registry.log_solution(run_id or "adhoc", solver, res,
                                  objective_hash=objective_id, objective_form=obj.form)
         return res.to_dict()
-
-    @app.tool(name="solve.quantum")
-    def solve_quantum(objective_id: str, k: int = 0, resolution_bits: int = 3,
-                     reps: int = 2) -> dict:
-        """Solve a binary quantum arm (selection QUBO or discretized MV) on Aer."""
-        st.budget.charge("solve.quantum")
-        obj = st.get_objective(objective_id)
-        ctx = {"k": k} if k else {}
-        try:
-            res = get_solver("qaoa", reps=reps).solve(obj, Constraints(), **ctx)
-            return res.to_dict()
-        except Exception as exc:
-            return {"unavailable": repr(exc),
-                    "note": "install qlab[quantum] for the Aer QAOA arm"}
-
-    @app.tool(name="solve.compare")
-    def solve_compare(as_of: str, universe: str = "core",
-                     lookback_days: int = 756, run_qaoa: bool = True) -> dict:
-        """Run classical vs quantum on the SAME covariance (the headline compare)."""
-        st.budget.charge("solve.compare")
-        d = check_as_of(as_of)
-        tickers = load_universe().tickers(universe)
-        snap = market.snapshot(tickers, d, offline=st.offline, seed=st.seed)
-        return compare_classical_quantum(snap, MomentsConfig(lookback_days=lookback_days),
-                                        Constraints(), run_qaoa=run_qaoa)
-
-    @app.tool(name="solve.qubo_resource_count")
-    def solve_qubo_resource_count(n: int = 7, resolution_bits: int = 4) -> dict:
-        """The 434-vs-7 argument, as a count: MVSK->QUBO->Ising resources."""
-        st.budget.charge("solve.qubo_resource_count")
-        out = mvsk_qubo_resource_count(n, resolution_bits)
-        out["note"] = ("worst-case closed form; run objective.build + "
-                       "solve.constructed_resource_count for measured counts")
-        return out
-
-    @app.tool(name="solve.constructed_resource_count")
-    def solve_constructed_resource_count(objective_id: str, resolution_bits: int = 4) -> dict:
-        """Measured MVSK->QUBO->Ising resources from an actual construction."""
-        st.budget.charge("solve.constructed_resource_count")
-        from qlab.solvers.ising_encoder import resource_report
-        return resource_report(st.get_objective(objective_id), resolution_bits)
 
     # -- backtest -----------------------------------------------------------
     @app.tool(name="backtest.run")
@@ -157,6 +177,10 @@ def register_lab_tools(app, st: LabState) -> None:
                     skew_lambda: float = 0.5, kurt_lambda: float = 0.5) -> dict:
         """Walk-forward backtest one arm. Returns the metric bundle + logs it."""
         st.budget.charge("backtest.run")
+        if solver != "none" and solver not in operational_solver_names():
+            raise PermissionError(
+                f"solver {solver!r} is not operational; inspect algorithms.list"
+            )
         tickers = load_universe().tickers(universe)
         prices = market.get_prices(tickers, start, end or None, offline=st.offline,
                                    seed=st.seed)
@@ -197,6 +221,13 @@ def register_lab_tools(app, st: LabState) -> None:
         st.budget.charge("registry.recent_decisions")
         return st.registry.recent_decisions(kind or None, limit)
 
+    @app.tool(name="registry.attach_challenge")
+    def registry_attach_challenge(decision_id: str, challenger_view: str) -> dict:
+        """Challenger-only: attach the opposing case to an existing judgment."""
+        st.budget.charge("registry.attach_challenge")
+        st.registry.attach_challenger_view(decision_id, challenger_view)
+        return {"decision_id": decision_id, "challenger_view": challenger_view}
+
     @app.tool(name="registry.log_verdict")
     def registry_log_verdict(decision_id: str, verdict: str, targets: dict,
                              reasons: list | None = None) -> dict:
@@ -209,6 +240,8 @@ def register_lab_tools(app, st: LabState) -> None:
         st.budget.charge("registry.log_verdict")
         if verdict not in ("PASS", "FAIL"):
             raise ValueError("verdict must be PASS or FAIL")
+        if st.registry.get_decision(decision_id) is None:
+            raise KeyError(f"unknown decision_id {decision_id!r}")
         vid = st.registry.log_verdict(decision_id, verdict, list(reasons or []),
                                       source="referee-agent", targets=targets)
         return {"verdict_id": vid, "decision_id": decision_id, "verdict": verdict}
@@ -216,18 +249,24 @@ def register_lab_tools(app, st: LabState) -> None:
     # -- report -------------------------------------------------------------
     @app.tool(name="report.recommendation")
     def report_recommendation(as_of: str, universe: str = "core",
-                             skew_lambda: float = 0.5, kurt_lambda: float = 0.5,
-                             run_qaoa: bool = True) -> dict:
-        """Compile a full allocation recommendation with a classical/quantum compare."""
+                             skew_lambda: float = 0.5,
+                             kurt_lambda: float = 0.5) -> dict:
+        """Compile a full staged allocation recommendation."""
+        from qlab.trader.mandate import load_mandate
+
         st.budget.charge("report.recommendation")
         check_as_of(as_of)
         return recommend(as_of=as_of, universe=universe, skew_lambda=skew_lambda,
-                         kurt_lambda=kurt_lambda, offline=st.offline,
-                         run_qaoa=run_qaoa, seed=st.seed)
+                         kurt_lambda=kurt_lambda, offline=st.offline, seed=st.seed,
+                         policy_id=load_mandate().operational_policy)
 
 
 def build_server(state: LabState | None = None):
-    """Standalone quant-lab server (own app + state). Kept for direct use."""
+    """Build an isolated lab app for embedding and tests.
+
+    The executable module path delegates to :mod:`qlab.mcp.server` so normal
+    users always receive the owner-runtime guard and one-writer topology.
+    """
     FastMCP = require_fastmcp()
     st = state or LabState(offline=os.environ.get("QLAB_OFFLINE") == "1")
     app = FastMCP("quant-lab")
@@ -236,7 +275,9 @@ def build_server(state: LabState | None = None):
 
 
 def main() -> None:  # pragma: no cover
-    build_server().run()
+    from qlab.mcp.server import main as combined_main
+
+    combined_main()
 
 
 if __name__ == "__main__":  # pragma: no cover

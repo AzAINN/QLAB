@@ -1,17 +1,21 @@
 """Safe Claude Code stream integration for the operator console.
 
-`ask` sessions use a strict empty MCP config and no built-in tools. Governed
-sessions load only :mod:`qlab.mcp.tui_proxy`, whose tools call the owner API and
-never open DuckDB. That mode can inspect, research, run daily ops, and produce a
-dry rebalance proposal; paper execution remains a human-confirmed TUI action.
+`ask` sessions use a strict empty MCP config and no built-in tools. Workforce
+sessions run an inline qlab coordinator that can only delegate to five inline
+domain agents. Those agents receive least-privilege tools from
+:mod:`qlab.mcp.tui_proxy`; the proxy calls the owner API and never opens DuckDB.
+No Claude role receives filesystem, shell, code-editing, or paper-execution
+authority.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,9 +26,10 @@ EventKind = Literal[
     "session", "text", "text_delta", "tool_start", "tool_result", "result", "error"
 ]
 
-_PROXY_TOOLS = [
+_OBSERVATION_TOOLS = [
     "mcp__qlab-operator__portfolio.state",
     "mcp__qlab-operator__market.snapshot",
+    "mcp__qlab-operator__policy.current",
     "mcp__qlab-operator__audit.events",
     "mcp__qlab-operator__research.runs",
     "mcp__qlab-operator__research.decisions",
@@ -33,6 +38,148 @@ _PROXY_TOOLS = [
     "mcp__qlab-operator__research.batch",
 ]
 
+_LAB_TOOL_BASES = {
+    "data.fetch_universe",
+    "data.snapshot_summary",
+    "moments.estimate",
+    "objective.build",
+    "algorithms.list",
+    "algorithms.describe",
+    "policy.current",
+    "algorithms.solve",
+    "solve.classical",
+    "backtest.run",
+    "registry.list_runs",
+    "registry.report",
+    "registry.log_decision",
+    "registry.recent_decisions",
+    "registry.attach_challenge",
+    "registry.log_verdict",
+    "report.recommendation",
+}
+
+_WORKFLOW_PHASE = {
+    "moments-analyst": "analyst",
+    "challenger": "challenger",
+    "optimization-runner": "optimizer",
+    "referee": "referee",
+    "reporter": "reporter",
+}
+
+_PHASE_ARTIFACT_CONTRACT = {
+    "analyst": "moment_set_id, objective_id, and decision_id",
+    "challenger": "challenger_view",
+    "optimizer": "targets (ticker-to-weight object) and algorithm_id",
+    "referee": (
+        "verdict='PASS', verdict_id, and targets — the exact reviewed "
+        "ticker-to-weight object, which must equal the optimizer's persisted "
+        "targets; on FAIL use blocked instead of done"
+    ),
+    "reporter": "recommendation, plus plan_id when a dry preview was accepted",
+}
+
+_TRADER_PROXY_MAP = {
+    "get_portfolio_state": "portfolio.state",
+    "risk_report": "portfolio.state",
+    "reconcile": "workflow.daily_ops",
+    "propose_rebalance": "workflow.rebalance_preview",
+}
+
+_COORDINATOR_TOOLS = [
+    "mcp__qlab-operator__workflow.start",
+    "mcp__qlab-operator__workflow.status",
+]
+
+_PROXY_TOOLS = sorted(set(
+    _OBSERVATION_TOOLS
+    + [f"mcp__qlab-operator__{name}" for name in _LAB_TOOL_BASES]
+    + _COORDINATOR_TOOLS
+    + [f"mcp__qlab-operator__workflow.{phase}"
+       for phase in _WORKFLOW_PHASE.values()]
+))
+
+_COORDINATOR_NAME = "qlab-coordinator"
+
+
+def _proxy_tool(tool: str) -> str | None:
+    base = tool.rsplit("__", 1)[-1]
+    if base in _LAB_TOOL_BASES:
+        return f"mcp__qlab-operator__{base}"
+    mapped = _TRADER_PROXY_MAP.get(base)
+    return f"mcp__qlab-operator__{mapped}" if mapped else None
+
+
+def build_workforce_agents() -> dict[str, dict]:
+    """Build session-local Claude roles against the owner-backed proxy."""
+    from qlab.agents.loader import load_agents
+
+    agents: dict[str, dict] = {}
+    for source in load_agents():
+        phase = _WORKFLOW_PHASE.get(source.name)
+        if phase is None:
+            continue
+        tools = [mapped for tool in source.tools if (mapped := _proxy_tool(tool))]
+        tools.append(f"mcp__qlab-operator__workflow.{phase}")
+        if source.name in {
+            "moments-analyst", "optimization-runner", "referee", "reporter"
+        }:
+            tools.append("mcp__qlab-operator__policy.current")
+        tools = list(dict.fromkeys(tools))
+        override = f"""
+
+QLAB OWNER-WORKFORCE MODE (this section supersedes any execution or fixed-
+champion instruction above):
+- You are a portfolio/research worker, never a software developer. Do not read,
+  edit, write, or search repository files and do not run shell commands.
+- The task contains a workflow_id. First call workflow.{phase} with status
+  `working`. Before returning, call it with `done` and a concise summary plus
+  these required artifacts: {_PHASE_ARTIFACT_CONTRACT[phase]}. On a genuine
+  failure call `failed`; when a required fact or approval is missing call
+  `blocked` and preserve the available evidence in artifacts.
+- Perform only the {phase} phase. Do not spawn other agents. Use owner MCP facts;
+  never invent ids, data, solver output, a verdict, or a completed phase.
+- MVSK is a research hypothesis, not an assumed live champion. Preserve it in
+  comparisons, but use the catalog and current qlab policy for operational work.
+- No Claude role can execute a paper order. The reporter may request daily ops
+  or a dry rebalance preview only; human confirmation remains outside Claude.
+""".strip()
+        agents[source.name] = {
+            "description": source.description,
+            "prompt": source.body + "\n\n" + override,
+            "tools": tools,
+            "model": source.model or "inherit",
+            "permissionMode": "dontAsk",
+            "maxTurns": 24,
+        }
+
+    role_names = ",".join(_WORKFLOW_PHASE)
+    agents[_COORDINATOR_NAME] = {
+        "description": "Coordinates qlab's governed portfolio workforce; never develops code.",
+        "prompt": (
+            "You are the qlab workforce coordinator, not a coding assistant. "
+            "You have no filesystem, shell, browser, editing, or trading tools. "
+            "For a new portfolio/research goal, call workflow.start once. If the "
+            "user message contains RESUME_WORKFLOW_ID, call workflow.status for "
+            "that id, do not create a new workflow, and continue at the first "
+            "non-done phase. Then invoke moments-analyst, challenger, optimization-runner, "
+            "referee, and reporter in exactly that order using the Agent tool. "
+            "Pass each worker the workflow_id, the original goal, relevant prior "
+            "worker output and persisted artifacts, as_of, and universe. Run them in the foreground and "
+            "wait for each result. After every worker, call workflow.status and "
+            "do not continue unless its phase is done. If a phase fails or is "
+            "blocked, stop and report that state. The reporter may run only after "
+            "the referee phase is done and must not claim approval unless the "
+            "persisted verdict is PASS. End with the workflow_id, phase outcomes, "
+            "recommendation or research conclusion, data provenance, uncertainty, "
+            "and what—if anything—requires human action."
+        ),
+        "tools": [f"Agent({role_names})", *_COORDINATOR_TOOLS],
+        "model": "inherit",
+        "permissionMode": "dontAsk",
+        "maxTurns": 40,
+    }
+    return agents
+
 
 @dataclass(frozen=True)
 class ClaudeEvent:
@@ -40,14 +187,24 @@ class ClaudeEvent:
     text: str
     tool: str = ""
     raw: dict = field(default_factory=dict, repr=False)
+    agent: str = ""
+
+
+def _agent_from_tool_block(block: dict) -> str:
+    if block.get("name") != "Agent":
+        return ""
+    tool_input = block.get("input") or {}
+    return str(tool_input.get("subagent_type") or tool_input.get("agent_type") or "")
 
 
 def parse_stream_line(line: str) -> list[ClaudeEvent]:
     """Parse one Claude stream-json line without exposing thinking blocks."""
+    if not line or not line.strip():
+        return []
     try:
         payload = json.loads(line)
     except (TypeError, json.JSONDecodeError):
-        return [ClaudeEvent("error", line.strip() or "invalid Claude stream event")]
+        return [ClaudeEvent("error", line.strip())]
 
     out: list[ClaudeEvent] = []
     kind = payload.get("type")
@@ -67,7 +224,10 @@ def parse_stream_line(line: str) -> list[ClaudeEvent]:
             block = event.get("content_block") or {}
             if block.get("type") == "tool_use":
                 name = str(block.get("name", "tool"))
-                out.append(ClaudeEvent("tool_start", f"calling {name}", name, payload))
+                out.append(ClaudeEvent(
+                    "tool_start", f"calling {name}", name, payload,
+                    _agent_from_tool_block(block),
+                ))
 
     elif kind in ("assistant", "user"):
         message = payload.get("message") or {}
@@ -80,7 +240,10 @@ def parse_stream_line(line: str) -> list[ClaudeEvent]:
                 out.append(ClaudeEvent("text", str(block["text"]), raw=payload))
             elif block_type == "tool_use":
                 name = str(block.get("name", "tool"))
-                out.append(ClaudeEvent("tool_start", f"calling {name}", name, payload))
+                out.append(ClaudeEvent(
+                    "tool_start", f"calling {name}", name, payload,
+                    _agent_from_tool_block(block),
+                ))
             elif block_type == "tool_result":
                 text = block.get("content", "tool completed")
                 if isinstance(text, list):
@@ -133,16 +296,21 @@ def build_claude_argv(
         "--strict-mcp-config",
         "--mcp-config", json.dumps(config),
         "--tools", "",
+        "--disable-slash-commands",
+        "--no-chrome",
     ]
     if governed:
-        argv.extend(["--allowedTools", ",".join(_PROXY_TOOLS)])
-        argv.extend([
-            "--append-system-prompt",
-            "You are operating qlab in propose-only mode. Use the bounded "
-            "MCP tools for facts and dry proposals. You cannot execute paper "
-            "orders. Report data source, age, mandate status, and uncertainty.",
-        ])
-    argv.append(prompt)
+        agents = build_workforce_agents()
+        argv[argv.index("--tools") + 1] = "Agent"
+        argv.extend(["--allowedTools", ",".join(["Agent", *_PROXY_TOOLS])])
+        argv.extend(["--agents", json.dumps(agents)])
+        argv.extend(["--agent", _COORDINATOR_NAME])
+        argv.extend(["--permission-mode", "dontAsk"])
+        argv.extend(["--forward-subagent-text"])
+        argv.extend(["--name", "qlab-workforce"])
+        argv.extend(["--setting-sources", "project"])
+    # "--" so a prompt beginning with a dash is never parsed as a CLI flag.
+    argv.extend(["--", prompt])
     return argv
 
 
@@ -176,20 +344,31 @@ class ClaudeSession:
     def start(self, prompt: str, *, governed: bool = False) -> bool:
         if self.running or not self.available:
             return False
-        self.mode = "propose-only" if governed else "read-only"
+        self.mode = "workforce" if governed else "read-only"
         argv = build_claude_argv(
             prompt,
             governed=governed,
             runtime_url=self.runtime_url,
             offline=self.offline,
         )
+        env = os.environ.copy()
+        process_cwd = self.cwd
+        if governed:
+            env["CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS"] = "1"
+            env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+            # Keep the workforce out of the source checkout's developer context
+            # (CLAUDE.md, project agents, git state). The explicit inline agents
+            # and strict owner proxy are the complete session configuration.
+            process_cwd = Path(tempfile.gettempdir()) / "qlab-claude-workforce"
+            process_cwd.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
             argv,
-            cwd=self.cwd,
+            cwd=process_cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=env,
         )
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
@@ -202,12 +381,25 @@ class ClaudeSession:
     def _read(self) -> None:
         assert self.process is not None
         assert self.process.stdout is not None
+        # stderr must be drained concurrently: a long verbose workforce run
+        # can fill the stderr pipe buffer before stdout closes, deadlocking
+        # both the child (blocked write) and this reader (blocked read).
+        stderr_tail: list[str] = []
+
+        def drain_stderr() -> None:
+            if self.process is None or self.process.stderr is None:
+                return
+            for line in self.process.stderr:
+                stderr_tail.append(line)
+                del stderr_tail[:-40]
+
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stderr_thread.start()
         for line in self.process.stdout:
             for event in parse_stream_line(line):
                 self.on_event(event)
-        stderr = ""
-        if self.process.stderr is not None:
-            stderr = self.process.stderr.read().strip()
         returncode = self.process.wait()
+        stderr_thread.join(timeout=5.0)
+        stderr = "".join(stderr_tail).strip()
         if returncode and stderr:
             self.on_event(ClaudeEvent("error", stderr[-2000:]))

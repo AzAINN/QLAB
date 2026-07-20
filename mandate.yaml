@@ -46,3 +46,9 @@ rebalance:
 # ~2.5% weight granularity, which would make the optimized weights fiction.
 execution:
   allow_fractional: true
+
+# Deployment is evidence-led, not novelty-led. MVSK stays in the research
+# ablation until it earns promotion; the paper desk starts from the robust HRP
+# benchmark that currently wins out of sample.
+allocation:
+  operational_policy: hrp

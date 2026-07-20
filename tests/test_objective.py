@@ -1,4 +1,4 @@
-"""The one-true-objective: cross-compiler agreement + the 434-vs-7 resource count.
+"""The one-true-objective: cross-compiler agreement.
 
 If the scipy compilation and a brute-force polynomial disagree, the solver arms
 would be optimizing different things and every comparison would be invalid
@@ -14,7 +14,6 @@ from qlab.core.objective import (
     build_objective,
     compile_dirac_hubo,
     compile_scipy,
-    mvsk_qubo_resource_count,
     term_contributions,
 )
 from qlab.core.moments import co_moments, ledoit_wolf
@@ -57,17 +56,6 @@ def test_gradient_matches_finite_difference(moment_set):
         assert abs(analytic[i] - fd) < 1e-4
 
 
-def test_qubo_resource_count_reproduces_headline():
-    rc = mvsk_qubo_resource_count(7, 4)
-    assert rc["weight_qubits"] == 28
-    assert rc["coskew_entries"] == 84          # C(9,3)
-    assert rc["cokurt_entries"] == 210         # C(10,4)
-    assert rc["auxiliary_qubits"] == 406       # C(28,2)+28
-    assert rc["penalty_gadgets"] == 406
-    assert rc["total_logical_qubits"] == 434
-    assert rc["dirac3_continuous_variables"] == 7
-
-
 def test_dirac_hubo_payload_structure(moment_set):
     obj = build_objective("mvsk", moment_set, skew_lambda=0.5, kurt_lambda=0.5)
     payload = compile_dirac_hubo(obj, budget=1.0)
@@ -75,6 +63,15 @@ def test_dirac_hubo_payload_structure(moment_set):
     assert payload["variable_type"] == "continuous"
     assert payload["max_degree"] == 4
     assert payload["sum_constraint"]["equals"] == 1.0
+
+
+def test_dirac_hubo_declares_degree_three_for_skew_only_mvsk(moment_set):
+    obj = build_objective("mvsk", moment_set, skew_lambda=0.5, kurt_lambda=0.0)
+    payload = compile_dirac_hubo(obj)
+
+    assert payload["max_degree"] == 3
+    assert payload["terms"]["degree3_from_coskew"] > 0
+    assert payload["terms"]["degree4_from_cokurt"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +184,7 @@ def test_dirac_encoder_agrees_with_scipy():
 
 
 # ---------------------------------------------------------------------------
-# R0.2b: constructed MVSK -> binary -> Ising encoder (measured, not asserted)
+# Offline constructed MVSK -> binary -> Ising representation
 # ---------------------------------------------------------------------------
 def test_ising_encoder_constructs_and_counts():
     from math import comb
@@ -198,7 +195,9 @@ def test_ising_encoder_constructs_and_counts():
     rep = resource_report(obj, resolution_bits=4)
     assert rep["weight_qubits"] == 28
     assert rep["raw_degree4_expansions"] == comb(7 + 3, 4) * 4 ** 4   # 53,760
-    assert rep["worst_case_total_logical_qubits"] == 434              # §0.3 headline
+    n_bits = obj.n * 4
+    expected_upper_bound = n_bits + comb(n_bits, 2) + n_bits
+    assert rep["worst_case_total_logical_qubits"] == expected_upper_bound
     assert 0 < rep["constructed_auxiliary_qubits"] <= rep["worst_case_auxiliary_qubits"]
     assert rep["constructed_total_logical_qubits"] == 28 + rep["constructed_auxiliary_qubits"]
 

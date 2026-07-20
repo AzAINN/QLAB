@@ -246,8 +246,22 @@ class QlabTui(App[None]):
         height: 2;
         color: #7d8995;
     }
-    #desk-content, #market-content, #workforce-content {
+    #desk-content, #market-content {
         height: 1fr;
+    }
+    #workforce-content {
+        height: auto;
+        max-height: 50%;
+    }
+    #workforce-console {
+        height: 1fr;
+        margin-top: 1;
+        padding: 0 1;
+        background: transparent;
+        border: none;
+        border-top: solid #22303c;
+        color: #aeb9c4;
+        scrollbar-size: 1 1;
     }
     #research-summary, #audit-summary {
         height: 7;
@@ -409,6 +423,7 @@ class QlabTui(App[None]):
         self._agent_states: dict[str, str] = {}
         self._pulse = 0
         self._live_stream_stop = False
+        self._console_partial = ""
         self.claude = ClaudeSession(
             self._receive_claude_event,
             cwd=_WORKSPACE_ROOT,
@@ -437,6 +452,8 @@ class QlabTui(App[None]):
                 with Vertical(id="workforce", classes="canvas-view"):
                     yield Static("WORKFORCE", classes="canvas-title")
                     yield Static(id="workforce-content", markup=True)
+                    yield RichLog(id="workforce-console", wrap=True,
+                                  markup=True, max_lines=800)
                 with Vertical(id="research", classes="canvas-view"):
                     yield Static("RESEARCH", classes="canvas-title")
                     yield Static(id="research-summary", markup=True)
@@ -469,6 +486,9 @@ class QlabTui(App[None]):
             "time", "object", "state", "verdict", "reflection", "detail")
         universe = self.query_one("#universe", ListView)
         universe.index = 0
+        self._console_write(
+            "[#64717d]workforce console — the coordinator, its agents, and "
+            "the audit bus stream here. Start with [bold]: workforce GOAL[/][/]")
         self._render_nav()
         self._render_agents()
         self._start_refresh()
@@ -540,8 +560,40 @@ class QlabTui(App[None]):
 
     def _apply_live_event(self, event: dict) -> None:
         self._ingest_events([event])
-        if str(event.get("kind", "")) in _REFRESH_EVENT_KINDS:
+        kind = str(event.get("kind", ""))
+        if kind in _REFRESH_EVENT_KINDS or kind == "tool_call":
+            self._console_write_bus(event)
+        if kind in _REFRESH_EVENT_KINDS:
             self._start_refresh()
+
+    # -- workforce console -------------------------------------------------
+    _CONSOLE_TONES = {
+        "accent": "#d0a45c", "gold": "#b38b54", "ok": "#79a88b",
+        "bad": "#c97878", "info": "#6d9fbf", "muted": "#7d8995",
+    }
+
+    def _console_write(self, line: str) -> None:
+        self.query_one("#workforce-console", RichLog).write(line)
+
+    def _console_write_bus(self, event: dict) -> None:
+        from qlab.desk_cli import format_event
+
+        style, line = format_event(event)
+        tone = self._CONSOLE_TONES.get(style, "#7d8995")
+        self._console_write(f"[{tone}]{escape(line)}[/]")
+
+    def _console_stream_text(self, text: str) -> None:
+        """Append streamed narrative, emitting only completed lines."""
+        self._console_partial += text
+        *complete, self._console_partial = self._console_partial.split("\n")
+        for line in complete:
+            if line.strip():
+                self._console_write(f"[#c5ced7]{escape(line)}[/]")
+
+    def _console_flush(self) -> None:
+        if self._console_partial.strip():
+            self._console_write(f"[#c5ced7]{escape(self._console_partial)}[/]")
+        self._console_partial = ""
 
     def _tick_pulse(self) -> None:
         """Animate working-state glyphs only while something is running."""
@@ -1284,6 +1336,12 @@ class QlabTui(App[None]):
         if not self.claude.start(prompt, governed=governed):
             self._set_selected_work("Claude Code is not available or a session is already running.")
             return
+        if governed:
+            self._console_partial = ""
+            first_line = prompt.splitlines()[0]
+            self._console_write(
+                f"[bold #d0a45c]▌ workforce run[/]  "
+                f"[#7d8995]{escape(first_line[:110])}[/]")
         self._write_local_event(
             "claude.started",
             {"mode": "workforce" if governed else "read-only", "prompt": prompt[:120]},
@@ -1297,31 +1355,47 @@ class QlabTui(App[None]):
             pass  # app closed while the reader thread was finishing
 
     def _apply_claude_event(self, event: ClaudeEvent) -> None:
+        workforce = self.claude.mode == "workforce"
         if event.kind == "text_delta":
             self._claude_saw_delta = True
             self._claude_buffer += event.text
             self._set_selected_work(
                 f"CLAUDE · {self.claude.mode.upper()}\n\n" + self._claude_buffer[-6000:])
+            if workforce:
+                self._console_stream_text(event.text)
         elif event.kind == "text":
             if not self._claude_saw_delta:
                 self._claude_buffer += event.text
                 self._set_selected_work(
                     f"CLAUDE · {self.claude.mode.upper()}\n\n" + self._claude_buffer[-6000:])
+                if workforce:
+                    self._console_stream_text(event.text + "\n")
         elif event.kind == "tool_start":
             self._set_agent_from_tool(event.tool, event.agent)
             payload = {"tool": event.tool}
             if event.agent:
                 payload["agent"] = event.agent
             self._write_local_event("claude.tool", payload)
+            if workforce:
+                self._console_flush()
+                agent = f"  [#7d8995]{escape(event.agent)}[/]" if event.agent else ""
+                self._console_write(
+                    f"[#6d9fbf]→ {escape(event.tool)}[/]{agent}")
         elif event.kind == "error":
             self._set_selected_work("CLAUDE FAILED\n\n" + event.text[-4000:])
             self._write_local_event("claude.failed", {"error": event.text[-400:]})
+            if workforce:
+                self._console_flush()
+                self._console_write(f"[#c97878]✗ {escape(event.text[-300:])}[/]")
             self._start_refresh()
         elif event.kind == "result":
             if not self._claude_buffer and event.text:
                 self._set_selected_work(
                     f"CLAUDE · {self.claude.mode.upper()}\n\n" + event.text[-6000:])
             self._write_local_event("claude.completed", {})
+            if workforce:
+                self._console_flush()
+                self._console_write("[#79a88b]▮ workforce run complete[/]")
             self._start_refresh()
         self._render_status()
 

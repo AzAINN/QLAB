@@ -482,3 +482,35 @@ def test_workforce_view_shows_failure_card_with_resume_hint():
             assert "workforce resume wfbad" in content
 
     asyncio.run(run())
+
+
+def test_workforce_console_streams_narrative_and_bus_events():
+    from qlab.tui.app import QlabTui
+    from qlab.tui.claude import ClaudeEvent
+    from textual.widgets import RichLog
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")  # console renders once the view is visible
+            await pilot.pause(0.1)
+            console = app.query_one("#workforce-console", RichLog)
+            baseline = len(console.lines)
+
+            app.claude.mode = "workforce"
+            app._apply_claude_event(ClaudeEvent("text_delta", "thinking about"))
+            assert len(console.lines) == baseline  # partial line held back
+            app._apply_claude_event(ClaudeEvent("text_delta", " windows\n"))
+            app._apply_claude_event(ClaudeEvent(
+                "tool_start", "calling", "mcp__qlab-operator__workflow.analyst",
+                agent="moments-analyst"))
+            app._apply_live_event({
+                "event_id": "e9", "ts": "2026-07-20T09:00:00+00:00",
+                "kind": "referee_verdict", "payload": {"verdict": "PASS"},
+            })
+            app._apply_claude_event(ClaudeEvent("result", "done"))
+            await pilot.pause(0.05)
+            assert len(console.lines) > baseline + 3
+
+    asyncio.run(run())

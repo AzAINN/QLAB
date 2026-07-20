@@ -38,6 +38,11 @@ continue the same session, and the `■ stop` button interrupts without losing
 durable phase state. `: workforce GOAL`, `: workforce status`, and
 `: workforce resume ID` drive the same machinery from the command row.
 
+`: chat MESSAGE` switches the same chat box to a read-only desk assistant —
+ask about the portfolio, market, runs, or audit trail conversationally; it
+holds observation tools only (no agents, no writes, no execution) and keeps
+its own session, separate from the workforce coordinator.
+
 For a core-only install:
 
     python -m pip install .

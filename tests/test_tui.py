@@ -317,11 +317,13 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
             assert any("PASS" in cell for cell in row)                 # PASS row
             assert any("realized drawdown" in cell for cell in row)    # reflection
 
-            # selected-row detail surfaces challenger_view + verdict reasons
+            # selected-row detail expands challenger_view + verdict reasons
+            # into the work rail; the strip carries the verdict summary
             app._render_audit_detail("dec-pass-1")
-            strip = app.query_one("#event-strip").content
-            assert "turnover is acceptable" in strip
-            assert "turnover within cap" in strip
+            rail = str(app.query_one("#selected-work").content)
+            assert "turnover is acceptable" in rail
+            assert "turnover within cap" in rail
+            assert "verdict PASS" in str(app.query_one("#event-strip").content)
 
             # status strip carries the one DATA provenance token
             assert "DATA synthetic·0d" in app.query_one("#system-status").content
@@ -531,9 +533,11 @@ def test_workforce_chat_sends_resumes_and_stops():
             self.mode = "read-only"
             self.available = True
 
-        def start(self, prompt, *, governed=False, resume_session=None):
-            self.calls.append((prompt, governed, resume_session))
-            self.mode = "workforce" if governed else "read-only"
+        def start(self, prompt, *, governed=False, resume_session=None,
+                  chat=False):
+            self.calls.append((prompt, governed, resume_session, chat))
+            self.mode = ("workforce" if governed
+                         else "chat" if chat else "read-only")
             return True
 
         def stop(self):
@@ -556,12 +560,25 @@ def test_workforce_chat_sends_resumes_and_stops():
             # the init event binds the CLI session for multi-turn chat
             app._apply_claude_event(ClaudeEvent(
                 "session", "ready", raw={"session_id": "sess-1"}))
-            assert app._chat_session_id == "sess-1"
+            assert app._chat_sessions["workforce"] == "sess-1"
 
             # later messages resume that session verbatim
             app._chat_send("now challenge the estimation window")
             assert app.claude.calls[-1] == (
-                "now challenge the estimation window", True, "sess-1")
+                "now challenge the estimation window", True, "sess-1", False)
+
+            # : chat switches to the read-only desk assistant with its own
+            # session; nothing about the workforce session leaks into it
+            app._handle_command("chat what is my current drawdown")
+            assert app.claude.calls[-1] == (
+                "what is my current drawdown", False, None, True)
+            app._apply_claude_event(ClaudeEvent(
+                "session", "ready", raw={"session_id": "chat-9"}))
+            assert app._chat_sessions == {
+                "workforce": "sess-1", "chat": "chat-9"}
+            app._chat_send("and my kill switch distance?")
+            assert app.claude.calls[-1] == (
+                "and my kill switch distance?", False, "chat-9", True)
 
             # busy sessions refuse instead of double-starting
             app.claude.running = True
@@ -578,5 +595,54 @@ def test_workforce_chat_sends_resumes_and_stops():
             app.on_button_pressed(
                 Button.Pressed(app.query_one("#chat-exit", Button)))
             assert app.active_view == "desk"
+
+    asyncio.run(run())
+
+
+def test_chat_mode_argv_is_read_only_desk_assistant():
+    from qlab.tui.claude import build_claude_argv
+
+    argv = build_claude_argv(
+        "what is my drawdown?", governed=False, chat=True,
+        runtime_url="http://127.0.0.1:9999", offline=True,
+    )
+    config = json.loads(argv[argv.index("--mcp-config") + 1])
+    assert "qlab-operator" in config["mcpServers"]
+    allowed = argv[argv.index("--allowedTools") + 1]
+    assert "portfolio_state" in allowed and "market_snapshot" in allowed
+    # no dispatch, no phase writes, no research writes, no verdicts
+    for banned in ("Agent", "workflow_start", "workflow_analyst",
+                   "log_decision", "log_verdict", "attach_challenge",
+                   "algorithms_solve", "backtest_run"):
+        assert banned not in allowed
+    agents = json.loads(argv[argv.index("--agents") + 1])
+    assert set(agents) == {"qlab-desk"}
+    assert argv[argv.index("--agent") + 1] == "qlab-desk"
+    assert "Agent" not in agents["qlab-desk"]["tools"]
+
+
+def test_audit_row_select_expands_decision_into_work_rail():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            app._audit_decisions["d1"] = {
+                "decision_id": "d1", "kind": "estimation_window",
+                "as_of": "2026-07-19", "rationale": "stable covariance regime",
+                "challenger_view": "shorter window reacts faster",
+                "reflection": "realized vol matched",
+                "choice": {"window": 504},
+                "verdict": {"verdict": "PASS", "reasons": ["within mandate"]},
+            }
+            app._render_audit_detail("d1")
+            rail = str(app.query_one("#selected-work").content)
+            assert "DECISION d1" in rail
+            assert "stable covariance regime" in rail
+            assert "shorter window reacts faster" in rail
+            assert "VERDICT  PASS" in rail
+            assert "within mandate" in rail
+            assert "realized vol matched" in rail
 
     asyncio.run(run())

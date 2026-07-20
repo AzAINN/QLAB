@@ -244,14 +244,18 @@ class QlabTui(App[None]):
     }
     .canvas-title {
         height: 2;
-        color: #7d8995;
+        color: #93a5b4;
+        text-style: bold;
     }
     #desk-content, #market-content {
         height: 1fr;
     }
     #workforce-content {
         height: auto;
-        max-height: 50%;
+        max-height: 45%;
+        padding: 1 2;
+        background: #0b1016;
+        border: round #1d2833;
     }
     #workforce-console {
         height: 1fr;
@@ -265,30 +269,36 @@ class QlabTui(App[None]):
     }
     #chat-row {
         height: 3;
-        padding: 0 1;
-        border-top: solid #22303c;
+        margin-top: 1;
+    }
+    #chat-mode {
+        width: 6;
+        height: 3;
+        padding: 1 0 0 1;
     }
     #chat-input {
         width: 1fr;
         height: 3;
-        border: none;
-        padding: 1 1 0 0;
-        background: transparent;
-        color: #d7e0e8;
+        border: round #2a3a48;
+        padding: 0 1;
+        background: #0b1016;
+        color: #e6edf3;
     }
     #chat-input:focus {
-        border: none;
+        border: round #d0a45c;
     }
     #chat-exit {
-        width: 12;
+        width: 10;
         height: 3;
-        min-width: 10;
-        background: #17232e;
+        min-width: 8;
+        margin-left: 1;
+        background: #131a22;
         color: #aeb9c4;
-        border: none;
+        border: round #2a3a48;
     }
     #chat-exit:hover {
         background: #22303c;
+        color: #e6edf3;
     }
     #research-summary, #audit-summary {
         height: 7;
@@ -451,7 +461,8 @@ class QlabTui(App[None]):
         self._pulse = 0
         self._live_stream_stop = False
         self._console_partial = ""
-        self._chat_session_id = ""
+        self._chat_sessions = {"workforce": "", "chat": ""}
+        self._chat_mode = "workforce"
         self.claude = ClaudeSession(
             self._receive_claude_event,
             cwd=_WORKSPACE_ROOT,
@@ -472,27 +483,28 @@ class QlabTui(App[None]):
 
             with ContentSwitcher(initial="desk", id="canvas"):
                 with Vertical(id="desk", classes="canvas-view"):
-                    yield Static("DESK", classes="canvas-title")
+                    yield Static("[#d0a45c]\u258d[/] DESK", classes="canvas-title", markup=True)
                     yield Static(id="desk-content", markup=True)
                 with Vertical(id="market", classes="canvas-view"):
-                    yield Static("MARKET", classes="canvas-title")
+                    yield Static("[#d0a45c]\u258d[/] MARKET", classes="canvas-title", markup=True)
                     yield Static(id="market-content", markup=True)
                 with Vertical(id="workforce", classes="canvas-view"):
-                    yield Static("WORKFORCE", classes="canvas-title")
+                    yield Static("[#d0a45c]\u258d[/] WORKFORCE", classes="canvas-title", markup=True)
                     yield Static(id="workforce-content", markup=True)
                     yield RichLog(id="workforce-console", wrap=True,
                                   markup=True, max_lines=800)
                     with Horizontal(id="chat-row"):
+                        yield Static(id="chat-mode", markup=True)
                         yield Input(
                             placeholder="message the coordinator — Enter sends",
                             id="chat-input")
                         yield Button("exit", id="chat-exit")
                 with Vertical(id="research", classes="canvas-view"):
-                    yield Static("RESEARCH", classes="canvas-title")
+                    yield Static("[#d0a45c]\u258d[/] RESEARCH", classes="canvas-title", markup=True)
                     yield Static(id="research-summary", markup=True)
                     yield DataTable(id="runs-table", cursor_type="row")
                 with Vertical(id="audit", classes="canvas-view"):
-                    yield Static("AUDIT", classes="canvas-title")
+                    yield Static("[#d0a45c]\u258d[/] AUDIT", classes="canvas-title", markup=True)
                     yield Static(id="audit-summary", markup=True)
                     yield DataTable(id="audit-table", cursor_type="row")
 
@@ -523,6 +535,9 @@ class QlabTui(App[None]):
             "[#64717d]workforce chat — type below to talk to the coordinator; "
             "it deploys the five governed roles and everything streams here. "
             "[bold]■ stop[/] interrupts; durable state survives.[/]")
+        self._render_chat_mode()
+        self.query_one("#audit-table", DataTable).zebra_stripes = True
+        self.query_one("#runs-table", DataTable).zebra_stripes = True
         self._render_nav()
         self._render_agents()
         self._start_refresh()
@@ -608,6 +623,16 @@ class QlabTui(App[None]):
 
     def _console_write(self, line: str) -> None:
         self.query_one("#workforce-console", RichLog).write(line)
+
+    def _render_chat_mode(self) -> None:
+        chip = self.query_one("#chat-mode", Static)
+        field = self.query_one("#chat-input", Input)
+        if self._chat_mode == "chat":
+            chip.update("[bold #6d9fbf]CHAT[/]")
+            field.placeholder = "ask qlab anything — read-only · : workforce to switch"
+        else:
+            chip.update("[bold #d0a45c]WORK[/]")
+            field.placeholder = "message the coordinator — Enter sends · : chat to switch"
 
     def _console_write_bus(self, event: dict) -> None:
         from qlab.desk_cli import format_event
@@ -1003,10 +1028,11 @@ class QlabTui(App[None]):
             )
 
     def _render_audit_detail(self, key: str) -> None:
-        """Surface a selected decision's challenger case and verdict reasons.
+        """Full decision detail in the work rail; a summary on the strip.
 
-        The quiet workstation has no detail pane, so the one-line event strip
-        carries the governance context on row selection — no banner, no flood.
+        The audit table stays compact; selecting a row expands the judgment —
+        rationale, challenger case, verdict with reasons, reflection — where
+        there is room to actually read it.
         """
         decision = self._audit_decisions.get(str(key))
         if not decision:
@@ -1016,12 +1042,32 @@ class QlabTui(App[None]):
         label = str(verdict.get("verdict", "—")).upper() if verdict else "—"
         reasons = verdict.get("reasons") or []
         reason_text = "; ".join(str(reason) for reason in reasons) if reasons else "—"
-        line = (
-            f"{str(key)[:10]}  challenger: {challenger}  ·  "
-            f"verdict {label}: {reason_text}"
-        )
-        if len(line) > 200:
-            line = line[:199] + "…"
+        rationale = str(decision.get("rationale") or "").strip() or "—"
+        reflection = str(decision.get("reflection") or "").strip() or "pending"
+        choice = decision.get("choice") or {}
+        choice_text = "  ".join(
+            f"{k}={choice[k]}" for k in list(choice)[:4]) or "—"
+        card = "\n".join([
+            f"DECISION {str(key)[:16]}",
+            f"{decision.get('kind', '—')} · {decision.get('as_of', '—')}",
+            "",
+            "CHOICE",
+            choice_text[:160],
+            "",
+            "RATIONALE",
+            rationale[:300],
+            "",
+            "CHALLENGER",
+            challenger[:300],
+            "",
+            f"VERDICT  {label}",
+            reason_text[:300],
+            "",
+            "REFLECTION",
+            reflection[:300],
+        ])
+        self._set_selected_work(card)
+        line = f"{str(key)[:10]}  verdict {label} · challenger + rationale in the work rail →"
         self.query_one("#event-strip", Static).update(escape(line))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -1188,13 +1234,21 @@ class QlabTui(App[None]):
         """
         if self.claude.running:
             self._console_write(
-                "[#b38b54]coordinator is working — wait for the turn to "
+                "[#b38b54]a session is working — wait for the turn to "
                 "finish or press stop[/]")
             return
-        self._console_write(f"[bold #d0a45c]you ▸[/] [#d7e0e8]{escape(message)}[/]")
-        if self._chat_session_id:
+        self._console_write(f"[bold #d0a45c]you ▸[/] [#e6edf3]{escape(message)}[/]")
+        if self._chat_mode == "chat":
+            resume = self._chat_sessions["chat"]
+            if not resume:
+                self._console_write(
+                    "[#64717d]▌ chat — read-only desk assistant[/]")
+            self._start_claude(message, governed=False, chat=True,
+                               resume_session=resume)
+        elif self._chat_sessions["workforce"]:
             self._start_claude(
-                message, governed=True, resume_session=self._chat_session_id)
+                message, governed=True,
+                resume_session=self._chat_sessions["workforce"])
         else:
             self._start_workforce(message)
 
@@ -1233,7 +1287,8 @@ class QlabTui(App[None]):
                 "view desk|market|workforce|research|audit\n"
                 "view agents\n"
                 "symbol TICKER\n"
-                "workforce GOAL\n"
+                "chat MESSAGE      (read-only desk assistant)\n"
+                "workforce GOAL    (governed five-role pipeline)\n"
                 "workforce status\n"
                 "workforce resume ID\n"
                 "workforce stop\n"
@@ -1247,7 +1302,15 @@ class QlabTui(App[None]):
             )
         elif command == "ask" and rest:
             self._start_claude(rest, governed=False)
+        elif command == "chat":
+            self._chat_mode = "chat"
+            self.action_view("workforce")
+            self._render_chat_mode()
+            if rest:
+                self._chat_send(rest)
         elif command in {"workforce", "governed"}:
+            self._chat_mode = "workforce"
+            self._render_chat_mode()
             system = self.snapshot.get("system", {})
             if rest.lower() == "status":
                 self.action_view("workforce")
@@ -1398,15 +1461,15 @@ class QlabTui(App[None]):
         self._start_claude(prompt, governed=True)
 
     def _start_claude(self, prompt: str, *, governed: bool,
-                      resume_session: str = "") -> None:
+                      resume_session: str = "", chat: bool = False) -> None:
         if self.claude.running:
             self._write_local_event("claude.rejected", {"reason": "session already running"})
             return
         self._claude_buffer = ""
         self._claude_saw_delta = False
-        mode = "WORKFORCE" if governed else "READ-ONLY"
+        mode = "WORKFORCE" if governed else ("CHAT" if chat else "READ-ONLY")
         self._set_selected_work(f"CLAUDE · {mode}\n\nStarting streaming session…")
-        if not self.claude.start(prompt, governed=governed,
+        if not self.claude.start(prompt, governed=governed, chat=chat,
                                  resume_session=resume_session or None):
             self._set_selected_work("Claude Code is not available or a session is already running.")
             return
@@ -1430,11 +1493,11 @@ class QlabTui(App[None]):
             pass  # app closed while the reader thread was finishing
 
     def _apply_claude_event(self, event: ClaudeEvent) -> None:
-        workforce = self.claude.mode == "workforce"
+        workforce = self.claude.mode in ("workforce", "chat")
         if event.kind == "session":
             session_id = str(event.raw.get("session_id") or "")
-            if workforce and session_id:
-                self._chat_session_id = session_id
+            if session_id and self.claude.mode in self._chat_sessions:
+                self._chat_sessions[self.claude.mode] = session_id
         elif event.kind == "text_delta":
             self._claude_saw_delta = True
             self._claude_buffer += event.text
@@ -1474,7 +1537,9 @@ class QlabTui(App[None]):
             self._write_local_event("claude.completed", {})
             if workforce:
                 self._console_flush()
-                self._console_write("[#79a88b]▮ workforce run complete[/]")
+                done = ("▮ workforce run complete"
+                        if self.claude.mode == "workforce" else "▮ done")
+                self._console_write(f"[#79a88b]{done}[/]")
             self._start_refresh()
         self._render_status()
 

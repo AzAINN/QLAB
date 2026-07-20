@@ -101,6 +101,27 @@ _COORDINATOR_TOOLS = [
     _claude_tool("workflow.status"),
 ]
 
+# The conversational desk assistant: observation and reading only. No Agent
+# dispatch, no workflow phases, no research writes, and (as everywhere) no
+# execution surface exists to grant.
+_CHAT_TOOLS = [_claude_tool(base) for base in (
+    "portfolio.state", "market.snapshot", "policy.current", "audit.events",
+    "research.runs", "research.decisions", "algorithms.list",
+    "algorithms.describe", "registry.list_runs", "registry.report",
+    "registry.recent_decisions", "data.fetch_universe",
+    "data.snapshot_summary",
+)]
+
+_CHAT_SYSTEM_PROMPT = (
+    "You are the qlab desk assistant, chatting inside a quant operator "
+    "terminal. Answer questions about the paper portfolio, market snapshot, "
+    "operational policy, research runs, and audit trail conversationally and "
+    "compactly — this renders in a terminal pane. Use your qlab tools for "
+    "every number; never invent data or results. You are read-only: you "
+    "cannot trade, modify research, or deploy agents. When the operator "
+    "wants the governed five-role pipeline, point them at workforce mode."
+)
+
 _PROXY_TOOLS = sorted(set(
     _OBSERVATION_TOOLS
     + [_claude_tool(name) for name in _LAB_TOOL_BASES]
@@ -281,9 +302,10 @@ def build_claude_argv(
     runtime_url: str,
     offline: bool,
     resume_session: str | None = None,
+    chat: bool = False,
 ) -> list[str]:
     """Build an auditable Claude command with no ambient MCP/tool access."""
-    if governed:
+    if governed or chat:
         config = {
             "mcpServers": {
                 "qlab-operator": {
@@ -325,6 +347,27 @@ def build_claude_argv(
         argv.extend(["--forward-subagent-text"])
         argv.extend(["--name", "qlab-workforce"])
         argv.extend(["--setting-sources", "project"])
+    elif chat:
+        # Same restriction mechanism as the workforce (verified live): the
+        # selected agent's tools field IS the surface — read-only qlab tools,
+        # no Agent dispatch, no built-ins.
+        desk_agent = {
+            "qlab-desk": {
+                "description": "Conversational read-only qlab desk assistant.",
+                "prompt": _CHAT_SYSTEM_PROMPT,
+                "tools": list(_CHAT_TOOLS),
+                "model": "inherit",
+                "permissionMode": "dontAsk",
+                "maxTurns": 16,
+            }
+        }
+        argv[argv.index("--tools") + 1] = "default"
+        argv.extend(["--allowedTools", ",".join(_CHAT_TOOLS)])
+        argv.extend(["--agents", json.dumps(desk_agent)])
+        argv.extend(["--agent", "qlab-desk"])
+        argv.extend(["--permission-mode", "dontAsk"])
+        argv.extend(["--name", "qlab-chat"])
+        argv.extend(["--setting-sources", "project"])
     if resume_session:
         # Multi-turn chat: continue the persisted CLI session so the
         # coordinator keeps its conversation context between messages.
@@ -362,20 +405,22 @@ class ClaudeSession:
         return self.process is not None and self.process.poll() is None
 
     def start(self, prompt: str, *, governed: bool = False,
-              resume_session: str | None = None) -> bool:
+              resume_session: str | None = None, chat: bool = False) -> bool:
         if self.running or not self.available:
             return False
-        self.mode = "workforce" if governed else "read-only"
+        self.mode = ("workforce" if governed
+                     else "chat" if chat else "read-only")
         argv = build_claude_argv(
             prompt,
             governed=governed,
             runtime_url=self.runtime_url,
             offline=self.offline,
             resume_session=resume_session,
+            chat=chat,
         )
         env = os.environ.copy()
         process_cwd = self.cwd
-        if governed:
+        if governed or chat:
             env["CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS"] = "1"
             env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
             # Keep the workforce out of the source checkout's developer context

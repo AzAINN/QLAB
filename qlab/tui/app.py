@@ -263,6 +263,33 @@ class QlabTui(App[None]):
         color: #aeb9c4;
         scrollbar-size: 1 1;
     }
+    #chat-row {
+        height: 3;
+        padding: 0 1;
+        border-top: solid #22303c;
+    }
+    #chat-input {
+        width: 1fr;
+        height: 3;
+        border: none;
+        padding: 1 1 0 0;
+        background: transparent;
+        color: #d7e0e8;
+    }
+    #chat-input:focus {
+        border: none;
+    }
+    #chat-exit {
+        width: 12;
+        height: 3;
+        min-width: 10;
+        background: #17232e;
+        color: #aeb9c4;
+        border: none;
+    }
+    #chat-exit:hover {
+        background: #22303c;
+    }
     #research-summary, #audit-summary {
         height: 7;
         color: #aeb9c4;
@@ -424,6 +451,7 @@ class QlabTui(App[None]):
         self._pulse = 0
         self._live_stream_stop = False
         self._console_partial = ""
+        self._chat_session_id = ""
         self.claude = ClaudeSession(
             self._receive_claude_event,
             cwd=_WORKSPACE_ROOT,
@@ -454,6 +482,11 @@ class QlabTui(App[None]):
                     yield Static(id="workforce-content", markup=True)
                     yield RichLog(id="workforce-console", wrap=True,
                                   markup=True, max_lines=800)
+                    with Horizontal(id="chat-row"):
+                        yield Input(
+                            placeholder="message the coordinator — Enter sends",
+                            id="chat-input")
+                        yield Button("exit", id="chat-exit")
                 with Vertical(id="research", classes="canvas-view"):
                     yield Static("RESEARCH", classes="canvas-title")
                     yield Static(id="research-summary", markup=True)
@@ -487,8 +520,9 @@ class QlabTui(App[None]):
         universe = self.query_one("#universe", ListView)
         universe.index = 0
         self._console_write(
-            "[#64717d]workforce console — the coordinator, its agents, and "
-            "the audit bus stream here. Start with [bold]: workforce GOAL[/][/]")
+            "[#64717d]workforce chat — type below to talk to the coordinator; "
+            "it deploys the five governed roles and everything streams here. "
+            "[bold]■ stop[/] interrupts; durable state survives.[/]")
         self._render_nav()
         self._render_agents()
         self._start_refresh()
@@ -1046,6 +1080,8 @@ class QlabTui(App[None]):
             data_token = f"DATA {data_source}·{age}d"
         self.query_one("#system-status", Static).update(
             f"PAPER · {source}/DAILY · {mcp} · {claude} · {data_token}")
+        self.query_one("#chat-exit", Button).label = (
+            "■ stop" if self.claude.running else "exit")
 
     # -- events -----------------------------------------------------------
     def _ingest_events(self, events_: list[dict]) -> None:
@@ -1081,6 +1117,8 @@ class QlabTui(App[None]):
         self.active_view = view
         self.query_one("#canvas", ContentSwitcher).current = view
         self._render_nav()
+        if view == "workforce":
+            self.query_one("#chat-input", Input).focus()
 
     def action_next_symbol(self) -> None:
         if isinstance(self.focused, Input):
@@ -1132,11 +1170,46 @@ class QlabTui(App[None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         raw = event.value.strip()
         event.input.value = ""
+        if event.input.id == "chat-input":
+            if raw:
+                self._chat_send(raw)
+            return
         if raw.startswith(":"):
             raw = raw[1:].strip()
         if not raw:
             return
         self._handle_command(raw)
+
+    # -- coordinator chat --------------------------------------------------
+    def _chat_send(self, message: str) -> None:
+        """One chat turn with the workforce coordinator.
+
+        The first message starts a governed session; later messages resume
+        the same Claude CLI session so the coordinator keeps its context.
+        """
+        if self.claude.running:
+            self._console_write(
+                "[#b38b54]coordinator is working — wait for the turn to "
+                "finish or press stop[/]")
+            return
+        self._console_write(f"[bold #d0a45c]you ▸[/] [#d7e0e8]{escape(message)}[/]")
+        if self._chat_session_id:
+            self._start_claude(
+                message, governed=True, resume_session=self._chat_session_id)
+        else:
+            self._start_workforce(message)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "chat-exit":
+            return
+        if self.claude.running:
+            self.claude.stop()
+            self._console_write(
+                "[#b38b54]■ stopped — durable phase state is kept; send a "
+                "message to continue or use : workforce resume ID[/]")
+            self._write_local_event("claude.workforce_stopped", {})
+        else:
+            self.action_view("desk")
 
     def _handle_command(self, raw: str) -> None:
         command, _, rest = raw.partition(" ")
@@ -1325,7 +1398,8 @@ class QlabTui(App[None]):
         self.action_view("workforce")
         self._start_claude(prompt, governed=True)
 
-    def _start_claude(self, prompt: str, *, governed: bool) -> None:
+    def _start_claude(self, prompt: str, *, governed: bool,
+                      resume_session: str = "") -> None:
         if self.claude.running:
             self._write_local_event("claude.rejected", {"reason": "session already running"})
             return
@@ -1333,15 +1407,17 @@ class QlabTui(App[None]):
         self._claude_saw_delta = False
         mode = "WORKFORCE" if governed else "READ-ONLY"
         self._set_selected_work(f"CLAUDE · {mode}\n\nStarting streaming session…")
-        if not self.claude.start(prompt, governed=governed):
+        if not self.claude.start(prompt, governed=governed,
+                                 resume_session=resume_session or None):
             self._set_selected_work("Claude Code is not available or a session is already running.")
             return
         if governed:
             self._console_partial = ""
-            first_line = prompt.splitlines()[0]
-            self._console_write(
-                f"[bold #d0a45c]▌ workforce run[/]  "
-                f"[#7d8995]{escape(first_line[:110])}[/]")
+            if not resume_session:
+                first_line = prompt.splitlines()[0]
+                self._console_write(
+                    f"[bold #d0a45c]▌ workforce run[/]  "
+                    f"[#7d8995]{escape(first_line[:110])}[/]")
         self._write_local_event(
             "claude.started",
             {"mode": "workforce" if governed else "read-only", "prompt": prompt[:120]},
@@ -1356,7 +1432,11 @@ class QlabTui(App[None]):
 
     def _apply_claude_event(self, event: ClaudeEvent) -> None:
         workforce = self.claude.mode == "workforce"
-        if event.kind == "text_delta":
+        if event.kind == "session":
+            session_id = str(event.raw.get("session_id") or "")
+            if workforce and session_id:
+                self._chat_session_id = session_id
+        elif event.kind == "text_delta":
             self._claude_saw_delta = True
             self._claude_buffer += event.text
             self._set_selected_work(
@@ -1402,17 +1482,17 @@ class QlabTui(App[None]):
     def _set_agent_from_tool(self, tool: str, explicit_agent: str = "") -> None:
         if explicit_agent in _AGENT_NAMES:
             agent = explicit_agent
-        elif "workflow.analyst" in tool or "objective.build" in tool:
+        elif "workflow_analyst" in tool or "objective_build" in tool:
             agent = "moments-analyst"
-        elif "workflow.challenger" in tool:
+        elif "workflow_challenger" in tool:
             agent = "challenger"
-        elif "workflow.optimizer" in tool or "algorithms.solve" in tool:
+        elif "workflow_optimizer" in tool or "algorithms_solve" in tool:
             agent = "optimization-runner"
-        elif "workflow.referee" in tool or "log_verdict" in tool or "backtest.run" in tool:
+        elif "workflow_referee" in tool or "log_verdict" in tool or "backtest_run" in tool:
             agent = "referee"
-        elif ("workflow.reporter" in tool or "rebalance_preview" in tool
-              or "daily_ops" in tool or "portfolio.state" in tool
-              or "report.recommendation" in tool):
+        elif ("workflow_reporter" in tool or "rebalance_preview" in tool
+              or "daily_ops" in tool or "portfolio_state" in tool
+              or "report_recommendation" in tool):
             agent = "reporter"
         else:
             return

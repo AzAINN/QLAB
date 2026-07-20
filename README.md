@@ -31,8 +31,12 @@ offers to launch the Claude CLI as qlab's constrained workforce coordinator.
     qlab tui --claude auto    # start the workforce after the first snapshot
     qlab tui --claude off     # do not offer; : workforce GOAL still starts it
 
-Inside the desk, `: workforce GOAL` starts a durable run, `: workforce status`
-opens its phase view, and `: workforce resume ID` continues an interrupted run.
+Inside the desk, the workforce view (key `3`) is a chat: type to the
+coordinator and it deploys the five governed roles while their narrative,
+tool calls, and audit-bus events stream in the center; follow-up messages
+continue the same session, and the `■ stop` button interrupts without losing
+durable phase state. `: workforce GOAL`, `: workforce status`, and
+`: workforce resume ID` drive the same machinery from the command row.
 
 For a core-only install:
 

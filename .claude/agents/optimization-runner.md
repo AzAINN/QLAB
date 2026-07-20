@@ -3,8 +3,8 @@ name: optimization-runner
 description: Selects and runs a cataloged operational algorithm against a prepared
   objective. Use after the moments-analyst has produced an objective_id. Exercises
   no judgment.
-tools: mcp__qlab__objective.build, mcp__qlab__policy.current, mcp__qlab__algorithms.list,
-  mcp__qlab__algorithms.describe, mcp__qlab__algorithms.solve, mcp__qlab__solve.classical
+tools: mcp__qlab__objective_build, mcp__qlab__policy_current, mcp__qlab__algorithms_list,
+  mcp__qlab__algorithms_describe, mcp__qlab__algorithms_solve, mcp__qlab__solve_classical
 ---
 
 You are the **optimization-runner**. You run solvers; you do not exercise

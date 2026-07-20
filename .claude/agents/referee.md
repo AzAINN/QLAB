@@ -3,8 +3,8 @@ name: referee
 description: The approval gate. Read-only. Independently checks constraints, benchmark
   coverage, and sanity before any result reaches the human or any trade is proposed.
   Must PASS. Use after the optimizer returns and before the reporter acts.
-tools: mcp__qlab__registry.list_runs, mcp__qlab__registry.report, mcp__qlab__backtest.run,
-  mcp__qlab__algorithms.describe, mcp__qlab__policy.current, mcp__qlab__registry.log_verdict
+tools: mcp__qlab__registry_list_runs, mcp__qlab__registry_report, mcp__qlab__backtest_run,
+  mcp__qlab__algorithms_describe, mcp__qlab__policy_current, mcp__qlab__registry_log_verdict
 ---
 
 You are the **referee**. You are read-only and adversarial to the *result*, not

@@ -156,9 +156,12 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
     assert config.keys() == {"mcpServers"}
     assert server["args"] == ["-m", "qlab.mcp.tui_proxy"]
     assert server["env"]["QLAB_RUNTIME_URL"] == "http://127.0.0.1:9999"
-    assert "workflow.rebalance_preview" in allowed
+    # Claude-facing names must be the sanitized (underscored) forms —
+    # dotted grants match nothing in Claude Code.
+    assert "workflow_rebalance_preview" in allowed
+    assert "." not in allowed.replace("127.0.0.1", "")
     assert "execute" not in allowed and "order" not in allowed
-    assert argv[argv.index("--tools") + 1] == "Agent"
+    assert argv[argv.index("--tools") + 1] == "default"
     assert argv[argv.index("--agent") + 1] == "qlab-coordinator"
     assert "--forward-subagent-text" in argv
 
@@ -169,8 +172,8 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
     }
     assert agents["qlab-coordinator"]["tools"] == [
         "Agent(moments-analyst,challenger,optimization-runner,referee,reporter)",
-        "mcp__qlab-operator__workflow.start",
-        "mcp__qlab-operator__workflow.status",
+        "mcp__qlab-operator__workflow_start",
+        "mcp__qlab-operator__workflow_status",
     ]
     all_role_tools = {
         tool for name, definition in agents.items() if name != "qlab-coordinator"
@@ -386,12 +389,12 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
     app, client = ToolApp(), ToolClient()
     register_proxy_tools(app, client)
 
-    assert "workflow.rebalance_preview" in app.tools
-    assert {"workflow.start", "workflow.status", "workflow.analyst",
-            "workflow.challenger", "workflow.optimizer", "workflow.referee",
-            "workflow.reporter"} <= set(app.tools)
+    assert "workflow_rebalance_preview" in app.tools
+    assert {"workflow_start", "workflow_status", "workflow_analyst",
+            "workflow_challenger", "workflow_optimizer", "workflow_referee",
+            "workflow_reporter"} <= set(app.tools)
     assert not any("execute" in name or "order" in name for name in app.tools)
-    app.tools["workflow.rebalance_preview"]({"GLD": 1.0}, "decision-1")
+    app.tools["workflow_rebalance_preview"]({"GLD": 1.0}, "decision-1")
     assert client.calls[-1] == (
         "POST", "/api/rebalance_preview",
         {"offline": True, "targets": {"GLD": 1.0}, "decision_id": "decision-1"},
@@ -503,7 +506,7 @@ def test_workforce_console_streams_narrative_and_bus_events():
             assert len(console.lines) == baseline  # partial line held back
             app._apply_claude_event(ClaudeEvent("text_delta", " windows\n"))
             app._apply_claude_event(ClaudeEvent(
-                "tool_start", "calling", "mcp__qlab-operator__workflow.analyst",
+                "tool_start", "calling", "mcp__qlab-operator__workflow_analyst",
                 agent="moments-analyst"))
             app._apply_live_event({
                 "event_id": "e9", "ts": "2026-07-20T09:00:00+00:00",
@@ -512,5 +515,68 @@ def test_workforce_console_streams_narrative_and_bus_events():
             app._apply_claude_event(ClaudeEvent("result", "done"))
             await pilot.pause(0.05)
             assert len(console.lines) > baseline + 3
+
+    asyncio.run(run())
+
+
+def test_workforce_chat_sends_resumes_and_stops():
+    from qlab.tui.app import QlabTui
+    from qlab.tui.claude import ClaudeEvent
+
+    class ClaudeStub:
+        def __init__(self):
+            self.calls = []
+            self.stopped = 0
+            self.running = False
+            self.mode = "read-only"
+            self.available = True
+
+        def start(self, prompt, *, governed=False, resume_session=None):
+            self.calls.append((prompt, governed, resume_session))
+            self.mode = "workforce" if governed else "read-only"
+            return True
+
+        def stop(self):
+            self.stopped += 1
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            app.claude = ClaudeStub()
+            await pilot.press("3")
+            await pilot.pause(0.05)
+
+            # first message starts a governed run with the goal
+            app._chat_send("review the current risk")
+            assert app.claude.calls[-1][0].startswith("GOAL: review the current risk")
+            assert app.claude.calls[-1][1] is True
+            assert app.claude.calls[-1][2] is None
+
+            # the init event binds the CLI session for multi-turn chat
+            app._apply_claude_event(ClaudeEvent(
+                "session", "ready", raw={"session_id": "sess-1"}))
+            assert app._chat_session_id == "sess-1"
+
+            # later messages resume that session verbatim
+            app._chat_send("now challenge the estimation window")
+            assert app.claude.calls[-1] == (
+                "now challenge the estimation window", True, "sess-1")
+
+            # busy sessions refuse instead of double-starting
+            app.claude.running = True
+            n = len(app.claude.calls)
+            app._chat_send("another")
+            assert len(app.claude.calls) == n
+
+            # the button stops a running session, and exits the view when idle
+            from textual.widgets import Button
+            app.on_button_pressed(
+                Button.Pressed(app.query_one("#chat-exit", Button)))
+            assert app.claude.stopped == 1
+            app.claude.running = False
+            app.on_button_pressed(
+                Button.Pressed(app.query_one("#chat-exit", Button)))
+            assert app.active_view == "desk"
 
     asyncio.run(run())

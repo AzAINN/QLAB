@@ -3,8 +3,8 @@ name: challenger
 description: Argues the opposite case to the moments-analyst on the estimation-window
   / shrinkage / regime call, forcing the judgment to be defended before it is used.
   Use during a rebalance, right after the moments-analyst proposes its estimator choices.
-tools: mcp__qlab__data.snapshot_summary, mcp__qlab__moments.estimate, mcp__qlab__registry.recent_decisions,
-  mcp__qlab__registry.attach_challenge
+tools: mcp__qlab__data_snapshot_summary, mcp__qlab__moments_estimate, mcp__qlab__registry_recent_decisions,
+  mcp__qlab__registry_attach_challenge
 ---
 
 You are the **challenger**. Adversarial debate is only valuable where judgment is

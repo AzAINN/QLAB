@@ -26,16 +26,27 @@ EventKind = Literal[
     "session", "text", "text_delta", "tool_start", "tool_result", "result", "error"
 ]
 
+def _claude_tool(base: str) -> str:
+    """Full Claude-visible proxy tool name for a dotted qlab base name.
+
+    Claude Code sanitizes MCP tool names (``workflow.status`` registers as
+    ``workflow_status``), so every allowlist and agent grant must use the
+    underscored form or it matches nothing. Dotted names stay the neutral
+    scheme everywhere else (owner HTTP routes, agents/*.md sources).
+    """
+    return f"mcp__qlab-operator__{base.replace('.', '_')}"
+
+
 _OBSERVATION_TOOLS = [
-    "mcp__qlab-operator__portfolio.state",
-    "mcp__qlab-operator__market.snapshot",
-    "mcp__qlab-operator__policy.current",
-    "mcp__qlab-operator__audit.events",
-    "mcp__qlab-operator__research.runs",
-    "mcp__qlab-operator__research.decisions",
-    "mcp__qlab-operator__workflow.rebalance_preview",
-    "mcp__qlab-operator__workflow.daily_ops",
-    "mcp__qlab-operator__research.batch",
+    _claude_tool("portfolio.state"),
+    _claude_tool("market.snapshot"),
+    _claude_tool("policy.current"),
+    _claude_tool("audit.events"),
+    _claude_tool("research.runs"),
+    _claude_tool("research.decisions"),
+    _claude_tool("workflow.rebalance_preview"),
+    _claude_tool("workflow.daily_ops"),
+    _claude_tool("research.batch"),
 ]
 
 _LAB_TOOL_BASES = {
@@ -86,15 +97,15 @@ _TRADER_PROXY_MAP = {
 }
 
 _COORDINATOR_TOOLS = [
-    "mcp__qlab-operator__workflow.start",
-    "mcp__qlab-operator__workflow.status",
+    _claude_tool("workflow.start"),
+    _claude_tool("workflow.status"),
 ]
 
 _PROXY_TOOLS = sorted(set(
     _OBSERVATION_TOOLS
-    + [f"mcp__qlab-operator__{name}" for name in _LAB_TOOL_BASES]
+    + [_claude_tool(name) for name in _LAB_TOOL_BASES]
     + _COORDINATOR_TOOLS
-    + [f"mcp__qlab-operator__workflow.{phase}"
+    + [_claude_tool(f"workflow.{phase}")
        for phase in _WORKFLOW_PHASE.values()]
 ))
 
@@ -104,9 +115,9 @@ _COORDINATOR_NAME = "qlab-coordinator"
 def _proxy_tool(tool: str) -> str | None:
     base = tool.rsplit("__", 1)[-1]
     if base in _LAB_TOOL_BASES:
-        return f"mcp__qlab-operator__{base}"
+        return _claude_tool(base)
     mapped = _TRADER_PROXY_MAP.get(base)
-    return f"mcp__qlab-operator__{mapped}" if mapped else None
+    return _claude_tool(mapped) if mapped else None
 
 
 def build_workforce_agents() -> dict[str, dict]:
@@ -119,11 +130,11 @@ def build_workforce_agents() -> dict[str, dict]:
         if phase is None:
             continue
         tools = [mapped for tool in source.tools if (mapped := _proxy_tool(tool))]
-        tools.append(f"mcp__qlab-operator__workflow.{phase}")
+        tools.append(_claude_tool(f"workflow.{phase}"))
         if source.name in {
             "moments-analyst", "optimization-runner", "referee", "reporter"
         }:
-            tools.append("mcp__qlab-operator__policy.current")
+            tools.append(_claude_tool("policy.current"))
         tools = list(dict.fromkeys(tools))
         override = f"""
 
@@ -131,7 +142,7 @@ QLAB OWNER-WORKFORCE MODE (this section supersedes any execution or fixed-
 champion instruction above):
 - You are a portfolio/research worker, never a software developer. Do not read,
   edit, write, or search repository files and do not run shell commands.
-- The task contains a workflow_id. First call workflow.{phase} with status
+- The task contains a workflow_id. First call the workflow_{phase} tool with status
   `working`. Before returning, call it with `done` and a concise summary plus
   these required artifacts: {_PHASE_ARTIFACT_CONTRACT[phase]}. On a genuine
   failure call `failed`; when a required fact or approval is missing call
@@ -158,14 +169,14 @@ champion instruction above):
         "prompt": (
             "You are the qlab workforce coordinator, not a coding assistant. "
             "You have no filesystem, shell, browser, editing, or trading tools. "
-            "For a new portfolio/research goal, call workflow.start once. If the "
-            "user message contains RESUME_WORKFLOW_ID, call workflow.status for "
+            "For a new portfolio/research goal, call workflow_start once. If the "
+            "user message contains RESUME_WORKFLOW_ID, call workflow_status for "
             "that id, do not create a new workflow, and continue at the first "
             "non-done phase. Then invoke moments-analyst, challenger, optimization-runner, "
             "referee, and reporter in exactly that order using the Agent tool. "
             "Pass each worker the workflow_id, the original goal, relevant prior "
             "worker output and persisted artifacts, as_of, and universe. Run them in the foreground and "
-            "wait for each result. After every worker, call workflow.status and "
+            "wait for each result. After every worker, call workflow_status and "
             "do not continue unless its phase is done. If a phase fails or is "
             "blocked, stop and report that state. The reporter may run only after "
             "the referee phase is done and must not claim approval unless the "
@@ -269,6 +280,7 @@ def build_claude_argv(
     governed: bool,
     runtime_url: str,
     offline: bool,
+    resume_session: str | None = None,
 ) -> list[str]:
     """Build an auditable Claude command with no ambient MCP/tool access."""
     if governed:
@@ -301,7 +313,11 @@ def build_claude_argv(
     ]
     if governed:
         agents = build_workforce_agents()
-        argv[argv.index("--tools") + 1] = "Agent"
+        # "default", not "Agent": --tools narrows the whole tool universe and
+        # would strip the MCP grants from every role. The coordinator's own
+        # agent definition (Agent + two workflow tools) is the restriction —
+        # verified live: built-ins do not leak into --agent-selected roles.
+        argv[argv.index("--tools") + 1] = "default"
         argv.extend(["--allowedTools", ",".join(["Agent", *_PROXY_TOOLS])])
         argv.extend(["--agents", json.dumps(agents)])
         argv.extend(["--agent", _COORDINATOR_NAME])
@@ -309,6 +325,10 @@ def build_claude_argv(
         argv.extend(["--forward-subagent-text"])
         argv.extend(["--name", "qlab-workforce"])
         argv.extend(["--setting-sources", "project"])
+    if resume_session:
+        # Multi-turn chat: continue the persisted CLI session so the
+        # coordinator keeps its conversation context between messages.
+        argv.extend(["--resume", resume_session])
     # "--" so a prompt beginning with a dash is never parsed as a CLI flag.
     argv.extend(["--", prompt])
     return argv
@@ -341,7 +361,8 @@ class ClaudeSession:
     def running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
-    def start(self, prompt: str, *, governed: bool = False) -> bool:
+    def start(self, prompt: str, *, governed: bool = False,
+              resume_session: str | None = None) -> bool:
         if self.running or not self.available:
             return False
         self.mode = "workforce" if governed else "read-only"
@@ -350,6 +371,7 @@ class ClaudeSession:
             governed=governed,
             runtime_url=self.runtime_url,
             offline=self.offline,
+            resume_session=resume_session,
         )
         env = os.environ.copy()
         process_cwd = self.cwd

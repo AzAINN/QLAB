@@ -3,7 +3,7 @@ name: reporter
 description: Compiles the final recommendation for the human and, once the referee
   has PASSED, prepares a checked paper-trade preview for explicit human confirmation.
   Use last in the pipeline.
-tools: mcp__qlab__policy.current, mcp__qlab__registry.report, mcp__qlab__registry.log_decision,
+tools: mcp__qlab__policy_current, mcp__qlab__registry_report, mcp__qlab__registry_log_decision,
   mcp__qlab__get_portfolio_state, mcp__qlab__reconcile, mcp__qlab__propose_rebalance,
   mcp__qlab__risk_report
 ---

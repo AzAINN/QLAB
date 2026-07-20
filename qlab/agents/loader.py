@@ -114,7 +114,15 @@ def _write_claude(agent: AgentDef, out_dir: Path) -> Path:
     if agent.model and agent.model != "inherit":
         fm["model"] = agent.model
     if agent.tools:
-        fm["tools"] = ", ".join(agent.tools)  # Claude accepts a comma list
+        # Claude Code sanitizes MCP tool names — a dotted registration like
+        # ``data.fetch_universe`` is exposed as ``data_fetch_universe`` — so
+        # grants must be emitted in the underscored form or they match nothing.
+        claude_names = [
+            f"{prefix}__{base.replace('.', '_')}"
+            for tool in agent.tools
+            for prefix, _, base in [tool.rpartition("__")]
+        ]
+        fm["tools"] = ", ".join(claude_names)  # Claude accepts a comma list
     front = yaml.safe_dump(fm, sort_keys=False, default_flow_style=False).strip()
     path = out_dir / f"{agent.name}.md"
     path.write_text(f"---\n{front}\n---\n\n{agent.body}\n", encoding="utf-8")

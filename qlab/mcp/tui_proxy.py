@@ -45,37 +45,37 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         payload["offline"] = client.offline
         return client.post(f"/api/lab/{name}", payload).get("result")
 
-    @app.tool(name="portfolio.state")
+    @app.tool(name="portfolio_state")
     def portfolio_state() -> dict:
         """Current paper portfolio, exposure, drawdown, and target weights."""
         return client.get("/api/portfolio", offline=int(client.offline))
 
-    @app.tool(name="market.snapshot")
+    @app.tool(name="market_snapshot")
     def market_snapshot() -> dict:
         """Daily-bar market snapshot with source, age, volatility, and regime."""
         return client.get("/api/market", offline=int(client.offline))
 
-    @app.tool(name="policy.current")
+    @app.tool(name="policy_current")
     def policy_current() -> dict:
         """Configured operational allocation policy and evidence rationale."""
         return client.get("/api/policy")
 
-    @app.tool(name="audit.events")
+    @app.tool(name="audit_events")
     def audit_events(limit: int = 50) -> list[dict]:
         """Recent ordered workflow, mandate, proposal, and execution events."""
         return client.get("/api/events", limit=max(1, min(limit, 200))).get("events", [])
 
-    @app.tool(name="research.runs")
+    @app.tool(name="research_runs")
     def research_runs() -> list[dict]:
         """Recent reproducible research and ablation runs."""
         return client.get("/api/runs").get("runs", [])
 
-    @app.tool(name="research.decisions")
+    @app.tool(name="research_decisions")
     def research_decisions() -> list[dict]:
         """Recent agent-authored judgment records and reflections."""
         return client.get("/api/decisions").get("decisions", [])
 
-    @app.tool(name="workflow.rebalance_preview")
+    @app.tool(name="workflow_rebalance_preview")
     def rebalance_preview(targets: dict, decision_id: str) -> dict:
         """Build a dry plan from the optimizer's exact referee-reviewed targets."""
         return client.post("/api/rebalance_preview", {
@@ -83,12 +83,12 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "decision_id": decision_id,
         })
 
-    @app.tool(name="workflow.daily_ops")
+    @app.tool(name="workflow_daily_ops")
     def daily_ops() -> dict:
         """Run the non-trading reconcile, risk, drift, and regime heartbeat."""
         return client.post("/api/daily_ops", {"offline": client.offline})
 
-    @app.tool(name="research.batch")
+    @app.tool(name="research_batch")
     def research_batch() -> dict:
         """Run the compact offline ablation through the owner runtime."""
         return client.post("/api/batch", {
@@ -96,12 +96,12 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         })
 
     # -- owner-backed research lab ----------------------------------------
-    @app.tool(name="data.fetch_universe")
+    @app.tool(name="data_fetch_universe")
     def data_fetch_universe(which: str = "core") -> dict:
         """List the investable universe without opening a second registry."""
         return lab("data.fetch_universe", {"which": which})
 
-    @app.tool(name="data.snapshot_summary")
+    @app.tool(name="data_snapshot_summary")
     def data_snapshot_summary(as_of: str, universe: str = "core",
                               lookback_days: int = 756) -> dict:
         """Point-in-time data provenance, span, and regime summary."""
@@ -109,7 +109,7 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "as_of": as_of, "universe": universe, "lookback_days": lookback_days,
         })
 
-    @app.tool(name="moments.estimate")
+    @app.tool(name="moments_estimate")
     def moments_estimate(as_of: str, universe: str = "core",
                          lookback_days: int = 756,
                          shrinkage: str = "ledoit_wolf",
@@ -126,7 +126,7 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "higher_moments": higher_moments,
         })
 
-    @app.tool(name="objective.build")
+    @app.tool(name="objective_build")
     def objective_build(moment_set_id: str, form: str = "min_variance",
                         skew_lambda: float = 0.5,
                         kurt_lambda: float = 0.5) -> dict:
@@ -136,17 +136,17 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "skew_lambda": skew_lambda, "kurt_lambda": kurt_lambda,
         })
 
-    @app.tool(name="algorithms.list")
+    @app.tool(name="algorithms_list")
     def algorithms_list(category: str = "", stage: str = "operational") -> dict:
         """List algorithm catalog entries by category and deployment stage."""
         return lab("algorithms.list", {"category": category, "stage": stage})
 
-    @app.tool(name="algorithms.describe")
+    @app.tool(name="algorithms_describe")
     def algorithms_describe(algorithm_id: str) -> dict:
         """Describe one cataloged algorithm and its permitted deployment stage."""
         return lab("algorithms.describe", {"algorithm_id": algorithm_id})
 
-    @app.tool(name="algorithms.solve")
+    @app.tool(name="algorithms_solve")
     def algorithms_solve(objective_id: str, algorithm_id: str,
                          max_weight: float = 1.0, run_id: str = "") -> dict:
         """Run one operational algorithm against an owner-held objective."""
@@ -155,7 +155,7 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "max_weight": max_weight, "run_id": run_id,
         })
 
-    @app.tool(name="solve.classical")
+    @app.tool(name="solve_classical")
     def solve_classical(objective_id: str, solver: str = "classical",
                         max_weight: float = 1.0, run_id: str = "") -> dict:
         """Compatibility route through the staged operational catalog."""
@@ -164,7 +164,7 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "max_weight": max_weight, "run_id": run_id,
         })
 
-    @app.tool(name="backtest.run")
+    @app.tool(name="backtest_run")
     def backtest_run(objective: str, solver: str, universe: str = "core",
                      start: str = "2010-01-01", end: str = "",
                      cadence: str = "quarterly", lookback_days: int = 756,
@@ -178,17 +178,17 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "skew_lambda": skew_lambda, "kurt_lambda": kurt_lambda,
         })
 
-    @app.tool(name="registry.list_runs")
+    @app.tool(name="registry_list_runs")
     def registry_list_runs(limit: int = 20) -> list:
         """List recent research runs from the owner registry."""
         return lab("registry.list_runs", {"limit": limit})
 
-    @app.tool(name="registry.report")
+    @app.tool(name="registry_report")
     def registry_report(run_id: str) -> dict:
         """Fetch a persisted research report by run id."""
         return lab("registry.report", {"run_id": run_id})
 
-    @app.tool(name="registry.log_decision")
+    @app.tool(name="registry_log_decision")
     def registry_log_decision(as_of: str, kind: str, choice: dict,
                               rationale: str, challenger_view: str = "") -> dict:
         """Record one governed judgment and its rationale."""
@@ -197,19 +197,19 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "rationale": rationale, "challenger_view": challenger_view,
         })
 
-    @app.tool(name="registry.recent_decisions")
+    @app.tool(name="registry_recent_decisions")
     def registry_recent_decisions(kind: str = "", limit: int = 10) -> list:
         """Read prior judgments and realized reflections."""
         return lab("registry.recent_decisions", {"kind": kind, "limit": limit})
 
-    @app.tool(name="registry.attach_challenge")
+    @app.tool(name="registry_attach_challenge")
     def registry_attach_challenge(decision_id: str, challenger_view: str) -> dict:
         """Attach the challenger evidence to the analyst's persisted judgment."""
         return lab("registry.attach_challenge", {
             "decision_id": decision_id, "challenger_view": challenger_view,
         })
 
-    @app.tool(name="registry.log_verdict")
+    @app.tool(name="registry_log_verdict")
     def registry_log_verdict(decision_id: str, verdict: str, targets: dict,
                              reasons: list | None = None) -> dict:
         """Record the referee PASS or FAIL bound to exact target weights."""
@@ -218,7 +218,7 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "reasons": reasons or [],
         })
 
-    @app.tool(name="report.recommendation")
+    @app.tool(name="report_recommendation")
     def report_recommendation(as_of: str, universe: str = "core",
                               skew_lambda: float = 0.5,
                               kurt_lambda: float = 0.5) -> dict:
@@ -229,7 +229,7 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         })
 
     # -- durable workforce control ----------------------------------------
-    @app.tool(name="workflow.start")
+    @app.tool(name="workflow_start")
     def workflow_start(goal: str, as_of: str = "", universe: str = "core") -> dict:
         """Create a durable five-phase workforce run and return its id."""
         return client.post("/api/workflows/start", {
@@ -237,7 +237,7 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "offline": client.offline,
         })
 
-    @app.tool(name="workflow.status")
+    @app.tool(name="workflow_status")
     def workflow_status(workflow_id: str = "", limit: int = 10) -> dict:
         """Inspect one workforce run, or list recent runs when id is omitted."""
         if workflow_id:
@@ -253,31 +253,31 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "summary": summary, "artifacts": artifacts or {},
         })
 
-    @app.tool(name="workflow.analyst")
+    @app.tool(name="workflow_analyst")
     def workflow_analyst(workflow_id: str, status: str,
                          summary: str = "", artifacts: dict | None = None) -> dict:
         """Moments analyst only: persist analyst phase progress or completion."""
         return phase_update("analyst", workflow_id, status, summary, artifacts)
 
-    @app.tool(name="workflow.challenger")
+    @app.tool(name="workflow_challenger")
     def workflow_challenger(workflow_id: str, status: str,
                             summary: str = "", artifacts: dict | None = None) -> dict:
         """Challenger only: persist challenger phase progress or completion."""
         return phase_update("challenger", workflow_id, status, summary, artifacts)
 
-    @app.tool(name="workflow.optimizer")
+    @app.tool(name="workflow_optimizer")
     def workflow_optimizer(workflow_id: str, status: str,
                            summary: str = "", artifacts: dict | None = None) -> dict:
         """Optimization runner only: persist optimizer phase progress."""
         return phase_update("optimizer", workflow_id, status, summary, artifacts)
 
-    @app.tool(name="workflow.referee")
+    @app.tool(name="workflow_referee")
     def workflow_referee(workflow_id: str, status: str,
                          summary: str = "", artifacts: dict | None = None) -> dict:
         """Referee only: persist gate progress, PASS, or FAIL evidence."""
         return phase_update("referee", workflow_id, status, summary, artifacts)
 
-    @app.tool(name="workflow.reporter")
+    @app.tool(name="workflow_reporter")
     def workflow_reporter(workflow_id: str, status: str,
                           summary: str = "", artifacts: dict | None = None) -> dict:
         """Reporter only: persist the final human-facing proposal phase."""

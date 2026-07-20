@@ -1,5 +1,8 @@
 # Quiet Workstation TUI — Implementation Plan
 
+> **Status: IMPLEMENTED.** This remains the current interface direction; active
+> cleanup and algorithm staging are tracked in ../2026-07-19-continuation-ledger.md.
+
 **Goal:** Build a calm, terminal-native operator console for qlab that keeps
 portfolio facts, agent work, paper-trading authority, and audit state visible
 without turning the screen into a grid of decorative cards.

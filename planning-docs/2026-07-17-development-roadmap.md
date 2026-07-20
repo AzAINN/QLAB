@@ -1,7 +1,9 @@
 # Development Roadmap & Architecture Design — 2026-07-17
 
 **Purpose:** decides the starting point for development and lays out the additive architecture, based on (a) the master brief (`research-plan.md`), (b) a full audit of the remote `barbara-feature` branch (`QuantAgentv1`, pushed 2026-07-16, 8,246 LOC), and (c) a literature/method sweep on news→optimizer integration and agent governance.
-**Status:** DRAFT — awaiting owner approval before implementation planning.
+**Status:** ARCHIVED — approved and implemented through R0/R1; retained as the
+pre-implementation decision record. See 2026-07-19-continuation-ledger.md for
+current staged scope.
 **Deadlines in play:** July 31 entry (14 days out), August 31 full submission.
 
 ---

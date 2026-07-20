@@ -1,5 +1,12 @@
 # qlab — Status & Delivery Map
 
+> **Superseded 2026-07-19.** This file preserves an earlier delivery snapshot
+> present at the 06f9596 continuation baseline; embedded commit and test markers
+> below are historical. Quantum sections describe the former staged direction;
+> QAOA and Ising construction analysis are now offline research only. Current
+> status and the recovered code-review ledger live in
+> [2026-07-19-continuation-ledger.md](2026-07-19-continuation-ledger.md).
+
 **Date:** 2026-07-17 · **HEAD:** `0cdd0f5` · **Suite:** 118 passed, 1 skipped · **Deadlines:** July 31 (slice), August 31 (full system)
 
 ---

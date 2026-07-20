@@ -1,5 +1,9 @@
 # R1 — One Honest Loop + TUI Implementation Plan
 
+> **Status: IMPLEMENTED / HISTORICAL RECIPE.** R1 landed before the 2026-07-19
+> cleanup. References below to staged quantum controls are superseded by the
+> offline algorithm boundary in ../2026-07-19-continuation-ledger.md.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Consolidate DB ownership into one MCP process, add the deterministic signals layer (turbulence/absorption/FRED vol indices/regime conditioning), the Tier-1 estimators (nonlinear shrinkage, vol targeting), and a Textual operator console — culminating in the July 31 demo: a referee-gated rebalance watched live in the TUI.

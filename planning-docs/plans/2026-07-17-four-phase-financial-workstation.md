@@ -1,8 +1,9 @@
 # Four-Phase Financial Workstation Implementation Plan
 
-**Status:** Active  
-**Date:** 2026-07-17  
-**Current phase:** Phase 1 — Trust and data foundation
+**Status:** SUPERSEDED — retained as design history; current delivery state is
+tracked in ../2026-07-19-continuation-ledger.md.
+**Date:** 2026-07-17
+**Current phase:** Historical phase framing
 
 ## Goal
 

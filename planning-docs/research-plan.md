@@ -1,5 +1,11 @@
 # Quant Lab — Master Brief
 
+> **Status: HISTORICAL RESEARCH BRIEF.** This document records the original
+> hypothesis and should not be read as current runtime capability. As of
+> 2026-07-19, QAOA and gate-model resource estimation are offline-only and are
+> absent from the CLI, HTTP API, TUI, MCP server, and default ablation. Current
+> scope is tracked in 2026-07-19-continuation-ledger.md.
+
 **Purpose:** context pack + brainstorming brief for Claude Code. Compiles the Fang call, the architecture work, the TradingAgents teardown, the Qiskit/IBM constraints, and the open questions into one document.
 **Status markers:** `[DECIDED]` = settled, don't relitigate. `[OPEN]` = needs a call. `[EXPLORE]` = brainstorm target.
 **Date:** 2026-07-13

@@ -1,5 +1,9 @@
 # Quantum-Enhanced Trading Agent Lab
 
+> **Status: ARCHIVED ORIGINAL SPEC.** It predates the owner-runtime refactor and
+> the 2026-07-19 algorithm staging boundary. It is design history, not a claim
+> about the current product surface.
+
 ## Context
 
 The working directory is empty — this is a from-scratch build. The user wants a **concise, understandable, elegant** multi-agent trading research system that uses **quantum computing (Qiskit)** alongside classical optimization, inspired by two reference patterns they linked:

@@ -193,6 +193,10 @@ two-writer topology.
     qlab prewarm --universe core
     qlab ui --no-browser
     qlab tui --claude offer
+    qlab desk
+    qlab workforce run "Review the desk and challenge the estimation window"
+    qlab workforce status
+    qlab events --kind workflow_phase
 
 run-once performs analysis, solves the configured operational policy, logs the decision,
 runs the deterministic referee, reconciles the book, and then either proposes
@@ -200,6 +204,14 @@ or executes the mandate-checked paper plan.
 
 daily-ops only reconciles, reports risk, resolves reflections, and checks
 triggers. It cannot trade.
+
+The desk verbs are the research-CLI face of the owner runtime: `qlab desk`
+prints one status card, `qlab workforce run` drives a governed run headless
+and streams the coordinator plus the owner's live audit bus, and `qlab
+events` tails that bus (`GET /api/stream`, server-sent events). The TUI
+subscribes to the same stream, so phase changes and verdicts land on every
+surface the moment they are recorded. None of these verbs can execute a
+paper trade.
 
 batch runs the reproducible staged experiment matrix. Specs containing the
 legacy quantum_arms block are rejected as offline research.

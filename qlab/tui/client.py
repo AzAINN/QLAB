@@ -33,6 +33,31 @@ class ApiClient:
         return response.json()
 
 
+    def stream(self, path: str, **params: Any):
+        """Yield server-sent event dicts from an owner stream endpoint.
+
+        Blocks between events; callers exit by breaking (Ctrl-C closes the
+        socket via the context manager). Heartbeat comments are skipped.
+        """
+        import json
+
+        with httpx.stream(
+            "GET", self.base_url + path, params=params,
+            timeout=httpx.Timeout(None, connect=10.0),
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if not payload:
+                    continue
+                try:
+                    yield json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+
+
 def gather_snapshot(client, *, offline: bool = True) -> dict:
     """Fetch the complete observer snapshot in one owner-process request."""
     return client.get("/api/tui", offline=int(offline), event_limit=100)

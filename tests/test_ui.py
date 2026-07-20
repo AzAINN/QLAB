@@ -199,3 +199,41 @@ def test_events_endpoint_supports_initial_window(session):
         session, "GET", "/api/events", {"limit": ["1"]}, {})
     assert status == 200
     assert [event["kind"] for event in obj["events"]] == ["two"]
+
+
+def test_sse_stream_delivers_live_events(session):
+    """A real streamed connection receives bus events as they are recorded."""
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    import qlab.ui.server as server_module
+
+    handler = type("H", (server_module._Handler,), {"session": session})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with server_module._LOCK:
+            session.registry.record_event("primer", {"n": 1})
+        response = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/stream", timeout=10)
+        first = response.readline().decode()
+        assert first.startswith("data:")
+        assert '"primer"' in first
+
+        with server_module._LOCK:
+            session.registry.record_event("workflow_phase", {"phase": "analyst"})
+        seen = ""
+        for _ in range(40):
+            line = response.readline().decode()
+            if '"workflow_phase"' in line:
+                seen = line
+                break
+        assert seen.startswith("data:")
+        response.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

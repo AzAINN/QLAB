@@ -8,6 +8,9 @@
     qlab prewarm    [--universe core|candidates]       pre-fill the data cache
     qlab ui         [--no-browser] [--port N]          owner runtime + web client
     qlab tui        [--claude offer|auto|off]          terminal operator console
+    qlab desk                                          one-card desk status
+    qlab workforce  run "GOAL" | status | watch        governed runs from any shell
+    qlab events     [--kind K]                         tail the live audit bus
 
 All of it runs with zero external accounts thanks to ``--offline`` and the
 simulated paper broker.
@@ -244,6 +247,10 @@ def build_parser() -> argparse.ArgumentParser:
               "(auto), or keep it off until requested (off)"),
     )
     tui.set_defaults(func=_cmd_tui)
+
+    from qlab.desk_cli import register_subcommands
+
+    register_subcommands(sub, add_common)
 
     return p
 

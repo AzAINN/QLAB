@@ -396,3 +396,89 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
         "POST", "/api/rebalance_preview",
         {"offline": True, "targets": {"GLD": 1.0}, "decision_id": "decision-1"},
     )
+
+
+def test_phase_elapsed_labels():
+    from qlab.tui.formatting import phase_elapsed
+
+    assert phase_elapsed(None, None) == ""
+    assert phase_elapsed("garbage", "2026-07-19T10:00:00") == ""
+    assert phase_elapsed(
+        "2026-07-19T10:00:00", "2026-07-19T10:00:08") == "8s"
+    assert phase_elapsed(
+        "2026-07-19T10:00:00", "2026-07-19T10:02:10") == "2m10s"
+    assert phase_elapsed(
+        "2026-07-19T10:00:00", "2026-07-19T11:05:00") == "1h05m"
+    # an open phase measures against now and never goes negative
+    assert phase_elapsed("2999-01-01T00:00:00+00:00", None) == "0s"
+
+
+def test_workforce_view_shows_result_card_and_timings():
+    from qlab.tui.app import QlabTui
+
+    class CompleteWorkflowClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wfdone", "kind": "portfolio_review",
+                "status": "complete", "current_phase": "reporter",
+                "request": {"goal": "review", "as_of": "2026-07-19",
+                            "universe": "core"},
+                "result": {"final_summary": "hold reviewed HRP targets"},
+                "steps": [
+                    {"phase": "referee", "agent": "referee", "status": "done",
+                     "summary": "PASS", "started_at": "2026-07-19T10:00:00",
+                     "completed_at": "2026-07-19T10:00:42",
+                     "artifacts": {"verdict": "PASS"}},
+                    {"phase": "reporter", "agent": "reporter", "status": "done",
+                     "summary": "", "started_at": "2026-07-19T10:00:42",
+                     "completed_at": "2026-07-19T10:01:00",
+                     "artifacts": {}},
+                ],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(CompleteWorkflowClient(), refresh_interval=0,
+                      claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            content = str(app.query_one("#workforce-content").content)
+            assert "RESULT" in content
+            assert "referee PASS" in content
+            assert "hold reviewed HRP targets" in content
+            assert "42s" in content
+
+    asyncio.run(run())
+
+
+def test_workforce_view_shows_failure_card_with_resume_hint():
+    from qlab.tui.app import QlabTui
+
+    class FailedWorkflowClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wfbad", "kind": "portfolio_review",
+                "status": "blocked", "current_phase": "referee",
+                "request": {"goal": "review", "as_of": "2026-07-19",
+                            "universe": "core"},
+                "steps": [
+                    {"phase": "referee", "agent": "referee",
+                     "status": "blocked", "summary": "no PASS: cap breach"},
+                ],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(FailedWorkflowClient(), refresh_interval=0,
+                      claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            content = str(app.query_one("#workforce-content").content)
+            assert "BLOCKED at referee" in content
+            assert "workforce resume wfbad" in content
+
+    asyncio.run(run())

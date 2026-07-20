@@ -1,0 +1,6 @@
+[mcp_servers.qlab]
+command = "python"
+args = [
+    "-m",
+    "qlab.mcp.server",
+]

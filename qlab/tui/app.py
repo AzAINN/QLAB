@@ -28,7 +28,7 @@ from textual.widgets import (
 
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
-from qlab.tui.formatting import money, pct, sparkline, weight_bar
+from qlab.tui.formatting import money, pct, phase_elapsed, sparkline, weight_bar
 from qlab.paths import workspace_root
 
 
@@ -38,6 +38,12 @@ _VIEWS = ("desk", "market", "workforce", "research", "audit")
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
 )
+_PULSE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+# Bus events that mean durable state changed and a full refresh is worth it.
+_REFRESH_EVENT_KINDS = {
+    "workflow_started", "workflow_phase", "referee_verdict",
+    "plan_built", "order_filled", "decision_logged", "ablation_complete",
+}
 
 
 def _verdict_cell(verdict: dict | None) -> str:
@@ -401,6 +407,8 @@ class QlabTui(App[None]):
         self._pending_plan_id = ""
         self._agent_focus = False
         self._agent_states: dict[str, str] = {}
+        self._pulse = 0
+        self._live_stream_stop = False
         self.claude = ClaudeSession(
             self._receive_claude_event,
             cwd=_WORKSPACE_ROOT,
@@ -466,8 +474,11 @@ class QlabTui(App[None]):
         self._start_refresh()
         if self.refresh_interval > 0:
             self.set_interval(self.refresh_interval, self._start_refresh)
+            self.set_interval(0.25, self._tick_pulse)
+        self._start_live_stream()
 
     def on_unmount(self) -> None:
+        self._live_stream_stop = True
         self.claude.stop()
         if self.owned_server is not None and self.owned_server.poll() is None:
             self.owned_server.terminate()
@@ -502,6 +513,46 @@ class QlabTui(App[None]):
 
     def _finish_refresh(self) -> None:
         self._refreshing = False
+
+    def _start_live_stream(self) -> None:
+        """Subscribe to the owner's SSE bus so state changes land instantly.
+
+        Polling stays on as the fallback; this only makes the desk react the
+        moment a phase flips or a verdict lands instead of at the next tick.
+        """
+        if not hasattr(self.client, "stream"):
+            return
+
+        def run() -> None:
+            import time
+
+            while not self._live_stream_stop:
+                try:
+                    for event in self.client.stream("/api/stream"):
+                        if self._live_stream_stop:
+                            return
+                        self.call_from_thread(self._apply_live_event, event)
+                except Exception:
+                    pass  # owner restarting or unreachable; retry quietly
+                time.sleep(2.0)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _apply_live_event(self, event: dict) -> None:
+        self._ingest_events([event])
+        if str(event.get("kind", "")) in _REFRESH_EVENT_KINDS:
+            self._start_refresh()
+
+    def _tick_pulse(self) -> None:
+        """Animate working-state glyphs only while something is running."""
+        self._pulse += 1
+        states = set(self._agent_states.values())
+        workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        running = workflows and workflows[0].get("status") == "running"
+        if "working" in states or running or self.claude.running:
+            self._render_agents()
+            if self.active_view == "workforce":
+                self._render_workforce()
 
     def _apply_snapshot(self, snapshot: dict) -> None:
         self.snapshot = snapshot
@@ -694,7 +745,8 @@ class QlabTui(App[None]):
             "",
             "[#64717d]PHASE                                      STATE[/]",
         ]
-        for step in workflow.get("steps", []):
+        steps = workflow.get("steps", [])
+        for step in steps:
             state = str(step.get("status", "queued"))
             glyph, color = {
                 "working": ("●", "#6d9fbf"),
@@ -703,13 +755,46 @@ class QlabTui(App[None]):
                 "failed": ("×", "#c97878"),
                 "blocked": ("!", "#d0a45c"),
             }.get(state, ("◌", "#5f6b76"))
+            if state == "working":
+                glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
+            elapsed = phase_elapsed(
+                step.get("started_at"), step.get("completed_at"))
+            timing = f"  [#5f6b76]{elapsed}[/]" if elapsed else ""
             lines.append(
                 f"[{color}]{glyph}[/] {escape(str(step.get('phase', ''))):<12}  "
-                f"{escape(str(step.get('agent', ''))):<22} {escape(state)}"
+                f"{escape(str(step.get('agent', ''))):<22} {escape(state)}{timing}"
             )
             summary = str(step.get("summary") or "").strip()
             if summary:
                 lines.append(f"   [#7d8995]{escape(summary[:140])}[/]")
+
+        status = str(workflow.get("status", ""))
+        result = workflow.get("result") or {}
+        if status == "complete" and result.get("final_summary"):
+            referee = next(
+                (s for s in steps if s.get("phase") == "referee"), None)
+            verdict = str(((referee or {}).get("artifacts") or {})
+                          .get("verdict") or "")
+            chip = f"  ·  referee {verdict}" if verdict else ""
+            lines.extend([
+                "",
+                f"[#79a88b]▮ RESULT{chip}[/]",
+                f"[#c5ced7]{escape(str(result['final_summary'])[:400])}[/]",
+            ])
+        elif status in ("failed", "blocked"):
+            tone = "#c97878" if status == "failed" else "#d0a45c"
+            broken = next(
+                (s for s in steps if s.get("status") in ("failed", "blocked")),
+                None)
+            why = str((broken or {}).get("summary") or "").strip()
+            lines.extend([
+                "",
+                f"[{tone}]▮ {status.upper()} at "
+                f"{escape(str((broken or {}).get('phase', '—')))}[/]"
+                + (f"\n[#7d8995]{escape(why[:200])}[/]" if why else ""),
+                "[#64717d]Resume with : workforce resume "
+                f"{escape(str(workflow.get('workflow_id', '')))}[/]",
+            ])
         earlier = workflows[1:5]
         if earlier:
             lines.extend(["", "[#64717d]EARLIER RUNS"
@@ -880,6 +965,8 @@ class QlabTui(App[None]):
                 "failed": ("×", "#c97878"),
                 "blocked": ("!", "#d0a45c"),
             }.get(state, ("◌", "#5f6b76"))
+            if state == "working":
+                glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
             lines.append(
                 f"[{color}]{glyph}[/] [bold]{escape(name)}[/]\n"
                 f"   [#6f7c87]{escape(state)} · {escape(str(agent.get('authority', '—')))}[/]"

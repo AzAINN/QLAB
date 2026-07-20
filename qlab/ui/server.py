@@ -19,6 +19,7 @@ GET  /api/algorithms           categorized algorithm deployment catalog
 GET  /api/policy               configured operational allocation policy
 GET  /api/workflows            durable Claude-workforce runs and phase state
 GET  /api/workflows/<id>       one durable workflow and its ordered steps
+GET  /api/stream               server-sent events from the audit bus (live)
 GET  /api/tui                  one consistent terminal snapshot
 POST /api/lab/<tool>           bounded research tool executed by this owner
 POST /api/workflows/start      begin a five-role workforce run
@@ -627,6 +628,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self._send(200, _INDEX.read_bytes(), "text/html; charset=utf-8")
             return
+        if parsed.path == "/api/stream":
+            self._stream(parse_qs(parsed.query))
+            return
         if parsed.path.startswith("/api/"):
             try:
                 with _LOCK:
@@ -637,6 +641,50 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(status, obj)
             return
         self._send(404, b"not found", "text/plain")
+
+    def _stream(self, query: dict) -> None:
+        """Server-sent events from the audit bus.
+
+        Each connection runs on its own ThreadingHTTPServer thread and takes
+        the dispatch lock only for the brief per-poll registry read, so a
+        live stream never starves normal API calls. ``after`` resumes from an
+        ISO timestamp cursor; ``kind`` filters events; a comment heartbeat is
+        emitted while idle so clients can detect a dead socket.
+        """
+        import time
+
+        cursor = (query.get("after") or [None])[0]
+        kind = (query.get("kind") or [None])[0]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        idle_polls = 0
+        try:
+            while True:
+                # A fresh connection gets a short primer backlog, not history.
+                limit = 200 if cursor else 25
+                with _LOCK:
+                    events = self.session.registry.read_events(limit, cursor)
+                if events:
+                    idle_polls = 0
+                    for event in events:
+                        cursor = str(event.get("ts") or cursor)
+                        if kind and event.get("kind") != kind:
+                            continue
+                        payload = json.dumps(
+                            _jsonable(event), default=str, sort_keys=True)
+                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                else:
+                    idle_polls += 1
+                    if idle_polls % 20 == 0:  # ~10 s of silence
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def do_POST(self):
         parsed = urlparse(self.path)

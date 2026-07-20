@@ -20,6 +20,12 @@ htmlcov/
 # Local secrets
 .env
 
+# Machine-local orchestration state and personal scratch
+.claude/settings.local.json
+.claude/launch.json
+.superpowers/
+codex-info-log/
+
 # OS / editor
 .DS_Store
 Thumbs.db

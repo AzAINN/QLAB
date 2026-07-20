@@ -809,11 +809,10 @@ class QlabTui(App[None]):
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
         if not workflows:
             content = (
-                "[#64717d]NO DURABLE RUN[/]\n\n"
-                "Start one with [bold]: workforce GOAL[/]. Claude becomes the "
-                "coordinator and deploys the five role-bound agents in order.\n\n"
-                "The owner process persists every phase. Stopping Claude leaves "
-                "the run inspectable and resumable."
+                "[#64717d]NO DURABLE RUN[/]   "
+                "[#7d8995]type in the chat box below — Claude coordinates "
+                "analyst → challenger → optimizer → referee → reporter, and "
+                "every phase persists in the owner.[/]"
             )
             self.query_one("#workforce-content", Static).update(content)
             return

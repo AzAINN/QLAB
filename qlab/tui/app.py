@@ -1471,7 +1471,10 @@ class QlabTui(App[None]):
         self._set_selected_work(f"CLAUDE · {mode}\n\nStarting streaming session…")
         if not self.claude.start(prompt, governed=governed, chat=chat,
                                  resume_session=resume_session or None):
-            self._set_selected_work("Claude Code is not available or a session is already running.")
+            reason = self.claude.last_error or (
+                "Claude Code is not available or a session is already running."
+            )
+            self._set_selected_work(reason)
             return
         if governed:
             self._console_partial = ""

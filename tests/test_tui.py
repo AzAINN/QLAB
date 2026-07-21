@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import pytest
+import yaml
 
 from qlab.state.registry import Registry
 from qlab.ui.server import UISession, handle_api
@@ -143,7 +145,7 @@ def test_claude_stream_parser_emits_text_and_hides_thinking():
 
 
 def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
-    from qlab.tui.claude import build_claude_argv
+    from qlab.tui.claude import build_claude_argv, build_workforce_agents
 
     argv = build_claude_argv(
         "inspect", governed=True,
@@ -164,8 +166,12 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
     assert argv[argv.index("--tools") + 1] == "default"
     assert argv[argv.index("--agent") + 1] == "qlab-coordinator"
     assert "--forward-subagent-text" in argv
+    assert "--agents" not in argv
+    # npm's Windows launcher is a .cmd file and therefore inherits cmd.exe's
+    # 8,191-character ceiling. Keep ample room for longer Windows paths.
+    assert len(subprocess.list2cmdline(argv)) < 4_096
 
-    agents = json.loads(argv[argv.index("--agents") + 1])
+    agents = build_workforce_agents()
     assert set(agents) == {
         "qlab-coordinator", "moments-analyst", "challenger",
         "optimization-runner", "referee", "reporter",
@@ -181,6 +187,26 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
     }
     assert not ({"Read", "Write", "Edit", "Bash"} & all_role_tools)
     assert not any("execute" in tool or "order" in tool for tool in all_role_tools)
+
+
+def test_session_agent_files_preserve_workforce_authority(tmp_path):
+    from qlab.tui.claude import build_workforce_agents, write_session_agents
+
+    written = write_session_agents(tmp_path, build_workforce_agents())
+    assert {path.stem for path in written} == {
+        "qlab-coordinator", "moments-analyst", "challenger",
+        "optimization-runner", "referee", "reporter",
+    }
+    coordinator = tmp_path / ".claude" / "agents" / "qlab-coordinator.md"
+    _, front, body = coordinator.read_text(encoding="utf-8").split("---", 2)
+    metadata = yaml.safe_load(front)
+    assert metadata["tools"].split(", ") == [
+        "Agent(moments-analyst,challenger,optimization-runner,referee,reporter)",
+        "mcp__qlab-operator__workflow_start",
+        "mcp__qlab-operator__workflow_status",
+    ]
+    assert metadata["permissionMode"] == "dontAsk"
+    assert "no filesystem, shell, browser, editing, or trading tools" in body
 
 
 def test_claude_parser_identifies_spawned_workforce_agent():
@@ -600,7 +626,7 @@ def test_workforce_chat_sends_resumes_and_stops():
 
 
 def test_chat_mode_argv_is_read_only_desk_assistant():
-    from qlab.tui.claude import build_claude_argv
+    from qlab.tui.claude import _chat_agent, build_claude_argv
 
     argv = build_claude_argv(
         "what is my drawdown?", governed=False, chat=True,
@@ -615,10 +641,69 @@ def test_chat_mode_argv_is_read_only_desk_assistant():
                    "log_decision", "log_verdict", "attach_challenge",
                    "algorithms_solve", "backtest_run"):
         assert banned not in allowed
-    agents = json.loads(argv[argv.index("--agents") + 1])
+    assert "--agents" not in argv
+    agents = _chat_agent()
     assert set(agents) == {"qlab-desk"}
     assert argv[argv.index("--agent") + 1] == "qlab-desk"
     assert "Agent" not in agents["qlab-desk"]["tools"]
+
+
+def test_claude_session_uses_resolved_launcher_and_isolated_agents(
+    tmp_path, monkeypatch,
+):
+    from qlab.tui import claude as claude_module
+
+    launched = {}
+
+    class Process:
+        def poll(self):
+            return None
+
+    class Thread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    def popen(argv, **kwargs):
+        launched["argv"] = argv
+        launched.update(kwargs)
+        return Process()
+
+    monkeypatch.setattr(
+        claude_module.shutil, "which", lambda command: r"C:\Tools\claude.cmd"
+    )
+    monkeypatch.setattr(claude_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(claude_module.threading, "Thread", Thread)
+    session = claude_module.ClaudeSession(lambda event: None, cwd=tmp_path)
+
+    assert session.start("inspect", governed=True)
+    assert launched["argv"][0] == r"C:\Tools\claude.cmd"
+    assert "--agents" not in launched["argv"]
+    process_cwd = launched["cwd"]
+    assert process_cwd != tmp_path
+    assert (process_cwd / ".claude" / "agents" / "qlab-coordinator.md").is_file()
+
+
+def test_claude_session_reports_process_creation_failure(tmp_path, monkeypatch):
+    from qlab.tui import claude as claude_module
+
+    monkeypatch.setattr(
+        claude_module.shutil, "which", lambda command: r"C:\Tools\claude.cmd"
+    )
+
+    def fail(*args, **kwargs):
+        error = OSError(206, "The filename or extension is too long")
+        error.winerror = 206
+        raise error
+
+    monkeypatch.setattr(claude_module.subprocess, "Popen", fail)
+    session = claude_module.ClaudeSession(lambda event: None, cwd=tmp_path)
+
+    assert not session.start("inspect", governed=True)
+    assert "WinError 206" in session.last_error
+    assert "too long" in session.last_error
 
 
 def test_audit_row_select_expands_decision_into_work_rail():

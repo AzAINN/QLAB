@@ -90,9 +90,11 @@ agent definitions. Runtime state is never written into site-packages.
 - The qlab-operator MCP proxy is the propose-only surface for Claude sessions
   launched under the TUI. It observes the owner over HTTP and cannot execute a
   paper trade or open DuckDB.
-- Claude runs as an inline qlab coordinator, not a developer. Its only built-in
-  tool is an allowlisted Agent dispatcher for the five domain roles. No role
-  receives Read, Bash, Edit, Write, browser, raw-order, or paper-execution tools.
+- Claude runs as an isolated, session-local qlab coordinator, not a developer.
+  Its only built-in tool is an allowlisted Agent dispatcher for the five domain
+  roles. The role files are generated into a temporary project at launch so the
+  Windows command line stays short. No role receives Read, Bash, Edit, Write,
+  browser, raw-order, or paper-execution tools.
 - Workforce runs persist analyst → challenger → optimizer → referee → reporter
   phase state in the owner registry, so a stopped CLI session is inspectable and
   resumable from a new one.

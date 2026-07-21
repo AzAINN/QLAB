@@ -1,11 +1,11 @@
 """Safe Claude Code stream integration for the operator console.
 
 `ask` sessions use a strict empty MCP config and no built-in tools. Workforce
-sessions run an inline qlab coordinator that can only delegate to five inline
-domain agents. Those agents receive least-privilege tools from
-:mod:`qlab.mcp.tui_proxy`; the proxy calls the owner API and never opens DuckDB.
-No Claude role receives filesystem, shell, code-editing, or paper-execution
-authority.
+sessions run an isolated, session-local qlab coordinator that can only delegate
+to five session-local domain agents. Those agents receive least-privilege tools
+from :mod:`qlab.mcp.tui_proxy`; the proxy calls the owner API and never opens
+DuckDB. No Claude role receives filesystem, shell, code-editing, or
+paper-execution authority.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
+
+import yaml
 
 
 EventKind = Literal[
@@ -114,12 +116,44 @@ _CHAT_TOOLS = [_claude_tool(base) for base in (
 
 _CHAT_SYSTEM_PROMPT = (
     "You are the qlab desk assistant, chatting inside a quant operator "
-    "terminal. Answer questions about the paper portfolio, market snapshot, "
-    "operational policy, research runs, and audit trail conversationally and "
-    "compactly — this renders in a terminal pane. Use your qlab tools for "
-    "every number; never invent data or results. You are read-only: you "
-    "cannot trade, modify research, or deploy agents. When the operator "
-    "wants the governed five-role pipeline, point them at workforce mode."
+    "terminal. Answer conversationally and compactly — this renders in a "
+    "terminal pane. Use your qlab tools for every live number (portfolio, "
+    "market, runs, decisions, catalog); never invent data or results. You "
+    "are read-only: you cannot trade, modify research, or deploy agents. "
+    "For the governed five-role pipeline, point the operator at workforce "
+    "mode.\n\n"
+    "You know the system you sit inside. qlab is a governed agentic quant "
+    "research desk: AI agents own judgment, algorithms own numbers, "
+    "deterministic code owns rigor. One owner HTTP process is the only "
+    "DuckDB writer; every surface (TUI, web, this chat's MCP proxy) speaks "
+    "HTTP to it. Components: core (point-in-time data, moment estimation "
+    "incl. Ledoit-Wolf and LW2020 nonlinear shrinkage, one MVSK polynomial, "
+    "cash-carry walk-forward backtests, deflated-Sharpe metrics); solvers "
+    "(SLSQP classical + multistart, HRP, equal-risk-contribution, CVaR LP, "
+    "optional Dirac-3 adapter; offline-only QAOA/Ising research lane); "
+    "algorithms catalog (operational / research / offline stages enforced "
+    "in code — HRP is the configured paper policy; MVSK is a research "
+    "hypothesis that currently loses out of sample and says so); signals "
+    "(turbulence, absorption ratio, regime-conditioned covariance); "
+    "governance (deterministic referee whose PASS is hash-bound to exact "
+    "targets, challenger views, reflection loop); trader (mandate limits, "
+    "kill switch, two-phase leg-idempotent paper plans, simulated broker, "
+    "partial Alpaca paper adapter); state (content-hashed DuckDB registry "
+    "of runs, decisions, verdicts, plans, orders, events, durable workforce "
+    "phases).\n\n"
+    "Known open work, for roadmap questions: news → bounded entropy-pooling "
+    "risk views with expected returns pinned (the August research "
+    "centerpiece); a lambda-sweep and estimator-sensitivity study of why "
+    "MVSK loses; a larger-universe stress run; real Alpaca paper data and "
+    "order lifecycle; market-calendar scheduling; exercising the generated "
+    "IBM Bob personas; one full live five-role workforce validation.\n\n"
+    "When the operator asks what to build next or wants ideas, brainstorm "
+    "freely and concretely — propose experiments, views, UI panels, or "
+    "governance checks — but label speculation as ideas, ground any claim "
+    "about current state in tool calls, and never propose breaking the "
+    "invariants: one DuckDB writer, referee PASS bound to exact targets, "
+    "no raw-order or agent-reachable execution path, quantum stays offline "
+    "until evidence promotes it."
 )
 
 _PROXY_TOOLS = sorted(set(
@@ -211,6 +245,53 @@ champion instruction above):
         "maxTurns": 40,
     }
     return agents
+
+
+def _chat_agent() -> dict[str, dict]:
+    return {
+        "qlab-desk": {
+            "description": "Conversational read-only qlab desk assistant.",
+            "prompt": _CHAT_SYSTEM_PROMPT,
+            "tools": list(_CHAT_TOOLS),
+            "model": "inherit",
+            "permissionMode": "dontAsk",
+            "maxTurns": 16,
+        }
+    }
+
+
+def write_session_agents(root: Path, agents: dict[str, dict]) -> list[Path]:
+    """Materialize session-only Claude agents below an isolated project root.
+
+    Windows npm installations launch Claude through ``claude.cmd``. Passing the
+    workforce as inline ``--agents`` JSON exceeded cmd.exe's 8,191-character
+    command-line limit, so the same definitions live in project agent files.
+    The isolated root contains no source checkout or ambient developer context.
+    """
+    agent_dir = root / ".claude" / "agents"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for name, definition in agents.items():
+        if name not in {*_WORKFLOW_PHASE, _COORDINATOR_NAME, "qlab-desk"}:
+            raise ValueError(f"unexpected session agent name: {name!r}")
+        prompt = str(definition["prompt"])
+        frontmatter = {
+            "name": name,
+            "description": definition["description"],
+            "tools": ", ".join(definition.get("tools", [])),
+            "permissionMode": definition.get("permissionMode", "dontAsk"),
+            "maxTurns": definition.get("maxTurns", 24),
+        }
+        model = definition.get("model")
+        if model and model != "inherit":
+            frontmatter["model"] = model
+        front = yaml.safe_dump(
+            frontmatter, sort_keys=False, default_flow_style=False
+        ).strip()
+        path = agent_dir / f"{name}.md"
+        path.write_text(f"---\n{front}\n---\n\n{prompt}\n", encoding="utf-8")
+        written.append(path)
+    return written
 
 
 @dataclass(frozen=True)
@@ -334,14 +415,12 @@ def build_claude_argv(
         "--no-chrome",
     ]
     if governed:
-        agents = build_workforce_agents()
         # "default", not "Agent": --tools narrows the whole tool universe and
         # would strip the MCP grants from every role. The coordinator's own
         # agent definition (Agent + two workflow tools) is the restriction —
         # verified live: built-ins do not leak into --agent-selected roles.
         argv[argv.index("--tools") + 1] = "default"
         argv.extend(["--allowedTools", ",".join(["Agent", *_PROXY_TOOLS])])
-        argv.extend(["--agents", json.dumps(agents)])
         argv.extend(["--agent", _COORDINATOR_NAME])
         argv.extend(["--permission-mode", "dontAsk"])
         argv.extend(["--forward-subagent-text"])
@@ -351,19 +430,8 @@ def build_claude_argv(
         # Same restriction mechanism as the workforce (verified live): the
         # selected agent's tools field IS the surface — read-only qlab tools,
         # no Agent dispatch, no built-ins.
-        desk_agent = {
-            "qlab-desk": {
-                "description": "Conversational read-only qlab desk assistant.",
-                "prompt": _CHAT_SYSTEM_PROMPT,
-                "tools": list(_CHAT_TOOLS),
-                "model": "inherit",
-                "permissionMode": "dontAsk",
-                "maxTurns": 16,
-            }
-        }
         argv[argv.index("--tools") + 1] = "default"
         argv.extend(["--allowedTools", ",".join(_CHAT_TOOLS)])
-        argv.extend(["--agents", json.dumps(desk_agent)])
         argv.extend(["--agent", "qlab-desk"])
         argv.extend(["--permission-mode", "dontAsk"])
         argv.extend(["--name", "qlab-chat"])
@@ -394,7 +462,9 @@ class ClaudeSession:
         self.offline = offline
         self.process: subprocess.Popen[str] | None = None
         self._thread: threading.Thread | None = None
+        self._session_dir: tempfile.TemporaryDirectory | None = None
         self.mode = "read-only"
+        self.last_error = ""
 
     @property
     def available(self) -> bool:
@@ -406,7 +476,13 @@ class ClaudeSession:
 
     def start(self, prompt: str, *, governed: bool = False,
               resume_session: str | None = None, chat: bool = False) -> bool:
-        if self.running or not self.available:
+        executable = shutil.which("claude")
+        self.last_error = ""
+        if self.running:
+            self.last_error = "A Claude Code session is already running."
+            return False
+        if not executable:
+            self.last_error = "Claude Code is not available on PATH."
             return False
         self.mode = ("workforce" if governed
                      else "chat" if chat else "read-only")
@@ -420,23 +496,41 @@ class ClaudeSession:
         )
         env = os.environ.copy()
         process_cwd = self.cwd
-        if governed or chat:
-            env["CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS"] = "1"
-            env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
-            # Keep the workforce out of the source checkout's developer context
-            # (CLAUDE.md, project agents, git state). The explicit inline agents
-            # and strict owner proxy are the complete session configuration.
-            process_cwd = Path(tempfile.gettempdir()) / "qlab-claude-workforce"
-            process_cwd.mkdir(parents=True, exist_ok=True)
-        self.process = subprocess.Popen(
-            argv,
-            cwd=process_cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
+        try:
+            if governed or chat:
+                env["CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS"] = "1"
+                env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+                # Keep the session out of the source checkout's developer context
+                # while loading its explicit roles from short, project-local files.
+                if self._session_dir is not None:
+                    self._session_dir.cleanup()
+                self._session_dir = tempfile.TemporaryDirectory(prefix="qlab-claude-")
+                process_cwd = Path(self._session_dir.name)
+                write_session_agents(
+                    process_cwd,
+                    build_workforce_agents() if governed else _chat_agent(),
+                )
+            # Use the exact path already resolved by the availability check. This
+            # avoids a second, cwd-dependent executable lookup on Windows.
+            argv[0] = executable
+            self.process = subprocess.Popen(
+                argv,
+                cwd=process_cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+        except OSError as exc:
+            self.process = None
+            if self._session_dir is not None:
+                self._session_dir.cleanup()
+                self._session_dir = None
+            winerror = getattr(exc, "winerror", None)
+            detail = f"WinError {winerror}: " if winerror is not None else ""
+            self.last_error = f"Could not start Claude Code: {detail}{exc.strerror or exc}"
+            return False
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
         return True

@@ -167,6 +167,22 @@ _PROXY_TOOLS = sorted(set(
 _COORDINATOR_NAME = "qlab-coordinator"
 
 
+def resolve_claude_executable() -> str | None:
+    """Resolve a runnable ``claude`` launcher, robust on Windows.
+
+    Python 3.12.0's ``shutil.which`` regression returns npm's extensionless
+    shell shim (``...\\npm\\claude``) ahead of ``claude.cmd``; ``CreateProcess``
+    rejects that script with WinError 193. On Windows prefer the launchers that
+    actually run — ``.cmd``/``.exe``/``.bat`` — before falling back.
+    """
+    if os.name == "nt":
+        for name in ("claude.cmd", "claude.exe", "claude.bat"):
+            found = shutil.which(name)
+            if found:
+                return found
+    return shutil.which("claude")
+
+
 def _proxy_tool(tool: str) -> str | None:
     base = tool.rsplit("__", 1)[-1]
     if base in _LAB_TOOL_BASES:
@@ -199,9 +215,14 @@ champion instruction above):
   edit, write, or search repository files and do not run shell commands.
 - The task contains a workflow_id. First call the workflow_{phase} tool with status
   `working`. Before returning, call it with `done` and a concise summary plus
-  these required artifacts: {_PHASE_ARTIFACT_CONTRACT[phase]}. On a genuine
-  failure call `failed`; when a required fact or approval is missing call
-  `blocked` and preserve the available evidence in artifacts.
+  these required artifacts: {_PHASE_ARTIFACT_CONTRACT[phase]}.
+- Run autonomously — never ask the operator a question or wait for input. When a
+  judgment call, preference, or parameter is unspecified, pick the best-estimate
+  default from qlab facts and sensible defaults, note the assumption in your
+  summary, and proceed. Reserve `failed` for a genuine tool or data failure, and
+  `blocked` only when a hard governance gate genuinely cannot be satisfied (e.g.
+  the referee cannot PASS) — never merely because a preference was unstated.
+  Preserve the available evidence in artifacts. Do not stall a run; decide and move on.
 - Perform only the {phase} phase. Do not spawn other agents. Use owner MCP facts;
   never invent ids, data, solver output, a verdict, or a completed phase.
 - MVSK is a research hypothesis, not an assumed live champion. Preserve it in
@@ -224,16 +245,25 @@ champion instruction above):
         "prompt": (
             "You are the qlab workforce coordinator, not a coding assistant. "
             "You have no filesystem, shell, browser, editing, or trading tools. "
+            "Run the whole pipeline autonomously: never ask the operator a "
+            "question or pause for confirmation mid-run, and let each worker make "
+            "its own best-estimate judgment calls rather than deferring upward. "
             "For a new portfolio/research goal, call workflow_start once. If the "
             "user message contains RESUME_WORKFLOW_ID, call workflow_status for "
-            "that id, do not create a new workflow, and continue at the first "
-            "non-done phase. Then invoke moments-analyst, challenger, optimization-runner, "
-            "referee, and reporter in exactly that order using the Agent tool. "
+            "that id, do not create a new workflow, and continue at the earliest "
+            "non-done phase(s). Run the roles as a dependency graph, not a strict "
+            "line, so the run finishes faster. First invoke moments-analyst with "
+            "the Agent tool and wait for its result. Then dispatch challenger and "
+            "optimization-runner IN PARALLEL — emit both Agent calls in the same "
+            "turn, because each depends only on the analyst and never on the "
+            "other — and wait for both to finish. Only once both are done, invoke "
+            "referee, and after it, reporter. "
             "Pass each worker the workflow_id, the original goal, relevant prior "
-            "worker output and persisted artifacts, as_of, and universe. Run them in the foreground and "
-            "wait for each result. After every worker, call workflow_status and "
-            "do not continue unless its phase is done. If a phase fails or is "
-            "blocked, stop and report that state. The reporter may run only after "
+            "worker output and persisted artifacts, as_of, and universe. After "
+            "each worker, call workflow_status and do not advance to a stage until "
+            "every phase it depends on is done. If a phase fails or is blocked, "
+            "stop and report that state. The referee runs only after both the "
+            "challenger and the optimizer are done; the reporter runs only after "
             "the referee phase is done and must not claim approval unless the "
             "persisted verdict is PASS. End with the workflow_id, phase outcomes, "
             "recommendation or research conclusion, data provenance, uncertainty, "
@@ -423,7 +453,6 @@ def build_claude_argv(
         argv.extend(["--allowedTools", ",".join(["Agent", *_PROXY_TOOLS])])
         argv.extend(["--agent", _COORDINATOR_NAME])
         argv.extend(["--permission-mode", "dontAsk"])
-        argv.extend(["--forward-subagent-text"])
         argv.extend(["--name", "qlab-workforce"])
         argv.extend(["--setting-sources", "project"])
     elif chat:
@@ -468,7 +497,7 @@ class ClaudeSession:
 
     @property
     def available(self) -> bool:
-        return bool(shutil.which("claude"))
+        return bool(resolve_claude_executable())
 
     @property
     def running(self) -> bool:
@@ -476,7 +505,7 @@ class ClaudeSession:
 
     def start(self, prompt: str, *, governed: bool = False,
               resume_session: str | None = None, chat: bool = False) -> bool:
-        executable = shutil.which("claude")
+        executable = resolve_claude_executable()
         self.last_error = ""
         if self.running:
             self.last_error = "A Claude Code session is already running."
@@ -513,6 +542,9 @@ class ClaudeSession:
             # Use the exact path already resolved by the availability check. This
             # avoids a second, cwd-dependent executable lookup on Windows.
             argv[0] = executable
+            if os.name == "nt" and executable.lower().endswith((".cmd", ".bat")):
+                argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", *argv]
+            
             self.process = subprocess.Popen(
                 argv,
                 cwd=process_cwd,

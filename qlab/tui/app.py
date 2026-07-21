@@ -38,6 +38,27 @@ _VIEWS = ("desk", "market", "workforce", "research", "audit")
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
 )
+# The governed pipeline as a flowchart: (phase, agent, short label). The phase
+# matches the durable workflow_steps.phase; the agent matches the spawned role.
+_FLOW = (
+    ("analyst", "moments-analyst", "analyst"),
+    ("challenger", "challenger", "challenger"),
+    ("optimizer", "optimization-runner", "optimizer"),
+    ("referee", "referee", "referee"),
+    ("reporter", "reporter", "reporter"),
+)
+_AGENT_TO_PHASE = {agent: phase for phase, agent, _ in _FLOW}
+_PHASE_SHORT = {phase: short for phase, _, short in _FLOW}
+# One state → (glyph, colour) table shared by the flowchart and the agent rail.
+_STATE_STYLE = {
+    "working": ("●", "#6d9fbf"),
+    "queued": ("◐", "#b38b54"),
+    "waiting": ("◐", "#b38b54"),
+    "done": ("✓", "#79a88b"),
+    "failed": ("×", "#c97878"),
+    "blocked": ("!", "#d0a45c"),
+    "idle": ("◌", "#5f6b76"),
+}
 _PULSE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 # Bus events that mean durable state changed and a full refresh is worth it.
 _REFRESH_EVENT_KINDS = {
@@ -59,6 +80,28 @@ def _reflection_cell(reflection: str | None) -> str:
     """First ~50 chars of a decision's reflection, 'pending' when unresolved."""
     text = str(reflection or "").strip()
     return text[:50] if text else "pending"
+
+
+class FlowNode(Static):
+    """One agent in the workforce flowchart.
+
+    The node shows the phase's live state on its face; hovering reveals the
+    full current update (summary, elapsed, artifacts) both as a native tooltip
+    and expanded in the work rail. The flowchart replaces the streamed Claude
+    narrative — no block of coordinator text is ever dumped into the console.
+    """
+
+    def __init__(self, phase: str, agent: str, short: str):
+        super().__init__(id=f"flow-{phase}", markup=True)
+        self.phase = phase
+        self.agent = agent
+        self.short = short
+
+    def on_enter(self, event: events.Enter) -> None:
+        app = self.app
+        detail = getattr(app, "_flow_details", {}).get(self.phase) or (
+            f"{self.agent}\n\nnot yet started")
+        app._set_selected_work(f"{self.short.upper()} · {self.agent}\n\n{detail}")
 
 
 class PaperConfirmScreen(ModalScreen[bool]):
@@ -160,9 +203,11 @@ class ClaudeWorkforceScreen(ModalScreen[bool]):
             yield Static("START CLAUDE WORKFORCE?", id="workforce-dialog-title")
             yield Static(
                 "qlab will launch the Claude CLI as a constrained coordinator. "
-                "It may deploy only the analyst, challenger, optimizer, referee, "
-                "and reporter through the owner-backed MCP proxy. It receives no "
-                "code, shell, filesystem, or paper-execution tools.",
+                "It deploys the analyst, challenger, optimizer, referee, and "
+                "reporter through the owner-backed MCP proxy and runs the pipeline "
+                "autonomously — no mid-run questions. Progress shows on the "
+                "flowchart (hover a node for detail); it receives no code, shell, "
+                "filesystem, or paper-execution tools.",
                 id="workforce-dialog-copy",
             )
             with Horizontal(id="workforce-dialog-actions"):
@@ -252,10 +297,44 @@ class QlabTui(App[None]):
     }
     #workforce-content {
         height: auto;
-        max-height: 45%;
+        max-height: 30%;
         padding: 1 2;
         background: #0b1016;
         border: round #1d2833;
+    }
+    #flow-row {
+        height: 6;
+        margin-top: 1;
+        align: left middle;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-size: 1 0;
+    }
+    FlowNode {
+        width: 12;
+        height: 4;
+        padding: 0;
+        border: round #2a3a48;
+        color: #8f9ba6;
+        content-align: center middle;
+        text-align: center;
+    }
+    FlowNode.-working {
+        border: round #6d9fbf;
+        background: #10202b;
+        color: #e3eef6;
+        text-style: bold;
+    }
+    FlowNode.-queued { border: round #6b5836; color: #bda879; }
+    FlowNode.-done { border: round #3f6b53; color: #bfe0cd; }
+    FlowNode.-failed { border: round #7d3a3a; color: #edb6b6; }
+    FlowNode.-blocked { border: round #8a6a2f; color: #ecd4a5; }
+    .flow-arrow {
+        width: 3;
+        height: 4;
+        content-align: center middle;
+        text-align: center;
+        color: #46525d;
     }
     #workforce-console {
         height: 1fr;
@@ -458,6 +537,9 @@ class QlabTui(App[None]):
         self._pending_plan_id = ""
         self._agent_focus = False
         self._agent_states: dict[str, str] = {}
+        # Flowchart state: phase -> state token, and phase -> hover detail.
+        self._flow_states: dict[str, str] = {}
+        self._flow_details: dict[str, str] = {}
         self._pulse = 0
         self._live_stream_stop = False
         self._console_partial = ""
@@ -491,8 +573,13 @@ class QlabTui(App[None]):
                 with Vertical(id="workforce", classes="canvas-view"):
                     yield Static("[#d0a45c]\u258d[/] WORKFORCE", classes="canvas-title", markup=True)
                     yield Static(id="workforce-content", markup=True)
+                    with Horizontal(id="flow-row"):
+                        for _index, (_phase, _agent, _short) in enumerate(_FLOW):
+                            if _index:
+                                yield Static("\u2192", classes="flow-arrow")
+                            yield FlowNode(_phase, _agent, _short)
                     yield RichLog(id="workforce-console", wrap=True,
-                                  markup=True, max_lines=800)
+                                  markup=True, max_lines=400)
                     with Horizontal(id="chat-row"):
                         yield Static(id="chat-mode", markup=True)
                         yield Input(
@@ -532,10 +619,12 @@ class QlabTui(App[None]):
         universe = self.query_one("#universe", ListView)
         universe.index = 0
         self._console_write(
-            "[#64717d]workforce chat — type below to talk to the coordinator; "
-            "it deploys the five governed roles and everything streams here. "
-            "[bold]■ stop[/] interrupts; durable state survives.[/]")
+            "[#64717d]workforce — type a goal below and the coordinator runs the "
+            "five governed roles autonomously. Watch the flowchart above; hover a "
+            "node for its live update. [bold]■ stop[/] interrupts; durable state "
+            "survives.[/]")
         self._render_chat_mode()
+        self._render_flow()
         self.query_one("#audit-table", DataTable).zebra_stripes = True
         self.query_one("#runs-table", DataTable).zebra_stripes = True
         self._render_nav()
@@ -662,6 +751,7 @@ class QlabTui(App[None]):
         running = workflows and workflows[0].get("status") == "running"
         if "working" in states or running or self.claude.running:
             self._render_agents()
+            self._render_flow()
             if self.active_view == "workforce":
                 self._render_workforce()
 
@@ -830,59 +920,91 @@ class QlabTui(App[None]):
         ])
         self.query_one("#market-content", Static).update(content)
 
+    def _render_flow(self) -> None:
+        """Paint the five-node agent flowchart from the current flow state."""
+        for phase, agent, short in _FLOW:
+            try:
+                node = self.query_one(f"#flow-{phase}", FlowNode)
+            except Exception:
+                continue
+            state = self._flow_states.get(phase, "idle")
+            glyph, color = _STATE_STYLE.get(state, ("◌", "#5f6b76"))
+            if state == "working":
+                glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
+            node.update(
+                f"[bold]{escape(short)}[/]\n[{color}]{glyph} {escape(state)}[/]")
+            for token in ("working", "queued", "done", "failed", "blocked"):
+                node.set_class(token == state, f"-{token}")
+            node.tooltip = self._flow_details.get(phase) or (
+                f"{agent}\n\nnot yet started")
+
+    def _flow_detail(self, agent: str, phase: str, step: dict) -> str:
+        """A phase's hover card: agent, state, elapsed, summary, artifacts."""
+        state = str(step.get("status", "queued"))
+        elapsed = phase_elapsed(step.get("started_at"), step.get("completed_at"))
+        head = f"{agent} · {phase}\nstate {state}" + (
+            f" · {elapsed}" if elapsed else "")
+        summary = str(step.get("summary") or "").strip()
+        if summary:
+            head += f"\n\n{summary[:400]}"
+        artifacts = step.get("artifacts") or {}
+        if artifacts:
+            packed = "  ".join(f"{key}={artifacts[key]}"
+                               for key in list(artifacts)[:4])
+            head += f"\n\nartifacts: {packed[:200]}"
+        return head
+
     def _render_workforce(self) -> None:
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
         if not workflows:
-            content = (
+            self.query_one("#workforce-content", Static).update(
                 "[#64717d]NO DURABLE RUN[/]   "
-                "[#7d8995]type in the chat box below — Claude coordinates "
-                "analyst → challenger → optimizer → referee → reporter, and "
-                "every phase persists in the owner.[/]"
+                "[#7d8995]type a goal below — Claude runs analyst → challenger → "
+                "optimizer → referee → reporter autonomously and makes its own "
+                "best-estimate calls. Hover a node above for its live update.[/]"
             )
-            self.query_one("#workforce-content", Static).update(content)
+            # Only reset to idle when nothing is live, so an in-flight run keeps
+            # the working glyph the tool stream already set.
+            if not self.claude.running and not self._action_running:
+                self._flow_states = {phase: "idle" for phase, _, _ in _FLOW}
+                self._flow_details = {}
+            self._render_flow()
             return
 
         workflow = workflows[0]
         request = workflow.get("request") or {}
+        status = str(workflow.get("status", "unknown"))
+        steps = workflow.get("steps", [])
+        step_by_phase = {str(step.get("phase")): step for step in steps}
+
+        # Rebuild flow state/detail from durable steps; where a phase has no
+        # step yet, keep a live 'working' the tool stream set, else queue it.
+        for phase, agent, _short in _FLOW:
+            step = step_by_phase.get(phase)
+            if step is not None:
+                self._flow_states[phase] = str(step.get("status", "queued"))
+                self._flow_details[phase] = self._flow_detail(agent, phase, step)
+            else:
+                live = self._flow_states.get(phase)
+                self._flow_states[phase] = (
+                    "working" if live == "working"
+                    else "queued" if status == "running" else "idle")
+                self._flow_details.setdefault(
+                    phase, f"{agent} · {phase}\n\nnot yet started")
+        self._render_flow()
+
         lines = [
             f"[bold #edf3f7]{escape(str(workflow.get('workflow_id', '—')))}[/]   "
-            f"{escape(str(workflow.get('status', 'unknown')).upper())}",
+            f"{escape(status.upper())}",
             f"[#64717d]{escape(str(workflow.get('kind', 'portfolio_review')))} · "
             f"as of {escape(str(request.get('as_of', '—')))} · "
             f"{escape(str(request.get('universe', 'core')))}[/]",
-            "",
-            f"{escape(str(request.get('goal', 'Governed portfolio review')))}",
-            "",
-            "[#64717d]PHASE                                      STATE[/]",
+            f"[#7d8995]{escape(str(request.get('goal', 'Governed portfolio review'))[:160])}[/]",
         ]
-        steps = workflow.get("steps", [])
-        for step in steps:
-            state = str(step.get("status", "queued"))
-            glyph, color = {
-                "working": ("●", "#6d9fbf"),
-                "queued": ("◐", "#b38b54"),
-                "done": ("✓", "#79a88b"),
-                "failed": ("×", "#c97878"),
-                "blocked": ("!", "#d0a45c"),
-            }.get(state, ("◌", "#5f6b76"))
-            if state == "working":
-                glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
-            elapsed = phase_elapsed(
-                step.get("started_at"), step.get("completed_at"))
-            timing = f"  [#5f6b76]{elapsed}[/]" if elapsed else ""
-            lines.append(
-                f"[{color}]{glyph}[/] {escape(str(step.get('phase', ''))):<12}  "
-                f"{escape(str(step.get('agent', ''))):<22} {escape(state)}{timing}"
-            )
-            summary = str(step.get("summary") or "").strip()
-            if summary:
-                lines.append(f"   [#7d8995]{escape(summary[:140])}[/]")
 
-        status = str(workflow.get("status", ""))
         result = workflow.get("result") or {}
         if status == "complete" and result.get("final_summary"):
-            referee = next(
-                (s for s in steps if s.get("phase") == "referee"), None)
+            referee = step_by_phase.get("referee")
             verdict = str(((referee or {}).get("artifacts") or {})
                           .get("verdict") or "")
             chip = f"  ·  referee {verdict}" if verdict else ""
@@ -905,21 +1027,15 @@ class QlabTui(App[None]):
                 "[#64717d]Resume with : workforce resume "
                 f"{escape(str(workflow.get('workflow_id', '')))}[/]",
             ])
+
         earlier = workflows[1:5]
         if earlier:
-            lines.extend(["", "[#64717d]EARLIER RUNS"
-                          "                (resume with : workforce resume ID)[/]"])
-            for row in earlier:
-                lines.append(
-                    f"{escape(str(row.get('workflow_id', '—')))}  "
-                    f"{escape(str(row.get('status', '')))}"
-                    f" · {escape(str(row.get('current_phase', '')))}"
-                )
-        lines.extend([
-            "",
-            "[#64717d]Claude is coordination only. Paper execution remains a "
-            "separate human-confirmed action.[/]",
-        ])
+            packed = "   ".join(
+                f"{escape(str(row.get('workflow_id', '—')))} "
+                f"[#7d8995]{escape(str(row.get('status', '')))}[/]"
+                for row in earlier)
+            lines.append(
+                f"[#64717d]earlier (: workforce resume ID)[/]  {packed}")
         self.query_one("#workforce-content", Static).update("\n".join(lines))
 
     def _maybe_offer_workforce(self) -> None:
@@ -1479,10 +1595,18 @@ class QlabTui(App[None]):
         if governed:
             self._console_partial = ""
             if not resume_session:
+                self._flow_states = {phase: "queued" for phase, _, _ in _FLOW}
+                self._flow_details = {
+                    phase: f"{agent} · {phase}\n\nqueued — waiting to start"
+                    for phase, agent, _ in _FLOW}
+                self._render_flow()
                 first_line = prompt.splitlines()[0]
                 self._console_write(
                     f"[bold #d0a45c]▌ workforce run[/]  "
                     f"[#7d8995]{escape(first_line[:110])}[/]")
+                self._console_write(
+                    "[#64717d]running autonomously — hover a node for its live "
+                    "update[/]")
         self._write_local_event(
             "claude.started",
             {"mode": "workforce" if governed else "read-only", "prompt": prompt[:120]},
@@ -1496,57 +1620,96 @@ class QlabTui(App[None]):
             pass  # app closed while the reader thread was finishing
 
     def _apply_claude_event(self, event: ClaudeEvent) -> None:
-        workforce = self.claude.mode in ("workforce", "chat")
+        workforce = self.claude.mode == "workforce"
+        chat = self.claude.mode == "chat"
         if event.kind == "session":
             session_id = str(event.raw.get("session_id") or "")
             if session_id and self.claude.mode in self._chat_sessions:
                 self._chat_sessions[self.claude.mode] = session_id
-        elif event.kind == "text_delta":
-            self._claude_saw_delta = True
-            self._claude_buffer += event.text
-            self._set_selected_work(
-                f"CLAUDE · {self.claude.mode.upper()}\n\n" + self._claude_buffer[-6000:])
-            if workforce:
-                self._console_stream_text(event.text)
-        elif event.kind == "text":
-            if not self._claude_saw_delta:
+        elif event.kind in ("text_delta", "text"):
+            # The workforce never dumps coordinator/worker prose — its progress
+            # lives on the flowchart. Only the read-only chat and ask modes show
+            # assistant text (a short conversation, not a governed-run block).
+            if event.kind == "text_delta":
+                self._claude_saw_delta = True
+            elif self._claude_saw_delta:
+                return
+            if chat:
+                self._console_stream_text(
+                    event.text if event.kind == "text_delta" else event.text + "\n")
+            elif not workforce:  # read-only 'ask'
                 self._claude_buffer += event.text
                 self._set_selected_work(
-                    f"CLAUDE · {self.claude.mode.upper()}\n\n" + self._claude_buffer[-6000:])
-                if workforce:
-                    self._console_stream_text(event.text + "\n")
+                    "CLAUDE · READ-ONLY\n\n" + self._claude_buffer[-6000:])
         elif event.kind == "tool_start":
-            self._set_agent_from_tool(event.tool, event.agent)
+            agent = self._set_agent_from_tool(event.tool, event.agent)
             payload = {"tool": event.tool}
             if event.agent:
                 payload["agent"] = event.agent
             self._write_local_event("claude.tool", payload)
             if workforce:
+                base = event.tool.rsplit("__", 1)[-1] or event.tool
+                phase = _AGENT_TO_PHASE.get(agent, "")
+                if phase:
+                    self._flow_states[phase] = "working"
+                    self._flow_details[phase] = (
+                        f"{agent} · {phase}\n\nworking — {base}")
+                    self._render_flow()
+                    self._console_write(
+                        f"[#6d9fbf]▶ {escape(_PHASE_SHORT.get(phase, phase))}[/] "
+                        f"[#7d8995]{escape(base)}[/]")
+                else:
+                    self._console_write(
+                        f"[#6d9fbf]▶ coordinator[/] [#7d8995]{escape(base)}[/]")
+            elif chat:
                 self._console_flush()
-                agent = f"  [#7d8995]{escape(event.agent)}[/]" if event.agent else ""
-                self._console_write(
-                    f"[#6d9fbf]→ {escape(event.tool)}[/]{agent}")
+                self._console_write(f"[#6d9fbf]→ {escape(event.tool)}[/]")
         elif event.kind == "error":
-            self._set_selected_work("CLAUDE FAILED\n\n" + event.text[-4000:])
             self._write_local_event("claude.failed", {"error": event.text[-400:]})
             if workforce:
+                self._console_write(f"[#c97878]✗ {escape(event.text[-160:])}[/]")
+            elif chat:
                 self._console_flush()
                 self._console_write(f"[#c97878]✗ {escape(event.text[-300:])}[/]")
+            else:
+                self._set_selected_work("CLAUDE FAILED\n\n" + event.text[-4000:])
             self._start_refresh()
         elif event.kind == "result":
-            if not self._claude_buffer and event.text:
-                self._set_selected_work(
-                    f"CLAUDE · {self.claude.mode.upper()}\n\n" + event.text[-6000:])
             self._write_local_event("claude.completed", {})
             if workforce:
+                # Reporter is done and the run is complete: the one block that
+                # lands in the chat is the run's synthesized results.
+                self._print_workforce_results(event.text)
+            elif chat:
                 self._console_flush()
-                done = ("▮ workforce run complete"
-                        if self.claude.mode == "workforce" else "▮ done")
-                self._console_write(f"[#79a88b]{done}[/]")
+                self._console_write("[#79a88b]▮ done[/]")
+            elif event.text:
+                self._set_selected_work(
+                    "CLAUDE · READ-ONLY\n\n" + (self._claude_buffer or event.text)[-6000:])
             self._start_refresh()
         self._render_status()
 
-    def _set_agent_from_tool(self, tool: str, explicit_agent: str = "") -> None:
+    def _print_workforce_results(self, text: str) -> None:
+        """Print just the final results to the chat once the reporter is done.
+
+        The intermediate coordinator/worker narrative is never streamed; this is
+        the single block that reaches the console — the run's conclusion, drawn
+        from the coordinator's final message, and the durable result card above
+        keeps its own copy.
+        """
+        text = (text or "").strip()
+        self._console_write("")
+        self._console_write("[bold #79a88b]▮ RESULTS[/]")
+        if text and text != "Claude completed":
+            for line in text.splitlines():
+                self._console_write(
+                    f"[#e6edf3]{escape(line)}[/]" if line.strip() else "")
+        else:
+            self._console_write(
+                "[#7d8995]the coordinator returned no final text — see the "
+                "result card above[/]")
+
+    def _set_agent_from_tool(self, tool: str, explicit_agent: str = "") -> str:
         if explicit_agent in _AGENT_NAMES:
             agent = explicit_agent
         elif "workflow_analyst" in tool or "objective_build" in tool:
@@ -1562,9 +1725,10 @@ class QlabTui(App[None]):
               or "report_recommendation" in tool):
             agent = "reporter"
         else:
-            return
+            return ""
         self._agent_states[agent] = "working"
         self._render_agents()
+        return agent
 
     def _set_selected_work(self, text: str) -> None:
         self.query_one("#selected-work", Static).update(escape(text))

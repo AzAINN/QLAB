@@ -151,6 +151,45 @@ def test_workforce_is_durable_ordered_and_role_bound(reg):
     assert replay["result"]["final_summary"] == "reporter complete"
 
 
+def test_workforce_challenger_and_optimizer_run_in_parallel_after_analyst(reg):
+    """Challenger and optimizer depend only on the analyst, so the optimizer may
+    start without waiting for the challenger — but the referee still waits for
+    both, so nothing is *used* before the judgment is defended."""
+    import pytest
+
+    workflow = reg.start_workflow("portfolio_review", {"goal": "review"})
+    workflow_id = workflow["workflow_id"]
+
+    # Nothing downstream may start before the analyst is done.
+    with pytest.raises(RuntimeError, match="cannot start"):
+        reg.update_workflow_phase(workflow_id, "optimizer", "working")
+
+    reg.update_workflow_phase(
+        workflow_id, "analyst", "done",
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+    )
+
+    # With the analyst done, challenger and optimizer are concurrent: the
+    # optimizer starts and finishes without the challenger having begun.
+    reg.update_workflow_phase(workflow_id, "optimizer", "working")
+    reg.update_workflow_phase(
+        workflow_id, "optimizer", "done",
+        artifacts={"targets": {"GLD": 1.0}, "algorithm_id": "hrp"},
+    )
+
+    # The referee is the join point and cannot start until BOTH are done.
+    with pytest.raises(RuntimeError, match="cannot start before 'challenger'"):
+        reg.update_workflow_phase(workflow_id, "referee", "working")
+
+    reg.update_workflow_phase(
+        workflow_id, "challenger", "done", artifacts={"challenger_view": "c"},
+    )
+    referee_ready = reg.update_workflow_phase(workflow_id, "referee", "working")
+    states = {step["phase"]: step["status"] for step in referee_ready["steps"]}
+    assert states["challenger"] == "done" and states["optimizer"] == "done"
+    assert states["referee"] == "working"
+
+
 def test_workforce_refuses_unstructured_completion_and_referee_fail(reg):
     import pytest
 

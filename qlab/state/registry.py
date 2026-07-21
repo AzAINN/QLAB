@@ -32,6 +32,21 @@ from qlab.paths import state_path
 
 
 WORKFORCE_PHASES = ("analyst", "challenger", "optimizer", "referee", "reporter")
+# Dependency DAG, not a strict line: challenger and optimizer both consume only
+# the analyst's outputs and never each other's, so they may run concurrently.
+# The referee — the gate that lets a result be used — still waits for both, and
+# the reporter waits for the referee. Every real dependency (and "the judgment
+# is defended before the result is used") is preserved; only the optimizer's
+# artificial wait on the challenger is dropped, which is what enables the
+# parallel stage. Prerequisites must be a subset of the lower-seq phases so the
+# seq-ordered completion bookkeeping below stays valid.
+_WORKFORCE_DEPS = {
+    "analyst": (),
+    "challenger": ("analyst",),
+    "optimizer": ("analyst",),
+    "referee": ("challenger", "optimizer"),
+    "reporter": ("referee",),
+}
 _WORKFORCE_REQUIRED_ARTIFACTS = {
     "analyst": ("moment_set_id", "objective_id", "decision_id"),
     "challenger": ("challenger_view",),
@@ -504,7 +519,7 @@ class Registry:
         summary: str = "",
         artifacts: dict | None = None,
     ) -> dict:
-        """Advance one role-bound phase while enforcing dependency order."""
+        """Advance one role-bound phase while enforcing the dependency DAG."""
         if phase not in WORKFORCE_PHASES:
             raise ValueError(f"unknown workforce phase {phase!r}")
         if status not in {"working", "done", "failed", "blocked"}:
@@ -524,10 +539,11 @@ class Registry:
                 # persisted result.
                 return workflow
             raise RuntimeError(f"completed phase {phase!r} cannot be reopened")
-        for previous in steps[: int(step["seq"])]:
-            if previous["status"] != "done":
+        for dependency in _WORKFORCE_DEPS.get(phase, ()):
+            dependency_step = by_phase.get(dependency)
+            if dependency_step is None or dependency_step["status"] != "done":
                 raise RuntimeError(
-                    f"phase {phase!r} cannot start before {previous['phase']!r} is done"
+                    f"phase {phase!r} cannot start before {dependency!r} is done"
                 )
 
         artifacts = artifacts or {}

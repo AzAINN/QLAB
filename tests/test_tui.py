@@ -165,7 +165,6 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
     assert "execute" not in allowed and "order" not in allowed
     assert argv[argv.index("--tools") + 1] == "default"
     assert argv[argv.index("--agent") + 1] == "qlab-coordinator"
-    assert "--forward-subagent-text" in argv
     assert "--agents" not in argv
     # npm's Windows launcher is a .cmd file and therefore inherits cmd.exe's
     # 8,191-character ceiling. Keep ample room for longer Windows paths.
@@ -301,8 +300,15 @@ def test_workforce_view_renders_durable_phase_progress():
             await pilot.press("3")
             content = str(app.query_one("#workforce-content").content)
             assert app.active_view == "workforce"
+            # the compact header still carries the run identity
             assert "wf123" in content
-            assert "covariance ready" in content
+            # per-phase progress now lives on the flowchart, not in a text block
+            assert app._flow_states["analyst"] == "done"
+            assert app._flow_states["challenger"] == "working"
+            # the step summary is revealed on hover, not dumped into the view
+            assert "covariance ready" in app._flow_details["analyst"]
+            assert str(app.query_one("#flow-analyst").tooltip).find(
+                "covariance ready") >= 0
 
     asyncio.run(run())
 
@@ -479,7 +485,9 @@ def test_workforce_view_shows_result_card_and_timings():
             assert "RESULT" in content
             assert "referee PASS" in content
             assert "hold reviewed HRP targets" in content
-            assert "42s" in content
+            # phase timing is on the referee node's hover detail, not the block
+            assert "42s" in app._flow_details["referee"]
+            assert app._flow_states["referee"] == "done"
 
     asyncio.run(run())
 
@@ -515,7 +523,7 @@ def test_workforce_view_shows_failure_card_with_resume_hint():
     asyncio.run(run())
 
 
-def test_workforce_console_streams_narrative_and_bus_events():
+def test_workforce_mode_advances_flowchart_without_dumping_narrative():
     from qlab.tui.app import QlabTui
     from qlab.tui.claude import ClaudeEvent
     from textual.widgets import RichLog
@@ -530,19 +538,32 @@ def test_workforce_console_streams_narrative_and_bus_events():
             baseline = len(console.lines)
 
             app.claude.mode = "workforce"
+            # coordinator/worker prose is never dumped into the console
             app._apply_claude_event(ClaudeEvent("text_delta", "thinking about"))
-            assert len(console.lines) == baseline  # partial line held back
             app._apply_claude_event(ClaudeEvent("text_delta", " windows\n"))
+            assert len(console.lines) == baseline  # no narrative block
+
+            # a tool call advances the matching flowchart node and logs one line
             app._apply_claude_event(ClaudeEvent(
                 "tool_start", "calling", "mcp__qlab-operator__workflow_analyst",
                 agent="moments-analyst"))
+            assert app._flow_states["analyst"] == "working"
+            assert len(console.lines) == baseline + 1
+
+            # a durable bus event adds one compact line
             app._apply_live_event({
                 "event_id": "e9", "ts": "2026-07-20T09:00:00+00:00",
                 "kind": "referee_verdict", "payload": {"verdict": "PASS"},
             })
-            app._apply_claude_event(ClaudeEvent("result", "done"))
-            await pilot.pause(0.05)
-            assert len(console.lines) > baseline + 3
+            # on completion the run's final results — and only those — print
+            app._apply_claude_event(ClaudeEvent(
+                "result", "Recommendation: hold HRP targets.\nReferee PASS."))
+            rendered = "\n".join(strip.text for strip in console.lines)
+            assert "▮ RESULTS" in rendered
+            assert "Recommendation: hold HRP targets." in rendered
+            assert "Referee PASS." in rendered
+            # the streamed narrative was still never dumped
+            assert "thinking about windows" not in rendered
 
     asyncio.run(run())
 
@@ -679,7 +700,9 @@ def test_claude_session_uses_resolved_launcher_and_isolated_agents(
     session = claude_module.ClaudeSession(lambda event: None, cwd=tmp_path)
 
     assert session.start("inspect", governed=True)
-    assert launched["argv"][0] == r"C:\Tools\claude.cmd"
+    # On Windows a .cmd launcher is invoked through cmd.exe /c, so the resolved
+    # launcher may sit after a shell prefix rather than at argv[0].
+    assert r"C:\Tools\claude.cmd" in launched["argv"]
     assert "--agents" not in launched["argv"]
     process_cwd = launched["cwd"]
     assert process_cwd != tmp_path
@@ -704,6 +727,26 @@ def test_claude_session_reports_process_creation_failure(tmp_path, monkeypatch):
     assert not session.start("inspect", governed=True)
     assert "WinError 206" in session.last_error
     assert "too long" in session.last_error
+
+
+def test_resolve_claude_executable_prefers_runnable_launcher_on_windows(monkeypatch):
+    # Python 3.12.0's shutil.which returns npm's extensionless shell shim ahead
+    # of claude.cmd; CreateProcess rejects that script with WinError 193.
+    from qlab.tui import claude as claude_module
+
+    resolved = {
+        "claude": r"C:\Users\me\AppData\Roaming\npm\claude",
+        "claude.cmd": r"C:\Users\me\AppData\Roaming\npm\claude.cmd",
+    }
+    monkeypatch.setattr(claude_module.os, "name", "nt")
+    monkeypatch.setattr(
+        claude_module.shutil, "which", lambda command: resolved.get(command)
+    )
+
+    assert (
+        claude_module.resolve_claude_executable()
+        == r"C:\Users\me\AppData\Roaming\npm\claude.cmd"
+    )
 
 
 def test_audit_row_select_expands_decision_into_work_rail():

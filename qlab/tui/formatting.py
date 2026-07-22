@@ -28,6 +28,68 @@ def weight_bar(value: float, width: int = 16) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+# Braille cell = a 2-wide × 4-tall dot matrix (base codepoint U+2800). This
+# table maps a (row, col) inside one cell to its dot bit, so a line can be
+# plotted at 2× horizontal and 4× vertical the resolution of block glyphs —
+# which is what makes a terminal price chart read as a curve, not a bar row.
+_BRAILLE_DOTS = (
+    (0x01, 0x08),
+    (0x02, 0x10),
+    (0x04, 0x20),
+    (0x40, 0x80),
+)
+
+
+def braille_chart(values: list[float], width: int, height: int) -> list[str]:
+    """Render ``values`` as a multi-row braille line chart.
+
+    ``width``/``height`` are terminal cells; the dot grid is therefore
+    ``2*width`` by ``4*height``. Returns exactly ``height`` strings of exactly
+    ``width`` characters (blank braille where there is no line), so the caller
+    can drop it straight into a fixed region without reflow. A flat or too-short
+    series yields blank rows rather than raising.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    blank = "⠀" * width
+    finite = [float(v) for v in values if math.isfinite(float(v))]
+    if len(finite) < 2:
+        return [blank for _ in range(height)]
+
+    cols = width * 2
+    rows = height * 4
+    n = len(finite)
+    # Resample to one point per dot-column with linear interpolation, so a short
+    # series (e.g. 40 daily bars) upsampled onto a wide terminal reads as a
+    # smooth curve rather than a staircase of repeated samples.
+    sampled = []
+    for i in range(cols):
+        pos = i * (n - 1) / (cols - 1)
+        lo_i = int(pos)
+        hi_i = min(n - 1, lo_i + 1)
+        frac = pos - lo_i
+        sampled.append(finite[lo_i] * (1.0 - frac) + finite[hi_i] * frac)
+    lo, hi = min(sampled), max(sampled)
+    span = (hi - lo) or 1.0
+    # Dot-space y, 0 at the bottom of the grid.
+    ys = [int(round((value - lo) / span * (rows - 1))) for value in sampled]
+
+    grid = [[0] * width for _ in range(height)]
+    prev = ys[0]
+    for cx in range(cols):
+        cur = ys[cx]
+        # Fill the vertical run between adjacent samples so the line is
+        # continuous instead of a scatter of dots.
+        for dy in range(min(prev, cur), max(prev, cur) + 1):
+            ry = (rows - 1) - dy  # dot rows are top-down
+            grid[ry // 4][cx // 2] |= _BRAILLE_DOTS[ry % 4][cx % 2]
+        prev = cur
+    return [
+        "".join(chr(0x2800 + cell) for cell in row)
+        for row in grid
+    ]
+
+
 def pct(value: float | None, digits: int = 1) -> str:
     return "—" if value is None else f"{value:.{digits}%}"
 

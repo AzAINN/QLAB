@@ -545,6 +545,96 @@ def test_owner_refusals_reach_the_worker_with_their_reason():
     assert "retrying will not help" in str(gone.value)
 
 
+def test_nav_menu_rows_are_clickable():
+    """Each 1–5 spine row switches to its view on click, not just Market.
+
+    The row clicked is the click's y within the widget, so this pins the
+    mapping as well as the fact that a Static-based menu is now clickable.
+    """
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 44)) as pilot:
+            await pilot.pause(0.2)
+            for row, view in enumerate(
+                    ("desk", "market", "workforce", "research", "audit")):
+                # start elsewhere so each click is a genuine transition
+                app.action_view("audit" if view != "audit" else "desk")
+                await pilot.pause(0.02)
+                await pilot.click("#nav", offset=(3, row))
+                await pilot.pause(0.02)
+                assert app.active_view == view, (row, app.active_view)
+
+    asyncio.run(run())
+
+
+def test_braille_chart_is_fixed_size_and_plots_the_trend():
+    from qlab.tui.formatting import braille_chart
+
+    # Exact grid: every row is `width` cells, and there are `height` of them —
+    # so a caller can drop it into a fixed region without reflow.
+    rows = braille_chart(list(range(40)), width=30, height=8)
+    assert len(rows) == 8
+    assert all(len(row) == 30 for row in rows)
+
+    # A rising series lifts ink from the bottom-left toward the top-right.
+    def inked(row: str) -> bool:
+        return any(ch != "⠀" for ch in row)
+    assert inked(rows[-1])            # bottom carries the low end
+    assert inked(rows[0])             # top carries the high end
+    top_left = rows[0][: len(rows[0]) // 2]
+    assert all(ch == "⠀" for ch in top_left)  # nothing high on the left yet
+
+    # Degenerate inputs are blank, never an exception, and still fixed-size.
+    assert braille_chart([], 10, 3) == ["⠀" * 10] * 3
+    assert braille_chart([5.0], 10, 3) == ["⠀" * 10] * 3
+    flat = braille_chart([2.0] * 20, 12, 4)
+    assert len(flat) == 4 and all(len(r) == 12 for r in flat)
+
+
+def test_market_view_scales_the_chart_to_the_terminal():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(200, 52)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("2")
+            await pilot.pause(0.1)
+            content = str(app.query_one("#market-content").content)
+            # the braille chart is present and spans many rows (a real plot,
+            # not a one-line sparkline)
+            chart_rows = [ln for ln in content.split("\n")
+                          if any(c not in " ⠀" and ord(c) >= 0x2800 and ord(c) <= 0x28ff
+                                 for c in ln)]
+            assert len(chart_rows) >= 10
+            # the readouts still render below it
+            assert "portfolio weight" in content and "regime" in content
+
+    asyncio.run(run())
+
+
+def test_resize_sets_one_layout_tier():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(210, 50)) as pilot:
+            await pilot.pause(0.2)
+            assert "wide" in app.screen.classes
+
+            # exactly one tier is active at each width; wide/compact/narrow and
+            # the unnamed default are mutually exclusive
+            for width, expected in ((160, set()), (130, {"compact"}), (95, {"narrow"})):
+                await pilot.resize_terminal(width, 40)
+                await pilot.pause(0.1)
+                tiers = {"wide", "compact", "narrow"} & set(app.screen.classes)
+                assert tiers == expected, (width, tiers)
+
+    asyncio.run(run())
+
+
 def test_phase_elapsed_labels():
     from qlab.tui.formatting import phase_elapsed
 

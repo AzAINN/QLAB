@@ -32,11 +32,15 @@ offers to launch the Claude CLI as qlab's constrained workforce coordinator.
     qlab tui --claude off     # do not offer; : workforce GOAL still starts it
 
 Inside the desk, the workforce view (key `3`) is a chat: type to the
-coordinator and it deploys the five governed roles while their narrative,
-tool calls, and audit-bus events stream in the center; follow-up messages
-continue the same session, and the `■ stop` button interrupts without losing
-durable phase state. `: workforce GOAL`, `: workforce status`, and
-`: workforce resume ID` drive the same machinery from the command row.
+coordinator and it deploys the five governed roles. Progress is a flowchart —
+hover a node for that phase's live summary, elapsed time, and artifacts — and
+the console stays quiet, printing one short note per agent (what it settled,
+what runs next) and the run's results at the end. Full tool traffic remains on
+the timeline (`~`). Follow-up messages continue the same session, the `■ stop`
+button interrupts without losing durable phase state, and a run that stalls is
+stopped by a watchdog rather than hanging the desk. `: workforce GOAL`,
+`: workforce status`, and `: workforce resume ID` drive the same machinery from
+the command row.
 
 `: chat MESSAGE` switches the same chat box to a read-only desk assistant —
 ask about the portfolio, market, runs, or audit trail conversationally; it
@@ -187,9 +191,11 @@ There are two valid Claude modes:
    no owner UI process is running.
 2. Workforce desk: qlab tui owns the book and optionally launches a session-local
    `qlab-coordinator` against the qlab-operator proxy. The coordinator deploys
-   only the five qlab roles in their enforced order. They can inspect, research,
-   persist judgments, and request a dry rebalance preview; only the human-facing
-   TUI can confirm paper execution.
+   only the five qlab roles, following the dependency graph the registry
+   enforces: analyst, then challenger and optimizer concurrently, then the
+   referee gate, then the reporter. They can inspect, research, persist
+   judgments, and request a dry rebalance preview; only the human-facing TUI
+   can confirm paper execution.
 
 Starting a retired standalone quant-lab or quant-trader module now delegates to
 the guarded combined server, so those module paths cannot recreate the old

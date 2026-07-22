@@ -15,6 +15,30 @@ from typing import Any
 import httpx
 
 
+class OwnerRefused(RuntimeError):
+    """The owner runtime refused a call, carrying its own explanation.
+
+    A bare ``HTTPStatusError`` renders as "Server error '500 …' for url …",
+    which tells a worker nothing about *why* it was refused — so the worker
+    repeats the identical call until its turn budget is gone. Every refusal
+    the owner can explain (a missing artifact, a phase whose dependency is
+    not done, a budget, a look-ahead date) is re-raised with that text so one
+    corrected retry is possible instead of an unbounded blind one.
+    """
+
+
+def _refusal(path: str, exc: httpx.HTTPStatusError) -> OwnerRefused:
+    detail = ""
+    try:
+        payload = exc.response.json()
+        detail = str(payload.get("error") or "").strip()
+    except ValueError:
+        detail = exc.response.text.strip()[:400]
+    return OwnerRefused(
+        f"the qlab owner refused {path}: {detail or exc.response.reason_phrase}"
+    )
+
+
 class RuntimeClient:
     def __init__(self, base_url: str | None = None, *, offline: bool | None = None):
         self.base_url = (base_url or os.environ.get(
@@ -24,16 +48,32 @@ class RuntimeClient:
         self.offline = bool(offline)
 
     def get(self, path: str, **params: Any) -> dict:
-        response = httpx.get(
-            self.base_url + path, params=params, timeout=httpx.Timeout(30.0))
-        response.raise_for_status()
+        try:
+            response = httpx.get(
+                self.base_url + path, params=params, timeout=httpx.Timeout(30.0))
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise _refusal(path, exc) from exc
+        except httpx.HTTPError as exc:
+            raise OwnerRefused(
+                f"the qlab owner runtime at {self.base_url} is unreachable "
+                f"({exc!r}); stop and report this — retrying will not help"
+            ) from exc
         return response.json()
 
     def post(self, path: str, body: dict | None = None) -> dict:
-        response = httpx.post(
-            self.base_url + path, json=body or {},
-            timeout=httpx.Timeout(1800.0, connect=10.0))
-        response.raise_for_status()
+        try:
+            response = httpx.post(
+                self.base_url + path, json=body or {},
+                timeout=httpx.Timeout(900.0, connect=10.0))
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise _refusal(path, exc) from exc
+        except httpx.HTTPError as exc:
+            raise OwnerRefused(
+                f"the qlab owner runtime at {self.base_url} is unreachable "
+                f"({exc!r}); stop and report this — retrying will not help"
+            ) from exc
         return response.json()
 
 

@@ -186,6 +186,18 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
     }
     assert not ({"Read", "Write", "Edit", "Bash"} & all_role_tools)
     assert not any("execute" in tool or "order" in tool for tool in all_role_tools)
+    # Every worker may read its own run's durable record — the referee checks
+    # against what was persisted, not against ids retyped into its task, and a
+    # garbled hand-off stays recoverable instead of stalling the phase.
+    for name, definition in agents.items():
+        if name == "qlab-coordinator":
+            continue
+        assert "mcp__qlab-operator__workflow_status" in definition["tools"], name
+        # reading is not writing: no worker may touch another phase's update
+        others = {f"mcp__qlab-operator__workflow_{other}"
+                  for other in ("analyst", "challenger", "optimizer",
+                                "referee", "reporter")}
+        assert len(others & set(definition["tools"])) == 1, name
 
 
 def test_session_agent_files_preserve_workforce_authority(tmp_path):
@@ -206,6 +218,63 @@ def test_session_agent_files_preserve_workforce_authority(tmp_path):
     ]
     assert metadata["permissionMode"] == "dontAsk"
     assert "no filesystem, shell, browser, editing, or trading tools" in body
+
+
+def test_coordinator_dispatches_synchronously_and_fans_out_in_parallel():
+    """The two prompt clauses that decide whether a run finishes at all.
+
+    A backgrounded Agent call strands the coordinator — it holds no tool for
+    collecting one — which is exactly how a run hangs on the first worker. The
+    parallel clause is the time saving; both are contract, not style.
+    """
+    from qlab.tui.claude import build_workforce_agents
+
+    coordinator = build_workforce_agents()["qlab-coordinator"]["prompt"]
+    assert "run_in_background: false" in coordinator
+    assert "SAME turn" in coordinator
+    # bounded recovery: one re-dispatch, then stop — never an unbounded loop
+    assert "ONCE" in coordinator and "do not loop" in coordinator
+
+    analyst = build_workforce_agents()["moments-analyst"]["prompt"]
+    assert "ONE turn" in analyst  # batch independent tool calls
+    # bounded retry: a tool error is corrected, never repeated verbatim forever
+    assert "Never repeat an identical failing call" in analyst
+
+
+def test_session_watchdog_kills_a_stalled_run():
+    """No run may last forever, whatever the model decides to do."""
+    from qlab.tui.claude import ClaudeSession
+
+    class FakeProcess:
+        def __init__(self):
+            self.terminated = False
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    events = []
+    session = ClaudeSession(events.append)
+
+    over_budget = FakeProcess()
+    session._watchdog(over_budget, budget_s=0.0, silence_s=0.0)
+    assert over_budget.terminated
+    assert "no result after" in session._timed_out
+
+    # a session that produces nothing for too long is stalled, not thinking
+    session._timed_out = ""
+    session._last_event_at = 0.0
+    silent = FakeProcess()
+    session._watchdog(silent, budget_s=3600.0, silence_s=0.001)
+    assert silent.terminated
+    assert "silent for" in session._timed_out
 
 
 def test_claude_parser_identifies_spawned_workforce_agent():
@@ -435,6 +504,47 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
     )
 
 
+def test_owner_refusals_reach_the_worker_with_their_reason():
+    """An opaque 500 is what turns one bad call into an unbounded retry loop.
+
+    The owner already explains every refusal it raises (a missing artifact, a
+    phase whose dependency is not done); httpx's own message throws that away,
+    so the worker cannot correct itself and burns its turns repeating the call.
+    """
+    import httpx
+    import pytest as _pytest
+
+    from qlab.mcp.tui_proxy import OwnerRefused, RuntimeClient
+
+    client = RuntimeClient("http://127.0.0.1:1")
+
+    def raising(*_args, **_kwargs):
+        request = httpx.Request("POST", "http://127.0.0.1:1/api/workflows/analyst")
+        response = httpx.Response(
+            500, json={"error": "ValueError(\"phase 'analyst' cannot complete "
+                                "without artifacts ['objective_id']\")"},
+            request=request)
+        raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(httpx, "post", raising)
+        with _pytest.raises(OwnerRefused) as refused:
+            client.post("/api/workflows/analyst", {})
+    assert "objective_id" in str(refused.value)
+    assert "/api/workflows/analyst" in str(refused.value)
+
+    # an owner that is gone is terminal, and says so rather than inviting retries
+    def unreachable(*_args, **_kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(httpx, "get", unreachable)
+        with _pytest.raises(OwnerRefused) as gone:
+            client.get("/api/portfolio")
+    assert "unreachable" in str(gone.value)
+    assert "retrying will not help" in str(gone.value)
+
+
 def test_phase_elapsed_labels():
     from qlab.tui.formatting import phase_elapsed
 
@@ -488,6 +598,77 @@ def test_workforce_view_shows_result_card_and_timings():
             # phase timing is on the referee node's hover detail, not the block
             assert "42s" in app._flow_details["referee"]
             assert app._flow_states["referee"] == "done"
+
+    asyncio.run(run())
+
+
+def test_new_run_clears_the_previous_run_from_the_flowchart_immediately():
+    """A starting run must never wear the last run's finished nodes.
+
+    The durable row for a new run only exists once the coordinator calls
+    workflow.start; until then the snapshot still returns the previous run, so
+    the view has to refuse it rather than repaint completed phases.
+    """
+    from qlab.tui.app import QlabTui
+
+    previous = {
+        "workflow_id": "wfold", "kind": "portfolio_review",
+        "status": "complete", "current_phase": "reporter",
+        "request": {"goal": "old run", "as_of": "2026-07-19", "universe": "core"},
+        "result": {"final_summary": "old conclusion"},
+        "steps": [{"phase": phase, "agent": agent, "status": "done",
+                   "summary": f"{phase} finished"}
+                  for phase, agent in (
+                      ("analyst", "moments-analyst"), ("challenger", "challenger"),
+                      ("optimizer", "optimization-runner"), ("referee", "referee"),
+                      ("reporter", "reporter"))],
+    }
+    fresh = {
+        "workflow_id": "wfnew", "kind": "portfolio_review",
+        "status": "running", "current_phase": "analyst",
+        "request": {"goal": "new run", "as_of": "2026-07-20", "universe": "core"},
+        "steps": [{"phase": "analyst", "agent": "moments-analyst",
+                   "status": "working", "summary": ""}],
+    }
+
+    class RollingClient(StubClient):
+        workflows = [previous]
+
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = list(self.workflows)
+            return snap
+
+    async def run():
+        client = RollingClient()
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            assert app._flow_states["reporter"] == "done"  # showing the old run
+
+            # the operator starts a new run; the coordinator has not yet
+            # registered a workflow, so the snapshot still returns only wfold
+            app._bind_run()
+            assert app._flow_states == {
+                phase: "queued" for phase in
+                ("analyst", "challenger", "optimizer", "referee", "reporter")}
+            assert "old conclusion" not in str(
+                app.query_one("#workforce-content").content)
+
+            # a stale snapshot arriving mid-launch must not resurrect it either
+            app._apply_snapshot(client.get("/api/tui"))
+            assert app._flow_states["reporter"] == "queued"
+            assert app._active_workflow_id == ""
+
+            # once the new run registers, the view adopts it — and only it
+            client.workflows = [fresh, previous]
+            app._apply_snapshot(client.get("/api/tui"))
+            assert app._active_workflow_id == "wfnew"
+            assert app._flow_states["analyst"] == "working"
+            assert app._flow_states["reporter"] == "queued"
+            content = str(app.query_one("#workforce-content").content)
+            assert "wfnew" in content and "old conclusion" not in content
 
     asyncio.run(run())
 
@@ -550,22 +731,128 @@ def test_workforce_mode_advances_flowchart_without_dumping_narrative():
             assert app._flow_states["analyst"] == "working"
             assert len(console.lines) == baseline + 1
 
-            # a durable bus event adds one compact line
+            # further tool traffic inside the same phase stays silent
+            app._apply_claude_event(ClaudeEvent(
+                "tool_start", "calling", "mcp__qlab-operator__moments_estimate",
+                agent="moments-analyst"))
+            assert len(console.lines) == baseline + 1
+
+            # bus traffic that is not a phase transition never reaches the console
             app._apply_live_event({
                 "event_id": "e9", "ts": "2026-07-20T09:00:00+00:00",
-                "kind": "referee_verdict", "payload": {"verdict": "PASS"},
+                "kind": "tool_call", "payload": {"tool": "moments.estimate"},
             })
+            assert len(console.lines) == baseline + 1
+
             # on completion the run's final results — and only those — print
             app._apply_claude_event(ClaudeEvent(
                 "result", "Recommendation: hold HRP targets.\nReferee PASS."))
             rendered = "\n".join(strip.text for strip in console.lines)
-            assert "▮ RESULTS" in rendered
             assert "Recommendation: hold HRP targets." in rendered
             assert "Referee PASS." in rendered
             # the streamed narrative was still never dumped
             assert "thinking about windows" not in rendered
 
     asyncio.run(run())
+
+
+def test_completed_agent_prints_one_note_with_what_is_next():
+    """Each finished agent earns a two-line account; nothing else is printed."""
+    from qlab.tui.app import QlabTui
+    from textual.widgets import RichLog
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            written: list[str] = []
+            app._console_write = written.append  # count entries, not wrapped rows
+            app._bind_run()  # only a run this session launched narrates itself
+
+            phase_done = {
+                "event_id": "p1", "ts": "2026-07-20T09:00:00+00:00",
+                "kind": "workflow_phase",
+                "payload": {"workflow_id": "wf1", "phase": "analyst",
+                            "status": "done", "summary": "756d window, LW shrinkage"},
+            }
+            app._apply_live_event(phase_done)
+            assert len(written) == 2
+            rendered = "\n".join(written)
+            assert "analyst done" in rendered
+            assert "756d window, LW shrinkage" in rendered
+            # the parallel stage is announced, because that is what happens next
+            assert "in parallel" in rendered
+
+            # a replayed event (SSE reconnect primer) never double-prints
+            app._apply_live_event(dict(phase_done))
+            assert len(written) == 2
+
+    asyncio.run(run())
+
+
+def test_a_stopped_session_still_reports_where_the_run_reached():
+    """A watchdog stop or a crashed CLI owes the operator the durable state."""
+    from qlab.tui.app import QlabTui
+    from qlab.tui.claude import ClaudeEvent
+
+    class PartialRunClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wfhalf", "kind": "portfolio_review",
+                "status": "running", "current_phase": "optimizer",
+                "request": {"goal": "review", "as_of": "2026-07-20",
+                            "universe": "core"},
+                "steps": [
+                    {"phase": "analyst", "agent": "moments-analyst",
+                     "status": "done", "summary": "756d window"},
+                    {"phase": "optimizer", "agent": "optimization-runner",
+                     "status": "working", "summary": ""},
+                ],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(PartialRunClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            written: list[str] = []
+            app._console_write = written.append
+            app._active_workflow_id = "wfhalf"
+            app.claude.mode = "workforce"
+
+            app._apply_claude_event(ClaudeEvent(
+                "error", "session stopped by the qlab watchdog: no result after "
+                         "30 minutes."))
+            rendered = "\n".join(written)
+            assert "watchdog" in rendered
+            assert "RUN INCOMPLETE" in rendered
+            assert "756d window" in rendered      # what did finish
+            assert "optimizer" in rendered        # where it stopped
+
+    asyncio.run(run())
+
+
+def test_workforce_note_follows_the_dependency_graph():
+    from qlab.tui.app import workforce_note
+
+    head, nxt = workforce_note("analyst", "done", "window chosen", {"analyst"})
+    assert head.startswith("analyst done")
+    assert "in parallel" in nxt
+
+    # the first of the parallel pair waits for the other, not for the referee
+    _, nxt = workforce_note("optimizer", "done", "", {"analyst", "optimizer"})
+    assert "challenger" in nxt
+    _, nxt = workforce_note(
+        "optimizer", "done", "", {"analyst", "challenger", "optimizer"})
+    assert "referee" in nxt
+
+    head, nxt = workforce_note("referee", "blocked", "cap breach", {"analyst"})
+    assert "blocked" in head and "cap breach" in head
+    assert "Nothing was traded" in nxt
 
 
 def test_workforce_chat_sends_resumes_and_stops():

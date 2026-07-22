@@ -115,6 +115,13 @@ def _cmd_tui(args) -> int:
             sock.settimeout(0.2)
             return sock.connect_ex(("127.0.0.1", args.port)) == 0
 
+    # A cold first launch imports the full scientific stack (numpy/scipy/pandas/
+    # duckdb) and, on a fresh install, macOS scans each newly-downloaded native
+    # extension the first time it loads — which can push the owner's startup
+    # well past a few seconds. Wait generously; a still-not-ready owner is only
+    # an error once this budget is spent.
+    startup_budget_s = 45.0
+
     owner = None
     if not port_open():
         server_argv = [
@@ -130,19 +137,47 @@ def _cmd_tui(args) -> int:
             stderr=subprocess.PIPE,
             text=True,
         )
-        for _ in range(60):
+        print(
+            f"Starting the qlab runtime on port {args.port} "
+            "(first launch compiles imports; this can take up to a minute)…",
+            flush=True,
+        )
+
+        def _owner_stderr(process: subprocess.Popen) -> str:
+            # Best-effort drain so a real failure is diagnosable instead of
+            # hidden behind a generic timeout. terminate() first so the read
+            # cannot block on a still-running child holding the pipe open.
+            if process.poll() is None:
+                process.terminate()
+            try:
+                _out, err = process.communicate(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                _out, err = process.communicate()
+            return (err or "").strip()
+
+        deadline = time.monotonic() + startup_budget_s
+        while time.monotonic() < deadline:
             if port_open():
                 break
             if owner.poll() is not None:
-                detail = owner.stderr.read().strip() if owner.stderr else ""
+                detail = (owner.stderr.read().strip()
+                          if owner.stderr else "")
                 raise SystemExit(
                     "qlab UI runtime exited before the TUI connected"
                     + (f":\n{detail}" if detail else "")
                 )
-            time.sleep(0.1)
+            time.sleep(0.2)
         else:
-            owner.terminate()
-            raise SystemExit(f"qlab UI runtime did not open port {args.port}")
+            detail = _owner_stderr(owner)
+            raise SystemExit(
+                f"qlab UI runtime did not open port {args.port} within "
+                f"{int(startup_budget_s)}s"
+                + (f":\n{detail}" if detail else
+                   " and reported no error — the port may be held by another "
+                   "process, or startup is unusually slow. Try `qlab ui "
+                   "--no-browser` in a separate terminal to see its output.")
+            )
 
     client = ApiClient(f"http://127.0.0.1:{args.port}")
     try:

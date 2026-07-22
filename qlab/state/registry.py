@@ -582,13 +582,16 @@ class Registry:
                  step["step_id"]],
             )
             if status == "done":
-                next_step = next(
-                    (candidate for candidate in steps
-                     if int(candidate["seq"]) == int(step["seq"]) + 1),
-                    None,
-                )
-                workflow_status = "complete" if next_step is None else "running"
-                current_phase = phase if next_step is None else next_step["phase"]
+                # Concurrent phases finish out of seq order, so "what is open"
+                # is the set of steps still not done — never seq+1, which would
+                # report the challenger as current after the optimizer landed
+                # first, and could call a run complete with a phase outstanding.
+                open_phases = [
+                    candidate["phase"] for candidate in steps
+                    if candidate["phase"] != phase and candidate["status"] != "done"
+                ]
+                workflow_status = "complete" if not open_phases else "running"
+                current_phase = open_phases[0] if open_phases else phase
             else:
                 workflow_status = status if status in {"failed", "blocked"} else "running"
                 current_phase = phase

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
@@ -202,6 +203,13 @@ def build_workforce_agents() -> dict[str, dict]:
             continue
         tools = [mapped for tool in source.tools if (mapped := _proxy_tool(tool))]
         tools.append(_claude_tool(f"workflow.{phase}"))
+        # Read-only access to the run's own durable record. Without it a worker
+        # can only use the ids the coordinator retyped into its task, so one
+        # garbled hand-off (a mis-copied objective_id, targets that no longer
+        # hash to the optimizer's) becomes an unrecoverable phase. The referee
+        # in particular must check against what was persisted, not what it was
+        # handed.
+        tools.append(_claude_tool("workflow.status"))
         if source.name in {
             "moments-analyst", "optimization-runner", "referee", "reporter"
         }:
@@ -216,6 +224,9 @@ champion instruction above):
 - The task contains a workflow_id. First call the workflow_{phase} tool with status
   `working`. Before returning, call it with `done` and a concise summary plus
   these required artifacts: {_PHASE_ARTIFACT_CONTRACT[phase]}.
+- Be fast: emit independent tool calls together in ONE turn rather than one per
+  turn. Only serialize a call whose input is another call's output. Your opening
+  `working` update belongs in the same turn as your first read-only lookups.
 - Run autonomously — never ask the operator a question or wait for input. When a
   judgment call, preference, or parameter is unspecified, pick the best-estimate
   default from qlab facts and sensible defaults, note the assumption in your
@@ -223,6 +234,13 @@ champion instruction above):
   `blocked` only when a hard governance gate genuinely cannot be satisfied (e.g.
   the referee cannot PASS) — never merely because a preference was unstated.
   Preserve the available evidence in artifacts. Do not stall a run; decide and move on.
+- A tool error carries the owner's reason. Read it, correct the call, and try at
+  most twice more. Never repeat an identical failing call: if it still fails,
+  record the phase as `failed` with that reason in the summary and return. An
+  unreachable owner is terminal — report it, do not retry.
+- If an id or artifact you were handed is rejected as unknown or mismatched,
+  call workflow_status(workflow_id) once and use the values persisted by the
+  earlier phases — that record, not the task text, is the truth.
 - Perform only the {phase} phase. Do not spawn other agents. Use owner MCP facts;
   never invent ids, data, solver output, a verdict, or a completed phase.
 - MVSK is a research hypothesis, not an assumed live champion. Preserve it in
@@ -247,27 +265,45 @@ champion instruction above):
             "You have no filesystem, shell, browser, editing, or trading tools. "
             "Run the whole pipeline autonomously: never ask the operator a "
             "question or pause for confirmation mid-run, and let each worker make "
-            "its own best-estimate judgment calls rather than deferring upward. "
+            "its own best-estimate judgment calls rather than deferring upward.\n\n"
+            "EVERY Agent call must be synchronous — pass run_in_background: false "
+            "so the worker's result comes back in that same call. You have no tool "
+            "for collecting a backgrounded agent, so a backgrounded dispatch "
+            "strands the run. If the Agent tool rejects that parameter, re-issue "
+            "the identical call without it and treat the result as the worker's "
+            "output. Never end a turn with a dispatched worker unaccounted for.\n\n"
             "For a new portfolio/research goal, call workflow_start once. If the "
             "user message contains RESUME_WORKFLOW_ID, call workflow_status for "
             "that id, do not create a new workflow, and continue at the earliest "
-            "non-done phase(s). Run the roles as a dependency graph, not a strict "
-            "line, so the run finishes faster. First invoke moments-analyst with "
-            "the Agent tool and wait for its result. Then dispatch challenger and "
-            "optimization-runner IN PARALLEL — emit both Agent calls in the same "
-            "turn, because each depends only on the analyst and never on the "
-            "other — and wait for both to finish. Only once both are done, invoke "
-            "referee, and after it, reporter. "
-            "Pass each worker the workflow_id, the original goal, relevant prior "
-            "worker output and persisted artifacts, as_of, and universe. After "
-            "each worker, call workflow_status and do not advance to a stage until "
-            "every phase it depends on is done. If a phase fails or is blocked, "
-            "stop and report that state. The referee runs only after both the "
-            "challenger and the optimizer are done; the reporter runs only after "
-            "the referee phase is done and must not claim approval unless the "
-            "persisted verdict is PASS. End with the workflow_id, phase outcomes, "
-            "recommendation or research conclusion, data provenance, uncertainty, "
-            "and what—if anything—requires human action."
+            "non-done phase(s).\n\n"
+            "Run the roles as a dependency graph, not a strict line, so the run "
+            "finishes faster:\n"
+            "1. moments-analyst alone, and wait for its result.\n"
+            "2. challenger AND optimization-runner together — emit both Agent "
+            "calls in the SAME turn. Each depends only on the analyst and never on "
+            "the other, so they run concurrently; waiting for the challenger "
+            "before starting the optimizer wastes the run's longest stage.\n"
+            "3. referee, only once both of those are done.\n"
+            "4. reporter, only once the referee is done.\n\n"
+            "Pass each worker the workflow_id, the original goal, as_of, universe, "
+            "and the exact persisted artifacts it depends on — the analyst's "
+            "moment_set_id, objective_id, and decision_id to the parallel pair, and "
+            "the optimizer's targets object verbatim (never re-typed, re-rounded, "
+            "or re-ordered) to the referee and the reporter, because the referee's "
+            "PASS is bound to the hash of exactly those weights. Carrying the "
+            "artifacts in the task text is what lets each worker skip a lookup.\n\n"
+            "Call workflow_status twice at most: once before dispatching the "
+            "referee to confirm the parallel pair is done, and once at the end. "
+            "The Agent results themselves tell you the rest; polling after every "
+            "worker only adds turns.\n\n"
+            "If a phase comes back failed or blocked, you may re-dispatch that one "
+            "worker ONCE with the failure reason included. If it fails again, stop "
+            "immediately and report the failed phase and its reason — do not loop, "
+            "do not skip ahead, and do not fabricate the missing phase. The "
+            "reporter must not claim approval unless the persisted verdict is "
+            "PASS. End with the workflow_id, phase outcomes, recommendation or "
+            "research conclusion, data provenance, uncertainty, and what — if "
+            "anything — requires human action."
         ),
         "tools": [f"Agent({role_names})", *_COORDINATOR_TOOLS],
         "model": "inherit",
@@ -474,6 +510,16 @@ def build_claude_argv(
     return argv
 
 
+# Wall-clock ceilings. A governed run is minutes of work; anything past these
+# is a stalled coordinator, not slow progress. Enforced in code because a
+# prompt cannot promise termination — no run may hang the desk forever.
+WORKFORCE_TIMEOUT_S = 1800.0
+CHAT_TIMEOUT_S = 600.0
+# No stream event at all for this long means the CLI is wedged (a backgrounded
+# worker nobody is waiting on, a dead child), not thinking.
+WORKFORCE_SILENCE_S = 420.0
+
+
 class ClaudeSession:
     """One non-interactive streaming Claude turn with explicit authority."""
 
@@ -494,6 +540,8 @@ class ClaudeSession:
         self._session_dir: tempfile.TemporaryDirectory | None = None
         self.mode = "read-only"
         self.last_error = ""
+        self._last_event_at = 0.0
+        self._timed_out = ""
 
     @property
     def available(self) -> bool:
@@ -563,13 +611,50 @@ class ClaudeSession:
             detail = f"WinError {winerror}: " if winerror is not None else ""
             self.last_error = f"Could not start Claude Code: {detail}{exc.strerror or exc}"
             return False
+        self._timed_out = ""
+        self._last_event_at = time.monotonic()
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
+        threading.Thread(
+            target=self._watchdog,
+            args=(
+                self.process,
+                WORKFORCE_TIMEOUT_S if governed else CHAT_TIMEOUT_S,
+                WORKFORCE_SILENCE_S if governed else 0.0,
+            ),
+            daemon=True,
+        ).start()
         return True
 
     def stop(self) -> None:
         if self.running and self.process is not None:
             self.process.terminate()
+
+    def _watchdog(self, process: subprocess.Popen[str],
+                  budget_s: float, silence_s: float) -> None:
+        """Kill a session that has run — or gone quiet — past its ceiling.
+
+        The durable phase state in the registry survives, so the operator can
+        resume; what does not survive is a run that never ends.
+        """
+        deadline = time.monotonic() + budget_s
+        while process.poll() is None:
+            now = time.monotonic()
+            if now >= deadline:
+                self._timed_out = (
+                    f"no result after {int(budget_s // 60)} minutes")
+            elif silence_s and now - self._last_event_at >= silence_s:
+                self._timed_out = (
+                    f"silent for {int(silence_s // 60)} minutes — the "
+                    "coordinator is not making progress")
+            if self._timed_out:
+                process.terminate()
+                try:
+                    process.wait(timeout=10.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                return
+            time.sleep(1.0)
 
     def _read(self) -> None:
         assert self.process is not None
@@ -589,10 +674,20 @@ class ClaudeSession:
         stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
         stderr_thread.start()
         for line in self.process.stdout:
+            self._last_event_at = time.monotonic()
             for event in parse_stream_line(line):
                 self.on_event(event)
         returncode = self.process.wait()
         stderr_thread.join(timeout=5.0)
+        if self._timed_out:
+            # A watchdog kill closes stdout without a `result` line, so the
+            # console would otherwise just stop mid-run with no explanation.
+            self.on_event(ClaudeEvent(
+                "error",
+                f"session stopped by the qlab watchdog: {self._timed_out}. "
+                "Durable phase state is kept — resume it from the workforce view.",
+            ))
+            return
         stderr = "".join(stderr_tail).strip()
         if returncode and stderr:
             self.on_event(ClaudeEvent("error", stderr[-2000:]))

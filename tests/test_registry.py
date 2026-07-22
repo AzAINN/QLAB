@@ -172,10 +172,13 @@ def test_workforce_challenger_and_optimizer_run_in_parallel_after_analyst(reg):
     # With the analyst done, challenger and optimizer are concurrent: the
     # optimizer starts and finishes without the challenger having begun.
     reg.update_workflow_phase(workflow_id, "optimizer", "working")
-    reg.update_workflow_phase(
+    out_of_order = reg.update_workflow_phase(
         workflow_id, "optimizer", "done",
         artifacts={"targets": {"GLD": 1.0}, "algorithm_id": "hrp"},
     )
+    # Finishing out of seq order must report what is still open, not seq+1.
+    assert out_of_order["current_phase"] == "challenger"
+    assert out_of_order["status"] == "running"
 
     # The referee is the join point and cannot start until BOTH are done.
     with pytest.raises(RuntimeError, match="cannot start before 'challenger'"):

@@ -49,6 +49,18 @@ _FLOW = (
 )
 _AGENT_TO_PHASE = {agent: phase for phase, agent, _ in _FLOW}
 _PHASE_SHORT = {phase: short for phase, _, short in _FLOW}
+# What each phase contributes, in one clause — the "what just happened" half of
+# the per-phase console note. Mirrors qlab.state.registry's dependency DAG.
+_PHASE_DID = {
+    "analyst": "chose the estimation window, shrinkage, and regime call, and "
+               "logged that judgment",
+    "challenger": "argued the opposing case and attached it to the decision",
+    "optimizer": "ran the cataloged operational algorithm and produced target "
+                 "weights",
+    "referee": "independently checked constraints, benchmarks, and the "
+               "target binding",
+    "reporter": "compiled the human-facing recommendation",
+}
 # One state → (glyph, colour) table shared by the flowchart and the agent rail.
 _STATE_STYLE = {
     "working": ("●", "#6d9fbf"),
@@ -65,6 +77,52 @@ _REFRESH_EVENT_KINDS = {
     "workflow_started", "workflow_phase", "referee_verdict",
     "plan_built", "order_filled", "decision_logged", "ablation_complete",
 }
+
+
+def workforce_note(phase: str, status: str, summary: str,
+                   done_phases: set[str]) -> tuple[str, str]:
+    """The two-line note printed when one agent finishes: done, then next.
+
+    Pure so the wording is testable without a running app. ``done_phases``
+    is the set of phases already complete *including* this one; the follow-up
+    line is derived from the same dependency graph the registry enforces, so
+    the operator is never told a stage is next that the gate would refuse.
+    """
+    short = _PHASE_SHORT.get(phase, phase)
+    detail = " ".join(str(summary or "").split())[:220]
+    did = _PHASE_DID.get(phase, "completed its phase")
+
+    if status == "failed":
+        return (f"{short} failed — {detail or 'no reason recorded'}",
+                "The run stops here; durable phase state is kept, so : workforce "
+                "resume ID continues it once the cause is fixed.")
+    if status == "blocked":
+        return (f"{short} blocked — {detail or 'a governance gate was not met'}",
+                "A hard gate refused, so nothing downstream may proceed. Nothing "
+                "was traded; this is the gate working.")
+
+    # The worker's own summary is the specific account; the role clause is only
+    # the fallback, so the note never repeats what the summary already says.
+    head = f"{short} done — {detail or did}"
+    if phase == "analyst":
+        nxt = ("Next: the challenger and the optimizer both start now, in "
+               "parallel — neither depends on the other, only on this "
+               "estimation call.")
+    elif phase in ("challenger", "optimizer"):
+        other = "optimizer" if phase == "challenger" else "challenger"
+        nxt = (
+            "Next: the referee gate, now that both parallel phases are in."
+            if other in done_phases else
+            f"Next: waiting on the {other} (running in parallel), then the "
+            "referee gate."
+        )
+    elif phase == "referee":
+        nxt = ("Next: the reporter compiles the recommendation. A PASS is bound "
+               "to these exact weights; execution still needs you.")
+    else:
+        nxt = ("Run complete — the results print below. Any paper trade remains "
+               "a separate, explicitly confirmed action.")
+    return head, nxt
 
 
 def _verdict_cell(verdict: dict | None) -> str:
@@ -540,6 +598,14 @@ class QlabTui(App[None]):
         # Flowchart state: phase -> state token, and phase -> hover detail.
         self._flow_states: dict[str, str] = {}
         self._flow_details: dict[str, str] = {}
+        # Which durable run the flowchart is bound to. A new run clears this and
+        # sets _pending_workflow, so the chart never keeps painting the previous
+        # run's outcome in the seconds before the coordinator calls workflow.start.
+        self._active_workflow_id = ""
+        self._pending_workflow = False
+        self._seen_workflow_ids: set[str] = set()
+        self._phase_reported: dict[str, str] = {}
+        self._results_printed = False
         self._pulse = 0
         self._live_stream_stop = False
         self._console_partial = ""
@@ -697,19 +763,14 @@ class QlabTui(App[None]):
         threading.Thread(target=run, daemon=True).start()
 
     def _apply_live_event(self, event: dict) -> None:
+        # Console notes are raised by _ingest_events, which both the SSE stream
+        # and the snapshot poll feed — whichever delivers a phase event first
+        # writes its note, and the other is deduped by id.
         self._ingest_events([event])
-        kind = str(event.get("kind", ""))
-        if kind in _REFRESH_EVENT_KINDS or kind == "tool_call":
-            self._console_write_bus(event)
-        if kind in _REFRESH_EVENT_KINDS:
+        if str(event.get("kind", "")) in _REFRESH_EVENT_KINDS:
             self._start_refresh()
 
     # -- workforce console -------------------------------------------------
-    _CONSOLE_TONES = {
-        "accent": "#d0a45c", "gold": "#b38b54", "ok": "#79a88b",
-        "bad": "#c97878", "info": "#6d9fbf", "muted": "#7d8995",
-    }
-
     def _console_write(self, line: str) -> None:
         self.query_one("#workforce-console", RichLog).write(line)
 
@@ -723,12 +784,48 @@ class QlabTui(App[None]):
             chip.update("[bold #d0a45c]WORK[/]")
             field.placeholder = "message the coordinator — Enter sends · : chat to switch"
 
-    def _console_write_bus(self, event: dict) -> None:
-        from qlab.desk_cli import format_event
+    def _note_workflow_phase(self, payload: dict) -> None:
+        """One short paragraph per completed agent: what happened, what's next.
 
-        style, line = format_event(event)
-        tone = self._CONSOLE_TONES.get(style, "#7d8995")
-        self._console_write(f"[{tone}]{escape(line)}[/]")
+        Driven by the owner's durable phase events rather than Claude's
+        narrative, so the operator's running account of the pipeline is the
+        same record the registry keeps.
+        """
+        phase = str(payload.get("phase") or "")
+        status = str(payload.get("status") or "")
+        if phase not in _PHASE_SHORT:
+            return
+        # Only the run this session launched narrates itself. Startup replays a
+        # window of history, and a resumed desk may see another client's run;
+        # neither should scroll past as if it were happening now.
+        workflow_id = str(payload.get("workflow_id") or "")
+        if self._active_workflow_id:
+            if workflow_id != self._active_workflow_id:
+                return
+        elif not self._pending_workflow or workflow_id in self._seen_workflow_ids:
+            return
+        if self._phase_reported.get(phase) == status:
+            return
+        self._phase_reported[phase] = status
+        if status == "working":
+            self._console_write(
+                f"[#6d9fbf]▶ {escape(_PHASE_SHORT[phase])}[/] "
+                f"[#64717d]working[/]")
+            return
+        if status not in ("done", "failed", "blocked"):
+            return
+        done = {name for name, state in self._flow_states.items() if state == "done"}
+        if status == "done":
+            done.add(phase)
+        head, nxt = workforce_note(
+            phase, status, str(payload.get("summary") or ""), done)
+        glyph, tone = {
+            "done": ("✓", "#79a88b"),
+            "failed": ("×", "#c97878"),
+            "blocked": ("!", "#d0a45c"),
+        }[status]
+        self._console_write(f"[{tone}]{glyph} {escape(head)}[/]")
+        self._console_write(f"[#7d8995]  {escape(nxt)}[/]")
 
     def _console_stream_text(self, text: str) -> None:
         """Append streamed narrative, emitting only completed lines."""
@@ -954,24 +1051,57 @@ class QlabTui(App[None]):
             head += f"\n\nartifacts: {packed[:200]}"
         return head
 
+    def _select_workflow(self, workflows: list[dict]) -> dict | None:
+        """The run the view is bound to — never a stale one.
+
+        A launched run owns the view from the moment it starts, but its durable
+        row only appears once the coordinator calls workflow.start. In that gap
+        the previous run must not be shown: its finished nodes would read as
+        this run's progress. So a pending launch adopts the first workflow it
+        did not already know about, and shows nothing until then.
+        """
+        by_id = {str(row.get("workflow_id", "")): row for row in workflows}
+        if self._active_workflow_id:
+            return by_id.get(self._active_workflow_id)
+        if self._pending_workflow:
+            for row in workflows:  # newest first
+                workflow_id = str(row.get("workflow_id", ""))
+                if workflow_id and workflow_id not in self._seen_workflow_ids:
+                    self._active_workflow_id = workflow_id
+                    self._pending_workflow = False
+                    return row
+            return None
+        return workflows[0] if workflows else None
+
     def _render_workforce(self) -> None:
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
-        if not workflows:
-            self.query_one("#workforce-content", Static).update(
-                "[#64717d]NO DURABLE RUN[/]   "
-                "[#7d8995]type a goal below — Claude runs analyst → challenger → "
-                "optimizer → referee → reporter autonomously and makes its own "
-                "best-estimate calls. Hover a node above for its live update.[/]"
-            )
-            # Only reset to idle when nothing is live, so an in-flight run keeps
-            # the working glyph the tool stream already set.
-            if not self.claude.running and not self._action_running:
+        workflow = self._select_workflow(workflows)
+        if workflow is None:
+            if self._pending_workflow:
+                empty = ("[#64717d]STARTING RUN[/]   "
+                         "[#7d8995]the coordinator is opening a durable workflow — "
+                         "phases appear here as they register.[/]")
+            elif self._active_workflow_id:
+                empty = ("[#64717d]RESUMING[/]   "
+                         f"[#7d8995]{escape(self._active_workflow_id)} is outside "
+                         "the recent-run window; its phases appear as they "
+                         "advance.[/]")
+            else:
+                empty = ("[#64717d]NO DURABLE RUN[/]   "
+                         "[#7d8995]type a goal below — Claude runs analyst → "
+                         "challenger → optimizer → referee → reporter autonomously "
+                         "and makes its own best-estimate calls. Hover a node above "
+                         "for its live update.[/]")
+            self.query_one("#workforce-content", Static).update(empty)
+            # A pending launch already reset every node to 'queued'; only an
+            # idle desk falls back to 'idle'.
+            if not self._pending_workflow and not self.claude.running \
+                    and not self._action_running:
                 self._flow_states = {phase: "idle" for phase, _, _ in _FLOW}
                 self._flow_details = {}
             self._render_flow()
             return
 
-        workflow = workflows[0]
         request = workflow.get("request") or {}
         status = str(workflow.get("status", "unknown"))
         steps = workflow.get("steps", [])
@@ -982,7 +1112,12 @@ class QlabTui(App[None]):
         for phase, agent, _short in _FLOW:
             step = step_by_phase.get(phase)
             if step is not None:
-                self._flow_states[phase] = str(step.get("status", "queued"))
+                durable = str(step.get("status", "queued"))
+                # The agent stream sees a worker start before that worker gets
+                # its `working` update persisted; don't drop back to queued.
+                live_working = (durable == "queued"
+                                and self._flow_states.get(phase) == "working")
+                self._flow_states[phase] = "working" if live_working else durable
                 self._flow_details[phase] = self._flow_detail(agent, phase, step)
             else:
                 live = self._flow_states.get(phase)
@@ -1028,7 +1163,9 @@ class QlabTui(App[None]):
                 f"{escape(str(workflow.get('workflow_id', '')))}[/]",
             ])
 
-        earlier = workflows[1:5]
+        earlier = [row for row in workflows
+                   if str(row.get("workflow_id", "")) != self._active_workflow_id
+                   and row is not workflow][:4]
         if earlier:
             packed = "   ".join(
                 f"{escape(str(row.get('workflow_id', '—')))} "
@@ -1253,6 +1390,8 @@ class QlabTui(App[None]):
             if event_id:
                 self._event_ids.add(event_id)
             self._append_event(event)
+            if str(event.get("kind", "")) == "workflow_phase":
+                self._note_workflow_phase(event.get("payload") or {})
 
     def _append_event(self, event: dict) -> None:
         ts = str(event.get("ts", ""))
@@ -1574,13 +1713,41 @@ class QlabTui(App[None]):
         else:
             prompt = f"GOAL: {goal}"
         self.action_view("workforce")
-        self._start_claude(prompt, governed=True)
+        self._bind_run(workflow_id)
+        if not self._start_claude(prompt, governed=True):
+            # Nothing launched, so the view must go back to showing history
+            # rather than an empty chart waiting on a run that never starts.
+            self._active_workflow_id = ""
+            self._pending_workflow = False
+            self._render_workforce()
+
+    def _bind_run(self, workflow_id: str = "") -> None:
+        """Point every workforce surface at the run about to start.
+
+        Called before the session launches so the flowchart, the console notes,
+        and the result block can never be attributed to the previous run — the
+        durable row for a new run does not exist yet, and until it does the
+        view must show this run's empty state, not the last one's outcome.
+        """
+        workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        self._seen_workflow_ids = {
+            str(row.get("workflow_id", "")) for row in workflows}
+        self._active_workflow_id = workflow_id
+        self._pending_workflow = not workflow_id
+        self._phase_reported = {}
+        self._results_printed = False
+        self._flow_states = {phase: "queued" for phase, _, _ in _FLOW}
+        self._flow_details = {
+            phase: f"{agent} · {phase}\n\nqueued — waiting to start"
+            for phase, agent, _ in _FLOW}
+        self._render_flow()
+        self._render_workforce()
 
     def _start_claude(self, prompt: str, *, governed: bool,
-                      resume_session: str = "", chat: bool = False) -> None:
+                      resume_session: str = "", chat: bool = False) -> bool:
         if self.claude.running:
             self._write_local_event("claude.rejected", {"reason": "session already running"})
-            return
+            return False
         self._claude_buffer = ""
         self._claude_saw_delta = False
         mode = "WORKFORCE" if governed else ("CHAT" if chat else "READ-ONLY")
@@ -1591,27 +1758,23 @@ class QlabTui(App[None]):
                 "Claude Code is not available or a session is already running."
             )
             self._set_selected_work(reason)
-            return
+            return False
         if governed:
             self._console_partial = ""
             if not resume_session:
-                self._flow_states = {phase: "queued" for phase, _, _ in _FLOW}
-                self._flow_details = {
-                    phase: f"{agent} · {phase}\n\nqueued — waiting to start"
-                    for phase, agent, _ in _FLOW}
-                self._render_flow()
                 first_line = prompt.splitlines()[0]
                 self._console_write(
                     f"[bold #d0a45c]▌ workforce run[/]  "
                     f"[#7d8995]{escape(first_line[:110])}[/]")
                 self._console_write(
-                    "[#64717d]running autonomously — hover a node for its live "
-                    "update[/]")
+                    "[#64717d]running autonomously — one note per agent below; "
+                    "hover a node for its live detail[/]")
         self._write_local_event(
             "claude.started",
             {"mode": "workforce" if governed else "read-only", "prompt": prompt[:120]},
         )
         self._render_status()
+        return True
 
     def _receive_claude_event(self, event: ClaudeEvent) -> None:
         try:
@@ -1650,24 +1813,31 @@ class QlabTui(App[None]):
             if workforce:
                 base = event.tool.rsplit("__", 1)[-1] or event.tool
                 phase = _AGENT_TO_PHASE.get(agent, "")
+                # Tool traffic is timeline material, not console material: only
+                # the first tool of a phase writes a line, and only when the
+                # owner's own `working` event has not already announced it.
                 if phase:
+                    started = self._flow_states.get(phase) == "working"
                     self._flow_states[phase] = "working"
                     self._flow_details[phase] = (
                         f"{agent} · {phase}\n\nworking — {base}")
                     self._render_flow()
-                    self._console_write(
-                        f"[#6d9fbf]▶ {escape(_PHASE_SHORT.get(phase, phase))}[/] "
-                        f"[#7d8995]{escape(base)}[/]")
-                else:
-                    self._console_write(
-                        f"[#6d9fbf]▶ coordinator[/] [#7d8995]{escape(base)}[/]")
+                    if not started and self._phase_reported.get(phase) is None:
+                        self._phase_reported[phase] = "working"
+                        self._console_write(
+                            f"[#6d9fbf]▶ {escape(_PHASE_SHORT.get(phase, phase))}[/]"
+                            f" [#64717d]working[/]")
             elif chat:
                 self._console_flush()
                 self._console_write(f"[#6d9fbf]→ {escape(event.tool)}[/]")
         elif event.kind == "error":
             self._write_local_event("claude.failed", {"error": event.text[-400:]})
             if workforce:
-                self._console_write(f"[#c97878]✗ {escape(event.text[-160:])}[/]")
+                self._console_write(f"[#c97878]✗ {escape(event.text[-240:])}[/]")
+                # A terminal error still owes the operator the run's state: the
+                # durable phases reached before it stopped.
+                if not self.claude.running:
+                    self._print_workforce_results("")
             elif chat:
                 self._console_flush()
                 self._console_write(f"[#c97878]✗ {escape(event.text[-300:])}[/]")
@@ -1690,24 +1860,69 @@ class QlabTui(App[None]):
         self._render_status()
 
     def _print_workforce_results(self, text: str) -> None:
-        """Print just the final results to the chat once the reporter is done.
+        """Print the run's results once, when the coordinator's turn ends.
 
-        The intermediate coordinator/worker narrative is never streamed; this is
-        the single block that reaches the console — the run's conclusion, drawn
-        from the coordinator's final message, and the durable result card above
-        keeps its own copy.
+        The intermediate narrative is never streamed; this is the single block
+        that reaches the console. It leads with the durable record — per-phase
+        outcomes, the referee verdict, the reviewed targets — and only then the
+        coordinator's closing text, so the results stand even when the session
+        ends without one (a watchdog stop, a crashed CLI).
         """
-        text = (text or "").strip()
+        if self._results_printed:
+            return
+        self._results_printed = True
+        workflow = self._select_workflow(
+            self.snapshot.get("workflows", []) if self.snapshot else [])
+        status = str((workflow or {}).get("status", "")) or "unknown"
+        tone, label = {
+            "complete": ("#79a88b", "RESULTS"),
+            "failed": ("#c97878", "RUN FAILED"),
+            "blocked": ("#d0a45c", "RUN BLOCKED"),
+        }.get(status, ("#b38b54", "RUN INCOMPLETE"))
+
         self._console_write("")
-        self._console_write("[bold #79a88b]▮ RESULTS[/]")
+        self._console_write(f"[bold {tone}]▮ {label}[/]")
+
+        if workflow is not None:
+            steps = {str(step.get("phase")): step for step in workflow.get("steps", [])}
+            for phase, _agent, short in _FLOW:
+                step = steps.get(phase) or {}
+                state = str(step.get("status", "idle"))
+                glyph, color = _STATE_STYLE.get(state, ("◌", "#5f6b76"))
+                elapsed = phase_elapsed(
+                    step.get("started_at"), step.get("completed_at"))
+                summary = " ".join(str(step.get("summary") or "").split())[:150]
+                self._console_write(
+                    f"[{color}]{glyph}[/] [bold]{escape(short):<11}[/]"
+                    f"[#7d8995]{escape(state)}"
+                    f"{f' · {elapsed}' if elapsed else ''}[/]"
+                    + (f"  [#c5ced7]{escape(summary)}[/]" if summary else ""))
+            targets = (steps.get("referee", {}).get("artifacts") or {}).get(
+                "targets") or (
+                steps.get("optimizer", {}).get("artifacts") or {}).get("targets")
+            if isinstance(targets, dict) and targets:
+                packed = "  ".join(
+                    f"{ticker} {float(weight):.1%}"
+                    for ticker, weight in sorted(
+                        targets.items(), key=lambda kv: -float(kv[1]))[:8])
+                self._console_write(f"[#64717d]targets[/]  {escape(packed)}")
+            plan_id = str((steps.get("reporter", {}).get("artifacts") or {})
+                          .get("plan_id") or "")
+            if plan_id:
+                self._console_write(
+                    f"[#64717d]checked plan[/]  {escape(plan_id)}   "
+                    "[#7d8995]: rebalance paper to confirm it yourself[/]")
+
+        text = (text or "").strip()
         if text and text != "Claude completed":
+            self._console_write("")
             for line in text.splitlines():
                 self._console_write(
                     f"[#e6edf3]{escape(line)}[/]" if line.strip() else "")
-        else:
+        elif workflow is None:
             self._console_write(
-                "[#7d8995]the coordinator returned no final text — see the "
-                "result card above[/]")
+                "[#7d8995]no durable workflow was recorded and the coordinator "
+                "returned no final text[/]")
 
     def _set_agent_from_tool(self, tool: str, explicit_agent: str = "") -> str:
         if explicit_agent in _AGENT_NAMES:

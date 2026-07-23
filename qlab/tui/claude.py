@@ -56,6 +56,11 @@ _LAB_TOOL_BASES = {
     "data.fetch_universe",
     "data.snapshot_summary",
     "moments.estimate",
+    "regime.turbulence",
+    "regime.absorption",
+    "regime.volatility_term_structure",
+    "regime.drawdown",
+    "regime.tail_risk",
     "objective.build",
     "algorithms.list",
     "algorithms.describe",
@@ -81,7 +86,10 @@ _WORKFLOW_PHASE = {
 }
 
 _PHASE_ARTIFACT_CONTRACT = {
-    "analyst": "moment_set_id, objective_id, and decision_id",
+    "analyst": (
+        "moment_set_id, objective_id, decision_id, regime ('calm' or 'stress'), "
+        "and a one-line regime_reasoning naming the indicators that decided it"
+    ),
     "challenger": "challenger_view",
     "optimizer": "targets (ticker-to-weight object) and algorithm_id",
     "referee": (
@@ -301,9 +309,16 @@ champion instruction above):
             "immediately and report the failed phase and its reason — do not loop, "
             "do not skip ahead, and do not fabricate the missing phase. The "
             "reporter must not claim approval unless the persisted verdict is "
-            "PASS. End with the workflow_id, phase outcomes, recommendation or "
-            "research conclusion, data provenance, uncertainty, and what — if "
-            "anything — requires human action."
+            "PASS. End with a short plain-language briefing the operator reads "
+            "top to bottom: the recommendation or research conclusion first, "
+            "then the evidence (phase outcomes, data provenance), then any "
+            "uncertainty and what — if anything — needs human action. Write it "
+            "as terminal prose: sentences and short labelled lines, a leading "
+            "'- ' for list items, and NO Markdown headings (#), tables, bold "
+            "(**), or back-ticks — they render as literal characters. Do not "
+            "print internal record ids (decision, plan, objective, moment-set, "
+            "workflow, verdict); the terminal already shows the actionable plan "
+            "reference on its own line."
         ),
         "tools": [f"Agent({role_names})", *_COORDINATOR_TOOLS],
         "model": "inherit",
@@ -599,6 +614,12 @@ class ClaudeSession:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # The CLI emits UTF-8. Without this the pipe is decoded with the
+                # OS locale (cp1252 on Windows), turning an em dash into "â€”" and
+                # every other non-ASCII glyph into mojibake; replace keeps a
+                # stray byte from killing the reader thread mid-stream.
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=env,
             )

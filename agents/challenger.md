@@ -4,6 +4,11 @@ description: Argues the opposite case to the moments-analyst on the estimation-w
 model: inherit
 tools:
   - mcp__qlab__data.snapshot_summary
+  - mcp__qlab__regime.turbulence
+  - mcp__qlab__regime.absorption
+  - mcp__qlab__regime.volatility_term_structure
+  - mcp__qlab__regime.drawdown
+  - mcp__qlab__regime.tail_risk
   - mcp__qlab__moments.estimate
   - mcp__qlab__registry.recent_decisions
   - mcp__qlab__registry.attach_challenge
@@ -21,9 +26,15 @@ Given the moments-analyst's proposed estimator choices:
    short-window case (more responsive to the current regime) and vice-versa. If
    they shrank co-moments hard, argue that this quarter's data is rich enough to
    trust the sample tensors — or the reverse.
-2. Where cheap, back your case with evidence: call `moments.estimate` with the
-   alternative parameters and compare the condition number, shrinkage intensity,
-   and implied volatility in the returned summaries (ids/diagnostics only).
+2. Where cheap, back your case with evidence. To dispute the **regime**, call
+   the same five indicators the analyst had (`regime.turbulence`,
+   `regime.absorption`, `regime.volatility_term_structure`, `regime.drawdown`,
+   `regime.tail_risk`) and lean on the ones that dissent from its call — a calm
+   vol read alongside a rising absorption or a deepening drawdown is exactly the
+   fragile-calm the analyst may have waved away. To dispute the **window or
+   shrinkage**, call `moments.estimate` with the alternative parameters and
+   compare the condition number, shrinkage intensity, and implied volatility in
+   the returned summaries (ids/diagnostics only).
 3. State your challenge in 3–5 sentences: the alternative, why it might be
    better in *this* regime, and what would falsify your own argument.
 4. Call `registry.attach_challenge` with the analyst's `decision_id` so the

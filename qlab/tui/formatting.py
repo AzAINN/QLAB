@@ -3,6 +3,72 @@
 from __future__ import annotations
 
 import math
+import re
+
+
+# A mis-decoded UTF-8 stream (locale cp1252 on Windows) turns common typographic
+# glyphs into these sequences. The Popen is fixed to read UTF-8, but text already
+# captured — or produced by another surface — is normalised here as well.
+_MOJIBAKE = {
+    "â€”": "—", "â€“": "–", "â€™": "’", "â€˜": "‘",
+    "â€œ": "“", "â€\x9d": "”", "â€¦": "…", "Â·": "·",
+    "â€¢": "•", "Â ": " ", "Â": "",
+}
+
+# One or more ``word_`` segments then ``id`` — decision_id, plan_id,
+# moment_set_id, workflow_id, objective_id, verdict_id, run_id. Requires the
+# underscore, so ordinary words ("grid", "valid") never match.
+_ID_LABEL = r"(?:[A-Za-z][A-Za-z0-9]*_)+id"
+# An id-looking value: back-ticked, or a token that carries a digit or a hyphen
+# (so a following ordinary word like "was recorded" is left untouched). A
+# trailing sentence period is deliberately not consumed.
+_ID_VALUE = r"(?:`[^`]*`|(?=[\w.\-]*[\d-])[\w\-]+(?:\.[\w\-]+)*)"
+_ID_PAREN = re.compile(rf"\s*[(\[]\s*{_ID_LABEL}\b\s*[:=]?\s*{_ID_VALUE}?\s*[)\]]")
+_ID_INLINE = re.compile(rf"\b{_ID_LABEL}\b\s*[:=]?\s*{_ID_VALUE}")
+_ID_BARE = re.compile(rf"\b{_ID_LABEL}\b")
+_HEADING = re.compile(r"\s*#{1,6}\s+(.*\S)\s*$")
+
+
+def demojibake(text: str) -> str:
+    """Repair the cp1252-misread-UTF-8 sequences a stream can leave behind."""
+    for bad, good in _MOJIBAKE.items():
+        text = text.replace(bad, good)
+    return text
+
+
+def _strip_ids(text: str) -> str:
+    """Drop internal ``*_id`` references from prose a person reads.
+
+    These are audit keys the reader never types, so they read as noise in a
+    memo. A trailing id-looking value goes with its label; a bare mention just
+    loses the label. Empty brackets and doubled punctuation left behind are tidied.
+    """
+    text = _ID_PAREN.sub("", text)
+    text = _ID_INLINE.sub("", text)
+    text = _ID_BARE.sub("", text)
+    text = re.sub(r"[(\[]\s*[)\]]", "", text)          # emptied brackets
+    text = re.sub(r"\s+([,.;:])", r"\1", text)          # space before punctuation
+    text = re.sub(r"([,;:])(\s*[,;:])+", r"\1", text)   # doubled separators
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def clean_report_line(line: str) -> tuple[bool, str]:
+    """Normalise one line of agent prose for a terminal log.
+
+    Returns ``(is_heading, text)``. Strips the markdown that renders literally in
+    a RichLog — ``#`` headers, ``**`` bold, back-ticks — repairs mojibake, and
+    removes raw ``*_id`` audit keys, so the memo reads as plain sentences. A
+    header line is reported so the caller can style it like a section label.
+    """
+    line = demojibake(line)
+    heading = _HEADING.match(line)
+    body = heading.group(1) if heading else line
+    body = _strip_ids(body).replace("**", "").replace("`", "")
+    body = re.sub(r"[ \t]{2,}", " ", body).rstrip()
+    if heading:
+        return True, body.rstrip(" :").upper()
+    return False, body
 
 
 def sparkline(values: list[float]) -> str:

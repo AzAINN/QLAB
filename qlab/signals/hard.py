@@ -43,6 +43,52 @@ def absorption_ratio(returns: pd.DataFrame, window: int = 500,
     return pd.Series(out)
 
 
+def volatility_term_structure(returns: pd.DataFrame, short: int = 21,
+                              long: int = 126) -> pd.Series:
+    """Ratio of short- to long-horizon annualised vol of the equal-weight book.
+
+    Above 1 means recent variance runs hot relative to its own longer baseline
+    (a vol shock building); below 1 means it is calming. A scale-free read on
+    whether variance is *accelerating* — orthogonal to its absolute level, which
+    the turbulence and trailing-vol signals already cover.
+    """
+    port = returns.mean(axis=1)
+    short_vol = port.rolling(short).std() * np.sqrt(_TRADING_DAYS)
+    long_vol = port.rolling(long).std() * np.sqrt(_TRADING_DAYS)
+    return (short_vol / long_vol).replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def drawdown_pressure(returns: pd.DataFrame) -> pd.Series:
+    """Equal-weight peak-to-trough drawdown depth (>= 0) at each date.
+
+    The directional axis the symmetric variance measures miss: a market can
+    grind steadily lower at low volatility, or spike violently and recover.
+    Depth below the trailing high is what separates the two.
+    """
+    equity = np.exp(returns.mean(axis=1).cumsum())
+    return (1.0 - equity / equity.cummax()).clip(lower=0.0)
+
+
+def downside_tail(returns: pd.DataFrame, window: int = 63) -> pd.Series:
+    """Rolling ratio of downside to upside semi-deviation of the equal-weight book.
+
+    Above 1 means losses are more dispersed than gains — a fat, asymmetric left
+    tail the second moment alone cannot see. Windows without at least two up- and
+    two down-days are dropped rather than divided toward a spurious value.
+    """
+    port = returns.mean(axis=1)
+
+    def _ratio(x: np.ndarray) -> float:
+        down, up = x[x < 0.0], x[x > 0.0]
+        if down.size < 2 or up.size < 2:
+            return np.nan
+        upper = up.std()
+        return float(down.std() / upper) if upper > 1e-12 else np.nan
+
+    return (port.rolling(window).apply(_ratio, raw=True)
+            .replace([np.inf, -np.inf], np.nan).dropna())
+
+
 def fred_series(series_id: str, start: str = "2008-01-01", *,
                 cache_dir: str | Path | None = None, offline: bool = False,
                 seed: int = 7) -> pd.Series:

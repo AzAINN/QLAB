@@ -73,6 +73,31 @@ agent definitions. Runtime state is never written into site-packages.
 - Deflated Sharpe over cumulative registry trial counts and stationary
   bootstrap confidence intervals.
 
+### Regime indicators
+
+The moments-analyst does not read one regime number; it is given five
+deterministic, price-only indicators — each a different face of market
+variability — and must synthesize them into one defended regime call before it
+sets the estimation window and shrinkage. Every indicator returns the same
+schema (`regime` calm/stress, the `signal`, its own trailing `threshold` and
+`percentile`, and a one-line `reasoning`), so unlike readings compare directly.
+"Stress" always means *unusual for this market* — the tail of the indicator's
+own history — never a hard-coded level. None forecasts returns.
+
+| Tool | Face of variability | Logic |
+| --- | --- | --- |
+| `regime.turbulence` | statistical unusualness of the latest joint move | Chow–Kritzman Mahalanobis turbulence, per degree of freedom |
+| `regime.absorption` | systemic fragility / coupling | Kritzman absorption ratio — variance share in the top eigenvectors |
+| `regime.volatility_term_structure` | acceleration of variance | short- over long-horizon realised-vol ratio |
+| `regime.drawdown` | directional stress | equal-weight peak-to-trough depth with a trend filter |
+| `regime.tail_risk` | downside asymmetry | rolling downside/upside semi-deviation ratio with recent skew |
+
+The five are exposed to the analyst through the `qlab-operator` proxy and, in
+headless mode, the combined server; the primitives live in `qlab/signals` and
+the agent-facing readings in `qlab.signals.indicators`. The selected regime and
+its reasoning are persisted on the analyst phase and shown on their own line in
+the TUI workforce view.
+
 ### Governance and paper execution
 
 - Referee PASS is bound to the exact reviewed targets.
@@ -276,7 +301,7 @@ workspace, not the Python environment.
       core/         data, moments, objective, metrics, backtest, types
       governance/   deterministic referee and reflection loop
       mcp/          combined server, tool namespaces, propose-only owner proxy
-      signals/      deterministic regime signals and conditioning
+      signals/      deterministic regime signals, agent-facing indicators, conditioning
       solvers/      uniform implementation adapters
       state/        DuckDB registry and content-addressed artifacts
       trader/       mandate, broker adapters, plans, reconcile

@@ -43,6 +43,45 @@ def test_absorption_rises_when_correlation_concentrates():
     assert a.iloc[-1] > a.iloc[30] + 0.1  # deep-stress vs a calm-regime (row 450) value
 
 
+def test_volatility_term_structure_is_scale_free_and_spikes_at_onset():
+    from qlab.signals.hard import volatility_term_structure
+    r = _two_regime_returns()
+    ts = volatility_term_structure(r, short=21, long=126)
+    # The ratio is scale-free (short vol over long vol), so calm sits near 1 and
+    # the shift into the high-vol regime lifts short vol above the slower long
+    # baseline — a value well above the calm band.
+    calm = ts.iloc[:200].mean()
+    onset = ts.iloc[300:420].max()      # the shift lands after the long window fills
+    assert 0.4 < calm < 1.8
+    assert onset > calm + 0.4
+
+
+def test_drawdown_pressure_is_nonnegative_and_deepens_in_stress():
+    from qlab.signals.hard import drawdown_pressure
+    rng = np.random.default_rng(1)
+    idx = pd.bdate_range("2019-01-01", periods=600)
+    r = rng.normal(0.0004, 0.005, (600, 5))
+    r[-40:] = rng.normal(-0.02, 0.02, (40, 5))   # a sustained decline at the end
+    px = pd.DataFrame(r, index=idx, columns=list("ABCDE"))
+    dd = drawdown_pressure(px)
+    assert (dd >= 0.0).all()
+    assert dd.iloc[-1] > dd.iloc[:400].mean() + 0.05
+
+
+def test_downside_tail_flags_asymmetric_left_tail():
+    from qlab.signals.hard import downside_tail
+    rng = np.random.default_rng(2)
+    idx = pd.bdate_range("2019-01-01", periods=400)
+    # Symmetric history, then a window with big negative outliers only.
+    sym = rng.normal(0, 0.006, (340, 4))
+    left = np.minimum(rng.normal(0, 0.006, (60, 4)), 0) - np.abs(
+        rng.normal(0, 0.02, (60, 4)))
+    px = pd.DataFrame(np.vstack([sym, left]), index=idx, columns=list("ABCD"))
+    ratio = downside_tail(px, window=63)
+    assert ratio.iloc[-1] > ratio.iloc[:200].mean()   # left tail fattens
+    assert np.isfinite(ratio).all()                   # no divide-by-zero leaks
+
+
 def test_fred_series_offline_is_deterministic_without_network(tmp_path):
     from qlab.signals.hard import fred_series
     s1 = fred_series("VIXCLS", cache_dir=tmp_path, offline=True, seed=3)

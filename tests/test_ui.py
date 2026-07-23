@@ -117,6 +117,28 @@ def test_owner_exposes_safe_lab_tools_and_durable_workflows(session):
     assert status == 200 and fetched["workflow_id"] == workflow_id
 
 
+@pytest.mark.parametrize("tool", [
+    "regime.turbulence", "regime.absorption", "regime.volatility_term_structure",
+    "regime.drawdown", "regime.tail_risk",
+])
+def test_owner_exposes_regime_indicators_in_one_shared_schema(session, tool):
+    status, obj = handle_api(
+        session, "POST", f"/api/lab/{tool}", {},
+        {"as_of": "2022-06-30", "universe": "core", "offline": True},
+    )
+    assert status == 200, obj
+    reading = obj["result"]
+    assert reading["regime"] in ("calm", "stress")
+    # the schema is uniform across all five, so the analyst can compare them
+    assert {"indicator", "signal", "threshold", "percentile", "reasoning"} <= set(reading)
+    assert reading["reasoning"]
+
+
+def test_owner_refuses_a_regime_tool_outside_the_allowlist(session):
+    with pytest.raises(PermissionError):
+        session.call_lab_tool("regime.made_up", {"as_of": "2022-06-30"}, True)
+
+
 def test_owner_preview_uses_exact_referee_reviewed_targets(session):
     from datetime import date
 

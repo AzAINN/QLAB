@@ -166,6 +166,42 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "higher_moments": higher_moments,
         })
 
+    # -- regime indicators (options for the analyst's regime call) --------
+    def regime(name: str, as_of: str, universe: str, lookback_days: int) -> dict:
+        return lab(name, {"as_of": as_of, "universe": universe,
+                          "lookback_days": lookback_days})
+
+    @app.tool(name="regime_turbulence")
+    def regime_turbulence(as_of: str, universe: str = "core",
+                          lookback_days: int = 756) -> dict:
+        """Turbulence regime: how unusual is the latest cross-asset move."""
+        return regime("regime.turbulence", as_of, universe, lookback_days)
+
+    @app.tool(name="regime_absorption")
+    def regime_absorption(as_of: str, universe: str = "core",
+                          lookback_days: int = 756) -> dict:
+        """Absorption-ratio regime: how tightly coupled (fragile) the market is."""
+        return regime("regime.absorption", as_of, universe, lookback_days)
+
+    @app.tool(name="regime_volatility_term_structure")
+    def regime_volatility_term_structure(as_of: str, universe: str = "core",
+                                         lookback_days: int = 756) -> dict:
+        """Vol term-structure regime: is variance accelerating or mean-reverting."""
+        return regime("regime.volatility_term_structure", as_of, universe,
+                      lookback_days)
+
+    @app.tool(name="regime_drawdown")
+    def regime_drawdown(as_of: str, universe: str = "core",
+                        lookback_days: int = 756) -> dict:
+        """Drawdown regime: directional depth below the trailing peak, plus trend."""
+        return regime("regime.drawdown", as_of, universe, lookback_days)
+
+    @app.tool(name="regime_tail_risk")
+    def regime_tail_risk(as_of: str, universe: str = "core",
+                         lookback_days: int = 756) -> dict:
+        """Tail-risk regime: downside/upside asymmetry and recent realised skew."""
+        return regime("regime.tail_risk", as_of, universe, lookback_days)
+
     @app.tool(name="objective_build")
     def objective_build(moment_set_id: str, form: str = "min_variance",
                         skew_lambda: float = 0.5,

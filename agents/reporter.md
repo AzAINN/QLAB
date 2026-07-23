@@ -21,10 +21,19 @@ Steps:
 
 1. Call `policy.current` and use the optimizer's exact targets and the analyst's
    exact `decision_id`; do not recompute or silently replace the reviewed result.
-2. Write the human-facing memo: recommended weights,
-   the regime call and its rationale, the algorithm id and stage, HRP/CVaR benchmark context, estimator
-   diagnostics, and the challenger/referee evidence. Be candid about
-   small-sample limits and any benchmark that wins.
+2. Write the human-facing memo, and write it the way a good summary reads:
+   the answer first (the recommended weights and whether the gate cleared),
+   then the evidence behind it, then caveats that do not hide. Cover the regime
+   call and its rationale, the algorithm and its stage, HRP/CVaR benchmark
+   context, estimator diagnostics, and the challenger/referee evidence. Be
+   candid about small-sample limits and any benchmark that wins.
+   Format for a plain terminal, not a web page: write in sentences and short
+   labelled lines, use a leading "- " for list items, and do NOT use Markdown
+   headings (`#`), tables, bold (`**`), or back-ticks — they render as literal
+   characters for the operator. Never surface internal record ids (decision,
+   plan, objective, moment-set, workflow, verdict) in the prose; they are audit
+   keys the reader never types. The terminal shows the actionable plan reference
+   separately, so refer to "the checked plan" in words, not by its id.
 3. If (and only if) the referee PASSED and a trade is intended:
    a. `get_portfolio_state` then `reconcile` — the ledger must be clean.
    b. `propose_rebalance(targets, decision_id)` with those exact reviewed targets

@@ -650,6 +650,40 @@ def test_phase_elapsed_labels():
     assert phase_elapsed("2999-01-01T00:00:00+00:00", None) == "0s"
 
 
+def test_demojibake_repairs_cp1252_misread_utf8():
+    from qlab.tui.formatting import demojibake
+
+    # the em dash the reporter uses, mis-decoded by a cp1252 pipe
+    assert demojibake("fragile calm â€” a watch item") == "fragile calm — a watch item"
+    assert demojibake("itâ€™s") == "it’s"
+    assert demojibake("plain ascii stays put") == "plain ascii stays put"
+
+
+def test_clean_report_line_strips_markdown_headers_ids_and_emphasis():
+    from qlab.tui.formatting import clean_report_line
+
+    # a markdown header returns is_heading=True with the '#' and trailing colon gone
+    is_heading, text = clean_report_line(
+        "### Uncertainty / watch items (non-blocking)")
+    assert is_heading and text == "UNCERTAINTY / WATCH ITEMS (NON-BLOCKING)"
+
+    # internal *_id audit keys and their id-looking values are removed from prose
+    _, text = clean_report_line(
+        "Handed the optimizer decision_id: dec_a1b2 and objective_id `obj-9`.")
+    assert "decision_id" not in text and "objective_id" not in text
+    assert "dec_a1b2" not in text and "obj-9" not in text
+    assert text == "Handed the optimizer and."
+
+    # markdown emphasis and back-ticks that render literally are stripped
+    _, text = clean_report_line("**Result:** held the `checked plan`.")
+    assert "*" not in text and "`" not in text
+    assert text == "Result: held the checked plan."
+
+    # a plain sentence with no markup is left untouched
+    assert clean_report_line("Solved with HRP; the referee passed.") == (
+        False, "Solved with HRP; the referee passed.")
+
+
 def test_workforce_view_shows_result_card_and_timings():
     from qlab.tui.app import QlabTui
 
@@ -688,6 +722,42 @@ def test_workforce_view_shows_result_card_and_timings():
             # phase timing is on the referee node's hover detail, not the block
             assert "42s" in app._flow_details["referee"]
             assert app._flow_states["referee"] == "done"
+
+    asyncio.run(run())
+
+
+def test_workforce_view_shows_the_selected_regime_and_reasoning():
+    """The analyst's regime call and why it made it get their own TUI line."""
+    from qlab.tui.app import QlabTui
+
+    reason = ("Turbulence and absorption both stressed (95th pct); "
+              "shortened the window to 252d.")
+
+    class RegimeClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wfreg", "kind": "portfolio_review",
+                "status": "running", "current_phase": "challenger",
+                "request": {"goal": "review", "as_of": "2026-07-19",
+                            "universe": "core"},
+                "steps": [
+                    {"phase": "analyst", "agent": "moments-analyst",
+                     "status": "done", "summary": "252d window",
+                     "artifacts": {"regime": "stress",
+                                   "regime_reasoning": reason}},
+                ],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(RegimeClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            content = str(app.query_one("#workforce-content").content)
+            assert "REGIME" in content and "STRESS" in content
+            assert "Turbulence and absorption" in content
 
     asyncio.run(run())
 
@@ -846,6 +916,163 @@ def test_workforce_mode_advances_flowchart_without_dumping_narrative():
     asyncio.run(run())
 
 
+def test_results_fallback_cleans_markdown_mojibake_and_ids():
+    """With no durable workflow, the coordinator's closing text is the fallback,
+    and it still reaches the console as plain, readable prose."""
+    from qlab.tui.app import QlabTui
+    from qlab.tui.claude import ClaudeEvent
+    from textual.widgets import RichLog
+
+    messy = (
+        "Recommendation: hold the HRP targets.\n"
+        "### Uncertainty / watch items (non-blocking)\n"
+        "Vol-term-structure is closest to its flip â€” a fragile calm.\n"
+        "Logged under decision_id: dec_a1b2 with the checked plan ready."
+    )
+
+    async def run():
+        # StubClient's default snapshot carries no workflow → fallback path.
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            app.claude.mode = "workforce"
+            app._apply_claude_event(ClaudeEvent("result", messy))
+            rendered = "\n".join(
+                strip.text for strip in app.query_one(
+                    "#workforce-console", RichLog).lines)
+
+            assert "###" not in rendered            # no literal markdown header
+            assert "â€”" not in rendered and "—" in rendered   # mojibake repaired
+            assert "decision_id" not in rendered and "dec_a1b2" not in rendered
+            assert "UNCERTAINTY / WATCH ITEMS (NON-BLOCKING)" in rendered
+            assert "Recommendation: hold the HRP targets." in rendered
+
+    asyncio.run(run())
+
+
+def test_completed_run_prints_friendly_structured_summary():
+    """A completed run summarizes from the durable record — a plain-language
+    banner, the regime, one line per agent, the recommendation, and its meaning —
+    and never dumps the coordinator's raw model text."""
+    from qlab.tui.app import QlabTui
+    from qlab.tui.claude import ClaudeEvent
+    from textual.widgets import RichLog
+
+    targets = {"GLD": 0.22, "ACWI": 0.18, "BNDW": 0.16, "EMB": 0.14,
+               "IGF": 0.12, "VNQ": 0.10, "GSG": 0.08}
+
+    class CompleteClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wfdone", "kind": "portfolio_review",
+                "status": "complete", "current_phase": "reporter",
+                "request": {"goal": "review", "as_of": "2026-07-23",
+                            "universe": "core"},
+                "steps": [
+                    {"phase": "analyst", "status": "done",
+                     "artifacts": {"regime": "stress",
+                                   "regime_reasoning": "Turbulence stressed; window 252d."}},
+                    {"phase": "challenger", "status": "done"},
+                    {"phase": "optimizer", "status": "done",
+                     "artifacts": {"algorithm_id": "HRP", "targets": targets}},
+                    {"phase": "referee", "status": "done", "summary": "PASS",
+                     "artifacts": {"verdict": "PASS", "targets": targets}},
+                    {"phase": "reporter", "status": "done",
+                     "artifacts": {"plan_id": "plan-77"}},
+                ],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(CompleteClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(150, 46)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            app._active_workflow_id = "wfdone"
+            app.claude.mode = "workforce"
+            # a raw, markdown/id-laden coordinator note that must NOT be dumped
+            app._apply_claude_event(ClaudeEvent(
+                "result", "### Notes\nLogged decision_id: dec_9 â€” watch vol."))
+            # collapse the RichLog's visual word-wrap so substring checks are
+            # about content, not where the terminal broke a line
+            flat = " ".join(" ".join(
+                strip.text for strip in app.query_one(
+                    "#workforce-console", RichLog).lines).split())
+
+            assert "WORKFORCE COMPLETE" in flat
+            assert "referee-approved recommendation" in flat
+            assert "STRESS" in flat                       # regime call
+            # every agent gets a plain-language line
+            assert "WHAT EACH AGENT DID" in flat
+            for name in ("Analyst", "Challenger", "Optimizer", "Referee", "Reporter"):
+                assert name in flat
+            assert "using HRP" in flat and "approved it" in flat
+            # the final output and the one human action
+            assert "GLD 22.0%" in flat
+            assert ": rebalance paper" in flat
+            assert "WHAT THIS MEANS" in flat
+            assert "confirm the paper trade yourself" in flat
+            # the raw coordinator note is NOT dumped — no markdown, ids, mojibake
+            assert "###" not in flat
+            assert "decision_id" not in flat and "dec_9" not in flat
+            assert "â€”" not in flat
+            # and no leftover terminal-centric section from the old format
+            assert "PIPELINE" not in flat
+
+    asyncio.run(run())
+
+
+def test_blocked_run_summary_names_the_gate_and_what_it_means():
+    """A blocked run says where it stopped, why, and that nothing traded."""
+    from qlab.tui.app import QlabTui
+    from qlab.tui.claude import ClaudeEvent
+    from textual.widgets import RichLog
+
+    class BlockedClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wfblk", "kind": "portfolio_review",
+                "status": "blocked", "current_phase": "referee",
+                "request": {"goal": "review", "as_of": "2026-07-23",
+                            "universe": "core"},
+                "steps": [
+                    {"phase": "analyst", "status": "done",
+                     "artifacts": {"regime": "calm",
+                                   "regime_reasoning": "All indicators calm."}},
+                    {"phase": "optimizer", "status": "done",
+                     "artifacts": {"algorithm_id": "HRP"}},
+                    {"phase": "referee", "status": "blocked",
+                     "summary": "no PASS: single-name cap breach on GLD"},
+                ],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(BlockedClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(150, 46)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            app._active_workflow_id = "wfblk"
+            app.claude.mode = "workforce"
+            app._apply_claude_event(ClaudeEvent("result", ""))
+            flat = " ".join(" ".join(
+                strip.text for strip in app.query_one(
+                    "#workforce-console", RichLog).lines).split())
+
+            assert "STOPPED AT A SAFETY GATE" in flat
+            assert "cap breach on GLD" in flat          # why, cleaned
+            assert "did not run" in flat                # reporter never ran
+            assert "Nothing was traded" in flat or "nothing has traded" in flat
+
+    asyncio.run(run())
+
+
 def test_completed_agent_prints_one_note_with_what_is_next():
     """Each finished agent earns a two-line account; nothing else is printed."""
     from qlab.tui.app import QlabTui
@@ -919,9 +1146,9 @@ def test_a_stopped_session_still_reports_where_the_run_reached():
                          "30 minutes."))
             rendered = "\n".join(written)
             assert "watchdog" in rendered
-            assert "RUN INCOMPLETE" in rendered
-            assert "756d window" in rendered      # what did finish
-            assert "optimizer" in rendered        # where it stopped
+            assert "ENDED EARLY" in rendered
+            assert "Analyst" in rendered                    # the phase that finished
+            assert "still running when the run stopped" in rendered  # where it stopped
 
     asyncio.run(run())
 

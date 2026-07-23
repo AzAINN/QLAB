@@ -28,7 +28,9 @@ from textual.widgets import (
 
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
-from qlab.tui.formatting import braille_chart, money, pct, phase_elapsed
+from qlab.tui.formatting import (
+    braille_chart, clean_report_line, demojibake, money, pct, phase_elapsed,
+)
 from qlab.paths import workspace_root
 
 
@@ -147,6 +149,157 @@ def workforce_note(phase: str, status: str, summary: str,
         nxt = ("Run complete — the results print below. Any paper trade remains "
                "a separate, explicitly confirmed action.")
     return head, nxt
+
+
+# The regime a run selected is a first-class read for the operator, so it gets
+# its own colored line rather than living only in a hover card.
+_REGIME_TONE = {"calm": "#1fe07b", "stress": "#ff5257"}
+
+
+def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
+    """The analyst's selected regime and its one-line reasoning, or None.
+
+    Sourced from the durable analyst-phase artifacts the agent persists, so the
+    operator sees the exact call the run made rather than a re-derived one.
+    """
+    artifacts = (steps_by_phase.get("analyst", {}) or {}).get("artifacts") or {}
+    regime = str(artifacts.get("regime") or "").strip()
+    if not regime:
+        return None
+    reasoning = " ".join(str(artifacts.get("regime_reasoning") or "").split())
+    return regime, reasoning
+
+
+def _regime_line(steps_by_phase: dict, *, indent: str = "") -> str | None:
+    """A ready-to-print rich-markup regime line, coloured calm/stress, or None."""
+    readout = _regime_readout(steps_by_phase)
+    if readout is None:
+        return None
+    regime, reasoning = readout
+    tone = _REGIME_TONE.get(regime.lower(), "#ffb020")
+    line = f"{indent}[#38ccff]◆ REGIME[/]  [bold {tone}]{escape(regime.upper())}[/]"
+    if reasoning:
+        line += f"  [#8797a8]{escape(reasoning[:220])}[/]"
+    return line
+
+
+def _extract_targets(steps_by_phase: dict) -> dict:
+    """The reviewed target weights: the referee's if it re-published them (they
+    are then gate-bound), otherwise the optimizer's. Empty when neither ran."""
+    for phase in ("referee", "optimizer"):
+        targets = (steps_by_phase.get(phase, {}).get("artifacts") or {}).get("targets")
+        if isinstance(targets, dict) and targets:
+            return targets
+    return {}
+
+
+def _format_targets(targets: dict, limit: int = 8) -> str:
+    """Target weights as a compact, largest-first line: 'AAPL 30.0% · GLD 20.0%'."""
+    ordered = sorted(targets.items(), key=lambda kv: -float(kv[1]))[:limit]
+    return " · ".join(f"{ticker} {float(weight):.1%}" for ticker, weight in ordered)
+
+
+# The completion summary is written for an operator, not a quant: a coloured
+# banner, one friendly headline, the regime, a plain line per agent, the
+# recommendation, and what it means. Everything below is pure so the wording is
+# unit-tested without a running app, and built only from the durable record.
+def _result_banner(status: str) -> tuple[str, str]:
+    """The coloured headline banner for the run's terminal state."""
+    return {
+        "complete": ("#1fe07b", "WORKFORCE COMPLETE"),
+        "blocked": ("#ffb020", "STOPPED AT A SAFETY GATE"),
+        "failed": ("#ff5257", "STOPPED ON AN ERROR"),
+    }.get(status, ("#eb9a2e", "ENDED EARLY"))
+
+
+def _result_headline(status: str, verdict: str) -> str:
+    """One friendly sentence: what the run achieved, read first."""
+    if status == "complete":
+        if verdict.upper() == "PASS":
+            return ("The desk reviewed the portfolio and has a referee-approved "
+                    "recommendation ready for you.")
+        return "The desk finished its review — the recommendation is below."
+    if status == "blocked":
+        return "A safety gate stopped the run before any trade. Nothing was traded."
+    if status == "failed":
+        return "The run hit an error before finishing. Its completed steps are saved."
+    return "The run ended before completing. The steps it reached are below."
+
+
+# What each role does, in words an operator reads at a glance. The completion
+# summary leads with these and enriches only from the durable fact each phase
+# owns — never the raw agent summary, which is written for the audit trail.
+_PHASE_PERSON = {
+    "analyst": ("Analyst",
+                "read the market regime and set the estimate window and shrinkage"),
+    "challenger": ("Challenger",
+                   "argued the opposite case to keep that call honest"),
+    "optimizer": ("Optimizer", "computed the target allocation weights"),
+    "referee": ("Referee",
+                "independently re-checked the result against the mandate"),
+    "reporter": ("Reporter", "wrote the recommendation for you"),
+}
+
+
+def _agent_brief(phase: str, step: dict | None,
+                 run_status: str) -> tuple[str, str, str, str]:
+    """A friendly ``(glyph, colour, name, action)`` line for one phase.
+
+    Plain language, enriched with the single durable fact that phase owns (the
+    algorithm, the verdict, whether a plan was prepared) and, only when it broke,
+    a short cleaned reason — so the reader learns what happened and where.
+    """
+    name, action = _PHASE_PERSON.get(phase, (phase.title(), "ran its phase"))
+    state = str((step or {}).get("status", "idle"))
+    glyph, colour = _STATE_STYLE.get(state, ("◌", "#586777"))
+    artifacts = (step or {}).get("artifacts") or {}
+
+    if not step or state in ("idle", "queued", "waiting"):
+        return "◌", "#586777", name, "did not run"
+    if state == "working":
+        return glyph, colour, name, "was still running when the run stopped"
+    if state in ("failed", "blocked"):
+        reason = clean_report_line(
+            " ".join(str(step.get("summary") or "").split()))[1][:90]
+        base = ("hit an error and stopped the run" if state == "failed"
+                else "was refused by a safety gate")
+        return glyph, colour, name, base + (f" — {reason}" if reason else "")
+
+    if phase == "optimizer":
+        algo = str(artifacts.get("algorithm_id")
+                   or artifacts.get("algorithm") or "").strip()
+        if algo:
+            action = f"computed the target weights using {algo}"
+    elif phase == "referee":
+        result = str(artifacts.get("verdict") or "").upper()
+        if result == "PASS":
+            action = "re-checked the result against the mandate and approved it"
+        elif result:
+            action = ("re-checked the result against the mandate and did not "
+                      "approve a trade")
+    elif phase == "reporter" and artifacts.get("plan_id"):
+        action = "wrote the recommendation and prepared a paper trade to confirm"
+    return glyph, colour, name, action
+
+
+def _result_meaning(status: str, verdict: str, has_targets: bool,
+                    has_plan: bool) -> str:
+    """One or two sentences on what the outcome signifies for the operator."""
+    if status == "complete" and verdict.upper() == "PASS":
+        if has_plan:
+            return ("These weights passed every mandate check. Nothing has traded "
+                    "yet — confirm the paper trade yourself to act on them.")
+        return ("These weights passed every mandate check, but no paper trade was "
+                "prepared, so nothing has traded.")
+    if status == "complete":
+        return ("The review finished without an approved trade, so the result "
+                "above is for your consideration only — nothing has traded.")
+    if status == "blocked":
+        return ("A hard safety limit was hit, so the run stopped on purpose before "
+                "proposing a trade. This is the guardrail working as intended.")
+    if status == "failed":
+        return "Nothing was traded. You can resume the run once the cause is fixed."
+    return "Nothing was traded. You can resume the run to finish it."
 
 
 def _verdict_cell(verdict: dict | None) -> str:
@@ -347,6 +500,11 @@ class PaperConfirmScreen(ModalScreen[bool]):
     }
     #chat-input:focus {
         border: round #ffb020;
+    }
+    #chat-input:disabled {
+        border: round #16212e;
+        background: #060a10;
+        color: #55657a;
     }
     #chat-exit {
         width: 10;
@@ -737,6 +895,11 @@ class QlabTui(App[None]):
     #chat-input:focus {
         border: round #ffb020;
     }
+    #chat-input:disabled {
+        border: round #16212e;
+        background: #060a10;
+        color: #55657a;
+    }
     #chat-exit {
         width: 10;
         height: 3;
@@ -1097,12 +1260,29 @@ class QlabTui(App[None]):
 
     def _render_chat_mode(self) -> None:
         chip = self.query_one("#chat-mode", Static)
-        field = self.query_one("#chat-input", Input)
         if self._chat_mode == "chat":
             chip.update("[bold #38ccff]CHAT[/]")
-            field.placeholder = "ask qlab anything — read-only · : workforce to switch"
         else:
             chip.update("[bold #ffb020]WORK[/]")
+        self._sync_chat_input()
+
+    def _sync_chat_input(self) -> None:
+        """Lock the coordinator input while a session is running, reopen when done.
+
+        A running turn already refuses a new message (_chat_send returns early),
+        so the box would only mislead — the operator could type into it and see
+        nothing sent. Disabling it makes the state visible: it greys out during a
+        run and reopens, with the mode's own prompt, the moment the turn ends and
+        a message can actually be sent.
+        """
+        field = self.query_one("#chat-input", Input)
+        running = self.claude.running
+        field.disabled = running
+        if running:
+            field.placeholder = "agents are working — input reopens when the run ends"
+        elif self._chat_mode == "chat":
+            field.placeholder = "ask qlab anything — read-only · : workforce to switch"
+        else:
             field.placeholder = "message the coordinator — Enter sends · : chat to switch"
 
     def _note_workflow_phase(self, payload: dict) -> None:
@@ -1154,7 +1334,7 @@ class QlabTui(App[None]):
         *complete, self._console_partial = self._console_partial.split("\n")
         for line in complete:
             if line.strip():
-                self._console_write(f"[#cdd9e6]{escape(line)}[/]")
+                self._console_write(f"[#cdd9e6]{escape(demojibake(line))}[/]")
 
     def _console_flush(self) -> None:
         if self._console_partial.strip():
@@ -1350,13 +1530,23 @@ class QlabTui(App[None]):
 
         # The chart takes the whole width and most of the height; the readouts
         # underneath get what's left. Both track the terminal size, so a wider
-        # or taller window is spent on the plot.
+        # or taller window is spent on the plot. The left price gutter and the
+        # two-line time axis are reserved out of the plot's cells first, so the
+        # braille curve and its labels always align.
         avail_w, avail_h = self._plot_region("#market-content")
-        chart_w = max(24, avail_w - 1)
-        chart_h = max(6, min(30, avail_h - 12))
-        rows = braille_chart(history, chart_w, chart_h)
         hi = max(history) if history else 0.0
         lo = min(history) if history else 0.0
+        mid = (hi + lo) / 2.0
+        # Y axis (price): a right-aligned gutter carrying the high, midpoint, and
+        # low ticks. Its width is the widest of the three labels so every row's
+        # plot area starts at the same column.
+        gutter = max(len(money(hi)), len(money(mid)), len(money(lo))) if history else 0
+        chart_w = max(24, avail_w - gutter - 2)
+        chart_h = max(6, min(30, avail_h - 14))
+        rows = braille_chart(history, chart_w, chart_h)
+        last_row = len(rows) - 1
+        mid_row = last_row // 2
+        as_of = str(market.get("as_of", "—"))
 
         lines = [
             f"[bold #f6fafe]{escape(self.active_ticker)}[/]  "
@@ -1367,7 +1557,33 @@ class QlabTui(App[None]):
             f"[#9a7f4a]{len(history)} DAILY BARS[/]",
             "",
         ]
-        lines.extend(f"[{dir_col}]{escape(bar)}[/]" for bar in rows)
+        for i, bar in enumerate(rows):
+            if not history:
+                tick = ""
+            elif i == 0:
+                tick = money(hi)
+            elif i == last_row:
+                tick = money(lo)
+            elif i == mid_row:
+                tick = money(mid)
+            else:
+                tick = ""
+            lines.append(
+                f"[#9a7f4a]{tick:>{gutter}}[/] [#33465b]│[/]"
+                f"[{dir_col}]{escape(bar)}[/]")
+        # X axis (time): a baseline under the plot, then the oldest→latest span,
+        # then a one-line legend naming both axes so the plot is self-defining.
+        pad = " " * (gutter + 2)
+        lines.append(f"[#33465b]{' ' * gutter} └{'─' * chart_w}[/]")
+        left_lbl = f"{len(history)} bars ago"
+        right_lbl = f"as of {as_of}"
+        gap = chart_w - len(left_lbl) - len(right_lbl)
+        span = (left_lbl + " " * gap + right_lbl if gap >= 1
+                else f"{len(history)} bars → {as_of}"[:chart_w])
+        lines.append(f"[#9a7f4a]{pad}{escape(span)}[/]")
+        lines.append(
+            f"[#586777]{pad}X · time (daily bars, oldest → latest)"
+            "   Y · price (USD)[/]")
         lines.append("")
 
         stats = [
@@ -1511,6 +1727,12 @@ class QlabTui(App[None]):
             f"[#8797a8]{escape(str(request.get('goal', 'Governed portfolio review'))[:160])}[/]",
         ]
 
+        # The regime the analyst selected, as soon as it persists — the operator
+        # reads what drove the window/shrinkage call without opening a hover.
+        regime_line = _regime_line(step_by_phase)
+        if regime_line:
+            lines.append(regime_line)
+
         result = workflow.get("result") or {}
         if status == "complete" and result.get("final_summary"):
             referee = step_by_phase.get("referee")
@@ -1520,8 +1742,19 @@ class QlabTui(App[None]):
             lines.extend([
                 "",
                 f"[#1fe07b]▮ RESULT{chip}[/]",
-                f"[#cdd9e6]{escape(str(result['final_summary'])[:400])}[/]",
+                f"[#cdd9e6]{escape(str(result['final_summary'])[:320])}[/]",
             ])
+            targets = _extract_targets(step_by_phase)
+            if targets:
+                lines.append(
+                    f"[#9a7f4a]target weights[/]  "
+                    f"[#f6fafe]{escape(_format_targets(targets))}[/]")
+            plan_id = str((step_by_phase.get("reporter", {}).get("artifacts")
+                           or {}).get("plan_id") or "")
+            if plan_id:
+                lines.append(
+                    f"[#9a7f4a]checked plan[/]  [#f6fafe]{escape(plan_id)}[/]  "
+                    "[#8797a8]→ : rebalance paper to confirm[/]")
         elif status in ("failed", "blocked"):
             tone = "#ff5257" if status == "failed" else "#ffb020"
             broken = next(
@@ -1754,6 +1987,7 @@ class QlabTui(App[None]):
             f"PAPER · {source}/DAILY · {mcp} · {claude} · {data_token}")
         self.query_one("#chat-exit", Button).label = (
             "■ stop" if self.claude.running else "exit")
+        self._sync_chat_input()
 
     # -- events -----------------------------------------------------------
     def _ingest_events(self, events_: list[dict]) -> None:
@@ -1792,7 +2026,9 @@ class QlabTui(App[None]):
         self.query_one("#canvas", ContentSwitcher).current = view
         self._render_nav()
         if view == "workforce":
-            self.query_one("#chat-input", Input).focus()
+            field = self.query_one("#chat-input", Input)
+            if not field.disabled:  # a running turn owns the box; don't grab it
+                field.focus()
 
     def action_next_symbol(self) -> None:
         if isinstance(self.focused, Input):
@@ -2234,13 +2470,15 @@ class QlabTui(App[None]):
         self._render_status()
 
     def _print_workforce_results(self, text: str) -> None:
-        """Print the run's results once, when the coordinator's turn ends.
+        """Print one friendly completion summary when the coordinator's turn ends.
 
         The intermediate narrative is never streamed; this is the single block
-        that reaches the console. It leads with the durable record — per-phase
-        outcomes, the referee verdict, the reviewed targets — and only then the
-        coordinator's closing text, so the results stand even when the session
-        ends without one (a watchdog stop, a crashed CLI).
+        that reaches the console, and it is built from the durable record alone —
+        never a raw model text dump. It reads top to bottom the way a person
+        asks: what was achieved, the regime and why, what each agent did in a
+        line, the recommendation, and what it means. Only when no durable
+        workflow was recorded at all does it fall back to the coordinator's own
+        closing text, cleaned of markdown, ids, and mojibake.
         """
         if self._results_printed:
             return
@@ -2248,55 +2486,79 @@ class QlabTui(App[None]):
         workflow = self._select_workflow(
             self.snapshot.get("workflows", []) if self.snapshot else [])
         status = str((workflow or {}).get("status", "")) or "unknown"
-        tone, label = {
-            "complete": ("#1fe07b", "RESULTS"),
-            "failed": ("#ff5257", "RUN FAILED"),
-            "blocked": ("#ffb020", "RUN BLOCKED"),
-        }.get(status, ("#eb9a2e", "RUN INCOMPLETE"))
+        tone, label = _result_banner(status)
 
         self._console_write("")
         self._console_write(f"[bold {tone}]▮ {label}[/]")
 
-        if workflow is not None:
-            steps = {str(step.get("phase")): step for step in workflow.get("steps", [])}
-            for phase, _agent, short in _FLOW:
-                step = steps.get(phase) or {}
-                state = str(step.get("status", "idle"))
-                glyph, color = _STATE_STYLE.get(state, ("◌", "#586777"))
-                elapsed = phase_elapsed(
-                    step.get("started_at"), step.get("completed_at"))
-                summary = " ".join(str(step.get("summary") or "").split())[:150]
-                self._console_write(
-                    f"[{color}]{glyph}[/] [bold]{escape(short):<11}[/]"
-                    f"[#8797a8]{escape(state)}"
-                    f"{f' · {elapsed}' if elapsed else ''}[/]"
-                    + (f"  [#cdd9e6]{escape(summary)}[/]" if summary else ""))
-            targets = (steps.get("referee", {}).get("artifacts") or {}).get(
-                "targets") or (
-                steps.get("optimizer", {}).get("artifacts") or {}).get("targets")
-            if isinstance(targets, dict) and targets:
-                packed = "  ".join(
-                    f"{ticker} {float(weight):.1%}"
-                    for ticker, weight in sorted(
-                        targets.items(), key=lambda kv: -float(kv[1]))[:8])
-                self._console_write(f"[#9a7f4a]targets[/]  {escape(packed)}")
-            plan_id = str((steps.get("reporter", {}).get("artifacts") or {})
-                          .get("plan_id") or "")
-            if plan_id:
-                self._console_write(
-                    f"[#9a7f4a]checked plan[/]  {escape(plan_id)}   "
-                    "[#8797a8]: rebalance paper to confirm it yourself[/]")
+        if workflow is None:
+            self._print_results_fallback(text)
+            return
 
-        text = (text or "").strip()
-        if text and text != "Claude completed":
+        steps = {str(step.get("phase")): step for step in workflow.get("steps", [])}
+        verdict = str((steps.get("referee", {}).get("artifacts") or {})
+                      .get("verdict") or "")
+
+        # 1 · what was achieved — the conclusion, first.
+        self._console_write(f"[#cdd9e6]{escape(_result_headline(status, verdict))}[/]")
+
+        # 2 · the regime the run chose, and why.
+        regime_line = _regime_line(steps)
+        if regime_line:
             self._console_write("")
-            for line in text.splitlines():
-                self._console_write(
-                    f"[#f6fafe]{escape(line)}[/]" if line.strip() else "")
-        elif workflow is None:
+            self._console_write(regime_line)
+
+        # 3 · what each agent did, one plain-language line each.
+        self._console_write("")
+        self._console_write("[#9a7f4a]WHAT EACH AGENT DID[/]")
+        for phase, _agent, _short in _FLOW:
+            glyph, colour, name, action = _agent_brief(
+                phase, steps.get(phase), status)
             self._console_write(
-                "[#8797a8]no durable workflow was recorded and the coordinator "
-                "returned no final text[/]")
+                f"  [{colour}]{glyph}[/] [bold #f6fafe]{escape(name):<11}[/] "
+                f"[#cdd9e6]{escape(action)}[/]")
+
+        # 4 · the final output — the weights, and the one action left to a human.
+        targets = _extract_targets(steps)
+        has_plan = bool((steps.get("reporter", {}).get("artifacts") or {})
+                        .get("plan_id"))
+        if targets or has_plan:
+            self._console_write("")
+            self._console_write("[#9a7f4a]RECOMMENDATION[/]")
+            if targets:
+                self._console_write(
+                    f"  [#8797a8]target weights[/]  "
+                    f"[#f6fafe]{escape(_format_targets(targets))}[/]")
+            if has_plan:
+                self._console_write(
+                    "  [#8797a8]paper plan[/]     [#1fe07b]ready[/] "
+                    "[#8797a8]— type[/] [#f6fafe]: rebalance paper[/] "
+                    "[#8797a8]to confirm it yourself[/]")
+
+        # 5 · what the output signifies, in plain terms.
+        self._console_write("")
+        self._console_write("[#9a7f4a]WHAT THIS MEANS[/]")
+        self._console_write(
+            "  [#cdd9e6]"
+            f"{escape(_result_meaning(status, verdict, bool(targets), has_plan))}[/]")
+
+    def _print_results_fallback(self, text: str) -> None:
+        """No durable workflow to summarize: show the coordinator's closing text,
+        cleaned of markdown, ids, and mojibake, or a short pointer if it is empty."""
+        text = (text or "").strip()
+        if not text or text == "Claude completed":
+            self._console_write(
+                "[#8797a8]The run ended before it recorded any results. Start "
+                "again with a goal, or resume it from the workforce view.[/]")
+            return
+        for raw in text.splitlines():
+            is_heading, line = clean_report_line(raw)
+            if not line:
+                self._console_write("")
+            elif is_heading:
+                self._console_write(f"[#9a7f4a]{escape(line)}[/]")
+            else:
+                self._console_write(f"[#f6fafe]{escape(line)}[/]")
 
     def _set_agent_from_tool(self, tool: str, explicit_agent: str = "") -> str:
         if explicit_agent in _AGENT_NAMES:

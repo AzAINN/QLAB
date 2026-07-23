@@ -91,6 +91,61 @@ def register_lab_tools(app, st: LabState) -> None:
         mid = st.put_moment_set(ms)
         return {"moment_set_id": mid, "summary": ms.summary()}
 
+    # -- regime indicators (options for the analyst's regime call) ----------
+    # Five deterministic, price-only reads on different faces of market
+    # variability. Each returns one regime reading in a shared schema so the
+    # analyst can weigh several and defend a single call; none forecasts returns.
+    def _regime_snapshot(as_of: str, universe: str, lookback_days: int):
+        d = check_as_of(as_of)
+        tickers = load_universe().tickers(universe)
+        return market.snapshot(tickers, d, lookback_days=lookback_days,
+                               offline=st.offline, seed=st.seed)
+
+    @app.tool(name="regime.turbulence")
+    def regime_turbulence(as_of: str, universe: str = "core",
+                          lookback_days: int = 756, quantile: float = 0.80) -> dict:
+        """Turbulence regime: is the latest cross-asset move statistically unusual?"""
+        st.budget.charge("regime.turbulence")
+        from qlab.signals.indicators import turbulence_regime
+        return turbulence_regime(
+            _regime_snapshot(as_of, universe, lookback_days), quantile=quantile)
+
+    @app.tool(name="regime.absorption")
+    def regime_absorption(as_of: str, universe: str = "core",
+                          lookback_days: int = 756, quantile: float = 0.80) -> dict:
+        """Absorption-ratio regime: how tightly coupled (fragile) is the market?"""
+        st.budget.charge("regime.absorption")
+        from qlab.signals.indicators import absorption_regime
+        return absorption_regime(
+            _regime_snapshot(as_of, universe, lookback_days), quantile=quantile)
+
+    @app.tool(name="regime.volatility_term_structure")
+    def regime_vol_term(as_of: str, universe: str = "core",
+                        lookback_days: int = 756, quantile: float = 0.80) -> dict:
+        """Vol term-structure regime: is variance accelerating or mean-reverting?"""
+        st.budget.charge("regime.volatility_term_structure")
+        from qlab.signals.indicators import volatility_term_structure
+        return volatility_term_structure(
+            _regime_snapshot(as_of, universe, lookback_days), quantile=quantile)
+
+    @app.tool(name="regime.drawdown")
+    def regime_drawdown(as_of: str, universe: str = "core",
+                        lookback_days: int = 756, quantile: float = 0.80) -> dict:
+        """Drawdown regime: directional depth below the trailing peak, plus trend."""
+        st.budget.charge("regime.drawdown")
+        from qlab.signals.indicators import drawdown_regime
+        return drawdown_regime(
+            _regime_snapshot(as_of, universe, lookback_days), quantile=quantile)
+
+    @app.tool(name="regime.tail_risk")
+    def regime_tail_risk(as_of: str, universe: str = "core",
+                         lookback_days: int = 756, quantile: float = 0.80) -> dict:
+        """Tail-risk regime: downside/upside asymmetry and recent realised skew."""
+        st.budget.charge("regime.tail_risk")
+        from qlab.signals.indicators import tail_risk_regime
+        return tail_risk_regime(
+            _regime_snapshot(as_of, universe, lookback_days), quantile=quantile)
+
     # -- objective ----------------------------------------------------------
     @app.tool(name="objective.build")
     def objective_build(moment_set_id: str, form: str = "min_variance",

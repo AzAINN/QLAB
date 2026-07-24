@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from qlab.state.registry import Registry
 from qlab.trader.broker import SimulatedPaperBroker, default_price_provider
 from qlab.trader.mandate import Mandate, MandateViolation, load_mandate, tier
 from qlab.trader.plan import OrderLeg, OrderPlan, build_plan, execute_plan
@@ -722,3 +723,19 @@ def test_non_liquidation_refused_under_halt(reg_and_broker):
     reg.log_verdict("dec-reshuffle", "PASS", [], "deterministic", targets=reshuffle)
     with pytest.raises(MandateViolation, match="halted"):
         execute_plan(reg, broker, p2, mandate)
+
+
+def test_simulated_positions_carry_unrealized_pl():
+    reg = Registry(":memory:")
+    broker = SimulatedPaperBroker(
+        reg, price_provider=lambda tickers: {t: 110.0 for t in tickers},
+        starting_cash=10_000.0)
+    reg.apply_fill("ACWI", 10.0, 100.0, -1_000.0)  # bought at 100, marked 110
+    state = broker.portfolio_state(["ACWI"])
+    assert state["positions"]["ACWI"]["unrealized_pl"] == pytest.approx(100.0)
+
+
+def test_simulated_broker_has_no_portfolio_history():
+    reg = Registry(":memory:")
+    broker = SimulatedPaperBroker(reg)
+    assert not hasattr(broker, "portfolio_history")

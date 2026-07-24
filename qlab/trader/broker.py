@@ -83,7 +83,8 @@ class SimulatedPaperBroker(Broker):
             price = px.get(t, p["avg_price"])
             value = p["qty"] * price
             pos_value += value
-            holdings[t] = {"qty": p["qty"], "price": price, "value": value}
+            holdings[t] = {"qty": p["qty"], "price": price, "value": value,
+                           "unrealized_pl": (price - p["avg_price"]) * p["qty"]}
         equity = cash + pos_value
         weights = {t: (holdings[t]["value"] / equity if equity > 0 else 0.0)
                    for t in holdings}
@@ -148,7 +149,8 @@ class AlpacaPaperBroker(Broker):
     def portfolio_state(self, tickers: list[str]) -> dict:
         acct = self.trading.get_account()
         positions = {p.symbol: {"qty": float(p.qty), "price": float(p.current_price),
-                                "value": float(p.market_value)}
+                                "value": float(p.market_value),
+                                "unrealized_pl": float(p.unrealized_pl)}
                      for p in self.trading.get_all_positions()}
         equity = float(acct.equity)
         weights = {t: (positions[t]["value"] / equity if equity > 0 else 0.0)
@@ -178,6 +180,25 @@ class AlpacaPaperBroker(Broker):
         order = self.trading.submit_order(req)
         return {"client_order_id": client_order_id, "ticker": ticker, "side": side,
                 "notional": notional, "state": str(order.status), "id": str(order.id)}
+
+    def portfolio_history(self, period: str = "1M",
+                          timeframe: str = "1D") -> list[dict]:
+        """Account equity history from Alpaca, oldest first, UTC ISO stamps."""
+        from datetime import datetime, timezone
+
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+        history = self.trading.get_portfolio_history(
+            GetPortfolioHistoryRequest(period=period, timeframe=timeframe))
+        rows = []
+        for stamp, equity in zip(history.timestamp, history.equity):
+            if equity is None:
+                continue
+            rows.append({
+                "ts": datetime.fromtimestamp(int(stamp), tz=timezone.utc).isoformat(),
+                "equity": float(equity),
+            })
+        return rows
 
 
 def get_broker(registry: Registry, *, offline: bool = False,

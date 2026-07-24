@@ -6,6 +6,7 @@ import json
 import math
 import subprocess
 import threading
+import time
 from datetime import datetime
 from typing import Any
 
@@ -115,6 +116,7 @@ _REFRESH_EVENT_KINDS = {
     "workflow_started", "workflow_phase", "referee_verdict",
     "plan_built", "order_filled", "decision_logged", "ablation_complete",
 }
+_QUOTE_REPAINT_INTERVAL = 1.0
 COMMAND_TABLE = {
     ("view", "dashboard"): "action_view",
     ("view", "desk"): "action_view",
@@ -610,6 +612,8 @@ class QlabTui(App[None]):
         self._results_printed = False
         self._pulse = 0
         self._live_stream_stop = False
+        self._last_quote_repaint_at = 0.0
+        self._quote_repaint_timer = None
         self._console_partial = ""
         self._chat_sessions = {"workforce": "", "chat": ""}
         self._chat_mode = "workforce"
@@ -878,7 +882,7 @@ class QlabTui(App[None]):
         self._render_settings()
 
     def _start_live_stream(self) -> None:
-        """Subscribe to the owner's SSE bus so state changes land instantly.
+        """Subscribe to the owner's SSE bus so state and quotes land instantly.
 
         Polling stays on as the fallback; this only makes the desk react the
         moment a phase flips or a verdict lands instead of at the next tick.
@@ -887,8 +891,6 @@ class QlabTui(App[None]):
             return
 
         def run() -> None:
-            import time
-
             while not self._live_stream_stop:
                 try:
                     for event in self.client.stream("/api/stream"):
@@ -902,12 +904,91 @@ class QlabTui(App[None]):
         threading.Thread(target=run, daemon=True).start()
 
     def _apply_live_event(self, event: dict) -> None:
+        kind = str(event.get("kind", ""))
+        if kind == "quote":
+            self._apply_quote_event(event)
+            return
         # Console notes are raised by _ingest_events, which both the SSE stream
         # and the snapshot poll feed — whichever delivers a phase event first
         # writes its note, and the other is deduped by id.
         self._ingest_events([event])
-        if str(event.get("kind", "")) in _REFRESH_EVENT_KINDS:
+        if kind in _REFRESH_EVENT_KINDS:
             self._start_refresh()
+
+    def _apply_quote_event(self, event: dict) -> None:
+        """Merge quote rows into the local view model without a snapshot fetch."""
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+            raise ValueError("quote event payload.rows must be a list")
+        rows = payload["rows"]
+        normalized = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("quote event rows must be objects")
+            ticker = str(row.get("ticker") or "")
+            price = _finite_number(row.get("price"))
+            change = _finite_number(row.get("change_1d"))
+            if not ticker or price is None or change is None:
+                raise ValueError(
+                    "quote event rows require ticker, price, and change_1d"
+                )
+            normalized.append({
+                "ticker": ticker,
+                "price": price,
+                "change_1d": change,
+            })
+        if not normalized:
+            raise ValueError("quote event payload.rows must not be empty")
+
+        if not self.snapshot:
+            self.snapshot = {"market": {"assets": []}}
+        market = self.snapshot.get("market")
+        if not isinstance(market, dict):
+            market = {}
+            self.snapshot["market"] = market
+        assets = _records(market.get("assets"))
+        by_ticker = {
+            str(asset.get("ticker") or ""): asset
+            for asset in assets
+            if asset.get("ticker")
+        }
+        for row in normalized:
+            asset = by_ticker.get(row["ticker"])
+            if asset is None:
+                asset = {"ticker": row["ticker"], "history": []}
+                assets.append(asset)
+                by_ticker[row["ticker"]] = asset
+            asset.update(row)
+        market["assets"] = assets
+        self._queue_quote_repaint()
+
+    def _queue_quote_repaint(self) -> None:
+        if self._quote_repaint_timer is not None:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_quote_repaint_at
+        if elapsed >= _QUOTE_REPAINT_INTERVAL:
+            self._repaint_quote_surfaces()
+            return
+        self._quote_repaint_timer = self.set_timer(
+            _QUOTE_REPAINT_INTERVAL - elapsed,
+            self._repaint_quote_surfaces,
+        )
+
+    def _repaint_quote_surfaces(self) -> None:
+        self._quote_repaint_timer = None
+        self._last_quote_repaint_at = time.monotonic()
+        market = _record(self.snapshot.get("market"))
+        assets = _records(market.get("assets"))
+        self._sync_universe([
+            str(row.get("ticker"))
+            for row in assets
+            if row.get("ticker")
+        ])
+        self._render_universe(assets)
+        self.query_one("#tile-market-pulse-content", Static).update(
+            self._market_pulse_content(market)
+        )
 
     # -- workforce console -------------------------------------------------
     def _console_write(self, line: str) -> None:
@@ -1069,6 +1150,43 @@ class QlabTui(App[None]):
             else:
                 label.update(ticker)
 
+    def _market_pulse_content(self, market: dict) -> str:
+        pulse_lines = []
+        assets_by_ticker = {}
+        for asset in _records(market.get("assets")):
+            ticker = str(asset.get("ticker") or "")
+            if ticker:
+                assets_by_ticker[ticker] = asset
+        for ticker in self.universe_tickers:
+            asset = assets_by_ticker.get(ticker)
+            safe_ticker = escape(str(ticker))
+            if asset is None:
+                pulse_lines.append(
+                    f"[{TEXT}]{safe_ticker:<5}[/] [{MUTED}]no data[/]")
+                continue
+            price = _finite_number(asset.get("price"))
+            price_text = "—" if price is None else f"{price:.2f}"
+            change = _finite_number(asset.get("change_1d"))
+            change_cell = (
+                f"[{MUTED}]{'—':>6}[/]"
+                if change is None
+                else f"[{UP if change >= 0 else DOWN}]{change:+6.1%}[/]"
+            )
+            history = []
+            raw_history = asset.get("history")
+            if isinstance(raw_history, list):
+                for value in raw_history:
+                    number = _finite_number(value)
+                    if number is not None:
+                        history.append(number)
+            pulse = sparkline(history[-12:]) or "—"
+            pulse_lines.append(
+                f"[{TEXT}]{safe_ticker:<5}[/] "
+                f"[{TEXT_HI}]{price_text:>8}[/]  "
+                f"{change_cell}  [{CYAN}]{pulse}[/]"
+            )
+        return "\n".join(pulse_lines) if pulse_lines else f"[{MUTED}]—[/]"
+
     def _update_dashboard_tiles(self, contents: dict[str, str]) -> None:
         unavailable = f"[{MUTED}]owner snapshot unavailable[/]"
         for tile_key in _DASHBOARD_TILE_KEYS:
@@ -1177,44 +1295,7 @@ class QlabTui(App[None]):
             bold_values={0},
         ))
 
-        pulse_lines = []
-        assets_by_ticker = {}
-        for asset in _records(market.get("assets")):
-            ticker = str(asset.get("ticker") or "")
-            if ticker:
-                assets_by_ticker[ticker] = asset
-        for ticker in self.universe_tickers:
-            asset = assets_by_ticker.get(ticker)
-            safe_ticker = escape(str(ticker))
-            if asset is None:
-                pulse_lines.append(
-                    f"[{TEXT}]{safe_ticker:<5}[/] [{MUTED}]no data[/]")
-                continue
-            price = _finite_number(asset.get("price"))
-            price_text = "—" if price is None else f"{price:.2f}"
-            change = _finite_number(asset.get("change_1d"))
-            change_cell = (
-                f"[{MUTED}]{'—':>6}[/]"
-                if change is None
-                else f"[{UP if change >= 0 else DOWN}]{change:+6.1%}[/]"
-            )
-            history = []
-            raw_history = asset.get("history")
-            if isinstance(raw_history, list):
-                for value in raw_history:
-                    number = _finite_number(value)
-                    if number is not None:
-                        history.append(number)
-            history = history[-12:]
-            pulse = sparkline(history) or "—"
-            pulse_lines.append(
-                f"[{TEXT}]{safe_ticker:<5}[/] "
-                f"[{TEXT_HI}]{price_text:>8}[/]  "
-                f"{change_cell}  [{CYAN}]{pulse}[/]"
-            )
-        market_pulse_content = (
-            "\n".join(pulse_lines) if pulse_lines else f"[{MUTED}]—[/]"
-        )
+        market_pulse_content = self._market_pulse_content(market)
 
         decisions = _records(self.snapshot.get("decisions"))
         decision = decisions[0] if decisions else {}

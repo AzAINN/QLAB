@@ -34,7 +34,7 @@ class ApiClient:
 
 
     def stream(self, path: str, **params: Any):
-        """Yield server-sent event dicts from an owner stream endpoint.
+        """Yield durable audit and transient topic events from the owner.
 
         Blocks between events; callers exit by breaking (Ctrl-C closes the
         socket via the context manager). Heartbeat comments are skipped.

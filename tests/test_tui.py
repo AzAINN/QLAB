@@ -437,6 +437,77 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
     asyncio.run(run())
 
 
+def test_quote_event_repaints_only_market_pulse_and_universe():
+    from qlab.tui.app import QlabTui
+    from textual.widgets import Label, ListView
+
+    async def run():
+        client = StubClient()
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            other_tiles = {
+                tile_key: str(app.query_one(
+                    f"#tile-{tile_key}-content"
+                ).content)
+                for tile_key in (
+                    "equity", "allocation", "regime", "verdict", "run", "alerts",
+                )
+            }
+            posts_before = list(client.posts)
+            refreshes = []
+            app._start_refresh = lambda: refreshes.append("refresh")
+
+            app._apply_live_event({
+                "event_id": "quote-1",
+                "ts": "2026-07-24T12:00:00+00:00",
+                "kind": "quote",
+                "payload": {"rows": [{
+                    "ticker": "ACWI",
+                    "price": 123.45,
+                    "change_1d": -0.0123,
+                }]},
+            })
+
+            pulse = str(
+                app.query_one("#tile-market-pulse-content").content
+            )
+            universe = app.query_one("#universe", ListView)
+            first_label = universe.children[0].query_one(Label)
+            assert "ACWI" in pulse and "123.45" in pulse and "-1.2%" in pulse
+            assert "123.45" in str(first_label.content)
+            assert refreshes == []
+            assert client.posts == posts_before
+            assert {
+                tile_key: str(app.query_one(
+                    f"#tile-{tile_key}-content"
+                ).content)
+                for tile_key in other_tiles
+            } == other_tiles
+
+            app._apply_live_event({
+                "event_id": "quote-2",
+                "ts": "2026-07-24T12:00:00.100000+00:00",
+                "kind": "quote",
+                "payload": {"rows": [{
+                    "ticker": "ACWI",
+                    "price": 130.0,
+                    "change_1d": 0.02,
+                }]},
+            })
+            assert "130.00" not in str(
+                app.query_one("#tile-market-pulse-content").content
+            )
+            await pilot.pause(1.05)
+            assert "130.00" in str(
+                app.query_one("#tile-market-pulse-content").content
+            )
+            assert refreshes == []
+            assert client.posts == posts_before
+
+    asyncio.run(run())
+
+
 def test_dashboard_sparse_payload_updates_every_tile():
     from qlab.tui.app import QlabTui
 

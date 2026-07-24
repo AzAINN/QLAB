@@ -9,7 +9,7 @@ compose with the TUI and web client instead of competing with them:
     qlab workforce run "GOAL"       headless governed run, streamed live
     qlab workforce status [ID]      durable phase state of a run
     qlab workforce watch [ID]       tail a run someone else is driving
-    qlab events [--kind K]          tail the audit bus
+    qlab events [--kind K]          tail the owner event bus
 
 Requires the ``operator`` extra (rich + httpx). Paper execution is not
 reachable from here; the confirm dialog lives in the TUI alone.
@@ -34,6 +34,7 @@ _EVENT_STYLES = {
     "workflow_phase": "accent",
     "referee_verdict": "ok",
     "tool_call": "info",
+    "quote": "info",
     "plan_built": "gold",
     "order_filled": "gold",
     "mandate_violation": "bad",
@@ -104,8 +105,24 @@ def format_event(event: dict) -> tuple[str, str]:
     clock = ts[11:19] if len(ts) >= 19 else "        "
     kind = str(event.get("kind", "event"))
     payload = event.get("payload") or {}
-    parts = [f"{key}={_shorten(value, 36)}" for key, value in
-             list(payload.items())[:3]]
+    if kind == "quote":
+        rows = payload.get("rows")
+        quote_rows = rows if isinstance(rows, list) else []
+        parts = []
+        for row in quote_rows[:3]:
+            if not isinstance(row, dict):
+                continue
+            ticker = str(row.get("ticker") or "—")
+            try:
+                price = f"{float(row.get('price')):.2f}"
+                change = f"{float(row.get('change_1d')):+.1%}"
+            except (TypeError, ValueError):
+                price, change = "—", "—"
+            parts.append(f"{ticker} {price} {change}")
+        parts.append(f"count={len(quote_rows)}")
+    else:
+        parts = [f"{key}={_shorten(value, 36)}" for key, value in
+                 list(payload.items())[:3]]
     style = _EVENT_STYLES.get(kind, "muted")
     if kind == "referee_verdict" and payload.get("verdict") != "PASS":
         style = "bad"
@@ -381,7 +398,7 @@ def register_subcommands(sub, add_common) -> None:
     wf.add_argument("--port", type=int, default=8765)
     wf.set_defaults(func=cmd_workforce)
 
-    ev = sub.add_parser("events", help="tail the live audit bus")
+    ev = sub.add_parser("events", help="tail the live owner event bus")
     add_common(ev)
     ev.add_argument("--kind", default=None, help="filter to one event kind")
     ev.add_argument("--port", type=int, default=8765)

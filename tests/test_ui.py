@@ -259,3 +259,65 @@ def test_sse_stream_delivers_live_events(session):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_sse_stream_delivers_transient_quote_events(session, monkeypatch):
+    """The producer feeds SSE without writing its quote into DuckDB."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    import qlab.ui.server as server_module
+
+    assets = [
+        {"ticker": ticker, "price": 100.0 + index, "change_1d": index / 1000}
+        for index, ticker in enumerate(["ACWI", "BNDW", "GSG", "IGF"])
+    ]
+    monkeypatch.setattr(
+        session,
+        "market",
+        lambda offline: {"assets": assets},
+    )
+    durable_before = session.registry.read_events()
+    event = server_module._publish_quote_event(session)
+    assert event is not None
+    assert event["kind"] == "quote"
+    assert event["payload"]["rows"] == assets
+    assert server_module._publish_quote_event(session) is None
+    assert session.registry.read_events() == durable_before
+
+    handler = type("H", (server_module._Handler,), {"session": session})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        response = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/stream?kind=quote", timeout=10)
+        line = response.readline().decode()
+        assert line.startswith("data:")
+        streamed = json.loads(line.removeprefix("data:").strip())
+        assert streamed == event
+        response.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_quote_event_cli_format_shows_three_tickers_and_total():
+    from qlab.desk_cli import format_event
+
+    _, line = format_event({
+        "ts": "2026-07-24T12:34:56+00:00",
+        "kind": "quote",
+        "payload": {"rows": [
+            {"ticker": ticker, "price": 100.0 + index, "change_1d": 0.001}
+            for index, ticker in enumerate(["ACWI", "BNDW", "GSG", "IGF"])
+        ]},
+    })
+
+    assert all(ticker in line for ticker in ("ACWI", "BNDW", "GSG"))
+    assert "IGF" not in line
+    assert "count=4" in line

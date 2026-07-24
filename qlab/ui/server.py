@@ -19,7 +19,7 @@ GET  /api/algorithms           categorized algorithm deployment catalog
 GET  /api/policy               configured operational allocation policy
 GET  /api/workflows            durable Claude-workforce runs and phase state
 GET  /api/workflows/<id>       one durable workflow and its ordered steps
-GET  /api/stream               server-sent events from the audit bus (live)
+GET  /api/stream               durable audit + transient market events (live)
 GET  /api/tui                  one consistent terminal snapshot
 POST /api/lab/<tool>           bounded research tool executed by this owner
 POST /api/workflows/start      begin a five-role workforce run
@@ -41,8 +41,10 @@ import importlib.util
 import json
 import shutil
 import threading
+import uuid
 import webbrowser
-from datetime import date
+from collections import deque
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -59,6 +61,10 @@ _INDEX = _HERE / "index.html"
 # Effectively one request computes at a time (fine for a local single user),
 # while the socket layer never stalls.
 _LOCK = threading.Lock()
+
+_MARKET_EVENT_LIMIT = 500
+_QUOTE_REFRESH_TTL_SECONDS = 30.0
+_QUOTE_MIN_INTERVAL_SECONDS = 5.0
 
 
 # These research operations may be reached through the TUI's stateless MCP
@@ -117,6 +123,9 @@ class UISession:
         self.mandate = load_mandate()
         self.offline_default = offline_default
         self.seed = seed
+        self._market_events: deque[dict] = deque(maxlen=_MARKET_EVENT_LIMIT)
+        self._market_lock = threading.Lock()
+        self._last_quote_signature: tuple[tuple[str, float, float], ...] | None = None
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -414,6 +423,67 @@ class UISession:
             "workflows": self.registry.list_workflows(10),
         }
 
+    def read_market_events(
+        self,
+        limit: int = 100,
+        after: str | None = None,
+    ) -> list[dict]:
+        """Read transient market events with the registry bus cursor contract."""
+        limit = max(1, min(int(limit), _MARKET_EVENT_LIMIT))
+        with self._market_lock:
+            events = list(self._market_events)
+        if after:
+            return [
+                event for event in events
+                if str(event.get("ts") or "") > after
+            ][:limit]
+        return events[-limit:]
+
+
+def _publish_quote_event(session: UISession) -> dict | None:
+    """Recompute compact quotes and publish only a changed transient snapshot."""
+    snapshot = session.market(session.offline_default)
+    rows = [
+        {
+            "ticker": str(asset["ticker"]),
+            "price": float(asset["price"]),
+            "change_1d": float(asset["change_1d"]),
+        }
+        for asset in snapshot["assets"]
+    ]
+    if not rows:
+        raise RuntimeError("market quote topic produced no rows")
+    signature = tuple(
+        (row["ticker"], row["price"], row["change_1d"]) for row in rows
+    )
+    with session._market_lock:
+        if signature == session._last_quote_signature:
+            return None
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": "quote",
+            "payload": {"rows": rows},
+        }
+        session._last_quote_signature = signature
+        session._market_events.append(event)
+        return event
+
+
+def _run_market_topics(
+    session: UISession,
+    stop_event: threading.Event,
+    refresh_seconds: float = _QUOTE_REFRESH_TTL_SECONDS,
+) -> None:
+    """Run the owner's quote policy without ever touching the registry."""
+    interval = max(_QUOTE_MIN_INTERVAL_SECONDS, float(refresh_seconds))
+    while not stop_event.is_set():
+        try:
+            _publish_quote_event(session)
+        except Exception as exc:
+            print(f"[qlab] quote topic failed: {exc!r}", flush=True)
+        stop_event.wait(interval)
+
 
 # ---------------------------------------------------------------------------
 # API dispatch (pure functions of the session; easy to unit-test)
@@ -648,7 +718,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, b"not found", "text/plain")
 
     def _stream(self, query: dict) -> None:
-        """Server-sent events from the audit bus.
+        """Server-sent events from the durable audit and transient market buses.
 
         Each connection runs on its own ThreadingHTTPServer thread and takes
         the dispatch lock only for the brief per-poll registry read, so a
@@ -671,7 +741,19 @@ class _Handler(BaseHTTPRequestHandler):
                 # A fresh connection gets a short primer backlog, not history.
                 limit = 200 if cursor else 25
                 with _LOCK:
-                    events = self.session.registry.read_events(limit, cursor)
+                    audit_events = self.session.registry.read_events(limit, cursor)
+                market_events = self.session.read_market_events(limit, cursor)
+                events = sorted(
+                    [*audit_events, *market_events],
+                    key=lambda event: (
+                        str(event.get("ts") or ""),
+                        str(event.get("event_id") or ""),
+                    ),
+                )
+                # Cursor reads page the merged timeline so a newer quote cannot
+                # advance past an audit row waiting in the next registry page.
+                if cursor:
+                    events = events[:limit]
                 if events:
                     idle_polls = 0
                     for event in events:
@@ -710,9 +792,18 @@ class _Handler(BaseHTTPRequestHandler):
 
 def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) -> None:
     """Start the UI server (blocking). Ctrl-C to stop."""
-    _Handler.session = UISession(offline_default=offline)
+    session = UISession(offline_default=offline)
+    _Handler.session = session
     httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     httpd.daemon_threads = True
+    market_stop = threading.Event()
+    market_thread = threading.Thread(
+        target=_run_market_topics,
+        args=(session, market_stop),
+        daemon=True,
+        name="qlab-market-topics",
+    )
+    market_thread.start()
     url = f"http://127.0.0.1:{port}/"
     print(f"[qlab] UI at {url}  (offline={'on' if offline else 'off'}; paper capital only)")
     print("[qlab] press Ctrl-C to stop.")
@@ -723,4 +814,5 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) 
     except KeyboardInterrupt:
         print("\n[qlab] UI stopped.")
     finally:
+        market_stop.set()
         httpd.server_close()

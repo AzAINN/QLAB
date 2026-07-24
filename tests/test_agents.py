@@ -15,6 +15,7 @@ from qlab.agents.loader import (
 )
 
 _GENERATED_CLAUDE = Path(__file__).resolve().parents[1] / ".claude" / "agents"
+_GENERATED_BOB = Path(__file__).resolve().parents[1] / ".bob" / "personas"
 
 
 def _by_name():
@@ -36,6 +37,31 @@ def test_all_seven_roles_present():
         "data-qa", "signal-qa", "moments-analyst", "challenger",
         "optimization-runner", "referee", "reporter",
     }
+
+
+def test_estimation_roles_define_the_bounded_debate_protocol():
+    agents = _by_name()
+
+    analyst = agents["moments-analyst"].body
+    assert "DEBATE_FOLLOW_UP" in analyst
+    assert "specific numbers" in analyst
+    assert "NEW decision record" in analyst
+    assert "never edit or overwrite the old decision" in analyst
+    assert "do not continue into a third exchange" in analyst
+
+    challenger = agents["challenger"].body
+    assert "one focused counter-case" in challenger
+    assert "maximum of two" in challenger
+    assert "one rebuttal" in challenger and "round max" in challenger
+    assert "There is no third challenge" in challenger
+    assert "Never debate target weights, orders, or trades" in challenger
+
+    referee = agents["referee"].body
+    assert "Debate adjudication duty" in referee
+    assert "window/shrinkage/regime" in referee
+    assert "verdict reasons" in referee
+    assert "which argument carried and why" in referee
+    assert "never adjudicate target weights" in referee
 
 
 def test_least_privilege_separation():
@@ -131,12 +157,25 @@ def test_generated_claude_adapters_use_qlab_prefix():
 
 
 def test_sync_writes_both_adapters(tmp_path: Path):
-    written = sync(claude_out=tmp_path / "claude", bob_out=tmp_path / "bob")
+    claude_out = tmp_path / "claude"
+    bob_out = tmp_path / "bob"
+    written = sync(claude_out=claude_out, bob_out=bob_out)
     assert len(written["claude"]) == 7
     assert len(written["bob"]) == 7
-    assert (tmp_path / "claude" / "data-qa.md").exists()
-    assert (tmp_path / "bob" / "data-qa.yaml").exists()
-    assert (tmp_path / "claude" / "signal-qa.md").exists()
-    assert (tmp_path / "bob" / "signal-qa.yaml").exists()
-    assert (tmp_path / "claude" / "referee.md").exists()
-    assert (tmp_path / "bob" / "referee.yaml").exists()
+    assert (claude_out / "data-qa.md").exists()
+    assert (bob_out / "data-qa.yaml").exists()
+    assert (claude_out / "signal-qa.md").exists()
+    assert (bob_out / "signal-qa.yaml").exists()
+    assert (claude_out / "referee.md").exists()
+    assert (bob_out / "referee.yaml").exists()
+
+    for generated in sorted(claude_out.glob("*.md")):
+        checked_in = _GENERATED_CLAUDE / generated.name
+        assert generated.read_text(encoding="utf-8") == checked_in.read_text(
+            encoding="utf-8"
+        ), f"{checked_in} is out of sync with agents/"
+    for generated in sorted(bob_out.glob("*.yaml")):
+        checked_in = _GENERATED_BOB / generated.name
+        assert generated.read_text(encoding="utf-8") == checked_in.read_text(
+            encoding="utf-8"
+        ), f"{checked_in} is out of sync with agents/"

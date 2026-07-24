@@ -90,6 +90,19 @@ _WORKFLOW_PHASE = {
 
 _ADVISORY_ROLES = ("data-qa", "signal-qa")
 
+# Session-local model routing. ``inherit`` in the neutral source is the
+# no-override sentinel; any concrete ``model:`` value in an agent source wins
+# over this table.
+_ROLE_MODEL = {
+    "moments-analyst": "inherit",
+    "challenger": "inherit",
+    "referee": "inherit",
+    "optimization-runner": "haiku",
+    "reporter": "haiku",
+    "data-qa": "haiku",
+    "signal-qa": "haiku",
+}
+
 _PHASE_ARTIFACT_CONTRACT = {
     "analyst": (
         "moment_set_id, objective_id, decision_id, regime ('calm' or 'stress'), "
@@ -210,6 +223,13 @@ def _proxy_tool(tool: str) -> str | None:
     return _claude_tool(mapped) if mapped else None
 
 
+def _routed_model(name: str, source_model: str) -> str:
+    """Apply role defaults while preserving a concrete source-file override."""
+    if source_model and source_model != "inherit":
+        return source_model
+    return _ROLE_MODEL.get(name, source_model or "inherit")
+
+
 def build_workforce_agents() -> dict[str, dict]:
     """Build session-local Claude roles against the owner-backed proxy."""
     from qlab.agents.loader import load_agents
@@ -249,7 +269,7 @@ QLAB OWNER-WORKFORCE ADVISOR MODE:
                 "description": source.description,
                 "prompt": source.body + "\n\n" + advisor_override,
                 "tools": list(dict.fromkeys(tools)),
-                "model": source.model or "inherit",
+                "model": _routed_model(source.name, source.model),
                 "permissionMode": "dontAsk",
                 "maxTurns": 16,
             }
@@ -293,18 +313,32 @@ QLAB OWNER-WORKFORCE ADVISOR MODE:
                 f"phase with workflow_{phase}.\n"
             )
         )
+        if source.name in {"moments-analyst", "challenger"}:
+            phase_lifecycle = f"""- For the initial phase task, the task contains a workflow_id. First update
+  the assigned phase with status `working`. Before returning, update that same
+  phase with `done` and a concise summary plus these required artifacts:
+  {phase_contract}.
+- A task explicitly labelled `DEBATE_FOLLOW_UP` is the prompt-only exception:
+  the analyst/challenger phase is already complete. Do not call workflow phase
+  tools or change its persisted artifacts/status. Address only the
+  supplied estimation disagreement. The analyst may log a NEW decision and
+  return replacement moment/objective ids if persuaded; the challenger may
+  attach its one allowed rebuttal. Return those exact results to the coordinator."""
+        else:
+            phase_lifecycle = f"""- The task contains a workflow_id. First update the assigned phase with
+  status `working`. Before returning, update that same phase with `done` and a
+  concise summary plus these required artifacts: {phase_contract}."""
         override = f"""
 
 QLAB OWNER-WORKFORCE MODE (this section supersedes any execution or fixed-
 champion instruction above):
 - You are a portfolio/research worker, never a software developer. Do not read,
   edit, write, or search repository files and do not run shell commands.
-{dynamic_update}- The task contains a workflow_id. First update the assigned phase with
-  status `working`. Before returning, update that same phase with `done` and a
-  concise summary plus these required artifacts: {phase_contract}.
+{dynamic_update}{phase_lifecycle}
 - Be fast: emit independent tool calls together in ONE turn rather than one per
-  turn. Only serialize a call whose input is another call's output. Your opening
-  `working` update belongs in the same turn as your first read-only lookups.
+  turn. Only serialize a call whose input is another call's output. On an
+  initial phase task, your opening `working` update belongs in the same turn as
+  your first read-only lookups.
 - Run autonomously — never ask the operator a question or wait for input. When a
   judgment call, preference, or parameter is unspecified, pick the best-estimate
   default from qlab facts and sensible defaults, note the assumption in your
@@ -314,14 +348,16 @@ champion instruction above):
   Preserve the available evidence in artifacts. Do not stall a run; decide and move on.
 - A tool error carries the owner's reason. Read it, correct the call, and try at
   most twice more. Never repeat an identical failing call: if it still fails,
-  record the phase as `failed` with that reason in the summary and return. An
-  unreachable owner is terminal — report it, do not retry.
+  record the phase as `failed` with that reason in the summary and return. On a
+  `DEBATE_FOLLOW_UP`, report the failure without changing the completed phase.
+  An unreachable owner is terminal — report it, do not retry.
 - If an id or artifact you were handed is rejected as unknown or mismatched,
   call workflow_status(workflow_id) once and use the values persisted by the
   earlier phases — that record, not the task text, is the truth.
-- Perform only the exact assigned workflow phase (your base role is {phase}).
-  Do not spawn other agents. Use owner MCP facts; never invent ids, data, solver
-  output, a verdict, or a completed phase.
+- Perform only the exact assigned workflow phase (your base role is {phase}) or
+  the explicitly labelled, prompt-only `DEBATE_FOLLOW_UP` for that role. Do not
+  spawn other agents. Use owner MCP facts; never invent ids, data, solver output,
+  a verdict, or a completed phase.
 - MVSK is a research hypothesis, not an assumed live champion. Preserve it in
   comparisons, but use the catalog and current qlab policy for operational work.
 - No Claude role can execute a paper order. The reporter may request daily ops
@@ -331,7 +367,7 @@ champion instruction above):
             "description": source.description,
             "prompt": source.body + "\n\n" + override,
             "tools": tools,
-            "model": source.model or "inherit",
+            "model": _routed_model(source.name, source.model),
             "permissionMode": "dontAsk",
             "maxTurns": 24,
         }
@@ -375,14 +411,32 @@ champion instruction above):
             "review. Pass that advisory assessment into the challenger/referee "
             "briefs. Neither QA role updates or completes a workflow phase.\n\n"
             "For a normal workflow, after any QA preflight, run the gated roles "
-            "as this dependency graph:\n"
+            "with this bounded debate sequence:\n"
             "1. moments-analyst alone, and wait for its result.\n"
-            "2. challenger AND optimization-runner together — emit both Agent "
-            "calls in the SAME turn. Each depends only on the analyst and never on "
-            "the other, so they run concurrently; waiting for the challenger "
-            "before starting the optimizer wastes the run's longest stage.\n"
-            "3. referee, only once both of those are done.\n"
-            "4. reporter, only once the referee is done.\n\n"
+            "2. challenger alone with the analyst's exact decision and numbers; "
+            "require one focused counter-case and wait for its result.\n"
+            "3. Re-brief moments-analyst with the exact challenge and label the "
+            "task DEBATE_FOLLOW_UP. Require a numeric defend-or-amend response. "
+            "If persuaded, it must create a NEW decision record citing the prior "
+            "decision and exchange — never edit the old decision — and return any "
+            "replacement moment_set_id and objective_id.\n"
+            "4. If that response resolves the material disagreement, stop the "
+            "debate. Otherwise run exactly one rebuttal round: re-brief challenger "
+            "once with DEBATE_FOLLOW_UP and the analyst response, then re-brief "
+            "moments-analyst once with DEBATE_FOLLOW_UP and that rebuttal. This is "
+            "a maximum of two challenger↔analyst exchanges; never dispatch a third.\n"
+            "5. optimization-runner uses the analyst's final decision, moment set, "
+            "and objective, including replacements returned by an amendment.\n"
+            "6. referee runs after optimizer. If a material disagreement is still "
+            "live, its brief must quote both final arguments and exact numbers and "
+            "add an adjudication duty: verdict reasons record which argument "
+            "carried and why. The referee adjudicates estimation only, never trades.\n"
+            "7. reporter runs only once the referee is done.\n\n"
+            "These debate rounds are coordinator prompt policy only: they do not "
+            "create workflow phases, reopen completed phases, or change registry "
+            "artifact contracts. Debate is restricted to the genuinely "
+            "underdetermined window/shrinkage/regime call, never target weights, "
+            "orders, trades, or computed objective values.\n\n"
             "For a panel workflow, use the returned steps as the exact graph:\n"
             "1. Dispatch every analyst variant IN PARALLEL: emit multiple "
             "moments-analyst Agent calls in ONE message. Each brief must name its "
@@ -403,7 +457,9 @@ champion instruction above):
             "4. Dispatch the referee agent again for exact phase 'referee', passing "
             "the judge's winning targets verbatim and the winning analyst branch's "
             "decision_id so the PASS binds to the judged winner.\n"
-            "5. Dispatch reporter for exact phase 'reporter' only after PASS.\n\n"
+            "5. Dispatch reporter for exact phase 'reporter' only after PASS. Panel "
+            "branches use evidence adjudication, not the standard-review debate "
+            "rounds above.\n\n"
             "Every gated worker brief carries the workflow_id, exact workflow phase, "
             "original goal, as_of, universe, and the exact persisted artifacts it "
             "depends on. Never re-type, re-round, or re-order target objects: the "

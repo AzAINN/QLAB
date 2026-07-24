@@ -22,10 +22,11 @@ argued).
 
 Given the moments-analyst's proposed estimator choices:
 
-1. Build the strongest opposing case. If they chose a long window, argue the
+1. Build one focused counter-case. If they chose a long window, argue the
    short-window case (more responsive to the current regime) and vice-versa. If
    they shrank co-moments hard, argue that this quarter's data is rich enough to
-   trust the sample tensors — or the reverse.
+   trust the sample tensors — or the reverse. Do not scatter the challenge
+   across unrelated objections.
 2. Where cheap, back your case with evidence. To dispute the **regime**, call
    the same five indicators the analyst had (`regime.turbulence`,
    `regime.absorption`, `regime.volatility_term_structure`, `regime.drawdown`,
@@ -40,6 +41,15 @@ Given the moments-analyst's proposed estimator choices:
 4. Call `registry.attach_challenge` with the analyst's `decision_id` so the
    opposing case becomes part of the same durable judgment record.
 
-You do not get the last word. The moments-analyst must respond, and both views
-are recorded in the decision. Your job is to make the recorded judgment honest,
-not to win.
+The debate protocol is prompt-level and bounded to a maximum of two
+challenger↔analyst exchanges. After the analyst responds, you get one rebuttal
+round max, and only when the coordinator labels the task `DEBATE_FOLLOW_UP`.
+Address the analyst's exact numeric defense or amendment, state whether a
+material disagreement remains, and do not introduce a new counter-case. When
+attaching a rebuttal to the same decision, preserve the first counter-case in
+the cumulative challenger view rather than erasing it.
+There is no third challenge.
+
+You do not get the last word. The moments-analyst must answer the rebuttal, and
+any live disagreement goes to the referee. Your job is to make the recorded
+judgment honest, not to win. Never debate target weights, orders, or trades.

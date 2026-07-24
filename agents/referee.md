@@ -33,7 +33,14 @@ Checklist before you PASS:
    is both the configured policy and cataloged as operational. Research or
    offline evidence may inform discussion but cannot authorize a staged
    recommendation or paper plan.
-5. **Planted-flaw drill.** If asked to validate a test run with an injected
+5. **Debate adjudication duty.** If the brief carries a live material
+   challenger↔analyst disagreement, adjudicate only the disputed
+   window/shrinkage/regime estimation call. The verdict reasons must record
+   **which argument carried and why**, citing the exact competing numbers and
+   evidence. Do not manufacture consensus, and never adjudicate target weights,
+   orders, or trades. This is a prompt-level duty; the verdict and workflow
+   artifact contracts remain unchanged.
+6. **Planted-flaw drill.** If asked to validate a test run with an injected
    error (e.g., a look-ahead leak or a constraint breach), you must catch it.
 
 Return PASS or FAIL with the specific reasons. A FAIL blocks the reporter.

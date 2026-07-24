@@ -72,7 +72,27 @@ must carry `regime` (`calm`/`stress`) and a one-line `regime_reasoning` naming
 the indicators that drove it — the operator's terminal shows exactly that line,
 so keep it concise and self-explanatory.
 
-Hand the `moment_set_id` and `objective_id` to the optimization-runner. If the
-**challenger** disputes your window/shrinkage call, respond to its argument and
-record both sides in the decision before proceeding. Where there is ground truth
-(the objective value), there is no debate — just solve.
+Hand the final `moment_set_id` and `objective_id` to the optimization-runner.
+
+## Bounded debate protocol
+
+This is a prompt-level review of only the genuinely underdetermined estimation
+call: window, shrinkage, and regime. It never reopens a completed workflow phase,
+changes its artifact contract, or debates a trade or a computed objective value.
+
+When the coordinator re-briefs you with a `DEBATE_FOLLOW_UP`, engage the
+challenger's specific numbers rather than restating your original rationale:
+
+1. Say whether you **defend** or **amend** each disputed
+   window/shrinkage/regime claim and cite the competing diagnostics or indicator
+   readings.
+2. If persuaded, never edit or overwrite the old decision. Re-estimate and
+   rebuild the objective when the estimator changed, then use
+   `registry.log_decision` to create a **NEW decision record** whose rationale
+   cites the prior `decision_id`, the challenge, and what changed. Return the new
+   `decision_id`, `moment_set_id`, and `objective_id` to the coordinator.
+3. If not persuaded, identify the exact material disagreement that remains and
+   why. The coordinator may bring one challenger rebuttal back to you; answer it
+   once, and do not continue into a third exchange.
+
+Where there is ground truth, there is no debate — just solve.

@@ -318,6 +318,38 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
             )
 
 
+def test_workforce_agents_route_models_with_source_override_precedence(monkeypatch):
+    from dataclasses import replace
+
+    import qlab.agents.loader as loader
+    from qlab.tui import claude
+
+    expected = {
+        "moments-analyst": "inherit",
+        "challenger": "inherit",
+        "referee": "inherit",
+        "optimization-runner": "haiku",
+        "reporter": "haiku",
+        "data-qa": "haiku",
+        "signal-qa": "haiku",
+    }
+    assert claude._ROLE_MODEL == expected
+
+    agents = claude.build_workforce_agents()
+    assert {name: agents[name]["model"] for name in expected} == expected
+
+    source_agents = loader.load_agents()
+    overridden = [
+        replace(source, model="sonnet")
+        if source.name == "optimization-runner" else source
+        for source in source_agents
+    ]
+    monkeypatch.setattr(loader, "load_agents", lambda: overridden)
+    routed = claude.build_workforce_agents()
+    assert routed["optimization-runner"]["model"] == "sonnet"
+    assert routed["reporter"]["model"] == "haiku"
+
+
 def test_session_agent_files_preserve_workforce_authority(tmp_path):
     from qlab.tui.claude import build_workforce_agents, write_session_agents
 
@@ -339,20 +371,29 @@ def test_session_agent_files_preserve_workforce_authority(tmp_path):
     ]
     assert metadata["permissionMode"] == "dontAsk"
     assert "no filesystem, shell, browser, editing, or trading tools" in body
+    for name in {
+        "optimization-runner", "reporter", "data-qa", "signal-qa",
+    }:
+        path = tmp_path / ".claude" / "agents" / f"{name}.md"
+        _, front, _ = path.read_text(encoding="utf-8").split("---", 2)
+        assert yaml.safe_load(front)["model"] == "haiku"
+    for name in {"moments-analyst", "challenger", "referee"}:
+        path = tmp_path / ".claude" / "agents" / f"{name}.md"
+        _, front, _ = path.read_text(encoding="utf-8").split("---", 2)
+        assert "model" not in yaml.safe_load(front)
 
 
-def test_coordinator_dispatches_synchronously_and_fans_out_in_parallel():
-    """The two prompt clauses that decide whether a run finishes at all.
+def test_coordinator_dispatches_synchronously_with_bounded_debate_and_panel_fanout():
+    """Prompt clauses that bound standard review and keep panels parallel.
 
     A backgrounded Agent call strands the coordinator — it holds no tool for
-    collecting one — which is exactly how a run hangs on the first worker. The
-    parallel clause is the time saving; both are contract, not style.
+    collecting one — which is exactly how a run hangs on the first worker.
     """
     from qlab.tui.claude import build_workforce_agents
 
     coordinator = build_workforce_agents()["qlab-coordinator"]["prompt"]
     assert "run_in_background: false" in coordinator
-    assert "SAME turn" in coordinator
+    assert "IN PARALLEL" in coordinator and "ONE message" in coordinator
     assert "kind='panel'" in coordinator
     assert "analyst-1" in coordinator and "optimizer-1" in coordinator
     assert "exact workflow phase 'judge'" in coordinator
@@ -362,6 +403,19 @@ def test_coordinator_dispatches_synchronously_and_fans_out_in_parallel():
     assert "Pass its exact clean flag" in coordinator
     assert "dispatch signal-qa after the analyst" in coordinator
     assert "Neither QA role updates or completes a workflow phase" in coordinator
+    assert "one focused counter-case" in coordinator
+    assert "DEBATE_FOLLOW_UP" in coordinator
+    assert "NEW decision record" in coordinator
+    assert "never edit the old decision" in coordinator
+    assert "maximum of two challenger↔analyst exchanges" in coordinator
+    assert "never dispatch a third" in coordinator
+    assert "which argument carried and why" in coordinator
+    assert "coordinator prompt policy only" in coordinator
+    assert "never target weights, orders, trades" in coordinator
+    assert coordinator.index("challenger alone") < coordinator.index(
+        "optimization-runner uses the analyst's final decision"
+    )
+    assert "Panel branches use evidence adjudication" in coordinator
     # bounded recovery: one re-dispatch, then stop — never an unbounded loop
     assert "ONCE" in coordinator and "do not loop" in coordinator
 
@@ -369,6 +423,14 @@ def test_coordinator_dispatches_synchronously_and_fans_out_in_parallel():
     assert "ONE turn" in analyst  # batch independent tool calls
     # bounded retry: a tool error is corrected, never repeated verbatim forever
     assert "Never repeat an identical failing call" in analyst
+    assert "Do not call workflow phase" in analyst
+
+    challenger = build_workforce_agents()["challenger"]["prompt"]
+    assert "one rebuttal" in challenger
+    assert "Do not call workflow phase" in challenger
+
+    referee = build_workforce_agents()["referee"]["prompt"]
+    assert "which argument carried and why" in referee
 
 
 def test_session_watchdog_kills_a_stalled_run():

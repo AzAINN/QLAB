@@ -49,14 +49,16 @@ def make_console(*, record: bool = False, width: int | None = None):
         print("qlab desk verbs need the operator extra: "
               "pip install -e '.[operator]'", file=sys.stderr)
         raise SystemExit(2)
+    from qlab.tui.theme import AMBER, CYAN, DOWN, GOLD, MUTED, TEXT, UP
+
     return Console(theme=Theme({
-        "accent": "bold #d0a45c",
-        "gold": "#b38b54",
-        "ok": "bold #79a88b",
-        "bad": "bold #c97878",
-        "info": "#6d9fbf",
-        "muted": "#7d8995",
-        "value": "#e0e6eb",
+        "accent": f"bold {AMBER}",
+        "gold": GOLD,
+        "ok": f"bold {UP}",
+        "bad": f"bold {DOWN}",
+        "info": CYAN,
+        "muted": MUTED,
+        "value": TEXT,
     }), highlight=False, record=record, width=width)
 
 
@@ -144,6 +146,8 @@ def render_desk(console, snap: dict) -> None:
     """The whole desk on one card, from a single /api/tui payload."""
     from rich.table import Table
 
+    from qlab.tui.theme import BORDER
+
     portfolio = snap.get("portfolio", {})
     market = snap.get("market", {})
     system = snap.get("system", {})
@@ -169,7 +173,7 @@ def render_desk(console, snap: dict) -> None:
     weights = portfolio.get("weights", {})
     if weights:
         table = Table(show_header=True, header_style="muted",
-                      border_style="#22303c", padding=(0, 1))
+                      border_style=BORDER, padding=(0, 1))
         table.add_column("ticker", style="value")
         table.add_column("weight", justify="right", style="info")
         table.add_column("target", justify="right", style="muted")

@@ -31,35 +31,36 @@ from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
     braille_chart, clean_report_line, demojibake, money, pct, phase_elapsed,
 )
+from qlab.tui.theme import (
+    ALLOCATION_TRACK,
+    AMBER,
+    AMBER_HI,
+    APP_CSS,
+    BG,
+    BG_PANEL,
+    BG_RAISED,
+    BORDER,
+    BORDER_HI,
+    CHART_AXIS,
+    CYAN,
+    DIM,
+    DOWN,
+    GOLD,
+    LABEL_GOLD,
+    MUTED,
+    PAPER_MODAL_CSS,
+    SEL_BG,
+    STATE_STYLE,
+    TEXT,
+    TEXT_HI,
+    UP,
+    WORKFORCE_MODAL_CSS,
+)
 from qlab.paths import workspace_root
 
 
 _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
-
-# ---------------------------------------------------------------------------
-# Palette — one Bloomberg-inspired high-contrast scheme, defined once and shared
-# by the CSS (below) and every inline markup color. Amber phosphor on true
-# black, saturated up/down, a cyan interaction accent. Bright enough to read at
-# a glance across a wide terminal; changing a role's colour means changing it
-# here only.
-# ---------------------------------------------------------------------------
-BG        = "#03060b"   # canvas — near-black
-BG_PANEL  = "#070c13"   # side rails / raised panels
-BG_RAISED = "#0f1926"   # table headers, dialogs, input wells
-SEL_BG    = "#14273b"   # selected row / highlighted list item
-BORDER    = "#1d2b3b"   # quiet dividers
-BORDER_HI = "#3a5069"   # active dividers / focus
-TEXT      = "#cdd9e6"   # default body text (cool white)
-TEXT_HI   = "#f6fafe"   # bright emphasis
-MUTED     = "#8797a8"   # secondary text
-DIM       = "#586777"   # tertiary / captions
-AMBER     = "#ffb020"   # primary Bloomberg amber (accent, titles bar)
-AMBER_HI  = "#ffcf66"   # bright amber (section titles, focus)
-GOLD      = "#eb9a2e"   # secondary amber/orange (queued, warnings)
-UP        = "#1fe07b"   # positive / done
-DOWN      = "#ff5257"   # negative / failed
-CYAN      = "#38ccff"   # interactive accent / working
 _VIEWS = ("desk", "market", "workforce", "research", "audit")
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
@@ -87,16 +88,7 @@ _PHASE_DID = {
                "target binding",
     "reporter": "compiled the human-facing recommendation",
 }
-# One state → (glyph, colour) table shared by the flowchart and the agent rail.
-_STATE_STYLE = {
-    "working": ("●", CYAN),
-    "queued": ("◐", GOLD),
-    "waiting": ("◐", GOLD),
-    "done": ("✓", UP),
-    "failed": ("×", DOWN),
-    "blocked": ("!", AMBER),
-    "idle": ("◌", DIM),
-}
+_STATE_STYLE = STATE_STYLE
 _PULSE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 # Bus events that mean durable state changed and a full refresh is worth it.
 _REFRESH_EVENT_KINDS = {
@@ -153,7 +145,7 @@ def workforce_note(phase: str, status: str, summary: str,
 
 # The regime a run selected is a first-class read for the operator, so it gets
 # its own colored line rather than living only in a hover card.
-_REGIME_TONE = {"calm": "#1fe07b", "stress": "#ff5257"}
+_REGIME_TONE = {"calm": UP, "stress": DOWN}
 
 
 def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
@@ -176,10 +168,10 @@ def _regime_line(steps_by_phase: dict, *, indent: str = "") -> str | None:
     if readout is None:
         return None
     regime, reasoning = readout
-    tone = _REGIME_TONE.get(regime.lower(), "#ffb020")
-    line = f"{indent}[#38ccff]◆ REGIME[/]  [bold {tone}]{escape(regime.upper())}[/]"
+    tone = _REGIME_TONE.get(regime.lower(), AMBER)
+    line = f"{indent}[{CYAN}]◆ REGIME[/]  [bold {tone}]{escape(regime.upper())}[/]"
     if reasoning:
-        line += f"  [#8797a8]{escape(reasoning[:220])}[/]"
+        line += f"  [{MUTED}]{escape(reasoning[:220])}[/]"
     return line
 
 
@@ -206,10 +198,10 @@ def _format_targets(targets: dict, limit: int = 8) -> str:
 def _result_banner(status: str) -> tuple[str, str]:
     """The coloured headline banner for the run's terminal state."""
     return {
-        "complete": ("#1fe07b", "WORKFORCE COMPLETE"),
-        "blocked": ("#ffb020", "STOPPED AT A SAFETY GATE"),
-        "failed": ("#ff5257", "STOPPED ON AN ERROR"),
-    }.get(status, ("#eb9a2e", "ENDED EARLY"))
+        "complete": (UP, "WORKFORCE COMPLETE"),
+        "blocked": (AMBER, "STOPPED AT A SAFETY GATE"),
+        "failed": (DOWN, "STOPPED ON AN ERROR"),
+    }.get(status, (GOLD, "ENDED EARLY"))
 
 
 def _result_headline(status: str, verdict: str) -> str:
@@ -251,11 +243,11 @@ def _agent_brief(phase: str, step: dict | None,
     """
     name, action = _PHASE_PERSON.get(phase, (phase.title(), "ran its phase"))
     state = str((step or {}).get("status", "idle"))
-    glyph, colour = _STATE_STYLE.get(state, ("◌", "#586777"))
+    glyph, colour = _STATE_STYLE.get(state, ("◌", DIM))
     artifacts = (step or {}).get("artifacts") or {}
 
     if not step or state in ("idle", "queued", "waiting"):
-        return "◌", "#586777", name, "did not run"
+        return "◌", DIM, name, "did not run"
     if state == "working":
         return glyph, colour, name, "was still running when the run stopped"
     if state in ("failed", "blocked"):
@@ -357,316 +349,7 @@ class PaperConfirmScreen(ModalScreen[bool]):
     """Explicit confirmation for the only mutating action exposed by v1."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
-
-    CSS = """
-    Screen {
-        layout: vertical;
-        background: #03060b;
-        color: #cdd9e6;
-    }
-
-    #workspace {
-        height: 1fr;
-    }
-
-    #spine {
-        width: 24;
-        min-width: 16;
-        padding: 1 1 0 1;
-        background: #070c13;
-        border-right: solid #1d2b3b;
-    }
-    #wordmark {
-        height: 3;
-        color: #ffb020;
-        text-style: bold;
-    }
-    #nav {
-        height: 7;
-        color: #8797a8;
-    }
-    #universe-label {
-        height: 2;
-        margin-top: 1;
-        color: #586777;
-        text-style: bold;
-    }
-    #universe {
-        height: 1fr;
-        background: transparent;
-        border: none;
-        scrollbar-size: 0 0;
-    }
-    #universe ListItem {
-        height: 1;
-        padding: 0;
-        color: #8797a8;
-    }
-    #universe ListItem.-highlight {
-        background: #14273b;
-        color: #ffcf66;
-        text-style: bold;
-    }
-
-    #canvas {
-        width: 1fr;
-        height: 1fr;
-        padding: 1 2;
-        background: #03060b;
-    }
-    .canvas-view {
-        width: 1fr;
-        height: 1fr;
-        overflow-y: auto;
-        scrollbar-size: 1 1;
-    }
-    .canvas-title {
-        height: 1;
-        color: #ffcf66;
-        text-style: bold;
-        background: #0f1926;
-    }
-    #desk-content, #market-content {
-        height: 1fr;
-    }
-    #workforce-content {
-        height: auto;
-        max-height: 32%;
-        padding: 1 2;
-        margin-top: 1;
-        background: #070c13;
-        border: round #1d2b3b;
-    }
-    #flow-row {
-        height: 6;
-        margin-top: 1;
-        align: left middle;
-        overflow-x: auto;
-        overflow-y: hidden;
-        scrollbar-size: 1 0;
-    }
-    FlowNode {
-        width: 13;
-        height: 4;
-        padding: 0;
-        border: round #1d2b3b;
-        color: #8797a8;
-        content-align: center middle;
-        text-align: center;
-    }
-    FlowNode.-working {
-        border: round #38ccff;
-        background: #0a2233;
-        color: #d7f4ff;
-        text-style: bold;
-    }
-    FlowNode.-queued { border: round #5a4420; color: #ffcf66; }
-    FlowNode.-done { border: round #1f6a44; background: #08160f; color: #7cf0b4; }
-    FlowNode.-failed { border: round #6a2325; background: #1a0a0b; color: #ff9c9e; }
-    FlowNode.-blocked { border: round #6a4c18; color: #ffd98a; }
-    .flow-arrow {
-        width: 3;
-        height: 4;
-        content-align: center middle;
-        text-align: center;
-        color: #586777;
-    }
-    #workforce-console {
-        height: 1fr;
-        margin-top: 1;
-        padding: 0 1;
-        background: transparent;
-        border: none;
-        border-top: solid #1d2b3b;
-        color: #cdd9e6;
-        scrollbar-size: 1 1;
-    }
-    #chat-row {
-        height: 3;
-        margin-top: 1;
-    }
-    #chat-mode {
-        width: 6;
-        height: 3;
-        padding: 1 0 0 1;
-    }
-    #chat-input {
-        width: 1fr;
-        height: 3;
-        border: round #1d2b3b;
-        padding: 0 1;
-        background: #070c13;
-        color: #f6fafe;
-    }
-    #chat-input:focus {
-        border: round #ffb020;
-    }
-    #chat-input:disabled {
-        border: round #16212e;
-        background: #060a10;
-        color: #55657a;
-    }
-    #chat-exit {
-        width: 10;
-        height: 3;
-        min-width: 8;
-        margin-left: 1;
-        background: #0f1926;
-        color: #cdd9e6;
-        border: round #1d2b3b;
-    }
-    #chat-exit:hover {
-        background: #14273b;
-        color: #f6fafe;
-    }
-    #research-summary, #audit-summary {
-        height: 6;
-        color: #cdd9e6;
-    }
-    #runs-table, #audit-table {
-        height: 1fr;
-        background: transparent;
-        border: none;
-        scrollbar-size: 1 1;
-    }
-    DataTable > .datatable--header {
-        background: #0f1926;
-        color: #ffb020;
-        text-style: bold;
-    }
-    DataTable > .datatable--cursor {
-        background: #14273b;
-        color: #ffcf66;
-        text-style: bold;
-    }
-
-    #agent-rail {
-        width: 40;
-        min-width: 30;
-        padding: 1 1 0 2;
-        background: #070c13;
-        border-left: solid #1d2b3b;
-    }
-    #agent-label, #work-label {
-        height: 2;
-        color: #586777;
-        text-style: bold;
-    }
-    #agent-list {
-        height: 16;
-    }
-    #work-label {
-        margin-top: 1;
-    }
-    #selected-work {
-        height: 1fr;
-        color: #cdd9e6;
-        overflow-y: auto;
-        scrollbar-size: 1 1;
-    }
-
-    #timeline {
-        height: 12;
-        display: none;
-        padding: 0 2;
-        background: #070c13;
-        border-top: solid #1d2b3b;
-        color: #8797a8;
-        scrollbar-size: 1 1;
-    }
-    #event-strip {
-        height: 1;
-        padding: 0 1;
-        background: #0f1926;
-        color: #8797a8;
-    }
-    #command-row {
-        height: 2;
-        padding: 0 1;
-        background: #070c13;
-    }
-    #command {
-        width: 1fr;
-        height: 1;
-        border: none;
-        padding: 0;
-        background: transparent;
-        color: #f6fafe;
-    }
-    #command:focus {
-        border: none;
-    }
-    #system-status {
-        width: auto;
-        min-width: 28;
-        height: 1;
-        text-align: right;
-        color: #8797a8;
-    }
-
-    /* Responsive: wider terminals give the side rails more room; narrower ones
-       shed the agent rail first, then compress the spine. Charts live in the
-       center canvas, which is always 1fr, so every extra column widens them. */
-    Screen.wide #spine { width: 30; }
-    Screen.wide #agent-rail { width: 48; }
-    Screen.wide #agent-list { height: 18; }
-
-    Screen.compact #spine {
-        width: 20;
-    }
-    Screen.compact #agent-rail {
-        width: 32;
-        padding-left: 1;
-    }
-    Screen.narrow #agent-rail {
-        display: none;
-    }
-    Screen.narrow #spine {
-        width: 17;
-    }
-    Screen.narrow.agent-focus #spine,
-    Screen.narrow.agent-focus #canvas {
-        display: none;
-    }
-    Screen.narrow.agent-focus #agent-rail {
-        display: block;
-        width: 1fr;
-        border-left: none;
-        padding-left: 2;
-    }
-    """
-
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
-
-    CSS = """
-    PaperConfirmScreen {
-        align: center middle;
-        background: #03060bcc;
-    }
-    #paper-dialog {
-        width: 68;
-        height: auto;
-        padding: 2 3;
-        background: #0f1926;
-        border: solid #eb9a2e;
-    }
-    #paper-dialog-title {
-        color: #f6fafe;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    #paper-dialog-copy {
-        color: #cdd9e6;
-        margin-bottom: 2;
-    }
-    #paper-dialog-actions {
-        height: 3;
-        align-horizontal: right;
-    }
-    #paper-dialog-actions Button {
-        margin-left: 1;
-    }
-    """
+    CSS = PAPER_MODAL_CSS
 
     def __init__(self, plan_id: str = ""):
         super().__init__()
@@ -697,35 +380,7 @@ class ClaudeWorkforceScreen(ModalScreen[bool]):
 
     BINDINGS = [Binding("escape", "later", "Later", show=False)]
 
-    CSS = """
-    ClaudeWorkforceScreen {
-        align: center middle;
-        background: #03060bcc;
-    }
-    #workforce-dialog {
-        width: 72;
-        height: auto;
-        padding: 2 3;
-        background: #0f1926;
-        border: solid #3a5069;
-    }
-    #workforce-dialog-title {
-        color: #f6fafe;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    #workforce-dialog-copy {
-        color: #cdd9e6;
-        margin-bottom: 2;
-    }
-    #workforce-dialog-actions {
-        height: 3;
-        align-horizontal: right;
-    }
-    #workforce-dialog-actions Button {
-        margin-left: 1;
-    }
-    """
+    CSS = WORKFORCE_MODAL_CSS
 
     def compose(self) -> ComposeResult:
         with Vertical(id="workforce-dialog"):
@@ -755,271 +410,7 @@ class QlabTui(App[None]):
 
     TITLE = "qlab operator"
 
-    CSS = """
-    Screen {
-        layout: vertical;
-        background: #03060b;
-        color: #cdd9e6;
-    }
-
-    #workspace {
-        height: 1fr;
-    }
-
-    #spine {
-        width: 24;
-        min-width: 18;
-        padding: 1 1 0 1;
-        background: #070c13;
-        border-right: solid #1d2b3b;
-    }
-    #wordmark {
-        height: 3;
-        color: #f6fafe;
-        text-style: bold;
-    }
-    #nav {
-        height: 7;
-        color: #8797a8;
-    }
-    #universe-label {
-        height: 2;
-        margin-top: 1;
-        color: #9a7f4a;
-    }
-    #universe {
-        height: 1fr;
-        background: transparent;
-        border: none;
-        scrollbar-size: 0 0;
-    }
-    #universe ListItem {
-        height: 1;
-        padding: 0;
-        color: #8797a8;
-    }
-    #universe ListItem.-highlight {
-        background: #14273b;
-        color: #f6fafe;
-        text-style: bold;
-    }
-
-    #canvas {
-        width: 1fr;
-        height: 1fr;
-        padding: 1 2;
-        background: #03060b;
-    }
-    .canvas-view {
-        width: 1fr;
-        height: 1fr;
-        overflow-y: auto;
-        scrollbar-size: 1 1;
-    }
-    .canvas-title {
-        height: 2;
-        color: #ffcf66;
-        text-style: bold;
-    }
-    #desk-content, #market-content {
-        height: 1fr;
-    }
-    #workforce-content {
-        height: auto;
-        max-height: 30%;
-        padding: 1 2;
-        background: #070c13;
-        border: round #1d2b3b;
-    }
-    #flow-row {
-        height: 6;
-        margin-top: 1;
-        align: left middle;
-        overflow-x: auto;
-        overflow-y: hidden;
-        scrollbar-size: 1 0;
-    }
-    FlowNode {
-        width: 12;
-        height: 4;
-        padding: 0;
-        border: round #1d2b3b;
-        color: #8797a8;
-        content-align: center middle;
-        text-align: center;
-    }
-    FlowNode.-working {
-        border: round #38ccff;
-        background: #0a2233;
-        color: #f6fafe;
-        text-style: bold;
-    }
-    FlowNode.-queued { border: round #6b5836; color: #bda879; }
-    FlowNode.-done { border: round #3f6b53; color: #bfe0cd; }
-    FlowNode.-failed { border: round #7d3a3a; color: #edb6b6; }
-    FlowNode.-blocked { border: round #8a6a2f; color: #ecd4a5; }
-    .flow-arrow {
-        width: 3;
-        height: 4;
-        content-align: center middle;
-        text-align: center;
-        color: #586777;
-    }
-    #workforce-console {
-        height: 1fr;
-        margin-top: 1;
-        padding: 0 1;
-        background: transparent;
-        border: none;
-        border-top: solid #1d2b3b;
-        color: #cdd9e6;
-        scrollbar-size: 1 1;
-    }
-    #chat-row {
-        height: 3;
-        margin-top: 1;
-    }
-    #chat-mode {
-        width: 6;
-        height: 3;
-        padding: 1 0 0 1;
-    }
-    #chat-input {
-        width: 1fr;
-        height: 3;
-        border: round #1d2b3b;
-        padding: 0 1;
-        background: #070c13;
-        color: #f6fafe;
-    }
-    #chat-input:focus {
-        border: round #ffb020;
-    }
-    #chat-input:disabled {
-        border: round #16212e;
-        background: #060a10;
-        color: #55657a;
-    }
-    #chat-exit {
-        width: 10;
-        height: 3;
-        min-width: 8;
-        margin-left: 1;
-        background: #0f1926;
-        color: #cdd9e6;
-        border: round #1d2b3b;
-    }
-    #chat-exit:hover {
-        background: #1d2b3b;
-        color: #f6fafe;
-    }
-    #research-summary, #audit-summary {
-        height: 7;
-        color: #cdd9e6;
-    }
-    #runs-table, #audit-table {
-        height: 1fr;
-        background: transparent;
-        border: none;
-        scrollbar-size: 1 1;
-    }
-    DataTable > .datatable--header {
-        background: #0f1926;
-        color: #8797a8;
-        text-style: none;
-    }
-    DataTable > .datatable--cursor {
-        background: #14273b;
-        color: #f6fafe;
-    }
-
-    #agent-rail {
-        width: 38;
-        min-width: 31;
-        padding: 1 1 0 2;
-        background: #070c13;
-        border-left: solid #1d2b3b;
-    }
-    #agent-label, #work-label {
-        height: 2;
-        color: #9a7f4a;
-    }
-    #agent-list {
-        height: 16;
-    }
-    #work-label {
-        margin-top: 1;
-    }
-    #selected-work {
-        height: 1fr;
-        color: #cdd9e6;
-        overflow-y: auto;
-        scrollbar-size: 1 1;
-    }
-
-    #timeline {
-        height: 10;
-        display: none;
-        padding: 0 2;
-        background: #070c13;
-        border-top: solid #1d2b3b;
-        color: #8797a8;
-        scrollbar-size: 1 1;
-    }
-    #event-strip {
-        height: 1;
-        padding: 0 1;
-        background: #0f1926;
-        color: #8797a8;
-    }
-    #command-row {
-        height: 2;
-        padding: 0 1;
-        background: #070c13;
-    }
-    #command {
-        width: 1fr;
-        height: 1;
-        border: none;
-        padding: 0;
-        background: transparent;
-        color: #f6fafe;
-    }
-    #command:focus {
-        border: none;
-    }
-    #system-status {
-        width: auto;
-        min-width: 28;
-        height: 1;
-        text-align: right;
-        color: #8797a8;
-    }
-
-    Screen.compact #spine {
-        width: 19;
-    }
-    Screen.compact #agent-rail {
-        width: 31;
-        padding-left: 1;
-    }
-    Screen.narrow #agent-rail {
-        display: none;
-    }
-    Screen.narrow #spine {
-        width: 18;
-    }
-    Screen.narrow.agent-focus #spine,
-    Screen.narrow.agent-focus #canvas {
-        display: none;
-    }
-    Screen.narrow.agent-focus #agent-rail {
-        display: block;
-        width: 1fr;
-        border-left: none;
-        padding-left: 2;
-    }
-    """
+    CSS = APP_CSS
 
     BINDINGS = [
         Binding("1", "view('desk')", "Desk", show=False),
@@ -1107,13 +498,13 @@ class QlabTui(App[None]):
 
             with ContentSwitcher(initial="desk", id="canvas"):
                 with Vertical(id="desk", classes="canvas-view"):
-                    yield Static("[#ffb020]\u258d[/] DESK", classes="canvas-title", markup=True)
+                    yield Static(f"[{AMBER}]\u258d[/] DESK", classes="canvas-title", markup=True)
                     yield Static(id="desk-content", markup=True)
                 with Vertical(id="market", classes="canvas-view"):
-                    yield Static("[#ffb020]\u258d[/] MARKET", classes="canvas-title", markup=True)
+                    yield Static(f"[{AMBER}]\u258d[/] MARKET", classes="canvas-title", markup=True)
                     yield Static(id="market-content", markup=True)
                 with Vertical(id="workforce", classes="canvas-view"):
-                    yield Static("[#ffb020]\u258d[/] WORKFORCE", classes="canvas-title", markup=True)
+                    yield Static(f"[{AMBER}]\u258d[/] WORKFORCE", classes="canvas-title", markup=True)
                     yield Static(id="workforce-content", markup=True)
                     with Horizontal(id="flow-row"):
                         for _index, (_phase, _agent, _short) in enumerate(_FLOW):
@@ -1129,11 +520,11 @@ class QlabTui(App[None]):
                             id="chat-input")
                         yield Button("exit", id="chat-exit")
                 with Vertical(id="research", classes="canvas-view"):
-                    yield Static("[#ffb020]\u258d[/] RESEARCH", classes="canvas-title", markup=True)
+                    yield Static(f"[{AMBER}]\u258d[/] RESEARCH", classes="canvas-title", markup=True)
                     yield Static(id="research-summary", markup=True)
                     yield DataTable(id="runs-table", cursor_type="row")
                 with Vertical(id="audit", classes="canvas-view"):
-                    yield Static("[#ffb020]\u258d[/] AUDIT", classes="canvas-title", markup=True)
+                    yield Static(f"[{AMBER}]\u258d[/] AUDIT", classes="canvas-title", markup=True)
                     yield Static(id="audit-summary", markup=True)
                     yield DataTable(id="audit-table", cursor_type="row")
 
@@ -1161,7 +552,7 @@ class QlabTui(App[None]):
         universe = self.query_one("#universe", ListView)
         universe.index = 0
         self._console_write(
-            "[#9a7f4a]workforce — type a goal below and the coordinator runs the "
+            f"[{LABEL_GOLD}]workforce — type a goal below and the coordinator runs the "
             "five governed roles autonomously. Watch the flowchart above; hover a "
             "node for its live update. [bold]■ stop[/] interrupts; durable state "
             "survives.[/]")
@@ -1261,9 +652,9 @@ class QlabTui(App[None]):
     def _render_chat_mode(self) -> None:
         chip = self.query_one("#chat-mode", Static)
         if self._chat_mode == "chat":
-            chip.update("[bold #38ccff]CHAT[/]")
+            chip.update(f"[bold {CYAN}]CHAT[/]")
         else:
-            chip.update("[bold #ffb020]WORK[/]")
+            chip.update(f"[bold {AMBER}]WORK[/]")
         self._sync_chat_input()
 
     def _sync_chat_input(self) -> None:
@@ -1310,8 +701,8 @@ class QlabTui(App[None]):
         self._phase_reported[phase] = status
         if status == "working":
             self._console_write(
-                f"[#38ccff]▶ {escape(_PHASE_SHORT[phase])}[/] "
-                f"[#9a7f4a]working[/]")
+                f"[{CYAN}]▶ {escape(_PHASE_SHORT[phase])}[/] "
+                f"[{LABEL_GOLD}]working[/]")
             return
         if status not in ("done", "failed", "blocked"):
             return
@@ -1321,12 +712,12 @@ class QlabTui(App[None]):
         head, nxt = workforce_note(
             phase, status, str(payload.get("summary") or ""), done)
         glyph, tone = {
-            "done": ("✓", "#1fe07b"),
-            "failed": ("×", "#ff5257"),
-            "blocked": ("!", "#ffb020"),
+            "done": ("✓", UP),
+            "failed": ("×", DOWN),
+            "blocked": ("!", AMBER),
         }[status]
         self._console_write(f"[{tone}]{glyph} {escape(head)}[/]")
-        self._console_write(f"[#8797a8]  {escape(nxt)}[/]")
+        self._console_write(f"[{MUTED}]  {escape(nxt)}[/]")
 
     def _console_stream_text(self, text: str) -> None:
         """Append streamed narrative, emitting only completed lines."""
@@ -1334,11 +725,11 @@ class QlabTui(App[None]):
         *complete, self._console_partial = self._console_partial.split("\n")
         for line in complete:
             if line.strip():
-                self._console_write(f"[#cdd9e6]{escape(demojibake(line))}[/]")
+                self._console_write(f"[{TEXT}]{escape(demojibake(line))}[/]")
 
     def _console_flush(self) -> None:
         if self._console_partial.strip():
-            self._console_write(f"[#cdd9e6]{escape(self._console_partial)}[/]")
+            self._console_write(f"[{TEXT}]{escape(self._console_partial)}[/]")
         self._console_partial = ""
 
     def _tick_pulse(self) -> None:
@@ -1385,9 +776,9 @@ class QlabTui(App[None]):
         lines = []
         for key, view in labels:
             if view == self.active_view:
-                lines.append(f"[bold #f6fafe]› {key}  {view.title()}[/]")
+                lines.append(f"[bold {TEXT_HI}]› {key}  {view.title()}[/]")
             else:
-                lines.append(f"[#8797a8]  {key}  {view.title()}[/]")
+                lines.append(f"[{MUTED}]  {key}  {view.title()}[/]")
         self.query_one("#nav", Static).update("\n".join(lines))
 
     def _sync_universe(self, tickers: list[str]) -> None:
@@ -1429,16 +820,16 @@ class QlabTui(App[None]):
 
         dd_col = DOWN if drawdown >= kill_at * 0.5 else TEXT
         lines = [
-            f"[bold #f6fafe]{money(equity)}[/]   [#8797a8]cash {money(cash)}[/]",
-            f"[#8797a8]drawdown[/] [{dd_col}]{pct(drawdown)}[/]   "
-            f"[#8797a8]kill switch[/] [#eb9a2e]{pct(kill_at, 0)}[/]",
+            f"[bold {TEXT_HI}]{money(equity)}[/]   [{MUTED}]cash {money(cash)}[/]",
+            f"[{MUTED}]drawdown[/] [{dd_col}]{pct(drawdown)}[/]   "
+            f"[{MUTED}]kill switch[/] [{GOLD}]{pct(kill_at, 0)}[/]",
             "",
         ]
         # The allocation bars are the desk's chart; widen them with the window.
         avail_w, _ = self._plot_region("#desk-content")
         bar_w = max(16, min(44, avail_w - 30))
         lines.append(
-            f"[#9a7f4a]{'CURRENT ALLOCATION':<{bar_w + 6}}      CURRENT   TARGET[/]")
+            f"[{LABEL_GOLD}]{'CURRENT ALLOCATION':<{bar_w + 6}}      CURRENT   TARGET[/]")
         held_outside = [t for t in current if t not in self.universe_tickers
                         and abs(float(current[t])) > 0.0005]
         for ticker in [*self.universe_tickers, *held_outside]:
@@ -1451,19 +842,19 @@ class QlabTui(App[None]):
             # reads red, so drift is visible at a glance, not just in the number.
             if target is not None and cur > float(target):
                 tpos = min(filled, round(float(target) * bar_w))
-                bar = (f"[#ffb020]{'█' * tpos}[/][#ff5257]{'█' * (filled - tpos)}[/]"
-                       f"[#33475a]{track}[/]")
+                bar = (f"[{AMBER}]{'█' * tpos}[/][{DOWN}]{'█' * (filled - tpos)}[/]"
+                       f"[{ALLOCATION_TRACK}]{track}[/]")
             else:
-                bar = f"[#ffb020]{'█' * filled}[/][#33475a]{track}[/]"
+                bar = f"[{AMBER}]{'█' * filled}[/][{ALLOCATION_TRACK}]{track}[/]"
             lines.append(
-                f"[#cdd9e6]{ticker:<5}[/] {bar}  [#f6fafe]{cur:6.1%}[/]  →  "
-                f"[#cdd9e6]{target_text}[/]")
+                f"[{TEXT}]{ticker:<5}[/] {bar}  [{TEXT_HI}]{cur:6.1%}[/]  →  "
+                f"[{TEXT}]{target_text}[/]")
 
         lines.extend([
             "",
-            "[#9a7f4a]MARKET REGIME[/]",
+            f"[{LABEL_GOLD}]MARKET REGIME[/]",
             f"[bold]{str(regime.get('regime', 'unknown')).upper()}[/]   "
-            f"[#8797a8]{escape(str(regime.get('method', 'unavailable')))}[/]",
+            f"[{MUTED}]{escape(str(regime.get('method', 'unavailable')))}[/]",
             f"realized volatility signal  {pct(regime.get('signal'))}",
             f"stress threshold             {pct(regime.get('threshold'))}",
             "",
@@ -1474,7 +865,7 @@ class QlabTui(App[None]):
             plan = plans[0]
             turnover = plan.get("pre_trade", {}).get("turnover")
             lines.extend([
-                "[#9a7f4a]LATEST PROPOSAL[/]",
+                f"[{LABEL_GOLD}]LATEST PROPOSAL[/]",
                 f"[bold]{escape(plan['plan_id'][:12])}[/]   "
                 f"state {escape(str(plan.get('state', 'unknown')))}   "
                 f"turnover {pct(turnover)}",
@@ -1482,7 +873,7 @@ class QlabTui(App[None]):
             ])
         else:
             lines.extend([
-                "[#9a7f4a]PROPOSAL[/]",
+                f"[{LABEL_GOLD}]PROPOSAL[/]",
                 "No active rebalance proposal.",
             ])
 
@@ -1490,9 +881,9 @@ class QlabTui(App[None]):
         policy = self.snapshot.get("policy") or {}
         lines.extend([
             "",
-            f"[#9a7f4a]POLICY[/]  [#cdd9e6]{escape(str(policy.get('label', policy.get('id', '—'))))}[/] "
-            "[#586777]· MVSK research only[/]",
-            f"[#9a7f4a]DATA[/]  [#cdd9e6]{source} · {market.get('frequency', 'unknown')} · "
+            f"[{LABEL_GOLD}]POLICY[/]  [{TEXT}]{escape(str(policy.get('label', policy.get('id', '—'))))}[/] "
+            f"[{DIM}]· MVSK research only[/]",
+            f"[{LABEL_GOLD}]DATA[/]  [{TEXT}]{source} · {market.get('frequency', 'unknown')} · "
             f"as of {market.get('as_of', '—')} · age {market.get('bar_age_days', '—')}d[/]",
         ])
         self.query_one("#desk-content", Static).update("\n".join(lines))
@@ -1549,12 +940,12 @@ class QlabTui(App[None]):
         as_of = str(market.get("as_of", "—"))
 
         lines = [
-            f"[bold #f6fafe]{escape(self.active_ticker)}[/]  "
-            f"[bold #f6fafe]{money(row.get('price'))}[/]  "
+            f"[bold {TEXT_HI}]{escape(self.active_ticker)}[/]  "
+            f"[bold {TEXT_HI}]{money(row.get('price'))}[/]  "
             f"[{dir_col}]{'▲' if up else '▼'} {pct(row.get('change_1d'))} today[/]"
-            f"    [#9a7f4a]HIGH[/] [#cdd9e6]{money(hi)}[/]  "
-            f"[#9a7f4a]LOW[/] [#cdd9e6]{money(lo)}[/]  "
-            f"[#9a7f4a]{len(history)} DAILY BARS[/]",
+            f"    [{LABEL_GOLD}]HIGH[/] [{TEXT}]{money(hi)}[/]  "
+            f"[{LABEL_GOLD}]LOW[/] [{TEXT}]{money(lo)}[/]  "
+            f"[{LABEL_GOLD}]{len(history)} DAILY BARS[/]",
             "",
         ]
         for i, bar in enumerate(rows):
@@ -1569,20 +960,20 @@ class QlabTui(App[None]):
             else:
                 tick = ""
             lines.append(
-                f"[#9a7f4a]{tick:>{gutter}}[/] [#33465b]│[/]"
+                f"[{LABEL_GOLD}]{tick:>{gutter}}[/] [{CHART_AXIS}]│[/]"
                 f"[{dir_col}]{escape(bar)}[/]")
         # X axis (time): a baseline under the plot, then the oldest→latest span,
         # then a one-line legend naming both axes so the plot is self-defining.
         pad = " " * (gutter + 2)
-        lines.append(f"[#33465b]{' ' * gutter} └{'─' * chart_w}[/]")
+        lines.append(f"[{CHART_AXIS}]{' ' * gutter} └{'─' * chart_w}[/]")
         left_lbl = f"{len(history)} bars ago"
         right_lbl = f"as of {as_of}"
         gap = chart_w - len(left_lbl) - len(right_lbl)
         span = (left_lbl + " " * gap + right_lbl if gap >= 1
                 else f"{len(history)} bars → {as_of}"[:chart_w])
-        lines.append(f"[#9a7f4a]{pad}{escape(span)}[/]")
+        lines.append(f"[{LABEL_GOLD}]{pad}{escape(span)}[/]")
         lines.append(
-            f"[#586777]{pad}X · time (daily bars, oldest → latest)"
+            f"[{DIM}]{pad}X · time (daily bars, oldest → latest)"
             "   Y · price (USD)[/]")
         lines.append("")
 
@@ -1599,12 +990,12 @@ class QlabTui(App[None]):
         per_row = 2 if avail_w >= 78 else 1
         for i in range(0, len(stats), per_row):
             cells = [
-                f"[#9a7f4a]{escape(label):<18}[/][#f6fafe]{escape(str(value)):<16}[/]"
+                f"[{LABEL_GOLD}]{escape(label):<18}[/][{TEXT_HI}]{escape(str(value)):<16}[/]"
                 for label, value in stats[i:i + per_row]
             ]
             lines.append("  ".join(cells))
         lines.append(
-            "[#9a7f4a]Daily adjusted-close context; this is not a streaming quote.[/]")
+            f"[{LABEL_GOLD}]Daily adjusted-close context; this is not a streaming quote.[/]")
         self.query_one("#market-content", Static).update("\n".join(lines))
 
     def _render_flow(self) -> None:
@@ -1615,7 +1006,7 @@ class QlabTui(App[None]):
             except Exception:
                 continue
             state = self._flow_states.get(phase, "idle")
-            glyph, color = _STATE_STYLE.get(state, ("◌", "#586777"))
+            glyph, color = _STATE_STYLE.get(state, ("◌", DIM))
             if state == "working":
                 glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
             node.update(
@@ -1668,17 +1059,17 @@ class QlabTui(App[None]):
         workflow = self._select_workflow(workflows)
         if workflow is None:
             if self._pending_workflow:
-                empty = ("[#9a7f4a]STARTING RUN[/]   "
-                         "[#8797a8]the coordinator is opening a durable workflow — "
+                empty = (f"[{LABEL_GOLD}]STARTING RUN[/]   "
+                         f"[{MUTED}]the coordinator is opening a durable workflow — "
                          "phases appear here as they register.[/]")
             elif self._active_workflow_id:
-                empty = ("[#9a7f4a]RESUMING[/]   "
-                         f"[#8797a8]{escape(self._active_workflow_id)} is outside "
+                empty = (f"[{LABEL_GOLD}]RESUMING[/]   "
+                         f"[{MUTED}]{escape(self._active_workflow_id)} is outside "
                          "the recent-run window; its phases appear as they "
                          "advance.[/]")
             else:
-                empty = ("[#9a7f4a]NO DURABLE RUN[/]   "
-                         "[#8797a8]type a goal below — Claude runs analyst → "
+                empty = (f"[{LABEL_GOLD}]NO DURABLE RUN[/]   "
+                         f"[{MUTED}]type a goal below — Claude runs analyst → "
                          "challenger → optimizer → referee → reporter autonomously "
                          "and makes its own best-estimate calls. Hover a node above "
                          "for its live update.[/]")
@@ -1719,12 +1110,12 @@ class QlabTui(App[None]):
         self._render_flow()
 
         lines = [
-            f"[bold #f6fafe]{escape(str(workflow.get('workflow_id', '—')))}[/]   "
+            f"[bold {TEXT_HI}]{escape(str(workflow.get('workflow_id', '—')))}[/]   "
             f"{escape(status.upper())}",
-            f"[#9a7f4a]{escape(str(workflow.get('kind', 'portfolio_review')))} · "
+            f"[{LABEL_GOLD}]{escape(str(workflow.get('kind', 'portfolio_review')))} · "
             f"as of {escape(str(request.get('as_of', '—')))} · "
             f"{escape(str(request.get('universe', 'core')))}[/]",
-            f"[#8797a8]{escape(str(request.get('goal', 'Governed portfolio review'))[:160])}[/]",
+            f"[{MUTED}]{escape(str(request.get('goal', 'Governed portfolio review'))[:160])}[/]",
         ]
 
         # The regime the analyst selected, as soon as it persists — the operator
@@ -1741,22 +1132,22 @@ class QlabTui(App[None]):
             chip = f"  ·  referee {verdict}" if verdict else ""
             lines.extend([
                 "",
-                f"[#1fe07b]▮ RESULT{chip}[/]",
-                f"[#cdd9e6]{escape(str(result['final_summary'])[:320])}[/]",
+                f"[{UP}]▮ RESULT{chip}[/]",
+                f"[{TEXT}]{escape(str(result['final_summary'])[:320])}[/]",
             ])
             targets = _extract_targets(step_by_phase)
             if targets:
                 lines.append(
-                    f"[#9a7f4a]target weights[/]  "
-                    f"[#f6fafe]{escape(_format_targets(targets))}[/]")
+                    f"[{LABEL_GOLD}]target weights[/]  "
+                    f"[{TEXT_HI}]{escape(_format_targets(targets))}[/]")
             plan_id = str((step_by_phase.get("reporter", {}).get("artifacts")
                            or {}).get("plan_id") or "")
             if plan_id:
                 lines.append(
-                    f"[#9a7f4a]checked plan[/]  [#f6fafe]{escape(plan_id)}[/]  "
-                    "[#8797a8]→ : rebalance paper to confirm[/]")
+                    f"[{LABEL_GOLD}]checked plan[/]  [{TEXT_HI}]{escape(plan_id)}[/]  "
+                    f"[{MUTED}]→ : rebalance paper to confirm[/]")
         elif status in ("failed", "blocked"):
-            tone = "#ff5257" if status == "failed" else "#ffb020"
+            tone = DOWN if status == "failed" else AMBER
             broken = next(
                 (s for s in steps if s.get("status") in ("failed", "blocked")),
                 None)
@@ -1765,8 +1156,8 @@ class QlabTui(App[None]):
                 "",
                 f"[{tone}]▮ {status.upper()} at "
                 f"{escape(str((broken or {}).get('phase', '—')))}[/]"
-                + (f"\n[#8797a8]{escape(why[:200])}[/]" if why else ""),
-                "[#9a7f4a]Resume with : workforce resume "
+                + (f"\n[{MUTED}]{escape(why[:200])}[/]" if why else ""),
+                f"[{LABEL_GOLD}]Resume with : workforce resume "
                 f"{escape(str(workflow.get('workflow_id', '')))}[/]",
             ])
 
@@ -1776,10 +1167,10 @@ class QlabTui(App[None]):
         if earlier:
             packed = "   ".join(
                 f"{escape(str(row.get('workflow_id', '—')))} "
-                f"[#8797a8]{escape(str(row.get('status', '')))}[/]"
+                f"[{MUTED}]{escape(str(row.get('status', '')))}[/]"
                 for row in earlier)
             lines.append(
-                f"[#9a7f4a]earlier (: workforce resume ID)[/]  {packed}")
+                f"[{LABEL_GOLD}]earlier (: workforce resume ID)[/]  {packed}")
         self.query_one("#workforce-content", Static).update("\n".join(lines))
 
     def _maybe_offer_workforce(self) -> None:
@@ -1949,18 +1340,18 @@ class QlabTui(App[None]):
             name = agent["name"]
             state = self._agent_states.get(name, agent.get("state", "idle"))
             glyph, color = {
-                "working": ("●", "#38ccff"),
-                "queued": ("◐", "#eb9a2e"),
-                "waiting": ("◐", "#eb9a2e"),
-                "done": ("✓", "#1fe07b"),
-                "failed": ("×", "#ff5257"),
-                "blocked": ("!", "#ffb020"),
-            }.get(state, ("◌", "#586777"))
+                "working": ("●", CYAN),
+                "queued": ("◐", GOLD),
+                "waiting": ("◐", GOLD),
+                "done": ("✓", UP),
+                "failed": ("×", DOWN),
+                "blocked": ("!", AMBER),
+            }.get(state, ("◌", DIM))
             if state == "working":
                 glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
             lines.append(
                 f"[{color}]{glyph}[/] [bold]{escape(name)}[/]\n"
-                f"   [#586777]{escape(state)} · {escape(str(agent.get('authority', '—')))}[/]"
+                f"   [{DIM}]{escape(state)} · {escape(str(agent.get('authority', '—')))}[/]"
             )
         self.query_one("#agent-list", Static).update("\n".join(lines))
 
@@ -2099,15 +1490,15 @@ class QlabTui(App[None]):
         """
         if self.claude.running:
             self._console_write(
-                "[#eb9a2e]a session is working — wait for the turn to "
+                f"[{GOLD}]a session is working — wait for the turn to "
                 "finish or press stop[/]")
             return
-        self._console_write(f"[bold #ffb020]you ▸[/] [#f6fafe]{escape(message)}[/]")
+        self._console_write(f"[bold {AMBER}]you ▸[/] [{TEXT_HI}]{escape(message)}[/]")
         if self._chat_mode == "chat":
             resume = self._chat_sessions["chat"]
             if not resume:
                 self._console_write(
-                    "[#9a7f4a]▌ chat — read-only desk assistant[/]")
+                    f"[{LABEL_GOLD}]▌ chat — read-only desk assistant[/]")
             self._start_claude(message, governed=False, chat=True,
                                resume_session=resume)
         elif self._chat_sessions["workforce"]:
@@ -2123,7 +1514,7 @@ class QlabTui(App[None]):
         if self.claude.running:
             self.claude.stop()
             self._console_write(
-                "[#eb9a2e]■ stopped — durable phase state is kept; send a "
+                f"[{GOLD}]■ stopped — durable phase state is kept; send a "
                 "message to continue or use : workforce resume ID[/]")
             self._write_local_event("claude.workforce_stopped", {})
         else:
@@ -2374,10 +1765,10 @@ class QlabTui(App[None]):
             if not resume_session:
                 first_line = prompt.splitlines()[0]
                 self._console_write(
-                    f"[bold #ffb020]▌ workforce run[/]  "
-                    f"[#8797a8]{escape(first_line[:110])}[/]")
+                    f"[bold {AMBER}]▌ workforce run[/]  "
+                    f"[{MUTED}]{escape(first_line[:110])}[/]")
                 self._console_write(
-                    "[#9a7f4a]running autonomously — one note per agent below; "
+                    f"[{LABEL_GOLD}]running autonomously — one note per agent below; "
                     "hover a node for its live detail[/]")
         self._write_local_event(
             "claude.started",
@@ -2435,22 +1826,22 @@ class QlabTui(App[None]):
                     if not started and self._phase_reported.get(phase) is None:
                         self._phase_reported[phase] = "working"
                         self._console_write(
-                            f"[#38ccff]▶ {escape(_PHASE_SHORT.get(phase, phase))}[/]"
-                            f" [#9a7f4a]working[/]")
+                            f"[{CYAN}]▶ {escape(_PHASE_SHORT.get(phase, phase))}[/]"
+                            f" [{LABEL_GOLD}]working[/]")
             elif chat:
                 self._console_flush()
-                self._console_write(f"[#38ccff]→ {escape(event.tool)}[/]")
+                self._console_write(f"[{CYAN}]→ {escape(event.tool)}[/]")
         elif event.kind == "error":
             self._write_local_event("claude.failed", {"error": event.text[-400:]})
             if workforce:
-                self._console_write(f"[#ff5257]✗ {escape(event.text[-240:])}[/]")
+                self._console_write(f"[{DOWN}]✗ {escape(event.text[-240:])}[/]")
                 # A terminal error still owes the operator the run's state: the
                 # durable phases reached before it stopped.
                 if not self.claude.running:
                     self._print_workforce_results("")
             elif chat:
                 self._console_flush()
-                self._console_write(f"[#ff5257]✗ {escape(event.text[-300:])}[/]")
+                self._console_write(f"[{DOWN}]✗ {escape(event.text[-300:])}[/]")
             else:
                 self._set_selected_work("CLAUDE FAILED\n\n" + event.text[-4000:])
             self._start_refresh()
@@ -2462,7 +1853,7 @@ class QlabTui(App[None]):
                 self._print_workforce_results(event.text)
             elif chat:
                 self._console_flush()
-                self._console_write("[#1fe07b]▮ done[/]")
+                self._console_write(f"[{UP}]▮ done[/]")
             elif event.text:
                 self._set_selected_work(
                     "CLAUDE · READ-ONLY\n\n" + (self._claude_buffer or event.text)[-6000:])
@@ -2500,7 +1891,7 @@ class QlabTui(App[None]):
                       .get("verdict") or "")
 
         # 1 · what was achieved — the conclusion, first.
-        self._console_write(f"[#cdd9e6]{escape(_result_headline(status, verdict))}[/]")
+        self._console_write(f"[{TEXT}]{escape(_result_headline(status, verdict))}[/]")
 
         # 2 · the regime the run chose, and why.
         regime_line = _regime_line(steps)
@@ -2510,13 +1901,13 @@ class QlabTui(App[None]):
 
         # 3 · what each agent did, one plain-language line each.
         self._console_write("")
-        self._console_write("[#9a7f4a]WHAT EACH AGENT DID[/]")
+        self._console_write(f"[{LABEL_GOLD}]WHAT EACH AGENT DID[/]")
         for phase, _agent, _short in _FLOW:
             glyph, colour, name, action = _agent_brief(
                 phase, steps.get(phase), status)
             self._console_write(
-                f"  [{colour}]{glyph}[/] [bold #f6fafe]{escape(name):<11}[/] "
-                f"[#cdd9e6]{escape(action)}[/]")
+                f"  [{colour}]{glyph}[/] [bold {TEXT_HI}]{escape(name):<11}[/] "
+                f"[{TEXT}]{escape(action)}[/]")
 
         # 4 · the final output — the weights, and the one action left to a human.
         targets = _extract_targets(steps)
@@ -2524,22 +1915,22 @@ class QlabTui(App[None]):
                         .get("plan_id"))
         if targets or has_plan:
             self._console_write("")
-            self._console_write("[#9a7f4a]RECOMMENDATION[/]")
+            self._console_write(f"[{LABEL_GOLD}]RECOMMENDATION[/]")
             if targets:
                 self._console_write(
-                    f"  [#8797a8]target weights[/]  "
-                    f"[#f6fafe]{escape(_format_targets(targets))}[/]")
+                    f"  [{MUTED}]target weights[/]  "
+                    f"[{TEXT_HI}]{escape(_format_targets(targets))}[/]")
             if has_plan:
                 self._console_write(
-                    "  [#8797a8]paper plan[/]     [#1fe07b]ready[/] "
-                    "[#8797a8]— type[/] [#f6fafe]: rebalance paper[/] "
-                    "[#8797a8]to confirm it yourself[/]")
+                    f"  [{MUTED}]paper plan[/]     [{UP}]ready[/] "
+                    f"[{MUTED}]— type[/] [{TEXT_HI}]: rebalance paper[/] "
+                    f"[{MUTED}]to confirm it yourself[/]")
 
         # 5 · what the output signifies, in plain terms.
         self._console_write("")
-        self._console_write("[#9a7f4a]WHAT THIS MEANS[/]")
+        self._console_write(f"[{LABEL_GOLD}]WHAT THIS MEANS[/]")
         self._console_write(
-            "  [#cdd9e6]"
+            f"  [{TEXT}]"
             f"{escape(_result_meaning(status, verdict, bool(targets), has_plan))}[/]")
 
     def _print_results_fallback(self, text: str) -> None:
@@ -2548,7 +1939,7 @@ class QlabTui(App[None]):
         text = (text or "").strip()
         if not text or text == "Claude completed":
             self._console_write(
-                "[#8797a8]The run ended before it recorded any results. Start "
+                f"[{MUTED}]The run ended before it recorded any results. Start "
                 "again with a goal, or resume it from the workforce view.[/]")
             return
         for raw in text.splitlines():
@@ -2556,9 +1947,9 @@ class QlabTui(App[None]):
             if not line:
                 self._console_write("")
             elif is_heading:
-                self._console_write(f"[#9a7f4a]{escape(line)}[/]")
+                self._console_write(f"[{LABEL_GOLD}]{escape(line)}[/]")
             else:
-                self._console_write(f"[#f6fafe]{escape(line)}[/]")
+                self._console_write(f"[{TEXT_HI}]{escape(line)}[/]")
 
     def _set_agent_from_tool(self, tool: str, explicit_agent: str = "") -> str:
         if explicit_agent in _AGENT_NAMES:

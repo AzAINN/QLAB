@@ -369,29 +369,36 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
                 "tile-alerts",
             }
             assert {tile.id for tile in app.query(".dashboard-tile")} == tile_ids
-            assert "$10,100.00" in str(
-                app.query_one("#tile-equity-content").content)
+            equity = str(app.query_one("#tile-equity-content").content)
+            assert "$10,100.00" in equity
+            assert "• EQUITY" in equity and "• KILL-SWITCH DISTANCE" in equity
             assert "ACWI" in str(
                 app.query_one("#tile-allocation-content").content)
-            assert "CALM" in str(
-                app.query_one("#tile-regime-content").content)
+            regime = str(app.query_one("#tile-regime-content").content)
+            assert "CALM" in regime and "• REGIME" in regime
             assert "ACWI" in str(
                 app.query_one("#tile-market-pulse-content").content)
-            assert "no verdicts yet" in str(
+            empty_verdict = str(
                 app.query_one("#tile-verdict-content").content)
+            assert "—" in empty_verdict and "no verdicts yet" in empty_verdict
             assert "no runs" in str(app.query_one("#tile-run-content").content)
             assert "no alerts" in str(
                 app.query_one("#tile-alerts-content").content)
 
             app.snapshot["decisions"] = [{
                 "decision_id": "decision-pass",
-                "rationale": "within mandate",
+                "rationale": (
+                    "**within mandate** decision_id: decision-hidden"
+                ),
                 "verdict": {"verdict": "PASS"},
             }]
             app._render_dashboard()
             verdict = str(app.query_one("#tile-verdict-content").content)
             assert "PASS" in verdict
-            assert "within mandate" in verdict
+            assert "• within mandate" in verdict
+            assert "**" not in verdict
+            assert "decision_id" not in verdict
+            assert "decision-hidden" not in verdict
 
             app.action_view("market")
             app._handle_command("view desk")
@@ -647,12 +654,19 @@ class AuditClient(StubClient):
             "created_at": "2026-07-17T14:30:00+00:00",
             "kind": "rebalance_gate",
             "choice": {"regime": "calm"},
-            "rationale": "within mandate",
-            "challenger_view": "turnover is acceptable given the calm regime",
+            "rationale": (
+                "**within mandate** decision_id: decision-hidden"
+            ),
+            "challenger_view": (
+                "`turnover` is acceptable given the calm regime"
+            ),
             "reflection": "realized drawdown matched the projection",
             "realized_outcome": {"drawdown": 0.01},
             "verdict": {"verdict": "PASS", "source": "deterministic",
-                        "reasons": ["turnover within cap", "weights within mandate"]},
+                        "reasons": [
+                            "turnover within cap objective_id: obj-hidden",
+                            "weights within mandate",
+                        ]},
         }]
         snap["plans"] = [{
             "plan_id": "plan-must-not-appear",
@@ -700,6 +714,10 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
             rail = str(app.query_one("#selected-work").content)
             assert "turnover is acceptable" in rail
             assert "turnover within cap" in rail
+            assert "• within mandate" in rail
+            assert "**" not in rail and "`" not in rail
+            assert "decision_id" not in rail and "decision-hidden" not in rail
+            assert "objective_id" not in rail and "obj-hidden" not in rail
             assert "verdict PASS" in str(app.query_one("#event-strip").content)
 
             # status strip carries the one DATA provenance token
@@ -906,6 +924,10 @@ def test_settings_view_fetches_bootstrap_once_and_renders_read_only_bulletins():
             assert "SYNTHETIC" in data and "2026-07-17" in data
             assert "moments-analyst" in agents and "RESEARCH" in agents
             assert "qlab amber phosphor" in theme and "amber" in theme
+            assert "• paper capital" in mandate
+            assert "• snapshot source" in data
+            assert "• moments-analyst" in agents
+            assert "• palette" in theme
 
             await pilot.press("1")
             await pilot.press("f7")
@@ -1055,6 +1077,51 @@ def test_clean_report_line_strips_markdown_headers_ids_and_emphasis():
         False, "Solved with HRP; the referee passed.")
 
 
+def test_verdict_chip_returns_semantic_token_names_and_compact_text():
+    from qlab.tui.formatting import verdict_chip
+
+    assert verdict_chip({"verdict": "PASS"}) == ("UP", "PASS")
+    assert verdict_chip({"verdict": "fail"}) == ("DOWN", "FAIL")
+    assert verdict_chip(None) == ("MUTED", "—")
+
+
+def test_key_number_lines_aligns_every_value_column():
+    from qlab.tui.formatting import key_number_lines
+
+    assert key_number_lines([
+        ("cash", "$2.00"),
+        ("drawdown", "1.5%"),
+    ]) == [
+        "cash      $2.00",
+        "drawdown  1.5%",
+    ]
+    assert key_number_lines([]) == []
+
+
+def test_bulletin_cleans_markdown_ids_empty_lines_and_length():
+    from qlab.tui.formatting import bulletin
+
+    assert bulletin([
+        "### Result:",
+        "",
+        "**Held** the `checked plan` (plan_id: plan-7).",
+    ]) == [
+        "RESULT",
+        "Held the checked plan.",
+    ]
+    assert bulletin(["abcdefgh"], max_len=4) == ["abcd"]
+
+
+def test_tui_app_uses_theme_tokens_instead_of_literal_hex_colors():
+    import re
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "qlab" / "tui" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert re.search(r"#[0-9a-fA-F]{3,8}\b", source) is None
+
+
 def test_workforce_view_shows_result_card_and_timings():
     from qlab.tui.app import QlabTui
 
@@ -1066,7 +1133,13 @@ def test_workforce_view_shows_result_card_and_timings():
                 "status": "complete", "current_phase": "reporter",
                 "request": {"goal": "review", "as_of": "2026-07-19",
                             "universe": "core"},
-                "result": {"final_summary": "hold reviewed HRP targets"},
+                "result": {
+                    "final_summary": (
+                        "### Recommendation\n"
+                        "**hold** reviewed HRP targets "
+                        "decision_id: decision-hidden"
+                    ),
+                },
                 "steps": [
                     {"phase": "referee", "agent": "referee", "status": "done",
                      "summary": "PASS", "started_at": "2026-07-19T10:00:00",
@@ -1089,7 +1162,11 @@ def test_workforce_view_shows_result_card_and_timings():
             content = str(app.query_one("#workforce-content").content)
             assert "RESULT" in content
             assert "referee PASS" in content
-            assert "hold reviewed HRP targets" in content
+            assert "• RECOMMENDATION" in content
+            assert "• hold reviewed HRP targets" in content
+            assert "###" not in content and "**" not in content
+            assert "decision_id" not in content
+            assert "decision-hidden" not in content
             # phase timing is on the referee node's hover detail, not the block
             assert "42s" in app._flow_details["referee"]
             assert app._flow_states["referee"] == "done"
@@ -1527,8 +1604,15 @@ def test_a_stopped_session_still_reports_where_the_run_reached():
 def test_workforce_note_follows_the_dependency_graph():
     from qlab.tui.app import workforce_note
 
-    head, nxt = workforce_note("analyst", "done", "window chosen", {"analyst"})
-    assert head.startswith("analyst done")
+    head, nxt = workforce_note(
+        "analyst",
+        "done",
+        "**window chosen** decision_id: decision-hidden",
+        {"analyst"},
+    )
+    assert head.startswith("analyst done") and "window chosen" in head
+    assert "**" not in head and "decision_id" not in head
+    assert "decision-hidden" not in head
     assert "in parallel" in nxt
 
     # the first of the parallel pair waits for the other, not for the referee

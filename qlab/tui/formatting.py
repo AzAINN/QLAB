@@ -71,6 +71,42 @@ def clean_report_line(line: str) -> tuple[bool, str]:
     return False, body
 
 
+def verdict_chip(verdict: dict | None) -> tuple[str, str]:
+    """Return the semantic theme token and compact referee verdict text."""
+    label = str((verdict or {}).get("verdict") or "").upper()
+    if label == "PASS":
+        return "UP", "PASS"
+    if label == "FAIL":
+        return "DOWN", "FAIL"
+    return "MUTED", "—"
+
+
+def key_number_lines(pairs: list[tuple[str, object]]) -> list[str]:
+    """Render label/value pairs with one shared, visible value column."""
+    rendered = [(str(label), str(value)) for label, value in pairs]
+    if not rendered:
+        return []
+    label_width = max(len(label) for label, _value in rendered)
+    return [
+        f"{label:<{label_width}}  {value}"
+        for label, value in rendered
+    ]
+
+
+def bulletin(lines: list[str], max_len: int = 200) -> list[str]:
+    """Clean agent prose into non-empty, length-bounded bulletin lines."""
+    limit = max(0, int(max_len))
+    if not limit:
+        return []
+    rendered = []
+    for raw in lines:
+        _is_heading, text = clean_report_line(str(raw))
+        text = text[:limit].rstrip()
+        if text:
+            rendered.append(text)
+    return rendered
+
+
 def sparkline(values: list[float]) -> str:
     """Render a stable unicode sparkline; flat and empty series are valid."""
     ticks = "▁▂▃▄▅▆▇█"

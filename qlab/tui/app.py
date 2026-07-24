@@ -30,8 +30,8 @@ from textual.widgets import (
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
-    braille_chart, clean_report_line, demojibake, money, pct, phase_elapsed,
-    sparkline, weight_bar,
+    braille_chart, bulletin, key_number_lines, money, pct, phase_elapsed,
+    sparkline, verdict_chip, weight_bar,
 )
 from qlab.tui.theme import (
     ALLOCATION_TRACK,
@@ -96,6 +96,11 @@ _PHASE_DID = {
     "reporter": "compiled the human-facing recommendation",
 }
 _STATE_STYLE = STATE_STYLE
+_COLOR_BY_TOKEN = {
+    "UP": UP,
+    "DOWN": DOWN,
+    "MUTED": MUTED,
+}
 _BOOK_STATE_ALIASES = {
     "proposed": "queued",
     "checked": "done",
@@ -141,6 +146,49 @@ COMMAND_TABLE = {
 }
 
 
+def _bulletin_markup(
+    lines: list[str], *, tone: str = TEXT, max_len: int = 200
+) -> list[str]:
+    """Rich-markup bullet rows built from the shared plain-text normalizer."""
+    return [
+        f"[{tone}]• {escape(line)}[/]"
+        for line in bulletin(lines, max_len=max_len)
+    ]
+
+
+def _key_number_markup(
+    pairs: list[tuple[str, object]],
+    *,
+    value_tones: list[str] | None = None,
+    bold_values: set[int] | None = None,
+    values_are_markup: bool = False,
+) -> list[str]:
+    """Theme the shared aligned key/value rows without embedding colors in them."""
+    normalized = [(str(label), str(value)) for label, value in pairs]
+    if not normalized:
+        return []
+    label_width = max(len(label) for label, _value in normalized)
+    tones = value_tones or []
+    bold = bold_values or set()
+    rendered = []
+    for index, line in enumerate(key_number_lines(normalized)):
+        label = line[:label_width]
+        value = line[label_width + 2:]
+        tone = tones[index] if index < len(tones) else TEXT_HI
+        style = f"bold {tone}" if index in bold else tone
+        safe_value = value if values_are_markup else escape(value)
+        rendered.append(
+            f"[{MUTED}]• {escape(label)}[/]  [{style}]{safe_value}[/]"
+        )
+    return rendered
+
+
+def _verdict_style(verdict: dict | None) -> tuple[str, str]:
+    """Resolve the formatter's semantic token name through the TUI theme."""
+    token_name, text = verdict_chip(verdict)
+    return _COLOR_BY_TOKEN.get(token_name, MUTED), text
+
+
 def workforce_note(phase: str, status: str, summary: str,
                    done_phases: set[str]) -> tuple[str, str]:
     """The two-line note printed when one agent finishes: done, then next.
@@ -151,7 +199,9 @@ def workforce_note(phase: str, status: str, summary: str,
     the operator is never told a stage is next that the gate would refuse.
     """
     short = _PHASE_SHORT.get(phase, phase)
-    detail = " ".join(str(summary or "").split())[:220]
+    detail = " · ".join(
+        bulletin(str(summary or "").splitlines(), max_len=220)
+    )[:220]
     did = _PHASE_DID.get(phase, "completed its phase")
 
     if status == "failed":
@@ -202,7 +252,12 @@ def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
     regime = str(artifacts.get("regime") or "").strip()
     if not regime:
         return None
-    reasoning = " ".join(str(artifacts.get("regime_reasoning") or "").split())
+    reasoning = " · ".join(
+        bulletin(
+            str(artifacts.get("regime_reasoning") or "").splitlines(),
+            max_len=220,
+        )
+    )
     return regime, reasoning
 
 
@@ -295,8 +350,12 @@ def _agent_brief(phase: str, step: dict | None,
     if state == "working":
         return glyph, colour, name, "was still running when the run stopped"
     if state in ("failed", "blocked"):
-        reason = clean_report_line(
-            " ".join(str(step.get("summary") or "").split()))[1][:90]
+        reason = " · ".join(
+            bulletin(
+                str(step.get("summary") or "").splitlines(),
+                max_len=90,
+            )
+        )[:90]
         base = ("hit an error and stopped the run" if state == "failed"
                 else "was refused by a safety gate")
         return glyph, colour, name, base + (f" — {reason}" if reason else "")
@@ -340,11 +399,9 @@ def _result_meaning(status: str, verdict: str, has_targets: bool,
 
 def _verdict_cell(verdict: dict | None) -> str:
     """Compact referee token for the audit table: 'PASS·source' or '—'."""
-    if not verdict:
-        return "—"
-    label = str(verdict.get("verdict", "")).upper() or "—"
-    source = str(verdict.get("source", "")).strip()
-    return f"{label}·{source}" if source else label
+    _token_name, label = verdict_chip(verdict)
+    source = str((verdict or {}).get("source", "")).strip()
+    return f"{label}·{source}" if verdict and source else label
 
 
 def _reflection_cell(reflection: str | None) -> str:
@@ -917,20 +974,21 @@ class QlabTui(App[None]):
             "failed": ("×", DOWN),
             "blocked": ("!", AMBER),
         }[status]
-        self._console_write(f"[{tone}]{glyph} {escape(head)}[/]")
-        self._console_write(f"[{MUTED}]  {escape(nxt)}[/]")
+        for line in bulletin([head], max_len=260):
+            self._console_write(f"[{tone}]{glyph} {escape(line)}[/]")
+        for line in bulletin([nxt], max_len=260):
+            self._console_write(f"[{MUTED}]  • {escape(line)}[/]")
 
     def _console_stream_text(self, text: str) -> None:
         """Append streamed narrative, emitting only completed lines."""
         self._console_partial += text
         *complete, self._console_partial = self._console_partial.split("\n")
-        for line in complete:
-            if line.strip():
-                self._console_write(f"[{TEXT}]{escape(demojibake(line))}[/]")
+        for line in _bulletin_markup(complete):
+            self._console_write(line)
 
     def _console_flush(self) -> None:
-        if self._console_partial.strip():
-            self._console_write(f"[{TEXT}]{escape(self._console_partial)}[/]")
+        for line in _bulletin_markup([self._console_partial]):
+            self._console_write(line)
         self._console_partial = ""
 
     def _tick_pulse(self) -> None:
@@ -1037,13 +1095,16 @@ class QlabTui(App[None]):
         distance_tone = (
             MUTED if kill_distance is None else UP if kill_distance > 0 else DOWN
         )
-        equity_content = "\n".join([
-            f"[{MUTED}]EQUITY[/]  [bold {TEXT_HI}]{money(equity)}[/]",
-            f"[{MUTED}]CASH[/]  [{TEXT_HI}]{money(cash)}[/]",
-            f"[{MUTED}]DRAWDOWN[/]  [{drawdown_tone}]{pct(drawdown)}[/]",
-            f"[{MUTED}]KILL-SWITCH DISTANCE[/]  "
-            f"[bold {distance_tone}]{pct(kill_distance)}[/]",
-        ])
+        equity_content = "\n".join(_key_number_markup(
+            [
+                ("EQUITY", money(equity)),
+                ("CASH", money(cash)),
+                ("DRAWDOWN", pct(drawdown)),
+                ("KILL-SWITCH DISTANCE", pct(kill_distance)),
+            ],
+            value_tones=[TEXT_HI, TEXT_HI, drawdown_tone, distance_tone],
+            bold_values={0, 3},
+        ))
 
         def allocation_bar(value: float, target: float | None) -> str:
             raw = weight_bar(value, width=10)
@@ -1088,19 +1149,27 @@ class QlabTui(App[None]):
             allocation_lines.append(f"[{MUTED}]—[/]")
         allocation_content = "\n".join(allocation_lines)
 
-        regime_name = escape(str(regime.get("regime") or "—").upper())
-        source = escape(str(market.get("source") or "—").upper())
+        regime_name = str(regime.get("regime") or "—").upper()
+        source = str(market.get("source") or "—").upper()
         age = market.get("bar_age_days")
-        age_text = "—" if age is None else escape(f"{age}d")
-        regime_content = "\n".join([
-            f"[bold {TEXT_HI}]{regime_name}[/]",
-            f"[{MUTED}]SIGNAL[/] "
-            f"[{TEXT}]{pct(_finite_number(regime.get('signal')))}[/]  "
-            f"[{DIM}]VS[/]  [{MUTED}]THRESHOLD[/] "
-            f"[{TEXT}]{pct(_finite_number(regime.get('threshold')))}[/]",
-            f"[{MUTED}]SOURCE[/] [{TEXT}]{source}[/]  "
-            f"[{MUTED}]BAR AGE[/] [{TEXT}]{age_text}[/]",
-        ])
+        age_text = "—" if age is None else f"{age}d"
+        regime_content = "\n".join(_key_number_markup(
+            [
+                ("REGIME", regime_name),
+                (
+                    "SIGNAL / THRESHOLD",
+                    f"{pct(_finite_number(regime.get('signal')))} / "
+                    f"{pct(_finite_number(regime.get('threshold')))}",
+                ),
+                ("SOURCE / BAR AGE", f"{source} / {age_text}"),
+            ],
+            value_tones=[
+                _REGIME_TONE.get(regime_name.lower(), TEXT_HI),
+                TEXT,
+                TEXT,
+            ],
+            bold_values={0},
+        ))
 
         pulse_lines = []
         assets_by_ticker = {}
@@ -1144,32 +1213,25 @@ class QlabTui(App[None]):
         decisions = _records(self.snapshot.get("decisions"))
         decision = decisions[0] if decisions else {}
         verdict = _record(decision.get("verdict"))
+        verdict_tone, verdict_text = _verdict_style(verdict or None)
+        verdict_lines = [
+            f"[bold {verdict_tone}]▮ {escape(verdict_text)}[/]",
+        ]
         if verdict:
-            verdict_label = str(verdict.get("verdict") or "—").upper()
-            verdict_tone = (
-                UP if verdict_label == "PASS"
-                else DOWN if verdict_label == "FAIL"
-                else GOLD
-            )
-            verdict_glyph = (
-                "✓" if verdict_label == "PASS"
-                else "×" if verdict_label == "FAIL"
-                else "•"
-            )
-            rationale = " ".join(
-                str(decision.get("rationale") or "—").split())
-            verdict_content = "\n".join([
-                f"[bold {verdict_tone}] {verdict_glyph} "
-                f"{escape(verdict_label)} [/]",
-                f"[{TEXT}]{escape(rationale[:180])}[/]",
-            ])
+            verdict_lines.extend(_bulletin_markup(
+                str(decision.get("rationale") or "—").splitlines(),
+                max_len=180,
+            ))
         else:
-            verdict_content = f"[{MUTED}]no verdicts yet[/]"
+            verdict_lines.extend(
+                _bulletin_markup(["no verdicts yet"], tone=MUTED)
+            )
+        verdict_content = "\n".join(verdict_lines)
 
         workflows = _records(self.snapshot.get("workflows"))
         if workflows:
             workflow = workflows[0]
-            workflow_id = escape(str(workflow.get("workflow_id") or "—"))
+            workflow_id = str(workflow.get("workflow_id") or "—")
             status = str(workflow.get("status") or "—")
             phase = str(workflow.get("current_phase") or "—")
             phase_step = next((
@@ -1181,13 +1243,15 @@ class QlabTui(App[None]):
                 "complete": "done",
             }.get(status, status))
             glyph, state_tone = _STATE_STYLE.get(state, ("◌", DIM))
-            run_content = "\n".join([
-                f"[bold {TEXT_HI}]{workflow_id}[/]",
-                f"[{MUTED}]STATUS[/] "
-                f"[{state_tone}]{escape(status.upper())}[/]",
-                f"[{state_tone}]{glyph}[/] "
-                f"[{TEXT}]{escape(phase.upper())}[/]",
-            ])
+            run_content = "\n".join(_key_number_markup(
+                [
+                    ("RUN", workflow_id),
+                    ("STATUS", status.upper()),
+                    ("PHASE", f"{glyph} {phase.upper()}"),
+                ],
+                value_tones=[TEXT_HI, state_tone, state_tone],
+                bold_values={0},
+            ))
         else:
             run_content = f"[{MUTED}]no runs[/]"
 
@@ -1336,9 +1400,12 @@ class QlabTui(App[None]):
         elapsed = phase_elapsed(step.get("started_at"), step.get("completed_at"))
         head = f"{agent} · {phase}\nstate {state}" + (
             f" · {elapsed}" if elapsed else "")
-        summary = str(step.get("summary") or "").strip()
+        summary = bulletin(
+            str(step.get("summary") or "").splitlines(),
+            max_len=400,
+        )
         if summary:
-            head += f"\n\n{summary[:400]}"
+            head += "\n\n" + "\n".join(f"• {line}" for line in summary)
         artifacts = step.get("artifacts") or {}
         if artifacts:
             packed = "  ".join(f"{key}={artifacts[key]}"
@@ -1449,25 +1516,33 @@ class QlabTui(App[None]):
         result = workflow.get("result") or {}
         if status == "complete" and result.get("final_summary"):
             referee = step_by_phase.get("referee")
-            verdict = str(((referee or {}).get("artifacts") or {})
-                          .get("verdict") or "")
-            chip = f"  ·  referee {verdict}" if verdict else ""
+            raw_verdict = ((referee or {}).get("artifacts") or {}).get("verdict")
+            verdict_record = (
+                raw_verdict if isinstance(raw_verdict, dict)
+                else {"verdict": raw_verdict} if raw_verdict else None
+            )
+            verdict_tone, verdict_text = _verdict_style(verdict_record)
             lines.extend([
                 "",
-                f"[{UP}]▮ RESULT{chip}[/]",
-                f"[{TEXT}]{escape(str(result['final_summary'])[:320])}[/]",
+                f"[{verdict_tone}]▮ RESULT  ·  referee "
+                f"{escape(verdict_text)}[/]",
             ])
+            lines.extend(_bulletin_markup(
+                str(result["final_summary"]).splitlines(),
+                max_len=320,
+            ))
+            result_pairs = []
             targets = _extract_targets(step_by_phase)
             if targets:
-                lines.append(
-                    f"[{LABEL_GOLD}]target weights[/]  "
-                    f"[{TEXT_HI}]{escape(_format_targets(targets))}[/]")
+                result_pairs.append(("target weights", _format_targets(targets)))
             plan_id = str((step_by_phase.get("reporter", {}).get("artifacts")
                            or {}).get("plan_id") or "")
             if plan_id:
-                lines.append(
-                    f"[{LABEL_GOLD}]checked plan[/]  [{TEXT_HI}]{escape(plan_id)}[/]  "
-                    f"[{MUTED}]→ : rebalance paper to confirm[/]")
+                result_pairs.append((
+                    "checked plan",
+                    f"{plan_id} → : rebalance paper to confirm",
+                ))
+            lines.extend(_key_number_markup(result_pairs))
         elif status in ("failed", "blocked"):
             tone = DOWN if status == "failed" else AMBER
             broken = next(
@@ -1477,11 +1552,15 @@ class QlabTui(App[None]):
             lines.extend([
                 "",
                 f"[{tone}]▮ {status.upper()} at "
-                f"{escape(str((broken or {}).get('phase', '—')))}[/]"
-                + (f"\n[{MUTED}]{escape(why[:200])}[/]" if why else ""),
-                f"[{LABEL_GOLD}]Resume with : workforce resume "
-                f"{escape(str(workflow.get('workflow_id', '')))}[/]",
+                f"{escape(str((broken or {}).get('phase', '—')))}[/]",
             ])
+            lines.extend(_bulletin_markup(
+                why.splitlines(), tone=MUTED, max_len=200
+            ))
+            lines.append(
+                f"[{LABEL_GOLD}]Resume with : workforce resume "
+                f"{escape(str(workflow.get('workflow_id', '')))}[/]"
+            )
 
         earlier = [row for row in workflows
                    if str(row.get("workflow_id", "")) != self._active_workflow_id
@@ -1651,73 +1730,119 @@ class QlabTui(App[None]):
                 self.snapshot.get("policy", {}).get("label", "")).strip()
             policy_text = (
                 f"{policy_id} · {policy_label}" if policy_label else policy_id)
+            mandate_lines = [
+                f"[{LABEL_GOLD}]MANDATE · OWNER CONFIGURATION[/]",
+            ]
+            mandate_lines.extend(_key_number_markup(
+                [
+                    ("paper capital", money(mandate.get("paper_capital"))),
+                    (
+                        "per-asset cap",
+                        pct(mandate.get("max_weight_per_asset")),
+                    ),
+                    (
+                        "turnover cap",
+                        pct(mandate.get("max_turnover_per_rebalance")),
+                    ),
+                    (
+                        "drawdown kill",
+                        pct(mandate.get("trailing_drawdown_pct")),
+                    ),
+                    ("operational policy", policy_text),
+                ],
+                value_tones=[TEXT_HI, TEXT_HI, TEXT_HI, TEXT_HI, AMBER],
+                bold_values={0, 4},
+            ))
+            mandate_copy = "\n".join(mandate_lines)
+        elif self._bootstrap_error:
+            mandate_lines = [f"[bold {DOWN}]OWNER UNREACHABLE[/]"]
+            mandate_lines.extend(_bulletin_markup(
+                [
+                    "Mandate settings could not be loaded.",
+                    self._bootstrap_error,
+                ],
+                tone=MUTED,
+                max_len=300,
+            ))
+            mandate_copy = "\n".join(mandate_lines)
+        elif self._bootstrap_started:
             mandate_copy = "\n".join([
                 f"[{LABEL_GOLD}]MANDATE · OWNER CONFIGURATION[/]",
-                f"[{MUTED}]paper capital[/]       "
-                f"[bold {TEXT_HI}]{money(mandate.get('paper_capital'))}[/]",
-                f"[{MUTED}]per-asset cap[/]       "
-                f"[{TEXT_HI}]{pct(mandate.get('max_weight_per_asset'))}[/]",
-                f"[{MUTED}]turnover cap[/]        "
-                f"[{TEXT_HI}]{pct(mandate.get('max_turnover_per_rebalance'))}[/]",
-                f"[{MUTED}]drawdown kill[/]       "
-                f"[{TEXT_HI}]{pct(mandate.get('trailing_drawdown_pct'))}[/]",
-                f"[{MUTED}]operational policy[/]  "
-                f"[bold {AMBER}]{escape(policy_text)}[/]",
+                *_bulletin_markup(
+                    ["loading /api/bootstrap…"],
+                    tone=CYAN,
+                ),
             ])
-        elif self._bootstrap_error:
-            mandate_copy = (
-                f"[bold {DOWN}]OWNER UNREACHABLE[/]\n"
-                f"[{TEXT_HI}]Mandate settings could not be loaded.[/]\n"
-                f"[{MUTED}]{escape(self._bootstrap_error)}[/]"
-            )
-        elif self._bootstrap_started:
-            mandate_copy = (
-                f"[{LABEL_GOLD}]MANDATE · OWNER CONFIGURATION[/]\n"
-                f"[{CYAN}]● loading /api/bootstrap…[/]"
-            )
         else:
-            mandate_copy = (
-                f"[{LABEL_GOLD}]MANDATE · OWNER CONFIGURATION[/]\n"
-                f"[{MUTED}]Loaded once from the owner when Settings is opened.[/]"
-            )
+            mandate_copy = "\n".join([
+                f"[{LABEL_GOLD}]MANDATE · OWNER CONFIGURATION[/]",
+                *_bulletin_markup(
+                    ["Loaded once from the owner when Settings is opened."],
+                    tone=MUTED,
+                ),
+            ])
         self.query_one("#settings-mandate", Static).update(mandate_copy)
 
         market = self.snapshot.get("market", {}) if self.snapshot else {}
         system = self.snapshot.get("system", {}) if self.snapshot else {}
         market_age = market.get("bar_age_days")
         provenance_age = system.get("data_age_days")
-        data_copy = "\n".join([
-            f"[{LABEL_GOLD}]DATA · READ-ONLY PROVENANCE[/]",
-            f"[{MUTED}]snapshot source[/]     "
-            f"[{TEXT_HI}]{escape(str(market.get('source', '—')).upper())}[/]",
-            f"[{MUTED}]as of / frequency[/]  "
-            f"[{TEXT_HI}]{escape(str(market.get('as_of', '—')))} · "
-            f"{escape(str(market.get('frequency', '—')).upper())}[/]",
-            f"[{MUTED}]bar age[/]             "
-            f"[{TEXT_HI}]{'—' if market_age is None else f'{market_age} days'}[/]",
-            f"[{MUTED}]cached provenance[/]   "
-            f"[{TEXT_HI}]{escape(str(system.get('data_source', 'none')))} · "
-            f"{'—' if provenance_age is None else f'{provenance_age} days'}[/]",
-        ])
+        data_lines = [f"[{LABEL_GOLD}]DATA · READ-ONLY PROVENANCE[/]"]
+        data_lines.extend(_key_number_markup([
+            ("snapshot source", str(market.get("source", "—")).upper()),
+            (
+                "as of / frequency",
+                f"{market.get('as_of', '—')} · "
+                f"{str(market.get('frequency', '—')).upper()}",
+            ),
+            (
+                "bar age",
+                "—" if market_age is None else f"{market_age} days",
+            ),
+            (
+                "cached provenance",
+                f"{system.get('data_source', 'none')} · "
+                f"{'—' if provenance_age is None else f'{provenance_age} days'}",
+            ),
+        ]))
+        data_copy = "\n".join(data_lines)
         self.query_one("#settings-data", Static).update(data_copy)
 
         agents = self.snapshot.get("agents", []) if self.snapshot else []
         agent_lines = [f"[{LABEL_GOLD}]AGENTS · AUTHORITY[/]"]
-        for agent in agents:
-            agent_lines.append(
-                f"[{AMBER}]•[/] [{TEXT_HI}]{escape(str(agent.get('name', '—')))}[/]"
-                f"  [{MUTED}]{escape(str(agent.get('authority', '—')))}[/]"
-            )
+        agent_lines.extend(_key_number_markup(
+            [
+                (
+                    str(agent.get("name", "—")),
+                    str(agent.get("authority", "—")),
+                )
+                for agent in agents
+            ],
+            value_tones=[MUTED] * len(agents),
+            bold_values=set(range(len(agents))),
+        ))
         if not agents:
-            agent_lines.append(f"[{MUTED}]No owner agent definitions loaded.[/]")
+            agent_lines.extend(_bulletin_markup(
+                ["No owner agent definitions loaded."],
+                tone=MUTED,
+            ))
         self.query_one("#settings-agents", Static).update(
             "\n".join(agent_lines))
 
+        theme_lines = [f"[{LABEL_GOLD}]THEME · TERMINAL PALETTE[/]"]
+        theme_lines.extend(_key_number_markup(
+            [
+                ("palette", f"[{TEXT_HI}]{escape(PALETTE_NAME)}[/]"),
+                (
+                    "accents",
+                    f"[{AMBER}]████ amber[/]  [{CYAN}]████ cyan[/]  "
+                    f"[{UP}]████ up[/]  [{DOWN}]████ down[/]",
+                ),
+            ],
+            values_are_markup=True,
+        ))
         self.query_one("#settings-theme", Static).update(
-            f"[{LABEL_GOLD}]THEME · TERMINAL PALETTE[/]\n"
-            f"[{MUTED}]palette[/]  [{TEXT_HI}]{escape(PALETTE_NAME)}[/]\n"
-            f"[{MUTED}]accents[/]  [{AMBER}]████ amber[/]  "
-            f"[{CYAN}]████ cyan[/]  [{UP}]████ up[/]  [{DOWN}]████ down[/]"
+            "\n".join(theme_lines)
         )
 
     def _render_audit(self) -> None:
@@ -1763,38 +1888,68 @@ class QlabTui(App[None]):
         decision = self._audit_decisions.get(str(key))
         if not decision:
             return
-        challenger = str(decision.get("challenger_view") or "").strip() or "no challenge recorded"
-        verdict = decision.get("verdict") or {}
-        label = str(verdict.get("verdict", "—")).upper() if verdict else "—"
+        challenger = (
+            str(decision.get("challenger_view") or "").strip()
+            or "no challenge recorded"
+        )
+        verdict = _record(decision.get("verdict"))
+        verdict_tone, verdict_text = _verdict_style(verdict or None)
         reasons = verdict.get("reasons") or []
-        reason_text = "; ".join(str(reason) for reason in reasons) if reasons else "—"
+        reason_lines = (
+            [str(reason) for reason in reasons]
+            if isinstance(reasons, list)
+            else [str(reasons)]
+        )
+        if not reason_lines:
+            reason_lines = ["—"]
         rationale = str(decision.get("rationale") or "").strip() or "—"
-        reflection = str(decision.get("reflection") or "").strip() or "pending"
+        reflection = (
+            str(decision.get("reflection") or "").strip() or "pending"
+        )
         choice = decision.get("choice") or {}
-        choice_text = "  ".join(
-            f"{k}={choice[k]}" for k in list(choice)[:4]) or "—"
-        card = "\n".join([
-            f"DECISION {str(key)[:16]}",
-            f"{decision.get('kind', '—')} · {decision.get('as_of', '—')}",
+        card_lines = [
+            f"[bold {TEXT_HI}]DECISION {escape(str(key)[:16])}[/]",
+            f"[{MUTED}]{escape(str(decision.get('kind', '—')))} · "
+            f"{escape(str(decision.get('as_of', '—')))}[/]",
             "",
-            "CHOICE",
-            choice_text[:160],
+            f"[{LABEL_GOLD}]CHOICE[/]",
+        ]
+        if choice:
+            card_lines.extend(_key_number_markup([
+                (str(choice_key), str(choice[choice_key])[:160])
+                for choice_key in list(choice)[:4]
+            ]))
+        else:
+            card_lines.extend(_bulletin_markup(["—"], tone=MUTED))
+        card_lines.extend([
             "",
-            "RATIONALE",
-            rationale[:300],
+            f"[{LABEL_GOLD}]RATIONALE[/]",
+            *_bulletin_markup(
+                rationale.splitlines(),
+                max_len=300,
+            ),
             "",
-            "CHALLENGER",
-            challenger[:300],
+            f"[{LABEL_GOLD}]CHALLENGER[/]",
+            *_bulletin_markup(
+                challenger.splitlines(),
+                max_len=300,
+            ),
             "",
-            f"VERDICT  {label}",
-            reason_text[:300],
+            f"[bold {verdict_tone}]VERDICT  {escape(verdict_text)}[/]",
+            *_bulletin_markup(reason_lines, max_len=300),
             "",
-            "REFLECTION",
-            reflection[:300],
+            f"[{LABEL_GOLD}]REFLECTION[/]",
+            *_bulletin_markup(
+                reflection.splitlines(),
+                max_len=300,
+            ),
         ])
-        self._set_selected_work(card)
-        line = f"{str(key)[:10]}  verdict {label} · challenger + rationale in the work rail →"
-        self.query_one("#event-strip", Static).update(escape(line))
+        self._set_selected_work("\n".join(card_lines), markup=True)
+        self.query_one("#event-strip", Static).update(
+            f"{escape(str(key)[:10])}  "
+            f"[{verdict_tone}]verdict {escape(verdict_text)}[/] · "
+            "challenger + rationale in the work rail →"
+        )
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id != "audit-table" or event.row_key is None:
@@ -2462,7 +2617,10 @@ class QlabTui(App[None]):
                       .get("verdict") or "")
 
         # 1 · what was achieved — the conclusion, first.
-        self._console_write(f"[{TEXT}]{escape(_result_headline(status, verdict))}[/]")
+        for line in _bulletin_markup([
+            _result_headline(status, verdict),
+        ]):
+            self._console_write(line)
 
         # 2 · the regime the run chose, and why.
         regime_line = _regime_line(steps)
@@ -2476,9 +2634,11 @@ class QlabTui(App[None]):
         for phase, _agent, _short in _FLOW:
             glyph, colour, name, action = _agent_brief(
                 phase, steps.get(phase), status)
+            action_lines = bulletin([action], max_len=220)
+            action_text = " · ".join(action_lines) or "—"
             self._console_write(
                 f"  [{colour}]{glyph}[/] [bold {TEXT_HI}]{escape(name):<11}[/] "
-                f"[{TEXT}]{escape(action)}[/]")
+                f"[{TEXT}]{escape(action_text)}[/]")
 
         # 4 · the final output — the weights, and the one action left to a human.
         targets = _extract_targets(steps)
@@ -2487,22 +2647,32 @@ class QlabTui(App[None]):
         if targets or has_plan:
             self._console_write("")
             self._console_write(f"[{LABEL_GOLD}]RECOMMENDATION[/]")
+            recommendation_pairs = []
+            recommendation_tones = []
             if targets:
-                self._console_write(
-                    f"  [{MUTED}]target weights[/]  "
-                    f"[{TEXT_HI}]{escape(_format_targets(targets))}[/]")
+                recommendation_pairs.append(
+                    ("target weights", _format_targets(targets))
+                )
+                recommendation_tones.append(TEXT_HI)
             if has_plan:
-                self._console_write(
-                    f"  [{MUTED}]paper plan[/]     [{UP}]ready[/] "
-                    f"[{MUTED}]— type[/] [{TEXT_HI}]: rebalance paper[/] "
-                    f"[{MUTED}]to confirm it yourself[/]")
+                recommendation_pairs.append((
+                    "paper plan",
+                    "ready — type : rebalance paper to confirm it yourself",
+                ))
+                recommendation_tones.append(UP)
+            for line in _key_number_markup(
+                recommendation_pairs,
+                value_tones=recommendation_tones,
+            ):
+                self._console_write(f"  {line}")
 
         # 5 · what the output signifies, in plain terms.
         self._console_write("")
         self._console_write(f"[{LABEL_GOLD}]WHAT THIS MEANS[/]")
-        self._console_write(
-            f"  [{TEXT}]"
-            f"{escape(_result_meaning(status, verdict, bool(targets), has_plan))}[/]")
+        for line in _bulletin_markup([
+            _result_meaning(status, verdict, bool(targets), has_plan),
+        ]):
+            self._console_write(f"  {line}")
 
     def _print_results_fallback(self, text: str) -> None:
         """No durable workflow to summarize: show the coordinator's closing text,
@@ -2513,14 +2683,11 @@ class QlabTui(App[None]):
                 f"[{MUTED}]The run ended before it recorded any results. Start "
                 "again with a goal, or resume it from the workforce view.[/]")
             return
-        for raw in text.splitlines():
-            is_heading, line = clean_report_line(raw)
-            if not line:
-                self._console_write("")
-            elif is_heading:
-                self._console_write(f"[{LABEL_GOLD}]{escape(line)}[/]")
-            else:
-                self._console_write(f"[{TEXT_HI}]{escape(line)}[/]")
+        for line in _bulletin_markup(
+            text.splitlines(),
+            tone=TEXT_HI,
+        ):
+            self._console_write(line)
 
     def _set_agent_from_tool(self, tool: str, explicit_agent: str = "") -> str:
         if explicit_agent in _AGENT_NAMES:
@@ -2543,5 +2710,7 @@ class QlabTui(App[None]):
         self._render_agents()
         return agent
 
-    def _set_selected_work(self, text: str) -> None:
-        self.query_one("#selected-work", Static).update(escape(text))
+    def _set_selected_work(self, text: str, *, markup: bool = False) -> None:
+        self.query_one("#selected-work", Static).update(
+            text if markup else escape(text)
+        )

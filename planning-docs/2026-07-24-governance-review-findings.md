@@ -193,3 +193,27 @@ Reviewed current checkout `7049a77`; the unrelated modified planning document wa
 COVERAGE: reviewed all requested modules plus CLI, MCP exposure, role allowlists and owner routes; ran the focused trader/registry/autopilot/UI suite successfully (96 tests) and reproduced the adversarial sequences above with isolated in-memory registries.
 
 
+
+---
+## Resolution status (2026-07-24)
+
+FIXED: #1 (headless human-gate + cost gate, 58a6282), #3/#4/#5/#8/#14 +
+#6/#7 (trader-core batch, 9a0ab7f), #9/#15 (aded939), #10 (this commit),
+#12/#16/#17/#18 (88d9251).
+
+DOCUMENTED, not code-fixed:
+- #2 autopilot executes without human confirmation — BY DESIGN. The mandated
+  autopilot (qlab run-once / daily-ops) is the "policy operated under a hard
+  mandate" thesis; its protection is the referee + cost gate + reconcile +
+  drawdown tiers + kill switch, not human confirmation. Human confirmation
+  gates the INTERACTIVE surfaces (TUI, headless MCP), which is where an agent
+  could otherwise reach execution. Not a bug.
+- #11 workflow phases not role-bound at the owner HTTP boundary — accepted
+  design limitation, documented in qlab/tui/claude.py: branch-phase authority
+  is coordinator-prompt-level while the ARTIFACT contracts (targets binding,
+  decision binding, PASS binding) are registry-enforced. Owner-side caller
+  identity is a larger change tracked for a future auth pass.
+- #13 Alpaca submits MarketOrderRequest, ignoring order_type=marketable_limit
+  — real, but only exercisable with live Alpaca credentials and untestable in
+  the offline suite; deferred to the live-Alpaca integration work rather than
+  shipped as an unverified execution change.

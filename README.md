@@ -36,7 +36,9 @@ key:
 - `4` / `F4` — Research: experiment runs and algorithm evidence.
 - `5` / `F5` — Book: positions, checked plans, confirmation, and paper orders.
 - `6` / `F6` — Audit: decisions, challenges, verdicts, and reflections.
-- `7` / `F7` — Settings: read-only mandate, data, agent, and theme bulletins.
+- `7` / `F7` — Atlas: what every arm, metric, role, and rule is, with the live
+  champion and its latest ablation numbers.
+- `8` / `F8` — Settings: read-only mandate, data, agent, and theme bulletins.
 
     qlab tui --claude offer   # default: show readiness, never prompt
     qlab tui --claude auto    # start the workforce after the first snapshot

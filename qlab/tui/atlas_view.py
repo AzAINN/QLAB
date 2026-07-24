@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from rich.markup import escape
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Label, ListItem, ListView, Static
@@ -14,6 +16,27 @@ _GROUP_TITLES = (
     ("role", "WORKFORCE ROLES"),
     ("governance", "GOVERNANCE"),
 )
+# The ablation payload is a full compute_metrics bundle (13 keys, n_obs first).
+# The overlay shows the same five the owner's leaderboard ranks on, in reading
+# order, so the champion's line stays one glance instead of a metric dump.
+_OVERLAY_METRICS = (
+    "sharpe", "ann_return", "max_drawdown", "cvar_95", "deflated_sharpe",
+)
+
+
+def _overlay_cells(ablation: object) -> str:
+    """Curated metrics as markup cells; absent or non-finite values are dropped."""
+    if not isinstance(ablation, dict):
+        return ""
+    cells = []
+    for key in _OVERLAY_METRICS:
+        value = ablation.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(value):
+            continue  # a NaN is not a number to report
+        cells.append(f"[{LABEL_GOLD}]{key}[/] {value:.3f}")
+    return "  ".join(cells)
 
 
 class AtlasView(Vertical):
@@ -36,9 +59,8 @@ class AtlasView(Vertical):
                 id="atlas-detail-scroll")
 
     def set_entries(self, entries: list[dict]) -> None:
-        view = self.query_one("#atlas-list", ListView)
-        view.clear()
-        self._row_entries = []
+        """Rebuild the index from an owner payload and show its first entry."""
+        rows: list[dict | None] = []
         items = []
         for group, group_title in _GROUP_TITLES:
             members = [e for e in entries if e.get("group") == group]
@@ -47,23 +69,32 @@ class AtlasView(Vertical):
             items.append(ListItem(
                 Label(f"[{DIM}]{group_title}[/]", markup=True),
                 disabled=True))
-            self._row_entries.append(None)
+            rows.append(None)
             for entry in members:
                 star = f" [{AMBER}]★[/]" if entry.get("champion") else ""
                 items.append(ListItem(Label(
                     f"[{TEXT}]{escape(entry['title'])}[/]{star}",
                     markup=True)))
-                self._row_entries.append(entry)
-        view.extend(items)
-        first = next(
-            (index for index, entry in enumerate(self._row_entries) if entry),
-            None)
-        if first is None:
-            return
-        # The highlight has to start on the entry the detail pane is showing,
-        # otherwise arrow keys walk from a row the reader never selected.
-        view.index = first
-        self._render_detail(self._row_entries[first])
+                rows.append(entry)
+        view = self.query_one("#atlas-list", ListView)
+
+        async def rebuild() -> None:
+            # ListView.clear() only schedules the removal, so the mount has to
+            # wait for it — otherwise a second payload maps its row indices onto
+            # rows that are still on screen.
+            await view.clear()
+            self._row_entries = rows
+            await view.extend(items)
+            first = next(
+                (index for index, entry in enumerate(rows) if entry), None)
+            if first is None:
+                return
+            # The highlight has to start on the entry the detail pane is showing,
+            # otherwise arrow keys walk from a row the reader never selected.
+            view.index = first
+            self._render_detail(rows[first])
+
+        self.run_worker(rebuild(), group="atlas-rebuild", exclusive=True)
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         index = event.list_view.index
@@ -85,15 +116,12 @@ class AtlasView(Vertical):
         parts.extend(["", f"[{TEXT}]{escape(entry['body'])}[/]"])
         if entry.get("group") == "arm":
             parts.append("")
-            ablation = entry.get("ablation")
-            if ablation:
-                cells = "  ".join(
-                    f"[{LABEL_GOLD}]{key}[/] {value:.3f}"
-                    for key, value in sorted(ablation.items())
-                    if isinstance(value, (int, float)))
+            cells = _overlay_cells(entry.get("ablation"))
+            if cells:
                 parts.append(f"latest ablation  {cells}")
             else:
-                # Honest absence: no evidence is stated, never implied by a blank.
+                # Honest absence: no evidence is stated, never implied by a blank
+                # or by a header with nothing reportable under it.
                 parts.append(f"[{MUTED}]no ablation recorded for this arm yet[/]")
         if entry.get("arm_id"):
             parts.extend(["", f"[{DIM}]ablation id: {entry['arm_id']}[/]"])

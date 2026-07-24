@@ -645,7 +645,7 @@ class FlowBoard(Horizontal):
 
 
 class NavMenu(Static):
-    """The seven-view switcher in the spine.
+    """The eight-view switcher in the spine.
 
     It renders one text line per view (in ``_VIEWS`` order), so a click selects
     the view on the clicked row — the click's y within the widget *is* the row

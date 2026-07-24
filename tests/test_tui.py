@@ -170,14 +170,30 @@ def _atlas():
 
     from qlab.core.atlas import ATLAS_ENTRIES
 
+    # A full compute_metrics bundle, the shape the owner really serves: 13 keys,
+    # n_obs first, and a None where a metric could not be computed.
+    metrics = {
+        "n_obs": 504,
+        "ann_return": 0.0732,
+        "ann_vol": 0.0805,
+        "sharpe": 0.91,
+        "sortino": 1.243,
+        "downside_deviation": 0.0589,
+        "omega_ratio": 1.412,
+        "max_drawdown": -0.124,
+        "cvar_95": -0.0187,
+        "realized_skew": -0.312,
+        "realized_kurtosis": 4.118,
+        "deflated_sharpe": 0.634,
+        "turnover": None,
+    }
+
     entries = []
     for entry in ATLAS_ENTRIES:
         row = asdict(entry)
         row["stage"] = "operational" if entry.algorithm_key == "hrp" else None
         row["champion"] = entry.algorithm_key == "hrp"
-        row["ablation"] = (
-            {"sharpe": 0.91, "max_drawdown": -0.124}
-            if entry.arm_id == "B2" else None)
+        row["ablation"] = dict(metrics) if entry.arm_id == "B2" else None
         entries.append(row)
     return {"entries": entries, "champion_policy": "hrp"}
 
@@ -1639,12 +1655,66 @@ def test_atlas_detail_states_absent_ablation_and_shows_champion_numbers():
             assert "Hierarchical risk parity" in detail
             assert "★ CHAMPION" in detail
             assert "operational" in detail
-            assert "sharpe" in detail and "0.910" in detail
             assert "ablation id: B2" in detail
+            # The overlay is a curated five in a fixed reading order, not an
+            # alphabetical dump of the whole metric bundle.
+            assert "sharpe" in detail and "0.910" in detail
+            assert "deflated_sharpe" in detail and "0.634" in detail
+            assert "n_obs" not in detail
+            assert "omega_ratio" not in detail
+            assert "realized_kurtosis" not in detail
+            overlay = next(
+                line for line in detail.splitlines()
+                if "latest ablation" in line)
+            curated = (
+                "sharpe", "ann_return", "max_drawdown", "cvar_95",
+                "deflated_sharpe")
+            # `]name[` matches the label markup only, so deflated_sharpe cannot
+            # be mistaken for sharpe.
+            positions = [overlay.index(f"]{name}[") for name in curated]
+            assert positions == sorted(positions), overlay
 
             # A focused list must not swallow view navigation.
             await pilot.press("1")
             assert app.active_view == "dashboard"
+
+    asyncio.run(run())
+
+
+def test_atlas_ablation_without_curated_numbers_reads_as_absent():
+    from qlab.tui.app import QlabTui
+
+    class ShortWindowClient(StubClient):
+        def get(self, path, **params):
+            payload = super().get(path, **params)
+            if path == "/api/atlas":
+                for row in payload["entries"]:
+                    if row["ablation"]:
+                        # compute_metrics returns n_obs alone on a short series,
+                        # and a degenerate run can leave a non-finite behind.
+                        row["ablation"] = {
+                            "n_obs": 2,
+                            "sharpe": float("nan"),
+                            "ann_return": float("inf"),
+                        }
+            return payload
+
+    async def run():
+        app = QlabTui(
+            ShortWindowClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            await pilot.pause(0.3)
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            detail = str(app.query_one("#atlas-detail").content)
+            assert "Hierarchical risk parity" in detail
+            # No finite curated metric is honest absence, not a bare header.
+            assert "no ablation recorded" in detail
+            assert "latest ablation" not in detail
+            assert "nan" not in detail.lower() and "inf" not in detail.lower()
 
     asyncio.run(run())
 

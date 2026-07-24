@@ -22,7 +22,7 @@ GET  /api/workflows/<id>       one durable workflow and its ordered steps
 GET  /api/stream               durable audit + transient market events (live)
 GET  /api/tui                  one consistent terminal snapshot
 POST /api/lab/<tool>           bounded research tool executed by this owner
-POST /api/workflows/start      begin a five-role workforce run
+POST /api/workflows/start      begin a standard or panel workforce run
 POST /api/workflows/<phase>    update one role-bound workflow phase
 POST /api/rebalance_preview    build an exact, referee-bound checked plan
 POST /api/plans/execute        human-confirm one existing checked paper plan
@@ -158,6 +158,20 @@ class UISession:
         """Start a durable portfolio/research workforce run."""
         from qlab.mcp.guardrails import CallBudget
 
+        kind = str(body.get("kind") or "portfolio_review")
+        variants = body.get("variants")
+        if kind == "panel":
+            if not isinstance(variants, list):
+                raise ValueError(
+                    "panel variants must be a list[dict] with 2..5 entries"
+                )
+            if not 2 <= len(variants) <= 5:
+                raise ValueError(
+                    f"panel variants must contain 2..5 entries, got {len(variants)}"
+                )
+            if not all(isinstance(variant, dict) for variant in variants):
+                raise ValueError("every panel variant must be an object")
+
         self.lab_state.budget = CallBudget(
             200,
             on_charge=lambda tool: self.registry.record_event(
@@ -172,9 +186,9 @@ class UISession:
             "universe": str(body.get("universe") or "core"),
             "offline": bool(body.get("offline", self.offline_default)),
         }
-        return self.registry.start_workflow(
-            str(body.get("kind") or "portfolio_review"), request,
-        )
+        if kind == "panel":
+            request["variants"] = [dict(variant) for variant in variants]
+        return self.registry.start_workflow(kind, request)
 
     def update_workflow(self, phase: str, body: dict) -> dict:
         return self.registry.update_workflow_phase(
@@ -869,7 +883,10 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, {"result": session.call_lab_tool(name, body, off)}
 
     if method == "POST" and path == "/api/workflows/start":
-        return 200, session.start_workflow(body)
+        try:
+            return 200, session.start_workflow(body)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
 
     if method == "POST" and path == "/api/rebalance_preview":
         return 200, session.rebalance_preview(body, off)
@@ -879,9 +896,10 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "POST" and path.startswith("/api/workflows/"):
         phase = path.removeprefix("/api/workflows/")
-        if phase not in {"analyst", "challenger", "optimizer", "referee", "reporter"}:
-            return 404, {"error": f"unknown workforce phase {phase!r}"}
-        return 200, session.update_workflow(phase, body)
+        try:
+            return 200, session.update_workflow(phase, body)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
 
     if method == "POST" and path == "/api/run_once":
         from qlab.autopilot.loop import run_once

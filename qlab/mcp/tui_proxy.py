@@ -332,12 +332,21 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
 
     # -- durable workforce control ----------------------------------------
     @app.tool(name="workflow_start")
-    def workflow_start(goal: str, as_of: str = "", universe: str = "core") -> dict:
-        """Create a durable five-phase workforce run and return its id."""
-        return client.post("/api/workflows/start", {
+    def workflow_start(
+        goal: str,
+        as_of: str = "",
+        universe: str = "core",
+        kind: str = "portfolio_review",
+        variants: list[dict] | None = None,
+    ) -> dict:
+        """Create a durable standard or panel workforce run and return its id."""
+        payload = {
             "goal": goal, "as_of": as_of, "universe": universe,
-            "offline": client.offline,
-        })
+            "kind": kind, "offline": client.offline,
+        }
+        if variants is not None:
+            payload["variants"] = variants
+        return client.post("/api/workflows/start", payload)
 
     @app.tool(name="workflow_status")
     def workflow_status(workflow_id: str = "", limit: int = 10) -> dict:
@@ -354,6 +363,13 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "workflow_id": workflow_id, "status": status,
             "summary": summary, "artifacts": artifacts or {},
         })
+
+    @app.tool(name="workflow_phase")
+    def workflow_phase(phase: str, workflow_id: str, status: str,
+                       summary: str = "",
+                       artifacts: dict | None = None) -> dict:
+        """Persist one workflow instance phase; the owner validates its name."""
+        return phase_update(phase, workflow_id, status, summary, artifacts)
 
     @app.tool(name="workflow_analyst")
     def workflow_analyst(workflow_id: str, status: str,

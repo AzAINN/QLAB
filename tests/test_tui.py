@@ -268,6 +268,7 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
         "Agent(moments-analyst,challenger,optimization-runner,referee,reporter)",
         "mcp__qlab-operator__workflow_start",
         "mcp__qlab-operator__workflow_status",
+        "mcp__qlab-operator__workflow_phase",
     ]
     all_role_tools = {
         tool for name, definition in agents.items() if name != "qlab-coordinator"
@@ -282,11 +283,19 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
         if name == "qlab-coordinator":
             continue
         assert "mcp__qlab-operator__workflow_status" in definition["tools"], name
-        # reading is not writing: no worker may touch another phase's update
+        # The named tools stay role-specific. Only roles used for dynamic panel
+        # phases receive the generic route; their prompt binds it to the exact
+        # branch while the registry enforces dependencies and artifacts.
         others = {f"mcp__qlab-operator__workflow_{other}"
                   for other in ("analyst", "challenger", "optimizer",
                                 "referee", "reporter")}
         assert len(others & set(definition["tools"])) == 1, name
+        generic = "mcp__qlab-operator__workflow_phase"
+        if name in {"moments-analyst", "optimization-runner", "referee"}:
+            assert generic in definition["tools"]
+            assert "Update only the assigned phase" in definition["prompt"]
+        else:
+            assert generic not in definition["tools"]
 
 
 def test_session_agent_files_preserve_workforce_authority(tmp_path):
@@ -304,6 +313,7 @@ def test_session_agent_files_preserve_workforce_authority(tmp_path):
         "Agent(moments-analyst,challenger,optimization-runner,referee,reporter)",
         "mcp__qlab-operator__workflow_start",
         "mcp__qlab-operator__workflow_status",
+        "mcp__qlab-operator__workflow_phase",
     ]
     assert metadata["permissionMode"] == "dontAsk"
     assert "no filesystem, shell, browser, editing, or trading tools" in body
@@ -321,6 +331,10 @@ def test_coordinator_dispatches_synchronously_and_fans_out_in_parallel():
     coordinator = build_workforce_agents()["qlab-coordinator"]["prompt"]
     assert "run_in_background: false" in coordinator
     assert "SAME turn" in coordinator
+    assert "kind='panel'" in coordinator
+    assert "analyst-1" in coordinator and "optimizer-1" in coordinator
+    assert "exact workflow phase 'judge'" in coordinator
+    assert "walk-forward evidence" in coordinator
     # bounded recovery: one re-dispatch, then stop — never an unbounded loop
     assert "ONCE" in coordinator and "do not loop" in coordinator
 
@@ -862,6 +876,73 @@ def test_workforce_view_renders_durable_phase_progress():
     asyncio.run(run())
 
 
+def test_workforce_view_renders_panel_branches_and_judge_from_steps():
+    from qlab.tui.app import FlowNode, QlabTui
+
+    class PanelWorkflowClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wf-panel",
+                "kind": "panel",
+                "status": "running",
+                "current_phase": "analyst-2",
+                "request": {
+                    "goal": "compare estimator variants",
+                    "as_of": "2026-07-24",
+                    "universe": "core",
+                    "variants": [
+                        {"label": "responsive", "window": 252},
+                        {"label": "stable", "window": 756},
+                    ],
+                },
+                # Registry order is dependency-oriented. The board should pair
+                # each analyst chip with its matching optimizer chip.
+                "steps": [
+                    {"phase": "analyst-1", "agent": "moments-analyst",
+                     "status": "done", "summary": "responsive estimate"},
+                    {"phase": "analyst-2", "agent": "moments-analyst",
+                     "status": "working", "summary": "stable estimate"},
+                    {"phase": "optimizer-1", "agent": "optimization-runner",
+                     "status": "queued", "summary": ""},
+                    {"phase": "optimizer-2", "agent": "optimization-runner",
+                     "status": "queued", "summary": ""},
+                    {"phase": "judge", "agent": "referee",
+                     "status": "queued", "summary": ""},
+                    {"phase": "referee", "agent": "referee",
+                     "status": "queued", "summary": ""},
+                    {"phase": "reporter", "agent": "reporter",
+                     "status": "queued", "summary": ""},
+                ],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(
+            PanelWorkflowClient(), refresh_interval=0, claude_start="off",
+        )
+        async with app.run_test(size=(160, 42)) as pilot:
+            await pilot.pause(0.4)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+
+            nodes = list(app.query(FlowNode))
+            assert [node.phase for node in nodes] == [
+                "analyst-1", "optimizer-1",
+                "analyst-2", "optimizer-2",
+                "judge", "referee", "reporter",
+            ]
+            assert nodes[0].short == "v1 analyst"
+            assert nodes[1].short == "v1 optimizer"
+            assert app.query_one("#flow-analyst-2", FlowNode).phase == "analyst-2"
+            assert app.query_one("#flow-judge", FlowNode).phase == "judge"
+            assert app._flow_states["analyst-1"] == "done"
+            assert app._flow_states["analyst-2"] == "working"
+            assert "challenger" not in app._flow_states
+
+    asyncio.run(run())
+
+
 class BookClient(StubClient):
     def get(self, path, **params):
         if path == "/api/bootstrap":
@@ -1127,7 +1208,8 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
     register_proxy_tools(app, client)
 
     assert "workflow_rebalance_preview" in app.tools
-    assert {"workflow_start", "workflow_status", "workflow_analyst",
+    assert {"workflow_start", "workflow_status", "workflow_phase",
+            "workflow_analyst",
             "workflow_challenger", "workflow_optimizer", "workflow_referee",
             "workflow_reporter"} <= set(app.tools)
     assert {
@@ -1138,6 +1220,33 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
     assert client.calls[-1] == (
         "POST", "/api/rebalance_preview",
         {"offline": True, "targets": {"GLD": 1.0}, "decision_id": "decision-1"},
+    )
+    variants = [
+        {"label": "responsive", "window": 252},
+        {"label": "stable", "window": 756},
+    ]
+    app.tools["workflow_start"](
+        "compare windows", kind="panel", variants=variants,
+    )
+    assert client.calls[-1] == (
+        "POST", "/api/workflows/start",
+        {
+            "goal": "compare windows", "as_of": "", "universe": "core",
+            "kind": "panel", "offline": True, "variants": variants,
+        },
+    )
+    app.tools["workflow_phase"](
+        "analyst-2",
+        "workflow-panel",
+        "working",
+        "estimating stable branch",
+    )
+    assert client.calls[-1] == (
+        "POST", "/api/workflows/analyst-2",
+        {
+            "workflow_id": "workflow-panel", "status": "working",
+            "summary": "estimating stable branch", "artifacts": {},
+        },
     )
     app.tools["research_window_evidence"](
         "2026-07-17", cadence="annual",

@@ -74,8 +74,8 @@ _DASHBOARD_TILE_KEYS = (
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
 )
-# The governed pipeline as a flowchart: (phase, agent, short label). The phase
-# matches the durable workflow_steps.phase; the agent matches the spawned role.
+# Standard-run fallback before an owner workflow has registered. Once a durable
+# row exists, the board is rebuilt from that workflow's ordered steps.
 _FLOW = (
     ("analyst", "moments-analyst", "analyst"),
     ("challenger", "challenger", "challenger"),
@@ -83,8 +83,89 @@ _FLOW = (
     ("referee", "referee", "referee"),
     ("reporter", "reporter", "reporter"),
 )
-_AGENT_TO_PHASE = {agent: phase for phase, agent, _ in _FLOW}
-_PHASE_SHORT = {phase: short for phase, _, short in _FLOW}
+_DEFAULT_AGENT_BY_PHASE = {
+    phase: agent for phase, agent, _short in _FLOW
+}
+_DEFAULT_AGENT_BY_PHASE["judge"] = "referee"
+
+
+def _phase_parts(phase: str) -> tuple[str, int | None]:
+    """Return the registry phase type and optional panel branch number."""
+    base, dash, suffix = phase.rpartition("-")
+    if dash and suffix.isdigit():
+        return base, int(suffix)
+    return phase, None
+
+
+def _phase_short(phase: str) -> str:
+    base, branch = _phase_parts(phase)
+    if branch is not None and base in {"analyst", "optimizer"}:
+        return f"v{branch} {base}"
+    return base
+
+
+def _flow_from_steps(
+    steps: list[dict],
+    *,
+    standard_fallback: bool = False,
+) -> tuple[tuple[str, str, str], ...]:
+    """Build the visible phase board from one workflow's persisted steps.
+
+    Panel rows are stored as all analysts then all optimizers for dependency
+    bookkeeping. The operator board groups them by variant instead, followed
+    by the join phases in their persisted order.
+    """
+    specs: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        phase = str(step.get("phase") or "")
+        if not phase or phase in seen:
+            continue
+        seen.add(phase)
+        base, _branch = _phase_parts(phase)
+        agent = str(
+            step.get("agent")
+            or _DEFAULT_AGENT_BY_PHASE.get(base, base)
+        )
+        specs.append((phase, agent, _phase_short(phase)))
+
+    branch_numbers = sorted({
+        branch for phase, _agent, _short in specs
+        for base, branch in [_phase_parts(phase)]
+        if branch is not None and base in {"analyst", "optimizer"}
+    })
+    if branch_numbers:
+        by_phase = {phase: (phase, agent, short)
+                    for phase, agent, short in specs}
+        grouped = []
+        grouped_phases: set[str] = set()
+        for branch in branch_numbers:
+            for base in ("analyst", "optimizer"):
+                phase = f"{base}-{branch}"
+                if phase in by_phase:
+                    grouped.append(by_phase[phase])
+                    grouped_phases.add(phase)
+        grouped.extend(
+            spec for spec in specs if spec[0] not in grouped_phases
+        )
+        return tuple(grouped)
+
+    if standard_fallback:
+        by_phase = {phase: (phase, agent, short)
+                    for phase, agent, short in specs}
+        ordered = [
+            by_phase.get(phase, (phase, agent, short))
+            for phase, agent, short in _FLOW
+        ]
+        ordered.extend(spec for spec in specs if spec[0] not in {
+            phase for phase, _agent, _short in _FLOW
+        })
+        return tuple(ordered)
+    return tuple(specs) or _FLOW
+
+
 # What each phase contributes, in one clause — the "what just happened" half of
 # the per-phase console note. Mirrors qlab.state.registry's dependency DAG.
 _PHASE_DID = {
@@ -93,6 +174,7 @@ _PHASE_DID = {
     "challenger": "argued the opposing case and attached it to the decision",
     "optimizer": "ran the cataloged operational algorithm and produced target "
                  "weights",
+    "judge": "compared the branch evidence and selected one persisted result",
     "referee": "independently checked constraints, benchmarks, and the "
                "target binding",
     "reporter": "compiled the human-facing recommendation",
@@ -200,7 +282,8 @@ def _verdict_style(verdict: dict | None) -> tuple[str, str]:
 
 
 def workforce_note(phase: str, status: str, summary: str,
-                   done_phases: set[str]) -> tuple[str, str]:
+                   done_phases: set[str],
+                   all_phases: set[str] | None = None) -> tuple[str, str]:
     """The two-line note printed when one agent finishes: done, then next.
 
     Pure so the wording is testable without a running app. ``done_phases``
@@ -208,11 +291,12 @@ def workforce_note(phase: str, status: str, summary: str,
     line is derived from the same dependency graph the registry enforces, so
     the operator is never told a stage is next that the gate would refuse.
     """
-    short = _PHASE_SHORT.get(phase, phase)
+    base, branch = _phase_parts(phase)
+    short = _phase_short(phase)
     detail = " · ".join(
         bulletin(str(summary or "").splitlines(), max_len=220)
     )[:220]
-    did = _PHASE_DID.get(phase, "completed its phase")
+    did = _PHASE_DID.get(base, "completed its phase")
 
     if status == "failed":
         return (f"{short} failed — {detail or 'no reason recorded'}",
@@ -226,19 +310,41 @@ def workforce_note(phase: str, status: str, summary: str,
     # The worker's own summary is the specific account; the role clause is only
     # the fallback, so the note never repeats what the summary already says.
     head = f"{short} done — {detail or did}"
-    if phase == "analyst":
+    phase_set = all_phases or done_phases
+    if base == "analyst" and branch is not None:
+        nxt = (
+            "Next: once every analyst stance is in, the branch optimizers run "
+            "in parallel on their matching objectives."
+        )
+    elif base == "optimizer" and branch is not None:
+        optimizers = {
+            candidate for candidate in phase_set
+            if _phase_parts(candidate)[0] == "optimizer"
+            and _phase_parts(candidate)[1] is not None
+        }
+        nxt = (
+            "Next: the judge compares every branch on walk-forward evidence."
+            if optimizers and optimizers <= done_phases else
+            "Next: waiting on the other branch optimizers, then the evidence judge."
+        )
+    elif base == "judge":
+        nxt = (
+            "Next: the referee independently gates the judge's exact winning "
+            "targets."
+        )
+    elif base == "analyst":
         nxt = ("Next: the challenger and the optimizer both start now, in "
                "parallel — neither depends on the other, only on this "
                "estimation call.")
-    elif phase in ("challenger", "optimizer"):
-        other = "optimizer" if phase == "challenger" else "challenger"
+    elif base in ("challenger", "optimizer"):
+        other = "optimizer" if base == "challenger" else "challenger"
         nxt = (
             "Next: the referee gate, now that both parallel phases are in."
             if other in done_phases else
             f"Next: waiting on the {other} (running in parallel), then the "
             "referee gate."
         )
-    elif phase == "referee":
+    elif base == "referee":
         nxt = ("Next: the reporter compiles the recommendation. A PASS is bound "
                "to these exact weights; execution still needs you.")
     else:
@@ -263,7 +369,19 @@ def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
     Sourced from the durable analyst-phase artifacts the agent persists, so the
     operator sees the exact call the run made rather than a re-derived one.
     """
-    artifacts = (steps_by_phase.get("analyst", {}) or {}).get("artifacts") or {}
+    analyst_phase = "analyst"
+    if analyst_phase not in steps_by_phase:
+        judge_artifacts = (
+            steps_by_phase.get("judge", {}) or {}
+        ).get("artifacts") or {}
+        winner_phase = str(judge_artifacts.get("winner_phase") or "")
+        base, branch = _phase_parts(winner_phase)
+        if base != "optimizer" or branch is None:
+            return None
+        analyst_phase = f"analyst-{branch}"
+    artifacts = (
+        steps_by_phase.get(analyst_phase, {}) or {}
+    ).get("artifacts") or {}
     regime = str(artifacts.get("regime") or "").strip()
     if not regime:
         return None
@@ -292,8 +410,14 @@ def _regime_line(steps_by_phase: dict, *, indent: str = "") -> str | None:
 def _extract_targets(steps_by_phase: dict) -> dict:
     """The reviewed target weights: the referee's if it re-published them (they
     are then gate-bound), otherwise the optimizer's. Empty when neither ran."""
-    for phase in ("referee", "optimizer"):
-        targets = (steps_by_phase.get(phase, {}).get("artifacts") or {}).get("targets")
+    for phase, artifact in (
+        ("referee", "targets"),
+        ("judge", "winning_targets"),
+        ("optimizer", "targets"),
+    ):
+        targets = (
+            steps_by_phase.get(phase, {}).get("artifacts") or {}
+        ).get(artifact)
         if isinstance(targets, dict) and targets:
             return targets
     return {}
@@ -341,6 +465,7 @@ _PHASE_PERSON = {
     "challenger": ("Challenger",
                    "argued the opposite case to keep that call honest"),
     "optimizer": ("Optimizer", "computed the target allocation weights"),
+    "judge": ("Judge", "compared the variant results on persisted evidence"),
     "referee": ("Referee",
                 "independently re-checked the result against the mandate"),
     "reporter": ("Reporter", "wrote the recommendation for you"),
@@ -355,7 +480,10 @@ def _agent_brief(phase: str, step: dict | None,
     algorithm, the verdict, whether a plan was prepared) and, only when it broke,
     a short cleaned reason — so the reader learns what happened and where.
     """
-    name, action = _PHASE_PERSON.get(phase, (phase.title(), "ran its phase"))
+    base, branch = _phase_parts(phase)
+    name, action = _PHASE_PERSON.get(base, (phase.title(), "ran its phase"))
+    if branch is not None:
+        name = f"Variant {branch} {name.lower()}"
     state = str((step or {}).get("status", "idle"))
     glyph, colour = _STATE_STYLE.get(state, ("◌", DIM))
     artifacts = (step or {}).get("artifacts") or {}
@@ -375,19 +503,23 @@ def _agent_brief(phase: str, step: dict | None,
                 else "was refused by a safety gate")
         return glyph, colour, name, base + (f" — {reason}" if reason else "")
 
-    if phase == "optimizer":
+    if base == "optimizer":
         algo = str(artifacts.get("algorithm_id")
                    or artifacts.get("algorithm") or "").strip()
         if algo:
             action = f"computed the target weights using {algo}"
-    elif phase == "referee":
+    elif base == "judge":
+        winner = str(artifacts.get("winner_phase") or "").strip()
+        if winner:
+            action = f"compared the variants and selected {winner}"
+    elif base == "referee":
         result = str(artifacts.get("verdict") or "").upper()
         if result == "PASS":
             action = "re-checked the result against the mandate and approved it"
         elif result:
             action = ("re-checked the result against the mandate and did not "
                       "approve a trade")
-    elif phase == "reporter" and artifacts.get("plan_id"):
+    elif base == "reporter" and artifacts.get("plan_id"):
         action = "wrote the recommendation and prepared a paper trade to confirm"
     return glyph, colour, name, action
 
@@ -466,11 +598,43 @@ class FlowNode(Static):
         self.agent = agent
         self.short = short
 
+    def on_mount(self) -> None:
+        paint = getattr(self.app, "_paint_flow_node", None)
+        if paint is not None:
+            paint(self)
+
     def on_enter(self, event: events.Enter) -> None:
         app = self.app
         detail = getattr(app, "_flow_details", {}).get(self.phase) or (
             f"{self.agent}\n\nnot yet started")
         app._set_selected_work(f"{self.short.upper()} · {self.agent}\n\n{detail}")
+
+
+class FlowBoard(Horizontal):
+    """A recomposable workflow-step board; panel branches are real nodes."""
+
+    def __init__(self, flow: tuple[tuple[str, str, str], ...]):
+        super().__init__(id="flow-row")
+        self.flow = flow
+
+    def compose(self) -> ComposeResult:
+        for index, (phase, agent, short) in enumerate(self.flow):
+            if index:
+                yield Static("→", classes="flow-arrow")
+            yield FlowNode(phase, agent, short)
+
+    def set_flow(self, flow: tuple[tuple[str, str, str], ...]) -> None:
+        if flow == self.flow:
+            return
+        self.flow = flow
+        if self.is_attached:
+            self.run_worker(
+                self.recompose(),
+                name="recompose-workflow-flow",
+                group="workflow-flow",
+                exclusive=True,
+                exit_on_error=False,
+            )
 
 
 class NavMenu(Static):
@@ -607,6 +771,7 @@ class QlabTui(App[None]):
         self._agent_focus = False
         self._agent_states: dict[str, str] = {}
         # Flowchart state: phase -> state token, and phase -> hover detail.
+        self._flow_spec = _FLOW
         self._flow_states: dict[str, str] = {}
         self._flow_details: dict[str, str] = {}
         # Which durable run the flowchart is bound to. A new run clears this and
@@ -683,11 +848,7 @@ class QlabTui(App[None]):
                 with Vertical(id="workforce", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] WORKFORCE", classes="canvas-title", markup=True)
                     yield Static(id="workforce-content", markup=True)
-                    with Horizontal(id="flow-row"):
-                        for _index, (_phase, _agent, _short) in enumerate(_FLOW):
-                            if _index:
-                                yield Static("\u2192", classes="flow-arrow")
-                            yield FlowNode(_phase, _agent, _short)
+                    yield FlowBoard(self._flow_spec)
                     yield RichLog(id="workforce-console", wrap=True,
                                   markup=True, max_lines=400)
                     with Horizontal(id="chat-row"):
@@ -1038,7 +1199,7 @@ class QlabTui(App[None]):
         """
         phase = str(payload.get("phase") or "")
         status = str(payload.get("status") or "")
-        if phase not in _PHASE_SHORT:
+        if _phase_parts(phase)[0] not in _PHASE_DID:
             return
         # Only the run this session launched narrates itself. Startup replays a
         # window of history, and a resumed desk may see another client's run;
@@ -1054,7 +1215,7 @@ class QlabTui(App[None]):
         self._phase_reported[phase] = status
         if status == "working":
             self._console_write(
-                f"[{CYAN}]▶ {escape(_PHASE_SHORT[phase])}[/] "
+                f"[{CYAN}]▶ {escape(_phase_short(phase))}[/] "
                 f"[{LABEL_GOLD}]working[/]")
             return
         if status not in ("done", "failed", "blocked"):
@@ -1063,7 +1224,12 @@ class QlabTui(App[None]):
         if status == "done":
             done.add(phase)
         head, nxt = workforce_note(
-            phase, status, str(payload.get("summary") or ""), done)
+            phase,
+            status,
+            str(payload.get("summary") or ""),
+            done,
+            {candidate for candidate, _agent, _short in self._flow_spec},
+        )
         glyph, tone = {
             "done": ("✓", UP),
             "failed": ("×", DOWN),
@@ -1592,23 +1758,37 @@ class QlabTui(App[None]):
             f"[{LABEL_GOLD}]Daily adjusted-close context; this is not a streaming quote.[/]")
         self.query_one("#market-content", Static).update("\n".join(lines))
 
+    def _set_flow_spec(
+        self,
+        flow: tuple[tuple[str, str, str], ...],
+    ) -> None:
+        """Switch the board to the selected workflow's actual step instances."""
+        self._flow_spec = flow or _FLOW
+        try:
+            self.query_one("#flow-row", FlowBoard).set_flow(self._flow_spec)
+        except Exception:
+            pass
+
+    def _paint_flow_node(self, node: FlowNode) -> None:
+        state = self._flow_states.get(node.phase, "idle")
+        glyph, color = _STATE_STYLE.get(state, ("◌", DIM))
+        if state == "working":
+            glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
+        node.update(
+            f"[bold]{escape(node.short)}[/]\n"
+            f"[{color}]{glyph} {escape(state)}[/]"
+        )
+        for token in ("working", "queued", "done", "failed", "blocked"):
+            node.set_class(token == state, f"-{token}")
+        node.tooltip = self._flow_details.get(node.phase) or (
+            f"{node.agent}\n\nnot yet started"
+        )
+
     def _render_flow(self) -> None:
-        """Paint the five-node agent flowchart from the current flow state."""
-        for phase, agent, short in _FLOW:
-            try:
-                node = self.query_one(f"#flow-{phase}", FlowNode)
-            except Exception:
-                continue
-            state = self._flow_states.get(phase, "idle")
-            glyph, color = _STATE_STYLE.get(state, ("◌", DIM))
-            if state == "working":
-                glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
-            node.update(
-                f"[bold]{escape(short)}[/]\n[{color}]{glyph} {escape(state)}[/]")
-            for token in ("working", "queued", "done", "failed", "blocked"):
-                node.set_class(token == state, f"-{token}")
-            node.tooltip = self._flow_details.get(phase) or (
-                f"{agent}\n\nnot yet started")
+        """Paint the dynamic workflow-step board from durable phase state."""
+        self._set_flow_spec(self._flow_spec)
+        for node in self.query(FlowNode):
+            self._paint_flow_node(node)
 
     def _flow_detail(self, agent: str, phase: str, step: dict) -> str:
         """A phase's hover card: agent, state, elapsed, summary, artifacts."""
@@ -1683,6 +1863,7 @@ class QlabTui(App[None]):
             # idle desk falls back to 'idle'.
             if not self._pending_workflow and not self.claude.running \
                     and not self._action_running:
+                self._set_flow_spec(_FLOW)
                 self._flow_states = {phase: "idle" for phase, _, _ in _FLOW}
                 self._flow_details = {}
             self._render_flow()
@@ -1690,28 +1871,42 @@ class QlabTui(App[None]):
 
         request = workflow.get("request") or {}
         status = str(workflow.get("status", "unknown"))
-        steps = workflow.get("steps", [])
+        steps = [
+            step for step in (workflow.get("steps") or [])
+            if isinstance(step, dict)
+        ]
         step_by_phase = {str(step.get("phase")): step for step in steps}
+        flow = _flow_from_steps(
+            steps,
+            standard_fallback=str(workflow.get("kind") or "") != "panel",
+        )
+        self._set_flow_spec(flow)
 
         # Rebuild flow state/detail from durable steps; where a phase has no
         # step yet, keep a live 'working' the tool stream set, else queue it.
-        for phase, agent, _short in _FLOW:
+        prior_states = self._flow_states
+        flow_states: dict[str, str] = {}
+        flow_details: dict[str, str] = {}
+        for phase, agent, _short in flow:
             step = step_by_phase.get(phase)
             if step is not None:
                 durable = str(step.get("status", "queued"))
                 # The agent stream sees a worker start before that worker gets
                 # its `working` update persisted; don't drop back to queued.
                 live_working = (durable == "queued"
-                                and self._flow_states.get(phase) == "working")
-                self._flow_states[phase] = "working" if live_working else durable
-                self._flow_details[phase] = self._flow_detail(agent, phase, step)
+                                and prior_states.get(phase) == "working")
+                flow_states[phase] = "working" if live_working else durable
+                flow_details[phase] = self._flow_detail(agent, phase, step)
             else:
-                live = self._flow_states.get(phase)
-                self._flow_states[phase] = (
+                live = prior_states.get(phase)
+                flow_states[phase] = (
                     "working" if live == "working"
                     else "queued" if status == "running" else "idle")
-                self._flow_details.setdefault(
-                    phase, f"{agent} · {phase}\n\nnot yet started")
+                flow_details[phase] = (
+                    f"{agent} · {phase}\n\nnot yet started"
+                )
+        self._flow_states = flow_states
+        self._flow_details = flow_details
         self._render_flow()
 
         lines = [
@@ -2714,10 +2909,22 @@ class QlabTui(App[None]):
         self._pending_workflow = not workflow_id
         self._phase_reported = {}
         self._results_printed = False
-        self._flow_states = {phase: "queued" for phase, _, _ in _FLOW}
+        bound = next((
+            row for row in workflows
+            if str(row.get("workflow_id", "")) == workflow_id
+        ), None)
+        flow = (
+            _flow_from_steps(
+                list((bound or {}).get("steps") or []),
+                standard_fallback=str((bound or {}).get("kind") or "") != "panel",
+            )
+            if bound else _FLOW
+        )
+        self._set_flow_spec(flow)
+        self._flow_states = {phase: "queued" for phase, _, _ in flow}
         self._flow_details = {
             phase: f"{agent} · {phase}\n\nqueued — waiting to start"
-            for phase, agent, _ in _FLOW}
+            for phase, agent, _ in flow}
         self._render_flow()
         self._render_workforce()
 
@@ -2790,7 +2997,10 @@ class QlabTui(App[None]):
             self._write_local_event("claude.tool", payload)
             if workforce:
                 base = event.tool.rsplit("__", 1)[-1] or event.tool
-                phase = _AGENT_TO_PHASE.get(agent, "")
+                phase = self._phase_for_agent(
+                    agent,
+                    prefer_queued=event.tool == "Agent",
+                )
                 # Tool traffic is timeline material, not console material: only
                 # the first tool of a phase writes a line, and only when the
                 # owner's own `working` event has not already announced it.
@@ -2803,7 +3013,7 @@ class QlabTui(App[None]):
                     if not started and self._phase_reported.get(phase) is None:
                         self._phase_reported[phase] = "working"
                         self._console_write(
-                            f"[{CYAN}]▶ {escape(_PHASE_SHORT.get(phase, phase))}[/]"
+                            f"[{CYAN}]▶ {escape(_phase_short(phase))}[/]"
                             f" [{LABEL_GOLD}]working[/]")
             elif chat:
                 self._console_flush()
@@ -2863,7 +3073,15 @@ class QlabTui(App[None]):
             self._print_results_fallback(text)
             return
 
-        steps = {str(step.get("phase")): step for step in workflow.get("steps", [])}
+        workflow_steps = [
+            step for step in (workflow.get("steps") or [])
+            if isinstance(step, dict)
+        ]
+        steps = {str(step.get("phase")): step for step in workflow_steps}
+        flow = _flow_from_steps(
+            workflow_steps,
+            standard_fallback=str(workflow.get("kind") or "") != "panel",
+        )
         verdict = str((steps.get("referee", {}).get("artifacts") or {})
                       .get("verdict") or "")
 
@@ -2882,7 +3100,7 @@ class QlabTui(App[None]):
         # 3 · what each agent did, one plain-language line each.
         self._console_write("")
         self._console_write(f"[{LABEL_GOLD}]WHAT EACH AGENT DID[/]")
-        for phase, _agent, _short in _FLOW:
+        for phase, _agent, _short in flow:
             glyph, colour, name, action = _agent_brief(
                 phase, steps.get(phase), status)
             action_lines = bulletin([action], max_len=220)
@@ -2960,6 +3178,25 @@ class QlabTui(App[None]):
         self._agent_states[agent] = "working"
         self._render_agents()
         return agent
+
+    def _phase_for_agent(self, agent: str, *, prefer_queued: bool) -> str:
+        """Choose this dispatch's concrete phase from the active step board."""
+        candidates = [
+            phase for phase, candidate_agent, _short in self._flow_spec
+            if candidate_agent == agent
+        ]
+        if not candidates:
+            return ""
+        state_order = (
+            ("queued", "idle", "working")
+            if prefer_queued else
+            ("working", "queued", "idle")
+        )
+        for state in state_order:
+            for phase in candidates:
+                if self._flow_states.get(phase, "idle") == state:
+                    return phase
+        return candidates[0]
 
     def _set_selected_work(self, text: str, *, markup: bool = False) -> None:
         self.query_one("#selected-work", Static).update(

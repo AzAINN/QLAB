@@ -94,6 +94,10 @@ _PHASE_ARTIFACT_CONTRACT = {
     ),
     "challenger": "challenger_view",
     "optimizer": "targets (ticker-to-weight object) and algorithm_id",
+    "judge": (
+        "winner_phase, winning_targets (the chosen optimizer branch's exact "
+        "ticker-to-weight object), and walk-forward evidence for that choice"
+    ),
     "referee": (
         "verdict='PASS', verdict_id, and targets — the exact reviewed "
         "ticker-to-weight object, which must equal the optimizer's persisted "
@@ -112,6 +116,7 @@ _TRADER_PROXY_MAP = {
 _COORDINATOR_TOOLS = [
     _claude_tool("workflow.start"),
     _claude_tool("workflow.status"),
+    _claude_tool("workflow.phase"),
 ]
 
 # The conversational desk assistant: observation and reading only. No Agent
@@ -213,6 +218,11 @@ def build_workforce_agents() -> dict[str, dict]:
             continue
         tools = [mapped for tool in source.tools if (mapped := _proxy_tool(tool))]
         tools.append(_claude_tool(f"workflow.{phase}"))
+        if source.name in {"moments-analyst", "optimization-runner", "referee"}:
+            # The owner sees an HTTP caller, not which Claude subagent made it:
+            # branch-phase authority is coordinator-prompt-level, while the
+            # ARTIFACT contracts and dependency DAG remain registry-enforced.
+            tools.append(_claude_tool("workflow.phase"))
         # Read-only access to the run's own durable record. Without it a worker
         # can only use the ids the coordinator retyped into its task, so one
         # garbled hand-off (a mis-copied objective_id, targets that no longer
@@ -225,15 +235,35 @@ def build_workforce_agents() -> dict[str, dict]:
         }:
             tools.append(_claude_tool("policy.current"))
         tools = list(dict.fromkeys(tools))
+        phase_contract = _PHASE_ARTIFACT_CONTRACT[phase]
+        if source.name == "referee":
+            phase_contract += (
+                f". When assigned workflow phase 'judge', instead persist: "
+                f"{_PHASE_ARTIFACT_CONTRACT['judge']}"
+            )
+        dynamic_update = (
+            f"- The task names your exact workflow phase. If it is '{phase}', "
+            f"use workflow_{phase}. If it is a numbered {phase} branch"
+            + (" or 'judge'" if source.name == "referee" else "")
+            + ", use workflow_phase and pass that exact phase string. Update "
+              "only the assigned phase; never another branch.\n"
+            if source.name in {
+                "moments-analyst", "optimization-runner", "referee"
+            }
+            else (
+                f"- The task names workflow phase '{phase}'. Update only that "
+                f"phase with workflow_{phase}.\n"
+            )
+        )
         override = f"""
 
 QLAB OWNER-WORKFORCE MODE (this section supersedes any execution or fixed-
 champion instruction above):
 - You are a portfolio/research worker, never a software developer. Do not read,
   edit, write, or search repository files and do not run shell commands.
-- The task contains a workflow_id. First call the workflow_{phase} tool with status
-  `working`. Before returning, call it with `done` and a concise summary plus
-  these required artifacts: {_PHASE_ARTIFACT_CONTRACT[phase]}.
+{dynamic_update}- The task contains a workflow_id. First update the assigned phase with
+  status `working`. Before returning, update that same phase with `done` and a
+  concise summary plus these required artifacts: {phase_contract}.
 - Be fast: emit independent tool calls together in ONE turn rather than one per
   turn. Only serialize a call whose input is another call's output. Your opening
   `working` update belongs in the same turn as your first read-only lookups.
@@ -251,8 +281,9 @@ champion instruction above):
 - If an id or artifact you were handed is rejected as unknown or mismatched,
   call workflow_status(workflow_id) once and use the values persisted by the
   earlier phases — that record, not the task text, is the truth.
-- Perform only the {phase} phase. Do not spawn other agents. Use owner MCP facts;
-  never invent ids, data, solver output, a verdict, or a completed phase.
+- Perform only the exact assigned workflow phase (your base role is {phase}).
+  Do not spawn other agents. Use owner MCP facts; never invent ids, data, solver
+  output, a verdict, or a completed phase.
 - MVSK is a research hypothesis, not an assumed live champion. Preserve it in
   comparisons, but use the catalog and current qlab policy for operational work.
 - No Claude role can execute a paper order. The reporter may request daily ops
@@ -282,12 +313,17 @@ champion instruction above):
             "strands the run. If the Agent tool rejects that parameter, re-issue "
             "the identical call without it and treat the result as the worker's "
             "output. Never end a turn with a dispatched worker unaccounted for.\n\n"
-            "For a new portfolio/research goal, call workflow_start once. If the "
-            "user message contains RESUME_WORKFLOW_ID, call workflow_status for "
-            "that id, do not create a new workflow, and continue at the earliest "
-            "non-done phase(s).\n\n"
-            "Run the roles as a dependency graph, not a strict line, so the run "
-            "finishes faster:\n"
+            "For a new portfolio/research goal, choose the workflow shape and call "
+            "workflow_start exactly once. If the goal asks to compare, run a "
+            "tournament, or try estimator variants, call it with kind='panel' and "
+            "2-4 sensible variants. Give each variant a short label plus a distinct "
+            "window/shrinkage stance, such as responsive 252-day Ledoit-Wolf, "
+            "balanced 504-day nonlinear shrinkage, or stable 756-day Ledoit-Wolf; "
+            "these are hypotheses to test, never claimed results. Otherwise start "
+            "the normal portfolio_review workflow. If the user message contains "
+            "RESUME_WORKFLOW_ID, call workflow_status for that id, do not create a "
+            "new workflow, and continue its exact non-done steps.\n\n"
+            "For a normal workflow, run the roles as this dependency graph:\n"
             "1. moments-analyst alone, and wait for its result.\n"
             "2. challenger AND optimization-runner together — emit both Agent "
             "calls in the SAME turn. Each depends only on the analyst and never on "
@@ -295,17 +331,33 @@ champion instruction above):
             "before starting the optimizer wastes the run's longest stage.\n"
             "3. referee, only once both of those are done.\n"
             "4. reporter, only once the referee is done.\n\n"
-            "Pass each worker the workflow_id, the original goal, as_of, universe, "
-            "and the exact persisted artifacts it depends on — the analyst's "
-            "moment_set_id, objective_id, and decision_id to the parallel pair, and "
-            "the optimizer's targets object verbatim (never re-typed, re-rounded, "
-            "or re-ordered) to the referee and the reporter, because the referee's "
-            "PASS is bound to the hash of exactly those weights. Carrying the "
-            "artifacts in the task text is what lets each worker skip a lookup.\n\n"
-            "Call workflow_status twice at most: once before dispatching the "
-            "referee to confirm the parallel pair is done, and once at the end. "
-            "The Agent results themselves tell you the rest; polling after every "
-            "worker only adds turns.\n\n"
+            "For a panel workflow, use the returned steps as the exact graph:\n"
+            "1. Dispatch every analyst variant IN PARALLEL: emit multiple "
+            "moments-analyst Agent calls in ONE message. Each brief must name its "
+            "exact workflow phase ('analyst-1', 'analyst-2', and so on), include "
+            "only that matching variant stance, and require that branch phase to "
+            "persist its own artifacts.\n"
+            "2. Once all analyst branches are done, dispatch every corresponding "
+            "optimization-runner IN PARALLEL, again as multiple Agent calls in ONE "
+            "message. Name each exact phase ('optimizer-1', etc.) and pass only the "
+            "same-numbered analyst's objective_id and persisted artifacts.\n"
+            "3. Once all optimizers are done, dispatch the referee agent wearing "
+            "the judge hat with exact workflow phase 'judge'. Its comparison brief "
+            "must include every branch's variant, analyst rationale, optimizer "
+            "targets, and ids needed to cite walk-forward evidence through "
+            "backtest_run and registry_list_runs/registry_report. It must persist "
+            "winner_phase, that branch's exact winning_targets, and concise "
+            "comparative evidence; it may not synthesize new targets.\n"
+            "4. Dispatch the referee agent again for exact phase 'referee', passing "
+            "the judge's winning targets verbatim and the winning analyst branch's "
+            "decision_id so the PASS binds to the judged winner.\n"
+            "5. Dispatch reporter for exact phase 'reporter' only after PASS.\n\n"
+            "Every worker brief carries the workflow_id, exact workflow phase, "
+            "original goal, as_of, universe, and the exact persisted artifacts it "
+            "depends on. Never re-type, re-round, or re-order target objects: the "
+            "judge and referee bindings hash those exact weights. Use "
+            "workflow_status at dependency joins and at the end, not after every "
+            "worker; the Agent results carry the intervening outputs.\n\n"
             "If a phase comes back failed or blocked, you may re-dispatch that one "
             "worker ONCE with the failure reason included. If it fails again, stop "
             "immediately and report the failed phase and its reason — do not loop, "

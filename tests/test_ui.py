@@ -172,6 +172,83 @@ def test_owner_exposes_safe_lab_tools_and_durable_workflows(session):
     assert status == 200 and fetched["workflow_id"] == workflow_id
 
 
+def test_owner_starts_panel_and_round_trips_a_dynamic_phase(session):
+    variants = [
+        {"label": "responsive", "window": 252, "shrinkage": "ledoit_wolf"},
+        {"label": "stable", "window": 756, "shrinkage": "nonlinear"},
+    ]
+    status, workflow = handle_api(
+        session,
+        "POST",
+        "/api/workflows/start",
+        {},
+        {
+            "goal": "compare estimator variants",
+            "kind": "panel",
+            "variants": variants,
+            "offline": True,
+        },
+    )
+
+    assert status == 200
+    assert workflow["kind"] == "panel"
+    assert workflow["request"]["variants"] == variants
+    assert [step["phase"] for step in workflow["steps"]] == [
+        "analyst-1", "analyst-2", "optimizer-1", "optimizer-2",
+        "judge", "referee", "reporter",
+    ]
+
+    workflow_id = workflow["workflow_id"]
+    status, updated = handle_api(
+        session,
+        "POST",
+        "/api/workflows/analyst-2",
+        {},
+        {
+            "workflow_id": workflow_id,
+            "status": "done",
+            "summary": "stable stance estimated",
+            "artifacts": {
+                "moment_set_id": "moments-stable",
+                "objective_id": "objective-stable",
+                "decision_id": "decision-stable",
+            },
+        },
+    )
+    assert status == 200
+    assert next(
+        step for step in updated["steps"] if step["phase"] == "analyst-2"
+    )["status"] == "done"
+
+    status, fetched = handle_api(
+        session, "GET", f"/api/workflows/{workflow_id}", {}, {},
+    )
+    assert status == 200
+    assert next(
+        step for step in fetched["steps"] if step["phase"] == "analyst-2"
+    )["summary"] == "stable stance estimated"
+
+    status, invalid = handle_api(
+        session,
+        "POST",
+        "/api/workflows/start",
+        {},
+        {"kind": "panel", "variants": [{"window": 252}]},
+    )
+    assert status == 400
+    assert "2..5" in invalid["error"]
+
+    status, invalid = handle_api(
+        session,
+        "POST",
+        "/api/workflows/analyst-x",
+        {},
+        {"workflow_id": workflow_id, "status": "working"},
+    )
+    assert status == 400
+    assert "unknown workforce phase" in invalid["error"]
+
+
 @pytest.mark.parametrize("tool", [
     "regime.turbulence", "regime.absorption", "regime.volatility_term_structure",
     "regime.drawdown", "regime.tail_risk",

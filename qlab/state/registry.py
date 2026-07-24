@@ -411,6 +411,273 @@ class Registry:
             [],
         )
 
+    def _ensure_applied_views_table(self) -> None:
+        """Create the calibration ledger without requiring a schema migration."""
+        self.con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS applied_views (
+                view_id VARCHAR PRIMARY KEY,
+                as_of VARCHAR,
+                universe VARCHAR,
+                view_kind VARCHAR,
+                horizon_days INTEGER,
+                view_payload JSON,
+                pre_view_baseline JSON,
+                run_id VARCHAR,
+                score JSON,
+                resolved_at VARCHAR,
+                created_at VARCHAR
+            )
+            """
+        )
+        # Keep the lazy schema safe for a developer database created by an
+        # earlier P4.7 checkout with only the persistence columns.
+        for column in (
+            "view_kind VARCHAR",
+            "horizon_days INTEGER",
+            "score JSON",
+            "resolved_at VARCHAR",
+            "created_at VARCHAR",
+        ):
+            self.con.execute(
+                f"ALTER TABLE applied_views ADD COLUMN IF NOT EXISTS {column}"
+            )
+
+    def log_applied_view(
+        self,
+        as_of,
+        universe: str,
+        view_payload: dict,
+        pre_view_baseline,
+        run_id: str,
+    ) -> str:
+        """Persist one applied risk view for later realized calibration."""
+        from numbers import Integral, Real
+
+        if not isinstance(universe, str) or not universe.strip():
+            raise ValueError("universe must be a non-empty string")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must be a non-empty string")
+        if not isinstance(view_payload, dict):
+            raise TypeError("view_payload must be a dict")
+        if not all(isinstance(field, str) for field in view_payload):
+            raise TypeError("view_payload field names must be strings")
+
+        payload = dict(view_payload)
+        view_kind = payload.get("type")
+        baseline_fields = {
+            "vol": "pre_view_vol",
+            "corr": "pre_view_corr",
+            "tail": "pre_view_tail_mass",
+        }
+        if view_kind not in baseline_fields:
+            raise ValueError("view_payload.type must be vol, corr, or tail")
+
+        raw_horizon = payload.get("horizon_days", payload.get("horizon", 21))
+        if isinstance(raw_horizon, bool) or not isinstance(raw_horizon, Integral):
+            raise TypeError("view horizon_days must be an integer")
+        horizon_days = int(raw_horizon)
+        if horizon_days < 2:
+            raise ValueError("view horizon_days must be at least 2")
+
+        if isinstance(pre_view_baseline, dict):
+            baseline = dict(pre_view_baseline)
+            if not all(isinstance(field, str) for field in baseline):
+                raise TypeError("pre_view_baseline field names must be strings")
+        else:
+            if (
+                isinstance(pre_view_baseline, bool)
+                or not isinstance(pre_view_baseline, Real)
+            ):
+                raise TypeError("pre_view_baseline must be numeric or a dict")
+            value = float(pre_view_baseline)
+            if not math.isfinite(value):
+                raise ValueError("pre_view_baseline must be finite")
+            baseline = {baseline_fields[view_kind]: value}
+
+        try:
+            normalized_as_of = datetime.fromisoformat(
+                str(as_of).replace("Z", "+00:00")
+            ).date().isoformat()
+        except (TypeError, ValueError) as exc:
+            raise ValueError("as_of must be an ISO date or datetime") from exc
+
+        self._ensure_applied_views_table()
+        identity = {
+            "as_of": normalized_as_of,
+            "universe": universe.strip(),
+            "view_payload": payload,
+            "pre_view_baseline": baseline,
+            "run_id": run_id.strip(),
+            "horizon_days": horizon_days,
+        }
+        view_id = hashlib.sha256(_j(identity).encode()).hexdigest()[:16]
+        self.con.execute(
+            """
+            INSERT INTO applied_views (
+                view_id, as_of, universe, view_kind, horizon_days,
+                view_payload, pre_view_baseline, run_id, score,
+                resolved_at, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT DO NOTHING
+            """,
+            [
+                view_id,
+                normalized_as_of,
+                universe.strip(),
+                view_kind,
+                horizon_days,
+                _j(payload),
+                _j(baseline),
+                run_id.strip(),
+                None,
+                None,
+                _now(),
+            ],
+        )
+        return view_id
+
+    def resolve_view_calibration(self, prices) -> dict:
+        """Score every elapsed, unresolved risk view exactly once."""
+        from dataclasses import asdict
+
+        import numpy as np
+        import pandas as pd
+
+        from qlab.news.calibration import (
+            ViewScore,
+            calibration_summary,
+            view_realization,
+        )
+
+        if not isinstance(prices, pd.DataFrame):
+            raise TypeError("prices must be a pandas DataFrame")
+
+        self._ensure_applied_views_table()
+        panel = prices.sort_index()
+        index = pd.DatetimeIndex(panel.index)
+        if index.has_duplicates:
+            raise ValueError("prices index must not contain duplicate dates")
+
+        pending = self.con.execute(
+            """
+            SELECT view_id, as_of, view_kind, horizon_days, view_payload,
+                   pre_view_baseline, run_id
+            FROM applied_views
+            WHERE score IS NULL
+            ORDER BY as_of, created_at, view_id
+            """
+        ).fetchall()
+        for (
+            view_id,
+            as_of,
+            view_kind,
+            horizon_days,
+            raw_payload,
+            raw_baseline,
+            run_id,
+        ) in pending:
+            if horizon_days is None:
+                raise ValueError(
+                    f"applied view {view_id!r} has no calibration horizon"
+                )
+            horizon_days = int(horizon_days)
+            if horizon_days < 2:
+                raise ValueError(
+                    f"applied view {view_id!r} has an invalid horizon"
+                )
+
+            as_of_ts = pd.Timestamp(as_of)
+            future_positions = np.flatnonzero(index > as_of_ts)
+            if len(future_positions) < horizon_days:
+                continue
+            first_future = int(future_positions[0])
+            if first_future == 0:
+                continue
+
+            payload = _u(raw_payload)
+            baseline = _u(raw_baseline)
+            if not isinstance(payload, dict) or not isinstance(baseline, dict):
+                raise ValueError(
+                    f"applied view {view_id!r} has malformed persisted payload"
+                )
+            if view_kind in {"vol", "tail"}:
+                required_tickers = [payload.get("ticker")]
+            elif view_kind == "corr":
+                required_tickers = [
+                    payload.get("ticker_a"),
+                    payload.get("ticker_b"),
+                ]
+            else:
+                raise ValueError(
+                    f"applied view {view_id!r} has unknown type {view_kind!r}"
+                )
+            if not all(
+                isinstance(ticker, str) and ticker for ticker in required_tickers
+            ):
+                raise ValueError(
+                    f"applied view {view_id!r} has malformed ticker fields"
+                )
+            missing = [
+                ticker for ticker in required_tickers
+                if ticker not in panel.columns
+            ]
+            if missing:
+                raise ValueError(
+                    f"prices are missing applied-view tickers {missing}"
+                )
+
+            realized_positions = np.concatenate(
+                ([first_future - 1], future_positions[:horizon_days])
+            )
+            realized_prices = panel.iloc[realized_positions][required_tickers]
+            realized_returns = np.log(
+                realized_prices / realized_prices.shift(1)
+            ).dropna(how="any")
+            if len(realized_returns) < horizon_days:
+                continue
+
+            scoring_payload = dict(payload)
+            scoring_payload.update(baseline)
+            score = view_realization(
+                view_kind,
+                scoring_payload,
+                realized_returns.to_numpy(dtype=float),
+                required_tickers,
+            )
+            score_payload = asdict(score)
+            resolved_at = _now()
+            self.con.execute(
+                """
+                UPDATE applied_views
+                SET score=?, resolved_at=?
+                WHERE view_id=? AND score IS NULL
+                """,
+                [_j(score_payload), resolved_at, view_id],
+            )
+            self.record_event(
+                "view_calibration_resolved",
+                {
+                    "view_id": view_id,
+                    "run_id": run_id,
+                    "score": score_payload,
+                },
+            )
+
+        stored_scores = []
+        for (raw_score,) in self.con.execute(
+            """
+            SELECT score FROM applied_views
+            WHERE score IS NOT NULL
+            ORDER BY resolved_at, view_id
+            """
+        ).fetchall():
+            payload = _u(raw_score)
+            if not isinstance(payload, dict):
+                raise ValueError("applied view has a malformed stored score")
+            stored_scores.append(ViewScore(**payload))
+        return calibration_summary(stored_scores)
+
     # -- trial counting (deflated Sharpe) -----------------------------------
     def trial_count(self, objective_form: str | None = None) -> int:
         if objective_form:

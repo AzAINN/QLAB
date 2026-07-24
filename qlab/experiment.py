@@ -26,9 +26,18 @@ from qlab.arms import Arm, MomentsConfig, build_policy, solve_arm
 from qlab.core import data as market
 from qlab.core.backtest import BacktestResult, run_backtest
 from qlab.core.metrics import block_bootstrap_ci, deflated_sharpe, periodic_sharpe
+from qlab.core.objective import build_objective
+from qlab.core.types import MomentSet
 from qlab.core.universe import load_universe
+from qlab.core.views import (
+    CorrView,
+    TailView,
+    VolView,
+    apply_views,
+    conditioned_moments,
+)
 from qlab.paths import data_root
-from qlab.solvers.base import Constraints
+from qlab.solvers.base import Constraints, get_solver
 from qlab.state.registry import Registry
 
 
@@ -123,6 +132,162 @@ def run_ablation(
                                             "n_arms": len(arms)})
     results["ranking"] = _rank(results["arms"])
     return results
+
+
+def news_conditioned_arm(
+    prices,
+    views: list[VolView | CorrView | TailView | dict],
+    *,
+    kl_budget: float = 0.25,
+    cadence: str = "quarterly",
+    lookback_days: int = 756,
+    cost_bps: float = 5.0,
+    constraints: Constraints | None = None,
+    n_trials: int = 2,
+    arm_id: str = "news_conditioned_min_variance",
+) -> BacktestResult:
+    """Backtest a research-only minimum-variance arm under risk views.
+
+    Every rebalance entropy-pools the point-in-time return panel, derives the
+    conditioned covariance with :func:`conditioned_moments`, and solves only a
+    minimum-variance objective. The conditioned means are checked against the
+    ordinary sample means but never enter the objective. This function is not
+    cataloged or exposed through an operational solve path.
+    """
+    if not isinstance(views, list) or not views:
+        raise ValueError("news_conditioned_arm requires a non-empty views list")
+    try:
+        budget = float(kl_budget)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("kl_budget must be numeric") from exc
+    if not np.isfinite(budget) or budget <= 0.0:
+        raise ValueError("kl_budget must be positive and finite")
+    if isinstance(n_trials, bool) or not isinstance(n_trials, int):
+        raise TypeError("n_trials must be an integer")
+    if n_trials < 1:
+        raise ValueError("n_trials must be positive")
+
+    typed_views: list[VolView | CorrView | TailView] = []
+    for index, view in enumerate(views, start=1):
+        if isinstance(view, (VolView, CorrView, TailView)):
+            typed_views.append(view)
+            continue
+        if not isinstance(view, dict):
+            raise TypeError(
+                f"views[{index - 1}] must be a risk-view object or dict"
+            )
+        kind = view.get("type")
+        confidence = view.get("confidence", 1.0)
+        try:
+            if kind == "vol":
+                typed_views.append(VolView(
+                    str(view["ticker"]),
+                    float(view["target_vol"]),
+                    float(confidence),
+                ))
+            elif kind == "corr":
+                typed_views.append(CorrView(
+                    str(view["ticker_a"]),
+                    str(view["ticker_b"]),
+                    float(view["target_corr"]),
+                    float(confidence),
+                ))
+            elif kind == "tail":
+                typed_views.append(TailView(
+                    str(view["ticker"]),
+                    str(view["direction"]),
+                    float(confidence),
+                ))
+            else:
+                raise ValueError(
+                    f"views[{index - 1}].type must be vol, corr, or tail"
+                )
+        except KeyError as exc:
+            raise ValueError(
+                f"views[{index - 1}] is missing required field {exc.args[0]!r}"
+            ) from exc
+
+    solve_constraints = constraints or Constraints()
+    pinning_records: list[dict[str, Any]] = []
+
+    def conditioned_policy(snapshot):
+        returns = snapshot.log_returns(lookback_days).dropna(how="any")
+        panel = returns.to_numpy(dtype=float)
+        pooled = apply_views(
+            panel,
+            list(snapshot.tickers),
+            typed_views,
+            kl_budget=budget,
+        )
+        means, covariance = conditioned_moments(
+            panel,
+            pooled.probabilities,
+        )
+        ordinary_means = np.mean(panel, axis=0)
+        mean_drift = np.abs(means - ordinary_means)
+        max_drift = float(np.max(mean_drift))
+        if not np.allclose(means, ordinary_means, atol=1e-8, rtol=0.0):
+            raise AssertionError(
+                "news-conditioned arm violated per-asset mean pinning "
+                f"(max drift {max_drift:.2e})"
+            )
+
+        moment_set = MomentSet(
+            tickers=list(snapshot.tickers),
+            as_of=snapshot.as_of,
+            cov=covariance,
+            mu=None,
+            diagnostics={
+                "stage": "research",
+                "conditioning": "entropy_pooling_views",
+            },
+        )
+        objective = build_objective("min_variance", moment_set)
+        solved = get_solver("classical").solve(
+            objective,
+            solve_constraints,
+        )
+        pinning_records.append({
+            "as_of": str(snapshot.as_of),
+            "means_unconditioned": {
+                ticker: float(ordinary_means[column])
+                for column, ticker in enumerate(snapshot.tickers)
+            },
+            "means_conditioned": {
+                ticker: float(means[column])
+                for column, ticker in enumerate(snapshot.tickers)
+            },
+            "max_abs_drift": max_drift,
+            "kl_total": float(pooled.kl_total),
+        })
+        return solved.weights
+
+    result = run_backtest(
+        prices,
+        conditioned_policy,
+        arm_id=arm_id,
+        cadence=cadence,
+        lookback_days=lookback_days,
+        cost_bps=cost_bps,
+        n_trials=n_trials,
+    )
+    latest = pinning_records[-1]
+    result.diagnostics.update({
+        "stage": "research",
+        "research_only": True,
+        "operational": False,
+        "objective": "min_variance",
+        "solver": "classical",
+        "dsr_trial_counted": False,
+        "applied_labels": [view.label() for view in typed_views],
+        "mean_pinning": pinning_records,
+        "means_unconditioned": latest["means_unconditioned"],
+        "means_conditioned": latest["means_conditioned"],
+        "mean_pinning_max_abs": max(
+            record["max_abs_drift"] for record in pinning_records
+        ),
+    })
+    return result
 
 
 # ---------------------------------------------------------------------------

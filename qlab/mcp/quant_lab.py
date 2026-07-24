@@ -48,7 +48,7 @@ from qlab.core.views import (
     apply_views as apply_risk_views,
 )
 from qlab.core.window_evidence import window_evidence
-from qlab.experiment import recommend
+from qlab.experiment import news_conditioned_arm, recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
 from qlab.solvers.base import Constraints
 
@@ -56,6 +56,7 @@ from qlab.solvers.base import Constraints
 _MAX_RISK_VIEWS = 3
 _MAX_VIEW_CONFIDENCE = 0.7
 _VIEWS_LOOKBACK_DAYS = 756
+_VIEW_CALIBRATION_HORIZON_DAYS = 21
 _DATA_INTEGRITY_THRESHOLDS = {
     "max_last_bar_age_days": 4,
     "max_longest_gap_days": 5,
@@ -160,6 +161,52 @@ def _corroborate_views(typed_views, canonical_views, panel, tickers, regime):
             "confidence_after": adjusted.confidence,
         })
     return out, report
+
+
+def _pre_view_baseline(
+    view: dict,
+    panel,
+    tickers: list[str],
+) -> dict[str, float]:
+    """Measure the risk moment that existed immediately before a view."""
+    import numpy as np
+
+    index = {ticker: column for column, ticker in enumerate(tickers)}
+    kind = view["type"]
+    if kind == "vol":
+        ticker = view["ticker"]
+        if ticker not in index:
+            raise ValueError(f"view names {ticker!r}, absent from the panel")
+        value = float(np.std(panel[:, index[ticker]], ddof=0))
+        return {"pre_view_vol": value}
+    if kind == "corr":
+        ticker_a, ticker_b = view["ticker_a"], view["ticker_b"]
+        if ticker_a not in index or ticker_b not in index:
+            missing = [
+                ticker for ticker in (ticker_a, ticker_b) if ticker not in index
+            ]
+            raise ValueError(f"view names absent panel tickers {missing}")
+        left = panel[:, index[ticker_a]]
+        right = panel[:, index[ticker_b]]
+        if np.std(left, ddof=0) == 0.0 or np.std(right, ddof=0) == 0.0:
+            raise ValueError("pre-view correlation is undefined for a constant series")
+        value = float(np.corrcoef(left, right)[0, 1])
+        if not np.isfinite(value):
+            raise ValueError("pre-view correlation is not finite")
+        return {"pre_view_corr": value}
+
+    ticker = view["ticker"]
+    if ticker not in index:
+        raise ValueError(f"view names {ticker!r}, absent from the panel")
+    values = panel[:, index[ticker]]
+    centered = values - float(np.mean(values))
+    sigma = float(np.std(values, ddof=0))
+    tail_mass = (
+        0.0
+        if sigma == 0.0
+        else float(np.mean(np.abs(centered) > 2.0 * sigma))
+    )
+    return {"pre_view_tail_mass": tail_mass}
 
 
 def _validated_risk_views(
@@ -1061,12 +1108,14 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         kl_budget: float = 0.25,
         dry: bool = True,
         excerpt: str = "",
+        persist: bool = False,
     ) -> dict:
         """Validate and apply up to three risk views to a scenario panel.
 
-        This is a dry research diagnostic only. It records the bounded
-        entropy-pooling result, but does not persist conditioned tensors or
-        feed a downstream objective, solver, workflow phase, or paper plan.
+        The default dry path is the bounded entropy-pooling diagnostic. With
+        ``dry=false`` the same mean-pinned views feed a research-only
+        minimum-variance backtest; no conditioned tensor or result can enter
+        an operational solve, workflow phase, or paper plan.
 
         ``excerpt`` is the operator-supplied source text. When provided, every
         view's ``source_quote`` must be a whitespace-normalized substring of
@@ -1077,11 +1126,8 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         st.budget.charge("research.apply_views")
         if not isinstance(dry, bool):
             raise TypeError("dry must be a boolean")
-        if not dry:
-            raise PermissionError(
-                "research.apply_views supports dry=true only; downstream "
-                "conditioning is not wired"
-            )
+        if not isinstance(persist, bool):
+            raise TypeError("persist must be a boolean")
         if not isinstance(excerpt, str):
             raise TypeError("excerpt must be a string")
         budget = _view_number(kl_budget, "kl_budget", 0)
@@ -1123,7 +1169,36 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
             "hard_regime": regime.get("regime", "unknown"),
             "corroboration": corroboration,
         }
-        run_id = st.registry.log_run("views", {
+        arm_result = None
+        if not dry:
+            arm_result = news_conditioned_arm(
+                snapshot.prices,
+                corroborated_views,
+                kl_budget=budget,
+                lookback_days=_VIEWS_LOOKBACK_DAYS,
+                n_trials=max(len(st.registry.backtest_arm_ids()), 2),
+            )
+            summary["research_arm"] = {
+                "arm_id": arm_result.arm_id,
+                "stage": "research",
+                "operational": False,
+                "objective": "min_variance",
+                "solver": "classical",
+                "metrics": arm_result.metrics,
+                "total_turnover": arm_result.total_turnover,
+                "dsr_trial_counted": False,
+                "means_unconditioned": arm_result.diagnostics[
+                    "means_unconditioned"
+                ],
+                "means_conditioned": arm_result.diagnostics[
+                    "means_conditioned"
+                ],
+                "mean_pinning_max_abs": arm_result.diagnostics[
+                    "mean_pinning_max_abs"
+                ],
+            }
+
+        run_spec = {
             "algorithm_id": "entropy_pooling_views",
             "as_of": str(d),
             "universe": universe,
@@ -1133,12 +1208,42 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
             "n_scenarios": int(len(panel)),
             "views": canonical_views,
             "kl_budget": budget,
-            "dry": True,
-            "downstream_conditioning": False,
+            "dry": dry,
+            "downstream_conditioning": not dry,
             "dsr_trial_counted": False,
             "result": summary,
-        })
-        return {"run_id": run_id, **summary}
+        }
+        if persist:
+            run_spec["persist_applied_views"] = True
+        run_id = st.registry.log_run("views", run_spec)
+
+        if arm_result is not None:
+            st.registry.log_backtest(
+                run_id,
+                arm_result.arm_id,
+                arm_result.metrics,
+                objective="min_variance:research",
+            )
+
+        persisted_view_ids = []
+        if persist:
+            for view in canonical_views:
+                persisted_payload = {
+                    **view,
+                    "horizon_days": _VIEW_CALIBRATION_HORIZON_DAYS,
+                }
+                persisted_view_ids.append(st.registry.log_applied_view(
+                    str(d),
+                    universe,
+                    persisted_payload,
+                    _pre_view_baseline(view, panel_array, tickers),
+                    run_id,
+                ))
+
+        response = {"run_id": run_id, **summary}
+        if persist:
+            response["persisted_view_ids"] = persisted_view_ids
+        return response
 
     # -- backtest -----------------------------------------------------------
     @app.tool(name="backtest.run")

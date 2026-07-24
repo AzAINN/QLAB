@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -297,6 +298,99 @@ class Registry:
         q += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         return self._rows(q, params)
+
+    def recall_similar_decisions(
+        self,
+        fingerprint: dict,
+        kind: str | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        """Return reflected decisions nearest to a regime fingerprint.
+
+        The two percentile fields are already normalized to ``[0, 1]``, so
+        their mean absolute difference is the numeric distance. A matching
+        regime label adds a small bonus; the resulting ``similarity_score`` is
+        normalized back to ``[0, 1]``. Older decisions without a complete,
+        valid fingerprint are not comparable and are skipped.
+        """
+        numeric_fields = ("vol_percentile", "turbulence_percentile")
+        query_values: dict[str, float] = {}
+        for field in numeric_fields:
+            try:
+                value = float(fingerprint[field])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"fingerprint.{field} must be a numeric percentile"
+                ) from exc
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"fingerprint.{field} must be finite and within [0, 1]"
+                )
+            query_values[field] = value
+
+        query_label = str(fingerprint.get("regime_label", "")).strip().lower()
+        if not query_label:
+            raise ValueError("fingerprint.regime_label must not be empty")
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit must be an integer") from exc
+        if limit <= 0:
+            return []
+
+        q = (
+            "SELECT * FROM decisions "
+            "WHERE reflection IS NOT NULL AND TRIM(reflection) <> ''"
+        )
+        params: list = []
+        if kind:
+            q += " AND kind=?"
+            params.append(kind)
+        q += " ORDER BY created_at DESC, decision_id DESC"
+
+        scored: list[tuple[float, dict]] = []
+        for row in self._rows(q, params):
+            choice = row.get("choice") or {}
+            outcome = row.get("realized_outcome") or {}
+
+            candidate_values: dict[str, float] = {}
+            comparable = True
+            for field in numeric_fields:
+                raw = choice.get(field, outcome.get(field))
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    comparable = False
+                    break
+                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                    comparable = False
+                    break
+                candidate_values[field] = value
+            if not comparable:
+                continue
+
+            candidate_label = str(
+                choice.get("regime_label")
+                or choice.get("regime")
+                or outcome.get("regime_label")
+                or outcome.get("regime_call")
+                or ""
+            ).strip().lower()
+            if not candidate_label:
+                continue
+
+            numeric_distance = sum(
+                abs(query_values[field] - candidate_values[field])
+                for field in numeric_fields
+            ) / len(numeric_fields)
+            label_bonus = 0.25 if candidate_label == query_label else 0.0
+            similarity = (1.0 - numeric_distance + label_bonus) / 1.25
+            recalled = dict(row)
+            recalled["similarity_score"] = float(similarity)
+            scored.append((similarity, recalled))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [row for _score, row in scored[:limit]]
 
     def get_decision(self, decision_id: str) -> dict | None:
         rows = self._rows(

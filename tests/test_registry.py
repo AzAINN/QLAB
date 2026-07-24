@@ -35,6 +35,64 @@ def test_decision_and_reflection_loop(reg):
     assert rows and rows[0]["reflection"] == "504 was appropriate"
 
 
+def test_recall_similar_decisions_ranks_nearest_reflected_regime_first(reg):
+    def reflected(
+        as_of: date,
+        vol_percentile: float,
+        turbulence_percentile: float,
+        regime_label: str,
+        reflection: str,
+    ) -> str:
+        decision_id = reg.log_decision(Decision(
+            as_of=as_of,
+            kind="regime",
+            choice={
+                "vol_percentile": vol_percentile,
+                "turbulence_percentile": turbulence_percentile,
+                "regime_label": regime_label,
+                "regime": regime_label,
+            },
+            rationale=f"fixture {reflection}",
+        ))
+        reg.update_reflection(
+            decision_id,
+            {"regime_call": regime_label},
+            reflection,
+        )
+        return decision_id
+
+    nearest_id = reflected(
+        date(2022, 1, 31), 0.78, 0.74, "stress", "nearest lesson"
+    )
+    farther_id = reflected(
+        date(2022, 2, 28), 0.20, 0.15, "calm", "farther lesson"
+    )
+    reg.log_decision(Decision(
+        as_of=date(2022, 3, 31),
+        kind="regime",
+        choice={
+            "vol_percentile": 0.80,
+            "turbulence_percentile": 0.75,
+            "regime_label": "stress",
+        },
+        rationale="unresolved exact match must not be recalled",
+    ))
+
+    recalled = reg.recall_similar_decisions(
+        {
+            "vol_percentile": 0.80,
+            "turbulence_percentile": 0.75,
+            "regime_label": "stress",
+        },
+        kind="regime",
+        limit=2,
+    )
+
+    assert [row["decision_id"] for row in recalled] == [nearest_id, farther_id]
+    assert recalled[0]["reflection"] == "nearest lesson"
+    assert recalled[0]["similarity_score"] > recalled[1]["similarity_score"]
+
+
 def test_account_and_fills(reg):
     reg.init_account(10000.0)
     reg.apply_fill("GLD", 5.0, 180.0, -900.0)

@@ -50,10 +50,14 @@ Your loop for a given `as_of`:
    agree, name any that dissent (e.g. calm vol but rising absorption is a
    fragile-calm), and let that call drive the window/shrinkage decision below.
    This is judgment: the tools give the logic and the numbers; you decide.
-3. Call `registry.recent_decisions(kind="estimation_window")` and read the
-   **reflections** attached to past decisions. This is the learning loop: if a
-   126-day window was logged last quarter and the reflection says it did *not*
-   reduce realized vol, do not repeat it blindly.
+3. Read the top recalled analogous decisions in the supplied context and cite
+   each relevant reflection by `decision_id` when defending the new choice.
+   These are regime-fingerprint matches, not merely the newest records. If no
+   analogous reflections were supplied, call
+   `registry.recent_decisions(kind="estimation_window")` as a fallback and say
+   that no similarity match was available. This is the learning loop: if an
+   analogous 126-day window failed to reduce realized vol or lagged 60/40, do
+   not repeat it blindly.
 4. Call `policy.current`, then decide the estimation window, covariance
    shrinkage (`ledoit_wolf` or `nonlinear`), and denoising
    (`marchenko_pastur`) for that configured operational policy, **conditioned
@@ -75,7 +79,7 @@ Your loop for a given `as_of`:
    "regime_indicators": ["turbulence", "absorption"],
    "evidence_run_id": "..."}`) and make the rationale justify the
    window/shrinkage choice for *this* regime, citing both the table row and the
-   indicators that decided it.
+   indicators that decided it, plus any analogous reflected lessons used.
 
 When you close the analyst phase, the `done` summary and its required artifacts
 must carry `regime` (`calm`/`stress`) and a one-line `regime_reasoning` naming

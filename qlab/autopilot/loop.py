@@ -30,7 +30,7 @@ from qlab.core.types import Decision
 from qlab.governance.referee import cost_gate, deterministic_referee
 from qlab.governance.reflection import resolve_pending
 from qlab.paths import state_path
-from qlab.signals.hard import detect_regime_robust
+from qlab.signals.hard import composite_regime, detect_regime_robust
 from qlab.solvers.base import Constraints
 from qlab.trader.broker import get_broker
 from qlab.trader.mandate import Mandate, MandateViolation, load_mandate
@@ -56,6 +56,18 @@ def _asset_vols_from_moments(snapshot, config: MomentsConfig) -> dict[str, float
             moment_set.tickers,
             np.sqrt(np.clip(variances, 0.0, None)),
         )
+    }
+
+
+def _regime_fingerprint(snapshot, regime: dict) -> dict[str, float | str] | None:
+    """Map existing deterministic regime readings to recall percentiles."""
+    components = composite_regime(snapshot).get("components", {})
+    if not {"vol_pct", "turbulence_pct"}.issubset(components):
+        return None
+    return {
+        "vol_percentile": float(components["vol_pct"]),
+        "turbulence_percentile": float(components["turbulence_pct"]),
+        "regime_label": str(regime["regime"]),
     }
 
 
@@ -87,6 +99,20 @@ def run_once(
     snap = market.snapshot(tickers, as_of, offline=offline, seed=seed)
     reflections_resolved = resolve_pending(reg, snap.prices)
     regime = detect_regime(snap)
+    regime_fingerprint = _regime_fingerprint(snap, regime)
+    analogous_decisions = (
+        reg.recall_similar_decisions(regime_fingerprint, kind="regime", limit=2)
+        if regime_fingerprint
+        else []
+    )
+    analogous_context = ""
+    if analogous_decisions:
+        citations = " | ".join(
+            f"{row['decision_id']} (similarity={row['similarity_score']:.2f}): "
+            f"{' '.join(str(row['reflection']).split())}"
+            for row in analogous_decisions
+        )
+        analogous_context = f" Recalled analogous reflections: {citations}."
 
     # 2. solve the configured operational policy under the mandate ------------
     policy = get_operational_policy(mandate.operational_policy)
@@ -129,17 +155,18 @@ def run_once(
     challenger_view = (
         f"Challenger (window={alt_lookback}d versus {lookback_days}d): "
         f"weight divergence L1={weight_divergence:.3f}. "
-        f"{challenger_assessment}"
+        f"{challenger_assessment}{analogous_context}"
     )
     # 3. log the decision (the judgment record) ------------------------------
     decision = Decision(
         as_of=_as_date(as_of), kind="regime",
         choice={"targets": targets, "regime": regime["regime"],
                 "arm": champion.id, "est_vol": est_vol,
-                "lookback_days": lookback_days},
+                "lookback_days": lookback_days,
+                **(regime_fingerprint or {})},
         rationale=(f"Regime={regime['regime']} (signal={regime.get('signal', 0):.3f}). "
                    f"Configured operational policy={policy.id} ({policy.label}) solved "
-                   f"under mandate caps. {policy.rationale}"),
+                   f"under mandate caps. {policy.rationale}{analogous_context}"),
         challenger_view=challenger_view,
         alternatives_considered=[
             "min_variance", "risk_parity", "scenario_cvar", "mvsk (research only)"

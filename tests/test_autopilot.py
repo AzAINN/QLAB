@@ -263,6 +263,53 @@ def test_run_once_records_challenger_view(tmp_registry):
     assert summary["challenger_view"] == decision["challenger_view"]
 
 
+def test_run_once_cites_recalled_analogous_reflections(
+    tmp_registry,
+    monkeypatch,
+):
+    captured = {}
+
+    def recall(fingerprint, kind=None, limit=10):
+        captured.update({
+            "fingerprint": fingerprint,
+            "kind": kind,
+            "limit": limit,
+        })
+        return [
+            {
+                "decision_id": "prior-regime-a",
+                "reflection": "The shorter window lagged 60/40.",
+                "similarity_score": 0.97,
+            },
+            {
+                "decision_id": "prior-regime-b",
+                "reflection": "The longer window kept volatility calibrated.",
+                "similarity_score": 0.91,
+            },
+        ]
+
+    monkeypatch.setattr(tmp_registry, "recall_similar_decisions", recall)
+    run_once(
+        registry=tmp_registry,
+        offline=True,
+        execute=False,
+        as_of="2021-06-30",
+    )
+
+    decision = tmp_registry.recent_decisions(limit=1)[0]
+    assert captured["kind"] == "regime"
+    assert captured["limit"] == 2
+    assert set(captured["fingerprint"]) == {
+        "vol_percentile",
+        "turbulence_percentile",
+        "regime_label",
+    }
+    assert decision["choice"]["regime_label"] == decision["choice"]["regime"]
+    for decision_id in ("prior-regime-a", "prior-regime-b"):
+        assert decision_id in decision["rationale"]
+        assert decision_id in decision["challenger_view"]
+
+
 def test_reflection_loop_resolves_pending_decisions(tmp_registry):
     from datetime import date
 
@@ -296,6 +343,44 @@ def test_reflection_loop_resolves_pending_decisions(tmp_registry):
     assert decision["realized_outcome"]["realized_vol"] > 0
     assert "vol" in decision["reflection"].lower()
     assert resolve_pending(tmp_registry, prices, horizon_days=63) == 0
+
+
+def test_reflection_loop_scores_realized_alpha_vs_configured_6040(tmp_registry):
+    from datetime import date
+
+    import pandas as pd
+    import pytest
+
+    from qlab.core.types import Decision
+    from qlab.governance.reflection import resolve_pending
+
+    index = pd.bdate_range("2024-01-01", periods=4)
+    prices = pd.DataFrame(
+        {
+            "ACWI": [100.0, 100.0, 110.0, 110.0],
+            "BNDW": [100.0, 100.0, 100.0, 100.0],
+        },
+        index=index,
+    )
+    tmp_registry.log_decision(Decision(
+        as_of=date.fromisoformat(str(index[1].date())),
+        kind="regime",
+        choice={
+            "targets": {"ACWI": 1.0, "BNDW": 0.0},
+            "regime": "calm",
+            "est_vol": 0.10,
+        },
+        rationale="hand-built realized-alpha fixture",
+    ))
+
+    assert resolve_pending(tmp_registry, prices, horizon_days=2) == 1
+    decision = tmp_registry.recent_decisions(limit=1)[0]
+    outcome = decision["realized_outcome"]
+    assert outcome["realized_portfolio_return"] == pytest.approx(0.10)
+    assert outcome["realized_6040_return"] == pytest.approx(0.06)
+    assert outcome["realized_alpha_vs_6040"] == pytest.approx(0.04)
+    assert "60/40" in decision["reflection"]
+    assert "not a forecast" in decision["reflection"]
 
 
 def test_run_once_refuses_dirty_ledger(tmp_registry, monkeypatch):

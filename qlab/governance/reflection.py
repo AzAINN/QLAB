@@ -3,7 +3,8 @@
 The reflection loop scores what an agent actually chose: its target portfolio,
 volatility estimate, and regime call. Numbers and classifications are computed
 deterministically here; an LLM may later summarize the stored evidence, but it
-does not get to manufacture the outcome.
+does not get to manufacture the outcome. Realized alpha is benchmark-relative
+bookkeeping against the configured 60/40 arm, not a return forecast.
 """
 
 from __future__ import annotations
@@ -11,8 +12,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from qlab.arms import Arm, solve_arm
+from qlab.core.types import DataSnapshot
+
 _TRADING_DAYS = 252
 _REGIME_QUANTILE = 0.80
+_SIXTY_FORTY_ARM = Arm(
+    id="reflection_6040",
+    objective="sixty_forty",
+    solver="none",
+)
 
 
 def resolve_pending(registry, prices: pd.DataFrame, horizon_days: int = 63) -> int:
@@ -23,7 +32,9 @@ def resolve_pending(registry, prices: pd.DataFrame, horizon_days: int = 63) -> i
     fixed target weights recorded with the decision. The realized regime uses
     the same trailing-volatility idea as ``detect_regime``: compare the future
     horizon with the 80th percentile of historical rolling volatility that was
-    available at decision time.
+    available at decision time. Realized alpha compares the decided portfolio's
+    same-horizon return with the configured 60/40 benchmark arm; it records an
+    observed relative outcome and is not a forecast.
     """
     if horizon_days < 2:
         raise ValueError("horizon_days must be at least 2")
@@ -68,6 +79,44 @@ def resolve_pending(registry, prices: pd.DataFrame, horizon_days: int = 63) -> i
             np.std(portfolio_returns, ddof=1) * np.sqrt(_TRADING_DAYS)
         )
 
+        # Match the backtest's buy-and-hold drift semantics: target weights are
+        # the starting holdings and cash, if any, earns zero through the window.
+        horizon_asset_returns = (
+            panel.iloc[realized_positions[-1]].astype(float)
+            / panel.iloc[realized_positions[0]].astype(float)
+            - 1.0
+        )
+        benchmark_snapshot = DataSnapshot(
+            tickers=list(panel.columns),
+            prices=panel.loc[index <= as_of],
+            as_of=as_of.date(),
+            source=str(panel.attrs.get("source", "reflection")),
+        )
+        benchmark_weights, _ = solve_arm(
+            _SIXTY_FORTY_ARM,
+            benchmark_snapshot,
+        )
+        benchmark_series = benchmark_weights.as_series().reindex(
+            panel.columns
+        ).fillna(0.0)
+        benchmark_held = benchmark_series[benchmark_series.abs() > 0.0]
+        required_returns = set(columns) | set(benchmark_held.index)
+        if any(
+            not np.isfinite(float(horizon_asset_returns[ticker]))
+            for ticker in required_returns
+        ):
+            continue
+        realized_portfolio_return = float(
+            horizon_asset_returns.reindex(columns).to_numpy(dtype=float) @ weights
+        )
+        realized_6040_return = float(
+            horizon_asset_returns.reindex(benchmark_held.index).to_numpy(dtype=float)
+            @ benchmark_held.to_numpy(dtype=float)
+        )
+        realized_alpha_vs_6040 = (
+            realized_portfolio_return - realized_6040_return
+        )
+
         historical_prices = panel.loc[index <= as_of, columns]
         historical_returns = np.log(
             historical_prices / historical_prices.shift(1)
@@ -103,6 +152,9 @@ def resolve_pending(registry, prices: pd.DataFrame, horizon_days: int = 63) -> i
             "regime_realized": regime_realized,
             "regime_threshold": regime_threshold,
             "regime_consistent": regime_consistent,
+            "realized_portfolio_return": realized_portfolio_return,
+            "realized_6040_return": realized_6040_return,
+            "realized_alpha_vs_6040": realized_alpha_vs_6040,
         }
 
         if vol_ratio is None:
@@ -126,7 +178,10 @@ def resolve_pending(registry, prices: pd.DataFrame, horizon_days: int = 63) -> i
             f"{estimated_vol:.1%} (ratio {ratio_text}). Regime call "
             f"'{regime_call}' was "
             f"{'consistent with' if regime_consistent else 'contradicted by'} "
-            f"the realized '{regime_realized}' regime. {estimate_assessment}"
+            f"the realized '{regime_realized}' regime. Realized alpha versus "
+            f"configured 60/40 was {realized_alpha_vs_6040:+.1%}; this is "
+            f"benchmark-relative outcome bookkeeping, not a forecast. "
+            f"{estimate_assessment}"
         )
         registry.update_reflection(decision["decision_id"], outcome, reflection)
         registry.record_event(
@@ -134,6 +189,7 @@ def resolve_pending(registry, prices: pd.DataFrame, horizon_days: int = 63) -> i
             {
                 "decision_id": decision["decision_id"],
                 "realized_vol": realized_vol,
+                "realized_alpha_vs_6040": realized_alpha_vs_6040,
                 "regime_consistent": regime_consistent,
             },
         )

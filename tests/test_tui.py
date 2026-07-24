@@ -328,10 +328,10 @@ def test_workforce_agents_route_models_with_source_override_precedence(monkeypat
         "moments-analyst": "inherit",
         "challenger": "inherit",
         "referee": "inherit",
-        "optimization-runner": "haiku",
-        "reporter": "haiku",
-        "data-qa": "haiku",
-        "signal-qa": "haiku",
+        "optimization-runner": "sonnet",
+        "reporter": "sonnet",
+        "data-qa": "sonnet",
+        "signal-qa": "sonnet",
     }
     assert claude._ROLE_MODEL == expected
 
@@ -340,14 +340,15 @@ def test_workforce_agents_route_models_with_source_override_precedence(monkeypat
 
     source_agents = loader.load_agents()
     overridden = [
-        replace(source, model="sonnet")
+        replace(source, model="opus")
         if source.name == "optimization-runner" else source
         for source in source_agents
     ]
     monkeypatch.setattr(loader, "load_agents", lambda: overridden)
     routed = claude.build_workforce_agents()
-    assert routed["optimization-runner"]["model"] == "sonnet"
-    assert routed["reporter"]["model"] == "haiku"
+    # A concrete model in the agent source overrides the routing table.
+    assert routed["optimization-runner"]["model"] == "opus"
+    assert routed["reporter"]["model"] == "sonnet"
 
 
 def test_session_agent_files_preserve_workforce_authority(tmp_path):
@@ -376,7 +377,7 @@ def test_session_agent_files_preserve_workforce_authority(tmp_path):
     }:
         path = tmp_path / ".claude" / "agents" / f"{name}.md"
         _, front, _ = path.read_text(encoding="utf-8").split("---", 2)
-        assert yaml.safe_load(front)["model"] == "haiku"
+        assert yaml.safe_load(front)["model"] == "sonnet"
     for name in {"moments-analyst", "challenger", "referee"}:
         path = tmp_path / ".claude" / "agents" / f"{name}.md"
         _, front, _ = path.read_text(encoding="utf-8").split("---", 2)

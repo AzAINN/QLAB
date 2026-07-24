@@ -107,10 +107,10 @@ _ROLE_MODEL = {
     "moments-analyst": "inherit",
     "challenger": "inherit",
     "referee": "inherit",
-    "optimization-runner": "haiku",
-    "reporter": "haiku",
-    "data-qa": "haiku",
-    "signal-qa": "haiku",
+    "optimization-runner": "sonnet",
+    "reporter": "sonnet",
+    "data-qa": "sonnet",
+    "signal-qa": "sonnet",
 }
 
 _PHASE_ARTIFACT_CONTRACT = {

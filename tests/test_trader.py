@@ -8,7 +8,7 @@ import pytest
 
 from qlab.trader.broker import SimulatedPaperBroker, default_price_provider
 from qlab.trader.mandate import Mandate, MandateViolation, load_mandate, tier
-from qlab.trader.plan import build_plan, execute_plan
+from qlab.trader.plan import OrderLeg, OrderPlan, build_plan, execute_plan
 
 CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 
@@ -162,7 +162,7 @@ def test_kill_switch_blocks_trading(reg):
 def test_execute_requires_referee_pass(reg_and_broker):     # use existing fixtures' style
     import pytest
     from qlab.trader.mandate import MandateViolation, load_mandate
-    from qlab.trader.plan import build_plan, execute_plan
+    from qlab.trader.plan import OrderLeg, OrderPlan, build_plan, execute_plan
     reg, broker = reg_and_broker
     mandate = load_mandate()
     targets = {t: 1.0 / len(mandate.universe_whitelist) for t in mandate.universe_whitelist}
@@ -472,3 +472,59 @@ def test_execute_plan_tool_refuses_legacy_plan_with_no_persisted_legs(tmp_regist
     result = execute_plan_tool("legacy-plan-1")
     assert result["executed"] is False
     assert "re-propose" in result["error"]
+
+
+def test_build_plan_sells_positions_omitted_from_targets(reg_and_broker):
+    import dataclasses
+
+    reg, broker = reg_and_broker
+    mandate = dataclasses.replace(load_mandate(), max_turnover_per_rebalance=2.0)
+    whitelist = mandate.universe_whitelist
+    # Deploy all assets equally.
+    full = {t: 1.0 / len(whitelist) for t in whitelist}
+    p1 = build_plan(reg, broker, mandate, full, "dec-full")
+    reg.log_verdict("dec-full", "PASS", [], "deterministic", targets=full)
+    execute_plan(reg, broker, p1)
+
+    # Now target only the first two names — the rest must be SOLD, not retained.
+    subset = {whitelist[0]: 0.34, whitelist[1]: 0.33, whitelist[2]: 0.33}
+    p2 = build_plan(reg, broker, mandate, subset, "dec-subset")
+    sold = {leg.ticker for leg in p2.legs if leg.side == "sell"}
+    for omitted in whitelist[3:]:
+        assert omitted in sold, f"{omitted} was omitted from targets but not sold"
+
+
+def test_execute_refuses_a_forged_plan_object(reg_and_broker):
+    reg, broker = reg_and_broker
+    mandate = load_mandate()
+    w = mandate.universe_whitelist
+    targets = {w[0]: 0.34, w[1]: 0.33, w[2]: 0.33}
+    plan = build_plan(reg, broker, mandate, targets, "dec-legit")
+    reg.log_verdict("dec-legit", "PASS", [], "deterministic", targets=targets)
+
+    # Forge an object with the real plan_id but a different decision and legs.
+    forged = OrderPlan(
+        plan_id=plan.plan_id, decision_id="dec-other",
+        targets={w[0]: 0.34, w[1]: 0.33, w[3]: 0.33},
+        legs=[OrderLeg(w[3], "buy", 999.0, "forged-1")],
+        pre_trade=plan.pre_trade, state="checked")
+    reg.log_verdict("dec-other", "PASS", [],
+                    "deterministic", targets=forged.targets)
+    with pytest.raises(MandateViolation, match="does not match the persisted"):
+        execute_plan(reg, broker, forged, mandate)
+
+
+def test_execute_refuses_a_plan_checked_against_a_stale_book(reg_and_broker):
+    reg, broker = reg_and_broker
+    mandate = load_mandate()
+    w = mandate.universe_whitelist
+    full = {t: 1.0 / len(w) for t in w}
+    # Two plans built while the book is all-cash, both fully deploying.
+    p1 = build_plan(reg, broker, mandate, full, "dec-a")
+    p2 = build_plan(reg, broker, mandate, dict(full), "dec-b")
+    reg.log_verdict("dec-a", "PASS", [], "deterministic", targets=full)
+    reg.log_verdict("dec-b", "PASS", [], "deterministic", targets=full)
+    execute_plan(reg, broker, p1, mandate)  # deploys the book
+    # p2 assumed all-cash; the book is now invested → must refuse, not double-deploy.
+    with pytest.raises(MandateViolation, match="stale book"):
+        execute_plan(reg, broker, p2, mandate)

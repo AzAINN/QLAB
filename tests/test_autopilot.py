@@ -567,3 +567,15 @@ def test_get_broker_fails_loud_when_alpaca_creds_present_but_broken(monkeypatch)
     reg = Registry(":memory:")
     with pytest.raises(RuntimeError, match="refusing to silently fall back"):
         broker_mod.get_broker(reg, offline=False, universe=["ACWI"])
+
+
+def test_check_targets_allows_liquidation_below_fully_invested():
+    from qlab.trader.mandate import MandateViolation, load_mandate
+
+    mandate = load_mandate()
+    liquidation = {mandate.universe_whitelist[0]: 0.0}
+    # A move to cash fails fully-invested normally but passes as a liquidation.
+    import pytest
+    with pytest.raises(MandateViolation, match="fully-invested"):
+        mandate.check_targets(liquidation)
+    mandate.check_targets(liquidation, allow_liquidation=True)  # no raise

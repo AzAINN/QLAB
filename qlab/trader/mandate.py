@@ -184,8 +184,14 @@ class Mandate:
                 raise ValueError(f"mandate {name} must be finite and positive")
 
     # -- checks -------------------------------------------------------------
-    def check_targets(self, targets: dict[str, float], tol: float = 1e-4) -> None:
-        """Validate a target weight map. Raises :class:`MandateViolation`."""
+    def check_targets(self, targets: dict[str, float], tol: float = 1e-4,
+                      *, allow_liquidation: bool = False) -> None:
+        """Validate a target weight map. Raises :class:`MandateViolation`.
+
+        ``allow_liquidation`` waives the fully-invested requirement so a
+        de-risking plan (targets summing below 1, e.g. a move to cash under
+        the kill switch) is permitted; every other limit still applies.
+        """
         for t in targets:
             if t not in self.universe_whitelist:
                 raise MandateViolation(f"{t} is not in the universe whitelist")
@@ -194,8 +200,11 @@ class Mandate:
             raise MandateViolation("long-only mandate: negative weight proposed")
         total = sum(vals)
         gross = sum(abs(v) for v in vals)
-        if self.fully_invested and abs(total - 1.0) > 1e-2:
+        if self.fully_invested and not allow_liquidation and abs(total - 1.0) > 1e-2:
             raise MandateViolation(f"fully-invested mandate: weights sum to {total:.4f}")
+        if allow_liquidation and total > 1.0 + 1e-2:
+            raise MandateViolation(
+                f"liquidation target must not add exposure: sum={total:.4f}")
         if gross > self.max_gross_exposure + tol:
             raise MandateViolation(
                 f"gross exposure {gross:.4f} exceeds cap "

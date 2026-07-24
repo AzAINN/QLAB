@@ -145,8 +145,14 @@ class AlpacaPaperBroker(Broker):
         equity = float(acct.equity)
         weights = {t: (positions[t]["value"] / equity if equity > 0 else 0.0)
                    for t in positions}
+        # Persist a monotone high-water mark: returning the current equity as
+        # the HWM would make drawdown always zero and silently disable the
+        # kill switch and drawdown tiers on the live account.
+        self.registry.update_high_water_mark(equity)
+        hwm = float(self.registry.get_account().get("high_water_mark", equity)
+                    or equity)
         return {"cash": float(acct.cash), "equity": equity, "positions": positions,
-                "weights": weights, "high_water_mark": equity,
+                "weights": weights, "high_water_mark": max(hwm, equity),
                 "halted": bool(acct.trading_blocked)}
 
     def submit_notional(self, client_order_id: str, ticker: str, side: str,

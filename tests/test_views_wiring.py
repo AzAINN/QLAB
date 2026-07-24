@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 
@@ -95,6 +97,60 @@ def test_apply_views_round_trips_offline_and_records_only_a_research_run(reg):
     assert reg.backtest_trial_count() == backtest_trials
 
 
+def test_apply_views_persists_applied_target_only_when_requested(reg):
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, seed=7, registry=reg)
+    solution_trials = reg.trial_count()
+    backtest_trials = reg.backtest_trial_count()
+    dsr_arms = reg.backtest_arm_ids()
+
+    result = session.call_lab_tool(
+        "research.apply_views",
+        {
+            "as_of": "2022-06-30",
+            "universe": "core",
+            "views": [_tail_view()],
+            "kl_budget": 0.25,
+            "dry": True,
+            "persist": True,
+        },
+        offline=True,
+    )
+
+    assert len(result["persisted_view_ids"]) == 1
+    row = reg.con.execute(
+        """
+        SELECT view_id, as_of, universe, view_kind, horizon_days,
+               view_payload, pre_view_baseline, run_id, score
+        FROM applied_views
+        """
+    ).fetchone()
+    assert row[:5] == (
+        result["persisted_view_ids"][0],
+        "2022-06-30",
+        "core",
+        "tail",
+        21,
+    )
+    payload = json.loads(row[5])
+    baseline = json.loads(row[6])
+    assert payload["direction"] == "fatter"
+    assert payload["ticker"] == "ACWI"
+    assert payload["horizon_days"] == 21
+    assert 0.0 <= baseline["pre_view_tail_mass"] <= 1.0
+    assert row[7] == result["run_id"]
+    assert row[8] is None
+
+    report = reg.report(result["run_id"])
+    assert report["run"][0]["spec"]["persist_applied_views"] is True
+    assert report["solutions"] == []
+    assert report["backtests"] == []
+    assert reg.trial_count() == solution_trials
+    assert reg.backtest_trial_count() == backtest_trials
+    assert reg.backtest_arm_ids() == dsr_arms
+
+
 @pytest.mark.parametrize(
     ("views", "message"),
     [
@@ -151,28 +207,65 @@ def test_apply_views_refuses_malformed_or_return_flavored_payloads_before_data(
     assert reg.backtest_trial_count() == 0
 
 
-def test_apply_views_refuses_non_dry_mode_before_data(reg, monkeypatch):
+def test_apply_views_non_dry_runs_and_persists_only_a_research_arm(
+    reg,
+    monkeypatch,
+):
+    import pandas as pd
+
     import qlab.mcp.quant_lab as quant_lab
+    from qlab.core.backtest import BacktestResult
     from qlab.ui.server import UISession
 
     session = UISession(offline_default=True, seed=7, registry=reg)
+    calls = []
 
-    def unexpected_snapshot(*_args, **_kwargs):
-        pytest.fail("dry-mode validation must run before loading market data")
-
-    monkeypatch.setattr(quant_lab.market, "snapshot", unexpected_snapshot)
-    with pytest.raises(PermissionError, match="dry=true only"):
-        session.call_lab_tool(
-            "research.apply_views",
-            {
-                "as_of": "2022-06-30",
-                "universe": "core",
-                "views": [_tail_view()],
-                "dry": False,
+    def fake_news_arm(prices, views, **kwargs):
+        calls.append((prices, views, kwargs))
+        means = {ticker: 0.0 for ticker in prices.columns}
+        return BacktestResult(
+            arm_id="news_conditioned_min_variance",
+            returns=pd.Series(
+                [0.0, 0.001],
+                index=pd.to_datetime(["2022-06-29", "2022-06-30"]),
+            ),
+            metrics={"ann_vol": 0.01},
+            diagnostics={
+                "means_unconditioned": means,
+                "means_conditioned": means,
+                "mean_pinning_max_abs": 0.0,
             },
-            True,
         )
-    assert reg.list_runs() == []
+
+    monkeypatch.setattr(quant_lab, "news_conditioned_arm", fake_news_arm)
+    result = session.call_lab_tool(
+        "research.apply_views",
+        {
+            "as_of": "2022-06-30",
+            "universe": "core",
+            "views": [_tail_view()],
+            "dry": False,
+        },
+        offline=True,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][2]["n_trials"] == 2
+    arm = result["research_arm"]
+    assert arm["arm_id"] == "news_conditioned_min_variance"
+    assert arm["stage"] == "research"
+    assert arm["operational"] is False
+    assert arm["dsr_trial_counted"] is False
+    assert arm["means_conditioned"] == arm["means_unconditioned"]
+
+    objective = reg.con.execute(
+        "SELECT objective FROM backtests WHERE run_id=?",
+        [result["run_id"]],
+    ).fetchone()[0]
+    assert objective == "min_variance:research"
+    assert reg.backtest_trial_count() == 1
+    assert reg.backtest_arm_ids() == set()
+    assert reg.trial_count() == 0
 
 
 def test_tui_proxy_forwards_apply_views_to_the_owner():

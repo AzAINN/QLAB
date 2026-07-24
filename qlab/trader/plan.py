@@ -119,21 +119,34 @@ def build_plan(
     Raises :class:`MandateViolation` if any hard limit is breached — the plan
     never reaches ``checked`` and therefore can never be executed.
     """
-    tickers = list(targets)
-    state = broker.portfolio_state(tickers)
+    # Every held ticker must be part of the plan: a position omitted from the
+    # targets is a position to SELL (target weight 0), not one to leave on the
+    # book. Iterating only the target tickers would silently retain it and push
+    # gross exposure past the mandate.
+    state = broker.portfolio_state(list(targets))
     equity = float(state["equity"])
     current_w = state.get("weights", {})
+    held = {t for t, w in current_w.items() if abs(float(w)) > 1e-6}
+    tickers = sorted(set(targets) | held)
 
-    # kill-switch first — a breached mandate refuses everything non-liquidating
+    current_gross = sum(abs(float(w)) for w in current_w.values())
+    target_gross = sum(abs(float(w)) for w in targets.values())
+    # A de-risking plan (strictly lower gross exposure) is a "liquidation": it
+    # is permitted past the kill switch and need not be fully invested.
+    is_liquidating = target_gross < current_gross - 1e-6
+
+    # kill-switch — a breached mandate refuses everything EXCEPT de-risking.
     if mandate.drawdown_breached(equity, float(state.get("high_water_mark", equity))):
         registry.set_halt(True)
-        raise MandateViolation(
-            f"trailing-drawdown kill-switch fired (>{mandate.trailing_drawdown_pct:.0%}); "
-            "trading halted, human paged")
+        if not is_liquidating:
+            raise MandateViolation(
+                f"trailing-drawdown kill-switch fired (>{mandate.trailing_drawdown_pct:.0%}); "
+                "trading halted, only liquidation permitted, human paged")
 
     # An all-cash book being deployed for the first time is not a "rebalance";
     # its turnover is necessarily 1.0, so the rebalance turnover cap is exempt.
-    is_initial_deployment = sum(current_w.values()) < 0.01
+    # Gross (not net) exposure: an offsetting book is not all-cash.
+    is_initial_deployment = current_gross < 0.01
 
     plan_id = _plan_id(decision_id, targets)
     stored = registry.get_plan(plan_id)
@@ -150,7 +163,7 @@ def build_plan(
     legs: list[OrderLeg] = []
     turnover = 0.0
     for t in tickers:
-        tgt_w = float(targets[t])
+        tgt_w = float(targets.get(t, 0.0))
         cur_w = float(current_w.get(t, 0.0))
         turnover += abs(tgt_w - cur_w)
         delta_notional = (tgt_w - cur_w) * equity
@@ -165,11 +178,12 @@ def build_plan(
         "equity": equity, "turnover": turnover, "est_cost": est_cost,
         "n_legs": len(legs), "order_type": mandate.order_type,
         "initial_deployment": is_initial_deployment,
+        "liquidating": is_liquidating,
         "current_weights": current_w, "target_weights": targets,
     }
 
     # --- mandate checks (any failure aborts before the plan is 'checked') ---
-    mandate.check_targets(targets)
+    mandate.check_targets(targets, allow_liquidation=is_liquidating)
     if not is_initial_deployment:
         mandate.check_turnover(turnover)
     mandate.check_order_count(len(legs))
@@ -184,7 +198,8 @@ def build_plan(
     return plan
 
 
-def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan) -> dict:
+def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan,
+                 mandate: Mandate | None = None) -> dict:
     """Execute a *checked* (or resumed *submitted*) plan. Idempotent per leg;
     advances the state machine.
 
@@ -194,6 +209,9 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan) -> dict:
     and each leg replays through its stable ``client_order_id`` if it was
     already filled, so re-running never double-books a leg.
     """
+    if mandate is None:
+        from qlab.trader.mandate import load_mandate
+        mandate = load_mandate()
     if plan.state not in ("checked", "submitted"):
         raise MandateViolation(
             f"plan {plan.plan_id} is {plan.state!r}, not 'checked' or 'submitted'")
@@ -220,9 +238,54 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan) -> dict:
             f"referee PASS for decision {plan.decision_id!r} does not cover these "
             "targets; re-review required")
 
+    # Execute the PERSISTED plan, never the caller's object: a forged OrderPlan
+    # carrying plan_id P but a different decision, targets, or legs cannot slip
+    # past the storage-backed checks above and then book its own legs.
+    stored_decision = stored["decision_id"]
+    stored_targets = stored["targets"]
+    stored_legs = [OrderLeg(**leg) for leg in (stored.get("legs") or [])]
+    if (plan.decision_id != stored_decision
+            or targets_hash(plan.targets) != targets_hash(stored_targets)
+            or {l.client_order_id for l in plan.legs}
+            != {l.client_order_id for l in stored_legs}):
+        raise MandateViolation(
+            f"supplied plan {plan.plan_id} does not match the persisted plan; "
+            "re-propose")
+
+    # Freshly-checked plans are revalidated against the CURRENT book: a plan
+    # built against a stale snapshot (e.g. a second plan proposed while the
+    # first was all-cash) must not deploy on top of positions that now exist.
+    # A plan that has ALREADY begun executing legitimately sees its own fills,
+    # so the stale-book refusal applies only to a plan that has never run.
+    already_started = any(
+        (registry.get_order(leg.client_order_id) or {}).get("state") == "filled"
+        for leg in stored_legs)
+    if stored["state"] == "checked" and not already_started:
+        assumed = (stored.get("pre_trade") or {}).get("current_weights", {})
+        live = broker.portfolio_state(
+            sorted(set(assumed) | set(stored_targets)))
+        live_w = live.get("weights", {})
+        drift = max((abs(float(live_w.get(t, 0.0)) - float(assumed.get(t, 0.0)))
+                     for t in set(assumed) | set(live_w)), default=0.0)
+        if drift > 1e-3:
+            raise MandateViolation(
+                f"plan {plan.plan_id} was checked against a stale book "
+                f"(max weight drift {drift:.4f}); re-propose against the "
+                "current positions")
+        if mandate.drawdown_breached(
+                float(live["equity"]),
+                float(live.get("high_water_mark", live["equity"]))):
+            target_gross = sum(abs(float(w)) for w in stored_targets.values())
+            current_gross = sum(abs(float(w)) for w in live_w.values())
+            if target_gross >= current_gross - 1e-6:
+                registry.set_halt(True)
+                raise MandateViolation(
+                    "trailing-drawdown kill-switch fired since this plan was "
+                    "checked; only liquidation may execute")
+
     registry.set_plan_state(plan.plan_id, "submitted")
     fills = []
-    for leg in plan.legs:
+    for leg in stored_legs:
         existing = registry.get_order(leg.client_order_id)
         if existing and existing["state"] == "filled":
             fills.append({

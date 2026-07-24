@@ -250,6 +250,23 @@ class UISession:
         )
         if not rec["clean"]:
             return {"accepted": False, "blocked_by": "reconcile", "reconcile": rec}
+        # Drawdown-tier gate at preview: an agent PASS binds the targets but a
+        # control-tier drawdown still forbids increasing gross exposure, so the
+        # preview must re-run the deterministic tier check against the live book
+        # — otherwise a preview could accept an exposure increase the referee
+        # would fail.
+        from qlab.governance.referee import deterministic_referee
+
+        book = broker.portfolio_state(self.mandate.universe_whitelist)
+        _, tier_reasons = deterministic_referee(
+            targets, self.mandate, date.today(), portfolio_state=book)
+        drawdown_reasons = [
+            r for r in tier_reasons
+            if "tier blocks gross exposure" in r
+            or "tier permits liquidation only" in r]
+        if drawdown_reasons:
+            return {"accepted": False, "blocked_by": "drawdown_tier",
+                    "reasons": drawdown_reasons}
         try:
             plan = build_plan(
                 self.registry, broker, self.mandate, targets, decision_id,

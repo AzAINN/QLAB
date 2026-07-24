@@ -352,6 +352,36 @@ def test_headless_shell_has_no_header_and_switches_context():
     asyncio.run(run())
 
 
+def test_view_switches_release_workforce_focus():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        client = StubClient()
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+
+            await pilot.press("3")
+            assert app.active_view == "workforce"
+            assert app.focused is app.query_one("#chat-input")
+
+            await pilot.press("f1")
+            assert app.active_view == "dashboard"
+            assert app.focused is None
+            posts_before_enter = list(client.posts)
+            await pilot.press("enter")
+            assert client.posts == posts_before_enter
+
+            await pilot.press("3")
+            assert app.focused is app.query_one("#chat-input")
+            await pilot.press("escape")
+            assert app.focused is None
+            await pilot.press("6")
+            assert app.active_view == "audit"
+
+    asyncio.run(run())
+
+
 def test_dashboard_renders_all_tiles_and_latest_verdict():
     from qlab.tui.app import QlabTui
 

@@ -2043,12 +2043,15 @@ class QlabTui(App[None]):
             view = "dashboard"
         if view not in _VIEWS:
             return
+        self.set_focus(None)
         self._agent_focus = False
         self.screen.remove_class("agent-focus")
         self.active_view = view
         self.query_one("#canvas", ContentSwitcher).current = view
         self._render_nav()
         if view == "workforce":
+            # Chat-first focus claims digits as text; F1-F7 still switch views,
+            # and Escape blurs the input so digit navigation works again.
             field = self.query_one("#chat-input", Input)
             if not field.disabled:  # a running turn owns the box; don't grab it
                 field.focus()

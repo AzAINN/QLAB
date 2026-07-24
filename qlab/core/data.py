@@ -120,6 +120,31 @@ def _check_feed(feed: str) -> str:
     return f
 
 
+def policy_for(offline: bool, *, provider: str | None = None,
+               seed: int = 7) -> DataPolicy:
+    """Resolve the runtime's :class:`DataPolicy`, honoring the legacy flags.
+
+    This is the single boundary translation of the CLI/env ``offline`` flag
+    into an explicit policy for the owner runtime's new data-plane surfaces:
+
+    - ``offline`` → deterministic synthetic demo (no network, research-grade);
+    - online + Alpaca provider → ``alpaca_operational`` (real data, no fallback,
+      execution-eligible), feed from ``ALPACA_FEED`` (default ``iex``);
+    - online + any other provider → a research-grade policy that permits the
+      synthetic fallback but is never execution-eligible.
+    """
+    if offline:
+        return DataPolicy.demo(seed)
+    prov = _provider_name(provider)
+    if prov == "alpaca":
+        return DataPolicy.alpaca_operational(
+            os.environ.get("ALPACA_FEED", "iex").strip().lower() or "iex")
+    return DataPolicy(
+        mode="historical", provider=prov,  # type: ignore[arg-type]
+        feed=None, allow_network=True, allow_cache=True, allow_synthetic=True,
+        require_fresh=False, execution_eligible=False)
+
+
 def _effective_policy(
     offline: bool, provider: str | None, policy: DataPolicy | None,
 ) -> DataPolicy:

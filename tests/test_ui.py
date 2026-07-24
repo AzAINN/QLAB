@@ -71,6 +71,37 @@ def test_unknown_route_is_404(session):
     assert status == 404 and "error" in obj
 
 
+def test_data_health_endpoint_reports_demo_data_as_research_only(session):
+    status, health = handle_api(
+        session, "GET", "/api/data/health", {"offline": ["1"]}, {})
+    assert status == 200
+    assert health["blocked"] is False
+    assert health["mode"] == "demo"
+    assert health["provider"] == "synthetic"
+    # Synthetic demo data is never execution-grade.
+    assert health["eligible_for_research"] is True
+    assert health["eligible_for_paper_proposal"] is False
+    assert health["eligible_for_execution"] is False
+    assert health["permit_id"].startswith("sha256:")
+
+
+def test_data_permit_current_returns_recorded_permit(session):
+    # Recording happens as a side effect of the health evaluation.
+    handle_api(session, "GET", "/api/data/health", {"offline": ["1"]}, {})
+    status, current = handle_api(
+        session, "GET", "/api/data/permit/current", {}, {})
+    assert status == 200
+    assert current["purpose"] == "paper_proposal"
+    assert current["permit"]["provider"] == "synthetic"
+    assert current["permit"]["eligible_for_paper_proposal"] is False
+
+
+def test_data_permit_current_is_null_before_any_evaluation(session):
+    status, current = handle_api(
+        session, "GET", "/api/data/permit/current", {}, {})
+    assert status == 200 and current["permit"] is None
+
+
 def test_tui_snapshot_is_provenance_first(session):
     session.registry.record_event("demo", {"stage": "observe"})
     status, snap = handle_api(

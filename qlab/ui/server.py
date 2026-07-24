@@ -11,6 +11,8 @@ GET  /api/bootstrap            universe, mandate, agents, portfolio, defaults
 GET  /api/portfolio            broker-truth positions + risk report
 GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
+GET  /api/data/health          data-policy provenance, freshness, eligibility
+GET  /api/data/permit/current  the latest recorded data permit for a purpose
 GET  /api/events               event stream with cursor and limit
 GET  /api/plans                recent order plans
 GET  /api/orders               recent orders
@@ -612,6 +614,46 @@ class UISession:
             "autopilot": autopilot,
         }
 
+    def data_health(self, offline: bool, purpose: str = "paper_proposal") -> dict:
+        """Evaluate the active universe's data health and record a permit.
+
+        Fails soft into a ``blocked`` report (not an exception) when an
+        operational policy cannot obtain real data, so the TUI can surface the
+        outage instead of the owner thread dying.
+        """
+        from qlab.core import data as market
+        from qlab.data.health import evaluate_panel_health
+        from qlab.data.permit import build_permit
+
+        tickers = self.mandate.universe_whitelist
+        policy = market.policy_for(offline, seed=self.seed)
+        try:
+            snap = market.snapshot(
+                tickers, date.today().isoformat(), lookback_days=252,
+                policy=policy, seed=self.seed)
+        except market.DataUnavailable as exc:
+            return {
+                "blocked": True, "mode": policy.mode, "provider": policy.provider,
+                "feed": policy.feed, "reason": str(exc),
+                "eligible_for_paper_proposal": False,
+                "eligible_for_execution": False,
+            }
+        health = evaluate_panel_health(snap.prices, policy, tickers=tickers)
+        permit = build_permit(
+            snapshot_id=snap.content_hash(), purpose=purpose, policy=policy,
+            health=health, universe=tickers, as_of=str(snap.as_of))
+        self.registry.record_data_permit(permit.to_dict())
+        return {
+            "blocked": False, "mode": policy.mode, "feed": policy.feed,
+            "permit_id": permit.permit_id, **health.to_dict(),
+        }
+
+    def data_permit_current(self, purpose: str = "paper_proposal") -> dict:
+        """The most recently recorded data permit for ``purpose`` (or null)."""
+        permit = self.registry.current_data_permit(purpose)
+        return {"purpose": purpose, "permit": (permit or {}).get("permit")
+                if permit else None}
+
     def allocation_policy(self) -> dict:
         from qlab.algorithms import get_operational_policy
 
@@ -875,6 +917,15 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/system":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.system_status(offline)
+
+    if method == "GET" and path == "/api/data/health":
+        offline = _qbool(query, "offline", session.offline_default)
+        purpose = query.get("purpose", ["paper_proposal"])[0]
+        return 200, session.data_health(offline, purpose)
+
+    if method == "GET" and path == "/api/data/permit/current":
+        purpose = query.get("purpose", ["paper_proposal"])[0]
+        return 200, session.data_permit_current(purpose)
 
     if method == "GET" and path == "/api/events":
         limit = int(query.get("limit", ["100"])[0])

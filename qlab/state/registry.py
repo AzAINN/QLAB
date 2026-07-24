@@ -149,6 +149,10 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     phase VARCHAR, agent VARCHAR, status VARCHAR, summary VARCHAR,
     artifacts JSON, started_at VARCHAR, completed_at VARCHAR,
     updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS data_permits (
+    permit_id VARCHAR PRIMARY KEY, snapshot_id VARCHAR, purpose VARCHAR,
+    provider VARCHAR, feed VARCHAR, as_of VARCHAR, permit JSON,
+    eligible_for_execution BOOLEAN, created_at VARCHAR);
 """
 
 
@@ -1180,6 +1184,36 @@ class Registry:
                          [eid, _now(), kind, _j(payload)])
         return eid
 
+    def record_data_permit(self, permit: dict) -> str:
+        """Persist a data permit and return its id.
+
+        The permit is content-addressed, so re-recording the same permit is
+        idempotent (INSERT OR REPLACE on the deterministic ``permit_id``).
+        """
+        permit_id = str(permit["permit_id"])
+        self.con.execute(
+            "INSERT OR REPLACE INTO data_permits VALUES (?,?,?,?,?,?,?,?,?)",
+            [permit_id, permit.get("snapshot_id"), permit.get("purpose"),
+             permit.get("provider"), permit.get("feed"), permit.get("as_of"),
+             _j(permit), bool(permit.get("eligible_for_execution", False)),
+             _now()],
+        )
+        return permit_id
+
+    def get_data_permit(self, permit_id: str) -> dict | None:
+        rows = self._rows(
+            "SELECT * FROM data_permits WHERE permit_id = ?", [permit_id])
+        return rows[0] if rows else None
+
+    def current_data_permit(self, purpose: str) -> dict | None:
+        """The most recently recorded permit for ``purpose`` (or None)."""
+        rows = self._rows(
+            "SELECT * FROM data_permits WHERE purpose = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            [purpose],
+        )
+        return rows[0] if rows else None
+
     def read_events(self, limit: int = 100, after: str | None = None) -> list[dict]:
         """Read an ordered event window for observer clients.
 
@@ -1211,7 +1245,8 @@ class Registry:
                 if k in ("spec", "tickers", "summary", "params", "weights",
                          "diagnostics", "metrics", "choice", "realized_outcome",
                          "targets", "pre_trade", "payload", "reasons",
-                         "legs", "request", "result", "artifacts") and isinstance(v, str):
+                         "legs", "request", "result", "artifacts",
+                         "permit") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:

@@ -80,6 +80,9 @@ def _as_date(value: date | datetime | str, name: str) -> date:
     raise TypeError(f"{name} must be a date or ISO date string")
 
 
+_NYSE_REGULAR_CLOSE = time(16, 0)
+
+
 def is_trading_day(day: date | datetime) -> bool:
     """Return whether ``day`` is a full or early-close NYSE session."""
     day = _as_date(day, "day")
@@ -89,6 +92,66 @@ def is_trading_day(day: date | datetime) -> bool:
             "extend _NYSE_HOLIDAYS before scheduling this date"
         )
     return day.weekday() < 5 and day not in _NYSE_HOLIDAYS
+
+
+def _is_session(day: date) -> bool:
+    """Lenient session predicate for counting across the calendar boundary.
+
+    Unlike :func:`is_trading_day` it never raises outside 2024-2027 — it falls
+    back to a weekday check so freshness math on an old bar degrades to "very
+    stale" instead of crashing.
+    """
+    if day.year in _SUPPORTED_YEARS:
+        return day.weekday() < 5 and day not in _NYSE_HOLIDAYS
+    return day.weekday() < 5
+
+
+def last_completed_session(
+    now: datetime | None = None,
+    *,
+    close: time = _NYSE_REGULAR_CLOSE,
+    finalization_grace: timedelta = timedelta(minutes=20),
+) -> date:
+    """The most recent NYSE session whose close (+grace) is at or before ``now``.
+
+    Session-aware freshness (plan §6.4): before today's close+grace the prior
+    completed session is current, and weekends/holidays never make a
+    prior-session bar stale. ``now`` must be timezone-aware.
+    """
+    current = now or datetime.now(_NYSE_TZ)
+    if current.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    current = current.astimezone(_NYSE_TZ)
+    day = current.date()
+    for _ in range(10):
+        if _is_session(day):
+            session_end = (
+                datetime.combine(day, close, tzinfo=_NYSE_TZ) + finalization_grace
+            )
+            if current >= session_end:
+                return day
+        day -= timedelta(days=1)
+    raise ValueError("no completed NYSE session found within 10 days of now")
+
+
+def sessions_between(
+    start_exclusive: date | datetime | str,
+    end_inclusive: date | datetime | str,
+) -> int:
+    """Count NYSE sessions in ``(start_exclusive, end_inclusive]`` (>= 0)."""
+    start = _as_date(start_exclusive, "start_exclusive")
+    end = _as_date(end_inclusive, "end_inclusive")
+    if end <= start:
+        return 0
+    count = 0
+    day = start
+    for _ in range(400):  # bound the walk; older than this reads as "very stale"
+        day += timedelta(days=1)
+        if day > end:
+            break
+        if _is_session(day):
+            count += 1
+    return count
 
 
 def next_rebalance_due(

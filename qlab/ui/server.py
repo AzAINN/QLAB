@@ -37,6 +37,11 @@ POST /api/workflows/start      begin a standard or panel workforce run
 POST /api/workflows/<phase>    update one role-bound workflow phase
 POST /api/rebalance_preview    build an exact, referee-bound checked plan
 POST /api/plans/execute        human-confirm one existing checked paper plan
+POST /api/approvals            create a plan-bound, expiring approval request
+GET  /api/approvals            list approval requests (optionally by status)
+GET  /api/approvals/<id>       one approval request
+POST /api/approvals/<id>/approve|reject|challenge   the human decision
+POST /api/plans/<id>/execute   execute by consuming a matching human approval
 POST /api/recommend            an operational allocation recommendation
 POST /api/run_once             one autopilot iteration (analyze -> solve -> trade)
 POST /api/daily_ops            heartbeat (reconcile/risk/triggers; never trades)
@@ -863,6 +868,132 @@ class UISession:
                           "answer, but the owner, data, and book remain usable"),
         }
 
+    # -- human approvals (the persisted execution gate) ---------------------
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def create_approval(self, body: dict, offline: bool) -> dict:
+        """Create a pending approval bound to an exact checked plan."""
+        from qlab.governance.approval import book_revision, build_approval_request
+
+        plan_id = str(body.get("plan_id") or "")
+        plan = self.registry.get_plan(plan_id)
+        if plan is None:
+            raise KeyError(f"unknown plan_id {plan_id!r}")
+        permit = self.registry.current_data_permit("execution")
+        approval = build_approval_request(
+            plan,
+            broker=("alpaca_paper" if not offline else "simulated_paper"),
+            data_permit_id=(permit or {}).get("permit_id"),
+            current_book_revision=book_revision(self.registry.get_positions()),
+            summary={"n_legs": (plan.get("pre_trade") or {}).get("n_legs"),
+                     "turnover": (plan.get("pre_trade") or {}).get("turnover")},
+            task_id=body.get("task_id"))
+        self.registry.create_approval_request(approval)
+        self.registry.record_event("approval_created",
+                                   {"approval_id": approval["approval_id"],
+                                    "plan_id": plan_id})
+        return {"approval_id": approval["approval_id"], "status": "pending",
+                "expires_at": approval["expires_at"]}
+
+    def list_approvals(self, status: str | None = None) -> dict:
+        self.registry.expire_due_approvals(self._now_iso())
+        return {"approvals": self.registry.list_approval_requests(50, status)}
+
+    def get_approval(self, approval_id: str) -> dict:
+        self.registry.expire_due_approvals(self._now_iso())
+        approval = self.registry.get_approval_request(approval_id)
+        if approval is None:
+            raise KeyError(f"unknown approval_id {approval_id!r}")
+        return approval
+
+    def challenge_approval(self, approval_id: str, body: dict) -> dict:
+        import hashlib
+
+        text = str(body.get("challenge") or "").strip()
+        if not text:
+            raise ValueError("challenge text is required")
+        digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+        self.registry.transition_approval(
+            approval_id, "pending", challenge_digest=digest)
+        self.registry.record_event("approval_challenged",
+                                   {"approval_id": approval_id})
+        return {"approval_id": approval_id, "challenge_digest": digest}
+
+    def decide_approval(self, approval_id: str, decision: str) -> dict:
+        """Approve or reject a pending approval (the human decision)."""
+        approval = self.registry.get_approval_request(approval_id)
+        if approval is None:
+            raise KeyError(f"unknown approval_id {approval_id!r}")
+        if approval.get("status") != "pending":
+            raise PermissionError(
+                f"approval is {approval.get('status')!r}, not pending")
+        status = {"approve": "approved", "reject": "rejected"}[decision]
+        self.registry.transition_approval(
+            approval_id, status, decided_at=self._now_iso())
+        self.registry.record_event("approval_" + status,
+                                   {"approval_id": approval_id})
+        return {"approval_id": approval_id, "status": status}
+
+    def execute_plan_with_approval(self, plan_id: str, body: dict,
+                                   offline: bool) -> dict:
+        """Governed execution: consume a persisted, matching human approval.
+
+        This is the invariant-#14 path — a boolean cannot stand in for a human.
+        The approval must be 'approved', unexpired, and still bind the exact
+        plan, targets, and book; otherwise it is invalidated, not executed.
+        """
+        from qlab.governance.approval import book_revision, check_approval_for_execution
+        from qlab.trader.broker import get_broker
+        from qlab.trader.mandate import MandateViolation
+        from qlab.trader.plan import OrderLeg, OrderPlan, execute_plan
+
+        approval_id = str(body.get("approval_id") or "")
+        self.registry.expire_due_approvals(self._now_iso())
+        approval = self.registry.get_approval_request(approval_id)
+        stored = self.registry.get_plan(plan_id)
+        if stored is None:
+            raise KeyError(f"unknown plan_id {plan_id!r}")
+
+        reasons = check_approval_for_execution(
+            approval or {}, stored,
+            current_book_revision=book_revision(self.registry.get_positions()),
+            now_iso=self._now_iso(),
+            data_permit_id=(approval or {}).get("data_permit_id"))
+        if reasons:
+            if approval and approval.get("status") == "approved":
+                self.registry.transition_approval(
+                    approval_id, "invalidated",
+                    invalidated_reason="; ".join(reasons))
+            return {"executed": False, "blocked_by": "approval", "reasons": reasons}
+
+        # Operational execution additionally revalidates data at submission.
+        from qlab.core import data as market
+
+        policy = market.policy_for(offline, seed=self.seed)
+        if policy.execution_eligible:
+            health = self.data_health(offline, purpose="execution")
+            if health.get("blocked") or not health.get("eligible_for_execution"):
+                return {"executed": False, "blocked_by": "data_revalidation",
+                        "data_health": health}
+
+        legs = [OrderLeg(**leg) for leg in (stored.get("legs") or [])]
+        plan = OrderPlan(plan_id=stored["plan_id"], decision_id=stored["decision_id"],
+                         targets=stored["targets"], legs=legs,
+                         pre_trade=stored["pre_trade"], state=stored["state"])
+        broker = get_broker(self.registry, offline=offline,
+                            starting_cash=self.mandate.paper_capital, seed=self.seed,
+                            universe=self.mandate.universe_whitelist)
+        try:
+            result = execute_plan(self.registry, broker, plan)
+        except MandateViolation as exc:
+            return {"executed": False, "mandate_violation": str(exc)}
+        self.registry.transition_approval(
+            approval_id, "consumed", consumed_at=self._now_iso())
+        self.registry.record_event("approval_consumed",
+                                   {"approval_id": approval_id, "plan_id": plan_id})
+        return {"executed": True, "approval_id": approval_id, **result}
+
     def allocation_policy(self) -> dict:
         from qlab.algorithms import get_operational_policy
 
@@ -1173,6 +1304,46 @@ def handle_api(session: UISession, method: str, path: str,
             return 200, session.bob_message(body)
         except ValueError as exc:
             return 400, {"error": str(exc)}
+
+    if method == "POST" and path == "/api/approvals":
+        try:
+            return 200, session.create_approval(body, off)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+
+    if method == "GET" and path == "/api/approvals":
+        return 200, session.list_approvals(query.get("status", [None])[0])
+
+    if method == "POST" and path.startswith("/api/approvals/"):
+        rest = path.removeprefix("/api/approvals/")
+        approval_id, _, action = rest.partition("/")
+        try:
+            if action == "challenge":
+                return 200, session.challenge_approval(approval_id, body)
+            if action in ("approve", "reject"):
+                return 200, session.decide_approval(approval_id, action)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
+        except (ValueError, PermissionError) as exc:
+            return 400, {"error": str(exc)}
+        return 404, {"error": f"unknown approval action {action!r}"}
+
+    if method == "GET" and path.startswith("/api/approvals/"):
+        approval_id = path.removeprefix("/api/approvals/")
+        try:
+            return 200, session.get_approval(approval_id)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
+
+    if (method == "POST" and path.startswith("/api/plans/")
+            and path.endswith("/execute") and path != "/api/plans/execute"):
+        plan_id = path.removeprefix("/api/plans/").removesuffix("/execute")
+        try:
+            return 200, session.execute_plan_with_approval(plan_id, body, off)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
 
     if method == "GET" and path == "/api/events":
         limit = int(query.get("limit", ["100"])[0])

@@ -162,6 +162,13 @@ CREATE TABLE IF NOT EXISTS bob_tasks (
     trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
     conclusion JSON, error VARCHAR, attempt_count INTEGER,
     created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS approval_requests (
+    approval_id VARCHAR PRIMARY KEY, task_id VARCHAR, plan_id VARCHAR,
+    plan_digest VARCHAR, decision_id VARCHAR, targets_hash VARCHAR,
+    data_permit_id VARCHAR, broker VARCHAR, book_revision VARCHAR,
+    expected_cost JSON, summary JSON, status VARCHAR, challenge_digest VARCHAR,
+    expires_at VARCHAR, decided_at VARCHAR, consumed_at VARCHAR,
+    invalidated_reason VARCHAR, created_at VARCHAR);
 """
 
 
@@ -1340,6 +1347,78 @@ class Registry:
                 [day_iso[:10]])
         return int(rows[0]["n"]) if rows else 0
 
+    # -- approval requests (the human execution gate) -----------------------
+    def create_approval_request(self, approval: dict) -> str:
+        """Persist a pending approval request bound to an exact plan."""
+        aid = str(approval["approval_id"])
+        self.con.execute(
+            "INSERT INTO approval_requests (approval_id, task_id, plan_id, "
+            "plan_digest, decision_id, targets_hash, data_permit_id, broker, "
+            "book_revision, expected_cost, summary, status, challenge_digest, "
+            "expires_at, decided_at, consumed_at, invalidated_reason, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [aid, approval.get("task_id"), approval.get("plan_id"),
+             approval.get("plan_digest"), approval.get("decision_id"),
+             approval.get("targets_hash"), approval.get("data_permit_id"),
+             approval.get("broker"), approval.get("book_revision"),
+             _j(approval.get("expected_cost")), _j(approval.get("summary")),
+             "pending", None, approval.get("expires_at"), None, None, None,
+             _now()])
+        return aid
+
+    def get_approval_request(self, approval_id: str) -> dict | None:
+        rows = self._rows(
+            "SELECT * FROM approval_requests WHERE approval_id = ?", [approval_id])
+        return rows[0] if rows else None
+
+    def list_approval_requests(self, limit: int = 50,
+                               status: str | None = None) -> list[dict]:
+        if status is not None:
+            return self._rows(
+                "SELECT * FROM approval_requests WHERE status = ? "
+                "ORDER BY created_at DESC LIMIT ?", [status, limit])
+        return self._rows(
+            "SELECT * FROM approval_requests ORDER BY created_at DESC LIMIT ?",
+            [limit])
+
+    def transition_approval(self, approval_id: str, status: str, *,
+                            challenge_digest: str | None = None,
+                            decided_at: str | None = None,
+                            consumed_at: str | None = None,
+                            invalidated_reason: str | None = None) -> None:
+        sets, params = ["status=?"], [status]
+        if challenge_digest is not None:
+            sets.append("challenge_digest=?")
+            params.append(challenge_digest)
+        if decided_at is not None:
+            sets.append("decided_at=?")
+            params.append(decided_at)
+        if consumed_at is not None:
+            sets.append("consumed_at=?")
+            params.append(consumed_at)
+        if invalidated_reason is not None:
+            sets.append("invalidated_reason=?")
+            params.append(invalidated_reason)
+        params.append(approval_id)
+        self.con.execute(
+            f"UPDATE approval_requests SET {', '.join(sets)} "
+            "WHERE approval_id=?", params)
+
+    def expire_due_approvals(self, now_iso: str) -> list[str]:
+        """Mark pending approvals whose expiry has passed as expired.
+
+        Returns the ids expired. Deterministic given ``now_iso`` so the owner's
+        expiry sweep is auditable.
+        """
+        due = self._rows(
+            "SELECT approval_id FROM approval_requests "
+            "WHERE status = 'pending' AND expires_at IS NOT NULL "
+            "AND expires_at <= ?", [now_iso])
+        ids = [r["approval_id"] for r in due]
+        for aid in ids:
+            self.transition_approval(aid, "expired", decided_at=now_iso)
+        return ids
+
     def read_events(self, limit: int = 100, after: str | None = None) -> list[dict]:
         """Read an ordered event window for observer clients.
 
@@ -1372,8 +1451,8 @@ class Registry:
                          "diagnostics", "metrics", "choice", "realized_outcome",
                          "targets", "pre_trade", "payload", "reasons",
                          "legs", "request", "result", "artifacts",
-                         "permit", "trigger_payload",
-                         "conclusion") and isinstance(v, str):
+                         "permit", "trigger_payload", "conclusion",
+                         "expected_cost") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:

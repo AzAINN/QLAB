@@ -72,3 +72,5 @@ start of every loop iteration. The work list lives in
 - Treat its output as a worker's draft: tests and review decide, not trust.
 
 OWNER DIRECTIVE (2026-07-24, mid-loop): after P4 completes, continue the loop into the P5 quality phase above — deep code review and quality improvement until a sweep comes back clean.
+
+STDIN FIX (2026-07-24): backgrounded 'codex exec "PROMPT" > log' HANGS reading stdin as an appended block. ALWAYS append '< /dev/null' to codex exec calls run via Bash run_in_background. Heredoc briefs ('codex exec - <<BRIEF') are safe (stdin EOFs).

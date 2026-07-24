@@ -200,6 +200,23 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "cadence": cadence,
         })
 
+    @app.tool(name="research_apply_views")
+    def research_apply_views(
+        as_of: str,
+        universe: str,
+        views: list[dict],
+        kl_budget: float = 0.25,
+        dry: bool = True,
+    ) -> dict:
+        """Validate and apply dry research risk views through the owner."""
+        return lab("research.apply_views", {
+            "as_of": as_of,
+            "universe": universe,
+            "views": views,
+            "kl_budget": kl_budget,
+            "dry": dry,
+        })
+
     # -- regime indicators (options for the analyst's regime call) --------
     def regime(name: str, as_of: str, universe: str, lookback_days: int) -> dict:
         return lab(name, {"as_of": as_of, "universe": universe,

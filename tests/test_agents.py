@@ -31,10 +31,10 @@ def _generated_claude_tool_ids(md_path: Path) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
-def test_all_seven_roles_present():
+def test_all_eight_roles_present():
     agents = _by_name()
     assert set(agents) == {
-        "data-qa", "signal-qa", "moments-analyst", "challenger",
+        "news-extractor", "data-qa", "signal-qa", "moments-analyst", "challenger",
         "optimization-runner", "referee", "reporter",
     }
 
@@ -64,10 +64,30 @@ def test_estimation_roles_define_the_bounded_debate_protocol():
     assert "never adjudicate target weights" in referee
 
 
+def test_news_extractor_source_keeps_the_return_ban_and_dry_boundary():
+    extractor = _by_name()["news-extractor"]
+    assert extractor.tools == ["mcp__qlab__research.apply_views"]
+    assert '"X will go up"' in extractor.body
+    assert "refuse to emit a view" in extractor.body
+    assert "at most three views" in extractor.body
+    assert "source_quote" in extractor.body
+    assert "confidence in `(0, 0.7]`" in extractor.body
+    assert "dry=true" in extractor.body
+    assert "condition a downstream moment set" in extractor.body
+
+
 def test_least_privilege_separation():
     """Least-privilege keys off tool *base names* (TRADER_TOOLS), not the server
     prefix — every tool now lives behind the single ``qlab`` runtime server."""
     a = _by_name()
+
+    # The quarantine has one typed construction call and no general reads,
+    # registry writes, workflow authority, numeric engines, or book access.
+    extractor = a["news-extractor"]
+    assert extractor.tools == ["mcp__qlab__research.apply_views"]
+    extractor_scopes = role_scopes(extractor.tools)
+    assert extractor_scopes["lab"] == {"research.apply_views"}
+    assert extractor_scopes["trader"] == set()
 
     # moments-analyst judges; it runs no solver and cannot touch the book.
     ma = role_scopes(a["moments-analyst"].tools)
@@ -160,8 +180,10 @@ def test_sync_writes_both_adapters(tmp_path: Path):
     claude_out = tmp_path / "claude"
     bob_out = tmp_path / "bob"
     written = sync(claude_out=claude_out, bob_out=bob_out)
-    assert len(written["claude"]) == 7
-    assert len(written["bob"]) == 7
+    assert len(written["claude"]) == 8
+    assert len(written["bob"]) == 8
+    assert (claude_out / "news-extractor.md").exists()
+    assert (bob_out / "news-extractor.yaml").exists()
     assert (claude_out / "data-qa.md").exists()
     assert (bob_out / "data-qa.yaml").exists()
     assert (claude_out / "signal-qa.md").exists()

@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import os
 from datetime import date
+from numbers import Real
 
 from qlab.arms import Arm, MomentsConfig, build_policy
 from qlab.algorithms.catalog import (
@@ -40,12 +41,21 @@ from qlab.core.objective import build_objective
 from qlab.core.selection import MAX_EXACT_ASSETS, select_k_of_n
 from qlab.core.types import DataSnapshot, Decision
 from qlab.core.universe import load_universe
+from qlab.core.views import (
+    CorrView,
+    TailView,
+    VolView,
+    apply_views as apply_risk_views,
+)
 from qlab.core.window_evidence import window_evidence
 from qlab.experiment import recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
 from qlab.solvers.base import Constraints
 
 
+_MAX_RISK_VIEWS = 3
+_MAX_VIEW_CONFIDENCE = 0.7
+_VIEWS_LOOKBACK_DAYS = 756
 _DATA_INTEGRITY_THRESHOLDS = {
     "max_last_bar_age_days": 4,
     "max_longest_gap_days": 5,
@@ -53,6 +63,153 @@ _DATA_INTEGRITY_THRESHOLDS = {
     "max_missing_bars": 0,
     "min_span_coverage": 0.95,
 }
+
+
+def _view_string(value: object, field: str, index: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"view {index} field {field!r} must be a non-empty string"
+        )
+    return value.strip()
+
+
+def _view_number(value: object, field: str, index: int) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"view {index} field {field!r} must be a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"view {index} field {field!r} must be finite")
+    return number
+
+
+def _validated_risk_views(
+    views: list[dict],
+) -> tuple[list[VolView | CorrView | TailView], list[dict]]:
+    """Validate the extractor's exact schema and build deterministic view types."""
+    if not isinstance(views, list):
+        raise TypeError("views must be a list of view objects")
+    if not views:
+        raise ValueError("research.apply_views requires at least one risk view")
+    if len(views) > _MAX_RISK_VIEWS:
+        raise ValueError(
+            f"research.apply_views accepts at most {_MAX_RISK_VIEWS} views, "
+            f"got {len(views)}"
+        )
+
+    fields_by_type = {
+        "vol": {
+            "type", "ticker", "target_vol", "confidence", "source_quote",
+        },
+        "corr": {
+            "type", "ticker_a", "ticker_b", "target_corr", "confidence",
+            "source_quote",
+        },
+        "tail": {
+            "type", "ticker", "direction", "confidence", "source_quote",
+        },
+    }
+    typed: list[VolView | CorrView | TailView] = []
+    canonical: list[dict] = []
+    for index, raw in enumerate(views, start=1):
+        if not isinstance(raw, dict):
+            raise TypeError(f"view {index} must be an object")
+        if not all(isinstance(key, str) for key in raw):
+            raise TypeError(f"view {index} field names must be strings")
+
+        view_type = raw.get("type")
+        if not isinstance(view_type, str):
+            raise ValueError(
+                f"view {index} field 'type' must be one of "
+                f"{sorted(fields_by_type)}"
+            )
+        if view_type not in fields_by_type:
+            if view_type in {"return", "price", "directional", "alpha"}:
+                raise ValueError(
+                    f"view {index} type {view_type!r} is forbidden: expected-"
+                    "return and price-direction views may not enter qlab"
+                )
+            raise ValueError(
+                f"view {index} field 'type' must be one of "
+                f"{sorted(fields_by_type)}"
+            )
+
+        required = fields_by_type[view_type]
+        extra = set(raw) - required
+        if extra:
+            return_fields = sorted(
+                key for key in extra
+                if any(token in key.lower()
+                       for token in ("return", "price", "alpha", "directional"))
+            )
+            if return_fields:
+                raise ValueError(
+                    f"view {index} contains forbidden return/price fields "
+                    f"{return_fields}; only vol/corr/tail risk views qualify"
+                )
+            raise ValueError(
+                f"view {index} has unexpected fields {sorted(extra)}"
+            )
+        missing = required - set(raw)
+        if missing:
+            raise ValueError(
+                f"view {index} is missing required fields {sorted(missing)}"
+            )
+
+        confidence = _view_number(raw["confidence"], "confidence", index)
+        if not 0.0 < confidence <= _MAX_VIEW_CONFIDENCE:
+            raise ValueError(
+                f"view {index} confidence must be in "
+                f"(0, {_MAX_VIEW_CONFIDENCE}], got {confidence}"
+            )
+        source_quote = _view_string(
+            raw["source_quote"], "source_quote", index
+        )
+
+        if view_type == "vol":
+            ticker = _view_string(raw["ticker"], "ticker", index)
+            target_vol = _view_number(
+                raw["target_vol"], "target_vol", index
+            )
+            typed.append(VolView(ticker, target_vol, confidence))
+            canonical.append({
+                "type": "vol",
+                "ticker": ticker,
+                "target_vol": target_vol,
+                "confidence": confidence,
+                "source_quote": source_quote,
+            })
+        elif view_type == "corr":
+            ticker_a = _view_string(raw["ticker_a"], "ticker_a", index)
+            ticker_b = _view_string(raw["ticker_b"], "ticker_b", index)
+            target_corr = _view_number(
+                raw["target_corr"], "target_corr", index
+            )
+            typed.append(CorrView(
+                ticker_a, ticker_b, target_corr, confidence
+            ))
+            canonical.append({
+                "type": "corr",
+                "ticker_a": ticker_a,
+                "ticker_b": ticker_b,
+                "target_corr": target_corr,
+                "confidence": confidence,
+                "source_quote": source_quote,
+            })
+        else:
+            ticker = _view_string(raw["ticker"], "ticker", index)
+            direction = _view_string(
+                raw["direction"], "direction", index
+            )
+            typed.append(TailView(ticker, direction, confidence))
+            canonical.append({
+                "type": "tail",
+                "ticker": ticker,
+                "direction": direction,
+                "confidence": confidence,
+                "source_quote": source_quote,
+            })
+
+    return typed, canonical
 
 
 def _index_date(value) -> date:
@@ -710,6 +867,75 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
             "best": best,
             "caveats": caveats,
         }
+
+    # -- quarantined qualitative risk views -------------------------------
+    @app.tool(name="research.apply_views")
+    def research_apply_views(
+        as_of: str,
+        universe: str,
+        views: list[dict],
+        kl_budget: float = 0.25,
+        dry: bool = True,
+    ) -> dict:
+        """Validate and apply up to three risk views to a scenario panel.
+
+        This is a dry research diagnostic only. It records the bounded
+        entropy-pooling result, but does not persist conditioned tensors or
+        feed a downstream objective, solver, workflow phase, or paper plan.
+        """
+        st.budget.charge("research.apply_views")
+        if not isinstance(dry, bool):
+            raise TypeError("dry must be a boolean")
+        if not dry:
+            raise PermissionError(
+                "research.apply_views supports dry=true only; downstream "
+                "conditioning is not wired"
+            )
+        budget = _view_number(kl_budget, "kl_budget", 0)
+        if budget <= 0.0:
+            raise ValueError("kl_budget must be positive")
+        typed_views, canonical_views = _validated_risk_views(views)
+
+        d = check_as_of(as_of)
+        tickers = load_universe().tickers(universe)
+        snapshot = market.snapshot(
+            tickers,
+            d,
+            offline=st.offline,
+            seed=st.seed,
+        )
+        panel = snapshot.log_returns(
+            lookback_days=_VIEWS_LOOKBACK_DAYS
+        ).dropna(how="any")
+        result = apply_risk_views(
+            panel.to_numpy(dtype=float),
+            tickers,
+            typed_views,
+            kl_budget=budget,
+        )
+        summary = {
+            "kl_total": result.kl_total,
+            "kl_per_view": result.kl_per_view,
+            "moments_before": result.moments_before,
+            "moments_after": result.moments_after,
+            "applied_labels": list(result.labels),
+        }
+        run_id = st.registry.log_run("views", {
+            "algorithm_id": "entropy_pooling_views",
+            "as_of": str(d),
+            "universe": universe,
+            "tickers": tickers,
+            "source": snapshot.source,
+            "panel_lookback_days": _VIEWS_LOOKBACK_DAYS,
+            "n_scenarios": int(len(panel)),
+            "views": canonical_views,
+            "kl_budget": budget,
+            "dry": True,
+            "downstream_conditioning": False,
+            "dsr_trial_counted": False,
+            "result": summary,
+        })
+        return {"run_id": run_id, **summary}
 
     # -- backtest -----------------------------------------------------------
     @app.tool(name="backtest.run")

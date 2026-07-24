@@ -47,6 +47,7 @@ def test_combined_registration_exposes_both_namespaces():
     register_trader_tools(app, TraderState(registry=reg, offline=True))
     assert "moments.estimate" in app.names
     assert "qa.data_integrity" in app.names
+    assert "research.apply_views" in app.names
     assert "research.equilibrium_returns" in app.names
     assert "research.window_evidence" in app.names
     # Research-stage executables are owner-only: agent-facing surfaces —
@@ -58,6 +59,7 @@ def test_combined_registration_exposes_both_namespaces():
         owner_app, LabState(offline=True, registry=reg), owner_only=True)
     assert "selection.run" in owner_app.names
     assert "qa.data_integrity" in owner_app.names
+    assert "research.apply_views" in owner_app.names
     assert "research.equilibrium_returns" in owner_app.names
     assert "research.window_evidence" in owner_app.names
     assert "selection_run" not in owner_app.names
@@ -116,6 +118,52 @@ def test_equilibrium_returns_is_in_agent_visible_owner_scope():
     assert base in OWNER_LAB_TOOLS
     assert base in _LAB_TOOL_BASES
     assert _claude_tool(base) in _PROXY_TOOLS
+
+
+def test_apply_views_is_owner_proxy_visible_and_extractor_only():
+    from qlab.mcp.tui_proxy import register_proxy_tools
+    from qlab.tui.claude import (
+        _LAB_TOOL_BASES,
+        _PROXY_TOOLS,
+        _claude_tool,
+        build_workforce_agents,
+    )
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    base = "research.apply_views"
+    tool = _claude_tool(base)
+    assert base in OWNER_LAB_TOOLS
+    assert base in _LAB_TOOL_BASES
+    assert tool in _PROXY_TOOLS
+
+    proxy = StubApp()
+    register_proxy_tools(proxy, object())
+    assert "research_apply_views" in proxy.names
+
+    # Unrelated goals do not even materialize the quarantined session role.
+    assert "news-extractor" not in build_workforce_agents()
+    agents = build_workforce_agents(
+        "Apply views from these pasted news excerpts."
+    )
+    extractor = agents["news-extractor"]
+    assert extractor["tools"] == [tool]
+    assert not any(
+        token in granted
+        for granted in extractor["tools"]
+        for token in (
+            "data_", "registry_", "solve", "backtest", "workflow_", "market",
+            "portfolio", "web",
+        )
+    )
+    coordinator = agents["qlab-coordinator"]
+    assert "news-extractor" in coordinator["tools"][0]
+    assert "CONTEXT — DRY NEWS VIEWS" in coordinator["prompt"]
+    assert "ordinary unconditioned moment set and objective" in (
+        coordinator["prompt"]
+    )
+    assert "downstream solver conditioning is future work" in (
+        coordinator["prompt"]
+    )
 
 
 def test_data_integrity_reports_an_injected_stale_ticker(reg, monkeypatch):

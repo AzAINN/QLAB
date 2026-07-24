@@ -137,7 +137,7 @@ class UISession:
             offline=offline_default, seed=seed,
         )
         owner_tools = _OwnerToolApp()
-        register_lab_tools(owner_tools, self.lab_state)
+        register_lab_tools(owner_tools, self.lab_state, owner_only=True)
         self._lab_tools = owner_tools.tools
 
     # -- Claude workforce --------------------------------------------------

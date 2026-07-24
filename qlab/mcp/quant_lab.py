@@ -41,12 +41,17 @@ from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
 from qlab.solvers.base import Constraints
 
 
-def register_lab_tools(app, st: LabState) -> None:
+def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
     """Mount every research-lab tool on ``app``, bound to session state ``st``.
 
     Split out of ``build_server`` so the combined single-process server
     (``qlab.mcp.server``) can mount the lab and trader namespaces on one
     FastMCP app over one shared Registry (one DuckDB writer).
+
+    ``owner_only=True`` additionally mounts tools reserved for human-driven
+    surfaces (owner API → TUI/CLI). Research-stage executables such as
+    ``selection.run`` are owner-only: the catalog's stage boundary keeps
+    research algorithms off every agent-facing MCP surface, headless included.
     """
 
     # -- data ---------------------------------------------------------------
@@ -93,8 +98,7 @@ def register_lab_tools(app, st: LabState) -> None:
         mid = st.put_moment_set(ms)
         return {"moment_set_id": mid, "summary": ms.summary()}
 
-    # -- exact candidate selection ------------------------------------------
-    @app.tool(name="selection.run")
+    # -- exact candidate selection (owner-only: research stage) --------------
     def selection_run(as_of: str, k: int, universe: str = "candidates",
                       tickers: list[str] | None = None,
                       lookback_days: int = 756) -> dict:
@@ -161,6 +165,11 @@ def register_lab_tools(app, st: LabState) -> None:
             "run_id": run_id,
             "contributions": selection["contributions"],
         }
+
+    if owner_only:
+        # Research-stage executable: humans (TUI/CLI via the owner API) may run
+        # it; agent-facing MCP surfaces — headless included — never see it.
+        app.tool(name="selection.run")(selection_run)
 
     # -- regime indicators (options for the analyst's regime call) ----------
     # Five deterministic, price-only reads on different faces of market

@@ -769,10 +769,17 @@ class UISession:
         return None
 
     def latest_ablation_metrics(self) -> dict[str, dict]:
-        """Per-arm metrics from the newest run that recorded backtests."""
-        runs = sorted(self.registry.list_runs(200),
-                      key=lambda run: str(run.get("created_at", "")), reverse=True)
-        for run in runs:
+        """Per-arm metrics from the newest staged ablation run.
+
+        Only ``kind == "ablation"`` runs are comparable: ``backtest.run`` and
+        ``research.apply_views`` also write the backtests table, one raw arm id
+        at a time, and a newer one of those must never displace the ablation.
+        ``list_runs`` is already newest-first, and filtering before ``report``
+        keeps the TUI poll path off an N+1 scan of unrelated research history.
+        """
+        for run in self.registry.list_runs(200):
+            if run.get("kind") != "ablation":
+                continue
             backtests = self.registry.report(run["run_id"]).get("backtests") or []
             if backtests:
                 return {bt["arm_id"]: bt["metrics"] for bt in backtests}

@@ -75,6 +75,30 @@ def test_leaderboard_reports_method_names_not_codes(session):
     assert by_id["b1"]["ablation"] is None
 
 
+def test_leaderboard_ignores_newer_non_ablation_backtest_runs(session):
+    ablation = session.registry.log_run("ablation", {"note": "staged"})
+    session.registry.log_backtest(ablation, "B2", {"sharpe": 0.91})
+    # The referee's backtest.run and research_apply_views write the same table
+    # under other run kinds, with arm ids that match no curated arm. Newer is
+    # not the same as comparable — they must never displace the ablation.
+    probe = session.registry.log_run("backtest", {"arm": "min_variance:classical"})
+    session.registry.log_backtest(probe, "min_variance:classical", {"sharpe": 2.5})
+    views = session.registry.log_run("views", {"note": "pasted excerpt"})
+    session.registry.log_backtest(views, "views_probe", {"sharpe": 3.0})
+
+    assert [row["arm_id"] for row in session.leaderboard()] == ["B2"]
+    status, payload = handle_api(session, "GET", "/api/atlas", {}, {})
+    assert status == 200
+    by_id = {entry["entry_id"]: entry for entry in payload["entries"]}
+    assert by_id["b2"]["ablation"]["sharpe"] == 0.91
+
+
+def test_leaderboard_is_empty_without_any_ablation_evidence(session):
+    session.registry.log_run("backtest", {"arm": "hrp:classical"})
+    assert session.leaderboard() == []
+    assert session.latest_ablation_metrics() == {}
+
+
 def test_tui_snapshot_carries_the_leaderboard(session):
     run_id = session.registry.log_run("ablation", {"note": "snapshot"})
     session.registry.log_backtest(run_id, "B0", {"sharpe": 0.42})

@@ -59,6 +59,21 @@ def test_mvsk_is_research_not_the_operational_policy() -> None:
     assert get_operational_policy("hrp").algorithm_id == "hrp"
 
 
+def test_exact_selection_is_visible_but_not_staged_solveable(moment_set) -> None:
+    selection = get_algorithm("selection_k_of_n")
+    assert selection.category == "selection"
+    assert selection.stage == "research"
+    assert selection.solver is None
+    assert selection.prepared_objective is False
+    assert selection.agent_usable is False
+
+    objective = build_objective("min_variance", moment_set)
+    with pytest.raises(PermissionError, match="stage='research'"):
+        solve_prepared_objective(
+            "selection_k_of_n", objective, Constraints()
+        )
+
+
 def test_catalog_rejects_objective_algorithm_mismatch(moment_set) -> None:
     objective = build_objective("mvsk", moment_set, skew_lambda=0.5, kurt_lambda=0.5)
     with pytest.raises(ValueError, match="supports"):

@@ -4,6 +4,7 @@ Namespaced, ref-passing tools the orchestrator's subagents call:
 
     data.*       fetch the universe, summarize a point-in-time snapshot
     moments.*    estimate co-moments (returns a moment_set_id + summary)
+    selection.*  run the exact research-stage candidate-universe selector
     objective.*  build the one-true objective (returns an objective_id)
     algorithms.*  list, describe, and run staged algorithms
     solve.*       compatibility alias for staged prepared-objective solvers
@@ -32,6 +33,7 @@ from qlab.core import data as market
 from qlab.core.backtest import run_backtest
 from qlab.core.moments import detect_regime
 from qlab.core.objective import build_objective
+from qlab.core.selection import MAX_EXACT_ASSETS, select_k_of_n
 from qlab.core.types import DataSnapshot, Decision
 from qlab.core.universe import load_universe
 from qlab.experiment import recommend
@@ -90,6 +92,75 @@ def register_lab_tools(app, st: LabState) -> None:
                               higher_moments=higher_moments)
         mid = st.put_moment_set(ms)
         return {"moment_set_id": mid, "summary": ms.summary()}
+
+    # -- exact candidate selection ------------------------------------------
+    @app.tool(name="selection.run")
+    def selection_run(as_of: str, k: int, universe: str = "candidates",
+                      tickers: list[str] | None = None,
+                      lookback_days: int = 756) -> dict:
+        """Run and persist exact research-stage k-of-N selection (N<=25).
+
+        Supply either a configured universe tier or an explicit ticker list.
+        This is a research run, not an ``algorithms.solve`` or paper-allocation
+        path.
+        """
+        st.budget.charge("selection.run")
+        from qlab.core.moments import estimate_moments
+
+        d = check_as_of(as_of)
+        selected_universe = list(tickers) if tickers is not None else (
+            load_universe().tickers(universe)
+        )
+        if not selected_universe:
+            raise ValueError("selection requires at least one ticker")
+        if len(set(selected_universe)) != len(selected_universe):
+            raise ValueError("selection tickers must be unique")
+        if len(selected_universe) > MAX_EXACT_ASSETS:
+            raise ValueError(
+                f"exact k-of-N selection requires N <= {MAX_EXACT_ASSETS}; "
+                f"got N={len(selected_universe)}"
+            )
+        if isinstance(k, bool) or not isinstance(k, int):
+            raise TypeError("k must be an integer")
+        if not 1 <= k <= len(selected_universe):
+            raise ValueError(
+                f"k must satisfy 1 <= k <= N; got k={k}, "
+                f"N={len(selected_universe)}"
+            )
+        if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
+            raise TypeError("lookback_days must be an integer")
+        if lookback_days < 2:
+            raise ValueError("lookback_days must be at least 2")
+
+        snap = market.snapshot(
+            selected_universe, d, offline=st.offline, seed=st.seed
+        )
+        moments = estimate_moments(
+            snap, lookback_days=lookback_days, higher_moments=False
+        )
+        moment_set_id = st.put_moment_set(moments)
+        selection = select_k_of_n(
+            moments.tickers,
+            k,
+            covariance=moments.cov,
+        ).to_dict()
+        run_id = st.registry.log_run("selection", {
+            "algorithm_id": "selection_k_of_n",
+            "as_of": str(d),
+            "universe": "explicit" if tickers is not None else universe,
+            "tickers": selected_universe,
+            "k": k,
+            "lookback_days": lookback_days,
+            "source": snap.source,
+            "moment_set_id": moment_set_id,
+            "result": selection,
+        })
+        return {
+            "selected": selection["selected"],
+            "score": selection["score"],
+            "run_id": run_id,
+            "contributions": selection["contributions"],
+        }
 
     # -- regime indicators (options for the analyst's regime call) ----------
     # Five deterministic, price-only reads on different faces of market

@@ -74,6 +74,7 @@ OWNER_LAB_TOOLS = frozenset({
     "data.fetch_universe",
     "data.snapshot_summary",
     "moments.estimate",
+    "selection.run",
     "regime.turbulence",
     "regime.absorption",
     "regime.volatility_term_structure",

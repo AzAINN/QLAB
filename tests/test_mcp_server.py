@@ -44,6 +44,8 @@ def test_combined_registration_exposes_both_namespaces():
     register_lab_tools(app, LabState(offline=True, registry=reg))
     register_trader_tools(app, TraderState(registry=reg, offline=True))
     assert "moments.estimate" in app.names
+    assert "selection.run" in app.names
+    assert "selection_run" not in app.names
     assert {"algorithms.list", "algorithms.describe", "algorithms.solve"} <= set(app.names)
     assert "registry.log_verdict" in app.names
     assert "propose_rebalance" in app.names and "execute_plan" in app.names

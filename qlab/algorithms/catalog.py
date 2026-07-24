@@ -76,6 +76,12 @@ _ALGORITHMS = (
         "Rockafellar-Uryasev linear program over the historical scenario panel.",
     ),
     AlgorithmSpec(
+        "selection_k_of_n", "Exact k-of-N selection", "selection", "research",
+        ("selection_qubo",), None, "selection.run",
+        "Exact classical relevance/redundancy enumeration for N<=25; a "
+        "research-only candidate-universe gate, not an allocation or paper policy.",
+    ),
+    AlgorithmSpec(
         "regime_min_variance", "Regime-conditioned minimum variance", "allocation",
         "research", ("min_variance",), "classical", None,
         "Covariance-only research arm conditioned by the deterministic regime signal.",

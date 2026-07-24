@@ -8,6 +8,7 @@ same polynomial.
 * ``classical_multistart`` → MVSK (A3): multistart SLSQP that explores the
   non-convex landscape under deterministic seeded restarts.
 * ``risk_parity``          → equal-risk-contribution (B3).
+* ``target_semivariance``  → scenario mean squared shortfall, single SLSQP.
 
 An optional CVXPY fast path is used for the convex min-variance problem when the
 ``optimize`` extra is installed; otherwise scipy handles everything.
@@ -20,7 +21,7 @@ import time
 import numpy as np
 from scipy.optimize import minimize
 
-from qlab.core.objective import compile_scipy
+from qlab.core.objective import compile_scipy, compile_target_semivariance
 from qlab.core.types import Objective, SolveResult, Weights
 from qlab.solvers.base import Constraints, Solver, finalize_weights, register_solver
 
@@ -57,6 +58,65 @@ class ClassicalSolver(Solver):
             solver=self.name,
             status="optimal" if ok else "suboptimal",
             wall_clock_s=time.perf_counter() - t0,
+        )
+
+
+@register_solver("target_semivariance")
+class TargetSemivarianceSolver(Solver):
+    """Long-only scenario target-semivariance optimization."""
+
+    def solve(
+        self, objective: Objective, constraints: Constraints, *, returns=None, **_ctx
+    ) -> SolveResult:
+        if returns is None:
+            raise ValueError(
+                "target_semivariance needs the scenario return panel; "
+                "pass returns=<T×n array>"
+            )
+        t0 = time.perf_counter()
+        f, g = compile_target_semivariance(objective, returns)
+        scenarios = np.asarray(returns, dtype=float)
+        n = objective.n
+        x0 = np.full(n, constraints.budget / n)
+
+        # Daily squared returns are commonly O(1e-4) or smaller. Normalize the
+        # solve without changing the reported objective so SLSQP does not
+        # mistake its absolute tolerance for convergence at the initial point.
+        target = float(objective.extra.get("target", 0.0))
+        scale = max(
+            float(np.mean(scenarios ** 2)),
+            target ** 2,
+            f(x0),
+            1e-12,
+        )
+        res = minimize(
+            lambda w: f(w) / scale,
+            x0,
+            jac=lambda w: g(w) / scale,
+            method="SLSQP",
+            bounds=constraints.bounds(n),
+            constraints=[_budget_constraint(constraints.budget)],
+            options={"maxiter": 500, "ftol": 1e-12},
+        )
+        if not res.success or not np.isfinite(res.x).all():
+            raise RuntimeError(f"target semivariance SLSQP failed: {res.message}")
+        w = finalize_weights(res.x, constraints)
+        constraints.validate(w)
+        value = f(w)
+        return SolveResult(
+            weights=Weights(
+                tickers=objective.tickers,
+                values=[float(x) for x in w],
+            ),
+            objective_value=value,
+            solver=self.name,
+            status="optimal",
+            wall_clock_s=time.perf_counter() - t0,
+            diagnostics={
+                "target": target,
+                "n_scenarios": int(scenarios.shape[0]),
+                "downside_deviation": float(np.sqrt(value)),
+            },
         )
 
 

@@ -76,6 +76,12 @@ _ALGORITHMS = (
         "Rockafellar-Uryasev linear program over the historical scenario panel.",
     ),
     AlgorithmSpec(
+        "target_semivariance", "Target semivariance", "optimization", "research",
+        ("target_semivariance",), "target_semivariance", None,
+        "Mean squared below-target return over the historical scenario panel.",
+        prepared_objective=False,
+    ),
+    AlgorithmSpec(
         "selection_k_of_n", "Exact k-of-N selection", "selection", "research",
         ("selection_qubo",), None, "selection.run",
         "Exact classical relevance/redundancy enumeration for N<=25; a "

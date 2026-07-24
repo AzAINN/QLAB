@@ -16,6 +16,10 @@ subject to the long-only, fully-invested budget ``Σ wᵢ = 1``, ``w ≥ 0``.
 
 Offline encoding experiments consume the same polynomial terms through the
 explicit :mod:`qlab.algorithms.offline` boundary; they are not staged here.
+
+Scenario objectives are intentionally separate from that polynomial compiler.
+In particular, target semivariance is evaluated directly on the historical
+return panel, just as scenario CVaR is, and has no ``polynomial_terms`` form.
 """
 
 from __future__ import annotations
@@ -29,6 +33,17 @@ import numpy as np
 
 from qlab.core.types import MomentSet, Objective
 
+_SUPPORTED_FORMS = frozenset({
+    "min_variance",
+    "mvsk",
+    "max_utility",
+    "risk_parity",
+    "scenario_cvar",
+    "target_semivariance",
+    "selection_qubo",
+    "discretized_mv",
+})
+
 
 # ---------------------------------------------------------------------------
 # Build
@@ -40,6 +55,7 @@ def build_objective(
     skew_lambda: float = 0.0,
     kurt_lambda: float = 0.0,
     risk_aversion: float = 1.0,
+    target: float = 0.0,
     extra: dict | None = None,
     lambda_scale: str = "auto",
 ) -> Objective:
@@ -61,9 +77,19 @@ def build_objective(
     fraction of the Frobenius-norm-implied scale keeps λ_eff bounded relative
     to the tensor's actual magnitude under total contraction cancellation.
     """
+    if form not in _SUPPORTED_FORMS:
+        raise ValueError(
+            f"unsupported objective form {form!r}; "
+            f"available: {sorted(_SUPPORTED_FORMS)}"
+        )
     if lambda_scale not in ("auto", "raw"):
         raise ValueError(f"lambda_scale must be 'auto' or 'raw', got {lambda_scale!r}")
     extra = dict(extra or {})
+    if form == "target_semivariance":
+        target = float(target)
+        if not np.isfinite(target):
+            raise ValueError(f"target must be finite, got {target!r}")
+        extra["target"] = target
     l3, l4 = float(skew_lambda), float(kurt_lambda)
     if form == "mvsk" and lambda_scale == "auto":
         n = ms.n
@@ -165,11 +191,70 @@ def compile_scipy(obj: Objective) -> tuple[Callable[[np.ndarray], float],
     return f, g
 
 
+def compile_target_semivariance(
+    obj: Objective,
+    returns: np.ndarray,
+) -> tuple[Callable[[np.ndarray], float], Callable[[np.ndarray], np.ndarray]]:
+    """Compile mean squared below-target return over a scenario panel.
+
+    ``returns`` is a ``T × n`` matrix in the same ticker order as ``obj``.
+    The target is a per-scenario portfolio return stored by
+    :func:`build_objective`; observations at or above it contribute zero:
+
+    ``mean(max(target - returns @ w, 0) ** 2)``.
+
+    This convex, piecewise-quadratic scenario objective deliberately bypasses
+    the moment-polynomial compiler.
+    """
+    if obj.form != "target_semivariance":
+        raise ValueError(
+            "target semivariance compilation requires "
+            "form='target_semivariance'"
+        )
+    scenarios = np.asarray(returns, dtype=float)
+    if scenarios.ndim != 2:
+        raise ValueError(
+            "target_semivariance needs a two-dimensional scenario return panel"
+        )
+    if scenarios.shape[0] == 0:
+        raise ValueError(
+            "target_semivariance needs at least one return scenario"
+        )
+    if scenarios.shape[1] != obj.n:
+        raise ValueError(
+            "target_semivariance scenario columns must match objective assets: "
+            f"got {scenarios.shape[1]}, expected {obj.n}"
+        )
+    if not np.isfinite(scenarios).all():
+        raise ValueError(
+            "target_semivariance scenario return panel must contain only "
+            "finite values"
+        )
+    target = float(obj.extra.get("target", 0.0))
+    if not np.isfinite(target):
+        raise ValueError(f"target must be finite, got {target!r}")
+
+    def f(w: np.ndarray) -> float:
+        shortfall = np.maximum(target - scenarios @ w, 0.0)
+        return float(np.mean(shortfall ** 2))
+
+    def g(w: np.ndarray) -> np.ndarray:
+        shortfall = np.maximum(target - scenarios @ w, 0.0)
+        return -2.0 * (scenarios.T @ shortfall) / scenarios.shape[0]
+
+    return f, g
+
+
 def evaluate(obj: Objective, w: np.ndarray) -> float:
     """Evaluate the objective at ``w`` (uniform reporting across solver arms)."""
     if obj.form in ("min_variance", "max_utility", "mvsk"):
         f, _ = compile_scipy(obj)
         return f(np.asarray(w, dtype=float))
+    if obj.form == "target_semivariance":
+        raise ValueError(
+            "target_semivariance evaluation requires its scenario return panel; "
+            "use compile_target_semivariance"
+        )
     # For forms without a scalar polynomial (risk_parity, hrp, cvar) report the
     # portfolio variance so arms remain loosely comparable.
     w = np.asarray(w, dtype=float)
@@ -232,6 +317,11 @@ def compile_dirac_hubo(obj: Objective, budget: float = 1.0) -> dict:
     structured spec (term counts + coefficient references) so it can be
     submitted by :mod:`qlab.solvers.dirac3` when a QCI account is configured.
     """
+    if obj.form == "target_semivariance":
+        raise ValueError(
+            "target_semivariance is scenario-based and has no continuous-HUBO "
+            "polynomial payload"
+        )
     n = obj.n
     payload: dict = {
         "n_variables": n,

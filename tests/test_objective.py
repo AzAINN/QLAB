@@ -14,6 +14,7 @@ from qlab.core.objective import (
     build_objective,
     compile_dirac_hubo,
     compile_scipy,
+    compile_target_semivariance,
     term_contributions,
 )
 from qlab.core.moments import co_moments, ledoit_wolf
@@ -72,6 +73,67 @@ def test_dirac_hubo_declares_degree_three_for_skew_only_mvsk(moment_set):
     assert payload["max_degree"] == 3
     assert payload["terms"]["degree3_from_coskew"] > 0
     assert payload["terms"]["degree4_from_cokurt"] == 0
+
+
+def test_target_semivariance_uses_scenarios_and_avoids_downside_asset():
+    from qlab.core.objective import polynomial_terms
+    from qlab.solvers.base import Constraints, get_solver
+
+    returns = np.array([
+        [-0.010, 0.001, -0.004],
+        [-0.010, 0.002, 0.030],
+        [-0.010, 0.003, -0.004],
+        [0.010, 0.080, 0.030],
+        [0.010, 0.001, -0.004],
+        [0.010, 0.002, 0.030],
+    ])
+    ms = MomentSet(
+        tickers=["DOWNSIDE", "UPSIDE", "DIVERSIFIER"],
+        as_of=date(2020, 1, 1),
+        mu=returns.mean(axis=0),
+        cov=np.cov(returns, rowvar=False, ddof=1),
+    )
+    semivariance = build_objective("target_semivariance", ms, target=0.0)
+    f, _g = compile_target_semivariance(semivariance, returns)
+    constraints = Constraints()
+    semi_result = get_solver("target_semivariance").solve(
+        semivariance, constraints, returns=returns
+    )
+    min_variance_result = get_solver("classical").solve(
+        build_objective("min_variance", ms), constraints
+    )
+
+    w_semi = semi_result.weights.as_array()
+    w_min_variance = min_variance_result.weights.as_array()
+    expected = np.mean(np.maximum(-(returns @ w_semi), 0.0) ** 2)
+    assert semi_result.objective_value == pytest.approx(expected, abs=1e-12)
+    assert f(w_semi) == pytest.approx(expected, abs=1e-12)
+    assert w_semi[0] < w_min_variance[0] - 0.5
+    assert semivariance.extra["target"] == 0.0
+    with pytest.raises(ValueError, match="no polynomial form"):
+        polynomial_terms(semivariance)
+
+
+def test_target_semivariance_validates_target_and_scenario_panel(moment_set):
+    from qlab.solvers.base import Constraints, get_solver
+
+    with pytest.raises(ValueError, match="unsupported objective form"):
+        build_objective("not_an_objective", moment_set)
+    with pytest.raises(ValueError, match="target must be finite"):
+        build_objective("target_semivariance", moment_set, target=float("nan"))
+
+    objective = build_objective(
+        "target_semivariance", moment_set, target=0.001
+    )
+    solver = get_solver("target_semivariance")
+    with pytest.raises(ValueError, match="scenario return panel"):
+        solver.solve(objective, Constraints())
+    with pytest.raises(ValueError, match="columns must match"):
+        solver.solve(
+            objective,
+            Constraints(),
+            returns=np.zeros((5, objective.n - 1)),
+        )
 
 
 # ---------------------------------------------------------------------------

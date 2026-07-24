@@ -59,6 +59,25 @@ def test_mvsk_is_research_not_the_operational_policy() -> None:
     assert get_operational_policy("hrp").algorithm_id == "hrp"
 
 
+def test_target_semivariance_is_research_and_refused_by_staged_solve(
+    moment_set,
+) -> None:
+    spec = get_algorithm("target_semivariance")
+    assert spec.category == "optimization"
+    assert spec.stage == "research"
+    assert spec.solver == "target_semivariance"
+    assert spec.prepared_objective is False
+    assert spec.agent_usable is False
+
+    objective = build_objective(
+        "target_semivariance", moment_set, target=0.0
+    )
+    with pytest.raises(PermissionError, match="stage='research'"):
+        solve_prepared_objective(
+            "target_semivariance", objective, Constraints()
+        )
+
+
 def test_exact_selection_is_visible_but_not_staged_solveable(moment_set) -> None:
     selection = get_algorithm("selection_k_of_n")
     assert selection.category == "selection"

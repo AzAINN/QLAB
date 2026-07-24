@@ -22,6 +22,99 @@ from scipy import stats
 _TRADING_DAYS = 252
 
 
+def _clean_returns(returns, *, name: str = "returns") -> np.ndarray:
+    values = np.asarray(returns, dtype=float)
+    if values.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    values = values[~np.isnan(values)]
+    if values.size == 0:
+        raise ValueError(f"{name} must contain at least one observation")
+    if not np.isfinite(values).all():
+        raise ValueError(f"{name} must contain only finite values")
+    return values
+
+
+def omega_ratio(returns, target: float = 0.0) -> float:
+    """Gain-to-shortfall ratio relative to a per-period target.
+
+    Missing observations are dropped. If there are no below-target
+    observations, the ratio is defined as positive infinity.
+    """
+    values = _clean_returns(returns)
+    target = float(target)
+    if not np.isfinite(target):
+        raise ValueError(f"target must be finite, got {target!r}")
+    excess = values - target
+    gains = float(np.maximum(excess, 0.0).sum())
+    shortfall = float(np.maximum(-excess, 0.0).sum())
+    return float("inf") if shortfall == 0.0 else gains / shortfall
+
+
+def downside_deviation(returns, target: float = 0.0) -> float:
+    """Root mean squared below-target return over all observations."""
+    values = _clean_returns(returns)
+    target = float(target)
+    if not np.isfinite(target):
+        raise ValueError(f"target must be finite, got {target!r}")
+    shortfall = np.maximum(target - values, 0.0)
+    return float(np.sqrt(np.mean(shortfall ** 2)))
+
+
+def _capture_inputs(returns, benchmark_returns) -> tuple[np.ndarray, np.ndarray]:
+    if isinstance(returns, pd.Series) and isinstance(benchmark_returns, pd.Series):
+        paired = pd.concat(
+            [returns.rename("returns"), benchmark_returns.rename("benchmark")],
+            axis=1,
+            join="inner",
+        ).dropna()
+        values = paired["returns"].to_numpy(dtype=float)
+        benchmark = paired["benchmark"].to_numpy(dtype=float)
+    else:
+        values = np.asarray(returns, dtype=float)
+        benchmark = np.asarray(benchmark_returns, dtype=float)
+        if values.ndim != 1 or benchmark.ndim != 1:
+            raise ValueError(
+                "returns and benchmark_returns must be one-dimensional"
+            )
+        if values.shape != benchmark.shape:
+            raise ValueError(
+                "returns and benchmark_returns must have the same length"
+            )
+        keep = ~np.isnan(values) & ~np.isnan(benchmark)
+        values, benchmark = values[keep], benchmark[keep]
+    if values.size == 0:
+        raise ValueError(
+            "returns and benchmark_returns must share at least one observation"
+        )
+    if not np.isfinite(values).all() or not np.isfinite(benchmark).all():
+        raise ValueError(
+            "returns and benchmark_returns must contain only finite values"
+        )
+    return values, benchmark
+
+
+def upside_capture(returns, benchmark_returns) -> float:
+    """Mean portfolio return divided by mean benchmark return in up periods."""
+    values, benchmark = _capture_inputs(returns, benchmark_returns)
+    mask = benchmark > 0.0
+    if not mask.any():
+        raise ValueError(
+            "upside_capture needs at least one positive benchmark return"
+        )
+    return float(values[mask].mean() / benchmark[mask].mean())
+
+
+def downside_capture(returns, benchmark_returns) -> float:
+    """Mean portfolio return divided by mean benchmark return in down periods."""
+    values, benchmark = _capture_inputs(returns, benchmark_returns)
+    mask = benchmark < 0.0
+    if not mask.any():
+        raise ValueError(
+            "downside_capture needs at least one negative benchmark return"
+        )
+    return float(values[mask].mean() / benchmark[mask].mean())
+
+
 def compute_metrics(
     returns: pd.Series,
     *,
@@ -52,6 +145,8 @@ def compute_metrics(
         "ann_vol": ann_vol,
         "sharpe": sharpe,
         "sortino": sortino,
+        "downside_deviation": downside_deviation(r),
+        "omega_ratio": omega_ratio(r),
         "max_drawdown": max_drawdown(r),
         "cvar_95": cvar(r, 0.95),
         "realized_skew": float(stats.skew(r, bias=False)) if len(r) > 3 else 0.0,

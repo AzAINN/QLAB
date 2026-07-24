@@ -23,10 +23,12 @@ class StubApp:
 
     def __init__(self):
         self.names = []
+        self.tools = {}
 
     def tool(self, name: str):
         def deco(fn):
             self.names.append(name)
+            self.tools[name] = fn
             return fn
 
         return deco
@@ -94,6 +96,75 @@ def test_equilibrium_returns_is_in_agent_visible_owner_scope():
     assert base in OWNER_LAB_TOOLS
     assert base in _LAB_TOOL_BASES
     assert _claude_tool(base) in _PROXY_TOOLS
+
+
+def test_backtest_run_refuses_mislabeled_objective_solver_pair(
+    reg, monkeypatch,
+):
+    import qlab.mcp.quant_lab as quant_lab
+    from qlab.mcp.guardrails import LabState
+
+    app = StubApp()
+    register = quant_lab.register_lab_tools
+    register(app, LabState(offline=True, registry=reg))
+
+    def unexpected_prices(*_args, **_kwargs):
+        pytest.fail("pair validation must run before market data is loaded")
+
+    monkeypatch.setattr(quant_lab.market, "get_prices", unexpected_prices)
+    with pytest.raises(PermissionError) as refused:
+        app.tools["backtest.run"](
+            objective="target_semivariance",
+            solver="hrp",
+        )
+
+    message = str(refused.value)
+    assert "objective/solver mismatch" in message
+    assert "target_semivariance" in message
+    assert "hrp" in message
+    assert reg.backtest_trial_count() == 0
+
+
+def test_backtest_run_accepts_every_operational_pair_in_ablation_spec(reg):
+    import qlab.mcp.quant_lab as quant_lab
+    from qlab.algorithms.catalog import list_algorithms
+    from qlab.experiment import _load_spec
+    from qlab.mcp.guardrails import LabState
+    from qlab.paths import data_path
+
+    spec = _load_spec(data_path("configs", "specs", "ablation_v1.yaml"))
+    catalog = list_algorithms(stage="operational")
+
+    def is_operational_pair(arm):
+        catalog_solver = None if arm["solver"] == "none" else arm["solver"]
+        return any(
+            row["solver"] == catalog_solver
+            and (
+                arm["objective"] == row["id"]
+                or arm["objective"] in row["objective_forms"]
+            )
+            for row in catalog
+        )
+
+    arms = [arm for arm in spec["arms"] if is_operational_pair(arm)]
+    assert [arm["id"] for arm in arms] == [
+        "B0", "B1", "B2", "B3", "A1", "B4", "A2",
+    ]
+
+    app = StubApp()
+    quant_lab.register_lab_tools(
+        app, LabState(offline=True, registry=reg),
+    )
+    for arm in arms:
+        result = app.tools["backtest.run"](
+            objective=arm["objective"],
+            solver=arm["solver"],
+            start="2019-01-01",
+            end="2020-12-31",
+            lookback_days=60,
+        )
+        assert result["arm"] == f"{arm['objective']}:{arm['solver']}"
+        assert result["metrics"]["n_obs"] > 0
 
 
 def test_lab_and_trader_share_one_registry():

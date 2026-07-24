@@ -34,11 +34,19 @@ def _clean_returns(returns, *, name: str = "returns") -> np.ndarray:
     return values
 
 
-def omega_ratio(returns, target: float = 0.0) -> float:
+def _ratio_or_none(numerator: float, denominator: float) -> float | None:
+    """Return a finite ratio, or ``None`` when the ratio is undefined."""
+    if denominator == 0.0:
+        return None
+    ratio = numerator / denominator
+    return float(ratio) if np.isfinite(ratio) else None
+
+
+def omega_ratio(returns, target: float = 0.0) -> float | None:
     """Gain-to-shortfall ratio relative to a per-period target.
 
-    Missing observations are dropped. If there are no below-target
-    observations, the ratio is defined as positive infinity.
+    Missing observations are dropped. If there is no below-target shortfall,
+    the ratio is undefined and returned as ``None`` for strict JSON safety.
     """
     values = _clean_returns(returns)
     target = float(target)
@@ -47,7 +55,7 @@ def omega_ratio(returns, target: float = 0.0) -> float:
     excess = values - target
     gains = float(np.maximum(excess, 0.0).sum())
     shortfall = float(np.maximum(-excess, 0.0).sum())
-    return float("inf") if shortfall == 0.0 else gains / shortfall
+    return _ratio_or_none(gains, shortfall)
 
 
 def downside_deviation(returns, target: float = 0.0) -> float:
@@ -93,26 +101,28 @@ def _capture_inputs(returns, benchmark_returns) -> tuple[np.ndarray, np.ndarray]
     return values, benchmark
 
 
-def upside_capture(returns, benchmark_returns) -> float:
+def upside_capture(returns, benchmark_returns) -> float | None:
     """Mean portfolio return divided by mean benchmark return in up periods."""
     values, benchmark = _capture_inputs(returns, benchmark_returns)
     mask = benchmark > 0.0
     if not mask.any():
-        raise ValueError(
-            "upside_capture needs at least one positive benchmark return"
-        )
-    return float(values[mask].mean() / benchmark[mask].mean())
+        return None
+    return _ratio_or_none(
+        float(values[mask].mean()),
+        float(benchmark[mask].mean()),
+    )
 
 
-def downside_capture(returns, benchmark_returns) -> float:
+def downside_capture(returns, benchmark_returns) -> float | None:
     """Mean portfolio return divided by mean benchmark return in down periods."""
     values, benchmark = _capture_inputs(returns, benchmark_returns)
     mask = benchmark < 0.0
     if not mask.any():
-        raise ValueError(
-            "downside_capture needs at least one negative benchmark return"
-        )
-    return float(values[mask].mean() / benchmark[mask].mean())
+        return None
+    return _ratio_or_none(
+        float(values[mask].mean()),
+        float(benchmark[mask].mean()),
+    )
 
 
 def compute_metrics(
@@ -122,7 +132,7 @@ def compute_metrics(
     turnover: float | None = None,
     n_trials: int = 1,
     trial_sharpe_var: float | None = None,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Compute the standard metric bundle for a return series.
 
     ``returns`` are simple per-period returns of the portfolio.

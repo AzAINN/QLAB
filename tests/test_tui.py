@@ -921,6 +921,7 @@ def test_tui_cli_entry_is_registered():
 
 def test_operator_mcp_proxy_is_propose_only_and_never_executes():
     from qlab.mcp.tui_proxy import register_proxy_tools
+    from qlab.tui.claude import _LAB_TOOL_BASES
 
     class ToolApp:
         def __init__(self):
@@ -953,11 +954,34 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
     assert {"workflow_start", "workflow_status", "workflow_analyst",
             "workflow_challenger", "workflow_optimizer", "workflow_referee",
             "workflow_reporter"} <= set(app.tools)
+    assert {
+        base.replace(".", "_") for base in _LAB_TOOL_BASES
+    } <= set(app.tools)
     assert not any("execute" in name or "order" in name for name in app.tools)
     app.tools["workflow_rebalance_preview"]({"GLD": 1.0}, "decision-1")
     assert client.calls[-1] == (
         "POST", "/api/rebalance_preview",
         {"offline": True, "targets": {"GLD": 1.0}, "decision_id": "decision-1"},
+    )
+    app.tools["research_window_evidence"](
+        "2026-07-17", cadence="annual",
+    )
+    assert client.calls[-1] == (
+        "POST", "/api/lab/research.window_evidence",
+        {
+            "as_of": "2026-07-17", "universe": "core",
+            "cadence": "annual", "offline": True,
+        },
+    )
+    app.tools["research_equilibrium_returns"](
+        "2026-07-17", lookback_days=504,
+    )
+    assert client.calls[-1] == (
+        "POST", "/api/lab/research.equilibrium_returns",
+        {
+            "as_of": "2026-07-17", "universe": "core",
+            "lookback_days": 504, "offline": True,
+        },
     )
 
 

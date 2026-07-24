@@ -166,6 +166,32 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "higher_moments": higher_moments,
         })
 
+    @app.tool(name="research_equilibrium_returns")
+    def research_equilibrium_returns(
+        as_of: str,
+        universe: str = "core",
+        lookback_days: int = 756,
+    ) -> dict:
+        """Reverse-optimize equilibrium returns through the owner runtime."""
+        return lab("research.equilibrium_returns", {
+            "as_of": as_of,
+            "universe": universe,
+            "lookback_days": lookback_days,
+        })
+
+    @app.tool(name="research_window_evidence")
+    def research_window_evidence(
+        as_of: str,
+        universe: str = "core",
+        cadence: str = "quarterly",
+    ) -> dict:
+        """Rank cited estimation-window evidence through the owner runtime."""
+        return lab("research.window_evidence", {
+            "as_of": as_of,
+            "universe": universe,
+            "cadence": cadence,
+        })
+
     # -- regime indicators (options for the analyst's regime call) --------
     def regime(name: str, as_of: str, universe: str, lookback_days: int) -> dict:
         return lab(name, {"as_of": as_of, "universe": universe,

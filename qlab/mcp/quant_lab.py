@@ -27,7 +27,6 @@ from qlab.algorithms.catalog import (
     get_algorithm,
     list_algorithms,
     operational_algorithm_for_solver,
-    operational_solver_names,
     solve_prepared_objective,
 )
 from qlab.core import data as market
@@ -42,6 +41,36 @@ from qlab.core.window_evidence import window_evidence
 from qlab.experiment import recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
 from qlab.solvers.base import Constraints
+
+
+def _require_operational_backtest_pair(objective: str, solver: str) -> None:
+    """Refuse arm labels that do not describe an operational catalog pairing."""
+    catalog_solver = None if solver == "none" else solver
+    rows = list_algorithms(stage="operational")
+    matches = [
+        spec for spec in rows
+        if spec["solver"] == catalog_solver
+        and (
+            objective == spec["id"]
+            or objective in spec["objective_forms"]
+        )
+    ]
+    if matches:
+        return
+
+    # Named policies use their catalog id (``hrp`` / ``risk_parity``), while
+    # generic prepared objectives use an entry's declared objective form.
+    permitted = sorted({
+        candidate
+        for spec in rows
+        if spec["solver"] == catalog_solver
+        for candidate in (spec["id"], *spec["objective_forms"])
+    })
+    raise PermissionError(
+        "objective/solver mismatch: "
+        f"solver {solver!r} is not operational for objective {objective!r}; "
+        f"cataloged objectives for this solver: {permitted or ['none']}"
+    )
 
 
 def _current_portfolio_weights(
@@ -511,10 +540,7 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                     skew_lambda: float = 0.5, kurt_lambda: float = 0.5) -> dict:
         """Walk-forward backtest one arm. Returns the metric bundle + logs it."""
         st.budget.charge("backtest.run")
-        if solver != "none" and solver not in operational_solver_names():
-            raise PermissionError(
-                f"solver {solver!r} is not operational; inspect algorithms.list"
-            )
+        _require_operational_backtest_pair(objective, solver)
         tickers = load_universe().tickers(universe)
         prices = market.get_prices(tickers, start, end or None, offline=st.offline,
                                    seed=st.seed)

@@ -95,6 +95,15 @@ def _snapshot():
             {"id": "qaoa_selection", "stage": "offline"},
         ],
         "policy": {"id": "hrp", "label": "Hierarchical risk parity"},
+        "equilibrium_returns": {
+            "run_id": "eq-run-1",
+            "as_of": "2026-07-17",
+            "portfolio": {"mu": 0.034, "lo": -0.012, "hi": 0.067},
+            "caveats": {
+                "interpretation": "equilibrium prior, not a forecast",
+                "uncertainty": "bands are parameter uncertainty",
+            },
+        },
         "workflows": [],
     }
 
@@ -406,6 +415,9 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
                 app.query_one("#tile-allocation-content").content)
             regime = str(app.query_one("#tile-regime-content").content)
             assert "CALM" in regime and "• REGIME" in regime
+            assert "• EQ RETURN (1Y)" in regime
+            assert "-1.2%–6.7%" in regime
+            assert "3.4%" not in regime  # never render the bare equilibrium point
             assert "ACWI" in str(
                 app.query_one("#tile-market-pulse-content").content)
             empty_verdict = str(

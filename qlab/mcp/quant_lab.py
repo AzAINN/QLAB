@@ -32,6 +32,7 @@ from qlab.algorithms.catalog import (
 )
 from qlab.core import data as market
 from qlab.core.backtest import run_backtest
+from qlab.core.equilibrium import equilibrium_returns as compute_equilibrium_returns
 from qlab.core.moments import detect_regime
 from qlab.core.objective import build_objective
 from qlab.core.selection import MAX_EXACT_ASSETS, select_k_of_n
@@ -41,6 +42,50 @@ from qlab.core.window_evidence import window_evidence
 from qlab.experiment import recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
 from qlab.solvers.base import Constraints
+
+
+def _current_portfolio_weights(
+    registry,
+    snapshot: DataSnapshot,
+) -> dict[str, float] | None:
+    """Mark the registry's paper positions on the equilibrium snapshot.
+
+    The helper only reads account/position rows.  It avoids constructing a
+    broker (whose ``portfolio_state`` updates the high-water mark) so
+    ``research.equilibrium_returns`` remains a read-only computation apart from
+    its one auditable research run.
+    """
+    account = registry.get_account()
+    positions = registry.get_positions()
+    if not account and not positions:
+        return None
+
+    latest = snapshot.prices.iloc[-1]
+    cash = float(account.get("cash", 0.0))
+    equity = cash
+    marked: dict[str, float] = {}
+    for ticker, position in positions.items():
+        mark = (
+            float(latest[ticker])
+            if ticker in latest.index
+            else float(position["avg_price"])
+        )
+        value = float(position["qty"]) * mark
+        if value < -1e-9:
+            raise ValueError(
+                "equilibrium aggregation requires a long-only current portfolio"
+            )
+        equity += value
+        if ticker in snapshot.tickers:
+            marked[ticker] = value
+    if equity <= 0.0:
+        raise ValueError(
+            "equilibrium aggregation requires positive current portfolio equity"
+        )
+    return {
+        ticker: marked.get(ticker, 0.0) / equity
+        for ticker in snapshot.tickers
+    }
 
 
 def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
@@ -305,6 +350,93 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         st.registry.log_solution(run_id or "adhoc", solver, res,
                                  objective_hash=objective_id, objective_form=obj.form)
         return res.to_dict()
+
+    # -- equilibrium expected returns --------------------------------------
+    @app.tool(name="research.equilibrium_returns")
+    def research_equilibrium_returns(
+        as_of: str,
+        universe: str = "core",
+        lookback_days: int = 756,
+    ) -> dict:
+        """Reverse-optimize annual equilibrium returns and one-sigma bands."""
+        from qlab.core.moments import estimate_moments
+
+        st.budget.charge("research.equilibrium_returns")
+        if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
+            raise TypeError("lookback_days must be an integer")
+        if lookback_days < 2:
+            raise ValueError("lookback_days must be at least 2")
+
+        d = check_as_of(as_of)
+        tickers = load_universe().tickers(universe)
+        snapshot = market.snapshot(
+            tickers,
+            d,
+            lookback_days=lookback_days + 1,
+            offline=st.offline,
+            seed=st.seed,
+        )
+        moments = estimate_moments(
+            snapshot,
+            lookback_days=lookback_days,
+            higher_moments=False,
+        )
+        moment_set_id = st.put_moment_set(moments)
+        current_weights = _current_portfolio_weights(st.registry, snapshot)
+        result = compute_equilibrium_returns(
+            moments.cov,
+            moments.tickers,
+            int(moments.diagnostics["T"]),
+            target_weights=current_weights,
+        )
+        portfolio_weight_source = (
+            "current_paper_portfolio"
+            if current_weights is not None
+            else "inverse_volatility_prior_no_paper_book"
+        )
+        table = [
+            {"ticker": ticker, **result["returns"][ticker]}
+            for ticker in moments.tickers
+        ]
+        caveats = {
+            "interpretation": "equilibrium prior, not a forecast",
+            "uncertainty": "bands are parameter uncertainty",
+            "prior_weights": (
+                "inverse-volatility weights substitute for market-cap weights; "
+                "market caps are unavailable without an added data dependency"
+            ),
+            "portfolio_weights": portfolio_weight_source,
+            "source": snapshot.source,
+            "dsr_trial_counted": False,
+        }
+        run_spec = {
+            "as_of": str(d),
+            "universe": universe,
+            "tickers": moments.tickers,
+            "lookback_days": lookback_days,
+            "moment_set_id": moment_set_id,
+            "n_obs": result["n_obs"],
+            "tau": result["tau"],
+            "annualization": result["annualization"],
+            "risk_aversion": result["risk_aversion"],
+            "prior_weights": result["prior_weights"],
+            "prior_weight_source": result["prior_weight_source"],
+            "portfolio": result["portfolio"],
+            "table": table,
+            "caveats": caveats,
+        }
+        run_id = st.registry.log_run("equilibrium", run_spec)
+        # This reverse-optimization records no solution or backtest row, so it
+        # cannot enlarge either deflated-Sharpe trial universe.
+        return {
+            "run_id": run_id,
+            "moment_set_id": moment_set_id,
+            "as_of": str(d),
+            "table": table,
+            "portfolio": result["portfolio"],
+            "prior_weights": result["prior_weights"],
+            "caveats": caveats,
+        }
 
     # -- estimation-window evidence ----------------------------------------
     @app.tool(name="research.window_evidence")

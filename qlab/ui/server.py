@@ -92,6 +92,7 @@ OWNER_LAB_TOOLS = frozenset({
     "algorithms.solve",
     "solve.classical",
     "backtest.run",
+    "research.equilibrium_returns",
     "research.window_evidence",
     "registry.list_runs",
     "registry.report",
@@ -424,6 +425,25 @@ class UISession:
         }
         return policy
 
+    def latest_equilibrium_returns(self) -> dict | None:
+        """Compact summary of the newest persisted equilibrium research run."""
+        for run in self.registry.list_runs(1000):
+            if run.get("kind") != "equilibrium":
+                continue
+            spec = run.get("spec")
+            if not isinstance(spec, dict):
+                continue
+            portfolio = spec.get("portfolio")
+            if not isinstance(portfolio, dict):
+                continue
+            return {
+                "run_id": run.get("run_id"),
+                "as_of": spec.get("as_of"),
+                "portfolio": portfolio,
+                "caveats": spec.get("caveats"),
+            }
+        return None
+
     def tui_snapshot(self, offline: bool, event_limit: int = 100) -> dict:
         """One consistent payload for a complete TUI refresh."""
         from qlab.algorithms import list_algorithms
@@ -446,6 +466,7 @@ class UISession:
             "system": self.system_status(offline),
             "algorithms": list_algorithms(),
             "policy": self.allocation_policy(),
+            "equilibrium_returns": self.latest_equilibrium_returns(),
             "workflows": self.registry.list_workflows(10),
         }
 

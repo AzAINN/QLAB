@@ -44,6 +44,7 @@ def test_combined_registration_exposes_both_namespaces():
     register_lab_tools(app, LabState(offline=True, registry=reg))
     register_trader_tools(app, TraderState(registry=reg, offline=True))
     assert "moments.estimate" in app.names
+    assert "research.equilibrium_returns" in app.names
     assert "research.window_evidence" in app.names
     # Research-stage executables are owner-only: agent-facing surfaces —
     # headless included — must not mount them (catalog stage boundary).
@@ -53,6 +54,7 @@ def test_combined_registration_exposes_both_namespaces():
     register_lab_tools(
         owner_app, LabState(offline=True, registry=reg), owner_only=True)
     assert "selection.run" in owner_app.names
+    assert "research.equilibrium_returns" in owner_app.names
     assert "research.window_evidence" in owner_app.names
     assert "selection_run" not in owner_app.names
     assert {"algorithms.list", "algorithms.describe", "algorithms.solve"} <= set(app.names)
@@ -78,6 +80,20 @@ def test_window_evidence_is_in_owner_and_moments_analyst_scopes():
     assert base in _LAB_TOOL_BASES
     analyst_tools = build_workforce_agents()["moments-analyst"]["tools"]
     assert _claude_tool(base) in analyst_tools
+
+
+def test_equilibrium_returns_is_in_agent_visible_owner_scope():
+    from qlab.tui.claude import (
+        _LAB_TOOL_BASES,
+        _PROXY_TOOLS,
+        _claude_tool,
+    )
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    base = "research.equilibrium_returns"
+    assert base in OWNER_LAB_TOOLS
+    assert base in _LAB_TOOL_BASES
+    assert _claude_tool(base) in _PROXY_TOOLS
 
 
 def test_lab_and_trader_share_one_registry():

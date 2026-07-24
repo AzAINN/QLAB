@@ -1201,6 +1201,7 @@ class QlabTui(App[None]):
         portfolio = _record(self.snapshot.get("portfolio"))
         market = _record(self.snapshot.get("market"))
         regime = _record(market.get("regime"))
+        equilibrium = _record(self.snapshot.get("equilibrium_returns"))
         current = _record(portfolio.get("weights"))
         targets = _record(portfolio.get("target_weights"))
 
@@ -1277,21 +1278,32 @@ class QlabTui(App[None]):
         source = str(market.get("source") or "—").upper()
         age = market.get("bar_age_days")
         age_text = "—" if age is None else f"{age}d"
+        regime_pairs = [
+            ("REGIME", regime_name),
+            (
+                "SIGNAL / THRESHOLD",
+                f"{pct(_finite_number(regime.get('signal')))} / "
+                f"{pct(_finite_number(regime.get('threshold')))}",
+            ),
+            ("SOURCE / BAR AGE", f"{source} / {age_text}"),
+        ]
+        regime_tones = [
+            _REGIME_TONE.get(regime_name.lower(), TEXT_HI),
+            TEXT,
+            TEXT,
+        ]
+        equilibrium_portfolio = _record(equilibrium.get("portfolio"))
+        equilibrium_lo = _finite_number(equilibrium_portfolio.get("lo"))
+        equilibrium_hi = _finite_number(equilibrium_portfolio.get("hi"))
+        if equilibrium_lo is not None and equilibrium_hi is not None:
+            regime_pairs.append((
+                "EQ RETURN (1Y)",
+                f"{pct(equilibrium_lo)}–{pct(equilibrium_hi)}",
+            ))
+            regime_tones.append(CYAN)
         regime_content = "\n".join(_key_number_markup(
-            [
-                ("REGIME", regime_name),
-                (
-                    "SIGNAL / THRESHOLD",
-                    f"{pct(_finite_number(regime.get('signal')))} / "
-                    f"{pct(_finite_number(regime.get('threshold')))}",
-                ),
-                ("SOURCE / BAR AGE", f"{source} / {age_text}"),
-            ],
-            value_tones=[
-                _REGIME_TONE.get(regime_name.lower(), TEXT_HI),
-                TEXT,
-                TEXT,
-            ],
+            regime_pairs,
+            value_tones=regime_tones,
             bold_values={0},
         ))
 

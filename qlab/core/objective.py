@@ -31,6 +31,7 @@ from typing import Callable
 
 import numpy as np
 
+from qlab.core.equilibrium import implied_returns, inverse_vol_weights
 from qlab.core.types import MomentSet, Objective
 
 _SUPPORTED_FORMS = frozenset({
@@ -110,11 +111,34 @@ def build_objective(
             l4 = l4 * var0 / max(m4, m4_floor, 1e-30)
     elif form == "mvsk":
         extra.setdefault("lambda_scale", lambda_scale)
+
+    # The normal moment path deliberately omits a historical mean.  A
+    # max-utility objective therefore uses the deterministic equilibrium prior
+    # when no explicit MomentSet.mu exists, rather than silently reducing to a
+    # risk-only objective.  The vector is stored once on Objective, so every
+    # solver arm consumes the identical coefficient instead of estimating its
+    # own return input.
+    mu = ms.mu
+    if form == "max_utility":
+        if mu is None:
+            mu = implied_returns(ms.cov, inverse_vol_weights(ms.cov))
+            extra.setdefault(
+                "expected_returns_source",
+                "black_litterman_equilibrium_inverse_volatility",
+            )
+        else:
+            mu = np.asarray(mu, dtype=float)
+            if mu.shape != (ms.n,) or not np.isfinite(mu).all():
+                raise ValueError(
+                    "max_utility expected returns must be a finite vector "
+                    f"with shape ({ms.n},)"
+                )
+            extra.setdefault("expected_returns_source", "moment_set")
     return Objective(
         form=form,                       # type: ignore[arg-type]
         tickers=ms.tickers,
         cov=ms.cov,
-        mu=ms.mu,
+        mu=mu,
         coskew=ms.coskew,
         cokurt=ms.cokurt,
         skew_lambda=l3,

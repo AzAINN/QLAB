@@ -70,3 +70,5 @@ start of every loop iteration. The work list lives in
 - A trivial call costs ~26k tokens at max reasoning — brief it well, call it
   once per purpose, not iteratively.
 - Treat its output as a worker's draft: tests and review decide, not trust.
+
+OWNER DIRECTIVE (2026-07-24, mid-loop): after P4 completes, continue the loop into the P5 quality phase above — deep code review and quality improvement until a sweep comes back clean.

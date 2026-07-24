@@ -186,7 +186,12 @@ def build_plan(
     mandate.check_targets(targets, allow_liquidation=is_liquidating)
     if not is_initial_deployment:
         mandate.check_turnover(turnover)
-    mandate.check_order_count(len(legs))
+    # The daily order cap is cumulative across plans, not per-plan: count what
+    # today already booked so two plans cannot together exceed it.
+    from datetime import datetime, timezone
+    already_today = registry.count_orders_on(
+        datetime.now(timezone.utc).isoformat())
+    mandate.check_order_count(already_today + len(legs))
     pre_trade["expected_cost"] = _expected_cost(broker, mandate, legs)
     pre_trade["mandate_ok"] = True
 

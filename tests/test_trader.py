@@ -550,3 +550,21 @@ def test_execute_plan_tool_is_not_agent_reachable_without_human(tmp_registry):
     out = app.tools["execute_plan"]("any-plan")
     assert out["executed"] is False
     assert "human_confirmed" in out["error"]
+
+
+def test_daily_order_cap_is_cumulative_across_plans(reg_and_broker):
+    import dataclasses
+
+    reg, broker = reg_and_broker
+    mandate = dataclasses.replace(
+        load_mandate(), max_orders_per_day=4,
+        max_turnover_per_rebalance=5.0)
+    w = mandate.universe_whitelist
+    t1 = {w[0]: 0.34, w[1]: 0.33, w[2]: 0.33}
+    p1 = build_plan(reg, broker, mandate, t1, "dec-day1")
+    reg.log_verdict("dec-day1", "PASS", [], "deterministic", targets=t1)
+    execute_plan(reg, broker, p1, mandate)
+    # A second plan the same day must count the first plan's orders and refuse.
+    t2 = {w[0]: 0.4, w[3]: 0.3, w[4]: 0.3}
+    with pytest.raises(MandateViolation, match="daily cap"):
+        build_plan(reg, broker, mandate, t2, "dec-day2")

@@ -95,7 +95,10 @@ def targets_hash(targets: dict[str, float]) -> str:
     checkers (``execute_plan``) must import this, so a PASS can never be
     silently applied to a different set of targets than the one reviewed.
     """
-    key = ",".join(f"{k}:{float(v):.6f}" for k, v in sorted(targets.items()))
+    # Full float precision via repr: rounding to a few decimals would let two
+    # economically-distinct weight vectors collide onto one hash and satisfy a
+    # PASS created for the other. The hash must be exact.
+    key = ",".join(f"{k}:{float(v)!r}" for k, v in sorted(targets.items()))
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 _SCHEMA = """
@@ -821,6 +824,13 @@ class Registry:
         """Return recent order records for the audit surface."""
         return self._rows(
             "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", [limit])
+
+    def count_orders_on(self, day_iso: str) -> int:
+        """Orders created on a given UTC date (for the cumulative daily cap)."""
+        rows = self._rows(
+            "SELECT COUNT(*) AS n FROM orders WHERE substr(created_at,1,10)=?",
+            [day_iso[:10]])
+        return int(rows[0]["n"]) if rows else 0
 
     # -- referee verdicts -----------------------------------------------------
     def log_verdict(self, decision_id: str, verdict: str, reasons: list[str],

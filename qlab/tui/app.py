@@ -95,6 +95,32 @@ _REFRESH_EVENT_KINDS = {
     "workflow_started", "workflow_phase", "referee_verdict",
     "plan_built", "order_filled", "decision_logged", "ablation_complete",
 }
+COMMAND_TABLE = {
+    ("view", "desk"): "action_view",
+    ("view", "market"): "action_view",
+    ("view", "workforce"): "action_view",
+    ("view", "research"): "action_view",
+    ("view", "audit"): "action_view",
+    ("view", "agents"): "action_agent_focus",
+    ("agents", None): "action_agent_focus",
+    ("symbol", None): "action_symbol",
+    ("timeline", None): "action_timeline",
+    ("help", None): "action_help",
+    ("ask", None): "action_ask",
+    ("chat", None): "action_chat_mode",
+    ("workforce", None): "action_workforce_new",
+    ("workforce", "status"): "action_workforce_status",
+    ("workforce", "resume"): "action_workforce_resume",
+    ("workforce", "stop"): "action_workforce_stop",
+    ("governed", None): "action_workforce_new",
+    ("governed", "status"): "action_workforce_status",
+    ("governed", "resume"): "action_workforce_resume",
+    ("governed", "stop"): "action_workforce_stop",
+    ("rebalance", "dry"): "action_rebalance_dry",
+    ("rebalance", "paper"): "action_rebalance_paper",
+    ("daily", None): "action_daily_ops",
+    ("batch", None): "action_batch",
+}
 
 
 def workforce_note(phase: str, status: str, summary: str,
@@ -1467,6 +1493,114 @@ class QlabTui(App[None]):
         self._agent_focus = not self._agent_focus
         self.screen.set_class(self._agent_focus, "agent-focus")
 
+    def action_symbol(self, ticker: str) -> None:
+        self.active_ticker = ticker.upper()
+        self.query_one("#universe", ListView).index = (
+            self.universe_tickers.index(self.active_ticker))
+        self.action_view("market")
+        self._render_market()
+
+    def action_ask(self, prompt: str) -> None:
+        self._start_claude(prompt, governed=False)
+
+    def action_chat_mode(self, message: str = "") -> None:
+        self._chat_mode = "chat"
+        self.action_view("workforce")
+        self._render_chat_mode()
+        if message:
+            self._chat_send(message)
+
+    def action_workforce_new(self, goal: str = "") -> None:
+        self._chat_mode = "workforce"
+        self._render_chat_mode()
+        system = self.snapshot.get("system", {})
+        if not system.get("workforce_available", system.get("governed_available")):
+            reason = system.get(
+                "governed_lock_reason", "Claude workforce runtime is not ready")
+            self._set_selected_work(f"CLAUDE WORKFORCE LOCKED\n\n{reason}")
+            self._write_local_event("claude.workforce_locked", {"reason": reason})
+        else:
+            self._start_workforce(goal)
+
+    def action_workforce_status(self) -> None:
+        self._chat_mode = "workforce"
+        self._render_chat_mode()
+        self.action_view("workforce")
+        self._render_workforce()
+
+    def action_workforce_resume(self, workflow_id: str) -> None:
+        self._chat_mode = "workforce"
+        self._render_chat_mode()
+        self._start_workforce("", workflow_id=workflow_id)
+
+    def action_workforce_stop(self) -> None:
+        self._chat_mode = "workforce"
+        self._render_chat_mode()
+        self.claude.stop()
+        self._set_selected_work(
+            "CLAUDE WORKFORCE STOPPED\n\nThe owner kept its durable phase state. "
+            "Use : workforce resume ID to continue."
+        )
+        self._write_local_event("claude.workforce_stopped", {})
+
+    def action_rebalance_dry(self) -> None:
+        self._run_api_action(
+            "rebalance dry", "/api/run_once",
+            {"offline": self.offline, "execute": False},
+            active_agent="moments-analyst",
+        )
+
+    def action_rebalance_paper(self) -> None:
+        plan = next(
+            (row for row in self.snapshot.get("plans", [])
+             if row.get("state") in {"checked", "submitted"}),
+            None,
+        )
+        if plan is None:
+            self._set_selected_work(
+                "NO CHECKED PLAN\n\nRun : rebalance dry or complete a workforce "
+                "review before requesting paper execution."
+            )
+        else:
+            self._pending_plan_id = str(plan["plan_id"])
+            self.push_screen(
+                PaperConfirmScreen(self._pending_plan_id), self._paper_confirmed
+            )
+
+    def action_daily_ops(self) -> None:
+        self._run_api_action(
+            "daily ops", "/api/daily_ops", {"offline": self.offline},
+            active_agent="reporter",
+        )
+
+    def action_batch(self) -> None:
+        self.action_view("research")
+        self._run_api_action(
+            "batch ablation", "/api/batch",
+            {"offline": self.offline},
+            active_agent="optimization-runner",
+        )
+
+    def action_help(self) -> None:
+        self._set_selected_work(
+            "COMMANDS\n\n"
+            "view desk|market|workforce|research|audit\n"
+            "view agents\n"
+            "symbol TICKER\n"
+            "chat MESSAGE      (read-only desk assistant)\n"
+            "workforce GOAL    (governed five-role pipeline)\n"
+            "workforce status\n"
+            "workforce resume ID\n"
+            "workforce stop\n"
+            "rebalance dry\n"
+            "rebalance paper\n"
+            "daily\n"
+            "batch\n"
+            "ask PROMPT  (isolated, no tools)\n"
+            "timeline\n\n"
+            "1–5 switch views · j/k select instrument · Ctrl-Q quits"
+        )
+
     # -- command surface --------------------------------------------------
     def on_input_submitted(self, event: Input.Submitted) -> None:
         raw = event.value.strip()
@@ -1524,107 +1658,47 @@ class QlabTui(App[None]):
         command, _, rest = raw.partition(" ")
         command = command.lower()
         rest = rest.strip()
+        subword, _, argument = rest.partition(" ")
+        subword = subword.lower()
+        argument = argument.strip()
 
-        if command == "view" and rest.lower() in _VIEWS:
-            self.action_view(rest.lower())
-        elif (command == "view" and rest.lower() == "agents") or command == "agents":
-            self.action_agent_focus()
-        elif command == "symbol" and rest.upper() in self.universe_tickers:
-            self.active_ticker = rest.upper()
-            self.query_one("#universe", ListView).index = (
-                self.universe_tickers.index(self.active_ticker))
-            self.action_view("market")
-            self._render_market()
-        elif command == "timeline":
-            self.action_timeline()
-        elif command == "help":
-            self._set_selected_work(
-                "COMMANDS\n\n"
-                "view desk|market|workforce|research|audit\n"
-                "view agents\n"
-                "symbol TICKER\n"
-                "chat MESSAGE      (read-only desk assistant)\n"
-                "workforce GOAL    (governed five-role pipeline)\n"
-                "workforce status\n"
-                "workforce resume ID\n"
-                "workforce stop\n"
-                "rebalance dry\n"
-                "rebalance paper\n"
-                "daily\n"
-                "batch\n"
-                "ask PROMPT  (isolated, no tools)\n"
-                "timeline\n\n"
-                "1–5 switch views · j/k select instrument · Ctrl-Q quits"
-            )
-        elif command == "ask" and rest:
-            self._start_claude(rest, governed=False)
-        elif command == "chat":
-            self._chat_mode = "chat"
-            self.action_view("workforce")
-            self._render_chat_mode()
-            if rest:
-                self._chat_send(rest)
-        elif command in {"workforce", "governed"}:
-            self._chat_mode = "workforce"
-            self._render_chat_mode()
-            system = self.snapshot.get("system", {})
-            if rest.lower() == "status":
-                self.action_view("workforce")
-                self._render_workforce()
-            elif rest.lower() == "stop":
-                self.claude.stop()
-                self._set_selected_work(
-                    "CLAUDE WORKFORCE STOPPED\n\nThe owner kept its durable phase state. "
-                    "Use : workforce resume ID to continue."
-                )
-                self._write_local_event("claude.workforce_stopped", {})
-            elif rest.lower().startswith("resume "):
-                workflow_id = rest.split(None, 1)[1].strip()
-                self._start_workforce("", workflow_id=workflow_id)
-            elif not system.get("workforce_available", system.get("governed_available")):
-                reason = system.get(
-                    "governed_lock_reason", "Claude workforce runtime is not ready")
-                self._set_selected_work(f"CLAUDE WORKFORCE LOCKED\n\n{reason}")
-                self._write_local_event("claude.workforce_locked", {"reason": reason})
+        action_name = COMMAND_TABLE.get((command, subword)) if subword else None
+        action_args: tuple[Any, ...] = ()
+        if action_name == "action_view":
+            if argument:
+                action_name = None
             else:
-                self._start_workforce(rest)
-        elif command == "rebalance" and rest.lower() == "dry":
-            self._run_api_action(
-                "rebalance dry", "/api/run_once",
-                {"offline": self.offline, "execute": False},
-                active_agent="moments-analyst",
-            )
-        elif command == "rebalance" and rest.lower() == "paper":
-            plan = next(
-                (row for row in self.snapshot.get("plans", [])
-                 if row.get("state") in {"checked", "submitted"}),
-                None,
-            )
-            if plan is None:
-                self._set_selected_work(
-                    "NO CHECKED PLAN\n\nRun : rebalance dry or complete a workforce "
-                    "review before requesting paper execution."
-                )
+                action_args = (subword,)
+        elif action_name == "action_workforce_resume":
+            if argument:
+                action_args = (argument,)
             else:
-                self._pending_plan_id = str(plan["plan_id"])
-                self.push_screen(
-                    PaperConfirmScreen(self._pending_plan_id), self._paper_confirmed
-                )
-        elif command == "daily":
-            self._run_api_action(
-                "daily ops", "/api/daily_ops", {"offline": self.offline},
-                active_agent="reporter",
-            )
-        elif command == "batch":
-            self.action_view("research")
-            self._run_api_action(
-                "batch ablation", "/api/batch",
-                {"offline": self.offline},
-                active_agent="optimization-runner",
-            )
-        else:
-            self._write_local_event("command.unknown", {"command": raw})
-            self._set_selected_work("Unknown command. Use : help for the command surface.")
+                action_name = None
+        elif action_name is not None and argument:
+            action_name = None
+
+        if action_name is None:
+            action_name = COMMAND_TABLE.get((command, None))
+            if action_name == "action_symbol":
+                ticker = rest.upper()
+                if ticker in self.universe_tickers:
+                    action_args = (ticker,)
+                else:
+                    action_name = None
+            elif action_name == "action_ask":
+                if rest:
+                    action_args = (rest,)
+                else:
+                    action_name = None
+            elif action_name in {"action_chat_mode", "action_workforce_new"}:
+                action_args = (rest,)
+
+        if action_name is not None:
+            getattr(self, action_name)(*action_args)
+            return
+
+        self._write_local_event("command.unknown", {"command": raw})
+        self._set_selected_work("Unknown command. Use : help for the command surface.")
 
     def _paper_confirmed(self, confirmed: bool | None) -> None:
         if not confirmed:

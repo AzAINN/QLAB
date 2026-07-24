@@ -453,6 +453,56 @@ def test_dry_rebalance_routes_through_owner_api():
     asyncio.run(run())
 
 
+def test_command_table_covers_help_and_preserves_owner_action_routes():
+    from qlab.tui.app import COMMAND_TABLE, QlabTui
+
+    async def run():
+        client = StubClient()
+        app = QlabTui(client, refresh_interval=0)
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause(0.1)
+            app.action_help()
+            help_text = str(app.query_one("#selected-work").content)
+            command_lines = help_text.split("\n\n", 2)[1].splitlines()
+            help_keys = set()
+            for line in command_lines:
+                words = line.split()
+                command = words[0]
+                if len(words) == 1:
+                    help_keys.add((command, None))
+                elif "|" in words[1]:
+                    help_keys.update(
+                        (command, subword) for subword in words[1].split("|")
+                    )
+                elif words[1].isupper():
+                    help_keys.add((command, None))
+                else:
+                    help_keys.add((command, words[1]))
+            assert help_keys
+            assert help_keys <= set(COMMAND_TABLE)
+
+            app._handle_command("daily")
+            for _ in range(20):
+                if client.posts and not app._action_running:
+                    break
+                await pilot.pause(0.05)
+            assert client.posts == [
+                ("/api/daily_ops", {"offline": True}),
+            ]
+
+            app._handle_command("rebalance dry")
+            for _ in range(20):
+                if len(client.posts) == 2:
+                    break
+                await pilot.pause(0.05)
+            assert client.posts == [
+                ("/api/daily_ops", {"offline": True}),
+                ("/api/run_once", {"offline": True, "execute": False}),
+            ]
+
+    asyncio.run(run())
+
+
 def test_tui_cli_entry_is_registered():
     from qlab.autopilot.cli import build_parser
 

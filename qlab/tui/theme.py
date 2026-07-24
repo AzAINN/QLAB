@@ -178,8 +178,40 @@ APP_CSS_TEMPLATE = Template("""
         color: $amber_hi;
         text-style: bold;
     }
-    #desk-content, #market-content {
+    #market-content {
         height: 1fr;
+    }
+    #dashboard-grid {
+        width: 1fr;
+        height: auto;
+        layout: grid;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+        grid-rows: auto;
+        grid-gutter: 1 2;
+    }
+    .dashboard-tile {
+        width: 1fr;
+        height: auto;
+        min-height: 6;
+        background: $bg_panel;
+        border: round $border;
+    }
+    .tile-title {
+        height: 2;
+        padding: 0 1;
+        background: $bg_raised;
+        color: $muted;
+        text-style: bold;
+    }
+    .tile-content {
+        height: auto;
+        min-height: 3;
+        padding: 1;
+        color: $text;
+    }
+    #tile-allocation, #tile-market-pulse {
+        min-height: 12;
     }
     #workforce-content {
         height: auto;

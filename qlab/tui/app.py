@@ -12,7 +12,7 @@ from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -30,6 +30,7 @@ from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
     braille_chart, clean_report_line, demojibake, money, pct, phase_elapsed,
+    sparkline, weight_bar,
 )
 from qlab.tui.theme import (
     ALLOCATION_TRACK,
@@ -61,7 +62,7 @@ from qlab.paths import workspace_root
 
 _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
-_VIEWS = ("desk", "market", "workforce", "research", "audit")
+_VIEWS = ("dashboard", "market", "workforce", "research", "audit")
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
 )
@@ -96,6 +97,7 @@ _REFRESH_EVENT_KINDS = {
     "plan_built", "order_filled", "decision_logged", "ablation_complete",
 }
 COMMAND_TABLE = {
+    ("view", "dashboard"): "action_view",
     ("view", "desk"): "action_view",
     ("view", "market"): "action_view",
     ("view", "workforce"): "action_view",
@@ -371,6 +373,24 @@ class NavMenu(Static):
             self.app.action_view(_VIEWS[index])
 
 
+class Tile(Vertical):
+    """One titled dashboard cell with a stable content target."""
+
+    def __init__(self, title: str, tile_key: str):
+        super().__init__(id=f"tile-{tile_key}", classes="dashboard-tile")
+        self.tile_title = title
+        self.tile_key = tile_key
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            self.tile_title.upper(), classes="tile-title", markup=False)
+        yield Static(
+            id=f"tile-{self.tile_key}-content",
+            classes="tile-content",
+            markup=True,
+        )
+
+
 class PaperConfirmScreen(ModalScreen[bool]):
     """Explicit confirmation for the only mutating action exposed by v1."""
 
@@ -439,7 +459,7 @@ class QlabTui(App[None]):
     CSS = APP_CSS
 
     BINDINGS = [
-        Binding("1", "view('desk')", "Desk", show=False),
+        Binding("1", "view('dashboard')", "Dashboard", show=False),
         Binding("2", "view('market')", "Market", show=False),
         Binding("3", "view('workforce')", "Workforce", show=False),
         Binding("4", "view('research')", "Research", show=False),
@@ -470,7 +490,7 @@ class QlabTui(App[None]):
         self.refresh_interval = refresh_interval
         self.owned_server = owned_server
         self.claude_start = claude_start
-        self.active_view = "desk"
+        self.active_view = "dashboard"
         # Placeholder until the first snapshot; the owner's mandate universe
         # (market.assets) replaces it so a config change never desyncs the TUI.
         self.universe_tickers: list[str] = list(_DEFAULT_TICKERS)
@@ -522,10 +542,21 @@ class QlabTui(App[None]):
                     id="universe",
                 )
 
-            with ContentSwitcher(initial="desk", id="canvas"):
-                with Vertical(id="desk", classes="canvas-view"):
-                    yield Static(f"[{AMBER}]\u258d[/] DESK", classes="canvas-title", markup=True)
-                    yield Static(id="desk-content", markup=True)
+            with ContentSwitcher(initial="dashboard", id="canvas"):
+                with Vertical(id="dashboard", classes="canvas-view"):
+                    yield Static(
+                        f"[{AMBER}]\u258d[/] DASHBOARD",
+                        classes="canvas-title",
+                        markup=True,
+                    )
+                    with Grid(id="dashboard-grid"):
+                        yield Tile("equity", "equity")
+                        yield Tile("regime", "regime")
+                        yield Tile("allocation", "allocation")
+                        yield Tile("market pulse", "market-pulse")
+                        yield Tile("verdict", "verdict")
+                        yield Tile("run", "run")
+                        yield Tile("alerts", "alerts")
                 with Vertical(id="market", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] MARKET", classes="canvas-title", markup=True)
                     yield Static(id="market-content", markup=True)
@@ -613,8 +644,11 @@ class QlabTui(App[None]):
             self.screen.remove_class("agent-focus")
         # A resize changes how much room a chart has; repaint the view that owns
         # one so it fills the new space instead of waiting for the next poll.
-        if self.snapshot and self.active_view in ("market", "desk"):
-            self._render_market() if self.active_view == "market" else self._render_desk()
+        if self.snapshot and self.active_view in ("market", "dashboard"):
+            if self.active_view == "market":
+                self._render_market()
+            else:
+                self._render_dashboard()
 
     # -- snapshot refresh -------------------------------------------------
     def _start_refresh(self) -> None:
@@ -778,7 +812,7 @@ class QlabTui(App[None]):
             self.active_ticker = assets[0]["ticker"]
         self._render_nav()
         self._render_universe(assets)
-        self._render_desk()
+        self._render_dashboard()
         self._render_market()
         self._render_workforce()
         self._render_research()
@@ -796,7 +830,7 @@ class QlabTui(App[None]):
     # -- renderers --------------------------------------------------------
     def _render_nav(self) -> None:
         labels = (
-            ("1", "desk"), ("2", "market"), ("3", "workforce"),
+            ("1", "dashboard"), ("2", "market"), ("3", "workforce"),
             ("4", "research"), ("5", "audit"),
         )
         lines = []
@@ -831,7 +865,7 @@ class QlabTui(App[None]):
             else:
                 label.update(ticker)
 
-    def _render_desk(self) -> None:
+    def _render_dashboard(self) -> None:
         if not self.snapshot:
             return
         portfolio = self.snapshot.get("portfolio", {})
@@ -839,80 +873,154 @@ class QlabTui(App[None]):
         regime = market.get("regime", {})
         current = portfolio.get("weights", {})
         targets = portfolio.get("target_weights", {})
+
         equity = float(portfolio.get("equity", 0.0))
         cash = float(portfolio.get("cash", 0.0))
         drawdown = float(portfolio.get("drawdown", 0.0))
         kill_at = float(portfolio.get("kill_switch_at", 0.0))
-
-        dd_col = DOWN if drawdown >= kill_at * 0.5 else TEXT
-        lines = [
-            f"[bold {TEXT_HI}]{money(equity)}[/]   [{MUTED}]cash {money(cash)}[/]",
-            f"[{MUTED}]drawdown[/] [{dd_col}]{pct(drawdown)}[/]   "
-            f"[{MUTED}]kill switch[/] [{GOLD}]{pct(kill_at, 0)}[/]",
-            "",
-        ]
-        # The allocation bars are the desk's chart; widen them with the window.
-        avail_w, _ = self._plot_region("#desk-content")
-        bar_w = max(16, min(44, avail_w - 30))
-        lines.append(
-            f"[{LABEL_GOLD}]{'CURRENT ALLOCATION':<{bar_w + 6}}      CURRENT   TARGET[/]")
-        held_outside = [t for t in current if t not in self.universe_tickers
-                        and abs(float(current[t])) > 0.0005]
-        for ticker in [*self.universe_tickers, *held_outside]:
-            cur = float(current.get(ticker, 0.0))
-            target = targets.get(ticker)
-            target_text = "  —  " if target is None else f"{float(target):5.1%}"
-            filled = min(bar_w, max(0, round(cur * bar_w)))
-            track = "░" * (bar_w - filled)
-            # Amber up to the target; anything above target is an overweight and
-            # reads red, so drift is visible at a glance, not just in the number.
-            if target is not None and cur > float(target):
-                tpos = min(filled, round(float(target) * bar_w))
-                bar = (f"[{AMBER}]{'█' * tpos}[/][{DOWN}]{'█' * (filled - tpos)}[/]"
-                       f"[{ALLOCATION_TRACK}]{track}[/]")
-            else:
-                bar = f"[{AMBER}]{'█' * filled}[/][{ALLOCATION_TRACK}]{track}[/]"
-            lines.append(
-                f"[{TEXT}]{ticker:<5}[/] {bar}  [{TEXT_HI}]{cur:6.1%}[/]  →  "
-                f"[{TEXT}]{target_text}[/]")
-
-        lines.extend([
-            "",
-            f"[{LABEL_GOLD}]MARKET REGIME[/]",
-            f"[bold]{str(regime.get('regime', 'unknown')).upper()}[/]   "
-            f"[{MUTED}]{escape(str(regime.get('method', 'unavailable')))}[/]",
-            f"realized volatility signal  {pct(regime.get('signal'))}",
-            f"stress threshold             {pct(regime.get('threshold'))}",
-            "",
+        kill_distance = kill_at - drawdown
+        drawdown_tone = DOWN if drawdown > 0 else UP
+        distance_tone = UP if kill_distance > 0 else DOWN
+        equity_content = "\n".join([
+            f"[{MUTED}]EQUITY[/]  [bold {TEXT_HI}]{money(equity)}[/]",
+            f"[{MUTED}]CASH[/]  [{TEXT_HI}]{money(cash)}[/]",
+            f"[{MUTED}]DRAWDOWN[/]  [{drawdown_tone}]{pct(drawdown)}[/]",
+            f"[{MUTED}]KILL-SWITCH DISTANCE[/]  "
+            f"[bold {distance_tone}]{pct(kill_distance)}[/]",
         ])
 
-        plans = self.snapshot.get("plans", [])
-        if plans:
-            plan = plans[0]
-            turnover = plan.get("pre_trade", {}).get("turnover")
-            lines.extend([
-                f"[{LABEL_GOLD}]LATEST PROPOSAL[/]",
-                f"[bold]{escape(plan['plan_id'][:12])}[/]   "
-                f"state {escape(str(plan.get('state', 'unknown')))}   "
-                f"turnover {pct(turnover)}",
-                "Use [bold]: view audit[/] to inspect the decision and order trail.",
+        def allocation_bar(value: float, target: float | None) -> str:
+            raw = weight_bar(value, width=10)
+            filled = raw.rstrip("░")
+            track = raw[len(filled):]
+            if target is not None and value > target:
+                target_fill = len(weight_bar(target, width=10).rstrip("░"))
+                target_fill = min(len(filled), target_fill)
+                return (
+                    f"[{AMBER}]{filled[:target_fill]}[/]"
+                    f"[{DOWN}]{filled[target_fill:]}[/]"
+                    f"[{ALLOCATION_TRACK}]{track}[/]"
+                )
+            return f"[{AMBER}]{filled}[/][{ALLOCATION_TRACK}]{track}[/]"
+
+        allocation_lines = [f"[{DIM}]      CURRENT        TARGET[/]"]
+        held_outside = [
+            ticker for ticker in current
+            if ticker not in self.universe_tickers
+            and abs(float(current[ticker])) > 0.0005
+        ]
+        for ticker in [*self.universe_tickers, *held_outside]:
+            value = float(current.get(ticker, 0.0))
+            raw_target = targets.get(ticker)
+            target = None if raw_target is None else float(raw_target)
+            target_text = "—" if target is None else f"{target:.1%}"
+            allocation_lines.append(
+                f"[{TEXT}]{escape(str(ticker)):<5}[/] "
+                f"{allocation_bar(value, target)}  "
+                f"[{TEXT_HI}]{value:5.1%}[/] → [{TEXT}]{target_text:>5}[/]"
+            )
+        allocation_content = "\n".join(allocation_lines)
+
+        regime_name = escape(str(regime.get("regime", "unknown")).upper())
+        source = escape(str(market.get("source", "unknown")).upper())
+        age = market.get("bar_age_days")
+        age_text = "—" if age is None else f"{age}d"
+        regime_content = "\n".join([
+            f"[bold {TEXT_HI}]{regime_name}[/]",
+            f"[{MUTED}]SIGNAL[/] [{TEXT}]{pct(regime.get('signal'))}[/]  "
+            f"[{DIM}]VS[/]  [{MUTED}]THRESHOLD[/] "
+            f"[{TEXT}]{pct(regime.get('threshold'))}[/]",
+            f"[{MUTED}]SOURCE[/] [{TEXT}]{source}[/]  "
+            f"[{MUTED}]BAR AGE[/] [{TEXT}]{age_text}[/]",
+        ])
+
+        pulse_lines = []
+        assets_by_ticker = {
+            str(asset.get("ticker", "")): asset
+            for asset in market.get("assets", [])
+        }
+        for ticker in self.universe_tickers:
+            asset = assets_by_ticker.get(ticker)
+            safe_ticker = escape(str(ticker))
+            if asset is None:
+                pulse_lines.append(
+                    f"[{TEXT}]{safe_ticker:<5}[/] [{MUTED}]no data[/]")
+                continue
+            price = float(asset.get("price", 0.0))
+            change = float(asset.get("change_1d", 0.0))
+            change_tone = UP if change >= 0 else DOWN
+            history = [
+                float(value) for value in (asset.get("history") or [])
+            ][-12:]
+            pulse = sparkline(history) or "—"
+            pulse_lines.append(
+                f"[{TEXT}]{safe_ticker:<5}[/] [{TEXT_HI}]{price:8.2f}[/]  "
+                f"[{change_tone}]{change:+6.1%}[/]  [{CYAN}]{pulse}[/]"
+            )
+        market_pulse_content = "\n".join(pulse_lines)
+
+        decisions = self.snapshot.get("decisions", [])
+        decision = decisions[0] if decisions else {}
+        verdict = decision.get("verdict") or {}
+        if verdict:
+            verdict_label = str(verdict.get("verdict", "UNKNOWN")).upper()
+            verdict_tone = (
+                UP if verdict_label == "PASS"
+                else DOWN if verdict_label == "FAIL"
+                else GOLD
+            )
+            verdict_glyph = (
+                "✓" if verdict_label == "PASS"
+                else "×" if verdict_label == "FAIL"
+                else "•"
+            )
+            rationale = " ".join(
+                str(decision.get("rationale") or "no rationale recorded").split())
+            verdict_content = "\n".join([
+                f"[bold {verdict_tone}] {verdict_glyph} "
+                f"{escape(verdict_label)} [/]",
+                f"[{TEXT}]{escape(rationale[:180])}[/]",
             ])
         else:
-            lines.extend([
-                f"[{LABEL_GOLD}]PROPOSAL[/]",
-                "No active rebalance proposal.",
-            ])
+            verdict_content = f"[{MUTED}]no verdicts yet[/]"
 
-        source = str(market.get("source", "unknown")).upper()
-        policy = self.snapshot.get("policy") or {}
-        lines.extend([
-            "",
-            f"[{LABEL_GOLD}]POLICY[/]  [{TEXT}]{escape(str(policy.get('label', policy.get('id', '—'))))}[/] "
-            f"[{DIM}]· MVSK research only[/]",
-            f"[{LABEL_GOLD}]DATA[/]  [{TEXT}]{source} · {market.get('frequency', 'unknown')} · "
-            f"as of {market.get('as_of', '—')} · age {market.get('bar_age_days', '—')}d[/]",
-        ])
-        self.query_one("#desk-content", Static).update("\n".join(lines))
+        workflows = self.snapshot.get("workflows", [])
+        if workflows:
+            workflow = workflows[0]
+            workflow_id = escape(str(workflow.get("workflow_id", "—")))
+            status = str(workflow.get("status", "idle"))
+            phase = str(workflow.get("current_phase", "—"))
+            phase_step = next((
+                step for step in (workflow.get("steps") or [])
+                if str(step.get("phase", "")) == phase
+            ), {})
+            state = str(phase_step.get("status") or {
+                "running": "working",
+                "complete": "done",
+            }.get(status, status))
+            glyph, state_tone = _STATE_STYLE.get(state, ("◌", DIM))
+            run_content = "\n".join([
+                f"[bold {TEXT_HI}]{workflow_id}[/]",
+                f"[{MUTED}]STATUS[/] "
+                f"[{state_tone}]{escape(status.upper())}[/]",
+                f"[{state_tone}]{glyph}[/] "
+                f"[{TEXT}]{escape(phase.upper())}[/]",
+            ])
+        else:
+            run_content = f"[{MUTED}]no runs[/]"
+
+        contents = {
+            "equity": equity_content,
+            "allocation": allocation_content,
+            "regime": regime_content,
+            "market-pulse": market_pulse_content,
+            "verdict": verdict_content,
+            "run": run_content,
+            "alerts": f"[{MUTED}]no alerts[/]",
+        }
+        for tile_key, content in contents.items():
+            self.query_one(
+                f"#tile-{tile_key}-content", Static).update(content)
 
     def _plot_region(self, widget_id: str) -> tuple[int, int]:
         """Cells available to a chart in ``widget_id`` — its live size, or a
@@ -1435,6 +1543,8 @@ class QlabTui(App[None]):
 
     # -- navigation -------------------------------------------------------
     def action_view(self, view: str) -> None:
+        if view == "desk":
+            view = "dashboard"
         if view not in _VIEWS:
             return
         self._agent_focus = False
@@ -1584,7 +1694,7 @@ class QlabTui(App[None]):
     def action_help(self) -> None:
         self._set_selected_work(
             "COMMANDS\n\n"
-            "view desk|market|workforce|research|audit\n"
+            "view dashboard|desk|market|workforce|research|audit\n"
             "view agents\n"
             "symbol TICKER\n"
             "chat MESSAGE      (read-only desk assistant)\n"
@@ -1652,7 +1762,7 @@ class QlabTui(App[None]):
                 "message to continue or use : workforce resume ID[/]")
             self._write_local_event("claude.workforce_stopped", {})
         else:
-            self.action_view("desk")
+            self.action_view("dashboard")
 
     def _handle_command(self, raw: str) -> None:
         command, _, rest = raw.partition(" ")

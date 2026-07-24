@@ -302,14 +302,66 @@ def test_headless_shell_has_no_header_and_switches_context():
             assert app.query_one("#spine") is not None
             assert app.query_one("#agent-rail") is not None
             assert app.query_one("#system-status").content.startswith("PAPER")
+            assert app.active_view == "dashboard"
 
             await pilot.press("2")
             await pilot.press("j")
             assert app.active_view == "market"
             assert app.active_ticker == "BNDW"
 
+            await pilot.press("1")
+            assert app.active_view == "dashboard"
+
             await pilot.press("~")
             assert app.query_one("#timeline").styles.display == "block"
+
+    asyncio.run(run())
+
+
+def test_dashboard_renders_all_tiles_and_latest_verdict():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            tile_ids = {
+                "tile-equity",
+                "tile-allocation",
+                "tile-regime",
+                "tile-market-pulse",
+                "tile-verdict",
+                "tile-run",
+                "tile-alerts",
+            }
+            assert {tile.id for tile in app.query(".dashboard-tile")} == tile_ids
+            assert "$10,100.00" in str(
+                app.query_one("#tile-equity-content").content)
+            assert "ACWI" in str(
+                app.query_one("#tile-allocation-content").content)
+            assert "CALM" in str(
+                app.query_one("#tile-regime-content").content)
+            assert "ACWI" in str(
+                app.query_one("#tile-market-pulse-content").content)
+            assert "no verdicts yet" in str(
+                app.query_one("#tile-verdict-content").content)
+            assert "no runs" in str(app.query_one("#tile-run-content").content)
+            assert "no alerts" in str(
+                app.query_one("#tile-alerts-content").content)
+
+            app.snapshot["decisions"] = [{
+                "decision_id": "decision-pass",
+                "rationale": "within mandate",
+                "verdict": {"verdict": "PASS"},
+            }]
+            app._render_dashboard()
+            verdict = str(app.query_one("#tile-verdict-content").content)
+            assert "PASS" in verdict
+            assert "within mandate" in verdict
+
+            app.action_view("market")
+            app._handle_command("view desk")
+            assert app.active_view == "dashboard"
 
     asyncio.run(run())
 
@@ -608,9 +660,9 @@ def test_nav_menu_rows_are_clickable():
         async with app.run_test(size=(160, 44)) as pilot:
             await pilot.pause(0.2)
             for row, view in enumerate(
-                    ("desk", "market", "workforce", "research", "audit")):
+                    ("dashboard", "market", "workforce", "research", "audit")):
                 # start elsewhere so each click is a genuine transition
-                app.action_view("audit" if view != "audit" else "desk")
+                app.action_view("audit" if view != "audit" else "dashboard")
                 await pilot.pause(0.02)
                 await pilot.click("#nav", offset=(3, row))
                 await pilot.pause(0.02)
@@ -1295,7 +1347,7 @@ def test_workforce_chat_sends_resumes_and_stops():
             app.claude.running = False
             app.on_button_pressed(
                 Button.Pressed(app.query_one("#chat-exit", Button)))
-            assert app.active_view == "desk"
+            assert app.active_view == "dashboard"
 
     asyncio.run(run())
 

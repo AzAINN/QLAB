@@ -36,7 +36,7 @@
 | `qlab/state/registry.py` | Add `equity_marks` table to `_SCHEMA` + two accessors |
 | `qlab/trader/broker.py` | `unrealized_pl` in both brokers; `portfolio_history()` on Alpaca |
 | `qlab/ui/server.py` | `performance()`, `record_equity_mark()`, `backfill_equity_history()`, `atlas()`, `latest_ablation_metrics()`, `leaderboard()`; new routes; snapshot keys |
-| `qlab/tui/formatting.py` | `connection_chip()` pure function |
+| `qlab/tui/formatting.py` | `connection_chip()` and `report_lines()` pure functions |
 | `qlab/tui/atlas_view.py` | **Create** — master-detail widget |
 | `qlab/tui/app.py` | conn chip; book equity section + P&L column; atlas view wiring; leaderboard render; arm-name humanization |
 | `qlab/tui/theme.py` | `APP_CSS` additions for `#conn-chip` and atlas layout |
@@ -1507,7 +1507,192 @@ git commit -m "feat(tui): ablation leaderboard by method name; humanize arm ids"
 
 ---
 
-### Task 10: Full-suite verification
+### Task 10: Markdown-aware report rendering in the console
+
+Agent reports arrive as markdown (`## headers`, `- bullets`, tables, code
+fences) and are currently flattened into truncated plain lines by
+`bulletin()`. Normalize them into styled, bulleted console output instead.
+
+**Files:**
+- Modify: `qlab/tui/formatting.py` (new pure function), `qlab/tui/app.py` (`_console_stream_text` ~line 1247, `_console_flush` ~line 1254)
+- Test: `tests/test_tui.py`
+
+**Interfaces:**
+- Produces: `report_lines(lines: list[str], max_len: int = 260) -> list[tuple[str, str]]` returning `(kind, text)` pairs with kind in `{"h1", "h2", "bullet", "code", "table", "text", "blank"}`; app-side `_REPORT_TONES: dict[str, str]` mapping kind → markup template.
+- Consumes: nothing from other tasks (independent; can run any time after Task 6 exists to avoid merge conflicts in `formatting.py`).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+def test_report_lines_normalizes_agent_markdown():
+    from qlab.tui.formatting import report_lines
+
+    out = report_lines([
+        "## How news is currently used",
+        "",
+        "",
+        "News is a quarantined research input, not a trading signal.",
+        "- first point",
+        "* second point",
+        "1. numbered step",
+        "### The extractor cannot trade",
+        "| source | quality |",
+        "    conditioned = reweight(scenarios)",
+    ])
+    kinds = [kind for kind, _ in out]
+    texts = {text for _, text in out}
+    assert ("h1", "How news is currently used") in out
+    assert ("h2", "The extractor cannot trade") in out
+    assert kinds.count("bullet") == 3
+    assert ("bullet", "first point") in out
+    assert ("bullet", "1. numbered step") in out       # numbering preserved
+    assert ("table", "| source | quality |") in out    # tables pass untruncated
+    assert ("code", "    conditioned = reweight(scenarios)") in out
+    assert kinds.count("blank") == 1                   # blank runs collapse
+    assert not any("##" in text for text in texts)     # markers consumed
+
+
+def test_report_lines_wraps_long_paragraphs_without_truncating():
+    from qlab.tui.formatting import report_lines
+
+    long = "word " * 100
+    out = report_lines([long])
+    assert all(kind == "text" for kind, _ in out)
+    assert len(out) > 1                                 # wrapped, not cut
+    assert sum(len(text.split()) for _, text in out) == 100
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest tests/test_tui.py -q -k report_lines`
+Expected: FAIL with `ImportError` on `report_lines`
+
+- [ ] **Step 3: Implement**
+
+`qlab/tui/formatting.py`:
+
+```python
+def report_lines(lines: list[str], max_len: int = 260) -> list[tuple[str, str]]:
+    """Normalize agent-report markdown into (kind, text) console lines.
+
+    Tone-free by design — the app maps kinds to theme markup. Tables and
+    code stay verbatim (truncating them mangles alignment); paragraphs wrap
+    instead of truncating so long reports stay readable.
+    """
+    import re
+    import textwrap
+
+    out: list[tuple[str, str]] = []
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            if out and out[-1][0] != "blank":
+                out.append(("blank", ""))
+            continue
+        if stripped.startswith("```"):
+            continue                       # fence markers carry no content
+        if stripped.startswith("### "):
+            out.append(("h2", stripped[4:].strip()))
+            continue
+        if stripped.startswith("## ") or stripped.startswith("# "):
+            out.append(("h1", stripped.lstrip("#").strip()))
+            continue
+        if stripped.startswith(("|", "┌", "├", "└", "━", "─")):
+            out.append(("table", line))
+            continue
+        if line.startswith(("    ", "\t")):
+            out.append(("code", line))
+            continue
+        bullet = re.match(r"^[-*•]\s+(.*)$", stripped)
+        if bullet:
+            for piece in textwrap.wrap(bullet.group(1), max_len) or [""]:
+                out.append(("bullet", piece))
+            continue
+        numbered = re.match(r"^\d+[.)]\s", stripped)
+        if numbered:
+            for piece in textwrap.wrap(stripped, max_len) or [""]:
+                out.append(("bullet", piece))
+            continue
+        for piece in textwrap.wrap(stripped, max_len):
+            out.append(("text", piece))
+    return out
+```
+
+`app.py` — a module-level tone map next to `_bulletin_markup`:
+
+```python
+_REPORT_TONES = {
+    "h1": f"[bold {AMBER}]▍{{}}[/]",
+    "h2": f"[bold {TEXT_HI}]{{}}[/]",
+    "bullet": f"[{MUTED}]  • [/][{TEXT}]{{}}[/]",
+    "code": f"[{DIM}]{{}}[/]",
+    "table": f"[{DIM}]{{}}[/]",
+    "text": f"[{TEXT}]{{}}[/]",
+    "blank": "{}",
+}
+```
+
+`_console_stream_text` / `_console_flush`: route complete report lines
+through `report_lines(...)` and write
+`_REPORT_TONES[kind].format(escape(text))` instead of `_bulletin_markup`.
+Numbered bullets already carry their `1.` prefix, so the bullet template's
+`•` glyph applies only to unnumbered kinds — adjust the template application:
+
+```python
+for kind, text in report_lines(complete):
+    if kind == "bullet" and text[:1].isdigit():
+        self._console_write(f"[{MUTED}]  [/][{TEXT}]{escape(text)}[/]")
+    else:
+        self._console_write(_REPORT_TONES[kind].format(escape(text)))
+```
+
+Leave `_bulletin_markup` and its other call sites (verdicts, summaries)
+untouched — they format one-line facts, not documents.
+
+- [ ] **Step 4: Add an app-level regression test**
+
+```python
+def test_console_renders_markdown_report_styled():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app._console_stream_text(
+                "## Verdict\n- referee passed\n- targets bound\n")
+            log = app.query_one("#workforce-console", RichLog)
+            rendered = "\n".join(
+                strip.text if hasattr(strip, "text") else str(strip)
+                for strip in log.lines)
+            assert "##" not in rendered
+            assert "Verdict" in rendered
+
+    asyncio.run(run())
+```
+
+(`RichLog.lines` holds rendered strips; if the pinned Textual version exposes
+them differently, assert via `log.lines` repr — the contract is: no literal
+`##` reaches the console, the heading text does.)
+
+- [ ] **Step 5: Run tests**
+
+Run: `python -m pytest tests/test_tui.py -q`
+Expected: all pass — including the existing stream-parser tests
+(`test_claude_stream_parser_emits_text_and_hides_thinking`), which must not
+be weakened; adapt the renderer, not the assertions, if they conflict.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add qlab/tui/formatting.py qlab/tui/app.py tests/test_tui.py
+git commit -m "feat(tui): markdown-aware report rendering in the workforce console"
+```
+
+---
+
+### Task 11: Full-suite verification
 
 - [ ] **Step 1: Run the entire suite offline**
 
@@ -1534,7 +1719,7 @@ git commit -m "fix(tui): smoke-test fixes for atlas and performance views"
 
 ## Self-review notes
 
-- Spec coverage: hybrid atlas (T1+T5+T8), registry+backfill performance (T2+T3+T4+T7), nav placement with settings last (T8), master-detail (T8), names-not-codes everywhere with dim footnote (T1, T5, T8, T9), staleness chip (T6), leaderboard (T5+T9), position P&L (T3+T7).
+- Spec coverage: hybrid atlas (T1+T5+T8), registry+backfill performance (T2+T3+T4+T7), nav placement with settings last (T8), master-detail (T8), names-not-codes everywhere with dim footnote (T1, T5, T8, T9), staleness chip (T6), leaderboard (T5+T9), position P&L (T3+T7), markdown-aware report rendering (T10).
 - Champion marking is derived from `mandate.operational_policy` at request time — promoting a new policy moves the star with no atlas edit.
 - All new registry writes go through `UISession` methods invoked from `handle_api` — the owner process remains the single writer.
 - Line-number anchors are as of commit 13f3d55 and drift as tasks land — locate by symbol name, not by number.

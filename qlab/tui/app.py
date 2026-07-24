@@ -1652,6 +1652,66 @@ class QlabTui(App[None]):
         }
         self._update_dashboard_tiles(contents)
 
+    def _bob_panel_content(self) -> str:
+        """Bob's mode, lifecycle state, pending approvals, and recent tasks.
+
+        Mode is the authority statement (observe never launches work; only
+        propose can put a plan up for approval), so it is shown first and
+        never abbreviated away.
+        """
+        bob = _record(self.snapshot.get("bob"))
+        if not bob:
+            return f"[{MUTED}]desk manager unavailable[/]"
+        mode = str(bob.get("mode", "—"))
+        state = str(bob.get("state", "—"))
+        state_tone = {
+            "observing": UP, "blocked": DOWN, "degraded": AMBER,
+            "paused": MUTED,
+        }.get(state, TEXT_HI)
+        approvals = _records(self.snapshot.get("approvals"))
+        tasks = _records(self.snapshot.get("bob_tasks"))
+        active = [t for t in tasks if t.get("status") in ("queued", "running")]
+        pairs = [
+            ("MODE", mode.upper()),
+            ("STATE", state.upper()),
+            ("PENDING APPROVALS", str(len(approvals))),
+            ("OPEN TASKS", str(len(active))),
+        ]
+        tones = [
+            AMBER if mode == "propose" else TEXT_HI,
+            state_tone,
+            AMBER if approvals else MUTED,
+            TEXT_HI if active else MUTED,
+        ]
+        lines = [f"[{LABEL_GOLD}]BOB · DESK MANAGER[/]"]
+        lines.extend(_key_number_markup(
+            pairs, value_tones=tones, bold_values={0, 1}))
+        reason = str(bob.get("blocked_reason") or "").strip()
+        if reason:
+            lines.extend(_bulletin_markup([reason], tone=DOWN, max_len=90))
+        elif not bob.get("coordinator_available"):
+            lines.extend(_bulletin_markup(
+                ["coordinator unavailable — monitoring continues"],
+                tone=MUTED, max_len=90))
+
+        # Pending approvals are the human's decision queue: each one names the
+        # exact plan it binds and when it expires. Approving is a deliberate
+        # act through the owner API, never a side effect of viewing.
+        if approvals:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]PENDING APPROVALS[/]")
+            for approval in approvals[:5]:
+                plan_id = str(approval.get("plan_id", ""))[:12]
+                expires = str(approval.get("expires_at", ""))[11:19]
+                lines.append(
+                    f"  [{AMBER}]{str(approval.get('approval_id',''))[:8]}[/] "
+                    f"plan {plan_id} · expires {expires}")
+            lines.extend(_bulletin_markup(
+                ["approve or reject through the owner approvals API; "
+                 "execution consumes the approval"],
+                tone=MUTED, max_len=90))
+        return "\n".join(lines)
+
     def _plot_region(self, widget_id: str) -> tuple[int, int]:
         """Cells available to a chart in ``widget_id`` — its live size, or a
         size derived from the terminal when layout has not settled yet."""
@@ -2299,7 +2359,8 @@ class QlabTui(App[None]):
         decisions = self.snapshot.get("decisions", [])
         self.query_one("#audit-summary", Static).update(
             "Every judgment, challenge, verdict, and reflection remains inspectable.\n\n"
-            f"{len(decisions)} decisions   ·   plans and orders are in Book"
+            f"{len(decisions)} decisions   ·   plans and orders are in Book\n\n"
+            f"{self._bob_panel_content()}"
         )
         rows = []
         self._audit_decisions = {}
@@ -2478,9 +2539,25 @@ class QlabTui(App[None]):
             autopilot_token = f"AUTO {last_run_text}·{trigger_count}"
         else:
             autopilot_token = "AUTO —·0"
+        # Feed identity is never collapsed into the word "live": IEX is not SIP
+        # coverage, and the operator must always see which one is priced.
+        quotes = self.snapshot.get("quotes") or {}
+        if quotes.get("live_stream"):
+            feed = str(quotes.get("feed", "")).replace("_", " ").upper()
+            health = quotes.get("health") or {}
+            feed_token = (
+                f"ALPACA·{feed}" if health.get("fresh") else f"ALPACA·{feed} STALE")
+        else:
+            feed_token = "FEED —"
+        bob = self.snapshot.get("bob") or {}
+        bob_token = (
+            f"BOB {str(bob.get('mode', '—')).upper()}/"
+            f"{str(bob.get('state', '—')).upper()}" if bob else "BOB —")
+        approvals = self.snapshot.get("approvals") or []
+        approval_token = f" · APPROVALS {len(approvals)}" if approvals else ""
         self.query_one("#system-status", Static).update(
-            f"PAPER · {source}/DAILY · {mcp} · {claude} · "
-            f"{data_token} · {autopilot_token}")
+            f"PAPER · {source}/DAILY · {feed_token} · {mcp} · {claude} · "
+            f"{data_token} · {autopilot_token} · {bob_token}{approval_token}")
         self.query_one("#chat-exit", Button).label = (
             "■ stop" if self.claude.running else "exit")
         self._sync_chat_input()

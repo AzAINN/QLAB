@@ -2510,3 +2510,117 @@ def test_audit_row_select_expands_decision_into_work_rail():
             assert "realized vol matched" in rail
 
     asyncio.run(run())
+
+
+def _bob_snapshot(**over):
+    """The standard snapshot plus the Bob/approval/quote projections (P8)."""
+    snap = _snapshot()
+    snap.update({
+        "bob": {"manager_id": "bob-the-quant", "mode": "observe",
+                "state": "observing", "blocked_reason": None,
+                "coordinator_available": True},
+        "bob_tasks": [{"task_id": "task-1", "status": "queued",
+                       "trigger_kind": "regime_flip"}],
+        "approvals": [],
+        "quotes": {"live_stream": False, "quotes": {}, "health": None},
+    })
+    snap.update(over)
+    return snap
+
+
+class _BobStubClient(StubClient):
+    def __init__(self, snapshot):
+        super().__init__()
+        self._snapshot = snapshot
+
+    def get(self, path, **params):
+        if path == "/api/tui":
+            return self._snapshot
+        return super().get(path, **params)
+
+
+def test_status_line_shows_bob_mode_and_feed_identity():
+    from qlab.tui.app import QlabTui
+
+    snap = _bob_snapshot(quotes={
+        "live_stream": True, "feed": "sip",
+        "quotes": {"ACWI": {"price": 101.0, "age_seconds": 0.4}},
+        "health": {"fresh": True, "state": "live"}})
+
+    async def run():
+        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(200, 48)) as pilot:
+            await pilot.pause(0.2)
+            status = str(app.query_one("#system-status").content)
+            # IEX/SIP is never collapsed into the word "live".
+            assert "ALPACA·SIP" in status
+            assert "BOB OBSERVE/OBSERVING" in status
+
+    asyncio.run(run())
+
+
+def test_status_line_marks_a_stale_quote_feed():
+    from qlab.tui.app import QlabTui
+
+    snap = _bob_snapshot(quotes={
+        "live_stream": True, "feed": "iex", "quotes": {},
+        "health": {"fresh": False, "state": "stale"}})
+
+    async def run():
+        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(200, 48)) as pilot:
+            await pilot.pause(0.2)
+            status = str(app.query_one("#system-status").content)
+            assert "ALPACA·IEX STALE" in status
+
+    asyncio.run(run())
+
+
+def test_audit_view_shows_bob_panel_and_pending_approvals():
+    from qlab.tui.app import QlabTui
+
+    snap = _bob_snapshot(
+        bob={"manager_id": "bob-the-quant", "mode": "propose",
+             "state": "blocked", "blocked_reason": "data plane is blocked",
+             "coordinator_available": True},
+        approvals=[{"approval_id": "appr-abc123", "plan_id": "plan-xyz789",
+                    "expires_at": "2026-07-24T18:45:00+00:00",
+                    "status": "pending"}])
+
+    async def run():
+        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app.action_view("audit")
+            await pilot.pause(0.2)
+            panel = str(app.query_one("#audit-summary").content)
+            assert "BOB · DESK MANAGER" in panel
+            assert "PROPOSE" in panel and "BLOCKED" in panel
+            assert "data plane is blocked" in panel
+            assert "PENDING APPROVALS" in panel
+            assert "appr-abc" in panel and "plan-xyz789" in panel
+            # Viewing never approves; the panel says how approval happens.
+            assert "approve or reject through the owner approvals API" in panel
+
+    asyncio.run(run())
+
+
+def test_bob_panel_reports_degraded_coordinator_without_failing():
+    from qlab.tui.app import QlabTui
+
+    snap = _bob_snapshot(bob={
+        "manager_id": "bob-the-quant", "mode": "observe", "state": "degraded",
+        "blocked_reason": None, "coordinator_available": False})
+
+    async def run():
+        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app.action_view("audit")
+            await pilot.pause(0.2)
+            panel = str(app.query_one("#audit-summary").content)
+            assert "DEGRADED" in panel
+            assert "coordinator unavailable" in panel
+            assert "monitoring continues" in panel
+
+    asyncio.run(run())

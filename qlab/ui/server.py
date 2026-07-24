@@ -1090,11 +1090,16 @@ class UISession:
                 replays,
                 events,
             )
+        self.registry.expire_due_approvals(self._now_iso())
         return {
             "portfolio": portfolio,
             "live_portfolio": self.live_portfolio(offline),
             "market": market_snapshot,
             "stress": stress,
+            "bob": self.bob.status(),
+            "bob_tasks": self.registry.list_bob_tasks(10),
+            "approvals": self.registry.list_approval_requests(10, "pending"),
+            "quotes": self.quotes(),
             "agents": self.agents(),
             "decisions": decisions,
             "runs": self.registry.list_runs(30),

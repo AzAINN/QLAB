@@ -80,6 +80,7 @@ OWNER_LAB_TOOLS = frozenset({
     "data.snapshot_summary",
     "moments.estimate",
     "selection.run",
+    "regime.hmm",
     "regime.turbulence",
     "regime.absorption",
     "regime.volatility_term_structure",
@@ -134,6 +135,7 @@ class UISession:
         self._market_events: deque[dict] = deque(maxlen=_MARKET_EVENT_LIMIT)
         self._market_lock = threading.Lock()
         self._last_quote_signature: tuple[tuple[str, float, float], ...] | None = None
+        self._regime_hmm_cache: dict[str, dict[str, object]] = {}
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -317,6 +319,7 @@ class UISession:
 
         from qlab.core import data as market
         from qlab.core.moments import detect_regime
+        from qlab.signals.hard import detect_regime_robust
 
         tickers = self.mandate.universe_whitelist
         snap = market.snapshot(
@@ -343,12 +346,54 @@ class UISession:
                 "realized_vol": vol,
                 "history": [float(x) for x in series.tail(40)],
             })
+
+        hmm_reading = None
+        hmm_posterior = None
+        if importlib.util.find_spec("hmmlearn") is not None:
+            from qlab.signals.hmm import fit_regime_hmm
+
+            cache_key = snap.content_hash()
+            hmm_reading = self._regime_hmm_cache.get(cache_key)
+            if hmm_reading is None:
+                fitted = fit_regime_hmm(
+                    snap.log_returns().dropna(how="any"),
+                    n_states=3,
+                    seed=self.seed,
+                )
+                latest = fitted["posteriors"].iloc[-1]
+                labels = fitted["state_labels"]
+                posterior = {
+                    labels[int(state)]: float(probability)
+                    for state, probability in latest.items()
+                }
+                hmm_reading = {
+                    "posterior": posterior,
+                    "label": max(posterior, key=posterior.get),
+                }
+                self._regime_hmm_cache = {cache_key: hmm_reading}
+            hmm_posterior = hmm_reading["posterior"]
+
+        robust = detect_regime_robust(
+            snap,
+            hmm_posterior=hmm_posterior,
+        )
+        regime = detect_regime(snap)
+        regime.update({
+            "robust_state": robust.regime,
+            "confidence": robust.confidence,
+            "effective_risk_fraction": robust.effective_risk_fraction,
+        })
+        if hmm_reading is not None:
+            regime.update({
+                "posterior": hmm_reading["posterior"],
+                "hmm_label": hmm_reading["label"],
+            })
         return {
             "source": snap.source,
             "as_of": last_dt.isoformat(),
             "bar_age_days": max(0, (date.today() - last_dt).days),
             "frequency": "daily",
-            "regime": detect_regime(snap),
+            "regime": regime,
             "assets": assets,
         }
 

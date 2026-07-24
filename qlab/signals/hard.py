@@ -5,6 +5,7 @@ prices or fetched from fixed public index series; no text, no LLM.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping, Sequence
 from math import ceil
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import pandas as pd
 
 from qlab.core.types import DataSnapshot
 from qlab.paths import state_path
+from qlab.signals.robust import RobustRegime, robust_regime
 
 _TRADING_DAYS = 252
 
@@ -113,7 +115,96 @@ def fred_series(series_id: str, start: str = "2008-01-01", *,
     return s
 
 
-def composite_regime(snapshot: DataSnapshot, *, offline: bool = False) -> dict:
+def _stress_vote(
+    series: pd.Series,
+    current: float,
+    quantile: float,
+    detector: str,
+) -> str:
+    values = series.to_numpy(dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) < 20 or not np.isfinite(current):
+        raise ValueError(
+            f"insufficient history for robust {detector} regime vote"
+        )
+    threshold = float(np.quantile(values, quantile))
+    return "stress" if current > threshold else "calm"
+
+
+def regime_detector_votes(
+    snapshot: DataSnapshot,
+    *,
+    quantile: float = 0.80,
+) -> dict[str, str]:
+    """Read the three independent hard detectors used by the robust wrapper."""
+    if not 0.0 < quantile < 1.0:
+        raise ValueError("quantile must be strictly between 0 and 1")
+    rets = snapshot.log_returns().dropna(how="any")
+    if len(rets) < 200:
+        raise ValueError(
+            "robust regime detection requires at least 200 complete return "
+            "observations"
+        )
+
+    adaptive_window = min(252, max(63, len(rets) // 2))
+    turb = turbulence(rets, lookback=adaptive_window) / rets.shape[1]
+    turb_current = float(turb.tail(5).mean()) if len(turb) else float("nan")
+
+    absorption = absorption_ratio(
+        rets,
+        window=adaptive_window,
+        step=5,
+    )
+    absorption_current = (
+        float(absorption.iloc[-1]) if len(absorption) else float("nan")
+    )
+
+    realized_vol = (
+        rets.mean(axis=1).rolling(63).std().dropna()
+        * np.sqrt(_TRADING_DAYS)
+    )
+    vol_current = (
+        float(realized_vol.iloc[-1]) if len(realized_vol) else float("nan")
+    )
+    return {
+        "turbulence": _stress_vote(
+            turb, turb_current, quantile, "turbulence"
+        ),
+        "absorption": _stress_vote(
+            absorption, absorption_current, quantile, "absorption"
+        ),
+        "volatility": _stress_vote(
+            realized_vol, vol_current, quantile, "volatility"
+        ),
+    }
+
+
+def detect_regime_robust(
+    snapshot: DataSnapshot,
+    *,
+    hmm_posterior: Mapping[str, float] | None = None,
+    history: Sequence[str] = (),
+    quantile: float = 0.80,
+    confirmation_days: int = 3,
+) -> RobustRegime:
+    """Compose hard-detector agreement with the optional HMM posterior."""
+    votes = regime_detector_votes(snapshot, quantile=quantile)
+    return robust_regime(
+        list(votes.values()),
+        hmm_posterior=hmm_posterior,
+        history=history,
+        confirmation_days=confirmation_days,
+    )
+
+
+def composite_regime(
+    snapshot: DataSnapshot,
+    *,
+    offline: bool = False,
+    robust: bool = False,
+    hmm_posterior: Mapping[str, float] | None = None,
+    history: Sequence[str] = (),
+) -> dict | RobustRegime:
     """Blend price-based stress signals into one lambda in [0, 1].
 
     lambda = mean of (turbulence percentile, absorption percentile, trailing-vol
@@ -126,7 +217,17 @@ def composite_regime(snapshot: DataSnapshot, *, offline: bool = False) -> dict:
     ``(absr <= absr.iloc[-1]).mean()`` percentile degenerates (often to a
     trivial 1.0), which would pin lambda high regardless of actual factor
     concentration.
+
+    ``robust=True`` opts into the misclassification wrapper and returns a
+    :class:`~qlab.signals.robust.RobustRegime`. The default dictionary contract
+    is unchanged.
     """
+    if robust:
+        return detect_regime_robust(
+            snapshot,
+            hmm_posterior=hmm_posterior,
+            history=history,
+        )
     rets = snapshot.log_returns().dropna(how="any")
     if len(rets) < 300:
         return {"regime": "calm", "regime_lambda": 0.0,

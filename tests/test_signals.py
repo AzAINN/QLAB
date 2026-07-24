@@ -8,6 +8,7 @@ helper is module-level on purpose: later signal tasks reuse it.
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _two_regime_returns(seed=7, n=6):
@@ -119,6 +120,154 @@ def test_composite_regime_drops_degenerate_absorption():
     assert 0.0 <= out["regime_lambda"] <= 1.0
 
 
+def test_detector_agreement_reports_plurality_fraction():
+    from qlab.signals.robust import detector_agreement
+
+    regime, agreement = detector_agreement(["stress", "calm", "stress"])
+    assert regime == "stress"
+    assert agreement == pytest.approx(2 / 3)
+
+
+def test_robust_regime_enters_uncertain_on_low_posterior_or_disagreement():
+    from qlab.signals.robust import robust_regime
+
+    low_posterior = robust_regime(
+        ["calm", "calm", "calm"],
+        hmm_posterior={"calm": 0.49, "normal": 0.31, "stress": 0.20},
+    )
+    disagreement = robust_regime(
+        ["stress", "calm", "stress"],
+        hmm_posterior={"calm": 0.05, "normal": 0.10, "stress": 0.85},
+    )
+
+    assert low_posterior.regime == "uncertain"
+    assert low_posterior.confidence == pytest.approx(0.49)
+    assert low_posterior.effective_risk_fraction == 0.5
+    assert disagreement.regime == "uncertain"
+    assert disagreement.confidence == pytest.approx(2 / 3)
+    assert disagreement.effective_risk_fraction == 0.5
+
+
+def test_robust_regime_holds_then_confirms_a_three_day_change():
+    from qlab.signals.robust import robust_regime
+
+    held = robust_regime(
+        ["stress", "stress", "stress"],
+        history=["calm", "stress"],
+    )
+    flipped = robust_regime(
+        ["stress", "stress", "stress"],
+        history=["calm", "stress", "stress"],
+    )
+
+    assert held.regime == "calm"
+    assert held.effective_risk_fraction == 1.0
+    assert flipped.regime == "stress"
+    assert flipped.effective_risk_fraction == 0.5
+
+
+def test_robust_regime_ramps_risk_after_a_confirmed_switch():
+    from qlab.signals.robust import robust_regime
+
+    histories = [
+        ["calm", "stress", "stress"],
+        ["calm", "stress", "stress", "stress"],
+        ["calm", "stress", "stress", "stress", "stress"],
+    ]
+    fractions = [
+        robust_regime(["stress"] * 3, history=history).effective_risk_fraction
+        for history in histories
+    ]
+    assert fractions == [0.5, 0.7, 0.9]
+
+
+def test_composite_robust_path_needs_no_hmm_dependency():
+    from qlab.core.types import DataSnapshot
+    from qlab.signals.hard import composite_regime
+    from qlab.signals.robust import RobustRegime
+
+    returns = _two_regime_returns()
+    prices = (1 + returns).cumprod() * 100
+    snapshot = DataSnapshot(
+        list(prices.columns), prices, prices.index[-1].date()
+    )
+    result = composite_regime(snapshot, offline=True, robust=True)
+    assert isinstance(result, RobustRegime)
+    assert result.regime in {"calm", "stress", "uncertain"}
+    assert 0.0 <= result.confidence <= 1.0
+
+
+def test_hmm_fit_is_seeded_and_labels_states_by_ascending_volatility():
+    pytest.importorskip("hmmlearn")
+    from qlab.signals.hmm import fit_regime_hmm
+
+    rng = np.random.default_rng(19)
+    index = pd.bdate_range("2015-01-01", periods=900)
+    blocks = [
+        rng.normal(0.0, scale, (300, 4))
+        for scale in (0.003, 0.010, 0.030)
+    ]
+    returns = pd.DataFrame(
+        np.vstack(blocks),
+        index=index,
+        columns=list("ABCD"),
+    )
+
+    first = fit_regime_hmm(returns, seed=31)
+    second = fit_regime_hmm(returns, seed=31)
+    np.testing.assert_allclose(first["posteriors"], second["posteriors"])
+    np.testing.assert_allclose(
+        first["transition_matrix"], second["transition_matrix"]
+    )
+    ordered = sorted(
+        first["state_volatility"],
+        key=first["state_volatility"].get,
+    )
+    assert [first["state_labels"][state] for state in ordered] == [
+        "calm", "normal", "stress",
+    ]
+    np.testing.assert_allclose(first["posteriors"].sum(axis=1), 1.0)
+    np.testing.assert_allclose(first["transition_matrix"].sum(axis=1), 1.0)
+
+
+def test_regime_hmm_tool_refuses_loudly_without_optional_extra(monkeypatch):
+    import builtins
+
+    from qlab.state.registry import Registry
+    from qlab.ui.server import UISession
+
+    real_import = builtins.__import__
+
+    def import_without_hmm(name, *args, **kwargs):
+        if name == "hmmlearn" or name.startswith("hmmlearn."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_hmm)
+    registry = Registry(":memory:")
+    session = UISession(
+        offline_default=True,
+        registry=registry,
+        seed=7,
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match=r"optional 'hmm' extra",
+        ):
+            session.call_lab_tool(
+                "regime.hmm",
+                {
+                    "as_of": "2022-06-30",
+                    "universe": "core",
+                    "lookback_days": 300,
+                },
+                True,
+            )
+    finally:
+        registry.close()
+
+
 def test_conditioned_covariance_scales_with_lambda():
     from qlab.signals.condition import condition_covariance, regime_labels
     r = _two_regime_returns()
@@ -145,7 +294,6 @@ def test_b4_arm_runs_regime_conditional():
 
 
 def test_regime_conditional_rejects_higher_moments():
-    import pytest
     from qlab.arms import Arm, MomentsConfig, solve_arm
     from qlab.core.types import DataSnapshot
     r = _two_regime_returns()

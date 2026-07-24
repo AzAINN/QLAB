@@ -449,6 +449,40 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
     asyncio.run(run())
 
 
+def test_dashboard_regime_tile_renders_hmm_posterior_and_uncertain_state():
+    from qlab.tui.app import QlabTui
+
+    snapshot = _snapshot()
+    snapshot["market"]["regime"].update({
+        "posterior": {"calm": 0.62, "normal": 0.30, "stress": 0.08},
+        "robust_state": "uncertain",
+        "confidence": 0.62,
+        "effective_risk_fraction": 0.5,
+    })
+
+    class PosteriorClient(StubClient):
+        def get(self, path, **params):
+            if path == "/api/tui":
+                return snapshot
+            return super().get(path, **params)
+
+    async def run():
+        app = QlabTui(
+            PosteriorClient(),
+            refresh_interval=0,
+            claude_start="off",
+        )
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            regime = str(app.query_one("#tile-regime-content").content)
+            assert "calm 62" in regime
+            assert "normal 30" in regime
+            assert "stress 8" in regime
+            assert "UNCERTAIN" in regime
+
+    asyncio.run(run())
+
+
 def test_quote_event_repaints_only_market_pulse_and_universe():
     from qlab.tui.app import QlabTui
     from textual.widgets import Label, ListView

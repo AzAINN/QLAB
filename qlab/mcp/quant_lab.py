@@ -248,14 +248,58 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         app.tool(name="selection.run")(selection_run)
 
     # -- regime indicators (options for the analyst's regime call) ----------
-    # Five deterministic, price-only reads on different faces of market
-    # variability. Each returns one regime reading in a shared schema so the
-    # analyst can weigh several and defend a single call; none forecasts returns.
+    # Five deterministic, price-only reads plus one explicitly optional HMM.
+    # The optional tool remains registered without hmmlearn so invoking it can
+    # refuse loudly with the exact extra required; none forecasts returns.
     def _regime_snapshot(as_of: str, universe: str, lookback_days: int):
         d = check_as_of(as_of)
         tickers = load_universe().tickers(universe)
         return market.snapshot(tickers, d, lookback_days=lookback_days,
                                offline=st.offline, seed=st.seed)
+
+    @app.tool(name="regime.hmm")
+    def regime_hmm(as_of: str, universe: str = "core",
+                   lookback_days: int = 756) -> dict:
+        """Gaussian-HMM posterior over calm, normal, and stress regimes."""
+        st.budget.charge("regime.hmm")
+        from qlab.signals.hmm import fit_regime_hmm
+
+        snapshot = _regime_snapshot(as_of, universe, lookback_days)
+        fitted = fit_regime_hmm(
+            snapshot.log_returns().dropna(how="any"),
+            n_states=3,
+            seed=st.seed,
+        )
+        latest = fitted["posteriors"].iloc[-1]
+        labels = fitted["state_labels"]
+        posterior = {
+            labels[int(state)]: float(probability)
+            for state, probability in latest.items()
+        }
+        label = max(posterior, key=posterior.get)
+        confidence = posterior[label]
+        return {
+            "indicator": "hmm",
+            "method": "gaussian_hmm_portfolio_return_realized_vol",
+            "regime": label,
+            "label": label,
+            "posterior": {
+                state: round(posterior.get(state, 0.0), 6)
+                for state in ("calm", "normal", "stress")
+            },
+            "confidence": round(confidence, 6),
+            "as_of": str(latest.name.date()),
+            "lookback_days": int(lookback_days),
+            "transition_matrix": fitted["transition_matrix"].tolist(),
+            "state_labels": {
+                str(state): regime
+                for state, regime in labels.items()
+            },
+            "reasoning": (
+                f"The Gaussian HMM assigns {confidence:.0%} posterior "
+                f"probability to {label}."
+            ),
+        }
 
     @app.tool(name="regime.turbulence")
     def regime_turbulence(as_of: str, universe: str = "core",

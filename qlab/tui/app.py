@@ -247,7 +247,12 @@ def workforce_note(phase: str, status: str, summary: str,
 
 # The regime a run selected is a first-class read for the operator, so it gets
 # its own colored line rather than living only in a hover card.
-_REGIME_TONE = {"calm": UP, "stress": DOWN}
+_REGIME_TONE = {
+    "calm": UP,
+    "normal": CYAN,
+    "stress": DOWN,
+    "uncertain": AMBER,
+}
 
 
 def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
@@ -1274,7 +1279,9 @@ class QlabTui(App[None]):
             allocation_lines.append(f"[{MUTED}]—[/]")
         allocation_content = "\n".join(allocation_lines)
 
-        regime_name = str(regime.get("regime") or "—").upper()
+        regime_name = str(
+            regime.get("robust_state") or regime.get("regime") or "—"
+        ).upper()
         source = str(market.get("source") or "—").upper()
         age = market.get("bar_age_days")
         age_text = "—" if age is None else f"{age}d"
@@ -1306,6 +1313,27 @@ class QlabTui(App[None]):
             value_tones=regime_tones,
             bold_values={0},
         ))
+        posterior = _record(regime.get("posterior"))
+        if posterior:
+            selected = regime_name.lower()
+            posterior_parts = []
+            for state in ("calm", "normal", "stress"):
+                probability = _finite_number(posterior.get(state))
+                if probability is None:
+                    continue
+                token = f"{state} {round(probability * 100):.0f}"
+                if selected == state:
+                    posterior_parts.append(
+                        f"[bold {_REGIME_TONE[state]}]{token}[/]"
+                    )
+                else:
+                    posterior_parts.append(f"[{MUTED}]{token}[/]")
+            if posterior_parts:
+                state_tone = _REGIME_TONE.get(selected, AMBER)
+                posterior_parts.append(
+                    f"[bold {state_tone}]{escape(regime_name)}[/]"
+                )
+                regime_content += "\n" + " · ".join(posterior_parts)
 
         market_pulse_content = self._market_pulse_content(market)
 

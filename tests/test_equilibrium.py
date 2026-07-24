@@ -207,3 +207,13 @@ def test_tui_snapshot_exposes_latest_equilibrium_summary(reg) -> None:
         "portfolio": older["portfolio"],
         "caveats": older["caveats"],
     }
+
+
+def test_inverse_vol_prior_refuses_stale_series():
+    import numpy as np
+    import pytest
+
+    from qlab.core.equilibrium import inverse_vol_weights
+
+    with pytest.raises(ValueError, match="stale"):
+        inverse_vol_weights(np.diag([1e-24, 0.04]))

@@ -48,7 +48,16 @@ def inverse_vol_weights(cov: np.ndarray) -> np.ndarray:
         raise ValueError(
             "inverse-volatility prior requires strictly positive asset variances"
         )
-    inverse_vol = 1.0 / np.sqrt(variances)
+    vols = np.sqrt(variances)
+    # A near-constant series (stale prints, broken feed) would monopolize an
+    # inverse-vol prior; that is a data problem, not a portfolio view.
+    median_vol = float(np.median(vols))
+    if median_vol > 0 and float(vols.min()) < 1e-4 * median_vol:
+        raise ValueError(
+            "inverse-volatility prior refused: an asset's volatility is "
+            "~10,000x below the cross-sectional median — check for a stale "
+            "or constant price series")
+    inverse_vol = 1.0 / vols
     return inverse_vol / inverse_vol.sum()
 
 

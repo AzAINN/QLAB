@@ -333,9 +333,9 @@ def workforce_note(phase: str, status: str, summary: str,
             "targets."
         )
     elif base == "analyst":
-        nxt = ("Next: the challenger and the optimizer both start now, in "
-               "parallel — neither depends on the other, only on this "
-               "estimation call.")
+        nxt = ("Next: the challenger opens the bounded debate on this "
+               "estimation call; the optimizer runs after the debate settles "
+               "on the final decision.")
     elif base in ("challenger", "optimizer"):
         other = "optimizer" if base == "challenger" else "challenger"
         nxt = (

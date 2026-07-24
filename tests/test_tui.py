@@ -2161,8 +2161,8 @@ def test_completed_agent_prints_one_note_with_what_is_next():
             rendered = "\n".join(written)
             assert "analyst done" in rendered
             assert "756d window, LW shrinkage" in rendered
-            # the parallel stage is announced, because that is what happens next
-            assert "in parallel" in rendered
+            # the debate stage is announced, because that is what happens next
+            assert "bounded debate" in rendered
 
             # a replayed event (SSE reconnect primer) never double-prints
             app._apply_live_event(dict(phase_done))
@@ -2227,7 +2227,7 @@ def test_workforce_note_follows_the_dependency_graph():
     assert head.startswith("analyst done") and "window chosen" in head
     assert "**" not in head and "decision_id" not in head
     assert "decision-hidden" not in head
-    assert "in parallel" in nxt
+    assert "debate" in nxt and "optimizer" in nxt
 
     # the first of the parallel pair waits for the other, not for the referee
     _, nxt = workforce_note("optimizer", "done", "", {"analyst", "optimizer"})

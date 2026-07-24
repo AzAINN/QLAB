@@ -168,10 +168,18 @@ def get_broker(registry: Registry, *, offline: bool = False,
                universe: list[str] | None = None) -> Broker:
     """Return the Alpaca paper broker if credentials exist, else the simulator."""
     if os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_API_SECRET"):
+        # Credentials present means the operator asked for Alpaca: a failure to
+        # build it must be loud, never a silent downgrade to simulation (which
+        # would book against the wrong venue without telling anyone).
         try:
             return AlpacaPaperBroker(registry)
-        except Exception:
-            pass  # fall back to the simulator so the loop never breaks
+        except Exception as exc:
+            raise RuntimeError(
+                "Alpaca credentials are set but the Alpaca paper broker could "
+                f"not be initialized ({exc}); refusing to silently fall back to "
+                "the simulator. Unset ALPACA_API_KEY/SECRET to use the "
+                "simulator deliberately."
+            ) from exc
     return SimulatedPaperBroker(
         registry, default_price_provider(offline=offline, seed=seed),
         starting_cash, universe=universe)

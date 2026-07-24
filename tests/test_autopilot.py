@@ -507,3 +507,63 @@ def test_run_once_cost_gate_refuses_terminally():
     import pytest
     with pytest.raises(MandateViolation, match="terminal"):
         execute_plan(reg, broker, plan)
+
+
+def test_mandate_rejects_nan_hard_limits():
+    import math
+    import pytest
+
+    from qlab.trader.mandate import Mandate
+
+    with pytest.raises(ValueError, match="trailing_drawdown_pct must be finite"):
+        Mandate(universe_whitelist=["ACWI"], trailing_drawdown_pct=math.nan)
+    with pytest.raises(ValueError, match="max_turnover"):
+        Mandate(universe_whitelist=["ACWI"], max_turnover_per_rebalance=math.nan)
+
+
+def test_reconcile_flags_cash_divergence():
+    from qlab.trader.reconcile import reconcile
+
+    reg = Registry(":memory:")
+    reg.init_account(10_000.0)
+
+    class _CashBlindBroker:
+        name = "stub"
+
+        def portfolio_state(self, _tickers):
+            return {"positions": {}, "cash": 0.0, "equity": 0.0}
+
+    # Positions agree (both empty) but broker cash 0 vs ledger 10k → not clean.
+    result = reconcile(reg, _CashBlindBroker(), ["ACWI"])
+    assert result["clean"] is False
+    assert "__cash__" in result["diffs"]
+
+
+def test_cost_gate_rejects_negative_cost():
+    import dataclasses
+
+    from qlab.governance.referee import cost_gate
+    from qlab.trader.mandate import CostConfig, load_mandate
+
+    mandate = dataclasses.replace(load_mandate(), costs=CostConfig())
+    pre = {"n_legs": 1, "expected_cost": {"total": -100.0,
+                                          "legs": [{"notional": 1000.0}]}}
+    reasons = cost_gate(pre, 100_000.0, 1.0, 7, mandate)
+    assert any("negative" in r for r in reasons)
+
+
+def test_get_broker_fails_loud_when_alpaca_creds_present_but_broken(monkeypatch):
+    import pytest
+
+    import qlab.trader.broker as broker_mod
+
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_API_SECRET", "s")
+
+    def boom(_registry):
+        raise RuntimeError("alpaca sdk missing")
+
+    monkeypatch.setattr(broker_mod, "AlpacaPaperBroker", boom)
+    reg = Registry(":memory:")
+    with pytest.raises(RuntimeError, match="refusing to silently fall back"):
+        broker_mod.get_broker(reg, offline=False, universe=["ACWI"])

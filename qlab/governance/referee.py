@@ -59,6 +59,9 @@ def cost_gate(pre_trade: dict, equity: float, gross_exposure: float,
     traded_notional = sum(abs(float(leg.get("notional", 0.0))) for leg in legs)
     if not np.isfinite(cost_total) or not np.isfinite(traded_notional):
         return ["non-finite cost or traded notional; refusing"]
+    if cost_total < 0:
+        return [f"expected cost is negative ({cost_total:.2f}); malformed "
+                "decomposition, refusing"]
 
     reasons: list[str] = []
     cap = equity * costs.max_cost_bps_of_equity / 1e4

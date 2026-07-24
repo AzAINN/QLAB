@@ -162,6 +162,20 @@ class Mandate:
     costs: CostConfig = field(default_factory=CostConfig)
 
     def __post_init__(self) -> None:
+        # Every hard limit must be finite: a YAML .nan would otherwise make
+        # every comparison against it false, silently disabling the limit
+        # (a NaN drawdown cap never "breaches"). Fail closed at load.
+        for name, value in (
+            ("trailing_drawdown_pct", self.trailing_drawdown_pct),
+            ("max_turnover_per_rebalance", self.max_turnover_per_rebalance),
+            ("max_weight_per_asset", self.max_weight_per_asset),
+            ("min_weight_per_asset", self.min_weight_per_asset),
+            ("drift_band_pct", self.drift_band_pct),
+        ):
+            if not math.isfinite(value):
+                raise ValueError(f"mandate {name} must be finite, got {value!r}")
+        if not math.isfinite(self.max_orders_per_day):
+            raise ValueError("mandate max_orders_per_day must be finite")
         for name, value in (
             ("max_gross_exposure", self.max_gross_exposure),
             ("stress_vol_limit", self.stress_vol_limit),

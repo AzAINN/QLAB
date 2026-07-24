@@ -937,6 +937,59 @@ def test_backfill_merges_alpaca_history_idempotently(session, monkeypatch):
     assert payload["backfilled"] == 0
 
 
+def _checked_plan(session) -> str:
+    """A referee-PASSed persisted checked plan — the only executable shape."""
+    from datetime import date
+
+    from qlab.core.types import Decision
+
+    tickers = session.mandate.universe_whitelist
+    targets = {ticker: 1.0 / len(tickers) for ticker in tickers}
+    decision_id = session.registry.log_decision(Decision(
+        as_of=date.today(), kind="rebalance_gate",
+        choice={"targets": targets}, rationale="configured HRP policy",
+    ))
+    session.registry.log_verdict(
+        decision_id, "PASS", ["within mandate"], source="referee-agent",
+        targets=targets)
+    _, preview = handle_api(
+        session, "POST", "/api/rebalance_preview", {},
+        {"offline": True, "decision_id": decision_id, "targets": targets})
+    assert preview["accepted"] is True
+    return preview["plan_id"]
+
+
+def test_rejected_execution_writes_no_execution_mark(session):
+    """An "execution" mark asserts a fill happened; a refused plan forges none."""
+    plan_id = _checked_plan(session)
+    session.registry.set_plan_state(plan_id, "refused")
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+    assert (status, result["executed"]) == (200, False)
+    assert "mandate_violation" in result
+    assert [row for row in session.registry.equity_marks()
+            if row["source"] == "execution"] == []
+
+
+def test_failed_mark_never_masks_a_completed_execution(session, monkeypatch):
+    """The legs already filled: a broker hiccup fails into the audit bus."""
+    plan_id = _checked_plan(session)
+
+    def unavailable(offline):
+        raise RuntimeError("alpaca account read failed")
+
+    monkeypatch.setattr(session, "portfolio", unavailable)
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+    assert (status, result["executed"]) == (200, True)
+    failures = [event for event in session.registry.read_events(100)
+                if event["kind"] == "equity_mark_failed"]
+    assert [event["payload"]["source"] for event in failures] == ["execution"]
+    assert "alpaca account read failed" in failures[0]["payload"]["error"]
+
+
 def test_snapshot_poll_marks_are_throttled_to_one_an_hour(session):
     """The 2s TUI refresh must not turn the marks table into 43k rows a day."""
     first = session.tui_snapshot(offline=True, event_limit=10)

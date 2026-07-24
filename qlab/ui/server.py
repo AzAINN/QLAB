@@ -21,6 +21,7 @@ GET  /api/agents               deployed agent definitions
 GET  /api/algorithms           categorized algorithm deployment catalog
 GET  /api/policy               configured operational allocation policy
 GET  /api/atlas                curated component catalog + live champion/stage overlay
+GET  /api/performance          realized equity curve + metrics from the equity marks
 GET  /api/workflows            durable Claude-workforce runs and phase state
 GET  /api/workflows/<id>       one durable workflow and its ordered steps
 GET  /api/stream               durable audit + transient market events (live)
@@ -30,6 +31,7 @@ POST /api/workflows/start      begin a standard or panel workforce run
 POST /api/workflows/<phase>    update one role-bound workflow phase
 POST /api/rebalance_preview    build an exact, referee-bound checked plan
 POST /api/plans/execute        human-confirm one existing checked paper plan
+POST /api/performance/backfill merge the broker's own equity history into the marks
 POST /api/recommend            an operational allocation recommendation
 POST /api/run_once             one autopilot iteration (analyze -> solve -> trade)
 POST /api/daily_ops            heartbeat (reconcile/risk/triggers; never trades)
@@ -1084,6 +1086,22 @@ def _overlap_stream_cursor(cursor: str) -> str:
     return (parsed - timedelta(microseconds=1)).isoformat()
 
 
+def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None:
+    """Mark the book after a mutation; a failed mark must never hide the result.
+
+    ``record_equity_mark`` re-reads the broker, so it can fail (a network hiccup)
+    right after real legs filled. The trade already happened: refusing the
+    response would hide reality from the operator, so the failure fails loud into
+    the audit bus instead. Only the post-mutation hooks are guarded — the backfill
+    route still surfaces its RuntimeError to the client as a 400.
+    """
+    try:
+        session.record_equity_mark(source, offline)
+    except Exception as exc:  # the mutation's own result must still reach the client
+        session.registry.record_event(
+            "equity_mark_failed", {"source": source, "error": repr(exc)})
+
+
 # ---------------------------------------------------------------------------
 # API dispatch (pure functions of the session; easy to unit-test)
 # ---------------------------------------------------------------------------
@@ -1125,7 +1143,8 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.atlas()
 
     if method == "GET" and path == "/api/performance":
-        return 200, session.performance(off)
+        return 200, session.performance(
+            _qbool(query, "offline", session.offline_default))
 
     if method == "GET" and path == "/api/workflows":
         limit = max(1, min(int(query.get("limit", ["10"])[0]), 50))
@@ -1199,7 +1218,10 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "POST" and path == "/api/plans/execute":
         result = session.execute_checked_plan(body, off)
-        session.record_equity_mark("execution", off)
+        # A mark sourced "execution" asserts that legs filled; a refused or
+        # mandate-violating plan must not forge that provenance.
+        if result.get("executed") is True:
+            _mark_after_mutation(session, "execution", off)
         return 200, result
 
     if method == "POST" and path == "/api/performance/backfill":
@@ -1231,7 +1253,7 @@ def handle_api(session: UISession, method: str, path: str,
 
         summary = daily_ops(registry=session.registry, mandate=session.mandate,
                             offline=off, seed=session.seed)
-        session.record_equity_mark("daily", off)
+        _mark_after_mutation(session, "daily", off)
         return 200, summary
 
     if method == "POST" and path == "/api/batch":

@@ -102,6 +102,26 @@ def test_data_permit_current_is_null_before_any_evaluation(session):
     assert status == 200 and current["permit"] is None
 
 
+def test_live_portfolio_marks_to_market_with_provenance(session):
+    # Deploy the book, then evaluate it live.
+    handle_api(session, "POST", "/api/run_once", {}, {"offline": True})
+    status, live = handle_api(
+        session, "GET", "/api/portfolio/live", {"offline": ["1"]}, {})
+    assert status == 200
+    assert live["blocked"] is False
+    assert live["equity"] > 0
+    assert len(live["positions"]) == 7
+    # A fully-invested long book: gross ~ net ~ 1.0.
+    assert live["gross_exposure"] == pytest.approx(live["net_exposure"], abs=1e-6)
+    assert 0.9 < live["gross_exposure"] <= 1.0 + 1e-6
+    for row in live["positions"]:
+        assert "unrealized_pnl" in row and "weight" in row
+    # Demo marks are never execution-grade and are labeled as such.
+    assert live["marks"]["live"] is False
+    assert live["marks"]["execution_grade"] is False
+    assert "kill_switch_distance" in live
+
+
 def test_tui_snapshot_is_provenance_first(session):
     session.registry.record_event("demo", {"stage": "observe"})
     status, snap = handle_api(

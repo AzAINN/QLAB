@@ -9,6 +9,7 @@ Routes
 GET  /                         the single-page app
 GET  /api/bootstrap            universe, mandate, agents, portfolio, defaults
 GET  /api/portfolio            broker-truth positions + risk report
+GET  /api/portfolio/live       live mark-to-market: P&L, exposure, provenance
 GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
 GET  /api/data/health          data-policy provenance, freshness, eligibility
@@ -356,6 +357,87 @@ class UISession:
             "halted": state["halted"],
             "positions": state["positions"], "weights": state["weights"],
             "target_weights": targets,
+        }
+
+    def live_portfolio(self, offline: bool) -> dict:
+        """Mark the paper book to live prices and evaluate it, with provenance.
+
+        Unlike :meth:`portfolio` this reports a full mark-to-market: per-position
+        unrealized P&L against the booked average price, gross/net exposure, and
+        the provenance of the marks (live Alpaca trades vs demo synthetic). In an
+        operational policy it fails loud into a ``blocked`` report when live data
+        is unavailable rather than valuing the book on fabricated prices.
+
+        Quote-level (seconds) freshness arrives with the market stream; here the
+        marks are the broker's latest available prices and provenance is reported
+        at the daily-bar level.
+        """
+        from qlab.core import data as market
+        from qlab.trader.broker import get_broker
+
+        policy = market.policy_for(offline, seed=self.seed)
+        universe = self.mandate.universe_whitelist
+        try:
+            broker = get_broker(
+                self.registry, offline=offline,
+                starting_cash=self.mandate.paper_capital,
+                seed=self.seed, universe=universe)
+            state = broker.portfolio_state(universe)
+        except (market.DataUnavailable, RuntimeError) as exc:
+            return {"blocked": True, "mode": policy.mode, "provider": policy.provider,
+                    "feed": policy.feed, "reason": str(exc)}
+
+        equity = float(state["equity"])
+        booked = self.registry.get_positions()
+        marked = state.get("positions", {})
+        rows = []
+        gross = net = unrealized = 0.0
+        for ticker, pos in booked.items():
+            qty = float(pos.get("qty", 0.0))
+            if abs(qty) < 1e-12:
+                continue
+            avg_price = float(pos.get("avg_price", 0.0))
+            price = float(marked.get(ticker, {}).get("price", avg_price))
+            value = qty * price
+            cost = qty * avg_price
+            pnl = value - cost
+            weight = value / equity if equity > 0 else 0.0
+            gross += abs(weight)
+            net += weight
+            unrealized += pnl
+            rows.append({
+                "ticker": ticker, "qty": qty, "avg_price": avg_price,
+                "price": price, "value": value, "weight": round(weight, 6),
+                "unrealized_pnl": pnl,
+                "unrealized_pnl_pct": (pnl / cost if abs(cost) > 1e-9 else 0.0),
+            })
+
+        hwm = float(state.get("high_water_mark", equity))
+        dd = 1.0 - equity / hwm if hwm > 0 else 0.0
+        live = broker.name == "alpaca_paper"
+        return {
+            "blocked": False,
+            "broker": broker.name,
+            "cash": float(state["cash"]),
+            "equity": equity,
+            "high_water_mark": hwm,
+            "drawdown": round(dd, 4),
+            "kill_switch_at": self.mandate.trailing_drawdown_pct,
+            "kill_switch_distance": round(self.mandate.trailing_drawdown_pct - dd, 4),
+            "halted": bool(state["halted"]),
+            "gross_exposure": round(gross, 6),
+            "net_exposure": round(net, 6),
+            "unrealized_pnl": unrealized,
+            "positions": rows,
+            "marks": {
+                "live": live,
+                "source": "alpaca" if live else policy.provider,
+                "feed": policy.feed if live else None,
+                "execution_grade": live and policy.execution_eligible,
+                # A per-quote timestamp lands with the market stream (next phase);
+                # until then the marks are the broker's latest available prices.
+                "quote_as_of": None,
+            },
         }
 
     def market(self, offline: bool) -> dict:
@@ -712,6 +794,7 @@ class UISession:
             )
         return {
             "portfolio": portfolio,
+            "live_portfolio": self.live_portfolio(offline),
             "market": market_snapshot,
             "stress": stress,
             "agents": self.agents(),
@@ -883,6 +966,10 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "GET" and path == "/api/portfolio":
         return 200, session.portfolio(_qbool(query, "offline", session.offline_default))
+
+    if method == "GET" and path == "/api/portfolio/live":
+        return 200, session.live_portfolio(
+            _qbool(query, "offline", session.offline_default))
 
     if method == "GET" and path == "/api/market":
         return 200, session.market(_qbool(query, "offline", session.offline_default))

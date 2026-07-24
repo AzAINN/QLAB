@@ -63,9 +63,12 @@ def test_apply_views_round_trips_offline_and_records_only_a_research_run(reg):
         "moments_after",
         "applied_labels",
         "provenance_verified",
+        "hard_regime",
+        "corroboration",
     }
     assert result["applied_labels"] == ["tail(ACWI fatter)"]
     assert result["provenance_verified"] is False  # no excerpt supplied
+    assert len(result["corroboration"]) == 1  # one corroboration entry per view
     assert 0.0 <= result["kl_total"] <= 0.25
     assert set(result["moments_before"]) == set(result["moments_after"])
     for ticker in result["moments_before"]:
@@ -242,3 +245,35 @@ def test_apply_views_marks_unverified_without_excerpt(reg):
         {"as_of": "2021-06-30", "universe": "core", "views": [view]},
         offline=True)
     assert out["provenance_verified"] is False
+
+
+def test_apply_views_haircuts_confidence_when_view_contradicts_regime(reg):
+    """A calm-flavored view in a stress regime (or vice versa) loses confidence."""
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    # A fatter-tail (stress-flavored) view: corroboration depends on the
+    # snapshot's detected regime, which the summary reports back.
+    out = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core",
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.6, "source_quote": "x"}]},
+        offline=True)
+    assert "hard_regime" in out and out["hard_regime"] in {"calm", "stress"}
+    entry = out["corroboration"][0]
+    assert entry["flavor"] == "stress"
+    if entry["corroborated"]:
+        assert entry["confidence_after"] == pytest.approx(0.6)
+    else:
+        assert entry["confidence_after"] == pytest.approx(0.3)  # halved
+    # A thinner-tail view is the opposite flavor, so exactly one of the two
+    # corroborates against a given regime.
+    out2 = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core",
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "thinner",
+                    "confidence": 0.6, "source_quote": "x"}]},
+        offline=True)
+    assert (out["corroboration"][0]["corroborated"]
+            != out2["corroboration"][0]["corroborated"])

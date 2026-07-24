@@ -103,6 +103,65 @@ def _verify_view_provenance(canonical_views: list[dict], excerpt: str) -> bool:
     return True
 
 
+_CORROBORATION_HAIRCUT = 0.5
+
+
+def _view_flavor(kind: str, payload: dict, panel, tickers: list[str]) -> str:
+    """Is a view stress-flavored, calm-flavored, or neutral vs the hard signals?
+
+    News that predicts more risk (higher vol, fatter tails, spiking
+    correlations) is 'stress'-flavored; the opposite is 'calm'. Comparing that
+    flavor to the deterministic realized-vol regime is how a news view earns —
+    or loses — confidence, without any of it touching returns.
+    """
+    import numpy as np
+
+    index = {t: j for j, t in enumerate(tickers)}
+    if kind == "vol":
+        j = index.get(payload["ticker"])
+        if j is None:
+            return "neutral"
+        realized = float(np.std(panel[:, j], ddof=0))
+        return "stress" if payload["target_vol"] > realized else "calm"
+    if kind == "tail":
+        return "stress" if payload["direction"] == "fatter" else "calm"
+    if kind == "corr":
+        a, b = index.get(payload["ticker_a"]), index.get(payload["ticker_b"])
+        if a is None or b is None:
+            return "neutral"
+        current = float(np.corrcoef(panel[:, a], panel[:, b])[0, 1])
+        return "stress" if payload["target_corr"] > current else "calm"
+    return "neutral"
+
+
+def _corroborate_views(typed_views, canonical_views, panel, tickers, regime):
+    """Haircut a view's confidence when it contradicts the hard-signal regime.
+
+    Deterministic and boundary-safe: agreement with the realized-vol regime
+    keeps full confidence; contradiction halves it before entropy pooling.
+    Returns (possibly-reweighted typed views, a per-view corroboration report).
+    """
+    import dataclasses
+
+    stress = regime.get("regime") == "stress"
+    out, report = [], []
+    for view, canonical in zip(typed_views, canonical_views):
+        flavor = _view_flavor(canonical["type"], canonical, panel, tickers)
+        agrees = flavor == "neutral" or (flavor == "stress") == stress
+        factor = 1.0 if agrees else _CORROBORATION_HAIRCUT
+        adjusted = dataclasses.replace(
+            view, confidence=view.confidence * factor)
+        out.append(adjusted)
+        report.append({
+            "label": view.label(), "flavor": flavor,
+            "hard_regime": regime.get("regime", "unknown"),
+            "corroborated": agrees,
+            "confidence_before": view.confidence,
+            "confidence_after": adjusted.confidence,
+        })
+    return out, report
+
+
 def _validated_risk_views(
     views: list[dict],
 ) -> tuple[list[VolView | CorrView | TailView], list[dict]]:
@@ -1008,10 +1067,16 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         panel = snapshot.log_returns(
             lookback_days=_VIEWS_LOOKBACK_DAYS
         ).dropna(how="any")
+        panel_array = panel.to_numpy(dtype=float)
+        # Corroborate each news view against the deterministic hard-signal
+        # regime before pooling: contradiction costs confidence.
+        regime = detect_regime(snapshot)
+        corroborated_views, corroboration = _corroborate_views(
+            typed_views, canonical_views, panel_array, tickers, regime)
         result = apply_risk_views(
-            panel.to_numpy(dtype=float),
+            panel_array,
             tickers,
-            typed_views,
+            corroborated_views,
             kl_budget=budget,
         )
         summary = {
@@ -1021,6 +1086,8 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
             "moments_after": result.moments_after,
             "applied_labels": list(result.labels),
             "provenance_verified": provenance_verified,
+            "hard_regime": regime.get("regime", "unknown"),
+            "corroboration": corroboration,
         }
         run_id = st.registry.log_run("views", {
             "algorithm_id": "entropy_pooling_views",

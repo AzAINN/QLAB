@@ -17,10 +17,11 @@ class UniverseAssetMeta(AssetMeta):
 
     region: str = ""
     factor: str | None = None
+    sector: str | None = None
 
 
 class Universe:
-    """The core, candidate-selection, and extended ETF research tiers.
+    """The ETF tiers and research-only stock candidate pool.
 
     The core is ~7 cross-asset ETFs (genuinely mixed correlation signs); the
     candidate pool (~19) is what the selection QUBO picks ``k`` from. Tiers
@@ -34,16 +35,22 @@ class Universe:
         core_data = _tier_list(data, "core")
         candidate_data = _tier_list(data, "candidates")
         extended_data = _tier_list(data, "extended")
+        stock_data = _tier_list(data, "stocks")
 
         core_tickers = [_structured_ticker(entry, "core") for entry in core_data]
         candidate_tickers = [_candidate_ticker(entry) for entry in candidate_data]
         extended_tickers = [
             _structured_ticker(entry, "extended") for entry in extended_data
         ]
+        stock_tickers = [
+            _structured_ticker(entry, "stocks") for entry in stock_data
+        ]
         _require_unique("core", core_tickers)
         _require_unique("candidates", candidate_tickers)
         _require_unique("extended", extended_tickers)
+        _require_unique("stocks", stock_tickers)
         _validate_extended_metadata(extended_data)
+        _validate_stock_metadata(stock_data)
 
         self._raw = data
         self.core: list[UniverseAssetMeta] = [
@@ -53,12 +60,19 @@ class Universe:
         self.extended: list[UniverseAssetMeta] = [
             UniverseAssetMeta(**entry) for entry in extended_data
         ]
+        self.stocks: list[UniverseAssetMeta] = [
+            UniverseAssetMeta(**{"asset_class": "stock", **entry})
+            for entry in stock_data
+        ]
         self.benchmarks: dict[str, dict[str, float]] = data.get("benchmarks", {})
         self.selection_k: int = int(data.get("selection_k", 7))
         self._metadata_by_ticker = {asset.ticker: asset for asset in self.core}
         # Prefer the richer extended record when a ticker appears in both tiers.
         self._metadata_by_ticker.update(
             {asset.ticker: asset for asset in self.extended}
+        )
+        self._metadata_by_ticker.update(
+            {asset.ticker: asset for asset in self.stocks}
         )
 
     # -- convenience views ---------------------------------------------------
@@ -70,6 +84,10 @@ class Universe:
     def extended_tickers(self) -> list[str]:
         return [a.ticker for a in self.extended]
 
+    @property
+    def stock_tickers(self) -> list[str]:
+        return [a.ticker for a in self.stocks]
+
     def tickers(self, which: str = "core") -> list[str]:
         """Return tickers for a named universe tier in stable config order."""
         if which == "core":
@@ -78,6 +96,8 @@ class Universe:
             return list(self.candidates)
         if which == "extended":
             return self.extended_tickers
+        if which == "stocks":
+            return self.stock_tickers
         raise ValueError(f"unknown universe selector: {which!r}")
 
     def metadata(self, which: str = "core") -> list[UniverseAssetMeta]:
@@ -88,6 +108,8 @@ class Universe:
             return list(self.extended)
         if which == "candidates":
             return [self.meta(ticker) for ticker in self.candidates]
+        if which == "stocks":
+            return list(self.stocks)
         raise ValueError(f"unknown universe selector: {which!r}")
 
     def meta(self, ticker: str, which: str | None = None) -> UniverseAssetMeta:
@@ -116,6 +138,13 @@ class Universe:
             asset.ticker: asset.factor
             for asset in self.metadata(which)
             if asset.factor is not None
+        }
+
+    def sectors(self, which: str = "stocks") -> dict[str, str]:
+        return {
+            asset.ticker: asset.sector
+            for asset in self.metadata(which)
+            if asset.sector is not None
         }
 
 
@@ -172,6 +201,20 @@ def _validate_extended_metadata(entries: list[Any]) -> None:
             raise ValueError(
                 f"extended universe entry {ticker!r} has an invalid factor"
             )
+
+
+def _validate_stock_metadata(entries: list[Any]) -> None:
+    required = ("ticker", "name", "sector")
+    for entry in entries:
+        ticker = entry.get("ticker", "<unknown>")
+        missing = [
+            field
+            for field in required
+            if not isinstance(entry.get(field), str) or not entry[field].strip()
+        ]
+        if missing:
+            joined = ", ".join(missing)
+            raise ValueError(f"stocks universe entry {ticker!r} missing: {joined}")
 
 
 @lru_cache(maxsize=4)

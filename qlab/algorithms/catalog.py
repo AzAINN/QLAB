@@ -82,6 +82,12 @@ _ALGORITHMS = (
         "research-only candidate-universe gate, not an allocation or paper policy.",
     ),
     AlgorithmSpec(
+        "stock_factor_covariance", "Stock factor covariance", "estimation",
+        "research", ("factor_covariance",), None, None,
+        "Research-only estimation building block for a future stock sleeve; "
+        "it is not an allocation or paper-trading path.",
+    ),
+    AlgorithmSpec(
         "regime_min_variance", "Regime-conditioned minimum variance", "allocation",
         "research", ("min_variance",), "classical", None,
         "Covariance-only research arm conditioned by the deterministic regime signal.",

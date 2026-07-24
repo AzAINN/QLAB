@@ -46,6 +46,23 @@ EXTENDED = [
     "IEF",
     "LQD",
 ]
+STOCKS = [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "JPM",
+    "V",
+    "LLY",
+    "JNJ",
+    "XOM",
+    "PG",
+    "CAT",
+    "NEE",
+    "PLD",
+]
 
 
 def _extended_asset(ticker: str) -> dict[str, str]:
@@ -85,12 +102,26 @@ def test_extended_tier_has_stable_unique_order_and_metadata():
     }
 
 
+def test_stock_tier_has_unique_tickers_and_sector_metadata():
+    universe = load_universe()
+    tickers = universe.tickers("stocks")
+
+    assert tickers == STOCKS
+    assert len(tickers) == len(set(tickers))
+    assert [asset.ticker for asset in universe.metadata("stocks")] == tickers
+    assert all(asset.name for asset in universe.metadata("stocks"))
+    assert set(universe.sectors()) == set(tickers)
+    assert len(set(universe.sectors().values())) >= 8
+    assert universe.meta("AAPL", "stocks").sector == "technology"
+
+
 @pytest.mark.parametrize(
     ("tier", "entries"),
     [
         ("core", [{"ticker": "DUP"}, {"ticker": "DUP"}]),
         ("candidates", ["DUP", "DUP"]),
         ("extended", [_extended_asset("DUP"), _extended_asset("DUP")]),
+        ("stocks", [{"ticker": "DUP"}, {"ticker": "DUP"}]),
     ],
 )
 def test_duplicate_ticker_within_any_tier_raises(tier, entries):

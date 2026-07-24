@@ -64,6 +64,55 @@ candidates:
   - IGF     # infrastructure
   - USO     # oil
 
+# Research-only stock candidate pool. Stocks have no paper-trading path until
+# promoted through the algorithm catalog gate.
+stocks:
+  - ticker: AAPL
+    name: Apple
+    sector: technology
+  - ticker: MSFT
+    name: Microsoft
+    sector: technology
+  - ticker: NVDA
+    name: NVIDIA
+    sector: technology
+  - ticker: AMZN
+    name: Amazon
+    sector: consumer_discretionary
+  - ticker: GOOGL
+    name: Alphabet
+    sector: communication_services
+  - ticker: META
+    name: Meta Platforms
+    sector: communication_services
+  - ticker: JPM
+    name: JPMorgan Chase
+    sector: financials
+  - ticker: V
+    name: Visa
+    sector: financials
+  - ticker: LLY
+    name: Eli Lilly
+    sector: health_care
+  - ticker: JNJ
+    name: Johnson & Johnson
+    sector: health_care
+  - ticker: XOM
+    name: Exxon Mobil
+    sector: energy
+  - ticker: PG
+    name: Procter & Gamble
+    sector: consumer_staples
+  - ticker: CAT
+    name: Caterpillar
+    sector: industrials
+  - ticker: NEE
+    name: NextEra Energy
+    sector: utilities
+  - ticker: PLD
+    name: Prologis
+    sector: real_estate
+
 # A liquid 30-ETF research tier with structured metadata. This is separate from
 # both the staged core and the candidate-selection pool; tier overlap is allowed.
 extended:

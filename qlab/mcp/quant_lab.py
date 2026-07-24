@@ -954,6 +954,40 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         }
 
     # -- estimation-window evidence ----------------------------------------
+    @app.tool(name="news.fetch")
+    def news_fetch(
+        as_of: str,
+        universe: str = "core",
+        lookback_hours: int = 48,
+    ) -> dict:
+        """Fetch recent, provenance-tagged news headlines for the universe.
+
+        Text only — no market numbers, no writes. This is the owner-side feed
+        that supplies the quarantined news-extractor's evidence; the extractor
+        never fetches. Offline uses the deterministic synthetic provider.
+        """
+        from qlab.news.feed import fetch_news
+
+        st.budget.charge("news.fetch")
+        d = check_as_of(as_of)
+        tickers = load_universe().tickers(universe)
+        items = fetch_news(
+            str(d), tickers, lookback_hours=lookback_hours, offline=st.offline)
+        # A single excerpt string the extractor can quote against, plus the
+        # structured items for display/provenance.
+        excerpt = "\n".join(
+            f"[{it.source} {it.published}] {it.headline}. {it.summary}"
+            for it in items)
+        return {
+            "as_of": str(d),
+            "universe": universe,
+            "n_items": len(items),
+            "items": [it.provenance() | {"headline": it.headline,
+                                         "summary": it.summary}
+                      for it in items],
+            "excerpt": excerpt,
+        }
+
     @app.tool(name="research.window_evidence")
     def research_window_evidence(
         as_of: str,

@@ -102,6 +102,7 @@ OWNER_LAB_TOOLS = frozenset({
     "algorithms.solve",
     "solve.classical",
     "backtest.run",
+    "news.fetch",
     "research.apply_views",
     "research.equilibrium_returns",
     "research.predict_vol",

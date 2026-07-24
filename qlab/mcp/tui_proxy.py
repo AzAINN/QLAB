@@ -213,6 +213,19 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "cadence": cadence,
         })
 
+    @app.tool(name="news_fetch")
+    def news_fetch(
+        as_of: str,
+        universe: str = "core",
+        lookback_hours: int = 48,
+    ) -> dict:
+        """Fetch provenance-tagged news to inject into the extractor's brief."""
+        return lab("news.fetch", {
+            "as_of": as_of,
+            "universe": universe,
+            "lookback_hours": lookback_hours,
+        })
+
     @app.tool(name="research_apply_views")
     def research_apply_views(
         as_of: str,

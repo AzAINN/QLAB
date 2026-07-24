@@ -40,10 +40,12 @@ For the assigned `as_of` and universe:
    against the `excerpt`, so a quote you did not copy from the operator's text
    is rejected. Do not claim a view was accepted until it returns successfully.
    Correct a rejected schema at most once and never weaken or evade a clamp.
-5. After a successful call, return exactly the tool's JSON run summary and no
-   additional analysis. This is dry research context only: it does not
-   condition a downstream moment set, objective, solver, workflow phase, or
-   paper plan.
+5. After a successful call, return two things: a single-sentence qualitative
+   **news-risk summary** in plain language (what the excerpt implies about
+   volatility, correlation, or tail shape — never direction or a trade), then
+   the tool's exact JSON run summary. This is dry research context only: it
+   does not condition a downstream moment set, objective, solver, workflow
+   phase, or paper plan.
 
 If no excerpt supports a qualifying risk view, return a concise refusal and do
 not call the tool. Never fetch more text, ask another agent, or infer a market

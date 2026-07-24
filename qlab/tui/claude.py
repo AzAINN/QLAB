@@ -71,6 +71,7 @@ _LAB_TOOL_BASES = {
     "algorithms.solve",
     "solve.classical",
     "backtest.run",
+    "news.fetch",
     "research.apply_views",
     "research.equilibrium_returns",
     "research.predict_vol",
@@ -429,11 +430,14 @@ champion instruction above):
         }
 
     news_context_policy = (
-        "This goal mentions news or views, so dispatch news-extractor as the "
-        "FIRST Agent before any analyst. Its brief must carry the exact as_of "
-        "and universe plus a clearly delimited, verbatim copy of only the "
-        "operator-supplied text; never ask it to fetch, browse, or supplement "
-        "that text. Wait for its dry research.apply_views result. Pass the "
+        "This goal mentions news or views. First call news.fetch yourself for "
+        "the as_of and universe to obtain provenance-tagged headlines (the "
+        "owner-side feed; the extractor never fetches). Then dispatch "
+        "news-extractor as the FIRST Agent before any analyst. Its brief must "
+        "carry the exact as_of and universe plus a clearly delimited, verbatim "
+        "copy of the fetched news 'excerpt' string (or the operator's own text "
+        "if supplied); never ask it to fetch, browse, or supplement that text. "
+        "Wait for its dry research.apply_views result. Pass the "
         "exact applied-views run summary into every moments-analyst brief under "
         "the label 'CONTEXT — DRY NEWS VIEWS'. The analyst may cite the "
         "conditioned before/after risk moments qualitatively, but must still "
@@ -568,7 +572,8 @@ champion instruction above):
             "workflow, verdict); the terminal already shows the actionable plan "
             "reference on its own line."
         ),
-        "tools": [f"Agent({role_names})", *_COORDINATOR_TOOLS],
+        "tools": [f"Agent({role_names})", *_COORDINATOR_TOOLS,
+                  *([_claude_tool("news.fetch")] if include_extractor else [])],
         "model": "inherit",
         "permissionMode": "dontAsk",
         "maxTurns": 40,

@@ -277,3 +277,36 @@ def test_apply_views_haircuts_confidence_when_view_contradicts_regime(reg):
         offline=True)
     assert (out["corroboration"][0]["corroborated"]
             != out2["corroboration"][0]["corroborated"])
+
+
+def test_news_fetch_owner_tool_and_extractor_injection(reg):
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    out = session.call_lab_tool(
+        "news.fetch",
+        {"as_of": "2021-06-30", "universe": "core", "lookback_hours": 72},
+        offline=True)
+    assert out["n_items"] >= 1
+    assert isinstance(out["excerpt"], str) and out["excerpt"]
+    assert all("provider" in it for it in out["items"])
+    # A quote drawn from the fetched excerpt passes the provenance gate,
+    # closing the loop feed -> extractor -> apply_views.
+    quote = out["items"][0]["headline"]
+    view = {"type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.5, "source_quote": quote}
+    applied = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "views": [view],
+         "excerpt": out["excerpt"]}, offline=True)
+    assert applied["provenance_verified"] is True
+
+
+def test_news_fetch_reaches_extractor_only_via_owner_not_the_extractor_role():
+    from qlab.tui.claude import build_workforce_agents, _claude_tool
+
+    agents = build_workforce_agents("react to the latest news")
+    # The extractor still holds exactly one tool — it never fetches.
+    assert agents["news-extractor"]["tools"] == [_claude_tool("research.apply_views")]
+    # The coordinator is the one granted the feed, to fetch and inject.
+    assert _claude_tool("news.fetch") in agents["qlab-coordinator"]["tools"]

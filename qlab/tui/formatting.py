@@ -53,18 +53,23 @@ def _strip_ids(text: str) -> str:
     return text.strip()
 
 
-def clean_report_line(line: str) -> tuple[bool, str]:
+def clean_report_line(
+    line: str, *, strip_ids: bool = True
+) -> tuple[bool, str]:
     """Normalise one line of agent prose for a terminal log.
 
     Returns ``(is_heading, text)``. Strips the markdown that renders literally in
-    a RichLog — ``#`` headers, ``**`` bold, back-ticks — repairs mojibake, and
-    removes raw ``*_id`` audit keys, so the memo reads as plain sentences. A
-    header line is reported so the caller can style it like a section label.
+    a RichLog — ``#`` headers, ``**`` bold, back-ticks — and repairs mojibake.
+    Raw ``*_id`` audit keys are removed by default for narrative surfaces but
+    can be retained for evidence and diagnostics. A header line is reported so
+    the caller can style it like a section label.
     """
     line = demojibake(line)
     heading = _HEADING.match(line)
     body = heading.group(1) if heading else line
-    body = _strip_ids(body).replace("**", "").replace("`", "")
+    if strip_ids:
+        body = _strip_ids(body)
+    body = body.replace("**", "").replace("`", "")
     body = re.sub(r"[ \t]{2,}", " ", body).rstrip()
     if heading:
         return True, body.rstrip(" :").upper()
@@ -93,14 +98,18 @@ def key_number_lines(pairs: list[tuple[str, object]]) -> list[str]:
     ]
 
 
-def bulletin(lines: list[str], max_len: int = 200) -> list[str]:
+def bulletin(
+    lines: list[str], max_len: int = 200, *, strip_ids: bool = True
+) -> list[str]:
     """Clean agent prose into non-empty, length-bounded bulletin lines."""
     limit = max(0, int(max_len))
     if not limit:
         return []
     rendered = []
     for raw in lines:
-        _is_heading, text = clean_report_line(str(raw))
+        _is_heading, text = clean_report_line(
+            str(raw), strip_ids=strip_ids
+        )
         text = text[:limit].rstrip()
         if text:
             rendered.append(text)

@@ -746,8 +746,8 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
             assert "turnover within cap" in rail
             assert "• within mandate" in rail
             assert "**" not in rail and "`" not in rail
-            assert "decision_id" not in rail and "decision-hidden" not in rail
-            assert "objective_id" not in rail and "obj-hidden" not in rail
+            assert "decision_id: decision-hidden" in rail
+            assert "objective_id: obj-hidden" in rail
             assert "verdict PASS" in str(app.query_one("#event-strip").content)
 
             # status strip carries the one DATA provenance token
@@ -967,6 +967,46 @@ def test_settings_view_fetches_bootstrap_once_and_renders_read_only_bulletins():
     asyncio.run(run())
 
 
+def test_settings_bootstrap_error_is_capped_with_an_explicit_ellipsis():
+    from qlab.tui.app import QlabTui
+
+    tail = "tail-must-not-render"
+    detail = "owner bootstrap failed: " + ("x" * 700) + tail
+
+    class FailingSettingsClient(StubClient):
+        def get(self, path, **params):
+            if path == "/api/bootstrap":
+                raise RuntimeError(detail)
+            return super().get(path, **params)
+
+    async def run():
+        app = QlabTui(
+            FailingSettingsClient(),
+            refresh_interval=0,
+            claude_start="off",
+        )
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            for _ in range(20):
+                if app._bootstrap_error:
+                    break
+                await pilot.pause(0.02)
+
+            mandate = app.query_one("#settings-mandate")
+            rendered = mandate.render().plain
+            error_line = next(
+                line for line in rendered.splitlines()
+                if "RuntimeError" in line
+            )
+            assert "OWNER UNREACHABLE" in rendered
+            assert error_line.endswith("…")
+            assert len(error_line.removeprefix("• ")) == 600
+            assert tail not in rendered
+
+    asyncio.run(run())
+
+
 def test_nav_menu_rows_are_clickable():
     """Each of the seven spine rows switches to its matching view on click.
 
@@ -1097,6 +1137,13 @@ def test_clean_report_line_strips_markdown_headers_ids_and_emphasis():
     assert "dec_a1b2" not in text and "obj-9" not in text
     assert text == "Handed the optimizer and."
 
+    # Evidence surfaces retain ids while applying the same text cleanup.
+    _, text = clean_report_line(
+        "**Rejected** plan_id: `plan-7` â€” retry.",
+        strip_ids=False,
+    )
+    assert text == "Rejected plan_id: plan-7 — retry."
+
     # markdown emphasis and back-ticks that render literally are stripped
     _, text = clean_report_line("**Result:** held the `checked plan`.")
     assert "*" not in text and "`" not in text
@@ -1139,6 +1186,10 @@ def test_bulletin_cleans_markdown_ids_empty_lines_and_length():
         "RESULT",
         "Held the checked plan.",
     ]
+    assert bulletin(
+        ["**Held** the `checked plan` (plan_id: plan-7)."],
+        strip_ids=False,
+    ) == ["Held the checked plan (plan_id: plan-7)."]
     assert bulletin(["abcdefgh"], max_len=4) == ["abcd"]
 
 
@@ -1195,8 +1246,7 @@ def test_workforce_view_shows_result_card_and_timings():
             assert "• RECOMMENDATION" in content
             assert "• hold reviewed HRP targets" in content
             assert "###" not in content and "**" not in content
-            assert "decision_id" not in content
-            assert "decision-hidden" not in content
+            assert "decision_id: decision-hidden" in content
             # phase timing is on the referee node's hover detail, not the block
             assert "42s" in app._flow_details["referee"]
             assert app._flow_states["referee"] == "done"
@@ -1338,6 +1388,49 @@ def test_workforce_view_shows_failure_card_with_resume_hint():
             content = str(app.query_one("#workforce-content").content)
             assert "BLOCKED at referee" in content
             assert "workforce resume wfbad" in content
+
+    asyncio.run(run())
+
+
+def test_workforce_failure_card_preserves_id_bearing_reason():
+    from qlab.tui.app import QlabTui
+
+    reason = "cannot complete without artifacts ['objective_id']"
+
+    class FailedWorkflowClient(StubClient):
+        def get(self, path, **params):
+            snap = _snapshot()
+            snap["workflows"] = [{
+                "workflow_id": "wffailed",
+                "kind": "portfolio_review",
+                "status": "failed",
+                "current_phase": "reporter",
+                "request": {
+                    "goal": "review",
+                    "as_of": "2026-07-19",
+                    "universe": "core",
+                },
+                "steps": [{
+                    "phase": "reporter",
+                    "agent": "reporter",
+                    "status": "failed",
+                    "summary": reason,
+                }],
+            }]
+            return snap
+
+    async def run():
+        app = QlabTui(
+            FailedWorkflowClient(),
+            refresh_interval=0,
+            claude_start="off",
+        )
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            content = app.query_one("#workforce-content").render().plain
+            assert "FAILED at reporter" in content
+            assert reason in content
 
     asyncio.run(run())
 

@@ -147,12 +147,18 @@ COMMAND_TABLE = {
 
 
 def _bulletin_markup(
-    lines: list[str], *, tone: str = TEXT, max_len: int = 200
+    lines: list[str],
+    *,
+    tone: str = TEXT,
+    max_len: int = 200,
+    strip_ids: bool = True,
 ) -> list[str]:
     """Rich-markup bullet rows built from the shared plain-text normalizer."""
     return [
         f"[{tone}]• {escape(line)}[/]"
-        for line in bulletin(lines, max_len=max_len)
+        for line in bulletin(
+            lines, max_len=max_len, strip_ids=strip_ids
+        )
     ]
 
 
@@ -1530,6 +1536,7 @@ class QlabTui(App[None]):
             lines.extend(_bulletin_markup(
                 str(result["final_summary"]).splitlines(),
                 max_len=320,
+                strip_ids=False,
             ))
             result_pairs = []
             targets = _extract_targets(step_by_phase)
@@ -1555,7 +1562,10 @@ class QlabTui(App[None]):
                 f"{escape(str((broken or {}).get('phase', '—')))}[/]",
             ])
             lines.extend(_bulletin_markup(
-                why.splitlines(), tone=MUTED, max_len=200
+                why.splitlines(),
+                tone=MUTED,
+                max_len=200,
+                strip_ids=False,
             ))
             lines.append(
                 f"[{LABEL_GOLD}]Resume with : workforce resume "
@@ -1755,14 +1765,17 @@ class QlabTui(App[None]):
             ))
             mandate_copy = "\n".join(mandate_lines)
         elif self._bootstrap_error:
+            bootstrap_error = self._bootstrap_error
+            if len(bootstrap_error) > 600:
+                bootstrap_error = bootstrap_error[:599].rstrip() + "…"
             mandate_lines = [f"[bold {DOWN}]OWNER UNREACHABLE[/]"]
             mandate_lines.extend(_bulletin_markup(
                 [
                     "Mandate settings could not be loaded.",
-                    self._bootstrap_error,
+                    bootstrap_error,
                 ],
                 tone=MUTED,
-                max_len=300,
+                max_len=600,
             ))
             mandate_copy = "\n".join(mandate_lines)
         elif self._bootstrap_started:
@@ -1927,21 +1940,28 @@ class QlabTui(App[None]):
             *_bulletin_markup(
                 rationale.splitlines(),
                 max_len=300,
+                strip_ids=False,
             ),
             "",
             f"[{LABEL_GOLD}]CHALLENGER[/]",
             *_bulletin_markup(
                 challenger.splitlines(),
                 max_len=300,
+                strip_ids=False,
             ),
             "",
             f"[bold {verdict_tone}]VERDICT  {escape(verdict_text)}[/]",
-            *_bulletin_markup(reason_lines, max_len=300),
+            *_bulletin_markup(
+                reason_lines,
+                max_len=300,
+                strip_ids=False,
+            ),
             "",
             f"[{LABEL_GOLD}]REFLECTION[/]",
             *_bulletin_markup(
                 reflection.splitlines(),
                 max_len=300,
+                strip_ids=False,
             ),
         ])
         self._set_selected_work("\n".join(card_lines), markup=True)

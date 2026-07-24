@@ -153,6 +153,9 @@ CREATE TABLE IF NOT EXISTS data_permits (
     permit_id VARCHAR PRIMARY KEY, snapshot_id VARCHAR, purpose VARCHAR,
     provider VARCHAR, feed VARCHAR, as_of VARCHAR, permit JSON,
     eligible_for_execution BOOLEAN, created_at VARCHAR);
+CREATE TABLE IF NOT EXISTS equity_marks (
+    ts VARCHAR, source VARCHAR, equity DOUBLE, cash DOUBLE,
+    PRIMARY KEY (ts, source));
 """
 
 
@@ -828,6 +831,23 @@ class Registry:
         """Return recent order records for the audit surface."""
         return self._rows(
             "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", [limit])
+
+    def log_equity_mark(self, ts: str, equity: float, cash: float | None,
+                        source: str) -> bool:
+        """One equity observation per (ts, source); duplicates are no-ops."""
+        row = self.con.execute(
+            "INSERT OR IGNORE INTO equity_marks (ts, source, equity, cash) "
+            "VALUES (?, ?, ?, ?)",
+            [str(ts), str(source), float(equity),
+             None if cash is None else float(cash)],
+        ).fetchone()
+        return bool(row and row[0])
+
+    def equity_marks(self, limit: int = 5000) -> list[dict]:
+        rows = self._rows(
+            "SELECT ts, source, equity, cash FROM equity_marks "
+            "ORDER BY ts DESC LIMIT ?", [int(limit)])
+        return list(reversed(rows))
 
     def count_orders_on(self, day_iso: str) -> int:
         """Orders created on a given UTC date (for the cumulative daily cap)."""

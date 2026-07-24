@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from qlab.core.types import Decision, SolveResult, Weights
+from qlab.state.registry import Registry
 
 
 def test_run_logging_is_idempotent(reg):
@@ -499,3 +500,20 @@ def test_referee_verdict_must_bind_the_workflows_own_decision(reg):
         workflow_id, "referee", "done",
         artifacts={"verdict": "PASS", "verdict_id": mine, "targets": targets})
     assert {s["phase"]: s["status"] for s in done["steps"]}["referee"] == "done"
+
+
+def test_equity_marks_are_idempotent_and_ordered():
+    reg = Registry(":memory:")
+    assert reg.log_equity_mark(
+        "2026-06-02T21:00:00+00:00", 10_050.0, cash=500.0, source="daily")
+    assert reg.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 10_000.0, cash=500.0, source="daily")
+    # Same (ts, source) is a silent no-op that keeps the first value.
+    assert not reg.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 99.0, cash=0.0, source="daily")
+    # A different source at the same instant is a distinct observation.
+    assert reg.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 10_000.0, cash=None, source="alpaca_backfill")
+    marks = reg.equity_marks()
+    assert [m["equity"] for m in marks if m["source"] == "daily"] == [10_000.0, 10_050.0]
+    assert marks[0]["ts"] == "2026-06-01T21:00:00+00:00"

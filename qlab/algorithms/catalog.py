@@ -109,6 +109,12 @@ _ALGORITHMS = (
         "admission gate; it never estimates returns or enters paper execution.",
     ),
     AlgorithmSpec(
+        "meta_labeling_scaffold", "Meta-labeling scaffold",
+        "prediction", "research", ("meta_labeling",), None, None,
+        "labeling + sizing scaffold for the future prediction lane; no signal, "
+        "no execution path",
+    ),
+    AlgorithmSpec(
         "regime_min_variance", "Regime-conditioned minimum variance", "allocation",
         "research", ("min_variance",), "classical", None,
         "Covariance-only research arm conditioned by the deterministic regime signal.",

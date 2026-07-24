@@ -45,6 +45,7 @@ import importlib.util
 import json
 import shutil
 import threading
+import time
 import uuid
 import webbrowser
 from collections import deque
@@ -152,6 +153,7 @@ class UISession:
         self._market_lock = threading.Lock()
         self._last_quote_signature: tuple[tuple[str, float, float], ...] | None = None
         self._regime_hmm_cache: dict[str, dict[str, object]] = {}
+        self._last_poll_mark = 0.0
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -440,6 +442,60 @@ class UISession:
                 "quote_as_of": None,
             },
         }
+
+    # -- realized performance ----------------------------------------------
+    def record_equity_mark(self, source: str, offline: bool) -> None:
+        state = self.portfolio(offline)
+        self.registry.log_equity_mark(
+            datetime.now(timezone.utc).isoformat(),
+            state["equity"], cash=state["cash"], source=source)
+
+    def performance(self, offline: bool) -> dict:
+        """Realized equity curve and metrics from the marks, or an honest note."""
+        import pandas as pd
+
+        from qlab.core.metrics import compute_metrics
+
+        rows = self.registry.equity_marks()
+        if not rows:
+            return {"series": [], "metrics": None, "since_start": None,
+                    "note": "no equity history yet", "marks": 0}
+        frame = pd.DataFrame(rows)
+        frame["ts"] = pd.to_datetime(frame["ts"], utc=True, format="ISO8601")
+        daily = (frame.set_index("ts").sort_index()["equity"]
+                 .resample("1D").last().dropna())
+        series = [{"ts": stamp.date().isoformat(), "equity": float(value)}
+                  for stamp, value in daily.tail(365).items()]
+        returns = daily.pct_change().dropna()
+        metrics = compute_metrics(returns) if len(returns) >= 3 else None
+        # compute_metrics reports only n_obs below three observations; a partial
+        # bundle must not reach the client as if it were a full one.
+        if metrics is not None and "sharpe" not in metrics:
+            metrics = None
+        start = float(daily.iloc[0])
+        since_start = float(daily.iloc[-1] / start - 1.0) if start > 0 else None
+        note = (None if metrics is not None
+                else "insufficient history for realized metrics "
+                     "(need >=4 daily marks)")
+        return {"series": series, "metrics": metrics, "since_start": since_start,
+                "note": note, "marks": len(rows)}
+
+    def backfill_equity_history(self, offline: bool) -> dict:
+        """Merge the broker's own equity history into the marks, idempotently."""
+        from qlab.trader.broker import get_broker
+
+        broker = get_broker(
+            self.registry, offline=offline,
+            starting_cash=self.mandate.paper_capital, seed=self.seed,
+            universe=self.mandate.universe_whitelist)
+        if not hasattr(broker, "portfolio_history"):
+            raise RuntimeError(
+                f"broker {broker.name!r} exposes no portfolio history to backfill")
+        inserted = sum(
+            self.registry.log_equity_mark(
+                row["ts"], row["equity"], cash=None, source="alpaca_backfill")
+            for row in broker.portfolio_history())
+        return {"backfilled": int(inserted)}
 
     def market(self, offline: bool) -> dict:
         """Compact, provenance-first daily-bar snapshot for terminal clients."""
@@ -839,6 +895,11 @@ class UISession:
         """One consistent payload for a complete TUI refresh."""
         from qlab.algorithms import list_algorithms
 
+        # One poll-sourced mark an hour keeps intraday granularity while the TUI
+        # is open without turning the 2s refresh into 43k rows a day.
+        if time.time() - self._last_poll_mark > 3600.0:
+            self._last_poll_mark = time.time()
+            self.record_equity_mark("poll", offline)
         portfolio = self.portfolio(offline)
         market_snapshot = self.market(offline)
         events = self.read_audit_stream_events(event_limit, after=None)
@@ -876,6 +937,7 @@ class UISession:
             "policy": self.allocation_policy(),
             "equilibrium_returns": self.latest_equilibrium_returns(),
             "leaderboard": self.leaderboard(),
+            "performance": self.performance(offline),
             "workflows": self.registry.list_workflows(10),
         }
 
@@ -1062,6 +1124,9 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/atlas":
         return 200, session.atlas()
 
+    if method == "GET" and path == "/api/performance":
+        return 200, session.performance(off)
+
     if method == "GET" and path == "/api/workflows":
         limit = max(1, min(int(query.get("limit", ["10"])[0]), 50))
         return 200, {"workflows": session.registry.list_workflows(limit)}
@@ -1133,7 +1198,15 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.rebalance_preview(body, off)
 
     if method == "POST" and path == "/api/plans/execute":
-        return 200, session.execute_checked_plan(body, off)
+        result = session.execute_checked_plan(body, off)
+        session.record_equity_mark("execution", off)
+        return 200, result
+
+    if method == "POST" and path == "/api/performance/backfill":
+        try:
+            return 200, session.backfill_equity_history(off)
+        except RuntimeError as exc:
+            return 400, {"error": str(exc)}
 
     if method == "POST" and path.startswith("/api/workflows/"):
         phase = path.removeprefix("/api/workflows/")
@@ -1156,8 +1229,10 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "POST" and path == "/api/daily_ops":
         from qlab.autopilot.loop import daily_ops
 
-        return 200, daily_ops(registry=session.registry, mandate=session.mandate,
-                              offline=off, seed=session.seed)
+        summary = daily_ops(registry=session.registry, mandate=session.mandate,
+                            offline=off, seed=session.seed)
+        session.record_equity_mark("daily", off)
+        return 200, summary
 
     if method == "POST" and path == "/api/batch":
         from qlab.experiment import run_ablation

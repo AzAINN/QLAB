@@ -882,3 +882,68 @@ def test_quote_event_cli_format_shows_three_tickers_and_total():
     assert all(ticker in line for ticker in ("ACWI", "BNDW", "GSG"))
     assert "IGF" not in line
     assert "count=4" in line
+
+
+def test_performance_payload_from_synthetic_marks(session):
+    equity = 10_000.0
+    for day in range(1, 31):
+        # Alternating drift: a constant daily return has exactly zero realized
+        # vol, which compute_metrics reports as sharpe 0.0 by its zero-vol guard.
+        equity *= 1.002 if day % 2 else 1.0005
+        session.registry.log_equity_mark(
+            f"2026-06-{day:02d}T21:00:00+00:00", equity, cash=500.0,
+            source="daily")
+    status, payload = handle_api(session, "GET", "/api/performance", {}, {})
+    assert status == 200
+    assert len(payload["series"]) == 30
+    assert payload["metrics"]["sharpe"] > 0
+    assert payload["since_start"] > 0
+    assert payload["note"] is None
+
+
+def test_performance_is_honest_about_insufficient_history(session):
+    session.registry.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 10_000.0, cash=None, source="daily")
+    status, payload = handle_api(session, "GET", "/api/performance", {}, {})
+    assert status == 200
+    assert payload["metrics"] is None
+    assert "insufficient" in payload["note"]
+
+
+def test_backfill_refuses_without_history_capable_broker(session):
+    status, payload = handle_api(
+        session, "POST", "/api/performance/backfill", {}, {})
+    assert status == 400
+    assert "portfolio history" in payload["error"]
+
+
+def test_backfill_merges_alpaca_history_idempotently(session, monkeypatch):
+    class StubBroker:
+        name = "alpaca_paper"
+
+        def portfolio_history(self):
+            return [
+                {"ts": "2026-06-01T20:00:00+00:00", "equity": 10_000.0},
+                {"ts": "2026-06-02T20:00:00+00:00", "equity": 10_050.0},
+            ]
+
+    monkeypatch.setattr(
+        "qlab.trader.broker.get_broker", lambda *args, **kwargs: StubBroker())
+    status, payload = handle_api(
+        session, "POST", "/api/performance/backfill", {}, {})
+    assert (status, payload["backfilled"]) == (200, 2)
+    status, payload = handle_api(
+        session, "POST", "/api/performance/backfill", {}, {})
+    assert payload["backfilled"] == 0
+
+
+def test_snapshot_poll_marks_are_throttled_to_one_an_hour(session):
+    """The 2s TUI refresh must not turn the marks table into 43k rows a day."""
+    first = session.tui_snapshot(offline=True, event_limit=10)
+    poll_marks = [row for row in session.registry.equity_marks()
+                  if row["source"] == "poll"]
+    assert len(poll_marks) == 1
+    assert first["performance"]["marks"] == 1
+    session.tui_snapshot(offline=True, event_limit=10)
+    assert len([row for row in session.registry.equity_marks()
+                if row["source"] == "poll"]) == 1

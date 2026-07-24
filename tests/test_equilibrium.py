@@ -193,7 +193,8 @@ def test_tui_snapshot_exposes_latest_equilibrium_summary(reg) -> None:
     }
     run_id = reg.log_run("equilibrium", older)
     session = UISession(offline_default=True, registry=reg)
-    session.portfolio = lambda offline: {}
+    # equity/cash are what the snapshot's hourly equity mark reads
+    session.portfolio = lambda offline: {"equity": 10_000.0, "cash": 10_000.0}
     session.market = lambda offline: {}
     session.agents = lambda: []
     session.system_status = lambda offline: {}

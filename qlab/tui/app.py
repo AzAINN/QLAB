@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import threading
 from datetime import datetime
@@ -64,6 +65,9 @@ _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 _VIEWS = (
     "dashboard", "market", "workforce", "research", "book", "audit", "settings",
+)
+_DASHBOARD_TILE_KEYS = (
+    "equity", "allocation", "regime", "market-pulse", "verdict", "run", "alerts",
 )
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
@@ -353,6 +357,26 @@ def _book_state_style(state: str) -> tuple[str, str]:
     """Map persisted plan/order states onto the shared workstation state tones."""
     token = _BOOK_STATE_ALIASES.get(state.lower(), state.lower())
     return _STATE_STYLE.get(token, ("◌", DIM))
+
+
+def _record(value: Any) -> dict[str, Any]:
+    """Return one owner record, or an empty record for a sparse payload."""
+    return value if isinstance(value, dict) else {}
+
+
+def _records(value: Any) -> list[dict[str, Any]]:
+    """Drop null or malformed rows from an owner snapshot list."""
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]
+
+
+def _finite_number(value: Any) -> float | None:
+    """JSON numbers are displayable; missing, boolean, and non-finite values are not."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 class FlowNode(Static):
@@ -981,22 +1005,38 @@ class QlabTui(App[None]):
             else:
                 label.update(ticker)
 
+    def _update_dashboard_tiles(self, contents: dict[str, str]) -> None:
+        unavailable = f"[{MUTED}]owner snapshot unavailable[/]"
+        for tile_key in _DASHBOARD_TILE_KEYS:
+            self.query_one(
+                f"#tile-{tile_key}-content", Static
+            ).update(contents.get(tile_key, unavailable))
+
     def _render_dashboard(self) -> None:
         if not self.snapshot:
+            self._update_dashboard_tiles({})
             return
-        portfolio = self.snapshot.get("portfolio", {})
-        market = self.snapshot.get("market", {})
-        regime = market.get("regime", {})
-        current = portfolio.get("weights", {})
-        targets = portfolio.get("target_weights", {})
+        portfolio = _record(self.snapshot.get("portfolio"))
+        market = _record(self.snapshot.get("market"))
+        regime = _record(market.get("regime"))
+        current = _record(portfolio.get("weights"))
+        targets = _record(portfolio.get("target_weights"))
 
-        equity = float(portfolio.get("equity", 0.0))
-        cash = float(portfolio.get("cash", 0.0))
-        drawdown = float(portfolio.get("drawdown", 0.0))
-        kill_at = float(portfolio.get("kill_switch_at", 0.0))
-        kill_distance = kill_at - drawdown
-        drawdown_tone = DOWN if drawdown > 0 else UP
-        distance_tone = UP if kill_distance > 0 else DOWN
+        equity = _finite_number(portfolio.get("equity"))
+        cash = _finite_number(portfolio.get("cash"))
+        drawdown = _finite_number(portfolio.get("drawdown"))
+        kill_at = _finite_number(portfolio.get("kill_switch_at"))
+        kill_distance = (
+            kill_at - drawdown
+            if kill_at is not None and drawdown is not None
+            else None
+        )
+        drawdown_tone = (
+            MUTED if drawdown is None else DOWN if drawdown > 0 else UP
+        )
+        distance_tone = (
+            MUTED if kill_distance is None else UP if kill_distance > 0 else DOWN
+        )
         equity_content = "\n".join([
             f"[{MUTED}]EQUITY[/]  [bold {TEXT_HI}]{money(equity)}[/]",
             f"[{MUTED}]CASH[/]  [{TEXT_HI}]{money(cash)}[/]",
@@ -1020,41 +1060,54 @@ class QlabTui(App[None]):
             return f"[{AMBER}]{filled}[/][{ALLOCATION_TRACK}]{track}[/]"
 
         allocation_lines = [f"[{DIM}]      CURRENT        TARGET[/]"]
-        held_outside = [
-            ticker for ticker in current
-            if ticker not in self.universe_tickers
-            and abs(float(current[ticker])) > 0.0005
-        ]
+        held_outside = []
+        for ticker, raw_value in current.items():
+            value = _finite_number(raw_value)
+            if (
+                ticker not in self.universe_tickers
+                and value is not None
+                and abs(value) > 0.0005
+            ):
+                held_outside.append(ticker)
         for ticker in [*self.universe_tickers, *held_outside]:
-            value = float(current.get(ticker, 0.0))
-            raw_target = targets.get(ticker)
-            target = None if raw_target is None else float(raw_target)
+            value = _finite_number(current.get(ticker))
+            target = _finite_number(targets.get(ticker))
+            bar = (
+                f"[{MUTED}]{'—':^10}[/]"
+                if value is None
+                else allocation_bar(value, target)
+            )
+            value_text = "—" if value is None else f"{value:.1%}"
             target_text = "—" if target is None else f"{target:.1%}"
             allocation_lines.append(
                 f"[{TEXT}]{escape(str(ticker)):<5}[/] "
-                f"{allocation_bar(value, target)}  "
-                f"[{TEXT_HI}]{value:5.1%}[/] → [{TEXT}]{target_text:>5}[/]"
+                f"{bar}  "
+                f"[{TEXT_HI}]{value_text:>5}[/] → [{TEXT}]{target_text:>5}[/]"
             )
+        if len(allocation_lines) == 1:
+            allocation_lines.append(f"[{MUTED}]—[/]")
         allocation_content = "\n".join(allocation_lines)
 
-        regime_name = escape(str(regime.get("regime", "unknown")).upper())
-        source = escape(str(market.get("source", "unknown")).upper())
+        regime_name = escape(str(regime.get("regime") or "—").upper())
+        source = escape(str(market.get("source") or "—").upper())
         age = market.get("bar_age_days")
-        age_text = "—" if age is None else f"{age}d"
+        age_text = "—" if age is None else escape(f"{age}d")
         regime_content = "\n".join([
             f"[bold {TEXT_HI}]{regime_name}[/]",
-            f"[{MUTED}]SIGNAL[/] [{TEXT}]{pct(regime.get('signal'))}[/]  "
+            f"[{MUTED}]SIGNAL[/] "
+            f"[{TEXT}]{pct(_finite_number(regime.get('signal')))}[/]  "
             f"[{DIM}]VS[/]  [{MUTED}]THRESHOLD[/] "
-            f"[{TEXT}]{pct(regime.get('threshold'))}[/]",
+            f"[{TEXT}]{pct(_finite_number(regime.get('threshold')))}[/]",
             f"[{MUTED}]SOURCE[/] [{TEXT}]{source}[/]  "
             f"[{MUTED}]BAR AGE[/] [{TEXT}]{age_text}[/]",
         ])
 
         pulse_lines = []
-        assets_by_ticker = {
-            str(asset.get("ticker", "")): asset
-            for asset in market.get("assets", [])
-        }
+        assets_by_ticker = {}
+        for asset in _records(market.get("assets")):
+            ticker = str(asset.get("ticker") or "")
+            if ticker:
+                assets_by_ticker[ticker] = asset
         for ticker in self.universe_tickers:
             asset = assets_by_ticker.get(ticker)
             safe_ticker = escape(str(ticker))
@@ -1062,24 +1115,37 @@ class QlabTui(App[None]):
                 pulse_lines.append(
                     f"[{TEXT}]{safe_ticker:<5}[/] [{MUTED}]no data[/]")
                 continue
-            price = float(asset.get("price", 0.0))
-            change = float(asset.get("change_1d", 0.0))
-            change_tone = UP if change >= 0 else DOWN
-            history = [
-                float(value) for value in (asset.get("history") or [])
-            ][-12:]
+            price = _finite_number(asset.get("price"))
+            price_text = "—" if price is None else f"{price:.2f}"
+            change = _finite_number(asset.get("change_1d"))
+            change_cell = (
+                f"[{MUTED}]{'—':>6}[/]"
+                if change is None
+                else f"[{UP if change >= 0 else DOWN}]{change:+6.1%}[/]"
+            )
+            history = []
+            raw_history = asset.get("history")
+            if isinstance(raw_history, list):
+                for value in raw_history:
+                    number = _finite_number(value)
+                    if number is not None:
+                        history.append(number)
+            history = history[-12:]
             pulse = sparkline(history) or "—"
             pulse_lines.append(
-                f"[{TEXT}]{safe_ticker:<5}[/] [{TEXT_HI}]{price:8.2f}[/]  "
-                f"[{change_tone}]{change:+6.1%}[/]  [{CYAN}]{pulse}[/]"
+                f"[{TEXT}]{safe_ticker:<5}[/] "
+                f"[{TEXT_HI}]{price_text:>8}[/]  "
+                f"{change_cell}  [{CYAN}]{pulse}[/]"
             )
-        market_pulse_content = "\n".join(pulse_lines)
+        market_pulse_content = (
+            "\n".join(pulse_lines) if pulse_lines else f"[{MUTED}]—[/]"
+        )
 
-        decisions = self.snapshot.get("decisions", [])
+        decisions = _records(self.snapshot.get("decisions"))
         decision = decisions[0] if decisions else {}
-        verdict = decision.get("verdict") or {}
+        verdict = _record(decision.get("verdict"))
         if verdict:
-            verdict_label = str(verdict.get("verdict", "UNKNOWN")).upper()
+            verdict_label = str(verdict.get("verdict") or "—").upper()
             verdict_tone = (
                 UP if verdict_label == "PASS"
                 else DOWN if verdict_label == "FAIL"
@@ -1091,7 +1157,7 @@ class QlabTui(App[None]):
                 else "•"
             )
             rationale = " ".join(
-                str(decision.get("rationale") or "no rationale recorded").split())
+                str(decision.get("rationale") or "—").split())
             verdict_content = "\n".join([
                 f"[bold {verdict_tone}] {verdict_glyph} "
                 f"{escape(verdict_label)} [/]",
@@ -1100,14 +1166,14 @@ class QlabTui(App[None]):
         else:
             verdict_content = f"[{MUTED}]no verdicts yet[/]"
 
-        workflows = self.snapshot.get("workflows", [])
+        workflows = _records(self.snapshot.get("workflows"))
         if workflows:
             workflow = workflows[0]
-            workflow_id = escape(str(workflow.get("workflow_id", "—")))
-            status = str(workflow.get("status", "idle"))
-            phase = str(workflow.get("current_phase", "—"))
+            workflow_id = escape(str(workflow.get("workflow_id") or "—"))
+            status = str(workflow.get("status") or "—")
+            phase = str(workflow.get("current_phase") or "—")
             phase_step = next((
-                step for step in (workflow.get("steps") or [])
+                step for step in _records(workflow.get("steps"))
                 if str(step.get("phase", "")) == phase
             ), {})
             state = str(phase_step.get("status") or {
@@ -1134,9 +1200,7 @@ class QlabTui(App[None]):
             "run": run_content,
             "alerts": f"[{MUTED}]no alerts[/]",
         }
-        for tile_key, content in contents.items():
-            self.query_one(
-                f"#tile-{tile_key}-content", Static).update(content)
+        self._update_dashboard_tiles(contents)
 
     def _plot_region(self, widget_id: str) -> tuple[int, int]:
         """Cells available to a chart in ``widget_id`` — its live size, or a

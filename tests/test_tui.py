@@ -400,6 +400,107 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
     asyncio.run(run())
 
 
+def test_dashboard_sparse_payload_updates_every_tile():
+    from qlab.tui.app import QlabTui
+
+    tile_keys = {
+        "equity",
+        "allocation",
+        "regime",
+        "market-pulse",
+        "verdict",
+        "run",
+        "alerts",
+    }
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            for tile_key in tile_keys:
+                app.query_one(
+                    f"#tile-{tile_key}-content"
+                ).update(f"stale {tile_key}")
+
+            app.snapshot = {
+                "portfolio": {},
+                "market": {
+                    "regime": {},
+                    "assets": [{
+                        "ticker": "ACWI",
+                        "history": [None],
+                    }],
+                },
+                "decisions": [None],
+                "workflows": [{
+                    "workflow_id": "wf-sparse",
+                    "steps": [None],
+                }],
+            }
+            app._render_dashboard()
+
+            contents = {
+                tile_key: str(app.query_one(
+                    f"#tile-{tile_key}-content"
+                ).content)
+                for tile_key in tile_keys
+            }
+            assert all("stale" not in content for content in contents.values())
+            assert "—" in contents["equity"]
+            assert "—" in contents["allocation"]
+            assert "—" in contents["regime"]
+            assert "—" in contents["market-pulse"]
+            assert "no verdicts yet" in contents["verdict"]
+            assert "wf-sparse" in contents["run"]
+            assert "—" in contents["run"]
+            assert "no alerts" in contents["alerts"]
+
+    asyncio.run(run())
+
+
+def test_dashboard_refresh_replaces_full_snapshot_with_unavailable_state():
+    from qlab.tui.app import QlabTui
+
+    tile_keys = {
+        "equity",
+        "allocation",
+        "regime",
+        "market-pulse",
+        "verdict",
+        "run",
+        "alerts",
+    }
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app._apply_snapshot(_snapshot())
+            assert "$10,100.00" in str(
+                app.query_one("#tile-equity-content").content)
+            assert "ACWI" in str(
+                app.query_one("#tile-market-pulse-content").content)
+
+            app._apply_snapshot({})
+
+            contents = {
+                tile_key: str(app.query_one(
+                    f"#tile-{tile_key}-content"
+                ).content)
+                for tile_key in tile_keys
+            }
+            assert all(
+                "owner snapshot unavailable" in content
+                for content in contents.values()
+            )
+            assert all(
+                "$10,100.00" not in content and "ACWI" not in content
+                for content in contents.values()
+            )
+
+    asyncio.run(run())
+
+
 class WorkforceReadyClient(StubClient):
     def get(self, path, **params):
         snap = _snapshot()

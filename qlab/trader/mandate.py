@@ -8,17 +8,49 @@ agent authors targets, but the mandate — not the model — decides what is all
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
+from qlab.core.costs import (
+    DEFAULT_ADV_NOTIONAL,
+    DEFAULT_COMMISSION_BPS,
+    DEFAULT_IMPACT_K,
+    DEFAULT_SPREAD_BPS,
+)
 from qlab.core.universe import load_universe
 from qlab.paths import data_path
 
 
 class MandateViolation(Exception):
     """Raised when a proposed action breaches the mandate. Fatal by design."""
+
+
+@dataclass(frozen=True)
+class CostConfig:
+    """Mandated assumptions for transaction-cost estimates."""
+
+    spread_bps: float = DEFAULT_SPREAD_BPS
+    commission_bps: float = DEFAULT_COMMISSION_BPS
+    impact_k: float = DEFAULT_IMPACT_K
+    adv_notional: dict[str, float] = field(
+        default_factory=lambda: {"default": DEFAULT_ADV_NOTIONAL}
+    )
+
+    def adv_for(self, ticker: str) -> float:
+        """Return a ticker override or the conservative configured default."""
+        if ticker in self.adv_notional:
+            return float(self.adv_notional[ticker])
+        return float(self.adv_notional.get("default", DEFAULT_ADV_NOTIONAL))
+
+    def __getitem__(self, key: str):
+        """Allow config-style access while retaining typed attributes."""
+        try:
+            return getattr(self, key)
+        except AttributeError as exc:
+            raise KeyError(key) from exc
 
 
 @dataclass
@@ -40,6 +72,7 @@ class Mandate:
     regime_triggered: bool = True
     allow_fractional: bool = True
     operational_policy: str = "hrp"
+    costs: CostConfig = field(default_factory=CostConfig)
 
     # -- checks -------------------------------------------------------------
     def check_targets(self, targets: dict[str, float], tol: float = 1e-4) -> None:
@@ -77,6 +110,49 @@ class Mandate:
         return drawdown > self.trailing_drawdown_pct
 
 
+def _cost_number(value, name: str, *, positive: bool = False) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"mandate costs.{name} must be numeric") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"mandate costs.{name} must be finite")
+    if number < 0 or (positive and number <= 0):
+        condition = "positive" if positive else "non-negative"
+        raise ValueError(f"mandate costs.{name} must be {condition}")
+    return number
+
+
+def _load_costs(raw: object) -> CostConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("mandate costs must be a mapping")
+
+    adv_raw = raw.get("adv_notional", DEFAULT_ADV_NOTIONAL)
+    if isinstance(adv_raw, dict):
+        adv_notional = {
+            str(ticker): _cost_number(value, f"adv_notional.{ticker}", positive=True)
+            for ticker, value in adv_raw.items()
+        }
+        adv_notional.setdefault("default", DEFAULT_ADV_NOTIONAL)
+    else:
+        adv_notional = {
+            "default": _cost_number(adv_raw, "adv_notional", positive=True)
+        }
+
+    return CostConfig(
+        spread_bps=_cost_number(
+            raw.get("spread_bps", DEFAULT_SPREAD_BPS), "spread_bps"
+        ),
+        commission_bps=_cost_number(
+            raw.get("commission_bps", DEFAULT_COMMISSION_BPS), "commission_bps"
+        ),
+        impact_k=_cost_number(raw.get("impact_k", DEFAULT_IMPACT_K), "impact_k"),
+        adv_notional=adv_notional,
+    )
+
+
 def load_mandate(path: str | Path | None = None) -> Mandate:
     """Load and flatten ``mandate.yaml`` into a :class:`Mandate`."""
     p = Path(path) if path else data_path("mandate.yaml")
@@ -106,6 +182,7 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     rb = raw.get("rebalance", {})
     ex = raw.get("execution", {})
     allocation = raw.get("allocation", {})
+    costs = _load_costs(raw.get("costs", {}))
     return Mandate(
         paper_capital=float(acct.get("paper_capital", 10000.0)),
         base_currency=acct.get("base_currency", "USD"),
@@ -124,4 +201,5 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
         regime_triggered=bool(rb.get("regime_triggered", True)),
         allow_fractional=bool(ex.get("allow_fractional", True)),
         operational_policy=str(allocation.get("operational_policy", "hrp")),
+        costs=costs,
     )

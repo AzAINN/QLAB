@@ -267,3 +267,193 @@ def test_ablation_spec_solvers_resolve_and_b3_is_real_risk_parity():
     w_eq = pd.Series(1.0 / len(w_b3.tickers), index=w_b3.tickers, dtype=float)
     l1_eq = float((w_b3.as_series() - w_eq).abs().sum())
     assert l1_eq > 0.05, f"B3 (risk parity) collapsed to equal-weight: L1={l1_eq}"
+
+
+def test_realistic_costed_backtest_reports_gross_net_and_summed_drag():
+    from qlab.core.types import Weights
+
+    index = pd.bdate_range("2020-01-01", "2021-12-31")
+    trend = np.linspace(100.0, 130.0, len(index))
+    prices = pd.DataFrame(
+        {"AAA": trend, "BBB": trend * 0.8 + 10.0},
+        index=index,
+    )
+
+    def alternating_policy(snap):
+        values = [1.0, 0.0] if snap.as_of.month % 2 else [0.0, 1.0]
+        return Weights(tickers=snap.tickers, values=values)
+
+    result = run_backtest(
+        prices,
+        alternating_policy,
+        cadence="monthly",
+        lookback_days=60,
+        cost_model="realistic",
+        portfolio_notional=1_000_000.0,
+        adv_notional={"default": 50_000_000.0},
+        daily_vol=0.02,
+        spread_bps=2.0,
+        commission_bps=0.0,
+        impact_k=0.0,
+    )
+
+    observed_drag = float((result.gross_returns - result.net_returns).sum())
+    summed_rebalance_costs = sum(result.cost_history.values())
+    assert result.net_returns.equals(result.returns)
+    assert result.gross_returns.index.equals(result.net_returns.index)
+    assert result.gross_returns.add(1.0).prod() > result.net_returns.add(1.0).prod()
+    assert observed_drag == pytest.approx(summed_rebalance_costs)
+    assert result.total_cost_drag == pytest.approx(summed_rebalance_costs)
+    assert result.metrics["total_cost_drag"] == pytest.approx(summed_rebalance_costs)
+    assert result.metrics["gross_ann_return"] > result.metrics["net_ann_return"]
+    assert all(
+        leg["adv_source"] == "configured"
+        for rebalance in result.cost_breakdown_history.values()
+        for leg in rebalance["legs"]
+    )
+
+
+def test_realistic_backtest_uses_trailing_median_dollar_volume():
+    from qlab.core.types import Weights
+
+    index = pd.bdate_range("2020-01-01", "2020-12-31")
+    prices = pd.DataFrame({"AAA": 100.0}, index=index)
+    volumes = pd.DataFrame({"AAA": 1_000_000.0}, index=index)
+
+    def fully_invested(snap):
+        return Weights(tickers=snap.tickers, values=[1.0])
+
+    result = run_backtest(
+        prices,
+        fully_invested,
+        cadence="quarterly",
+        lookback_days=60,
+        cost_model="realistic",
+        volumes=volumes,
+        daily_vol=0.02,
+    )
+
+    first = next(iter(result.cost_breakdown_history.values()))["legs"][0]
+    assert first["adv_notional"] == pytest.approx(100_000_000.0)
+    assert first["adv_source"] == "rolling_60d_median_dollar_volume"
+
+
+def test_mandate_cost_defaults_keep_older_configs_working(tmp_path):
+    from qlab.core.costs import (
+        DEFAULT_ADV_NOTIONAL,
+        DEFAULT_COMMISSION_BPS,
+        DEFAULT_IMPACT_K,
+        DEFAULT_SPREAD_BPS,
+    )
+    from qlab.trader.mandate import load_mandate
+
+    mandate_path = tmp_path / "legacy-mandate.yaml"
+    mandate_path.write_text(
+        "universe_whitelist:\n  - AAA\n",
+        encoding="utf-8",
+    )
+
+    mandate = load_mandate(mandate_path)
+    assert mandate.costs.spread_bps == DEFAULT_SPREAD_BPS
+    assert mandate.costs.commission_bps == DEFAULT_COMMISSION_BPS
+    assert mandate.costs.impact_k == DEFAULT_IMPACT_K
+    assert mandate.costs.adv_for("AAA") == DEFAULT_ADV_NOTIONAL
+
+
+def test_mandate_loads_cost_overrides_and_ticker_adv(tmp_path):
+    from qlab.trader.mandate import load_mandate
+
+    mandate_path = tmp_path / "costed-mandate.yaml"
+    mandate_path.write_text(
+        """
+universe_whitelist:
+  - AAA
+costs:
+  spread_bps: 3.0
+  commission_bps: 0.5
+  impact_k: 1.25
+  adv_notional:
+    default: 40000000
+    AAA: 125000000
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    mandate = load_mandate(mandate_path)
+    assert mandate.costs.spread_bps == 3.0
+    assert mandate.costs.commission_bps == 0.5
+    assert mandate.costs.impact_k == 1.25
+    assert mandate.costs.adv_for("AAA") == 125_000_000.0
+    assert mandate.costs.adv_for("BBB") == 40_000_000.0
+
+
+def test_realistic_costs_work_with_offline_price_only_data():
+    from qlab.core.types import Weights
+
+    prices = market.get_prices(
+        ["ACWI", "BNDW"],
+        "2019-01-01",
+        "2020-12-31",
+        offline=True,
+        seed=11,
+    )
+
+    def equal_weight(snap):
+        return Weights.equal(snap.tickers)
+
+    result = run_backtest(
+        prices,
+        equal_weight,
+        cadence="quarterly",
+        lookback_days=60,
+        cost_model="realistic",
+        adv_notional={"default": 50_000_000.0},
+    )
+
+    assert result.cost_history
+    assert all(
+        leg["adv_source"] == "configured"
+        for rebalance in result.cost_breakdown_history.values()
+        for leg in rebalance["legs"]
+    )
+
+
+def test_plan_pre_trade_reports_decomposed_expected_cost():
+    from qlab.state.registry import Registry
+    from qlab.trader.broker import SimulatedPaperBroker
+    from qlab.trader.mandate import CostConfig, Mandate
+    from qlab.trader.plan import build_plan
+
+    registry = Registry(":memory:")
+    broker = SimulatedPaperBroker(
+        registry,
+        lambda tickers: {ticker: 100.0 for ticker in tickers},
+        starting_cash=10_000.0,
+        universe=["AAA", "BBB"],
+    )
+    mandate = Mandate(
+        universe_whitelist=["AAA", "BBB"],
+        max_weight_per_asset=1.0,
+        costs=CostConfig(
+            spread_bps=2.0,
+            commission_bps=1.0,
+            impact_k=0.0,
+            adv_notional={"default": 50_000_000.0},
+        ),
+    )
+
+    plan = build_plan(
+        registry,
+        broker,
+        mandate,
+        {"AAA": 0.5, "BBB": 0.5},
+        "cost-report",
+    )
+
+    expected = plan.pre_trade["expected_cost"]
+    assert expected["commission"] == pytest.approx(1.0)
+    assert expected["half_spread"] == pytest.approx(1.0)
+    assert expected["impact"] == 0.0
+    assert expected["minimum_adjustment"] == 0.0
+    assert expected["total"] == pytest.approx(2.0)
+    assert len(expected["legs"]) == len(plan.legs) == 2

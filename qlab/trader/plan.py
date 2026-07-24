@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 
+from qlab.core.costs import DEFAULT_DAILY_VOL, cost_model
 from qlab.trader.broker import Broker
 from qlab.trader.mandate import Mandate, MandateViolation
 from qlab.state.registry import Registry, targets_hash
@@ -52,6 +53,56 @@ def _plan_id(decision_id: str, targets: dict[str, float]) -> str:
 
 def _client_order_id(plan_id: str, ticker: str) -> str:
     return hashlib.sha256(f"{plan_id}|{ticker}".encode()).hexdigest()[:16]
+
+
+def _expected_cost(
+    broker: Broker,
+    mandate: Mandate,
+    legs: list[OrderLeg],
+) -> dict:
+    """Build a display-only realistic cost estimate for the actual plan legs."""
+    totals = {
+        "commission": 0.0,
+        "half_spread": 0.0,
+        "impact": 0.0,
+        "minimum_adjustment": 0.0,
+        "total": 0.0,
+    }
+    prices = broker.prices([leg.ticker for leg in legs]) if legs else {}
+    leg_costs = []
+    for leg in legs:
+        price = float(prices[leg.ticker])
+        adv_notional = mandate.costs.adv_for(leg.ticker)
+        breakdown = cost_model(
+            leg.notional,
+            price,
+            adv_notional,
+            DEFAULT_DAILY_VOL,
+            spread_bps=mandate.costs.spread_bps,
+            commission_bps=mandate.costs.commission_bps,
+            impact_k=mandate.costs.impact_k,
+        )
+        scalar_breakdown = {
+            component: float(value)
+            for component, value in breakdown.items()
+        }
+        for component in totals:
+            totals[component] += scalar_breakdown[component]
+        leg_costs.append({
+            "ticker": leg.ticker,
+            "side": leg.side,
+            "notional": leg.notional,
+            "price": price,
+            "adv_notional": adv_notional,
+            "daily_vol": DEFAULT_DAILY_VOL,
+            **scalar_breakdown,
+        })
+    return {
+        "currency": mandate.base_currency,
+        "daily_vol_assumption": DEFAULT_DAILY_VOL,
+        **totals,
+        "legs": leg_costs,
+    }
 
 
 def build_plan(
@@ -122,6 +173,7 @@ def build_plan(
     if not is_initial_deployment:
         mandate.check_turnover(turnover)
     mandate.check_order_count(len(legs))
+    pre_trade["expected_cost"] = _expected_cost(broker, mandate, legs)
     pre_trade["mandate_ok"] = True
 
     plan = OrderPlan(plan_id, decision_id, targets, legs, pre_trade, state="checked")

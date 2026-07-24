@@ -48,6 +48,16 @@ rebalance:
 execution:
   allow_fractional: true
 
+# Display and research estimates use a half-spread plus square-root impact model.
+# ADV overrides are optional; an unlisted core ETF uses the conservative default.
+costs:
+  spread_bps: 2.0
+  commission_bps: 0.0
+  impact_k: 1.0
+  adv_notional:
+    default: 50000000.0
+    # ACWI: 250000000.0       # optional per-ticker trailing-ADV fallback
+
 # Deployment is evidence-led, not novelty-led. MVSK stays in the research
 # ablation until it earns promotion; the paper desk starts from the robust HRP
 # benchmark that currently wins out of sample.

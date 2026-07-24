@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
@@ -24,10 +25,66 @@ from qlab.core.universe import load_universe
 from qlab.paths import data_path
 
 _PERMITTED_UNIVERSE_TIERS = frozenset({"core", "extended"})
+DrawdownTier = Literal["none", "warning", "control", "breaker"]
+
+
+def tier(
+    drawdown: float,
+    *,
+    warning: float = 0.05,
+    control: float = 0.10,
+    breaker: float = 0.15,
+) -> DrawdownTier:
+    """Classify a trailing drawdown against deterministic circuit-breaker tiers."""
+    values = {
+        "drawdown": float(drawdown),
+        "warning": float(warning),
+        "control": float(control),
+        "breaker": float(breaker),
+    }
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if not 0.0 < values["warning"] < values["control"] < values["breaker"] <= 1.0:
+        raise ValueError(
+            "drawdown tiers must satisfy 0 < warning < control < breaker <= 1"
+        )
+    if values["drawdown"] >= values["breaker"]:
+        return "breaker"
+    if values["drawdown"] >= values["control"]:
+        return "control"
+    if values["drawdown"] >= values["warning"]:
+        return "warning"
+    return "none"
 
 
 class MandateViolation(Exception):
     """Raised when a proposed action breaches the mandate. Fatal by design."""
+
+
+@dataclass(frozen=True)
+class DrawdownTiers:
+    """Configurable pre-kill-switch controls; the trailing kill switch is separate."""
+
+    warning: float = 0.05
+    control: float = 0.10
+    breaker: float = 0.15
+
+    def __post_init__(self) -> None:
+        tier(
+            0.0,
+            warning=self.warning,
+            control=self.control,
+            breaker=self.breaker,
+        )
+
+    def tier(self, drawdown: float) -> DrawdownTier:
+        return tier(
+            drawdown,
+            warning=self.warning,
+            control=self.control,
+            breaker=self.breaker,
+        )
 
 
 @dataclass(frozen=True)
@@ -91,6 +148,9 @@ class Mandate:
     max_turnover_per_rebalance: float = 0.50
     max_orders_per_day: int = 20
     order_type: str = "marketable_limit"
+    max_gross_exposure: float = 1.0
+    stress_vol_limit: float = 0.30
+    drawdown_tiers: DrawdownTiers = field(default_factory=DrawdownTiers)
     trailing_drawdown_pct: float = 0.15
     drift_band_pct: float = 0.05
     cadence: str = "quarterly"
@@ -98,6 +158,14 @@ class Mandate:
     allow_fractional: bool = True
     operational_policy: str = "hrp"
     costs: CostConfig = field(default_factory=CostConfig)
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("max_gross_exposure", self.max_gross_exposure),
+            ("stress_vol_limit", self.stress_vol_limit),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"mandate {name} must be finite and positive")
 
     # -- checks -------------------------------------------------------------
     def check_targets(self, targets: dict[str, float], tol: float = 1e-4) -> None:
@@ -109,8 +177,14 @@ class Mandate:
         if self.long_only and any(v < -tol for v in vals):
             raise MandateViolation("long-only mandate: negative weight proposed")
         total = sum(vals)
+        gross = sum(abs(v) for v in vals)
         if self.fully_invested and abs(total - 1.0) > 1e-2:
             raise MandateViolation(f"fully-invested mandate: weights sum to {total:.4f}")
+        if gross > self.max_gross_exposure + tol:
+            raise MandateViolation(
+                f"gross exposure {gross:.4f} exceeds cap "
+                f"{self.max_gross_exposure:.4f}"
+            )
         for t, v in targets.items():
             if v > self.max_weight_per_asset + tol:
                 raise MandateViolation(
@@ -133,6 +207,10 @@ class Mandate:
             return False
         drawdown = 1.0 - equity / high_water_mark
         return drawdown > self.trailing_drawdown_pct
+
+    def drawdown_tier(self, drawdown: float) -> DrawdownTier:
+        """Return the configured pre-kill-switch tier for ``drawdown``."""
+        return self.drawdown_tiers.tier(drawdown)
 
 
 def _cost_number(value, name: str, *, positive: bool = False) -> float:
@@ -224,6 +302,14 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     rb = raw.get("rebalance", {})
     ex = raw.get("execution", {})
     allocation = raw.get("allocation", {})
+    tier_raw = raw.get("drawdown_tiers", {})
+    if not isinstance(tier_raw, dict):
+        raise ValueError("mandate drawdown_tiers must be a mapping")
+    drawdown_tiers = DrawdownTiers(
+        warning=float(tier_raw.get("warning_pct", 0.05)),
+        control=float(tier_raw.get("control_pct", 0.10)),
+        breaker=float(tier_raw.get("breaker_pct", 0.15)),
+    )
     costs = _load_costs(raw.get("costs", {}))
     return Mandate(
         paper_capital=float(acct.get("paper_capital", 10000.0)),
@@ -237,6 +323,9 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
         max_turnover_per_rebalance=float(con.get("max_turnover_per_rebalance", 0.50)),
         max_orders_per_day=int(con.get("max_orders_per_day", 20)),
         order_type=con.get("order_type", "marketable_limit"),
+        max_gross_exposure=float(con.get("max_gross_exposure", 1.0)),
+        stress_vol_limit=float(con.get("stress_vol_limit", 0.30)),
+        drawdown_tiers=drawdown_tiers,
         trailing_drawdown_pct=float(ks.get("trailing_drawdown_pct", 0.15)),
         drift_band_pct=float(rb.get("drift_band_pct", 0.05)),
         cadence=rb.get("cadence", "quarterly"),

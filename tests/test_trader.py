@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from qlab.trader.broker import SimulatedPaperBroker, default_price_provider
-from qlab.trader.mandate import Mandate, MandateViolation, load_mandate
+from qlab.trader.mandate import Mandate, MandateViolation, load_mandate, tier
 from qlab.trader.plan import build_plan, execute_plan
 
 CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
@@ -197,6 +199,130 @@ def test_deterministic_referee_flags_ill_conditioned_covariance():
         good, m, date(2020, 1, 1), moments_summary={"condition_number": 1e9})
     assert verdict == "FAIL"
     assert any("ill-conditioned" in r for r in reasons)
+
+
+@pytest.mark.parametrize(
+    ("drawdown", "expected"),
+    [
+        (0.0, "none"),
+        (0.049999, "none"),
+        (0.05, "warning"),
+        (0.099999, "warning"),
+        (0.10, "control"),
+        (0.149999, "control"),
+        (0.15, "breaker"),
+    ],
+)
+def test_drawdown_tier_boundaries(drawdown, expected):
+    assert tier(drawdown) == expected
+
+
+def test_drawdown_tier_thresholds_are_configurable():
+    assert tier(0.06, warning=0.02, control=0.04, breaker=0.08) == "control"
+
+
+def test_referee_blocks_exposure_increase_at_control_drawdown():
+    from datetime import date
+
+    from qlab.governance.referee import deterministic_referee
+
+    mandate = load_mandate()
+    targets = {
+        ticker: 1.0 / len(mandate.universe_whitelist)
+        for ticker in mandate.universe_whitelist
+    }
+    state = {
+        "drawdown": mandate.drawdown_tiers.control,
+        "weights": {
+            ticker: 0.10
+            for ticker in mandate.universe_whitelist
+        },
+    }
+
+    verdict, reasons = deterministic_referee(
+        targets,
+        mandate,
+        date(2020, 1, 1),
+        portfolio_state=state,
+    )
+
+    assert verdict == "FAIL"
+    assert any("control tier blocks gross exposure increase" in reason for reason in reasons)
+
+
+def test_referee_breaker_allows_only_liquidating_targets():
+    from datetime import date
+
+    from qlab.governance.referee import deterministic_referee
+
+    mandate = load_mandate()
+    targets = {
+        ticker: 1.0 / len(mandate.universe_whitelist)
+        for ticker in mandate.universe_whitelist
+    }
+    state = {
+        "drawdown": mandate.drawdown_tiers.breaker,
+        "weights": targets,
+    }
+
+    verdict, reasons = deterministic_referee(
+        targets,
+        mandate,
+        date(2020, 1, 1),
+        portfolio_state=state,
+    )
+
+    assert verdict == "FAIL"
+    assert any("breaker tier permits liquidation only" in reason for reason in reasons)
+
+
+def test_referee_enforces_abs_sum_gross_exposure_cap():
+    from datetime import date
+
+    from qlab.governance.referee import deterministic_referee
+
+    mandate = replace(
+        load_mandate(),
+        long_only=False,
+        max_weight_per_asset=2.0,
+        max_gross_exposure=1.0,
+    )
+    targets = {
+        mandate.universe_whitelist[0]: 1.10,
+        mandate.universe_whitelist[1]: -0.10,
+    }
+
+    verdict, reasons = deterministic_referee(
+        targets,
+        mandate,
+        date(2020, 1, 1),
+    )
+
+    assert verdict == "FAIL"
+    assert any("gross exposure cap breached: 1.2000" in reason for reason in reasons)
+
+
+def test_referee_stress_limit_is_audited_warning_not_failure():
+    from datetime import date
+
+    from qlab.governance.referee import deterministic_referee
+
+    mandate = load_mandate()
+    targets = {
+        ticker: 1.0 / len(mandate.universe_whitelist)
+        for ticker in mandate.universe_whitelist
+    }
+    vols = {ticker: 0.40 for ticker in targets}
+
+    verdict, reasons = deterministic_referee(
+        targets,
+        mandate,
+        date(2020, 1, 1),
+        vols=vols,
+    )
+
+    assert verdict == "PASS"
+    assert any(reason.startswith("stress: WARNING") for reason in reasons)
 
 
 def test_verdict_does_not_transfer_to_different_targets(reg_and_broker):

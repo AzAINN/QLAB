@@ -69,6 +69,7 @@ _VIEWS = (
 )
 _DASHBOARD_TILE_KEYS = (
     "equity", "allocation", "regime", "market-pulse", "verdict", "run", "alerts",
+    "stress",
 )
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
@@ -115,6 +116,7 @@ _PULSE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 _REFRESH_EVENT_KINDS = {
     "workflow_started", "workflow_phase", "referee_verdict",
     "plan_built", "order_filled", "decision_logged", "ablation_complete",
+    "cost_gate_refusal",
 }
 _QUOTE_REPAINT_INTERVAL = 1.0
 COMMAND_TABLE = {
@@ -654,7 +656,8 @@ class QlabTui(App[None]):
                         yield Tile("market pulse", "market-pulse")
                         yield Tile("verdict", "verdict")
                         yield Tile("run", "run")
-                        yield Tile("alerts", "alerts")
+                        yield Tile("guardrail alerts", "alerts")
+                        yield Tile("scenario replay", "stress")
                     with Horizontal(id="dashboard-actions"):
                         yield Button(
                             "DRY REBALANCE",
@@ -1206,6 +1209,7 @@ class QlabTui(App[None]):
         portfolio = _record(self.snapshot.get("portfolio"))
         market = _record(self.snapshot.get("market"))
         regime = _record(market.get("regime"))
+        stress = _record(self.snapshot.get("stress"))
         equilibrium = _record(self.snapshot.get("equilibrium_returns"))
         current = _record(portfolio.get("weights"))
         targets = _record(portfolio.get("target_weights"))
@@ -1382,6 +1386,90 @@ class QlabTui(App[None]):
         else:
             run_content = f"[{MUTED}]no runs[/]"
 
+        alerts_content = f"[{MUTED}]no alerts[/]"
+        stress_replay_content = f"[{MUTED}]no replay data[/]"
+        if stress:
+            tier_name = str(stress.get("drawdown_tier") or "—").upper()
+            tier_tone = {
+                "NONE": UP,
+                "WARNING": AMBER_HI,
+                "CONTROL": DOWN,
+                "BREAKER": DOWN,
+            }.get(tier_name, MUTED)
+            headroom = _finite_number(stress.get("leverage_headroom"))
+            stressed_vol = _finite_number(stress.get("stressed_vol"))
+            stress_limit = _finite_number(stress.get("stress_vol_limit"))
+            headroom_tone = (
+                MUTED if headroom is None else UP if headroom >= 0 else DOWN
+            )
+            vol_tone = (
+                MUTED
+                if stressed_vol is None or stress_limit is None
+                else DOWN
+                if stressed_vol > stress_limit
+                else UP
+            )
+            stress_pairs: list[tuple[str, object]] = [
+                ("DRAWDOWN TIER", tier_name),
+                ("LEVERAGE HEADROOM", pct(headroom)),
+                (
+                    "STRESSED VOL / LIMIT",
+                    f"{pct(stressed_vol)} / {pct(stress_limit)}",
+                ),
+            ]
+            stress_tones = [tier_tone, headroom_tone, vol_tone]
+
+            replays = _record(stress.get("replays"))
+            replay_pairs: list[tuple[str, object]] = []
+            replay_tones: list[str] = []
+            for label in ("2008", "2020", "2022"):
+                replay = _record(replays.get(label))
+                replay_return = _finite_number(replay.get("return"))
+                available = replay.get("available") is True
+                if available and replay_return is not None:
+                    replay_text = pct(replay_return)
+                    replay_tone = UP if replay_return >= 0 else DOWN
+                else:
+                    reason = str(replay.get("reason") or "").lower()
+                    replay_text = (
+                        "unavailable (synthetic)"
+                        if "synthetic" in reason
+                        else "unavailable"
+                    )
+                    replay_tone = MUTED
+                replay_pairs.append((f"{label} REPLAY", replay_text))
+                replay_tones.append(replay_tone)
+
+            refusals = _records(stress.get("cost_gate_refusals"))
+            if refusals:
+                raw_reasons = refusals[0].get("reasons")
+                clean_reasons = bulletin(
+                    [str(reason) for reason in raw_reasons]
+                    if isinstance(raw_reasons, list)
+                    else [],
+                    max_len=90,
+                )
+                refusal_text = (
+                    f"REFUSED · {clean_reasons[0]}"
+                    if clean_reasons
+                    else "REFUSED"
+                )
+                refusal_tone = DOWN
+            else:
+                refusal_text = "clear · no recent refusals"
+                refusal_tone = UP
+            stress_pairs.append(("COST GATE", refusal_text))
+            stress_tones.append(refusal_tone)
+            alerts_content = "\n".join(_key_number_markup(
+                stress_pairs,
+                value_tones=stress_tones,
+                bold_values={0, 2},
+            ))
+            stress_replay_content = "\n".join(_key_number_markup(
+                replay_pairs,
+                value_tones=replay_tones,
+            ))
+
         contents = {
             "equity": equity_content,
             "allocation": allocation_content,
@@ -1389,7 +1477,8 @@ class QlabTui(App[None]):
             "market-pulse": market_pulse_content,
             "verdict": verdict_content,
             "run": run_content,
-            "alerts": f"[{MUTED}]no alerts[/]",
+            "alerts": alerts_content,
+            "stress": stress_replay_content,
         }
         self._update_dashboard_tiles(contents)
 

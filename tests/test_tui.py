@@ -68,6 +68,37 @@ def _snapshot():
             },
             "assets": assets,
         },
+        "stress": {
+            "drawdown_tier": "none",
+            "drawdown_thresholds": {
+                "warning": 0.05,
+                "control": 0.10,
+                "breaker": 0.15,
+            },
+            "gross_exposure": 1.0,
+            "max_gross_exposure": 1.0,
+            "leverage_headroom": 0.0,
+            "stressed_vol": 0.10,
+            "stress_vol_limit": 0.30,
+            "replays": {
+                label: {
+                    "available": False,
+                    "start": start,
+                    "end": end,
+                    "return": None,
+                    "reason": (
+                        "unavailable: synthetic snapshot is not historical "
+                        "replay data"
+                    ),
+                }
+                for label, start, end in (
+                    ("2008", "2008-09-01", "2009-03-09"),
+                    ("2020", "2020-02-19", "2020-03-23"),
+                    ("2022", "2022-01-03", "2022-10-12"),
+                )
+            },
+            "cost_gate_refusals": [],
+        },
         "agents": [
             {"name": "moments-analyst", "state": "idle", "authority": "RESEARCH"},
             {"name": "challenger", "state": "idle", "authority": "CHALLENGE"},
@@ -154,9 +185,29 @@ def test_gather_snapshot_uses_single_tui_contract():
     snapshot = gather_snapshot(InProcessClient(), offline=True)
     assert snapshot["system"]["mode"] == "paper"
     assert snapshot["market"]["frequency"] == "daily"
+    assert snapshot["stress"]["drawdown_tier"] in {
+        "none", "warning", "control", "breaker",
+    }
     assert {row["stage"] for row in snapshot["algorithms"]} == {
         "operational", "research", "offline"
     }
+
+
+def test_owner_stress_payload_surfaces_latest_cost_gate_refusal():
+    client = InProcessClient()
+    client.session.registry.record_event(
+        "cost_gate_refusal",
+        {
+            "plan_id": "refused-plan",
+            "reasons": ["net-alpha gate did not clear expected cost"],
+        },
+    )
+
+    snapshot = client.get("/api/tui", offline=True)
+
+    refusal = snapshot["stress"]["cost_gate_refusals"][0]
+    assert refusal["plan_id"] == "refused-plan"
+    assert refusal["reasons"] == ["net-alpha gate did not clear expected cost"]
 
 
 def test_claude_stream_parser_emits_text_and_hides_thinking():
@@ -406,6 +457,7 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
                 "tile-verdict",
                 "tile-run",
                 "tile-alerts",
+                "tile-stress",
             }
             assert {tile.id for tile in app.query(".dashboard-tile")} == tile_ids
             equity = str(app.query_one("#tile-equity-content").content)
@@ -424,8 +476,14 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
                 app.query_one("#tile-verdict-content").content)
             assert "—" in empty_verdict and "no verdicts yet" in empty_verdict
             assert "no runs" in str(app.query_one("#tile-run-content").content)
-            assert "no alerts" in str(
-                app.query_one("#tile-alerts-content").content)
+            alerts = str(app.query_one("#tile-alerts-content").content)
+            assert "• DRAWDOWN TIER" in alerts and "NONE" in alerts
+            assert "• LEVERAGE HEADROOM" in alerts
+            assert "• STRESSED VOL / LIMIT" in alerts
+            assert "clear · no recent refusals" in alerts
+            replays = str(app.query_one("#tile-stress-content").content)
+            assert "• 2008 REPLAY" in replays
+            assert "unavailable (synthetic)" in replays
 
             app.snapshot["decisions"] = [{
                 "decision_id": "decision-pass",
@@ -445,6 +503,41 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
             app.action_view("market")
             app._handle_command("view desk")
             assert app.active_view == "dashboard"
+
+    asyncio.run(run())
+
+
+def test_dashboard_stress_alerts_tile_renders_all_drawdown_tiers():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            for tier_name in ("warning", "control", "breaker"):
+                app.snapshot["stress"]["drawdown_tier"] = tier_name
+                app._render_dashboard()
+                content = str(app.query_one("#tile-alerts-content").content)
+                assert tier_name.upper() in content
+
+            app.snapshot["stress"].update({
+                "leverage_headroom": -0.05,
+                "gross_exposure": 1.05,
+                "stressed_vol": 0.35,
+                "cost_gate_refusals": [{
+                    "ts": "2026-07-24T12:00:00+00:00",
+                    "plan_id": "plan-refused",
+                    "reasons": ["net-alpha gate did not clear expected cost"],
+                }],
+            })
+            app._render_dashboard()
+            content = str(app.query_one("#tile-alerts-content").content)
+            assert "• LEVERAGE HEADROOM" in content and "-5.0%" in content
+            assert "35.0% / 30.0%" in content
+            assert "REFUSED · net-alpha gate did not clear expected cost" in content
+            assert "• 2022 REPLAY" in str(
+                app.query_one("#tile-stress-content").content
+            )
 
     asyncio.run(run())
 
@@ -498,6 +591,7 @@ def test_quote_event_repaints_only_market_pulse_and_universe():
                 ).content)
                 for tile_key in (
                     "equity", "allocation", "regime", "verdict", "run", "alerts",
+                    "stress",
                 )
             }
             posts_before = list(client.posts)
@@ -565,6 +659,7 @@ def test_dashboard_sparse_payload_updates_every_tile():
         "verdict",
         "run",
         "alerts",
+        "stress",
     }
 
     async def run():
@@ -608,6 +703,7 @@ def test_dashboard_sparse_payload_updates_every_tile():
             assert "wf-sparse" in contents["run"]
             assert "—" in contents["run"]
             assert "no alerts" in contents["alerts"]
+            assert "no replay data" in contents["stress"]
 
     asyncio.run(run())
 
@@ -623,6 +719,7 @@ def test_dashboard_refresh_replaces_full_snapshot_with_unavailable_state():
         "verdict",
         "run",
         "alerts",
+        "stress",
     }
 
     async def run():

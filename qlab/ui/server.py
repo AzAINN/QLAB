@@ -397,6 +397,90 @@ class UISession:
             "assets": assets,
         }
 
+    def historical_replays(
+        self,
+        offline: bool,
+        weights: dict[str, float],
+    ) -> dict:
+        """Replay current weights on the full cached point-in-time price panel."""
+        from qlab.core import data as market
+        from qlab.core.stress import replay_scenarios
+
+        snap = market.snapshot(
+            self.mandate.universe_whitelist,
+            date.today().isoformat(),
+            offline=offline,
+            seed=self.seed,
+        )
+        snap.prices.attrs["source"] = snap.source
+        snap.prices.attrs["synthetic"] = snap.source == "synthetic"
+        return replay_scenarios(weights, snap.prices)
+
+    def stress_payload(
+        self,
+        portfolio: dict,
+        market_snapshot: dict,
+        replays: dict,
+        events: list[dict],
+    ) -> dict:
+        """Guardrail and scenario facts for the live dashboard stress tile."""
+        from qlab.core.stress import stress_correlation_to_one
+
+        raw_weights = portfolio.get("weights", {})
+        if not isinstance(raw_weights, dict):
+            raise ValueError("portfolio weights must be a mapping")
+        weights = {
+            str(ticker): float(weight)
+            for ticker, weight in raw_weights.items()
+        }
+        vols = {
+            str(asset["ticker"]): float(asset["realized_vol"])
+            for asset in market_snapshot.get("assets", [])
+            if isinstance(asset, dict)
+            and "ticker" in asset
+            and "realized_vol" in asset
+        }
+        gross = sum(abs(weight) for weight in weights.values())
+        drawdown = float(portfolio["drawdown"])
+        stressed_vol = stress_correlation_to_one(weights, vols)
+
+        refusals = []
+        for event in reversed(events):
+            if event.get("kind") != "cost_gate_refusal":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            reasons = payload.get("reasons")
+            refusals.append({
+                "ts": event.get("ts"),
+                "plan_id": payload.get("plan_id"),
+                "reasons": (
+                    [str(reason) for reason in reasons]
+                    if isinstance(reasons, list)
+                    else []
+                ),
+            })
+            if len(refusals) == 3:
+                break
+
+        tiers = self.mandate.drawdown_tiers
+        return {
+            "drawdown_tier": self.mandate.drawdown_tier(drawdown),
+            "drawdown_thresholds": {
+                "warning": tiers.warning,
+                "control": tiers.control,
+                "breaker": tiers.breaker,
+            },
+            "gross_exposure": gross,
+            "max_gross_exposure": self.mandate.max_gross_exposure,
+            "leverage_headroom": self.mandate.max_gross_exposure - gross,
+            "stressed_vol": stressed_vol,
+            "stress_vol_limit": self.mandate.stress_vol_limit,
+            "replays": replays,
+            "cost_gate_refusals": refusals,
+        }
+
     def agents(self) -> list[dict]:
         """Agent definitions shaped for the persistent work rail."""
         from qlab.agents.loader import load_agents
@@ -493,21 +577,37 @@ class UISession:
         """One consistent payload for a complete TUI refresh."""
         from qlab.algorithms import list_algorithms
 
+        portfolio = self.portfolio(offline)
+        market_snapshot = self.market(offline)
+        events = self.registry.read_events(event_limit)
         plans = self.registry.list_plans(20)
         decisions = self.registry.recent_decisions(limit=30)
         verdicts = self.registry.verdicts_for(
             [decision["decision_id"] for decision in decisions])
         for decision in decisions:
             decision["verdict"] = verdicts.get(decision["decision_id"])
+        stress = {}
+        if "drawdown" in portfolio and isinstance(market_snapshot.get("assets"), list):
+            raw_weights = portfolio.get("weights", {})
+            if not isinstance(raw_weights, dict):
+                raise ValueError("portfolio weights must be a mapping")
+            replays = self.historical_replays(offline, raw_weights)
+            stress = self.stress_payload(
+                portfolio,
+                market_snapshot,
+                replays,
+                events,
+            )
         return {
-            "portfolio": self.portfolio(offline),
-            "market": self.market(offline),
+            "portfolio": portfolio,
+            "market": market_snapshot,
+            "stress": stress,
             "agents": self.agents(),
             "decisions": decisions,
             "runs": self.registry.list_runs(30),
             "plans": plans,
             "orders": self.registry.list_orders(50),
-            "events": self.registry.read_events(event_limit),
+            "events": events,
             "system": self.system_status(offline),
             "algorithms": list_algorithms(),
             "policy": self.allocation_policy(),
@@ -812,6 +912,13 @@ def _bootstrap(session: UISession) -> dict:
             "paper_capital": m.paper_capital, "whitelist": m.universe_whitelist,
             "max_weight_per_asset": m.max_weight_per_asset,
             "max_turnover_per_rebalance": m.max_turnover_per_rebalance,
+            "max_gross_exposure": m.max_gross_exposure,
+            "stress_vol_limit": m.stress_vol_limit,
+            "drawdown_tiers": {
+                "warning": m.drawdown_tiers.warning,
+                "control": m.drawdown_tiers.control,
+                "breaker": m.drawdown_tiers.breaker,
+            },
             "trailing_drawdown_pct": m.trailing_drawdown_pct,
             "cadence": m.cadence, "order_type": m.order_type,
             "operational_policy": m.operational_policy,

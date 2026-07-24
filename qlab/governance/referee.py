@@ -7,10 +7,12 @@ verdict through the same registry.log_verdict tool - one gate, two reviewers.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import date
 
 import numpy as np
 
+from qlab.core.stress import stress_correlation_to_one
 from qlab.trader.mandate import Mandate
 
 
@@ -79,23 +81,111 @@ def cost_gate(pre_trade: dict, equity: float, gross_exposure: float,
 
 def deterministic_referee(targets: dict[str, float], mandate: Mandate,
                           as_of: date, moments_summary: dict | None = None,
+                          portfolio_state: dict | None = None,
+                          vols: Mapping[str, float] | Sequence[float] | None = None,
                           ) -> tuple[str, list[str]]:
-    reasons: list[str] = []
+    failures: list[str] = []
+    warnings: list[str] = []
     vals = np.array(list(targets.values()), dtype=float)
     if not np.all(np.isfinite(vals)):
-        reasons.append("non-finite weight")
+        failures.append("non-finite weight")
     for t in targets:
         if t not in mandate.universe_whitelist:
-            reasons.append(f"{t} outside universe whitelist")
+            failures.append(f"{t} outside universe whitelist")
     if mandate.long_only and np.any(vals < -1e-4):
-        reasons.append("long-only violated")
+        failures.append("long-only violated")
     if mandate.fully_invested and abs(vals.sum() - 1.0) > 1e-2:
-        reasons.append(f"budget violated: sum={vals.sum():.4f}")
+        failures.append(f"budget violated: sum={vals.sum():.4f}")
+    target_gross = float(np.abs(vals).sum())
+    if np.isfinite(target_gross) and (
+        target_gross > mandate.max_gross_exposure + 1e-4
+    ):
+        failures.append(
+            f"gross exposure cap breached: {target_gross:.4f} exceeds "
+            f"{mandate.max_gross_exposure:.4f}"
+        )
     over = {t: v for t, v in targets.items() if v > mandate.max_weight_per_asset + 1e-4}
     if over:
-        reasons.append(f"per-asset cap breach: {over}")
+        failures.append(f"per-asset cap breach: {over}")
     if isinstance(as_of, date) and as_of > date.today():
-        reasons.append("look-ahead as_of")
+        failures.append("look-ahead as_of")
     if moments_summary and moments_summary.get("condition_number", 0) > 1e8:
-        reasons.append("ill-conditioned covariance")
-    return ("PASS" if not reasons else "FAIL"), reasons
+        failures.append("ill-conditioned covariance")
+
+    if portfolio_state is not None:
+        try:
+            drawdown = _portfolio_drawdown(portfolio_state)
+            drawdown_tier = mandate.drawdown_tier(drawdown)
+        except (TypeError, ValueError) as exc:
+            failures.append(f"invalid portfolio drawdown state: {exc}")
+        else:
+            if drawdown_tier in {"control", "breaker"} and np.isfinite(target_gross):
+                try:
+                    current_gross = _current_gross_exposure(portfolio_state)
+                except (TypeError, ValueError) as exc:
+                    failures.append(f"invalid current gross exposure: {exc}")
+                else:
+                    if target_gross > current_gross + 1e-4:
+                        failures.append(
+                            f"drawdown {drawdown_tier} tier blocks gross exposure "
+                            f"increase ({current_gross:.4f} -> {target_gross:.4f})"
+                        )
+            if (
+                drawdown_tier == "breaker"
+                and np.isfinite(target_gross)
+                and target_gross > 1e-4
+            ):
+                failures.append(
+                    "drawdown breaker tier permits liquidation only; "
+                    f"target gross exposure is {target_gross:.4f}"
+                )
+
+    if vols is not None:
+        try:
+            stress_weights: Mapping[str, float] | Sequence[float]
+            stress_weights = (
+                targets if isinstance(vols, Mapping) else list(targets.values())
+            )
+            stressed_vol = stress_correlation_to_one(stress_weights, vols)
+        except (TypeError, ValueError) as exc:
+            failures.append(f"invalid correlation stress inputs: {exc}")
+        else:
+            if stressed_vol > mandate.stress_vol_limit:
+                # Correlation-to-one is a conservative bound, not a forecast, so
+                # exceeding it is audited as a warning without vetoing a valid plan.
+                warnings.append(
+                    "stress: WARNING correlation-to-one volatility "
+                    f"{stressed_vol:.2%} exceeds limit "
+                    f"{mandate.stress_vol_limit:.2%}"
+                )
+
+    return ("PASS" if not failures else "FAIL"), [*failures, *warnings]
+
+
+def _portfolio_drawdown(portfolio_state: dict) -> float:
+    if not isinstance(portfolio_state, dict):
+        raise TypeError("portfolio_state must be a mapping")
+    if "drawdown" in portfolio_state:
+        drawdown = float(portfolio_state["drawdown"])
+    else:
+        equity = float(portfolio_state["equity"])
+        high_water_mark = float(portfolio_state["high_water_mark"])
+        if high_water_mark <= 0:
+            raise ValueError("high_water_mark must be positive")
+        drawdown = 1.0 - equity / high_water_mark
+    if not np.isfinite(drawdown):
+        raise ValueError("drawdown must be finite")
+    return drawdown
+
+
+def _current_gross_exposure(portfolio_state: dict) -> float:
+    if "gross_exposure" in portfolio_state:
+        gross = float(portfolio_state["gross_exposure"])
+    else:
+        weights = portfolio_state.get("weights")
+        if not isinstance(weights, dict):
+            raise ValueError("weights or gross_exposure is required")
+        gross = sum(abs(float(weight)) for weight in weights.values())
+    if not np.isfinite(gross) or gross < 0:
+        raise ValueError("gross exposure must be finite and non-negative")
+    return gross

@@ -29,8 +29,17 @@ constraints:
   max_weight_per_asset: 0.40    # per-asset cap
   min_weight_per_asset: 0.0
   max_turnover_per_rebalance: 0.50   # sum |Δw| capped per rebalance
+  max_gross_exposure: 1.0       # abs-sum, so the cap also covers future shorts
+  stress_vol_limit: 0.30        # annualized correlation-to-one warning threshold
   max_orders_per_day: 20
   order_type: marketable_limit  # never plain market orders
+
+# Pre-kill-switch drawdown controls. These tiers inform the referee before the
+# existing trailing-drawdown kill switch fires as the final backstop.
+drawdown_tiers:
+  warning_pct: 0.05
+  control_pct: 0.10
+  breaker_pct: 0.15
 
 # Trailing-drawdown kill-switch. Past this drawdown from the high-water mark,
 # the server refuses every non-liquidating order and pages the human.

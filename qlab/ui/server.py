@@ -25,6 +25,7 @@ GET  /api/bob/status           BobTheQuant desk-manager mode and lifecycle state
 GET  /api/bob/tasks            Bob's deduplicated autonomous task history
 GET  /api/bob/templates        the registered workflow templates Bob may start
 GET  /api/bob/startable        queued tasks Bob may start now, with refusals
+GET  /api/bob/shadow           shadow-rollout scorecard (evidence, not a grant)
 POST /api/bob/observe          run one deterministic Bob observe tick
 POST /api/bob/mode             set Bob mode (observe|research|propose|paused)
 POST /api/bob/pause            pause Bob's autonomous work
@@ -1371,6 +1372,12 @@ def handle_api(session: UISession, method: str, path: str,
         from qlab.operator.templates import TEMPLATES
 
         return 200, {"templates": [t.to_dict() for t in TEMPLATES.values()]}
+
+    if method == "GET" and path == "/api/bob/shadow":
+        from qlab.operator.shadow import shadow_scorecard
+
+        return 200, shadow_scorecard(
+            session.registry, since=query.get("since", [None])[0])
 
     if method == "GET" and path == "/api/bob/startable":
         offline = _qbool(query, "offline", session.offline_default)

@@ -329,6 +329,20 @@ class UISession:
             targets=stored["targets"], legs=legs,
             pre_trade=stored["pre_trade"], state=stored["state"],
         )
+        # Execution-time data revalidation (P3): under an operational policy the
+        # data backing this plan must STILL be execution-grade at submission —
+        # fresh daily bar and, if a live stream is attached, fresh quotes. Demo
+        # /offline runtimes are never execution-grade, so this gate applies only
+        # to the real operational path and never blocks the simulated demo.
+        from qlab.core import data as market
+
+        policy = market.policy_for(offline, seed=self.seed)
+        if policy.execution_eligible:
+            health = self.data_health(offline, purpose="execution")
+            if health.get("blocked") or not health.get("eligible_for_execution"):
+                return {"executed": False, "blocked_by": "data_revalidation",
+                        "data_health": health}
+
         broker = get_broker(
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,

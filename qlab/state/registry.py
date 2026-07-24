@@ -186,6 +186,10 @@ class Registry:
         self.con.execute("ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS targets_hash VARCHAR")
         self.con.execute("ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS seq BIGINT")
         self.con.execute("ALTER TABLE plans ADD COLUMN IF NOT EXISTS legs VARCHAR")
+        # Order lifecycle: broker-truth fill accounting (P3).
+        self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_qty DOUBLE")
+        self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS avg_fill_price DOUBLE")
+        self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS fee DOUBLE")
 
     def close(self) -> None:
         self.con.close()
@@ -806,8 +810,35 @@ class Registry:
     def add_order(self, client_order_id: str, plan_id: str, ticker: str,
                   side: str, notional: float, state: str = "submitted") -> None:
         self.con.execute(
-            "INSERT INTO orders VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+            "INSERT INTO orders (client_order_id, plan_id, ticker, side, "
+            "notional, state, created_at) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT DO NOTHING",
             [client_order_id, plan_id, ticker, side, notional, state, _now()])
+
+    def apply_order_transition(self, client_order_id: str, state: str, *,
+                               filled_qty: float | None = None,
+                               avg_fill_price: float | None = None,
+                               fee: float | None = None) -> None:
+        """Record a broker-truth order transition with fill accounting.
+
+        The owner applies transitions produced by the trade-update supervisor;
+        this is the single writer. Only supplied fields are updated, so an
+        acknowledgement (no fill data) advances state without clobbering fills.
+        """
+        sets = ["state=?"]
+        params: list = [state]
+        if filled_qty is not None:
+            sets.append("filled_qty=?")
+            params.append(float(filled_qty))
+        if avg_fill_price is not None:
+            sets.append("avg_fill_price=?")
+            params.append(float(avg_fill_price))
+        if fee is not None:
+            sets.append("fee=?")
+            params.append(float(fee))
+        params.append(client_order_id)
+        self.con.execute(
+            f"UPDATE orders SET {', '.join(sets)} WHERE client_order_id=?", params)
 
     def get_order(self, client_order_id: str) -> dict | None:
         """Return one execution leg by its stable idempotency key."""

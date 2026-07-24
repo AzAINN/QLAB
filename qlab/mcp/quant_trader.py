@@ -82,15 +82,24 @@ def register_trader_tools(app, st: TraderState) -> None:
                 "pre_trade": plan.pre_trade, "n_legs": len(plan.legs)}
 
     @app.tool(name="execute_plan")
-    def execute_plan_tool(plan_id: str) -> dict:
+    def execute_plan_tool(plan_id: str, human_confirmed: bool = False) -> dict:
         """Phase 2: execute a checked (or resumed submitted) plan. Idempotent;
         refuses anything else.
+
+        Execution is not agent-reachable: ``human_confirmed=True`` is required,
+        the same affirmation the owner runtime demands, so an autonomous agent
+        connected to the headless server cannot book a trade on its own. The
+        net-alpha cost gate runs here too, matching the owner path.
 
         A fresh session (``st.plans`` empty after a restart) rebuilds the plan
         from the registry-persisted row, including its real order legs -- a
         legacy row with no persisted legs is refused rather than silently
         "executed" with zero legs.
         """
+        if human_confirmed is not True:
+            return {"executed": False,
+                    "error": "human_confirmed=true is required to execute a "
+                             "paper plan; execution is not agent-reachable"}
         plan = st.plans.get(plan_id)
         if plan is None:
             stored = st.registry.get_plan(plan_id)
@@ -103,8 +112,22 @@ def register_trader_tools(app, st: TraderState) -> None:
             legs = [OrderLeg(**leg) for leg in stored_legs]
             plan = OrderPlan(plan_id, stored["decision_id"], stored["targets"],
                              legs, stored["pre_trade"], state=stored["state"])
+        # Net-alpha gate before execution, matching the owner path: a refused
+        # plan is marked terminally refused so it cannot execute here either.
+        from qlab.governance.referee import cost_gate
+
+        book = st.broker.portfolio_state(st.tickers)
+        weights = book.get("weights", {})
+        gate_reasons = cost_gate(
+            plan.pre_trade, float(book["equity"]),
+            sum(abs(float(w)) for w in weights.values()),
+            len(book.get("positions", {})), st.mandate)
+        if gate_reasons:
+            st.registry.set_plan_state(plan.plan_id, "refused")
+            return {"executed": False, "blocked_by": "cost_gate",
+                    "reasons": gate_reasons}
         try:
-            result = execute_plan(st.registry, st.broker, plan)
+            result = execute_plan(st.registry, st.broker, plan, st.mandate)
             return {"executed": True, **result}
         except MandateViolation as exc:
             return {"executed": False, "mandate_violation": str(exc)}

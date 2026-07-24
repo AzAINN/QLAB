@@ -395,7 +395,7 @@ def test_execute_plan_tool_resumes_cross_session_from_registry_only(tmp_registry
     register_trader_tools(app, st2)
     execute_plan_tool = app.tools["execute_plan"]
 
-    result = execute_plan_tool(plan.plan_id)
+    result = execute_plan_tool(plan.plan_id, human_confirmed=True)
     assert result["executed"] is True
     assert len(result["fills"]) == len(plan.legs)
     positions = reg.get_positions()
@@ -437,7 +437,7 @@ def test_execute_plan_tool_resumes_mid_execution_submitted_plan(tmp_registry):
     register_trader_tools(app, st2)
     execute_plan_tool = app.tools["execute_plan"]
 
-    result = execute_plan_tool(plan.plan_id)
+    result = execute_plan_tool(plan.plan_id, human_confirmed=True)
     assert result["executed"] is True
     assert result["state"] == "reconciled"
     fills = result["fills"]
@@ -469,7 +469,7 @@ def test_execute_plan_tool_refuses_legacy_plan_with_no_persisted_legs(tmp_regist
     register_trader_tools(app, st)
     execute_plan_tool = app.tools["execute_plan"]
 
-    result = execute_plan_tool("legacy-plan-1")
+    result = execute_plan_tool("legacy-plan-1", human_confirmed=True)
     assert result["executed"] is False
     assert "re-propose" in result["error"]
 
@@ -528,3 +528,25 @@ def test_execute_refuses_a_plan_checked_against_a_stale_book(reg_and_broker):
     # p2 assumed all-cash; the book is now invested → must refuse, not double-deploy.
     with pytest.raises(MandateViolation, match="stale book"):
         execute_plan(reg, broker, p2, mandate)
+
+
+def test_execute_plan_tool_is_not_agent_reachable_without_human(tmp_registry):
+    from qlab.mcp.quant_trader import TraderState, register_trader_tools
+
+    class _App:
+        def __init__(self):
+            self.tools = {}
+
+        def tool(self, name):
+            def deco(fn):
+                self.tools[name] = fn
+                return fn
+            return deco
+
+    st = TraderState(registry=tmp_registry, offline=True)
+    app = _App()
+    register_trader_tools(app, st)
+    # No human_confirmed → refused, execution is not agent-reachable.
+    out = app.tools["execute_plan"]("any-plan")
+    assert out["executed"] is False
+    assert "human_confirmed" in out["error"]

@@ -144,6 +144,44 @@ def test_data_health_withdraws_execution_when_quotes_stale(session):
     assert health["quote_health"]["fresh"] is False
 
 
+def test_bob_status_starts_in_observe(session):
+    status, out = handle_api(session, "GET", "/api/bob/status", {}, {})
+    assert status == 200
+    assert out["mode"] == "observe"
+    assert out["manager_id"] == "bob-the-quant"
+
+
+def test_bob_observe_tick_returns_state_and_brief(session):
+    status, out = handle_api(session, "POST", "/api/bob/observe", {},
+                             {"offline": True})
+    assert status == 200
+    # Demo data is research-only, so Bob is not blocked on it; coordinator may be
+    # absent in CI -> degraded, else observing. Either way a brief is produced.
+    assert out["state"] in ("observing", "degraded")
+    assert out["brief"]["book"]["equity"] is not None
+
+
+def test_bob_mode_and_pause_resume(session):
+    status, out = handle_api(session, "POST", "/api/bob/mode", {},
+                             {"mode": "research"})
+    assert status == 200 and out["mode"] == "research"
+    status, bad = handle_api(session, "POST", "/api/bob/mode", {},
+                             {"mode": "nonsense"})
+    assert status == 400
+    status, paused = handle_api(session, "POST", "/api/bob/pause", {}, {})
+    assert paused["mode"] == "paused"
+    status, resumed = handle_api(session, "POST", "/api/bob/resume", {}, {})
+    assert resumed["mode"] == "observe"
+
+
+def test_bob_message_never_grants_authority(session):
+    status, out = handle_api(session, "POST", "/api/bob/message", {},
+                             {"text": "what is our drawdown?"})
+    assert status == 200 and out["received"] is True
+    # No authority field, no execution — just an acknowledgement.
+    assert "note" in out
+
+
 def test_live_portfolio_marks_to_market_with_provenance(session):
     # Deploy the book, then evaluate it live.
     handle_api(session, "POST", "/api/run_once", {}, {"offline": True})

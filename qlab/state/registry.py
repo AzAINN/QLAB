@@ -153,6 +153,15 @@ CREATE TABLE IF NOT EXISTS data_permits (
     permit_id VARCHAR PRIMARY KEY, snapshot_id VARCHAR, purpose VARCHAR,
     provider VARCHAR, feed VARCHAR, as_of VARCHAR, permit JSON,
     eligible_for_execution BOOLEAN, created_at VARCHAR);
+CREATE TABLE IF NOT EXISTS bob_state (
+    manager_id VARCHAR PRIMARY KEY, mode VARCHAR, state VARCHAR,
+    current_task_id VARCHAR, last_wake_reason VARCHAR, last_brief_at VARCHAR,
+    blocked_reason VARCHAR, coordinator_session_id VARCHAR, updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS bob_tasks (
+    task_id VARCHAR PRIMARY KEY, dedupe_key VARCHAR UNIQUE, trigger_kind VARCHAR,
+    trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
+    conclusion JSON, error VARCHAR, attempt_count INTEGER,
+    created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, updated_at VARCHAR);
 """
 
 
@@ -1245,6 +1254,92 @@ class Registry:
         )
         return rows[0] if rows else None
 
+    # -- BobTheQuant supervisor state ---------------------------------------
+    def get_bob_state(self, manager_id: str = "bob-the-quant") -> dict | None:
+        rows = self._rows(
+            "SELECT * FROM bob_state WHERE manager_id = ?", [manager_id])
+        return rows[0] if rows else None
+
+    def save_bob_state(self, state: dict, manager_id: str = "bob-the-quant") -> None:
+        """Upsert Bob's single logical current-state record."""
+        self.con.execute(
+            "INSERT OR REPLACE INTO bob_state VALUES (?,?,?,?,?,?,?,?,?)",
+            [manager_id, state.get("mode"), state.get("state"),
+             state.get("current_task_id"), state.get("last_wake_reason"),
+             state.get("last_brief_at"), state.get("blocked_reason"),
+             state.get("coordinator_session_id"), _now()])
+
+    def create_bob_task(self, task_id: str, dedupe_key: str, trigger_kind: str,
+                        trigger_payload: dict, template_id: str | None) -> bool:
+        """Create a queued task, deduped by its UNIQUE key.
+
+        Returns True if a new task was created, False if the dedupe key already
+        exists (the trigger was already handled for this state) — the caller
+        must not re-run a deduplicated task.
+        """
+        existing = self._rows(
+            "SELECT task_id FROM bob_tasks WHERE dedupe_key = ?", [dedupe_key])
+        if existing:
+            return False
+        self.con.execute(
+            "INSERT INTO bob_tasks (task_id, dedupe_key, trigger_kind, "
+            "trigger_payload, template_id, status, workflow_id, conclusion, "
+            "error, attempt_count, created_at, started_at, completed_at, "
+            "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [task_id, dedupe_key, trigger_kind, _j(trigger_payload), template_id,
+             "queued", None, None, None, 0, _now(), None, None, _now()])
+        return True
+
+    def update_bob_task(self, task_id: str, *, status: str | None = None,
+                        workflow_id: str | None = None,
+                        conclusion: dict | None = None,
+                        error: str | None = None,
+                        bump_attempt: bool = False) -> None:
+        sets, params = ["updated_at=?"], [_now()]
+        if status is not None:
+            sets.append("status=?")
+            params.append(status)
+            if status == "running":
+                sets.append("started_at=?")
+                params.append(_now())
+            if status in ("completed", "failed", "expired", "invalidated", "canceled"):
+                sets.append("completed_at=?")
+                params.append(_now())
+        if workflow_id is not None:
+            sets.append("workflow_id=?")
+            params.append(workflow_id)
+        if conclusion is not None:
+            sets.append("conclusion=?")
+            params.append(_j(conclusion))
+        if error is not None:
+            sets.append("error=?")
+            params.append(error)
+        if bump_attempt:
+            sets.append("attempt_count=attempt_count+1")
+        params.append(task_id)
+        self.con.execute(
+            f"UPDATE bob_tasks SET {', '.join(sets)} WHERE task_id=?", params)
+
+    def get_bob_task(self, task_id: str) -> dict | None:
+        rows = self._rows("SELECT * FROM bob_tasks WHERE task_id = ?", [task_id])
+        return rows[0] if rows else None
+
+    def list_bob_tasks(self, limit: int = 50) -> list[dict]:
+        return self._rows(
+            "SELECT * FROM bob_tasks ORDER BY created_at DESC LIMIT ?", [limit])
+
+    def count_bob_tasks_on(self, day_iso: str, trigger_kind: str | None = None) -> int:
+        """Autonomous tasks created on a UTC date (for the daily budget)."""
+        if trigger_kind is not None:
+            rows = self._rows(
+                "SELECT COUNT(*) AS n FROM bob_tasks WHERE substr(created_at,1,10)=? "
+                "AND trigger_kind=?", [day_iso[:10], trigger_kind])
+        else:
+            rows = self._rows(
+                "SELECT COUNT(*) AS n FROM bob_tasks WHERE substr(created_at,1,10)=?",
+                [day_iso[:10]])
+        return int(rows[0]["n"]) if rows else 0
+
     def read_events(self, limit: int = 100, after: str | None = None) -> list[dict]:
         """Read an ordered event window for observer clients.
 
@@ -1277,7 +1372,8 @@ class Registry:
                          "diagnostics", "metrics", "choice", "realized_outcome",
                          "targets", "pre_trade", "payload", "reasons",
                          "legs", "request", "result", "artifacts",
-                         "permit") and isinstance(v, str):
+                         "permit", "trigger_payload",
+                         "conclusion") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:

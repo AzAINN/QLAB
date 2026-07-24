@@ -15,6 +15,13 @@ GET  /api/system               runtime health and authority state
 GET  /api/data/health          data-policy provenance, freshness, eligibility
 GET  /api/data/permit/current  the latest recorded data permit for a purpose
 GET  /api/quotes               latest cached quotes + live market-stream health
+GET  /api/bob/status           BobTheQuant desk-manager mode and lifecycle state
+GET  /api/bob/tasks            Bob's deduplicated autonomous task history
+POST /api/bob/observe          run one deterministic Bob observe tick
+POST /api/bob/mode             set Bob mode (observe|research|propose|paused)
+POST /api/bob/pause            pause Bob's autonomous work
+POST /api/bob/resume           resume Bob into a mode
+POST /api/bob/message          ask Bob a question (never grants authority)
 GET  /api/events               event stream with cursor and limit
 GET  /api/plans                recent order plans
 GET  /api/orders               recent orders
@@ -163,6 +170,14 @@ class UISession:
         owner_tools = _OwnerToolApp()
         register_lab_tools(owner_tools, self.lab_state, owner_only=True)
         self._lab_tools = owner_tools.tools
+        # BobTheQuant: the deterministic desk supervisor. It degrades (not fails)
+        # when the coordinator (Claude) is absent and holds no execution or
+        # proposal authority in Observe mode.
+        from qlab.operator.bob import BobSupervisor
+
+        self.bob = BobSupervisor(
+            self.registry,
+            coordinator_available=lambda: bool(shutil.which("claude")))
 
     # -- Claude workforce --------------------------------------------------
     def call_lab_tool(self, name: str, body: dict, offline: bool) -> object:
@@ -785,6 +800,69 @@ class UISession:
         return {"purpose": purpose, "permit": (permit or {}).get("permit")
                 if permit else None}
 
+    # -- BobTheQuant desk manager -------------------------------------------
+    def bob_facts(self, offline: bool) -> dict:
+        """Assemble the deterministic owner facts Bob observes (no LLM)."""
+        port = self.portfolio(offline)
+        health = self.data_health(offline)
+        weights = port.get("weights", {}) or {}
+        targets = port.get("target_weights", {}) or {}
+        drift = max(
+            (abs(float(weights.get(t, 0.0)) - float(targets.get(t, 0.0)))
+             for t in set(weights) | set(targets)),
+            default=0.0)
+        dd = float(port.get("drawdown", 0.0))
+        orders = self.registry.list_orders(20)
+        anomaly = any(o.get("state") in ("rejected", "expired") for o in orders)
+        return {
+            "universe": self.mandate.universe_whitelist,
+            "data": {
+                "provider": health.get("provider"),
+                "blocked": bool(health.get("blocked")),
+                "eligible_for_paper_proposal": bool(
+                    health.get("eligible_for_paper_proposal")),
+                "reason": health.get("reason"),
+            },
+            "portfolio": {
+                "equity": port.get("equity"),
+                "drawdown": round(dd, 4),
+                "drawdown_tier": self.mandate.drawdown_tier(dd),
+                "halted": bool(port.get("halted")),
+                "gross_exposure": round(
+                    sum(abs(float(w)) for w in weights.values()), 6),
+                "drift": round(drift, 4),
+            },
+            "regime": {"robust_state": None, "flip": False},
+            "open_workflows": len(self.registry.list_workflows(50)),
+            "pending_approvals": 0,
+            "order_anomaly": anomaly,
+        }
+
+    def bob_observe(self, offline: bool) -> dict:
+        """Run one deterministic Bob observe tick against current owner facts."""
+        facts = self.bob_facts(offline)
+        return self.bob.observe(facts, trading_date=date.today().isoformat())
+
+    def bob_message(self, body: dict) -> dict:
+        """Accept a human question or explicit workflow request.
+
+        This never grants authority. The message is recorded; a substantive
+        answer needs the coordinator, so when Claude is absent Bob acknowledges
+        and reports itself degraded rather than fabricating an answer.
+        """
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise ValueError("message text is required")
+        self.registry.record_event("bob_message", {"text": text[:500]})
+        available = bool(shutil.which("claude"))
+        return {
+            "received": True,
+            "coordinator_available": available,
+            "note": ("queued for the interpreting agent" if available
+                     else "coordinator unavailable; Bob is degraded and cannot "
+                          "answer, but the owner, data, and book remain usable"),
+        }
+
     def allocation_policy(self) -> dict:
         from qlab.algorithms import get_operational_policy
 
@@ -1067,6 +1145,34 @@ def handle_api(session: UISession, method: str, path: str,
         raw = query.get("symbols", [None])[0]
         symbols = [s.strip() for s in raw.split(",")] if raw else None
         return 200, session.quotes(symbols)
+
+    if method == "GET" and path == "/api/bob/status":
+        return 200, session.bob.status()
+
+    if method == "GET" and path == "/api/bob/tasks":
+        return 200, {"tasks": session.registry.list_bob_tasks(50)}
+
+    if method == "POST" and path == "/api/bob/observe":
+        return 200, session.bob_observe(off)
+
+    if method == "POST" and path == "/api/bob/mode":
+        mode = str(body.get("mode") or "")
+        try:
+            return 200, session.bob.set_mode(mode)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+
+    if method == "POST" and path == "/api/bob/pause":
+        return 200, session.bob.pause()
+
+    if method == "POST" and path == "/api/bob/resume":
+        return 200, session.bob.resume(str(body.get("mode") or "observe"))
+
+    if method == "POST" and path == "/api/bob/message":
+        try:
+            return 200, session.bob_message(body)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
 
     if method == "GET" and path == "/api/events":
         limit = int(query.get("limit", ["100"])[0])

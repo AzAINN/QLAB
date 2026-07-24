@@ -20,6 +20,7 @@ GET  /api/orders               recent orders
 GET  /api/agents               deployed agent definitions
 GET  /api/algorithms           categorized algorithm deployment catalog
 GET  /api/policy               configured operational allocation policy
+GET  /api/atlas                curated component catalog + live champion/stage overlay
 GET  /api/workflows            durable Claude-workforce runs and phase state
 GET  /api/workflows/<id>       one durable workflow and its ordered steps
 GET  /api/stream               durable audit + transient market events (live)
@@ -767,6 +768,66 @@ class UISession:
             }
         return None
 
+    def latest_ablation_metrics(self) -> dict[str, dict]:
+        """Per-arm metrics from the newest run that recorded backtests."""
+        runs = sorted(self.registry.list_runs(200),
+                      key=lambda run: str(run.get("created_at", "")), reverse=True)
+        for run in runs:
+            backtests = self.registry.report(run["run_id"]).get("backtests") or []
+            if backtests:
+                return {bt["arm_id"]: bt["metrics"] for bt in backtests}
+        return {}
+
+    def atlas(self) -> dict:
+        """The curated catalog with live facts overlaid, never stored in prose."""
+        from dataclasses import asdict
+
+        from qlab.algorithms import list_algorithms
+        from qlab.core.atlas import ATLAS_ENTRIES
+
+        catalog = {row["id"]: row for row in list_algorithms()}
+        champion = self.mandate.operational_policy
+        ablation = self.latest_ablation_metrics()
+        entries = []
+        for entry in ATLAS_ENTRIES:
+            row = asdict(entry)
+            spec = catalog.get(entry.algorithm_key) if entry.algorithm_key else None
+            row["stage"] = spec["stage"] if spec else None
+            row["champion"] = bool(
+                entry.group == "arm" and entry.algorithm_key == champion)
+            # Absent ablation evidence stays absent — never a zero.
+            row["ablation"] = (
+                ablation.get(entry.arm_id) if entry.arm_id else None)
+            entries.append(row)
+        return {"entries": entries, "champion_policy": champion}
+
+    def leaderboard(self) -> list[dict]:
+        """Newest ablation ranked by Sharpe, in operator-readable method names."""
+        from qlab.algorithms import list_algorithms
+        from qlab.core.atlas import arm_algorithm_key, arm_display_name
+
+        catalog = {row["id"]: row for row in list_algorithms()}
+        champion = self.mandate.operational_policy
+        rows = []
+        for arm_id, metrics in self.latest_ablation_metrics().items():
+            key = arm_algorithm_key(arm_id)
+            spec = catalog.get(key) if key else None
+            rows.append({
+                "arm_id": arm_id,
+                "name": arm_display_name(arm_id),
+                "champion": bool(key == champion),
+                "benchmark": bool(spec and spec["category"] == "benchmark"),
+                "sharpe": metrics.get("sharpe"),
+                "ann_return": metrics.get("ann_return"),
+                "max_drawdown": metrics.get("max_drawdown"),
+                "cvar_95": metrics.get("cvar_95"),
+                "deflated_sharpe": metrics.get("deflated_sharpe"),
+            })
+        # Arms without a Sharpe sort last instead of claiming a rank.
+        rows.sort(key=lambda row: -(
+            row["sharpe"] if row["sharpe"] is not None else float("-inf")))
+        return rows
+
     def tui_snapshot(self, offline: bool, event_limit: int = 100) -> dict:
         """One consistent payload for a complete TUI refresh."""
         from qlab.algorithms import list_algorithms
@@ -807,6 +868,7 @@ class UISession:
             "algorithms": list_algorithms(),
             "policy": self.allocation_policy(),
             "equilibrium_returns": self.latest_equilibrium_returns(),
+            "leaderboard": self.leaderboard(),
             "workflows": self.registry.list_workflows(10),
         }
 
@@ -989,6 +1051,9 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "GET" and path == "/api/policy":
         return 200, session.allocation_policy()
+
+    if method == "GET" and path == "/api/atlas":
+        return 200, session.atlas()
 
     if method == "GET" and path == "/api/workflows":
         limit = max(1, min(int(query.get("limit", ["10"])[0]), 50))

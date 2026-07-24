@@ -41,6 +41,48 @@ def test_algorithm_catalog_endpoint_marks_offline_methods_non_runnable(session):
     assert not any(row["agent_usable"] for row in offline)
 
 
+def test_atlas_marks_champion_and_reports_absent_ablation(session):
+    status, payload = handle_api(session, "GET", "/api/atlas", {}, {})
+    assert status == 200
+    entries = payload["entries"]
+    champions = [e for e in entries if e["champion"]]
+    assert [e["algorithm_key"] for e in champions] == [
+        session.mandate.operational_policy]
+    by_id = {e["entry_id"]: e for e in entries}
+    assert by_id["b2"]["stage"] == "operational"
+    assert by_id["a3t"]["stage"] == "research"
+    assert by_id["b2"]["ablation"] is None      # empty registry: explicit absence
+    assert by_id["sharpe"]["stage"] is None     # metrics carry no stage
+
+
+def test_leaderboard_reports_method_names_not_codes(session):
+    run_id = session.registry.log_run("ablation", {"note": "test"})
+    session.registry.log_backtest(run_id, "B2", {
+        "sharpe": 0.91, "ann_return": 0.062, "max_drawdown": -0.124,
+        "cvar_95": -0.011, "deflated_sharpe": 0.83})
+    session.registry.log_backtest(run_id, "B0", {
+        "sharpe": 0.55, "ann_return": 0.050, "max_drawdown": -0.180,
+        "cvar_95": -0.015, "deflated_sharpe": 0.60})
+    rows = session.leaderboard()
+    assert [row["name"] for row in rows] == ["HRP", "60/40"]
+    assert rows[0]["champion"] and not rows[1]["champion"]
+    assert rows[1]["benchmark"]
+    # The atlas overlays the same ablation numbers on the arm entries.
+    status, payload = handle_api(session, "GET", "/api/atlas", {}, {})
+    assert status == 200
+    by_id = {entry["entry_id"]: entry for entry in payload["entries"]}
+    assert by_id["b2"]["ablation"]["sharpe"] == 0.91
+    assert by_id["b1"]["ablation"] is None
+
+
+def test_tui_snapshot_carries_the_leaderboard(session):
+    run_id = session.registry.log_run("ablation", {"note": "snapshot"})
+    session.registry.log_backtest(run_id, "B0", {"sharpe": 0.42})
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert [row["name"] for row in snap["leaderboard"]] == ["60/40"]
+
+
 @pytest.mark.parametrize("method,path", [
     ("GET", "/api/resource_count"),
     ("POST", "/api/compare"),

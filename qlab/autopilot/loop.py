@@ -136,20 +136,25 @@ def run_once(
             plan = build_plan(reg, broker, mandate, targets, decision_id,
                               cost_bps=5.0)
             # Net-alpha gate: with the plan's realistic cost known, a failed
-            # gate logs a superseding FAIL verdict — execute_plan's
-            # latest-verdict check then refuses this plan everywhere, not
-            # just on this code path.
+            # gate marks the plan itself terminally refused — execute_plan
+            # re-reads registry state, so no later PASS can revive it — and
+            # logs the FAIL verdict for the audit trail.
+            weights_before = state_before.get("weights", {})
             gate_reasons = cost_gate(
                 plan.pre_trade, float(state_before["equity"]),
-                state_before.get("weights", {}), targets, mandate)
+                sum(abs(float(w)) for w in weights_before.values()),
+                len(state_before.get("positions", {})), mandate)
             if gate_reasons:
+                reg.set_plan_state(plan.plan_id, "refused")
                 reg.log_verdict(decision_id, "FAIL", gate_reasons,
                                 source="deterministic", targets=targets)
+                verdict, reasons = "FAIL", gate_reasons
                 trade_result = {"executed": False, "blocked_by": "cost_gate",
                                 "reasons": gate_reasons,
                                 "expected_cost": plan.pre_trade.get("expected_cost")}
                 reg.record_event("cost_gate_refusal", {
-                    "decision_id": decision_id, "reasons": gate_reasons})
+                    "decision_id": decision_id, "plan_id": plan.plan_id,
+                    "reasons": gate_reasons})
             elif execute:
                 trade_result = execute_plan(reg, broker, plan)
                 trade_result["executed"] = True

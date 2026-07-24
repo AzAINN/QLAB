@@ -197,6 +197,17 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan) -> dict:
     if plan.state not in ("checked", "submitted"):
         raise MandateViolation(
             f"plan {plan.plan_id} is {plan.state!r}, not 'checked' or 'submitted'")
+    # Registry truth, not object memory: a plan the cost gate refused stays
+    # refused even if the caller still holds a 'checked' OrderPlan and a
+    # later PASS verdict exists. This is the single execution choke point.
+    stored = registry.get_plan(plan.plan_id)
+    if stored is None:
+        raise MandateViolation(
+            f"plan {plan.plan_id} is not persisted; re-propose")
+    if stored["state"] not in ("checked", "submitted"):
+        raise MandateViolation(
+            f"plan {plan.plan_id} is {stored['state']!r} in the registry "
+            "(terminal); re-propose")
     if registry.get_account().get("halted"):
         raise MandateViolation("account is halted; only liquidation is permitted")
     v = registry.get_verdict(plan.decision_id)

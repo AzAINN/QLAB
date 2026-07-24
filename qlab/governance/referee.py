@@ -14,43 +14,64 @@ import numpy as np
 from qlab.trader.mandate import Mandate
 
 
-def cost_gate(pre_trade: dict, equity: float,
-              current_weights: dict[str, float],
-              targets: dict[str, float], mandate: Mandate) -> list[str]:
+def cost_gate(pre_trade: dict, equity: float, gross_exposure: float,
+              n_positions: int, mandate: Mandate) -> list[str]:
     """The net-alpha gate, in deterministic code: reasons why costs refuse a plan.
 
     qlab forecasts no returns, so "expected alpha" is replaced by a mandated,
-    documented benefit assumption: closing drift toward the reviewed policy is
-    worth ``costs.rebalance_benefit_bps`` per unit of traded notional, taken
+    documented benefit assumption: the notional actually traded (from the
+    plan's own legs) is worth ``costs.rebalance_benefit_bps`` per unit, taken
     with the ``costs.live_haircut`` backtest-to-live discount. A plan passes
     only when that haircut benefit exceeds ``costs.safety_multiplier`` times
-    its expected cost, and its cost stays under an absolute equity cap. An
-    all-cash initial deployment is not a rebalance and is exempt, mirroring
-    ``build_plan``'s turnover exemption.
+    its expected cost, and its cost stays under an absolute equity cap.
+
+    Fail-closed by construction: malformed inputs (non-finite equity or cost,
+    a plan without its cost decomposition, a book whose positions contradict
+    its exposure) are refusals, never exemptions. The only exemption is a
+    genuinely all-cash initial deployment — zero positions AND zero gross
+    exposure — mirroring ``build_plan``'s turnover exemption; gross exposure
+    is a sum of absolute weights, so offsetting long/short books never
+    qualify.
     """
-    reasons: list[str] = []
-    if sum(current_weights.values()) < 0.01:
-        return reasons  # initial deployment: nothing is being "rebalanced"
-    cost_total = float((pre_trade.get("expected_cost") or {}).get("total", 0.0))
-    if equity <= 0:
-        return ["cost gate requires positive equity"]
     costs = mandate.costs
+    if not np.isfinite(equity) or equity <= 0:
+        return ["cost gate requires finite positive equity"]
+    if not np.isfinite(gross_exposure):
+        return ["cost gate requires finite gross exposure"]
+    if n_positions == 0 and gross_exposure < 0.01:
+        return []  # true all-cash initial deployment
+    if gross_exposure < 0.01:
+        return ["inconsistent portfolio state: positions exist with ~zero "
+                "gross exposure"]
+
+    expected = pre_trade.get("expected_cost")
+    if not isinstance(expected, dict) or "total" not in expected:
+        return ["plan carries no expected_cost decomposition; refusing"]
+    cost_total = float(expected["total"])
+    legs = expected.get("legs")
+    n_legs = int(pre_trade.get("n_legs", 0))
+    if n_legs == 0:
+        return []  # nothing trades; nothing to gate
+    if not isinstance(legs, list) or len(legs) != n_legs:
+        return ["expected_cost legs do not match the plan's legs; refusing"]
+    traded_notional = sum(abs(float(leg.get("notional", 0.0))) for leg in legs)
+    if not np.isfinite(cost_total) or not np.isfinite(traded_notional):
+        return ["non-finite cost or traded notional; refusing"]
+
+    reasons: list[str] = []
     cap = equity * costs.max_cost_bps_of_equity / 1e4
     if cost_total > cap:
         reasons.append(
             f"expected cost {cost_total:.2f} exceeds the absolute cap "
             f"{cap:.2f} ({costs.max_cost_bps_of_equity:.0f} bps of equity)")
-    tickers = set(current_weights) | set(targets)
-    drift_closed = 0.5 * sum(
-        abs(float(targets.get(t, 0.0)) - float(current_weights.get(t, 0.0)))
-        for t in tickers) * equity
-    benefit = drift_closed * costs.rebalance_benefit_bps / 1e4 * costs.live_haircut
+    benefit = (traded_notional * costs.rebalance_benefit_bps / 1e4
+               * costs.live_haircut)
     hurdle = cost_total * costs.safety_multiplier
     if benefit <= hurdle:
         reasons.append(
             f"net-alpha gate: haircut benefit {benefit:.2f} does not clear "
             f"{costs.safety_multiplier:.1f}x expected cost {cost_total:.2f} "
-            f"(drift closed {drift_closed:.2f}, benefit assumption "
+            f"(traded notional {traded_notional:.2f}, benefit assumption "
             f"{costs.rebalance_benefit_bps:.0f} bps, haircut "
             f"{costs.live_haircut:.2f})")
     return reasons

@@ -51,6 +51,19 @@ class CostConfig:
     safety_multiplier: float = 1.5
     max_cost_bps_of_equity: float = 25.0
 
+    def __post_init__(self) -> None:
+        # The gate's semantics require these ranges; a "haircut" above 1
+        # would amplify benefit and a multiplier below 1 would shrink the
+        # safety margin — silently inverting the gate.
+        if not 0.0 < self.live_haircut <= 1.0:
+            raise ValueError("costs.live_haircut must be in (0, 1]")
+        if self.safety_multiplier < 1.0:
+            raise ValueError("costs.safety_multiplier must be >= 1")
+        if self.rebalance_benefit_bps <= 0:
+            raise ValueError("costs.rebalance_benefit_bps must be positive")
+        if self.max_cost_bps_of_equity <= 0:
+            raise ValueError("costs.max_cost_bps_of_equity must be positive")
+
     def adv_for(self, ticker: str) -> float:
         """Return a ticker override or the conservative configured default."""
         if ticker in self.adv_notional:

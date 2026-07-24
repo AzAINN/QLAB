@@ -115,42 +115,67 @@ def test_reconcile_detects_stub_broker_mismatch():
 
 
 def test_cost_gate_pure_cases():
-    import dataclasses
+    import math
 
     from qlab.governance.referee import cost_gate
     from qlab.trader.mandate import CostConfig, load_mandate
+    import dataclasses
 
     mandate = dataclasses.replace(load_mandate(), costs=CostConfig())
-    swap = ({"ACWI": 0.5, "BNDW": 0.5}, {"ACWI": 0.0, "BNDW": 1.0})
 
-    # An all-cash initial deployment is exempt regardless of cost.
-    assert cost_gate({"expected_cost": {"total": 500.0}}, 100_000.0,
-                     {}, swap[1], mandate) == []
+    def pre(total, notionals):
+        return {"n_legs": len(notionals),
+                "expected_cost": {"total": total,
+                                  "legs": [{"notional": n} for n in notionals]}}
 
-    # Big drift, modest cost: benefit 50k*20bps*0.5 = 50 > 1.5*10 → pass.
-    assert cost_gate({"expected_cost": {"total": 10.0}}, 100_000.0,
-                     swap[0], swap[1], mandate) == []
+    # True all-cash initial deployment (no positions, no exposure) is exempt.
+    assert cost_gate(pre(500.0, [50_000.0]), 100_000.0, 0.0, 0, mandate) == []
 
-    # Tiny drift, same cost: benefit 1 <= 15 → net-alpha refusal.
-    near = {"ACWI": 0.51, "BNDW": 0.49}
-    reasons = cost_gate({"expected_cost": {"total": 10.0}}, 100_000.0,
-                        swap[0], near, mandate)
+    # Positions with ~zero gross exposure is malformed state, not an exemption.
+    assert cost_gate(pre(1.0, [1000.0]), 100_000.0, 0.0, 3, mandate) != []
+
+    # Big traded notional, modest cost: 50k*20bps*0.5 = 50 > 1.5*10 → pass.
+    assert cost_gate(pre(10.0, [25_000.0, 25_000.0]),
+                     100_000.0, 1.0, 7, mandate) == []
+
+    # Tiny trade, same cost: benefit 1 <= 15 → net-alpha refusal.
+    reasons = cost_gate(pre(10.0, [1_000.0]), 100_000.0, 1.0, 7, mandate)
     assert any("net-alpha gate" in reason for reason in reasons)
 
-    # Cost above the absolute equity cap refuses even with maximal drift.
-    reasons = cost_gate({"expected_cost": {"total": 300.0}}, 100_000.0,
-                        swap[0], swap[1], mandate)
+    # Cost above the absolute equity cap refuses even with huge notional.
+    reasons = cost_gate(pre(300.0, [50_000.0]), 100_000.0, 1.0, 7, mandate)
     assert any("absolute cap" in reason for reason in reasons)
 
-    assert cost_gate({"expected_cost": {"total": 1.0}}, 0.0,
-                     swap[0], swap[1], mandate) == [
-        "cost gate requires positive equity"]
+    # Fail-closed edges: bad equity, missing decomposition, NaN cost,
+    # leg-count mismatch. A zero-leg plan is a no-op and passes.
+    assert cost_gate(pre(1.0, [1000.0]), 0.0, 1.0, 7, mandate) != []
+    assert cost_gate({"n_legs": 2}, 100_000.0, 1.0, 7, mandate) != []
+    assert cost_gate(pre(math.nan, [1000.0]), 100_000.0, 1.0, 7, mandate) != []
+    bad = pre(1.0, [1000.0]); bad["n_legs"] = 3
+    assert cost_gate(bad, 100_000.0, 1.0, 7, mandate) != []
+    assert cost_gate({"n_legs": 0, "expected_cost": {"total": 0.0, "legs": []}},
+                     100_000.0, 1.0, 7, mandate) == []
 
 
-def test_run_once_cost_gate_blocks_and_supersedes_verdict():
+def test_cost_config_rejects_inverted_gate_assumptions():
+    import pytest
+
+    from qlab.trader.mandate import CostConfig
+
+    with pytest.raises(ValueError):
+        CostConfig(live_haircut=1.5)
+    with pytest.raises(ValueError):
+        CostConfig(safety_multiplier=0.5)
+    with pytest.raises(ValueError):
+        CostConfig(rebalance_benefit_bps=0.0)
+
+
+def test_run_once_cost_gate_refuses_terminally():
     import dataclasses
 
     from qlab.trader.mandate import CostConfig, load_mandate
+    from qlab.trader.plan import MandateViolation, OrderLeg, OrderPlan, execute_plan
+    from qlab.trader.broker import get_broker
 
     reg = Registry(":memory:")
     absurd = dataclasses.replace(
@@ -162,17 +187,29 @@ def test_run_once_cost_gate_blocks_and_supersedes_verdict():
     assert first["trade"]["executed"] is True  # initial deployment is exempt
 
     second = run_once(registry=reg, mandate=absurd, offline=True,
-                      execute=True, as_of="2021-09-30")
+                      execute=True, as_of="2022-09-30")
     trade = second["trade"]
-    if trade.get("blocked_by") == "cost_gate":
-        assert any("net-alpha gate" in r or "absolute cap" in r
-                   for r in trade["reasons"])
-        # The superseding FAIL is the latest verdict → execute_plan would
-        # refuse this plan on any other path too.
-        verdict = reg.get_verdict(second["decision_id"])
-        assert verdict["verdict"] == "FAIL"
-        assert trade["executed"] is False
-    else:
-        # Zero-drift second run can no-op before the gate; force the claim
-        # only when a real rebalance was proposed.
-        assert trade.get("mandate_violation") or trade["executed"] is False
+    assert trade.get("blocked_by") == "cost_gate", trade
+    assert trade["executed"] is False
+    # The summary's governance state matches the registry: gate FAIL wins.
+    assert second["referee"]["verdict"] == "FAIL"
+    verdict = reg.get_verdict(second["decision_id"])
+    assert verdict["verdict"] == "FAIL"
+
+    # Revival attempt: a later PASS bound to the exact targets must NOT
+    # resurrect the refused plan — refusal is a terminal plan state.
+    refused = [p for p in reg.list_plans(10) if p["state"] == "refused"]
+    assert refused, "gate refusal must persist a refused plan state"
+    plan_row = refused[0]
+    reg.log_verdict(plan_row["decision_id"], "PASS", ["revival attempt"],
+                    source="agent", targets=plan_row["targets"])
+    legs = [OrderLeg(**leg) for leg in (plan_row.get("legs") or [])]
+    plan = OrderPlan(plan_id=plan_row["plan_id"],
+                     decision_id=plan_row["decision_id"],
+                     targets=plan_row["targets"], legs=legs,
+                     pre_trade=plan_row["pre_trade"], state="checked")
+    broker = get_broker(reg, offline=True, starting_cash=absurd.paper_capital,
+                        seed=7, universe=absurd.universe_whitelist)
+    import pytest
+    with pytest.raises(MandateViolation, match="terminal"):
+        execute_plan(reg, broker, plan)

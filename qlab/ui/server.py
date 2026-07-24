@@ -227,6 +227,25 @@ class UISession:
             )
         except MandateViolation as exc:
             return {"accepted": False, "mandate_violation": str(exc)}
+        # The net-alpha gate applies to previews too — a refused plan is
+        # terminally refused in the registry, so the human-confirm path
+        # cannot execute it either.
+        from qlab.governance.referee import cost_gate
+
+        state = broker.portfolio_state(self.mandate.universe_whitelist)
+        weights = state.get("weights", {})
+        gate_reasons = cost_gate(
+            plan.pre_trade, float(state["equity"]),
+            sum(abs(float(w)) for w in weights.values()),
+            len(state.get("positions", {})), self.mandate)
+        if gate_reasons:
+            self.registry.set_plan_state(plan.plan_id, "refused")
+            self.registry.record_event("cost_gate_refusal", {
+                "decision_id": decision_id, "plan_id": plan.plan_id,
+                "reasons": gate_reasons})
+            return {"accepted": False, "blocked_by": "cost_gate",
+                    "reasons": gate_reasons, "plan_id": plan.plan_id,
+                    "expected_cost": plan.pre_trade.get("expected_cost")}
         return {
             "accepted": True, "plan_id": plan.plan_id, "state": plan.state,
             "pre_trade": plan.pre_trade, "n_legs": len(plan.legs),

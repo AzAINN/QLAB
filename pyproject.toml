@@ -35,6 +35,8 @@ dependencies = [
 # generator and the parquet cache — the demo still runs.
 data = ["yfinance>=0.2.40", "pyarrow>=15.0"]
 
+news = ["feedparser>=6.0"]
+
 # Classical convex solver path (faster / cleaner than the scipy fallback).
 optimize = ["cvxpy>=1.4"]
 

@@ -1,0 +1,108 @@
+# Curated, read-only news sources for the bounded qualitative research lane.
+# A source either maps every item to fixed tickers or applies keyword rules.
+feeds:
+  - name: Federal Reserve
+    url: https://www.federalreserve.gov/feeds/press_all.xml
+    tickers: [BNDW, EMB, IGF]
+
+  - name: European Central Bank
+    url: https://www.ecb.europa.eu/rss/press.html
+    tickers: [BNDW, EMB, IGF]
+
+  - name: U.S. Treasury
+    url: https://home.treasury.gov/news/press-releases/feed
+    tickers: [BNDW, EMB, IGF]
+
+  - name: Reuters Markets
+    url: https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best
+    keywords:
+      - terms: [global market, world stocks, equities, shares, stock market]
+        tickers: [ACWI]
+      - terms: [commodity, commodities, crude oil, energy market]
+        tickers: [GSG]
+      - terms: [gold, precious metal, bullion]
+        tickers: [GLD]
+      - terms: [real estate, property market, REIT]
+        tickers: [VNQ]
+
+  - name: EIA Today in Energy
+    url: https://www.eia.gov/rss/todayinenergy.xml
+    tickers: [GSG]
+
+  - name: Nareit News
+    url: https://www.reit.com/news/blog/market-commentary/rss.xml
+    tickers: [VNQ]
+
+# These are deterministic fixtures, not cached or simulated live headlines.
+# The provider picks one template per requested ticker and timestamps it from a
+# stable hash of as_of + the canonical universe.
+synthetic:
+  ACWI:
+    - source: qlab synthetic global markets
+      headline: Global equity volatility broadens across regions
+      summary: Cross-region equity markets show wider dispersion and a busier volatility backdrop.
+      url: synthetic://qlab/acwi/global-volatility
+    - source: qlab synthetic global markets
+      headline: Global market breadth narrows as risk conditions shift
+      summary: Market breadth and cross-region dispersion are the main risk context in the latest synthetic digest.
+      url: synthetic://qlab/acwi/market-breadth
+
+  BNDW:
+    - source: qlab synthetic central banks
+      headline: Central-bank guidance keeps the global rate path uncertain
+      summary: Policy-rate uncertainty remains relevant to duration and global aggregate bond volatility.
+      url: synthetic://qlab/bndw/rate-path
+    - source: qlab synthetic fixed income
+      headline: Global yield curves show uneven policy expectations
+      summary: Diverging policy expectations add duration and correlation risk across developed bond markets.
+      url: synthetic://qlab/bndw/yield-curves
+
+  EMB:
+    - source: qlab synthetic credit
+      headline: Emerging sovereign spreads respond to tighter liquidity
+      summary: Funding conditions and spread dispersion remain the principal risk context for emerging-market debt.
+      url: synthetic://qlab/emb/spreads
+    - source: qlab synthetic credit
+      headline: Dollar funding conditions reshape emerging-market bond risk
+      summary: Currency funding and sovereign spread sensitivity are elevated in the synthetic credit brief.
+      url: synthetic://qlab/emb/dollar-funding
+
+  GSG:
+    - source: qlab synthetic commodities
+      headline: Energy inventories amplify broad commodity dispersion
+      summary: Uneven inventory conditions increase volatility differences across the broad commodity complex.
+      url: synthetic://qlab/gsg/inventories
+    - source: qlab synthetic commodities
+      headline: Supply uncertainty widens moves across commodity sectors
+      summary: Energy and industrial inputs show a more varied risk profile as supply conditions change.
+      url: synthetic://qlab/gsg/supply
+
+  IGF:
+    - source: qlab synthetic infrastructure
+      headline: Financing costs remain central to infrastructure risk
+      summary: Long-duration infrastructure assets face a mixed rate and policy backdrop across regions.
+      url: synthetic://qlab/igf/financing
+    - source: qlab synthetic infrastructure
+      headline: Infrastructure policy pipelines vary across major regions
+      summary: Project timing and financing conditions create uneven risk across global infrastructure assets.
+      url: synthetic://qlab/igf/policy
+
+  GLD:
+    - source: qlab synthetic metals
+      headline: Real-yield uncertainty lifts gold-market volatility
+      summary: Shifts in real yields and defensive demand form the current synthetic gold risk context.
+      url: synthetic://qlab/gld/real-yields
+    - source: qlab synthetic metals
+      headline: Gold trading reflects competing rate and haven pressures
+      summary: Rate sensitivity and safe-haven demand pull gold risk conditions in different directions.
+      url: synthetic://qlab/gld/haven-demand
+
+  VNQ:
+    - source: qlab synthetic real estate
+      headline: Property financing conditions diverge across segments
+      summary: Refinancing costs and occupancy differences widen risk dispersion across listed real estate.
+      url: synthetic://qlab/vnq/financing
+    - source: qlab synthetic real estate
+      headline: Listed real-estate risk centers on refinancing schedules
+      summary: Debt maturities and segment-level fundamentals shape the latest synthetic property risk brief.
+      url: synthetic://qlab/vnq/refinancing

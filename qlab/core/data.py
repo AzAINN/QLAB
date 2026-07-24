@@ -21,9 +21,10 @@ import os
 import threading
 import uuid
 import warnings
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,104 @@ class _InvalidCacheError(RuntimeError):
     """A cache payload exists but its identity cannot be trusted."""
 
 
+class DataUnavailable(RuntimeError):
+    """Required real data could not be served and policy forbids a substitute.
+
+    Raised in place of a silent synthetic/other-provider fallback when the
+    active :class:`DataPolicy` forbids one (e.g. ``alpaca_operational``). The
+    caller must surface the outage and block, never proceed on fabricated data.
+    """
+
+
+@dataclass(frozen=True)
+class DataPolicy:
+    """Explicit, immutable description of how market data may be sourced.
+
+    Replaces the single boolean ``offline`` flag, which could not distinguish
+    "Alpaca required, no fallback" from "any cache is fine" from "deterministic
+    synthetic demo". Only ``provider`` and the ``allow_*`` flags drive
+    :func:`get_prices` resolution; ``mode``, ``feed``, ``require_fresh``, and
+    ``execution_eligible`` are metadata consumed by the freshness gate, data
+    permits, and execution eligibility (later phases).
+
+    The legacy ``offline`` boolean is translated into a permissive demo-grade
+    policy (synthetic fallback allowed) at the boundary; new call sites that
+    need integrity guarantees pass an explicit operational/historical policy.
+    """
+
+    mode: Literal["operational", "historical", "demo", "test"]
+    provider: Literal["alpaca", "yfinance", "synthetic"]
+    feed: Literal["iex", "sip", "delayed_sip"] | None
+    allow_network: bool
+    allow_cache: bool
+    allow_synthetic: bool
+    require_fresh: bool
+    execution_eligible: bool
+
+    @classmethod
+    def alpaca_operational(cls, feed: str = "iex") -> "DataPolicy":
+        """Live paper operations: Alpaca required, no synthetic/other fallback."""
+        return cls(mode="operational", provider="alpaca", feed=_check_feed(feed),
+                   allow_network=True, allow_cache=True, allow_synthetic=False,
+                   require_fresh=True, execution_eligible=True)
+
+    @classmethod
+    def alpaca_historical(cls, feed: str = "iex") -> "DataPolicy":
+        """Cached/historical Alpaca backtests: real data only, freshness relaxed."""
+        return cls(mode="historical", provider="alpaca", feed=_check_feed(feed),
+                   allow_network=True, allow_cache=True, allow_synthetic=False,
+                   require_fresh=False, execution_eligible=False)
+
+    @classmethod
+    def demo(cls, seed: int = 7) -> "DataPolicy":
+        """Deterministic synthetic demo: no network, never execution-eligible."""
+        return cls(mode="demo", provider="synthetic", feed=None,
+                   allow_network=False, allow_cache=True, allow_synthetic=True,
+                   require_fresh=False, execution_eligible=False)
+
+    @classmethod
+    def test(cls, seed: int = 7) -> "DataPolicy":
+        """Test fixtures: synthetic, offline, never execution-eligible."""
+        return cls(mode="test", provider="synthetic", feed=None,
+                   allow_network=False, allow_cache=True, allow_synthetic=True,
+                   require_fresh=False, execution_eligible=False)
+
+
+_VALID_FEEDS = ("iex", "sip", "delayed_sip")
+
+
+def _check_feed(feed: str) -> str:
+    f = (feed or "").strip().lower()
+    if f not in _VALID_FEEDS:
+        raise ValueError(
+            f"invalid Alpaca feed {feed!r}; expected one of {_VALID_FEEDS}")
+    return f
+
+
+def _effective_policy(
+    offline: bool, provider: str | None, policy: DataPolicy | None,
+) -> DataPolicy:
+    """Resolve the policy that governs one fetch.
+
+    An explicit ``policy`` wins. Otherwise the legacy ``offline`` boolean is
+    translated into a demo-grade policy that preserves today's behavior: no
+    network when offline, synthetic fallback always permitted, and the
+    requested provider kept only as the cache namespace.
+    """
+    if policy is not None:
+        return policy
+    return DataPolicy(
+        mode="demo",
+        provider=_provider_name(provider),  # type: ignore[arg-type]  (namespace only)
+        feed=None,
+        allow_network=not offline,
+        allow_cache=True,
+        allow_synthetic=True,
+        require_fresh=False,
+        execution_eligible=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -58,20 +157,25 @@ def get_prices(
     cache_dir: Path | None = None,
     refresh: bool = False,
     provider: str | None = None,
+    policy: DataPolicy | None = None,
 ) -> pd.DataFrame:
     """Return an adjusted-close panel (index = dates, columns = ``tickers``).
 
-    Resolution order: matching provider-specific cache → selected provider
-    (unless ``offline``) → synthetic. The provider defaults to
-    ``QLAB_DATA_PROVIDER`` or ``"yfinance"``. Offline mode never validates,
-    resolves, or invokes a provider.
+    Resolution is governed by a :class:`DataPolicy`. When ``policy`` is omitted
+    the legacy ``offline``/``provider`` arguments are translated into a
+    permissive demo-grade policy so existing callers behave exactly as before:
+    matching provider-specific cache → selected provider (if network allowed) →
+    synthetic. A policy that forbids the synthetic fallback
+    (``allow_synthetic=False``) raises :class:`DataUnavailable` instead of
+    fabricating data.
     """
     end = end or date.today().isoformat()
     cache_dir = Path(cache_dir) if cache_dir else (_CACHE_DIR or state_path("cache"))
 
-    provider_name = _provider_name(provider)
+    policy = _effective_policy(offline, provider, policy)
+    provider_name = policy.provider
     fetch: ProviderFetch | None = None
-    if not offline:
+    if policy.allow_network:
         provider_name, fetch = _resolve_provider(provider_name)
         # Provider setup is part of selecting an online source, not merely the
         # network fetch. A warm cache must not conceal a broken Alpaca setup.
@@ -88,7 +192,7 @@ def get_prices(
             legacy_path=legacy_path if provider_name == "yfinance" else None,
         )
     except _InvalidCacheError as exc:
-        if offline:
+        if not policy.allow_network:
             raise RuntimeError(
                 f"offline cache for provider {provider_name!r} is invalid: {exc}"
             ) from exc
@@ -97,15 +201,17 @@ def get_prices(
             stacklevel=2,
         )
         cached = None
+    if cached is not None and not policy.allow_cache:
+        cached = None  # policy forbids consuming any cache
     cached_is_synthetic = bool(
         cached is not None and cached.attrs.get("synthetic", False)
     )
     cached_source = _recorded_source(cached) if cached is not None else None
-    # Offline mode may consume any cache. Online mode may consume a real-data
-    # cache from the selected provider, but another provider's cache (or a
-    # synthetic fallback) must never masquerade as the requested live source.
+    # Without network we serve any available cache. With network only a fresh,
+    # matching real-provider cache short-circuits the fetch — another provider's
+    # cache (or a synthetic fallback) must never masquerade as the live source.
     if cached is not None and (
-        offline
+        not policy.allow_network
         or (
             not refresh
             and not cached_is_synthetic
@@ -127,7 +233,15 @@ def get_prices(
                 stacklevel=2,
             )
             return cached
-        if offline:
+        if not policy.allow_synthetic:
+            # Fail loud: the policy requires real data and none is available.
+            # Never fabricate, never substitute another provider (invariant 4).
+            raise DataUnavailable(
+                f"no {provider_name} data available for {list(tickers)} "
+                f"[{start}..{end}] and the {policy.mode} data policy forbids a "
+                "synthetic or cross-provider fallback; refusing to fabricate"
+            )
+        if not policy.allow_network:
             warnings.warn(
                 "offline=True and no cache - serving deterministic synthetic data",
                 stacklevel=2,
@@ -156,11 +270,13 @@ def snapshot(
     offline: bool = False,
     seed: int = 7,
     provider: str | None = None,
+    policy: DataPolicy | None = None,
 ) -> DataSnapshot:
     """Build a point-in-time :class:`DataSnapshot` ending at ``as_of``.
 
     The snapshot truncates to ``as_of`` at construction, so downstream code
-    cannot look ahead even by accident.
+    cannot look ahead even by accident. Data sourcing follows ``policy`` when
+    given, else the legacy ``offline``/``provider`` translation.
     """
     as_of_d = _as_date(as_of)
     prices = get_prices(
@@ -170,6 +286,7 @@ def snapshot(
         offline=offline,
         seed=seed,
         provider=provider,
+        policy=policy,
     )
     source = _recorded_source(prices)
     snap = DataSnapshot(tickers=list(tickers), prices=prices, as_of=as_of_d,

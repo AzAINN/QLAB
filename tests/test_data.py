@@ -582,3 +582,93 @@ def test_offline_mode_bypasses_provider_selection(tmp_path, monkeypatch):
     )
 
     assert prices.attrs == {"source": "synthetic", "synthetic": True}
+
+
+# --- DataPolicy (Phase 1 slice 1) --------------------------------------------
+
+
+def test_data_policy_constructors_set_expected_flags():
+    op = market.DataPolicy.alpaca_operational("sip")
+    assert (op.mode, op.provider, op.feed) == ("operational", "alpaca", "sip")
+    assert op.allow_network and not op.allow_synthetic
+    assert op.require_fresh and op.execution_eligible
+
+    hist = market.DataPolicy.alpaca_historical()
+    assert (hist.mode, hist.provider, hist.feed) == ("historical", "alpaca", "iex")
+    assert hist.allow_network and not hist.allow_synthetic
+    assert not hist.require_fresh and not hist.execution_eligible
+
+    for policy in (market.DataPolicy.demo(), market.DataPolicy.test()):
+        assert policy.provider == "synthetic"
+        assert not policy.allow_network and policy.allow_synthetic
+        assert not policy.execution_eligible
+
+
+def test_data_policy_rejects_unknown_feed():
+    with pytest.raises(ValueError, match="invalid Alpaca feed"):
+        market.DataPolicy.alpaca_operational("nasdaq_totalview")
+
+
+def test_data_policy_is_immutable():
+    op = market.DataPolicy.alpaca_operational()
+    with pytest.raises(Exception):
+        op.allow_synthetic = True  # frozen dataclass
+
+
+def test_effective_policy_translates_legacy_offline():
+    # An explicit policy always wins.
+    explicit = market.DataPolicy.alpaca_historical()
+    assert market._effective_policy(True, "alpaca", explicit) is explicit
+
+    # Legacy offline → demo-grade: no network, synthetic permitted, provider
+    # preserved only as the cache namespace.
+    off = market._effective_policy(True, "alpaca", None)
+    assert not off.allow_network and off.allow_synthetic and off.provider == "alpaca"
+
+    on = market._effective_policy(False, None, None)
+    assert on.allow_network and on.allow_synthetic and on.provider == "yfinance"
+
+
+def test_operational_policy_refuses_synthetic_when_fetch_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(market, "_validate_provider_setup", lambda provider: None)
+    monkeypatch.setitem(market.PROVIDERS, "alpaca", lambda t, s, e: None)  # outage
+    with pytest.raises(market.DataUnavailable, match="forbids a synthetic"):
+        market.get_prices(
+            ["AAA"], "2024-01-01", "2024-01-05",
+            cache_dir=tmp_path, policy=market.DataPolicy.alpaca_operational(),
+        )
+
+
+def test_operational_policy_never_returns_a_yfinance_cache(tmp_path, monkeypatch):
+    # Warm a yfinance cache for the same panel, then request under an Alpaca
+    # operational policy whose fetch fails: the yfinance cache must NOT satisfy
+    # the Alpaca request (different provider namespace), and no synthetic.
+    monkeypatch.setitem(market.PROVIDERS, "yfinance", lambda t, s, e: _panel(t))
+    market.get_prices(["AAA"], "2024-01-01", "2024-01-05",
+                      provider="yfinance", cache_dir=tmp_path)
+    monkeypatch.setattr(market, "_validate_provider_setup", lambda provider: None)
+    monkeypatch.setitem(market.PROVIDERS, "alpaca", lambda t, s, e: None)
+    with pytest.raises(market.DataUnavailable):
+        market.get_prices(
+            ["AAA"], "2024-01-01", "2024-01-05",
+            cache_dir=tmp_path, policy=market.DataPolicy.alpaca_operational(),
+        )
+
+
+def test_operational_policy_serves_real_alpaca_fetch(tmp_path, monkeypatch):
+    monkeypatch.setattr(market, "_validate_provider_setup", lambda provider: None)
+    monkeypatch.setitem(market.PROVIDERS, "alpaca", lambda t, s, e: _panel(t))
+    prices = market.get_prices(
+        ["AAA"], "2024-01-01", "2024-01-05",
+        cache_dir=tmp_path, policy=market.DataPolicy.alpaca_operational(),
+    )
+    assert prices.attrs == {"source": "alpaca", "synthetic": False}
+
+
+def test_snapshot_forwards_policy(tmp_path, monkeypatch):
+    monkeypatch.setattr(market, "_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(market, "_validate_provider_setup", lambda provider: None)
+    monkeypatch.setitem(market.PROVIDERS, "alpaca", lambda t, s, e: None)
+    with pytest.raises(market.DataUnavailable):
+        market.snapshot(["AAA"], "2024-01-03",
+                        policy=market.DataPolicy.alpaca_operational())

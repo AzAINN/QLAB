@@ -63,6 +63,7 @@ _INDEX = _HERE / "index.html"
 _LOCK = threading.Lock()
 
 _MARKET_EVENT_LIMIT = 500
+_STREAM_PAGE_CEILING = 5000
 _QUOTE_REFRESH_TTL_SECONDS = 30.0
 _QUOTE_MIN_INTERVAL_SECONDS = 5.0
 _MARKET_THREAD_NAME = "qlab-market-topics"
@@ -444,6 +445,29 @@ class UISession:
             ][:limit]
         return events[-limit:]
 
+    def read_audit_stream_events(
+        self,
+        limit: int,
+        after: str | None,
+    ) -> list[dict]:
+        """Read a bounded audit page in the merged stream's stable ordering."""
+        limit = max(1, min(int(limit), _STREAM_PAGE_CEILING))
+        # Registry.read_events caps ordinary observers at 500 and orders only
+        # by timestamp. The owner needs the full tuple order to page one dense
+        # timestamp without adding another registry connection or writer.
+        if after:
+            return self.registry._rows(
+                "SELECT * FROM events WHERE ts > ? "
+                "ORDER BY ts ASC, event_id ASC LIMIT ?",
+                [after, limit],
+            )
+        return self.registry._rows(
+            "SELECT * FROM ("
+            "SELECT * FROM events ORDER BY ts DESC, event_id DESC LIMIT ?"
+            ") ORDER BY ts ASC, event_id ASC",
+            [limit],
+        )
+
 
 def _publish_quote_event(session: UISession) -> dict | None:
     """Recompute compact quotes and publish only a changed transient snapshot."""
@@ -745,6 +769,8 @@ def _qbool(query: dict, key: str, default: bool) -> bool:
 # ---------------------------------------------------------------------------
 class _Handler(BaseHTTPRequestHandler):
     session: UISession = None  # type: ignore[assignment]
+    stream_page_cap = _MARKET_EVENT_LIMIT
+    stream_page_ceiling = _STREAM_PAGE_CEILING
     protocol_version = "HTTP/1.1"          # keep-alive; Content-Length is always sent
 
     def log_message(self, *args):  # keep the console clean
@@ -786,16 +812,29 @@ class _Handler(BaseHTTPRequestHandler):
         Each connection runs on its own ThreadingHTTPServer thread and takes
         the dispatch lock only for the brief per-poll registry read, so a
         live stream never starves normal API calls. ``after`` resumes from an
-        ISO timestamp cursor; once connected, the cursor also retains event ids
-        delivered at its timestamp boundary. ``kind`` filters events; a comment
-        heartbeat is emitted while idle so clients can detect a dead socket.
+        ISO timestamp cursor. Supplying ``after_id`` with it resumes strictly
+        after that ``(ts, event_id)`` pair. Once connected, the cursor also
+        retains event ids delivered at its timestamp boundary. ``kind`` filters
+        events; a comment heartbeat is emitted while idle so clients can detect
+        a dead socket.
         """
         import time
 
         cursor = (query.get("after") or [None])[0]
-        boundary_event_ids: set[str] = set()
-        tracks_boundary = cursor is None
+        after_id = (query.get("after_id") or [None])[0] if cursor else None
+        boundary_event_ids = {str(after_id)} if after_id is not None else set()
+        boundary_floor_id = str(after_id) if after_id is not None else None
+        tracks_boundary = cursor is None or boundary_floor_id is not None
         kind = (query.get("kind") or [None])[0]
+        page_cap = max(
+            1,
+            min(int(self.stream_page_cap), _MARKET_EVENT_LIMIT),
+        )
+        page_ceiling = max(
+            page_cap,
+            min(int(self.stream_page_ceiling), _STREAM_PAGE_CEILING),
+        )
+        overflow_logged = False
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -806,19 +845,63 @@ class _Handler(BaseHTTPRequestHandler):
             while True:
                 # A fresh connection gets a short primer backlog, not history.
                 limit = 200 if cursor else 25
-                read_limit = limit
+                read_limit = min(page_cap, limit)
                 read_after = cursor
                 if cursor and tracks_boundary:
                     read_after = _overlap_stream_cursor(cursor)
                     read_limit = min(
-                        _MARKET_EVENT_LIMIT,
+                        page_cap,
                         limit + len(boundary_event_ids),
                     )
-                with _LOCK:
-                    audit_events = self.session.registry.read_events(
+
+                while True:
+                    with _LOCK:
+                        audit_events = self.session.read_audit_stream_events(
+                            read_limit, read_after)
+                    market_events = self.session.read_market_events(
                         read_limit, read_after)
-                market_events = self.session.read_market_events(
-                    read_limit, read_after)
+
+                    def is_pending_boundary_event(event: dict) -> bool:
+                        if not cursor:
+                            return True
+                        event_ts = str(event.get("ts") or "")
+                        event_id = str(event.get("event_id") or "")
+                        if event_ts > cursor:
+                            return True
+                        if event_ts != cursor or not tracks_boundary:
+                            return False
+                        if (
+                            boundary_floor_id is not None
+                            and event_id <= boundary_floor_id
+                        ):
+                            return False
+                        return event_id not in boundary_event_ids
+
+                    saturated_boundary = bool(cursor and tracks_boundary) and any(
+                        len(source) >= read_limit
+                        and all(
+                            str(event.get("ts") or "") == cursor
+                            and not is_pending_boundary_event(event)
+                            for event in source
+                        )
+                        for source in (audit_events, market_events)
+                    )
+                    if not saturated_boundary:
+                        break
+                    if read_limit < page_cap:
+                        read_limit = min(page_cap, read_limit * 2)
+                        continue
+                    if not overflow_logged:
+                        print(
+                            "[qlab] WARNING stream boundary page full at "
+                            f"{cursor}; expanding fetch up to {page_ceiling}",
+                            flush=True,
+                        )
+                        overflow_logged = True
+                    if read_limit >= page_ceiling:
+                        return
+                    read_limit = min(page_ceiling, read_limit * 2)
+
                 events = sorted(
                     [*audit_events, *market_events],
                     key=lambda event: (
@@ -829,18 +912,11 @@ class _Handler(BaseHTTPRequestHandler):
                 # Cursor reads page the merged timeline so a newer quote cannot
                 # advance past an audit row waiting in the next registry page.
                 if cursor:
-                    if tracks_boundary:
-                        events = [
-                            event for event in events
-                            if (
-                                str(event.get("ts") or "") > cursor
-                                or (
-                                    str(event.get("ts") or "") == cursor
-                                    and str(event.get("event_id") or "")
-                                    not in boundary_event_ids
-                                )
-                            )
-                        ]
+                    events = [
+                        event
+                        for event in events
+                        if is_pending_boundary_event(event)
+                    ]
                     events = events[:limit]
                 if events:
                     idle_polls = 0
@@ -850,6 +926,7 @@ class _Handler(BaseHTTPRequestHandler):
                         if cursor is None or event_ts > cursor:
                             cursor = event_ts
                             boundary_event_ids.clear()
+                            boundary_floor_id = None
                             tracks_boundary = True
                         if event_ts == cursor:
                             boundary_event_ids.add(event_id)
@@ -888,14 +965,14 @@ class _Handler(BaseHTTPRequestHandler):
 def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) -> None:
     """Start the UI server (blocking). Ctrl-C to stop."""
     session = UISession(offline_default=offline)
-    _Handler.session = session
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    httpd.daemon_threads = True
+    market_stop, market_thread = _start_market_topics(session)
     try:
-        market_stop, market_thread = _start_market_topics(session)
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     except Exception:
-        httpd.server_close()
+        _stop_market_topics(market_stop, market_thread)
         raise
+    httpd.daemon_threads = True
+    _Handler.session = session
     url = f"http://127.0.0.1:{port}/"
     print(f"[qlab] UI at {url}  (offline={'on' if offline else 'off'}; paper capital only)")
     print("[qlab] press Ctrl-C to stop.")

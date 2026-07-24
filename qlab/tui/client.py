@@ -37,25 +37,38 @@ class ApiClient:
         """Yield durable audit and transient topic events from the owner.
 
         Blocks between events; callers exit by breaking (Ctrl-C closes the
-        socket via the context manager). Heartbeat comments are skipped.
+        socket via the context manager). Heartbeat comments are skipped, and
+        a closed connection resumes after the last exact event tuple.
         """
         import json
 
-        with httpx.stream(
-            "GET", self.base_url + path, params=params,
-            timeout=httpx.Timeout(None, connect=10.0),
-        ) as response:
-            response.raise_for_status()
-            for line in response.iter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                payload = line[len("data:"):].strip()
-                if not payload:
-                    continue
-                try:
-                    yield json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
+        request_params = dict(params)
+        last_cursor: tuple[str, str] | None = None
+        while True:
+            with httpx.stream(
+                "GET", self.base_url + path, params=request_params,
+                timeout=httpx.Timeout(None, connect=10.0),
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    payload = line[len("data:"):].strip()
+                    if not payload:
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict):
+                        event_ts = str(event.get("ts") or "")
+                        event_id = str(event.get("event_id") or "")
+                        if event_ts and event_id:
+                            last_cursor = (event_ts, event_id)
+                    yield event
+            if last_cursor is None:
+                return
+            request_params["after"], request_params["after_id"] = last_cursor
 
 
 def gather_snapshot(client, *, offline: bool = True) -> dict:

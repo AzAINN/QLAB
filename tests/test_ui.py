@@ -306,6 +306,174 @@ def test_sse_stream_delivers_transient_quote_events(session, monkeypatch):
         httpd.server_close()
 
 
+def test_sse_stream_resume_after_event_id_delivers_same_timestamp_sibling(
+    session,
+):
+    """A reconnect resumes after the exact merged-stream tuple."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from urllib.parse import urlencode
+
+    import qlab.state.registry as registry_module
+    import qlab.ui.server as server_module
+
+    boundary_ts = "2026-07-24T12:34:56+00:00"
+    original_now = registry_module._now
+    registry_module._now = lambda: boundary_ts
+    try:
+        event_ids = [
+            session.registry.record_event("same-ts", {"n": n})
+            for n in (1, 2)
+        ]
+    finally:
+        registry_module._now = original_now
+    first_id, second_id = sorted(event_ids)
+
+    handler = type("H", (server_module._Handler,), {"session": session})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    response = None
+    try:
+        query = urlencode({"after": boundary_ts, "after_id": first_id})
+        response = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/stream?{query}", timeout=5)
+        resumed = json.loads(
+            response.readline().decode().removeprefix("data:").strip())
+        assert resumed["event_id"] == second_id
+    finally:
+        if response is not None:
+            response.close()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_sse_stream_expands_a_saturated_timestamp_boundary(
+    session, capsys,
+):
+    """A full delivered boundary page cannot pin the stream cursor forever."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from urllib.parse import urlencode
+
+    import qlab.state.registry as registry_module
+    import qlab.ui.server as server_module
+
+    boundary_ts = "2026-07-24T12:34:56+00:00"
+    original_now = registry_module._now
+    registry_module._now = lambda: boundary_ts
+    try:
+        boundary_ids = {
+            session.registry.record_event("boundary", {"n": n})
+            for n in range(3)
+        }
+        registry_module._now = lambda: "2026-07-24T12:34:57+00:00"
+        sentinel_id = session.registry.record_event("sentinel", {})
+    finally:
+        registry_module._now = original_now
+
+    handler = type(
+        "H",
+        (server_module._Handler,),
+        {"session": session, "stream_page_cap": 2},
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    response = None
+    try:
+        query = urlencode({"after": "2026-07-24T12:34:55+00:00"})
+        response = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/stream?{query}", timeout=5)
+        received = []
+        while not any(event["event_id"] == sentinel_id for event in received):
+            line = response.readline().decode()
+            if line.startswith("data:"):
+                received.append(json.loads(
+                    line.removeprefix("data:").strip()))
+
+        received_boundary_ids = [
+            event["event_id"]
+            for event in received
+            if event["kind"] == "boundary"
+        ]
+        assert set(received_boundary_ids) == boundary_ids
+        assert len(received_boundary_ids) == len(boundary_ids)
+        assert "stream boundary page full" in capsys.readouterr().out
+    finally:
+        if response is not None:
+            response.close()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_api_client_resubscribe_uses_last_event_tuple(monkeypatch):
+    """A transparent reconnect preserves the merged stream's exact cursor."""
+    import json
+
+    import qlab.tui.client as client_module
+
+    first = {
+        "event_id": "event-a",
+        "ts": "2026-07-24T12:34:56+00:00",
+        "kind": "audit",
+    }
+    second = {
+        "event_id": "event-b",
+        "ts": "2026-07-24T12:34:56+00:00",
+        "kind": "audit",
+    }
+
+    class FakeResponse:
+        def __init__(self, event):
+            self.event = event
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield f"data: {json.dumps(self.event)}"
+
+    responses = iter([FakeResponse(first), FakeResponse(second)])
+    calls = []
+
+    def fake_stream(method, url, *, params, timeout):
+        calls.append(dict(params))
+        return next(responses)
+
+    monkeypatch.setattr(client_module.httpx, "stream", fake_stream)
+    events = client_module.ApiClient("http://owner").stream(
+        "/api/stream", kind="audit")
+    try:
+        assert next(events) == first
+        assert next(events) == second
+    finally:
+        events.close()
+
+    assert calls == [
+        {"kind": "audit"},
+        {
+            "kind": "audit",
+            "after": first["ts"],
+            "after_id": first["event_id"],
+        },
+    ]
+
+
 def test_sse_stream_delivers_late_same_timestamp_audit_event_once(session):
     """A quote cursor cannot skip an audit row committed later at the same ts."""
     import json
@@ -415,6 +583,39 @@ def test_market_topic_producer_lifecycles_leave_no_threads(
             server_module._stop_market_topics(stop_event, producer, timeout=2.0)
         assert not producer.is_alive()
         assert live_producers() == []
+
+
+def test_refused_second_serve_preserves_first_handler_session(
+    session, monkeypatch,
+):
+    """The producer guard rejects startup before the handler binding changes."""
+    import qlab.ui.server as server_module
+
+    second_session = server_module.UISession(
+        offline_default=True,
+        registry=Registry(":memory:"),
+    )
+
+    def wait_for_stop(_session, stop_event, _refresh_seconds):
+        stop_event.wait()
+
+    monkeypatch.setattr(server_module, "_run_market_topics", wait_for_stop)
+    monkeypatch.setattr(server_module._Handler, "session", session)
+    monkeypatch.setattr(
+        server_module,
+        "UISession",
+        lambda offline_default=True: second_session,
+    )
+
+    stop_event, producer = server_module._start_market_topics(session)
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            server_module.serve(port=0, offline=True, open_browser=False)
+        assert server_module._Handler.session is session
+    finally:
+        server_module._stop_market_topics(
+            stop_event, producer, timeout=2.0)
+        second_session.registry.close()
 
 
 def test_quote_event_cli_format_shows_three_tickers_and_total():

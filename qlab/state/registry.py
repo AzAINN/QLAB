@@ -33,18 +33,16 @@ from qlab.paths import state_path
 
 
 WORKFORCE_PHASES = ("analyst", "challenger", "optimizer", "referee", "reporter")
-# Dependency DAG, not a strict line: challenger and optimizer both consume only
-# the analyst's outputs and never each other's, so they may run concurrently.
-# The referee — the gate that lets a result be used — still waits for both, and
-# the reporter waits for the referee. Every real dependency (and "the judgment
-# is defended before the result is used") is preserved; only the optimizer's
-# artificial wait on the challenger is dropped, which is what enables the
-# parallel stage. Prerequisites must be a subset of the lower-seq phases so the
-# seq-ordered completion bookkeeping below stays valid.
+# Dependency DAG for the standard pipeline. The bounded debate makes the
+# challenger a true upstream of the optimizer: an amendment recorded in the
+# challenger phase's artifacts must be able to replace the optimizer's inputs,
+# so the optimizer may not start until the debate has settled. (Panels get
+# their own instance DAG where branch optimizers depend only on their own
+# analysts and the judge is the join point.)
 _WORKFORCE_DEPS = {
     "analyst": (),
     "challenger": ("analyst",),
-    "optimizer": ("analyst",),
+    "optimizer": ("analyst", "challenger"),
     "referee": ("challenger", "optimizer"),
     "reporter": ("referee",),
 }

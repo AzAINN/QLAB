@@ -886,6 +886,12 @@ class QlabTui(App[None]):
                     yield DataTable(id="runs-table", cursor_type="row")
                 with Vertical(id="book", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] BOOK", classes="canvas-title", markup=True)
+                    yield Static("EQUITY", classes="book-section-title")
+                    yield Static(
+                        id="book-equity",
+                        classes="book-section",
+                        markup=True,
+                    )
                     yield Static("POSITIONS", classes="book-section-title")
                     yield Static(
                         id="book-positions",
@@ -2108,10 +2114,58 @@ class QlabTui(App[None]):
                 key=str(run.get("run_id", "")),
             )
 
+    def _render_book_equity(self, portfolio: dict) -> None:
+        """Realized equity curve and metrics — or why there are none yet.
+
+        The curve is the recorded equity marks, not a backtest: an empty series
+        is a real state of the book (nothing marked yet), and metrics that the
+        owner could not compute carry its note instead of blank cells.
+        """
+        performance = (self.snapshot.get("performance") or {}) if self.snapshot else {}
+        rows = performance.get("series") or []
+        series = [float(row["equity"]) for row in rows]
+        lines: list[str] = []
+        if series:
+            since = performance.get("since_start")
+            tone = TEXT if since is None else (UP if float(since) >= 0 else DOWN)
+            header = f"[bold {TEXT_HI}]{money(portfolio.get('equity'))}[/]"
+            if since is not None:
+                sign = "+" if float(since) >= 0 else ""
+                header += f"   [{tone}]{sign}{pct(float(since))} since start[/]"
+            header += (
+                f"   [{LABEL_GOLD}]{int(performance.get('marks') or 0)} marks[/]")
+            lines.append(header)
+            lines.append("")
+            for bar in braille_chart(series, width=56, height=4):
+                lines.append(f"[{tone}]{escape(bar)}[/]")
+            span = (
+                f"{str(rows[0].get('ts', '—'))} → {str(rows[-1].get('ts', '—'))}"
+                if len(rows) > 1 else str(rows[-1].get("ts", "—")))
+            lines.append(f"[{DIM}]{escape(span)}  ·  daily equity marks[/]")
+            lines.append("")
+            metrics = performance.get("metrics")
+            if metrics:
+                lines.append(
+                    f"[{LABEL_GOLD}]ret[/] [{TEXT}]{pct(metrics['ann_return'])}[/]   "
+                    f"[{LABEL_GOLD}]vol[/] [{TEXT}]{pct(metrics['ann_vol'])}[/]   "
+                    f"[{LABEL_GOLD}]sharpe[/] [{TEXT}]{metrics['sharpe']:.2f}[/]   "
+                    f"[{LABEL_GOLD}]maxdd[/] [{TEXT}]{pct(metrics['max_drawdown'])}[/]   "
+                    f"[{LABEL_GOLD}]cvar95[/] [{TEXT}]{pct(metrics['cvar_95'])}[/]   "
+                    f"[{LABEL_GOLD}]obs[/] [{TEXT}]{int(metrics['n_obs'])}[/]")
+            else:
+                lines.append(
+                    f"[{MUTED}]{escape(str(performance.get('note') or ''))}[/]")
+        else:
+            lines.append(
+                f"[{MUTED}]No equity history yet — marks are recorded by daily "
+                f"ops, executions, and hourly polls.[/]")
+        self.query_one("#book-equity", Static).update("\n".join(lines))
+
     def _render_book(self) -> None:
         portfolio = self.snapshot.get("portfolio", {}) if self.snapshot else {}
         positions = portfolio.get("positions") or {}
         weights = portfolio.get("weights") or {}
+        self._render_book_equity(portfolio)
         tickers = sorted(
             set(positions) | {
                 ticker for ticker, weight in weights.items()
@@ -2120,18 +2174,26 @@ class QlabTui(App[None]):
             key=lambda ticker: (-float(weights.get(ticker, 0.0)), str(ticker)),
         )
         position_lines = [
-            f"[{DIM}]TICKER   WEIGHT        QUANTITY          VALUE[/]"
+            f"[{DIM}]TICKER   WEIGHT        QUANTITY          VALUE          P&L[/]"
         ]
         for ticker in tickers:
             position = positions.get(ticker) or {}
             quantity = position.get("qty")
             quantity_text = (
                 "—" if quantity is None else f"{float(quantity):,.4f}")
+            # Marks written before unrealized P&L existed carry no key at all;
+            # an em dash says "not known", which a $0.00 would misreport.
+            unrealized = position.get("unrealized_pl")
+            unrealized_text = "—" if unrealized is None else money(unrealized)
+            unrealized_tone = (
+                MUTED if unrealized is None
+                else (UP if float(unrealized) >= 0 else DOWN))
             position_lines.append(
                 f"[bold {TEXT_HI}]{escape(str(ticker)):<7}[/] "
                 f"[{AMBER}]{pct(float(weights.get(ticker, 0.0))):>7}[/]   "
                 f"[{TEXT}]{quantity_text:>12}[/]   "
-                f"[{TEXT_HI}]{money(position.get('value')):>12}[/]"
+                f"[{TEXT_HI}]{money(position.get('value')):>12}[/]   "
+                f"[{unrealized_tone}]{unrealized_text:>10}[/]"
             )
         if not tickers:
             position_lines.append(

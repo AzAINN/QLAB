@@ -50,9 +50,12 @@ def _snapshot():
             "drawdown": 0.01,
             "kill_switch_at": 0.15,
             "positions": {
-                "ACWI": {"qty": 40.4, "price": 100.0, "value": 4_040.0},
-                "BNDW": {"qty": 30.0, "price": 101.0, "value": 3_030.0},
-                "GLD": {"qty": 29.7, "price": 102.0, "value": 3_029.4},
+                "ACWI": {"qty": 40.4, "price": 100.0, "value": 4_040.0,
+                         "unrealized_pl": 40.0},
+                "BNDW": {"qty": 30.0, "price": 101.0, "value": 3_030.0,
+                         "unrealized_pl": -15.0},
+                "GLD": {"qty": 29.7, "price": 102.0, "value": 3_029.4,
+                        "unrealized_pl": 29.4},
             },
             "weights": {"ACWI": 0.4, "BNDW": 0.3, "GLD": 0.3},
             "target_weights": {"ACWI": 0.35, "BNDW": 0.35, "GLD": 0.3},
@@ -127,6 +130,18 @@ def _snapshot():
             {"id": "qaoa_selection", "stage": "offline"},
         ],
         "policy": {"id": "hrp", "label": "Hierarchical risk parity"},
+        "performance": {
+            "series": [
+                {"ts": f"2026-06-{day:02d}", "equity": 10_000.0 * (1.001 ** day)}
+                for day in range(1, 31)
+            ],
+            "metrics": {"ann_return": 0.041, "ann_vol": 0.082, "sharpe": 0.50,
+                        "sortino": 0.71, "max_drawdown": -0.021,
+                        "cvar_95": -0.006, "realized_skew": -0.2,
+                        "realized_kurtosis": 0.8, "deflated_sharpe": 0.6,
+                        "n_obs": 29},
+            "since_start": 0.0124, "note": None, "marks": 30,
+        },
         "equilibrium_returns": {
             "run_id": "eq-run-1",
             "as_of": "2026-07-17",
@@ -1139,6 +1154,83 @@ def test_book_view_renders_positions_plan_cards_and_specific_execute_flow():
             assert app.screen.plan_id == "plan-checked-newest"
             assert app._pending_plan_id == "plan-checked-newest"
             await pilot.click("#cancel-paper")
+
+    asyncio.run(run())
+
+
+def test_book_renders_equity_curve_metrics_and_position_pnl():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("5")
+            equity_panel = str(app.query_one("#book-equity").content)
+            assert "sharpe" in equity_panel and "0.50" in equity_panel
+            assert "$10,100.00" in equity_panel
+            assert "+1.2% since start" in equity_panel
+            positions = str(app.query_one("#book-positions").content)
+            assert "P&L" in positions
+            assert "$40.00" in positions and "$-15.00" in positions
+
+    asyncio.run(run())
+
+
+def test_book_is_honest_when_no_equity_history():
+    from qlab.tui.app import QlabTui
+
+    class NoHistoryClient(StubClient):
+        def get(self, path, **params):
+            snapshot = super().get(path, **params)
+            if path == "/api/tui":
+                snapshot["performance"] = {
+                    "series": [], "metrics": None, "since_start": None,
+                    "note": "no equity history yet", "marks": 0}
+            return snapshot
+
+    async def run():
+        app = QlabTui(NoHistoryClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("5")
+            panel = str(app.query_one("#book-equity").content)
+            assert "No equity history yet" in panel
+            assert "daily ops" in panel
+
+    asyncio.run(run())
+
+
+def test_book_equity_reports_note_when_metrics_are_unavailable():
+    """A short mark history is a contractual state: note, never NaN cells."""
+    from qlab.tui.app import QlabTui
+
+    class ThinHistoryClient(StubClient):
+        def get(self, path, **params):
+            snapshot = super().get(path, **params)
+            if path == "/api/tui":
+                snapshot["performance"] = {
+                    "series": [{"ts": "2026-07-23", "equity": 10_000.0},
+                               {"ts": "2026-07-24", "equity": 10_100.0}],
+                    "metrics": None, "since_start": 0.01,
+                    "note": "insufficient history for realized metrics "
+                            "(need >=4 daily marks)",
+                    "marks": 2}
+                for position in snapshot["portfolio"]["positions"].values():
+                    position.pop("unrealized_pl")
+            return snapshot
+
+    async def run():
+        app = QlabTui(ThinHistoryClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("5")
+            panel = str(app.query_one("#book-equity").content)
+            assert "insufficient history for realized metrics" in panel
+            assert "nan" not in panel.lower()
+            positions = str(app.query_one("#book-positions").content)
+            # No unrealized P&L on the position: an em dash, never a zero.
+            assert "$40.00" not in positions and "—" in positions
 
     asyncio.run(run())
 

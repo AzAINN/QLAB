@@ -28,6 +28,11 @@ from textual.widgets import (
     Static,
 )
 
+from qlab.paths import workspace_root
+from qlab.research.prediction import (
+    IC_ADMISSION_THRESHOLD,
+    IC_STABILITY_THRESHOLD,
+)
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
@@ -59,7 +64,6 @@ from qlab.tui.theme import (
     TEXT_HI,
     UP,
 )
-from qlab.paths import workspace_root
 
 
 _WORKSPACE_ROOT = workspace_root()
@@ -2027,6 +2031,34 @@ class QlabTui(App[None]):
             summary.append(
                 f"Algorithms  [bold]{counts['operational']} operational[/]"
                 f"   ·   {counts['research']} research   ·   {counts['offline']} offline"
+            )
+        latest_prediction = next(
+            (run for run in runs if run.get("kind") == "prediction"),
+            None,
+        )
+        if latest_prediction is None:
+            summary.append(f"[{MUTED}]vol forecast — no prediction run yet[/]")
+        else:
+            prediction_spec = latest_prediction.get("spec")
+            if not isinstance(prediction_spec, dict):
+                prediction_spec = {}
+            mean_ic = float(prediction_spec.get("mean_ic", 0.0))
+            stability = float(prediction_spec.get("ic_stability", 0.0))
+            usable = bool(
+                prediction_spec.get("usable", False)
+                and mean_ic > IC_ADMISSION_THRESHOLD
+                and stability > IC_STABILITY_THRESHOLD
+            )
+            stability_label = (
+                "stable"
+                if stability > IC_STABILITY_THRESHOLD
+                else "unstable"
+            )
+            usability_label = "usable" if usable else "not usable"
+            prediction_tone = UP if usable else DOWN
+            summary.append(
+                f"[{prediction_tone}]vol forecast IC {mean_ic:.3f} "
+                f"({stability_label}) — {usability_label}[/]"
             )
         summary.append("Run [bold]: batch[/] for the staged comparison suite.")
         self.query_one("#research-summary", Static).update("\n".join(summary))

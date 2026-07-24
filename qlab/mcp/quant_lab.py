@@ -716,6 +716,76 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                                  objective_hash=objective_id, objective_form=obj.form)
         return res.to_dict()
 
+    # -- admitted realized-volatility prediction --------------------------
+    def research_predict_vol(
+        as_of: str,
+        universe: str = "core",
+        lookback_days: int = 756,
+    ) -> dict:
+        """Evaluate the research-stage next-21-day realized-vol ridge baseline."""
+        from qlab.research.prediction import predict_vol_ridge
+
+        st.budget.charge("research.predict_vol")
+        if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
+            raise TypeError("lookback_days must be an integer")
+        if lookback_days < 300:
+            raise ValueError(
+                "research.predict_vol requires at least 300 return observations "
+                "for lagged features and purged walk-forward folds"
+            )
+
+        d = check_as_of(as_of)
+        tickers = load_universe().tickers(universe)
+        snapshot = market.snapshot(
+            tickers,
+            d,
+            lookback_days=lookback_days + 1,
+            offline=st.offline,
+            seed=st.seed,
+        )
+        panel = snapshot.log_returns().dropna(how="any")
+        result = predict_vol_ridge(panel)
+        caveats = ["risk prediction only", "research stage"]
+        run_spec = {
+            "algorithm_id": "vol_prediction_ridge",
+            "as_of": str(d),
+            "universe": universe,
+            "tickers": tickers,
+            "lookback_days": lookback_days,
+            "source": snapshot.source,
+            "mean_ic": result["mean_ic"],
+            "ic_stability": result["ic_stability"],
+            "ic_std": result["ic_std"],
+            "usable": result["usable"],
+            "chosen_alpha": result["chosen_alpha"],
+            "per_fold": result["per_fold"],
+            "n_obs": result["n_obs"],
+            "features": result["features"],
+            "target": result["target"],
+            "horizon_days": result["horizon_days"],
+            "embargo_days": result["embargo_days"],
+            "admission": result["admission"],
+            "dsr_trial_counted": False,
+            "caveats": caveats,
+        }
+        run_id = st.registry.log_run("prediction", run_spec)
+        # Prediction validation writes neither a solution nor a backtest row,
+        # so the DSR trial universe is unchanged.
+        return {
+            "run_id": run_id,
+            "mean_ic": result["mean_ic"],
+            "ic_stability": result["ic_stability"],
+            "usable": result["usable"],
+            "chosen_alpha": result["chosen_alpha"],
+            "per_fold": result["per_fold"],
+            "caveats": caveats,
+        }
+
+    if owner_only:
+        # This executes a research-stage model and is therefore reached only
+        # through the one-writer owner and its role-scoped stateless proxy.
+        app.tool(name="research.predict_vol")(research_predict_vol)
+
     # -- equilibrium expected returns --------------------------------------
     @app.tool(name="research.equilibrium_returns")
     def research_equilibrium_returns(

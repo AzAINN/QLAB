@@ -101,6 +101,14 @@ _ALGORITHMS = (
         "never move expected returns. KL-budgeted; research stage.",
     ),
     AlgorithmSpec(
+        "vol_prediction_ridge", "Realized-volatility ridge baseline",
+        "prediction", "research", ("risk_forecast",), None,
+        "research.predict_vol",
+        "Purged walk-forward baseline for next-21-day equal-weight portfolio "
+        "realized volatility. It predicts risk only and requires the IC "
+        "admission gate; it never estimates returns or enters paper execution.",
+    ),
+    AlgorithmSpec(
         "regime_min_variance", "Regime-conditioned minimum variance", "allocation",
         "research", ("min_variance",), "classical", None,
         "Covariance-only research arm conditioned by the deterministic regime signal.",

@@ -73,6 +73,7 @@ _LAB_TOOL_BASES = {
     "backtest.run",
     "research.apply_views",
     "research.equilibrium_returns",
+    "research.predict_vol",
     "research.window_evidence",
     "registry.list_runs",
     "registry.report",
@@ -93,6 +94,10 @@ _WORKFLOW_PHASE = {
 
 _ADVISORY_ROLES = ("data-qa", "signal-qa")
 _QUARANTINED_ROLE = "news-extractor"
+_PREDICTION_RESEARCH_ROLES = frozenset({
+    "signal-qa",
+    "moments-analyst",
+})
 
 # Session-local model routing. ``inherit`` in the neutral source is the
 # no-override sentinel; any concrete ``model:`` value in an agent source wins
@@ -259,6 +264,8 @@ def build_workforce_agents(goal: str = "") -> dict[str, dict]:
         ):
             continue
         tools = [mapped for tool in source.tools if (mapped := _proxy_tool(tool))]
+        if source.name in _PREDICTION_RESEARCH_ROLES:
+            tools.append(_claude_tool("research.predict_vol"))
         if is_extractor:
             expected_tools = [_claude_tool("research.apply_views")]
             if tools != expected_tools:
@@ -305,8 +312,10 @@ QLAB OWNER-WORKFORCE ADVISOR MODE:
   twice more; never repeat an identical failing call. An unreachable owner is
   terminal and must be reported without retry.
 - `registry.log_decision` with kind `{decision_kind}` is your sole permitted
-  write. You cannot solve, backtest, log a verdict, update workflow state,
-  touch the paper book, preview a rebalance, or execute an order.
+  agent-authored audit write. When granted, `research.predict_vol` may also
+  persist its own deterministic, DSR-excluded research run. You cannot make any
+  other write, solve, backtest, log a verdict, update workflow state, touch the
+  paper book, preview a rebalance, or execute an order.
 - Do not spawn other agents. Use owner MCP facts and cite exact returned
   numbers; never invent data, ids, detector output, or research evidence.
 - Your recommendation is advisory. The analyst/coordinator decides whether and

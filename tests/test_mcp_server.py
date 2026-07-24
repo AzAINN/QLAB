@@ -50,6 +50,7 @@ def test_combined_registration_exposes_both_namespaces():
     assert "research.apply_views" in app.names
     assert "research.equilibrium_returns" in app.names
     assert "research.window_evidence" in app.names
+    assert "research.predict_vol" not in app.names
     # Research-stage executables are owner-only: agent-facing surfaces —
     # headless included — must not mount them (catalog stage boundary).
     assert "selection.run" not in app.names
@@ -61,6 +62,7 @@ def test_combined_registration_exposes_both_namespaces():
     assert "qa.data_integrity" in owner_app.names
     assert "research.apply_views" in owner_app.names
     assert "research.equilibrium_returns" in owner_app.names
+    assert "research.predict_vol" in owner_app.names
     assert "research.window_evidence" in owner_app.names
     assert "selection_run" not in owner_app.names
     assert {"algorithms.list", "algorithms.describe", "algorithms.solve"} <= set(app.names)
@@ -86,6 +88,82 @@ def test_window_evidence_is_in_owner_and_moments_analyst_scopes():
     assert base in _LAB_TOOL_BASES
     analyst_tools = build_workforce_agents()["moments-analyst"]["tools"]
     assert _claude_tool(base) in analyst_tools
+
+
+def test_prediction_is_owner_scoped_to_signal_qa_and_moments_analyst():
+    from qlab.mcp.tui_proxy import register_proxy_tools
+    from qlab.tui.claude import (
+        _LAB_TOOL_BASES,
+        _PROXY_TOOLS,
+        _claude_tool,
+        build_workforce_agents,
+    )
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    base = "research.predict_vol"
+    tool = _claude_tool(base)
+    assert base in OWNER_LAB_TOOLS
+    assert base in _LAB_TOOL_BASES
+    assert tool in _PROXY_TOOLS
+
+    proxy = StubApp()
+    register_proxy_tools(proxy, object())
+    assert "research_predict_vol" in proxy.names
+
+    agents = build_workforce_agents()
+    assert tool in agents["signal-qa"]["tools"]
+    assert tool in agents["moments-analyst"]["tools"]
+    for role in (
+        "data-qa",
+        "challenger",
+        "optimization-runner",
+        "referee",
+        "reporter",
+    ):
+        assert tool not in agents[role]["tools"]
+
+
+def test_prediction_tool_round_trip_is_offline_and_dsr_excluded(reg):
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+
+    app = StubApp()
+    register_lab_tools(
+        app,
+        LabState(offline=True, registry=reg, seed=17),
+        owner_only=True,
+    )
+    trials_before = (reg.trial_count(), reg.backtest_trial_count())
+
+    result = app.tools["research.predict_vol"](
+        as_of="2024-12-31",
+        universe="core",
+        lookback_days=504,
+    )
+
+    assert {
+        "run_id",
+        "mean_ic",
+        "ic_stability",
+        "usable",
+        "chosen_alpha",
+        "per_fold",
+        "caveats",
+    } <= set(result)
+    assert result["caveats"] == [
+        "risk prediction only",
+        "research stage",
+    ]
+    assert len(result["per_fold"]) == 5
+    assert all(
+        fold["test_start_index"] - fold["train_end_index"] - 1 == 21
+        for fold in result["per_fold"]
+    )
+    report = reg.report(result["run_id"])
+    assert report["run"][0]["kind"] == "prediction"
+    assert report["run"][0]["spec"]["algorithm_id"] == "vol_prediction_ridge"
+    assert report["run"][0]["spec"]["dsr_trial_counted"] is False
+    assert (reg.trial_count(), reg.backtest_trial_count()) == trials_before
 
 
 def test_data_integrity_is_in_every_agent_visible_registration_scope():

@@ -1367,6 +1367,68 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
             "lookback_days": 504, "offline": True,
         },
     )
+    app.tools["research_predict_vol"](
+        "2026-07-17", lookback_days=504,
+    )
+    assert client.calls[-1] == (
+        "POST", "/api/lab/research.predict_vol",
+        {
+            "as_of": "2026-07-17", "universe": "core",
+            "lookback_days": 504, "offline": True,
+        },
+    )
+
+
+def test_research_view_renders_latest_prediction_admission_with_tone():
+    from qlab.tui.app import QlabTui
+    from qlab.tui.theme import DOWN, UP
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.2)
+            app.snapshot["runs"] = [
+                {
+                    "run_id": "prediction-new",
+                    "kind": "prediction",
+                    "created_at": "2026-07-17T12:00:00+00:00",
+                    "spec": {
+                        "mean_ic": 0.0412,
+                        "ic_stability": 0.81,
+                        "usable": True,
+                    },
+                },
+                {
+                    "run_id": "prediction-old",
+                    "kind": "prediction",
+                    "created_at": "2026-07-16T12:00:00+00:00",
+                    "spec": {
+                        "mean_ic": -0.2,
+                        "ic_stability": -1.0,
+                        "usable": False,
+                    },
+                },
+            ]
+            app._render_research()
+            summary = str(app.query_one("#research-summary").content)
+            expected = "vol forecast IC 0.041 (stable) — usable"
+            assert expected in summary
+            assert f"[{UP}]{expected}[/]" in summary
+
+            app.snapshot["runs"][0]["spec"] = {
+                "mean_ic": 0.029,
+                "ic_stability": 0.72,
+                # The view must independently enforce the strict IC threshold
+                # before displaying a persisted result as usable.
+                "usable": True,
+            }
+            app._render_research()
+            summary = str(app.query_one("#research-summary").content)
+            expected = "vol forecast IC 0.029 (stable) — not usable"
+            assert expected in summary
+            assert f"[{DOWN}]{expected}[/]" in summary
+
+    asyncio.run(run())
 
 
 def test_owner_refusals_reach_the_worker_with_their_reason():

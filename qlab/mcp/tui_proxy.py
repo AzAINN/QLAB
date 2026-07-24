@@ -187,6 +187,19 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "lookback_days": lookback_days,
         })
 
+    @app.tool(name="research_predict_vol")
+    def research_predict_vol(
+        as_of: str,
+        universe: str = "core",
+        lookback_days: int = 756,
+    ) -> dict:
+        """Evaluate the owner-held, research-stage realized-vol baseline."""
+        return lab("research.predict_vol", {
+            "as_of": as_of,
+            "universe": universe,
+            "lookback_days": lookback_days,
+        })
+
     @app.tool(name="research_window_evidence")
     def research_window_evidence(
         as_of: str,

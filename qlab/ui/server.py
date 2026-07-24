@@ -104,6 +104,7 @@ OWNER_LAB_TOOLS = frozenset({
     "backtest.run",
     "research.apply_views",
     "research.equilibrium_returns",
+    "research.predict_vol",
     "research.window_evidence",
     "registry.list_runs",
     "registry.report",

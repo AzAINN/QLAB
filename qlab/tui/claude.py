@@ -2,10 +2,10 @@
 
 `ask` sessions use a strict empty MCP config and no built-in tools. Workforce
 sessions run an isolated, session-local qlab coordinator that can only delegate
-to five session-local domain agents. Those agents receive least-privilege tools
-from :mod:`qlab.mcp.tui_proxy`; the proxy calls the owner API and never opens
-DuckDB. No Claude role receives filesystem, shell, code-editing, or
-paper-execution authority.
+to five gated pipeline roles and two advisory QA roles. Those agents receive
+least-privilege tools from :mod:`qlab.mcp.tui_proxy`; the proxy calls the owner
+API and never opens DuckDB. No Claude role receives filesystem, shell,
+code-editing, or paper-execution authority.
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ _OBSERVATION_TOOLS = [
 _LAB_TOOL_BASES = {
     "data.fetch_universe",
     "data.snapshot_summary",
+    "qa.data_integrity",
     "moments.estimate",
     "regime.turbulence",
     "regime.absorption",
@@ -86,6 +87,8 @@ _WORKFLOW_PHASE = {
     "referee": "referee",
     "reporter": "reporter",
 }
+
+_ADVISORY_ROLES = ("data-qa", "signal-qa")
 
 _PHASE_ARTIFACT_CONTRACT = {
     "analyst": (
@@ -214,9 +217,44 @@ def build_workforce_agents() -> dict[str, dict]:
     agents: dict[str, dict] = {}
     for source in load_agents():
         phase = _WORKFLOW_PHASE.get(source.name)
-        if phase is None:
+        if phase is None and source.name not in _ADVISORY_ROLES:
             continue
         tools = [mapped for tool in source.tools if (mapped := _proxy_tool(tool))]
+        if phase is None:
+            decision_kind = source.name.replace("-", "_")
+            advisor_override = f"""
+
+QLAB OWNER-WORKFORCE ADVISOR MODE:
+- You are an evidence advisor, never a software developer. Do not read, edit,
+  write, or search repository files and do not run shell commands.
+- You own no workflow phase and hold no workflow tools. Return your findings
+  directly to the coordinator; never claim a phase completion or gate.
+- Emit independent evidence calls together in ONE turn. Only serialize a call
+  whose input is another call's output.
+- Run autonomously and never ask the operator a question. When a parameter is
+  unspecified, use the coordinator's as_of, universe, and sensible qlab
+  defaults, state the assumption, and proceed.
+- A tool error carries the owner's reason. Correct the call and try at most
+  twice more; never repeat an identical failing call. An unreachable owner is
+  terminal and must be reported without retry.
+- `registry.log_decision` with kind `{decision_kind}` is your sole permitted
+  write. You cannot solve, backtest, log a verdict, update workflow state,
+  touch the paper book, preview a rebalance, or execute an order.
+- Do not spawn other agents. Use owner MCP facts and cite exact returned
+  numbers; never invent data, ids, detector output, or research evidence.
+- Your recommendation is advisory. The analyst/coordinator decides whether and
+  how it changes the governed pipeline.
+""".strip()
+            agents[source.name] = {
+                "description": source.description,
+                "prompt": source.body + "\n\n" + advisor_override,
+                "tools": list(dict.fromkeys(tools)),
+                "model": source.model or "inherit",
+                "permissionMode": "dontAsk",
+                "maxTurns": 16,
+            }
+            continue
+
         tools.append(_claude_tool(f"workflow.{phase}"))
         if source.name in {"moments-analyst", "optimization-runner", "referee"}:
             # The owner sees an HTTP caller, not which Claude subagent made it:
@@ -298,7 +336,7 @@ champion instruction above):
             "maxTurns": 24,
         }
 
-    role_names = ",".join(_WORKFLOW_PHASE)
+    role_names = ",".join((*_ADVISORY_ROLES, *_WORKFLOW_PHASE))
     agents[_COORDINATOR_NAME] = {
         "description": "Coordinates qlab's governed portfolio workforce; never develops code.",
         "prompt": (
@@ -323,7 +361,21 @@ champion instruction above):
             "the normal portfolio_review workflow. If the user message contains "
             "RESUME_WORKFLOW_ID, call workflow_status for that id, do not create a "
             "new workflow, and continue its exact non-done steps.\n\n"
-            "For a normal workflow, run the roles as this dependency graph:\n"
+            "QA roles are advisors, never workflow phases. Optionally dispatch "
+            "data-qa as the FIRST Agent, before any analyst, when the goal "
+            "mentions data quality or verification or before a panel workflow. "
+            "Give it the exact as_of, universe, and intended lookback. Pass its exact "
+            "clean flag, threshold table, ticker findings, recommendation, and "
+            "decision record into every moments-analyst brief; the finding is "
+            "advisory, so you and the analyst decide whether integrity warrants "
+            "stopping analysis. For other normal goals you may skip this "
+            "preflight. If the goal specifically asks to validate a signal, "
+            "regime interpretation, look-ahead risk, or stationarity, dispatch "
+            "signal-qa after the analyst proposes its read and before downstream "
+            "review. Pass that advisory assessment into the challenger/referee "
+            "briefs. Neither QA role updates or completes a workflow phase.\n\n"
+            "For a normal workflow, after any QA preflight, run the gated roles "
+            "as this dependency graph:\n"
             "1. moments-analyst alone, and wait for its result.\n"
             "2. challenger AND optimization-runner together — emit both Agent "
             "calls in the SAME turn. Each depends only on the analyst and never on "
@@ -352,7 +404,7 @@ champion instruction above):
             "the judge's winning targets verbatim and the winning analyst branch's "
             "decision_id so the PASS binds to the judged winner.\n"
             "5. Dispatch reporter for exact phase 'reporter' only after PASS.\n\n"
-            "Every worker brief carries the workflow_id, exact workflow phase, "
+            "Every gated worker brief carries the workflow_id, exact workflow phase, "
             "original goal, as_of, universe, and the exact persisted artifacts it "
             "depends on. Never re-type, re-round, or re-order target objects: the "
             "judge and referee bindings hash those exact weights. Use "
@@ -407,7 +459,9 @@ def write_session_agents(root: Path, agents: dict[str, dict]) -> list[Path]:
     agent_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for name, definition in agents.items():
-        if name not in {*_WORKFLOW_PHASE, _COORDINATOR_NAME, "qlab-desk"}:
+        if name not in {
+            *_WORKFLOW_PHASE, *_ADVISORY_ROLES, _COORDINATOR_NAME, "qlab-desk"
+        }:
             raise ValueError(f"unexpected session agent name: {name!r}")
         prompt = str(definition["prompt"])
         frontmatter = {

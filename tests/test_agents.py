@@ -30,10 +30,12 @@ def _generated_claude_tool_ids(md_path: Path) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
-def test_all_five_roles_present():
+def test_all_seven_roles_present():
     agents = _by_name()
-    assert set(agents) == {"moments-analyst", "challenger", "optimization-runner",
-                           "referee", "reporter"}
+    assert set(agents) == {
+        "data-qa", "signal-qa", "moments-analyst", "challenger",
+        "optimization-runner", "referee", "reporter",
+    }
 
 
 def test_least_privilege_separation():
@@ -56,6 +58,38 @@ def test_least_privilege_separation():
 
     # referee is read-only w.r.t. the book: no execution-gateway tools at all.
     assert role_scopes(a["referee"].tools)["trader"] == set()
+
+    regime_reads = {
+        "regime.turbulence",
+        "regime.absorption",
+        "regime.volatility_term_structure",
+        "regime.drawdown",
+        "regime.tail_risk",
+    }
+    expected_qa_tools = {
+        "data-qa": {
+            "data.snapshot_summary",
+            "qa.data_integrity",
+            "registry.log_decision",
+            *regime_reads,
+        },
+        "signal-qa": {
+            "research.window_evidence",
+            "registry.list_runs",
+            "registry.report",
+            "registry.log_decision",
+            *regime_reads,
+        },
+    }
+    for name, expected in expected_qa_tools.items():
+        scopes = role_scopes(a[name].tools)
+        assert scopes["lab"] == expected
+        assert scopes["trader"] == set()
+        assert "registry.log_verdict" not in scopes["lab"]
+        assert "backtest.run" not in scopes["lab"]
+        assert "algorithms.solve" not in scopes["lab"]
+        assert not any(base.startswith(("solve.", "workflow."))
+                       for base in scopes["lab"])
 
     # reporter is the ONLY role whose tools intersect the execution gateway.
     with_trader = {name for name, ag in a.items()
@@ -98,7 +132,11 @@ def test_generated_claude_adapters_use_qlab_prefix():
 
 def test_sync_writes_both_adapters(tmp_path: Path):
     written = sync(claude_out=tmp_path / "claude", bob_out=tmp_path / "bob")
-    assert len(written["claude"]) == 5
-    assert len(written["bob"]) == 5
+    assert len(written["claude"]) == 7
+    assert len(written["bob"]) == 7
+    assert (tmp_path / "claude" / "data-qa.md").exists()
+    assert (tmp_path / "bob" / "data-qa.yaml").exists()
+    assert (tmp_path / "claude" / "signal-qa.md").exists()
+    assert (tmp_path / "bob" / "signal-qa.yaml").exists()
     assert (tmp_path / "claude" / "referee.md").exists()
     assert (tmp_path / "bob" / "referee.yaml").exists()

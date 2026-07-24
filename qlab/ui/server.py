@@ -71,6 +71,14 @@ _MARKET_THREAD_JOIN_TIMEOUT_SECONDS = 5.0
 _MARKET_THREAD_LOCK = threading.Lock()
 _ACTIVE_MARKET_THREAD: threading.Thread | None = None
 
+_GATED_WORKFORCE_ROLES = frozenset({
+    "moments-analyst",
+    "challenger",
+    "optimization-runner",
+    "referee",
+    "reporter",
+})
+
 
 # These research operations may be reached through the TUI's stateless MCP
 # proxy. They can write research/audit rows, but none can mutate the paper book
@@ -78,6 +86,7 @@ _ACTIVE_MARKET_THREAD: threading.Thread | None = None
 OWNER_LAB_TOOLS = frozenset({
     "data.fetch_universe",
     "data.snapshot_summary",
+    "qa.data_integrity",
     "moments.estimate",
     "selection.run",
     "regime.hmm",
@@ -512,6 +521,8 @@ class UISession:
         }
         rows = []
         for agent in load_agents():
+            if agent.name not in _GATED_WORKFORCE_ROLES:
+                continue
             authority = {
                 "moments-analyst": "RESEARCH",
                 "challenger": "CHALLENGE",
@@ -941,7 +952,8 @@ def _bootstrap(session: UISession) -> dict:
     uni = load_universe()
     agents = [{"name": a.name, "description": a.description,
                "servers": sorted(a.server_scopes), "n_tools": len(a.tools),
-               "tools": a.tools} for a in load_agents()]
+               "tools": a.tools} for a in load_agents()
+              if a.name in _GATED_WORKFORCE_ROLES]
     m = session.mandate
     return {
         "today": date.today().isoformat(),

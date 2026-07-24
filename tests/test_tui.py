@@ -261,11 +261,13 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
 
     agents = build_workforce_agents()
     assert set(agents) == {
-        "qlab-coordinator", "moments-analyst", "challenger",
+        "qlab-coordinator", "data-qa", "signal-qa",
+        "moments-analyst", "challenger",
         "optimization-runner", "referee", "reporter",
     }
     assert agents["qlab-coordinator"]["tools"] == [
-        "Agent(moments-analyst,challenger,optimization-runner,referee,reporter)",
+        "Agent(data-qa,signal-qa,moments-analyst,challenger,"
+        "optimization-runner,referee,reporter)",
         "mcp__qlab-operator__workflow_start",
         "mcp__qlab-operator__workflow_status",
         "mcp__qlab-operator__workflow_phase",
@@ -276,12 +278,15 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
     }
     assert not ({"Read", "Write", "Edit", "Bash"} & all_role_tools)
     assert not any("execute" in tool or "order" in tool for tool in all_role_tools)
-    # Every worker may read its own run's durable record — the referee checks
+    # Every gated worker may read its own run's durable record — the referee checks
     # against what was persisted, not against ids retyped into its task, and a
     # garbled hand-off stays recoverable instead of stalling the phase.
-    for name, definition in agents.items():
-        if name == "qlab-coordinator":
-            continue
+    gated = {
+        "moments-analyst", "challenger", "optimization-runner",
+        "referee", "reporter",
+    }
+    for name in gated:
+        definition = agents[name]
         assert "mcp__qlab-operator__workflow_status" in definition["tools"], name
         # The named tools stay role-specific. Only roles used for dynamic panel
         # phases receive the generic route; their prompt binds it to the exact
@@ -297,20 +302,37 @@ def test_workforce_claude_command_loads_only_coordinator_and_owner_proxy():
         else:
             assert generic not in definition["tools"]
 
+    for name in {"data-qa", "signal-qa"}:
+        definition = agents[name]
+        assert not any(
+            "__workflow_" in tool for tool in definition["tools"]
+        ), name
+        assert "mcp__qlab-operator__registry_log_decision" in definition["tools"]
+        assert "sole permitted" in definition["prompt"]
+        for banned in (
+            "registry_log_verdict", "algorithms_solve", "solve_classical",
+            "backtest_run", "workflow_phase",
+        ):
+            assert not any(banned in tool for tool in definition["tools"]), (
+                name, banned,
+            )
+
 
 def test_session_agent_files_preserve_workforce_authority(tmp_path):
     from qlab.tui.claude import build_workforce_agents, write_session_agents
 
     written = write_session_agents(tmp_path, build_workforce_agents())
     assert {path.stem for path in written} == {
-        "qlab-coordinator", "moments-analyst", "challenger",
+        "qlab-coordinator", "data-qa", "signal-qa",
+        "moments-analyst", "challenger",
         "optimization-runner", "referee", "reporter",
     }
     coordinator = tmp_path / ".claude" / "agents" / "qlab-coordinator.md"
     _, front, body = coordinator.read_text(encoding="utf-8").split("---", 2)
     metadata = yaml.safe_load(front)
     assert metadata["tools"].split(", ") == [
-        "Agent(moments-analyst,challenger,optimization-runner,referee,reporter)",
+        "Agent(data-qa,signal-qa,moments-analyst,challenger,"
+        "optimization-runner,referee,reporter)",
         "mcp__qlab-operator__workflow_start",
         "mcp__qlab-operator__workflow_status",
         "mcp__qlab-operator__workflow_phase",
@@ -335,6 +357,11 @@ def test_coordinator_dispatches_synchronously_and_fans_out_in_parallel():
     assert "analyst-1" in coordinator and "optimizer-1" in coordinator
     assert "exact workflow phase 'judge'" in coordinator
     assert "walk-forward evidence" in coordinator
+    assert "Optionally dispatch data-qa as the FIRST Agent" in coordinator
+    assert "before a panel workflow" in coordinator
+    assert "Pass its exact clean flag" in coordinator
+    assert "dispatch signal-qa after the analyst" in coordinator
+    assert "Neither QA role updates or completes a workflow phase" in coordinator
     # bounded recovery: one re-dispatch, then stop — never an unbounded loop
     assert "ONCE" in coordinator and "do not loop" in coordinator
 
@@ -1256,6 +1283,16 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
         {
             "as_of": "2026-07-17", "universe": "core",
             "cadence": "annual", "offline": True,
+        },
+    )
+    app.tools["qa_data_integrity"](
+        "2026-07-17", lookback_days=504,
+    )
+    assert client.calls[-1] == (
+        "POST", "/api/lab/qa.data_integrity",
+        {
+            "as_of": "2026-07-17", "universe": "core",
+            "lookback_days": 504, "offline": True,
         },
     )
     app.tools["research_equilibrium_returns"](

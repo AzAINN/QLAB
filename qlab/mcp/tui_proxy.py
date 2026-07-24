@@ -149,6 +149,14 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "as_of": as_of, "universe": universe, "lookback_days": lookback_days,
         })
 
+    @app.tool(name="qa_data_integrity")
+    def qa_data_integrity(as_of: str, universe: str = "core",
+                          lookback_days: int = 756) -> dict:
+        """Deterministic per-ticker freshness, gap, jump, and span findings."""
+        return lab("qa.data_integrity", {
+            "as_of": as_of, "universe": universe, "lookback_days": lookback_days,
+        })
+
     @app.tool(name="moments_estimate")
     def moments_estimate(as_of: str, universe: str = "core",
                          lookback_days: int = 756,

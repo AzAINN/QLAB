@@ -3,6 +3,7 @@
 Namespaced, ref-passing tools the orchestrator's subagents call:
 
     data.*       fetch the universe, summarize a point-in-time snapshot
+    qa.*         run deterministic, read-only snapshot integrity checks
     moments.*    estimate co-moments (returns a moment_set_id + summary)
     selection.*  run the exact research-stage candidate-universe selector
     objective.*  build the one-true objective (returns an objective_id)
@@ -20,7 +21,9 @@ Tools return **ids + diagnostics only** — never raw tensors (invariant 1).
 
 from __future__ import annotations
 
+import math
 import os
+from datetime import date
 
 from qlab.arms import Arm, MomentsConfig, build_policy
 from qlab.algorithms.catalog import (
@@ -41,6 +44,105 @@ from qlab.core.window_evidence import window_evidence
 from qlab.experiment import recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
 from qlab.solvers.base import Constraints
+
+
+_DATA_INTEGRITY_THRESHOLDS = {
+    "max_last_bar_age_days": 4,
+    "max_longest_gap_days": 5,
+    "max_abs_1d_return": 0.35,
+    "max_missing_bars": 0,
+    "min_span_coverage": 0.95,
+}
+
+
+def _index_date(value) -> date:
+    """Normalize one price-index value without assuming a pandas index type."""
+    converted = value.date() if hasattr(value, "date") else value
+    if isinstance(converted, date):
+        return converted
+    return date.fromisoformat(str(converted)[:10])
+
+
+def _data_integrity_findings(
+    snapshot: DataSnapshot,
+    lookback_days: int,
+) -> list[dict]:
+    """Build the deterministic per-ticker integrity table (never raw prices)."""
+    findings: list[dict] = []
+    for ticker in snapshot.tickers:
+        series = snapshot.prices[ticker].tail(lookback_days)
+        valid = series.dropna()
+        n_obs = int(valid.shape[0])
+        missing_bars = int(series.isna().sum())
+        coverage = n_obs / lookback_days
+
+        valid_dates = [_index_date(value) for value in valid.index]
+        last_bar = valid_dates[-1] if valid_dates else None
+        last_bar_age_days = (
+            max(0, (snapshot.as_of - last_bar).days)
+            if last_bar is not None
+            else None
+        )
+        longest_gap_days = max(
+            (right - left).days
+            for left, right in zip(valid_dates, valid_dates[1:])
+        ) if len(valid_dates) > 1 else 0
+
+        raw_max_return = series.astype(float).pct_change(
+            fill_method=None
+        ).abs().max()
+        non_finite_return = (
+            raw_max_return == raw_max_return
+            and not math.isfinite(float(raw_max_return))
+        )
+        max_abs_return = (
+            float(raw_max_return)
+            if raw_max_return == raw_max_return
+            and math.isfinite(float(raw_max_return))
+            else None
+        )
+
+        issues: list[str] = []
+        if missing_bars > _DATA_INTEGRITY_THRESHOLDS["max_missing_bars"]:
+            issues.append("missing_bars")
+        if (
+            last_bar_age_days is None
+            or last_bar_age_days
+            > _DATA_INTEGRITY_THRESHOLDS["max_last_bar_age_days"]
+        ):
+            issues.append("stale_series")
+        if (
+            longest_gap_days
+            > _DATA_INTEGRITY_THRESHOLDS["max_longest_gap_days"]
+        ):
+            issues.append("long_gap")
+        if non_finite_return or (
+            max_abs_return is not None
+            and max_abs_return
+            > _DATA_INTEGRITY_THRESHOLDS["max_abs_1d_return"]
+        ):
+            issues.append("extreme_jump")
+        if coverage < _DATA_INTEGRITY_THRESHOLDS["min_span_coverage"]:
+            issues.append("insufficient_span")
+
+        findings.append({
+            "ticker": ticker,
+            "last_bar": last_bar.isoformat() if last_bar else None,
+            "last_bar_age_days": last_bar_age_days,
+            "longest_gap_days": int(longest_gap_days),
+            "missing_bars": missing_bars,
+            "max_abs_1d_return": (
+                round(max_abs_return, 6)
+                if max_abs_return is not None
+                else None
+            ),
+            "n_obs": n_obs,
+            "lookback_days": int(lookback_days),
+            "span_coverage": round(coverage, 4),
+            "issues": issues,
+            "clean": not issues,
+        })
+    return findings
 
 
 def _require_operational_backtest_pair(objective: str, solver: str) -> None:
@@ -151,6 +253,39 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         return {"as_of": str(d), "tickers": tickers, "source": snap.source,
                 "rows": int(len(snap.prices)),
                 "regime": detect_regime(snap)["regime"]}
+
+    # -- deterministic data QA ---------------------------------------------
+    @app.tool(name="qa.data_integrity")
+    def qa_data_integrity(as_of: str, universe: str = "core",
+                          lookback_days: int = 756) -> dict:
+        """Check snapshot freshness, gaps, jumps, and span without mutating it."""
+        st.budget.charge("qa.data_integrity")
+        if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
+            raise TypeError("lookback_days must be an integer")
+        if lookback_days < 2:
+            raise ValueError("lookback_days must be at least 2")
+
+        d = check_as_of(as_of)
+        tickers = load_universe().tickers(universe)
+        snap = market.snapshot(
+            tickers,
+            d,
+            lookback_days=lookback_days,
+            offline=st.offline,
+            seed=st.seed,
+        )
+        findings = _data_integrity_findings(snap, lookback_days)
+        flagged = [row["ticker"] for row in findings if not row["clean"]]
+        return {
+            "as_of": str(d),
+            "universe": universe,
+            "source": snap.source,
+            "lookback_days": lookback_days,
+            "thresholds": dict(_DATA_INTEGRITY_THRESHOLDS),
+            "findings": findings,
+            "flagged_tickers": flagged,
+            "clean": not flagged,
+        }
 
     # -- moments ------------------------------------------------------------
     @app.tool(name="moments.estimate")

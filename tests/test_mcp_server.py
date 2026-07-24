@@ -46,6 +46,7 @@ def test_combined_registration_exposes_both_namespaces():
     register_lab_tools(app, LabState(offline=True, registry=reg))
     register_trader_tools(app, TraderState(registry=reg, offline=True))
     assert "moments.estimate" in app.names
+    assert "qa.data_integrity" in app.names
     assert "research.equilibrium_returns" in app.names
     assert "research.window_evidence" in app.names
     # Research-stage executables are owner-only: agent-facing surfaces —
@@ -56,6 +57,7 @@ def test_combined_registration_exposes_both_namespaces():
     register_lab_tools(
         owner_app, LabState(offline=True, registry=reg), owner_only=True)
     assert "selection.run" in owner_app.names
+    assert "qa.data_integrity" in owner_app.names
     assert "research.equilibrium_returns" in owner_app.names
     assert "research.window_evidence" in owner_app.names
     assert "selection_run" not in owner_app.names
@@ -84,6 +86,24 @@ def test_window_evidence_is_in_owner_and_moments_analyst_scopes():
     assert _claude_tool(base) in analyst_tools
 
 
+def test_data_integrity_is_in_every_agent_visible_registration_scope():
+    from qlab.tui.claude import (
+        _LAB_TOOL_BASES,
+        _PROXY_TOOLS,
+        _claude_tool,
+        build_workforce_agents,
+    )
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    base = "qa.data_integrity"
+    tool = _claude_tool(base)
+    assert base in OWNER_LAB_TOOLS
+    assert base in _LAB_TOOL_BASES
+    assert tool in _PROXY_TOOLS
+    assert tool in build_workforce_agents()["data-qa"]["tools"]
+    assert tool not in build_workforce_agents()["signal-qa"]["tools"]
+
+
 def test_equilibrium_returns_is_in_agent_visible_owner_scope():
     from qlab.tui.claude import (
         _LAB_TOOL_BASES,
@@ -96,6 +116,73 @@ def test_equilibrium_returns_is_in_agent_visible_owner_scope():
     assert base in OWNER_LAB_TOOLS
     assert base in _LAB_TOOL_BASES
     assert _claude_tool(base) in _PROXY_TOOLS
+
+
+def test_data_integrity_reports_an_injected_stale_ticker(reg, monkeypatch):
+    from datetime import date
+
+    import numpy as np
+    import pandas as pd
+
+    import qlab.mcp.quant_lab as quant_lab
+    from qlab.core.types import DataSnapshot
+    from qlab.core.universe import load_universe
+    from qlab.mcp.guardrails import LabState
+
+    tickers = load_universe().tickers("core")
+    index = pd.bdate_range(end="2020-02-28", periods=40)
+    base = np.linspace(100.0, 110.0, len(index))
+    prices = pd.DataFrame({
+        ticker: base * (1.0 + offset / 100.0)
+        for offset, ticker in enumerate(tickers)
+    }, index=index)
+    stale_ticker = tickers[-1]
+    prices.loc[index[-8]:, stale_ticker] = np.nan
+    snapshot = DataSnapshot(
+        tickers=tickers,
+        prices=prices,
+        as_of=date(2020, 2, 28),
+        source="synthetic",
+    )
+
+    def injected_snapshot(requested, as_of, **kwargs):
+        assert requested == tickers
+        assert as_of == date(2020, 2, 28)
+        assert kwargs["lookback_days"] == 40
+        return snapshot
+
+    monkeypatch.setattr(quant_lab.market, "snapshot", injected_snapshot)
+    app = StubApp()
+    quant_lab.register_lab_tools(
+        app, LabState(offline=True, registry=reg),
+    )
+
+    result = app.tools["qa.data_integrity"](
+        as_of="2020-02-28",
+        universe="core",
+        lookback_days=40,
+    )
+
+    assert result["clean"] is False
+    assert result["flagged_tickers"] == [stale_ticker]
+    assert result["thresholds"] == {
+        "max_last_bar_age_days": 4,
+        "max_longest_gap_days": 5,
+        "max_abs_1d_return": 0.35,
+        "max_missing_bars": 0,
+        "min_span_coverage": 0.95,
+    }
+    stale = next(
+        row for row in result["findings"]
+        if row["ticker"] == stale_ticker
+    )
+    assert stale["last_bar_age_days"] > 4
+    assert stale["missing_bars"] == 8
+    assert stale["n_obs"] == 32
+    assert stale["span_coverage"] == 0.8
+    assert {"missing_bars", "stale_series", "insufficient_span"} <= set(
+        stale["issues"]
+    )
 
 
 def test_backtest_run_refuses_mislabeled_objective_solver_pair(

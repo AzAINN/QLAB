@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yaml
 
+from qlab.core.universe import load_universe
 from qlab.paths import data_path
 
 
@@ -25,6 +26,7 @@ class Mandate:
     paper_capital: float = 10000.0
     base_currency: str = "USD"
     universe_whitelist: list[str] = field(default_factory=list)
+    universe_tier: str = "core"
     long_only: bool = True
     fully_invested: bool = True
     max_weight_per_asset: float = 0.40
@@ -80,6 +82,24 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     p = Path(path) if path else data_path("mandate.yaml")
     with open(p, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        raise ValueError("mandate config must be a mapping")
+
+    configured_tier = raw.get("universe_tier")
+    if configured_tier is not None and (
+        not isinstance(configured_tier, str) or not configured_tier.strip()
+    ):
+        raise ValueError("mandate universe_tier must be a non-empty string")
+    universe_tier = configured_tier.strip() if configured_tier else "core"
+
+    if configured_tier is not None or "universe_whitelist" not in raw:
+        universe_whitelist = load_universe().tickers(universe_tier)
+    else:
+        configured_whitelist = raw["universe_whitelist"]
+        if not isinstance(configured_whitelist, list):
+            raise ValueError("mandate universe_whitelist must be a list")
+        universe_whitelist = list(configured_whitelist)
+
     acct = raw.get("account", {})
     con = raw.get("constraints", {})
     ks = raw.get("kill_switch", {})
@@ -89,7 +109,8 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     return Mandate(
         paper_capital=float(acct.get("paper_capital", 10000.0)),
         base_currency=acct.get("base_currency", "USD"),
-        universe_whitelist=list(raw.get("universe_whitelist", [])),
+        universe_whitelist=universe_whitelist,
+        universe_tier=universe_tier,
         long_only=bool(con.get("long_only", True)),
         fully_invested=bool(con.get("fully_invested", True)),
         max_weight_per_asset=float(con.get("max_weight_per_asset", 0.40)),

@@ -13,6 +13,7 @@ account:
   base_currency: USD
 
 # Only these tickers may ever appear in a target. Anything else is rejected.
+# universe_tier: extended       # Optional: resolve this list from configs/universe.yaml.
 universe_whitelist:
   - ACWI
   - BNDW

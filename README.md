@@ -24,12 +24,12 @@ Python 3.10 or newer is required.
     qlab tui
 
 The terminal opens as a quiet, no-top-header workstation. It starts or connects
-to one owner HTTP process; the TUI itself never opens DuckDB. On startup it
-offers to launch the Claude CLI as qlab's constrained workforce coordinator.
+to one owner HTTP process; the TUI itself never opens DuckDB. The status bar
+shows when the Claude CLI is ready without interrupting the desk.
 
-    qlab tui --claude offer   # default: ask once inside Textual
+    qlab tui --claude offer   # default: show readiness, never prompt
     qlab tui --claude auto    # start the workforce after the first snapshot
-    qlab tui --claude off     # do not offer; : workforce GOAL still starts it
+    qlab tui --claude off     # start only when : workforce GOAL requests it
 
 Inside the desk, the workforce view (key `3`) is a chat: type to the
 coordinator and it deploys the five governed roles. Progress is a flowchart —

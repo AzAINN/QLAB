@@ -278,8 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="snapshot refresh interval in seconds")
     tui.add_argument(
         "--claude", choices=["offer", "auto", "off"], default="offer",
-        help=("Claude workforce startup: prompt once (offer), launch automatically "
-              "(auto), or keep it off until requested (off)"),
+        help=("Claude workforce startup: show readiness without prompting (offer), "
+              "launch automatically (auto), or keep it off until requested (off)"),
     )
     tui.set_defaults(func=_cmd_tui)
 

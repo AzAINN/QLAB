@@ -55,7 +55,6 @@ from qlab.tui.theme import (
     TEXT,
     TEXT_HI,
     UP,
-    WORKFORCE_MODAL_CSS,
 )
 from qlab.paths import workspace_root
 
@@ -421,36 +420,6 @@ class PaperConfirmScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm-paper")
 
 
-class ClaudeWorkforceScreen(ModalScreen[bool]):
-    """One quiet startup choice: launch the constrained Claude workforce or wait."""
-
-    BINDINGS = [Binding("escape", "later", "Later", show=False)]
-
-    CSS = WORKFORCE_MODAL_CSS
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="workforce-dialog"):
-            yield Static("START CLAUDE WORKFORCE?", id="workforce-dialog-title")
-            yield Static(
-                "qlab will launch the Claude CLI as a constrained coordinator. "
-                "It deploys the analyst, challenger, optimizer, referee, and "
-                "reporter through the owner-backed MCP proxy and runs the pipeline "
-                "autonomously — no mid-run questions. Progress shows on the "
-                "flowchart (hover a node for detail); it receives no code, shell, "
-                "filesystem, or paper-execution tools.",
-                id="workforce-dialog-copy",
-            )
-            with Horizontal(id="workforce-dialog-actions"):
-                yield Button("Later", id="workforce-later")
-                yield Button("Start workforce", id="workforce-start", variant="primary")
-
-    def action_later(self) -> None:
-        self.dismiss(False)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "workforce-start")
-
-
 class QlabTui(App[None]):
     """Border-light terminal workspace for portfolio and agent operations."""
 
@@ -557,6 +526,25 @@ class QlabTui(App[None]):
                         yield Tile("verdict", "verdict")
                         yield Tile("run", "run")
                         yield Tile("alerts", "alerts")
+                    with Horizontal(id="dashboard-actions"):
+                        yield Button(
+                            "DRY REBALANCE",
+                            id="btn-rebalance-dry",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "DAILY OPS",
+                            id="btn-daily-ops",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "BATCH",
+                            id="btn-batch",
+                            classes="view-action-button",
+                            compact=True,
+                        )
                 with Vertical(id="market", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] MARKET", classes="canvas-title", markup=True)
                     yield Static(id="market-content", markup=True)
@@ -575,6 +563,19 @@ class QlabTui(App[None]):
                         yield Input(
                             placeholder="message the coordinator — Enter sends",
                             id="chat-input")
+                        yield Button(
+                            "NEW REVIEW",
+                            id="btn-workforce-new",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "RESUME LAST",
+                            id="btn-workforce-resume",
+                            classes="view-action-button",
+                            disabled=True,
+                            compact=True,
+                        )
                         yield Button("exit", id="chat-exit")
                 with Vertical(id="research", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] RESEARCH", classes="canvas-title", markup=True)
@@ -1190,6 +1191,14 @@ class QlabTui(App[None]):
 
     def _render_workforce(self) -> None:
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        resumable_id = self._latest_resumable_workflow_id()
+        resume_button = self.query_one("#btn-workforce-resume", Button)
+        resume_button.disabled = not bool(resumable_id)
+        resume_button.tooltip = (
+            f"Resume {resumable_id}"
+            if resumable_id else
+            "No incomplete workforce review to resume"
+        )
         workflow = self._select_workflow(workflows)
         if workflow is None:
             if self._pending_workflow:
@@ -1307,29 +1316,28 @@ class QlabTui(App[None]):
                 f"[{LABEL_GOLD}]earlier (: workforce resume ID)[/]  {packed}")
         self.query_one("#workforce-content", Static).update("\n".join(lines))
 
+    def _latest_resumable_workflow_id(self) -> str:
+        workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        for workflow in workflows:
+            if str(workflow.get("status", "")).lower() == "complete":
+                continue
+            workflow_id = str(workflow.get("workflow_id", "")).strip()
+            if workflow_id:
+                return workflow_id
+        return ""
+
     def _maybe_offer_workforce(self) -> None:
         if self._claude_offer_handled:
             return
-        if self.claude_start == "off":
+        if self.claude_start != "auto":
             self._claude_offer_handled = True
             return
-        # Not yet available (e.g. first snapshot raced readiness): leave the
-        # sentinel unset so a later snapshot can still make the one offer.
+        # A first snapshot can race runtime readiness. Auto mode waits for a
+        # ready snapshot; offer mode is status-only and never interrupts.
         if not bool(self.snapshot.get("system", {}).get("workforce_available")):
             return
         self._claude_offer_handled = True
-        if self.claude_start == "auto":
-            self._start_workforce("")
-        elif self.claude_start == "offer":
-            self.push_screen(ClaudeWorkforceScreen(), self._workforce_start_choice)
-
-    def _workforce_start_choice(self, start: bool | None) -> None:
-        if start:
-            self._start_workforce("")
-        else:
-            self._set_selected_work(
-                "CLAUDE WORKFORCE READY\n\nStart later with : workforce GOAL"
-            )
+        self._start_workforce("")
 
     def _render_research(self) -> None:
         runs = self.snapshot.get("runs", [])
@@ -1753,7 +1761,32 @@ class QlabTui(App[None]):
             self._start_workforce(message)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id != "chat-exit":
+        button_id = event.button.id
+        if button_id == "btn-rebalance-dry":
+            self.action_rebalance_dry()
+            return
+        if button_id == "btn-daily-ops":
+            self.action_daily_ops()
+            return
+        if button_id == "btn-batch":
+            self.action_batch()
+            return
+        if button_id == "btn-workforce-new":
+            self.action_workforce_new()
+            return
+        if button_id == "btn-workforce-resume":
+            workflow_id = self._latest_resumable_workflow_id()
+            if workflow_id:
+                self.action_workforce_resume(workflow_id)
+            else:
+                self._console_write(
+                    f"[{MUTED}]no incomplete workforce review to resume[/]")
+                self._set_selected_work(
+                    "NO REVIEW TO RESUME\n\nThe latest snapshot has no incomplete "
+                    "workforce review."
+                )
+            return
+        if button_id != "chat-exit":
             return
         if self.claude.running:
             self.claude.stop()

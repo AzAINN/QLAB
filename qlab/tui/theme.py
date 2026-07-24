@@ -213,6 +213,36 @@ APP_CSS_TEMPLATE = Template("""
     #tile-allocation, #tile-market-pulse {
         min-height: 12;
     }
+    #dashboard-actions {
+        height: 3;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    .view-action-button {
+        width: auto;
+        min-width: 10;
+        height: 3;
+        margin-left: 1;
+        padding: 0 1;
+        background: $bg_raised;
+        color: $text;
+        border: round $border;
+        text-style: bold;
+    }
+    .view-action-button:hover {
+        background: $sel_bg;
+        color: $text_hi;
+        border: round $border_hi;
+    }
+    .view-action-button:focus {
+        border: round $amber;
+    }
+    .view-action-button:disabled {
+        background: $disabled_bg;
+        color: $disabled_text;
+        border: round $disabled_border;
+        text-style: none;
+    }
     #workforce-content {
         height: auto;
         max-height: 30%;
@@ -477,4 +507,3 @@ WORKFORCE_MODAL_CSS_TEMPLATE = Template("""
     """)
 
 WORKFORCE_MODAL_CSS = WORKFORCE_MODAL_CSS_TEMPLATE.substitute(TOKENS)
-

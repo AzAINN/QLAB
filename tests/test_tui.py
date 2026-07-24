@@ -374,22 +374,19 @@ class WorkforceReadyClient(StubClient):
         return snap
 
 
-def test_tui_offers_constrained_claude_workforce_once():
-    from qlab.tui.app import ClaudeWorkforceScreen, QlabTui
+def test_tui_offer_mode_never_pushes_a_startup_modal():
+    from qlab.tui.app import QlabTui
 
     async def run():
         app = QlabTui(
             WorkforceReadyClient(), refresh_interval=0, claude_start="offer"
         )
         async with app.run_test(size=(140, 42)) as pilot:
-            for _ in range(20):
-                if isinstance(app.screen, ClaudeWorkforceScreen):
-                    break
-                await pilot.pause(0.05)
-            assert isinstance(app.screen, ClaudeWorkforceScreen)
-            await pilot.press("escape")
-            await pilot.pause(0.05)
-            assert not isinstance(app.screen, ClaudeWorkforceScreen)
+            await pilot.pause(0.2)
+            assert app.snapshot
+            assert len(app.screen_stack) == 1
+            assert app.screen is app.screen_stack[0]
+            assert "CLAUDE READY" in app.query_one("#system-status").content
 
     asyncio.run(run())
 
@@ -484,15 +481,15 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
     asyncio.run(run())
 
 
-def test_dry_rebalance_routes_through_owner_api():
+def test_dry_rebalance_button_routes_through_owner_api():
     from qlab.tui.app import QlabTui
 
     async def run():
         client = StubClient()
         app = QlabTui(client, refresh_interval=0)
-        async with app.run_test(size=(120, 36)) as pilot:
+        async with app.run_test(size=(140, 60)) as pilot:
             await pilot.pause(0.1)
-            app._handle_command("rebalance dry")
+            await pilot.click("#btn-rebalance-dry")
             for _ in range(20):
                 if client.posts:
                     break

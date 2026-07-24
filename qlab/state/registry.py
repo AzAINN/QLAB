@@ -162,6 +162,10 @@ CREATE TABLE IF NOT EXISTS bob_tasks (
     trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
     conclusion JSON, error VARCHAR, attempt_count INTEGER,
     created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS model_invocations (
+    invocation_id VARCHAR PRIMARY KEY, role VARCHAR, requested_tier VARCHAR,
+    resolved_model VARCHAR, backend VARCHAR, status VARCHAR, latency_ms DOUBLE,
+    tokens BIGINT, fallback_reason VARCHAR, created_at VARCHAR);
 CREATE TABLE IF NOT EXISTS approval_requests (
     approval_id VARCHAR PRIMARY KEY, task_id VARCHAR, plan_id VARCHAR,
     plan_digest VARCHAR, decision_id VARCHAR, targets_hash VARCHAR,
@@ -1375,6 +1379,23 @@ class Registry:
                 "SELECT COUNT(*) AS n FROM bob_tasks WHERE substr(created_at,1,10)=?",
                 [day_iso[:10]])
         return int(rows[0]["n"]) if rows else 0
+
+    # -- model invocation audit ---------------------------------------------
+    def record_model_invocation(self, record: dict) -> str:
+        """Persist which tier was requested and which model actually served it."""
+        iid = str(record["invocation_id"])
+        self.con.execute(
+            "INSERT OR REPLACE INTO model_invocations VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [iid, record.get("role"), record.get("requested_tier"),
+             record.get("resolved_model"), record.get("backend"),
+             record.get("status"), record.get("latency_ms"),
+             record.get("tokens"), record.get("fallback_reason"), _now()])
+        return iid
+
+    def list_model_invocations(self, limit: int = 50) -> list[dict]:
+        return self._rows(
+            "SELECT * FROM model_invocations ORDER BY created_at DESC LIMIT ?",
+            [limit])
 
     # -- approval requests (the human execution gate) -----------------------
     def create_approval_request(self, approval: dict) -> str:

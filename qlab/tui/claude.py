@@ -26,6 +26,8 @@ from typing import Callable, Literal
 
 import yaml
 
+from qlab.operator import model_routing as _routing
+
 
 EventKind = Literal[
     "session", "text", "text_delta", "tool_start", "tool_result", "result", "error"
@@ -100,17 +102,13 @@ _PREDICTION_RESEARCH_ROLES = frozenset({
     "moments-analyst",
 })
 
-# Session-local model routing. ``inherit`` in the neutral source is the
-# no-override sentinel; any concrete ``model:`` value in an agent source wins
-# over this table.
+# Session-local model routing, derived from the operator's role->tier policy
+# (qlab.operator.model_routing) so tiers are configured in ONE place rather
+# than as brand names scattered through TUI code. ``inherit`` is the
+# no-override sentinel; a concrete ``model:`` in an agent source still wins.
 _ROLE_MODEL = {
-    "moments-analyst": "inherit",
-    "challenger": "inherit",
-    "referee": "inherit",
-    "optimization-runner": "sonnet",
-    "reporter": "sonnet",
-    "data-qa": "sonnet",
-    "signal-qa": "sonnet",
+    role: _routing.TIER_MODEL[tier]
+    for role, tier in _routing.ROLE_TIER.items()
 }
 
 _PHASE_ARTIFACT_CONTRACT = {

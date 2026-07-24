@@ -139,6 +139,30 @@ def test_owner_refuses_a_regime_tool_outside_the_allowlist(session):
         session.call_lab_tool("regime.made_up", {"as_of": "2022-06-30"}, True)
 
 
+def test_owner_news_tool_is_offline_synthetic_and_honest(session):
+    """Offline news is deterministic, clearly labelled synthetic, and carries a
+    risk tilt and an untrusted-data disclaimer — never fabricated live news."""
+    status, obj = handle_api(
+        session, "POST", "/api/lab/news.market", {},
+        {"as_of": "2022-06-30", "universe": "core", "offline": True, "limit": 4},
+    )
+    assert status == 200, obj
+    news = obj["result"]
+    assert news["source"] == "synthetic"          # honest about being offline
+    assert 1 <= len(news["headlines"]) <= 4
+    assert all("[synthetic]" in h["title"] for h in news["headlines"])
+    assert -1.0 <= news["risk_tilt"] <= 1.0
+    assert news["tilt_label"] in ("risk_off", "neutral", "risk_on")
+    assert "untrusted" in news["disclaimer"].lower()
+
+    # deterministic: the same as_of returns the same read
+    status2, obj2 = handle_api(
+        session, "POST", "/api/lab/news.market", {},
+        {"as_of": "2022-06-30", "universe": "core", "offline": True, "limit": 4},
+    )
+    assert obj2["result"]["headlines"] == news["headlines"]
+
+
 def test_owner_preview_uses_exact_referee_reviewed_targets(session):
     from datetime import date
 

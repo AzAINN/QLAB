@@ -153,11 +153,19 @@ def workforce_note(phase: str, status: str, summary: str,
 
 # The regime a run selected is a first-class read for the operator, so it gets
 # its own colored line rather than living only in a hover card.
-_REGIME_TONE = {"calm": "#1fe07b", "stress": "#ff5257"}
+# The analyst's five-level regime ladder, most to least stressed, as a red→cyan
+# heat scale. Kept in sync with qlab.tui.claude._ANALYST_REGIMES.
+_REGIME_TONE = {
+    "crisis": "#ff3b47",
+    "stress": "#ff8c42",
+    "neutral": "#e6c84f",
+    "calm": "#1fe07b",
+    "expansion": "#38ccff",
+}
 
 
-def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
-    """The analyst's selected regime and its one-line reasoning, or None.
+def _regime_readout(steps_by_phase: dict) -> tuple[str, str, str] | None:
+    """The analyst's regime, its one-line reasoning, and the news summary, or None.
 
     Sourced from the durable analyst-phase artifacts the agent persists, so the
     operator sees the exact call the run made rather than a re-derived one.
@@ -167,19 +175,24 @@ def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
     if not regime:
         return None
     reasoning = " ".join(str(artifacts.get("regime_reasoning") or "").split())
-    return regime, reasoning
+    summary = " ".join(str(artifacts.get("regime_summary") or "").split())
+    return regime, reasoning, summary
 
 
 def _regime_line(steps_by_phase: dict, *, indent: str = "") -> str | None:
-    """A ready-to-print rich-markup regime line, coloured calm/stress, or None."""
+    """Rich-markup regime block: the coloured call, its reasoning, and the 1-3
+    line news backdrop that informed it (from market_news), or None."""
     readout = _regime_readout(steps_by_phase)
     if readout is None:
         return None
-    regime, reasoning = readout
+    regime, reasoning, summary = readout
     tone = _REGIME_TONE.get(regime.lower(), "#ffb020")
     line = f"{indent}[#38ccff]◆ REGIME[/]  [bold {tone}]{escape(regime.upper())}[/]"
     if reasoning:
-        line += f"  [#8797a8]{escape(reasoning[:220])}[/]"
+        line += f"  [#8797a8]{escape(reasoning[:200])}[/]"
+    if summary:
+        line += (f"\n{indent}  [#9a7f4a]news backdrop[/]  "
+                 f"[#cdd9e6]{escape(summary[:320])}[/]")
     return line
 
 

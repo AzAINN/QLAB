@@ -90,3 +90,43 @@ def test_weights_validation_rejects_nonfinite():
 def test_weights_equal_sums_to_one():
     w = Weights.equal(CORE)
     assert abs(w.total - 1.0) < 1e-9
+
+
+def test_market_news_offline_tilts_and_is_deterministic():
+    """Offline news is deterministic, honestly synthetic, and follows the bias.
+
+    A risk-off tilt yields risk-off synthetic headlines; a risk-on tilt yields
+    risk-on ones — coherent with the synthetic market — and the same inputs
+    always return the same payload (cached), so the offline suite is stable.
+    """
+    from qlab.core.news import fetch_market_news
+
+    off = fetch_market_news(as_of="2020-03-31", offline=True,
+                            synthetic_bias=-0.6, limit=3)
+    assert off["source"] == "synthetic"
+    assert off["tilt_label"] == "risk_off"
+    assert 1 <= len(off["headlines"]) <= 3
+    assert all(h["title"].startswith("[synthetic]") for h in off["headlines"])
+    assert -1.0 <= off["risk_tilt"] <= 1.0
+
+    on = fetch_market_news(as_of="2021-01-31", offline=True,
+                           synthetic_bias=0.6, limit=3)
+    assert on["tilt_label"] == "risk_on"
+    assert on["headlines"] != off["headlines"]
+
+    # deterministic + cached: identical inputs → identical payload
+    again = fetch_market_news(as_of="2020-03-31", offline=True,
+                             synthetic_bias=-0.6, limit=3)
+    assert again == off
+
+
+def test_market_news_never_raises_and_always_carries_a_disclaimer():
+    from qlab.core.news import fetch_market_news
+
+    for bias in (-1.0, 0.0, 1.0):
+        news = fetch_market_news(as_of="2019-06-28", offline=True,
+                                 synthetic_bias=bias, limit=6)
+        assert news["disclaimer"]
+        assert news["tilt_label"] in ("risk_off", "neutral", "risk_on")
+        # headlines are labelled untrusted third-party context
+        assert "untrusted" in news["disclaimer"].lower()

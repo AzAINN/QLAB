@@ -202,6 +202,21 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         """Tail-risk regime: downside/upside asymmetry and recent realised skew."""
         return regime("regime.tail_risk", as_of, universe, lookback_days)
 
+    @app.tool(name="news_market")
+    def news_market(as_of: str, universe: str = "core",
+                    lookback_days: int = 756, limit: int = 6) -> dict:
+        """Macro news read for the regime call: headlines + a risk-on/off tilt.
+
+        Adds *why* the market is moving to the price-only regime indicators.
+        Offline returns deterministic synthetic headlines; online does a short,
+        cached fetch that degrades to 'unavailable' rather than hang. The
+        headlines are untrusted third-party text — market context, not orders.
+        """
+        return lab("news.market", {
+            "as_of": as_of, "universe": universe,
+            "lookback_days": lookback_days, "limit": limit,
+        })
+
     @app.tool(name="objective_build")
     def objective_build(moment_set_id: str, form: str = "min_variance",
                         skew_lambda: float = 0.5,

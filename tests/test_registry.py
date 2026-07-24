@@ -120,7 +120,8 @@ def test_workforce_is_durable_ordered_and_role_bound(reg):
     verdict_id = reg.log_verdict("d1", "PASS", ["within mandate"], targets=targets)
     artifacts = {
         "analyst": {"moment_set_id": "m1", "objective_id": "o1",
-                    "decision_id": "d1"},
+                    "decision_id": "d1", "regime": "neutral",
+                    "regime_summary": "mixed data; news backdrop balanced"},
         "challenger": {"challenger_view": "shorter window may react faster"},
         "optimizer": {"targets": targets, "algorithm_id": "hrp"},
         "referee": {"verdict": "PASS", "verdict_id": verdict_id,
@@ -166,7 +167,8 @@ def test_workforce_challenger_and_optimizer_run_in_parallel_after_analyst(reg):
 
     reg.update_workflow_phase(
         workflow_id, "analyst", "done",
-        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+                   "regime": "neutral", "regime_summary": "offline synthetic backdrop"},
     )
 
     # With the analyst done, challenger and optimizer are concurrent: the
@@ -204,7 +206,8 @@ def test_workforce_refuses_unstructured_completion_and_referee_fail(reg):
 
     reg.update_workflow_phase(
         workflow_id, "analyst", "done",
-        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+                   "regime": "neutral", "regime_summary": "offline synthetic backdrop"},
     )
     reg.update_workflow_phase(
         workflow_id, "challenger", "done",
@@ -230,7 +233,8 @@ def test_workforce_referee_pass_is_bound_to_optimizer_targets(reg):
     workflow_id = workflow["workflow_id"]
     reg.update_workflow_phase(
         workflow_id, "analyst", "done",
-        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+                   "regime": "neutral", "regime_summary": "offline synthetic backdrop"},
     )
     reg.update_workflow_phase(
         workflow_id, "challenger", "done", artifacts={"challenger_view": "c"},

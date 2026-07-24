@@ -273,13 +273,16 @@ legacy quantum_arms block are rejected as offline research.
 
 The current operator surface is research and paper-first:
 
-- Online mode uses daily yfinance bars with a cache; it is not a streaming
-  quote tape.
+- Online mode uses cached, adjusted daily bars from `QLAB_DATA_PROVIDER`;
+  `yfinance` is the default and `alpaca` is optional.
 - Offline mode uses cache or deterministic synthetic fixtures.
-- Market provenance, as-of date, and bar age are shown to the operator.
-- Alpaca support is paper-only, requires the trader extra and local
-  ALPACA_API_KEY / ALPACA_API_SECRET values, and does not yet provide a complete
-  streaming market-data or order-lifecycle integration.
+- Market provenance records the producing provider (`yfinance`, `alpaca`, or
+  `synthetic`), and the as-of date and bar age are shown to the operator.
+- Alpaca support requires the trader extra plus local `ALPACA_API_KEY` and
+  `ALPACA_API_SECRET` values. It remains paper-only and daily-bar-only: there is
+  no streaming quote tape or complete order-lifecycle integration.
+- Selecting Alpaca without its package or credentials fails loudly; qlab does
+  not silently switch the request back to yfinance.
 - The simulated broker remains the zero-account default.
 
 ## Configuration and state
@@ -300,6 +303,7 @@ Optional path overrides:
 | QLAB_CONFIG_ROOT | Alternate mandate/config/agent bundle |
 | QLAB_UI_PORT | Owner-runtime guard port |
 | QLAB_OFFLINE | Default MCP data mode |
+| QLAB_DATA_PROVIDER | Online daily-bar provider (`yfinance` or `alpaca`) |
 
 An installed wheel defaults its writable state to .lab under the current
 workspace, not the Python environment.

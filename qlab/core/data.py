@@ -3,7 +3,7 @@
 Resilience is a first-class concern (spec "Revisions" table). Yahoo Finance
 intermittently 429-rate-limits and a hung fetch can stall a live demo, so:
 
-* every network fetch has a hard timeout and falls back to cache;
+* online fetches run through an explicit provider seam and fall back to cache;
 * an ``offline=True`` flag refuses the network entirely and serves cache/
   synthetic data, so a live demo cannot be taken down by a rate limit;
 * when no cache exists either, a **deterministic synthetic generator** produces
@@ -16,9 +16,11 @@ Nothing here imports MCP, agents, or a broker.
 from __future__ import annotations
 
 import hashlib
+import os
 import warnings
 from datetime import date
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -30,6 +32,8 @@ from qlab.paths import state_path
 # dynamic so QLAB_STATE_DIR and an installed command's working directory work.
 _CACHE_DIR: Path | None = None
 _FETCH_TIMEOUT_S = 15  # hard timeout — a hung fetch must not stall the pipeline
+ProviderFetch = Callable[[list[str], str, str], pd.DataFrame | None]
+PROVIDERS: dict[str, ProviderFetch] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -44,39 +48,52 @@ def get_prices(
     seed: int = 7,
     cache_dir: Path | None = None,
     refresh: bool = False,
+    provider: str | None = None,
 ) -> pd.DataFrame:
     """Return an adjusted-close panel (index = dates, columns = ``tickers``).
 
-    Resolution order: parquet cache → yfinance (unless ``offline``) → synthetic.
-    The result is always cached so the next call (and any demo) is instant.
+    Resolution order: matching parquet cache → selected provider (unless
+    ``offline``) → synthetic. The provider defaults to ``QLAB_DATA_PROVIDER``
+    or ``"yfinance"``. Offline mode never resolves or invokes a provider.
     """
     end = end or date.today().isoformat()
     cache_dir = Path(cache_dir) if cache_dir else (_CACHE_DIR or state_path("cache"))
     key = _cache_key(tickers, start, end)
     cache_path = cache_dir / f"{key}.parquet"
 
+    provider_name: str | None = None
+    fetch: ProviderFetch | None = None
+    if not offline:
+        provider_name, fetch = _resolve_provider(provider)
+
     cached = _read_cache(cache_path)
     cached_is_synthetic = bool(
         cached is not None and cached.attrs.get("synthetic", False)
     )
+    cached_source = _recorded_source(cached) if cached is not None else None
     # Offline mode may consume any cache. Online mode may consume a real-data
-    # cache, but a synthetic fallback must never masquerade as a live prewarm.
+    # cache from the selected provider, but another provider's cache (or a
+    # synthetic fallback) must never masquerade as the requested live source.
     if cached is not None and (
-        offline or (not refresh and not cached_is_synthetic)
+        offline
+        or (
+            not refresh
+            and not cached_is_synthetic
+            and cached_source == provider_name
+        )
     ):
         return cached
 
     df: pd.DataFrame | None = None
-    if not offline:
-        df = _fetch_yfinance(tickers, str(start), str(end))
+    if fetch is not None:
+        df = fetch(tickers, str(start), str(end))
 
     if df is None or df.empty:
-        if cached is not None:
-            source = cached.attrs.get(
-                "source", "synthetic" if cached_is_synthetic else "cache",
-            )
+        if cached is not None and (
+            cached_source == provider_name or cached_is_synthetic
+        ):
             warnings.warn(
-                f"market fetch unavailable - serving cached {source} data",
+                f"market fetch unavailable - serving cached {cached_source} data",
                 stacklevel=2,
             )
             return cached
@@ -92,7 +109,7 @@ def get_prices(
             )
         df = synthetic_prices(tickers, start, end, seed=seed)
     else:
-        df.attrs["source"] = "yfinance"
+        df.attrs["source"] = provider_name
         df.attrs["synthetic"] = False
 
     _write_cache(cache_path, df)
@@ -107,6 +124,7 @@ def snapshot(
     start: str | date = "2008-01-01",
     offline: bool = False,
     seed: int = 7,
+    provider: str | None = None,
 ) -> DataSnapshot:
     """Build a point-in-time :class:`DataSnapshot` ending at ``as_of``.
 
@@ -114,10 +132,15 @@ def snapshot(
     cannot look ahead even by accident.
     """
     as_of_d = _as_date(as_of)
-    prices = get_prices(tickers, start=start, end=as_of_d, offline=offline, seed=seed)
-    source = prices.attrs.get(
-        "source", "synthetic" if prices.attrs.get("synthetic") else "yfinance",
+    prices = get_prices(
+        tickers,
+        start=start,
+        end=as_of_d,
+        offline=offline,
+        seed=seed,
+        provider=provider,
     )
+    source = _recorded_source(prices)
     snap = DataSnapshot(tickers=list(tickers), prices=prices, as_of=as_of_d,
                         source=source)
     if lookback_days is not None:
@@ -137,20 +160,20 @@ def cached_provenance(
     Reads only the on-disk cache — never fetches, never synthesizes — so a
     status poll can surface data source and freshness without ever risking a
     hung network call. Returns ``(source, age_days)`` where ``source`` is the
-    panel's recorded provenance ("yfinance"/"synthetic") and ``age_days`` is
-    whole days from the last cached bar to today. Returns ``None`` when no
-    cache exists for this panel (the caller renders that as "no data").
+    panel's recorded provider name (for example, ``"yfinance"``, ``"alpaca"``,
+    or ``"synthetic"``) and ``age_days`` is whole days from the last cached bar
+    to today. Returns ``None`` when no cache exists for this panel (the caller
+    renders that as "no data").
     """
     end = end or date.today().isoformat()
     cache_dir = Path(cache_dir) if cache_dir else (_CACHE_DIR or state_path("cache"))
     cached = _read_cache(cache_dir / f"{_cache_key(tickers, start, end)}.parquet")
     if cached is None or cached.empty:
         return None
-    source = cached.attrs.get(
-        "source", "synthetic" if cached.attrs.get("synthetic") else "yfinance")
+    source = _recorded_source(cached)
     last = cached.index[-1]
     last_date = last.date() if hasattr(last, "date") else _as_date(str(last))
-    return str(source), max(0, (date.today() - last_date).days)
+    return source, max(0, (date.today() - last_date).days)
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +209,87 @@ def _fetch_yfinance(tickers: list[str], start: str, end: str) -> pd.DataFrame | 
     except Exception as exc:  # network / parse / rate-limit — degrade gracefully
         warnings.warn(f"yfinance fetch failed ({exc!r})", stacklevel=2)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Alpaca adapter (lazy import — trader extra)
+# ---------------------------------------------------------------------------
+def _fetch_alpaca(tickers: list[str], start: str, end: str) -> pd.DataFrame | None:
+    missing = [
+        name
+        for name in ("ALPACA_API_KEY", "ALPACA_API_SECRET")
+        if not os.environ.get(name, "").strip()
+    ]
+    if missing:
+        raise RuntimeError(f"alpaca provider requires {' and '.join(missing)}")
+
+    try:
+        from alpaca.data.enums import Adjustment  # noqa: PLC0415
+        from alpaca.data.historical import StockHistoricalDataClient  # noqa: PLC0415
+        from alpaca.data.requests import StockBarsRequest  # noqa: PLC0415
+        from alpaca.data.timeframe import TimeFrame  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            "alpaca provider requires the 'alpaca-py' package; "
+            "install qlab[trader]"
+        ) from exc
+
+    try:
+        client = StockHistoricalDataClient(
+            os.environ["ALPACA_API_KEY"],
+            os.environ["ALPACA_API_SECRET"],
+        )
+        request = StockBarsRequest(
+            symbol_or_symbols=tickers,
+            timeframe=TimeFrame.Day,
+            start=pd.Timestamp(start).to_pydatetime(),
+            end=pd.Timestamp(end).to_pydatetime(),
+            adjustment=Adjustment.ALL,
+        )
+        raw = client.get_stock_bars(request).df
+        if raw is None or raw.empty:
+            return None
+
+        close_values = raw["close"]
+        if isinstance(raw.index, pd.MultiIndex):
+            symbol_level = "symbol" if "symbol" in raw.index.names else 0
+            close = close_values.unstack(level=symbol_level)
+        elif len(tickers) == 1:
+            close = close_values.to_frame(name=tickers[0])
+        else:
+            raise ValueError("Alpaca multi-symbol bars did not include a symbol index")
+
+        close.index = pd.to_datetime(close.index)
+        if isinstance(close.index, pd.DatetimeIndex) and close.index.tz is not None:
+            close.index = close.index.tz_convert(None)
+        close = close.sort_index().reindex(columns=tickers)
+        close = close.dropna(how="all").ffill().dropna(how="any")
+        close.attrs["source"] = "alpaca"
+        close.attrs["synthetic"] = False
+        return close
+    except Exception as exc:  # network / parse / rate-limit — degrade gracefully
+        warnings.warn(f"alpaca fetch failed ({exc!r})", stacklevel=2)
+        return None
+
+
+def _fetch_registered_yfinance(
+    tickers: list[str], start: str, end: str,
+) -> pd.DataFrame | None:
+    return _fetch_yfinance(tickers, start, end)
+
+
+def _fetch_registered_alpaca(
+    tickers: list[str], start: str, end: str,
+) -> pd.DataFrame | None:
+    return _fetch_alpaca(tickers, start, end)
+
+
+# The small indirection preserves the established monkeypatch seam around the
+# concrete adapters while making registration itself public and extensible.
+PROVIDERS.update({
+    "yfinance": _fetch_registered_yfinance,
+    "alpaca": _fetch_registered_alpaca,
+})
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +372,25 @@ def synthetic_prices(
 def _cache_key(tickers: list[str], start, end) -> str:
     raw = f"{'-'.join(sorted(tickers))}|{start}|{end}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _resolve_provider(provider: str | None) -> tuple[str, ProviderFetch]:
+    name = (provider or os.environ.get("QLAB_DATA_PROVIDER") or "yfinance").strip()
+    name = name.lower()
+    try:
+        return name, PROVIDERS[name]
+    except KeyError as exc:
+        available = ", ".join(sorted(PROVIDERS))
+        raise RuntimeError(
+            f"unknown market data provider {name!r}; available providers: {available}"
+        ) from exc
+
+
+def _recorded_source(df: pd.DataFrame) -> str:
+    source = df.attrs.get(
+        "source", "synthetic" if df.attrs.get("synthetic") else "yfinance",
+    )
+    return str(source)
 
 
 def _read_cache(path: Path) -> pd.DataFrame | None:

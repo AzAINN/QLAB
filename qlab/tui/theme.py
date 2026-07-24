@@ -10,6 +10,8 @@ from string import Template
 # a glance across a wide terminal; changing a role's colour means changing it
 # here only.
 # ---------------------------------------------------------------------------
+PALETTE_NAME = "qlab amber phosphor"
+
 BG        = "#03060b"   # canvas — near-black
 BG_PANEL  = "#070c13"   # side rails / raised panels
 BG_RAISED = "#0f1926"   # table headers, dialogs, input wells
@@ -350,6 +352,57 @@ APP_CSS_TEMPLATE = Template("""
     DataTable > .datatable--cursor {
         background: $sel_bg;
         color: $text_hi;
+    }
+
+    .book-section-title {
+        height: 2;
+        margin-top: 1;
+        color: $label_gold;
+        text-style: bold;
+    }
+    .book-section {
+        width: 1fr;
+        height: auto;
+        min-height: 3;
+        padding: 1 2;
+        background: $bg_panel;
+        border: round $border;
+        color: $text;
+    }
+    #book-plans {
+        width: 1fr;
+        height: auto;
+    }
+    .book-plan-card {
+        display: none;
+        width: 1fr;
+        height: 4;
+        margin-bottom: 1;
+        padding: 0 1;
+        background: $bg_panel;
+        border: round $border;
+    }
+    .book-plan-copy {
+        width: 1fr;
+        height: 3;
+        padding: 0 1;
+        color: $text;
+    }
+    .book-execute-button {
+        width: 12;
+        min-width: 12;
+        margin-left: 2;
+    }
+
+    .settings-card {
+        width: 1fr;
+        height: auto;
+        min-height: 5;
+        margin-bottom: 1;
+        padding: 1 2;
+        background: $bg_panel;
+        border: round $border;
+        color: $text;
     }
 
     #agent-rail {

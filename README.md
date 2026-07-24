@@ -27,6 +27,17 @@ The terminal opens as a quiet, no-top-header workstation. It starts or connects
 to one owner HTTP process; the TUI itself never opens DuckDB. The status bar
 shows when the Claude CLI is ready without interrupting the desk.
 
+The complete screen map is available from either the digit or matching function
+key:
+
+- `1` / `F1` — Dashboard: portfolio, regime, allocation, and alerts.
+- `2` / `F2` — Market: daily price context and provenance.
+- `3` / `F3` — Workforce: governed coordinator chat and phase progress.
+- `4` / `F4` — Research: experiment runs and algorithm evidence.
+- `5` / `F5` — Book: positions, checked plans, confirmation, and paper orders.
+- `6` / `F6` — Audit: decisions, challenges, verdicts, and reflections.
+- `7` / `F7` — Settings: read-only mandate, data, agent, and theme bulletins.
+
     qlab tui --claude offer   # default: show readiness, never prompt
     qlab tui --claude auto    # start the workforce after the first snapshot
     qlab tui --claude off     # start only when : workforce GOAL requests it

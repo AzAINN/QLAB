@@ -49,6 +49,11 @@ def _snapshot():
             "cash": 1_000.0,
             "drawdown": 0.01,
             "kill_switch_at": 0.15,
+            "positions": {
+                "ACWI": {"qty": 40.4, "price": 100.0, "value": 4_040.0},
+                "BNDW": {"qty": 30.0, "price": 101.0, "value": 3_030.0},
+                "GLD": {"qty": 29.7, "price": 102.0, "value": 3_029.4},
+            },
             "weights": {"ACWI": 0.4, "BNDW": 0.3, "GLD": 0.3},
             "target_weights": {"ACWI": 0.35, "BNDW": 0.35, "GLD": 0.3},
         },
@@ -94,13 +99,36 @@ def _snapshot():
     }
 
 
+def _bootstrap():
+    return {
+        "mandate": {
+            "paper_capital": 10_000.0,
+            "whitelist": ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"],
+            "max_weight_per_asset": 0.40,
+            "max_turnover_per_rebalance": 0.50,
+            "trailing_drawdown_pct": 0.15,
+            "cadence": "quarterly",
+            "order_type": "marketable_limit",
+            "operational_policy": "hrp",
+        },
+        "universe": {"core": [], "candidates": [], "selection_k": 0},
+        "agents": [
+            {"name": row["name"], "tools": []}
+            for row in _snapshot()["agents"]
+        ],
+    }
+
+
 class StubClient:
     def __init__(self):
         self.posts = []
 
     def get(self, path, **params):
-        assert path == "/api/tui"
-        return _snapshot()
+        if path == "/api/tui":
+            return _snapshot()
+        if path == "/api/bootstrap":
+            return _bootstrap()
+        raise AssertionError(path)
 
     def post(self, path, body=None):
         self.posts.append((path, body or {}))
@@ -312,6 +340,12 @@ def test_headless_shell_has_no_header_and_switches_context():
             await pilot.press("1")
             assert app.active_view == "dashboard"
 
+            await pilot.press("f5")
+            assert app.active_view == "book"
+
+            await pilot.press("6")
+            assert app.active_view == "audit"
+
             await pilot.press("~")
             assert app.query_one("#timeline").styles.display == "block"
 
@@ -431,8 +465,81 @@ def test_workforce_view_renders_durable_phase_progress():
     asyncio.run(run())
 
 
+class BookClient(StubClient):
+    def get(self, path, **params):
+        if path == "/api/bootstrap":
+            return super().get(path, **params)
+        snap = _snapshot()
+        snap["plans"] = [
+            {
+                "plan_id": "plan-checked-newest",
+                "state": "checked",
+                "decision_id": "decision-newest",
+                "pre_trade": {"turnover": 0.125},
+                "created_at": "2026-07-24T12:30:00+00:00",
+            },
+            {
+                "plan_id": "plan-proposed-older",
+                "state": "proposed",
+                "decision_id": "decision-older",
+                "pre_trade": {"turnover": 0.075},
+                "created_at": "2026-07-23T09:15:00+00:00",
+            },
+        ]
+        snap["orders"] = [{
+            "client_order_id": "order-1",
+            "plan_id": "plan-checked-newest",
+            "ticker": "ACWI",
+            "side": "buy",
+            "notional": 1_250.0,
+            "state": "filled",
+            "created_at": "2026-07-24T12:35:00+00:00",
+        }]
+        return snap
+
+
+def test_book_view_renders_positions_plan_cards_and_specific_execute_flow():
+    from textual.widgets import Button
+
+    from qlab.tui.app import PaperConfirmScreen, QlabTui
+
+    async def run():
+        app = QlabTui(BookClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 54)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("f5")
+            assert app.active_view == "book"
+
+            positions = str(app.query_one("#book-positions").content)
+            checked = str(app.query_one("#book-plan-copy-0").content)
+            proposed = str(app.query_one("#book-plan-copy-1").content)
+            orders = str(app.query_one("#book-orders").content)
+            assert "ACWI" in positions and "40.0%" in positions
+            assert "plan-checked-newest" in checked
+            assert "CHECKED" in checked and "12.5%" in checked
+            assert "plan-proposed-older" in proposed
+            assert "BUY" in orders and "ACWI" in orders and "$1,250.00" in orders
+
+            execute = app.query_one("#execute-plan-0", Button)
+            unavailable = app.query_one("#execute-plan-1", Button)
+            assert str(execute.label) == "execute"
+            assert not execute.disabled
+            assert unavailable.disabled
+
+            await pilot.click("#execute-plan-0")
+            await pilot.pause(0.05)
+            assert isinstance(app.screen, PaperConfirmScreen)
+            assert app.screen.plan_id == "plan-checked-newest"
+            assert app._pending_plan_id == "plan-checked-newest"
+            await pilot.click("#cancel-paper")
+
+    asyncio.run(run())
+
+
 class AuditClient(StubClient):
     def get(self, path, **params):
+        if path == "/api/bootstrap":
+            return super().get(path, **params)
         snap = _snapshot()
         snap["decisions"] = [{
             "decision_id": "dec-pass-1",
@@ -445,6 +552,21 @@ class AuditClient(StubClient):
             "realized_outcome": {"drawdown": 0.01},
             "verdict": {"verdict": "PASS", "source": "deterministic",
                         "reasons": ["turnover within cap", "weights within mandate"]},
+        }]
+        snap["plans"] = [{
+            "plan_id": "plan-must-not-appear",
+            "state": "checked",
+            "decision_id": "dec-pass-1",
+            "pre_trade": {"turnover": 0.1},
+            "created_at": "2026-07-17T14:31:00+00:00",
+        }]
+        snap["orders"] = [{
+            "client_order_id": "order-must-not-appear",
+            "ticker": "ACWI",
+            "side": "buy",
+            "notional": 500.0,
+            "state": "filled",
+            "created_at": "2026-07-17T14:32:00+00:00",
         }]
         snap["system"]["data_source"] = "synthetic"
         snap["system"]["data_age_days"] = 0
@@ -462,10 +584,14 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
             labels = [str(column.label) for column in table.columns.values()]
             assert "verdict" in labels
             assert "reflection" in labels
+            assert table.row_count == 1
 
             row = [str(cell) for cell in table.get_row("dec-pass-1")]
             assert any("PASS" in cell for cell in row)                 # PASS row
             assert any("realized drawdown" in cell for cell in row)    # reflection
+            assert not any("plan-must-not-appear" in cell for cell in row)
+            assert "plans and orders are in Book" in str(
+                app.query_one("#audit-summary").content)
 
             # selected-row detail expands challenger_view + verdict reasons
             # into the work rail; the strip carries the verdict summary
@@ -644,8 +770,52 @@ def test_owner_refusals_reach_the_worker_with_their_reason():
     assert "retrying will not help" in str(gone.value)
 
 
+def test_settings_view_fetches_bootstrap_once_and_renders_read_only_bulletins():
+    from qlab.tui.app import QlabTui
+
+    class SettingsClient(StubClient):
+        def __init__(self):
+            super().__init__()
+            self.bootstrap_calls = 0
+
+        def get(self, path, **params):
+            if path == "/api/bootstrap":
+                self.bootstrap_calls += 1
+            return super().get(path, **params)
+
+    async def run():
+        client = SettingsClient()
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            for _ in range(20):
+                if app.bootstrap is not None:
+                    break
+                await pilot.pause(0.02)
+
+            mandate = str(app.query_one("#settings-mandate").content)
+            data = str(app.query_one("#settings-data").content)
+            agents = str(app.query_one("#settings-agents").content)
+            theme = str(app.query_one("#settings-theme").content)
+            assert app.active_view == "settings"
+            assert "$10,000.00" in mandate
+            assert "40.0%" in mandate and "50.0%" in mandate
+            assert "15.0%" in mandate and "hrp" in mandate
+            assert "SYNTHETIC" in data and "2026-07-17" in data
+            assert "moments-analyst" in agents and "RESEARCH" in agents
+            assert "qlab amber phosphor" in theme and "amber" in theme
+
+            await pilot.press("1")
+            await pilot.press("f7")
+            await pilot.pause(0.05)
+            assert client.bootstrap_calls == 1
+
+    asyncio.run(run())
+
+
 def test_nav_menu_rows_are_clickable():
-    """Each 1–5 spine row switches to its view on click, not just Market.
+    """Each of the seven spine rows switches to its matching view on click.
 
     The row clicked is the click's y within the widget, so this pins the
     mapping as well as the fact that a Static-based menu is now clickable.
@@ -657,7 +827,8 @@ def test_nav_menu_rows_are_clickable():
         async with app.run_test(size=(160, 44)) as pilot:
             await pilot.pause(0.2)
             for row, view in enumerate(
-                    ("dashboard", "market", "workforce", "research", "audit")):
+                    ("dashboard", "market", "workforce", "research", "book",
+                     "audit", "settings")):
                 # start elsewhere so each click is a genuine transition
                 app.action_view("audit" if view != "audit" else "dashboard")
                 await pilot.pause(0.02)

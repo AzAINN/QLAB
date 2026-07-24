@@ -49,6 +49,7 @@ from qlab.tui.theme import (
     GOLD,
     LABEL_GOLD,
     MUTED,
+    PALETTE_NAME,
     PAPER_MODAL_CSS,
     SEL_BG,
     STATE_STYLE,
@@ -61,7 +62,9 @@ from qlab.paths import workspace_root
 
 _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
-_VIEWS = ("dashboard", "market", "workforce", "research", "audit")
+_VIEWS = (
+    "dashboard", "market", "workforce", "research", "book", "audit", "settings",
+)
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
 )
@@ -89,6 +92,14 @@ _PHASE_DID = {
     "reporter": "compiled the human-facing recommendation",
 }
 _STATE_STYLE = STATE_STYLE
+_BOOK_STATE_ALIASES = {
+    "proposed": "queued",
+    "checked": "done",
+    "submitted": "working",
+    "filled": "done",
+    "cancelled": "blocked",
+    "canceled": "blocked",
+}
 _PULSE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 # Bus events that mean durable state changed and a full refresh is worth it.
 _REFRESH_EVENT_KINDS = {
@@ -101,7 +112,9 @@ COMMAND_TABLE = {
     ("view", "market"): "action_view",
     ("view", "workforce"): "action_view",
     ("view", "research"): "action_view",
+    ("view", "book"): "action_view",
     ("view", "audit"): "action_view",
+    ("view", "settings"): "action_view",
     ("view", "agents"): "action_agent_focus",
     ("agents", None): "action_agent_focus",
     ("symbol", None): "action_symbol",
@@ -336,6 +349,12 @@ def _reflection_cell(reflection: str | None) -> str:
     return text[:50] if text else "pending"
 
 
+def _book_state_style(state: str) -> tuple[str, str]:
+    """Map persisted plan/order states onto the shared workstation state tones."""
+    token = _BOOK_STATE_ALIASES.get(state.lower(), state.lower())
+    return _STATE_STYLE.get(token, ("◌", DIM))
+
+
 class FlowNode(Static):
     """One agent in the workforce flowchart.
 
@@ -359,11 +378,12 @@ class FlowNode(Static):
 
 
 class NavMenu(Static):
-    """The 1–5 view switcher in the spine.
+    """The seven-view switcher in the spine.
 
     It renders one text line per view (in ``_VIEWS`` order), so a click selects
     the view on the clicked row — the click's y within the widget *is* the row
-    index. Keyboard 1–5 still work; this only adds the mouse path a Static lacks.
+    index. Digit and function keys still work; this adds the mouse path a Static
+    lacks.
     """
 
     def on_click(self, event: events.Click) -> None:
@@ -432,8 +452,17 @@ class QlabTui(App[None]):
         Binding("2", "view('market')", "Market", show=False),
         Binding("3", "view('workforce')", "Workforce", show=False),
         Binding("4", "view('research')", "Research", show=False),
-        Binding("5", "view('audit')", "Audit", show=False),
-        Binding("6", "agent_focus", "Agents", show=False),
+        Binding("5", "view('book')", "Book", show=False),
+        Binding("6", "view('audit')", "Audit", show=False),
+        Binding("7", "view('settings')", "Settings", show=False),
+        Binding("f1", "view('dashboard')", "Dashboard", show=False),
+        Binding("f2", "view('market')", "Market", show=False),
+        Binding("f3", "view('workforce')", "Workforce", show=False),
+        Binding("f4", "view('research')", "Research", show=False),
+        Binding("f5", "view('book')", "Book", show=False),
+        Binding("f6", "view('audit')", "Audit", show=False),
+        Binding("f7", "view('settings')", "Settings", show=False),
+        Binding("a", "agent_focus", "Agents", show=False),
         Binding("j", "next_symbol", "Next symbol", show=False),
         Binding("k", "previous_symbol", "Previous symbol", show=False),
         Binding("colon", "command", "Command", show=False),
@@ -471,6 +500,10 @@ class QlabTui(App[None]):
         self._runs_signature: tuple = ()
         self._audit_signature: tuple = ()
         self._audit_decisions: dict[str, dict] = {}
+        self._book_plan_ids: dict[str, str] = {}
+        self.bootstrap: dict[str, Any] | None = None
+        self._bootstrap_started = False
+        self._bootstrap_error = ""
         self._claude_buffer = ""
         self._claude_saw_delta = False
         self._claude_offer_handled = False
@@ -581,10 +614,65 @@ class QlabTui(App[None]):
                     yield Static(f"[{AMBER}]\u258d[/] RESEARCH", classes="canvas-title", markup=True)
                     yield Static(id="research-summary", markup=True)
                     yield DataTable(id="runs-table", cursor_type="row")
+                with Vertical(id="book", classes="canvas-view"):
+                    yield Static(f"[{AMBER}]\u258d[/] BOOK", classes="canvas-title", markup=True)
+                    yield Static("POSITIONS", classes="book-section-title")
+                    yield Static(
+                        id="book-positions",
+                        classes="book-section",
+                        markup=True,
+                    )
+                    yield Static("PLANS · NEWEST 5", classes="book-section-title")
+                    with Vertical(id="book-plans"):
+                        for slot in range(5):
+                            with Horizontal(
+                                id=f"book-plan-{slot}",
+                                classes="book-plan-card",
+                            ):
+                                yield Static(
+                                    id=f"book-plan-copy-{slot}",
+                                    classes="book-plan-copy",
+                                    markup=True,
+                                )
+                                yield Button(
+                                    "execute",
+                                    id=f"execute-plan-{slot}",
+                                    classes="view-action-button book-execute-button",
+                                    disabled=True,
+                                    compact=True,
+                                )
+                    yield Static("ORDERS · NEWEST 10", classes="book-section-title")
+                    yield Static(
+                        id="book-orders",
+                        classes="book-section",
+                        markup=True,
+                    )
                 with Vertical(id="audit", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] AUDIT", classes="canvas-title", markup=True)
                     yield Static(id="audit-summary", markup=True)
                     yield DataTable(id="audit-table", cursor_type="row")
+                with Vertical(id="settings", classes="canvas-view"):
+                    yield Static(f"[{AMBER}]\u258d[/] SETTINGS", classes="canvas-title", markup=True)
+                    yield Static(
+                        id="settings-mandate",
+                        classes="settings-card",
+                        markup=True,
+                    )
+                    yield Static(
+                        id="settings-data",
+                        classes="settings-card",
+                        markup=True,
+                    )
+                    yield Static(
+                        id="settings-agents",
+                        classes="settings-card",
+                        markup=True,
+                    )
+                    yield Static(
+                        id="settings-theme",
+                        classes="settings-card",
+                        markup=True,
+                    )
 
             with Vertical(id="agent-rail"):
                 yield Static("AGENTS", id="agent-label")
@@ -619,6 +707,8 @@ class QlabTui(App[None]):
         self.query_one("#audit-table", DataTable).zebra_stripes = True
         self.query_one("#runs-table", DataTable).zebra_stripes = True
         self._render_nav()
+        self._render_book()
+        self._render_settings()
         self._render_agents()
         self._start_refresh()
         if self.refresh_interval > 0:
@@ -673,6 +763,32 @@ class QlabTui(App[None]):
 
     def _finish_refresh(self) -> None:
         self._refreshing = False
+
+    def _start_bootstrap(self) -> None:
+        """Fetch immutable owner configuration once, when Settings is first shown."""
+        if self._bootstrap_started:
+            return
+        self._bootstrap_started = True
+        self._render_settings()
+
+        def run() -> None:
+            try:
+                bootstrap = self.client.get("/api/bootstrap")
+                self.call_from_thread(self._finish_bootstrap, bootstrap, "")
+            except Exception as exc:
+                self.call_from_thread(
+                    self._finish_bootstrap, None, repr(exc))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _finish_bootstrap(
+        self,
+        bootstrap: dict[str, Any] | None,
+        error: str,
+    ) -> None:
+        self.bootstrap = bootstrap
+        self._bootstrap_error = error
+        self._render_settings()
 
     def _start_live_stream(self) -> None:
         """Subscribe to the owner's SSE bus so state changes land instantly.
@@ -817,7 +933,9 @@ class QlabTui(App[None]):
         self._render_market()
         self._render_workforce()
         self._render_research()
+        self._render_book()
         self._render_audit()
+        self._render_settings()
         if not self._action_running:
             self._agent_states = {
                 str(agent.get("name")): str(agent.get("state", "idle"))
@@ -830,16 +948,13 @@ class QlabTui(App[None]):
 
     # -- renderers --------------------------------------------------------
     def _render_nav(self) -> None:
-        labels = (
-            ("1", "dashboard"), ("2", "market"), ("3", "workforce"),
-            ("4", "research"), ("5", "audit"),
-        )
         lines = []
-        for key, view in labels:
+        for index, view in enumerate(_VIEWS, start=1):
             if view == self.active_view:
-                lines.append(f"[bold {TEXT_HI}]› {key}  {view.title()}[/]")
+                lines.append(
+                    f"[bold {TEXT_HI}]› {index}  {view.title()}[/]")
             else:
-                lines.append(f"[{MUTED}]  {key}  {view.title()}[/]")
+                lines.append(f"[{MUTED}]  {index}  {view.title()}[/]")
         self.query_one("#nav", Static).update("\n".join(lines))
 
     def _sync_universe(self, tickers: list[str]) -> None:
@@ -1372,13 +1487,180 @@ class QlabTui(App[None]):
                 key=str(run.get("run_id", "")),
             )
 
+    def _render_book(self) -> None:
+        portfolio = self.snapshot.get("portfolio", {}) if self.snapshot else {}
+        positions = portfolio.get("positions") or {}
+        weights = portfolio.get("weights") or {}
+        tickers = sorted(
+            set(positions) | {
+                ticker for ticker, weight in weights.items()
+                if abs(float(weight)) > 0.0005
+            },
+            key=lambda ticker: (-float(weights.get(ticker, 0.0)), str(ticker)),
+        )
+        position_lines = [
+            f"[{DIM}]TICKER   WEIGHT        QUANTITY          VALUE[/]"
+        ]
+        for ticker in tickers:
+            position = positions.get(ticker) or {}
+            quantity = position.get("qty")
+            quantity_text = (
+                "—" if quantity is None else f"{float(quantity):,.4f}")
+            position_lines.append(
+                f"[bold {TEXT_HI}]{escape(str(ticker)):<7}[/] "
+                f"[{AMBER}]{pct(float(weights.get(ticker, 0.0))):>7}[/]   "
+                f"[{TEXT}]{quantity_text:>12}[/]   "
+                f"[{TEXT_HI}]{money(position.get('value')):>12}[/]"
+            )
+        if not tickers:
+            position_lines.append(
+                f"[{MUTED}]No positions yet — the paper book is cash.[/]")
+        self.query_one("#book-positions", Static).update(
+            "\n".join(position_lines))
+
+        plans = sorted(
+            self.snapshot.get("plans", []) if self.snapshot else [],
+            key=lambda row: str(row.get("created_at", "")),
+            reverse=True,
+        )[:5]
+        self._book_plan_ids = {}
+        for slot in range(5):
+            card = self.query_one(f"#book-plan-{slot}", Horizontal)
+            button = self.query_one(f"#execute-plan-{slot}", Button)
+            if slot >= len(plans):
+                card.styles.display = "none"
+                button.disabled = True
+                continue
+            plan = plans[slot]
+            card.styles.display = "block"
+            plan_id = str(plan.get("plan_id", ""))
+            state = str(plan.get("state", "unknown")).lower()
+            glyph, tone = _book_state_style(state)
+            pre_trade = plan.get("pre_trade") or {}
+            turnover = pre_trade.get("turnover")
+            turnover_text = (
+                pct(float(turnover)) if turnover is not None else "—")
+            created = (
+                str(plan.get("created_at", "")).replace("T", " ")[:19] or "—")
+            self.query_one(
+                f"#book-plan-copy-{slot}", Static).update(
+                    f"[{tone}]{glyph} {escape(state.upper())}[/]  "
+                    f"[bold {TEXT_HI}]{escape(plan_id or '—')}[/]\n"
+                    f"[{LABEL_GOLD}]turnover[/] [{TEXT}]{turnover_text}[/]   "
+                    f"[{LABEL_GOLD}]created[/] [{TEXT}]{escape(created)}[/]"
+                )
+            button_id = str(button.id)
+            self._book_plan_ids[button_id] = plan_id
+            button.disabled = state not in {"checked", "submitted"}
+            button.tooltip = (
+                f"Confirm execution of {plan_id}"
+                if not button.disabled else
+                f"Plan state {state} is not executable"
+            )
+
+        orders = sorted(
+            self.snapshot.get("orders", []) if self.snapshot else [],
+            key=lambda row: str(row.get("created_at", "")),
+            reverse=True,
+        )[:10]
+        order_lines = []
+        for order in orders:
+            side = str(order.get("side", "—")).upper()
+            side_tone = UP if side == "BUY" else DOWN if side == "SELL" else MUTED
+            state = str(order.get("state", "unknown"))
+            glyph, state_tone = _book_state_style(state)
+            order_lines.append(
+                f"[bold {side_tone}]{escape(side):<4}[/]  "
+                f"[{TEXT_HI}]{escape(str(order.get('ticker', '—'))):<6}[/]  "
+                f"[{TEXT}]{money(order.get('notional')):>12}[/]  "
+                f"[{state_tone}]{glyph} {escape(state.upper())}[/]"
+            )
+        if not order_lines:
+            order_lines.append(f"[{MUTED}]No paper orders yet.[/]")
+        self.query_one("#book-orders", Static).update("\n".join(order_lines))
+
+    def _render_settings(self) -> None:
+        if self.bootstrap is not None:
+            mandate = self.bootstrap.get("mandate") or {}
+            policy_id = str(mandate.get("operational_policy", "—"))
+            policy_label = str(
+                self.snapshot.get("policy", {}).get("label", "")).strip()
+            policy_text = (
+                f"{policy_id} · {policy_label}" if policy_label else policy_id)
+            mandate_copy = "\n".join([
+                f"[{LABEL_GOLD}]MANDATE · OWNER CONFIGURATION[/]",
+                f"[{MUTED}]paper capital[/]       "
+                f"[bold {TEXT_HI}]{money(mandate.get('paper_capital'))}[/]",
+                f"[{MUTED}]per-asset cap[/]       "
+                f"[{TEXT_HI}]{pct(mandate.get('max_weight_per_asset'))}[/]",
+                f"[{MUTED}]turnover cap[/]        "
+                f"[{TEXT_HI}]{pct(mandate.get('max_turnover_per_rebalance'))}[/]",
+                f"[{MUTED}]drawdown kill[/]       "
+                f"[{TEXT_HI}]{pct(mandate.get('trailing_drawdown_pct'))}[/]",
+                f"[{MUTED}]operational policy[/]  "
+                f"[bold {AMBER}]{escape(policy_text)}[/]",
+            ])
+        elif self._bootstrap_error:
+            mandate_copy = (
+                f"[bold {DOWN}]OWNER UNREACHABLE[/]\n"
+                f"[{TEXT_HI}]Mandate settings could not be loaded.[/]\n"
+                f"[{MUTED}]{escape(self._bootstrap_error)}[/]"
+            )
+        elif self._bootstrap_started:
+            mandate_copy = (
+                f"[{LABEL_GOLD}]MANDATE · OWNER CONFIGURATION[/]\n"
+                f"[{CYAN}]● loading /api/bootstrap…[/]"
+            )
+        else:
+            mandate_copy = (
+                f"[{LABEL_GOLD}]MANDATE · OWNER CONFIGURATION[/]\n"
+                f"[{MUTED}]Loaded once from the owner when Settings is opened.[/]"
+            )
+        self.query_one("#settings-mandate", Static).update(mandate_copy)
+
+        market = self.snapshot.get("market", {}) if self.snapshot else {}
+        system = self.snapshot.get("system", {}) if self.snapshot else {}
+        market_age = market.get("bar_age_days")
+        provenance_age = system.get("data_age_days")
+        data_copy = "\n".join([
+            f"[{LABEL_GOLD}]DATA · READ-ONLY PROVENANCE[/]",
+            f"[{MUTED}]snapshot source[/]     "
+            f"[{TEXT_HI}]{escape(str(market.get('source', '—')).upper())}[/]",
+            f"[{MUTED}]as of / frequency[/]  "
+            f"[{TEXT_HI}]{escape(str(market.get('as_of', '—')))} · "
+            f"{escape(str(market.get('frequency', '—')).upper())}[/]",
+            f"[{MUTED}]bar age[/]             "
+            f"[{TEXT_HI}]{'—' if market_age is None else f'{market_age} days'}[/]",
+            f"[{MUTED}]cached provenance[/]   "
+            f"[{TEXT_HI}]{escape(str(system.get('data_source', 'none')))} · "
+            f"{'—' if provenance_age is None else f'{provenance_age} days'}[/]",
+        ])
+        self.query_one("#settings-data", Static).update(data_copy)
+
+        agents = self.snapshot.get("agents", []) if self.snapshot else []
+        agent_lines = [f"[{LABEL_GOLD}]AGENTS · AUTHORITY[/]"]
+        for agent in agents:
+            agent_lines.append(
+                f"[{AMBER}]•[/] [{TEXT_HI}]{escape(str(agent.get('name', '—')))}[/]"
+                f"  [{MUTED}]{escape(str(agent.get('authority', '—')))}[/]"
+            )
+        if not agents:
+            agent_lines.append(f"[{MUTED}]No owner agent definitions loaded.[/]")
+        self.query_one("#settings-agents", Static).update(
+            "\n".join(agent_lines))
+
+        self.query_one("#settings-theme", Static).update(
+            f"[{LABEL_GOLD}]THEME · TERMINAL PALETTE[/]\n"
+            f"[{MUTED}]palette[/]  [{TEXT_HI}]{escape(PALETTE_NAME)}[/]\n"
+            f"[{MUTED}]accents[/]  [{AMBER}]████ amber[/]  "
+            f"[{CYAN}]████ cyan[/]  [{UP}]████ up[/]  [{DOWN}]████ down[/]"
+        )
+
     def _render_audit(self) -> None:
         decisions = self.snapshot.get("decisions", [])
-        plans = self.snapshot.get("plans", [])
-        orders = self.snapshot.get("orders", [])
         self.query_one("#audit-summary", Static).update(
-            "Every judgment, structured proposal, and paper fill remains inspectable.\n\n"
-            f"{len(decisions)} decisions   ·   {len(plans)} proposals   ·   {len(orders)} orders"
+            "Every judgment, challenge, verdict, and reflection remains inspectable.\n\n"
+            f"{len(decisions)} decisions   ·   plans and orders are in Book"
         )
         rows = []
         self._audit_decisions = {}
@@ -1392,19 +1674,6 @@ class QlabTui(App[None]):
                 _verdict_cell(decision.get("verdict")),
                 _reflection_cell(decision.get("reflection")),
                 str(detail)[:48], key,
-            ))
-        for plan in plans:
-            rows.append((
-                plan.get("created_at", ""), "proposal", plan.get("state", ""),
-                "—", "—",
-                f"decision {str(plan.get('decision_id', ''))[:10]}", plan.get("plan_id", ""),
-            ))
-        for order in orders:
-            rows.append((
-                order.get("created_at", ""), "paper order", order.get("state", ""),
-                "—", "—",
-                f"{order.get('side', '')} {order.get('ticker', '')} ${order.get('notional', 0):,.2f}",
-                order.get("client_order_id", ""),
             ))
         rows.sort(key=lambda row: row[0], reverse=True)
         signature = tuple((row[6], row[0], row[2], row[3], row[4]) for row in rows)
@@ -1564,6 +1833,8 @@ class QlabTui(App[None]):
             field = self.query_one("#chat-input", Input)
             if not field.disabled:  # a running turn owns the box; don't grab it
                 field.focus()
+        elif view == "settings":
+            self._start_bootstrap()
 
     def action_next_symbol(self) -> None:
         if isinstance(self.focused, Input):
@@ -1680,10 +1951,25 @@ class QlabTui(App[None]):
                 "review before requesting paper execution."
             )
         else:
-            self._pending_plan_id = str(plan["plan_id"])
-            self.push_screen(
-                PaperConfirmScreen(self._pending_plan_id), self._paper_confirmed
+            self._confirm_plan_execution(str(plan["plan_id"]))
+
+    def _confirm_plan_execution(self, plan_id: str) -> None:
+        plan = next(
+            (row for row in self.snapshot.get("plans", [])
+             if str(row.get("plan_id", "")) == plan_id),
+            None,
+        )
+        state = str((plan or {}).get("state", "")).lower()
+        if plan is None or state not in {"checked", "submitted"}:
+            self._set_selected_work(
+                "PLAN NOT EXECUTABLE\n\nOnly a persisted checked or submitted "
+                "plan can enter the human confirmation flow."
             )
+            return
+        self._pending_plan_id = plan_id
+        self.push_screen(
+            PaperConfirmScreen(self._pending_plan_id), self._paper_confirmed
+        )
 
     def action_daily_ops(self) -> None:
         self._run_api_action(
@@ -1702,7 +1988,7 @@ class QlabTui(App[None]):
     def action_help(self) -> None:
         self._set_selected_work(
             "COMMANDS\n\n"
-            "view dashboard|desk|market|workforce|research|audit\n"
+            "view dashboard|desk|market|workforce|research|book|audit|settings\n"
             "view agents\n"
             "symbol TICKER\n"
             "chat MESSAGE      (read-only desk assistant)\n"
@@ -1716,7 +2002,8 @@ class QlabTui(App[None]):
             "batch\n"
             "ask PROMPT  (isolated, no tools)\n"
             "timeline\n\n"
-            "1–5 switch views · j/k select instrument · Ctrl-Q quits"
+            "1–7 or F1–F7 switch views · j/k select instrument · "
+            "A toggles agents · Ctrl-Q quits"
         )
 
     # -- command surface --------------------------------------------------
@@ -1762,6 +2049,9 @@ class QlabTui(App[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
+        if button_id in self._book_plan_ids:
+            self._confirm_plan_execution(self._book_plan_ids[button_id])
+            return
         if button_id == "btn-rebalance-dry":
             self.action_rebalance_dry()
             return

@@ -94,6 +94,13 @@ _ALGORITHMS = (
         "it is not an allocation or paper-trading path.",
     ),
     AlgorithmSpec(
+        "entropy_pooling_views", "Entropy-pooling risk views", "estimation",
+        "research", ("min_variance", "mvsk"), None, None,
+        "Sequential minimum-relative-entropy scenario reweighting for bounded "
+        "vol/correlation/tail views with per-asset means pinned — risk views "
+        "never move expected returns. KL-budgeted; research stage.",
+    ),
+    AlgorithmSpec(
         "regime_min_variance", "Regime-conditioned minimum variance", "allocation",
         "research", ("min_variance",), "classical", None,
         "Covariance-only research arm conditioned by the deterministic regime signal.",

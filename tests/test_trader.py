@@ -371,7 +371,8 @@ def test_latest_verdict_wins_when_timestamps_collide(reg_and_broker, monkeypatch
         execute_plan(reg, broker, plan)
 
 
-def test_execute_plan_tool_resumes_cross_session_from_registry_only(tmp_registry):
+def test_execute_plan_tool_resumes_cross_session_from_registry_only(tmp_registry,
+                                                                     monkeypatch):
     """A resumed session (fresh ``TraderState``, empty in-memory ``st.plans``)
     must rebuild REAL legs from the persisted plan row -- not silently execute
     a plan with zero legs, which used to record a bogus 'reconciled' with 0
@@ -379,6 +380,7 @@ def test_execute_plan_tool_resumes_cross_session_from_registry_only(tmp_registry
     """
     from qlab.mcp.quant_trader import TraderState, register_trader_tools
 
+    monkeypatch.setenv("QLAB_HEADLESS_EXECUTE", "1")
     reg = tmp_registry
     st1 = TraderState(registry=reg, offline=True)
     targets = {t: 1.0 / len(st1.mandate.universe_whitelist)
@@ -403,7 +405,8 @@ def test_execute_plan_tool_resumes_cross_session_from_registry_only(tmp_registry
     assert all(abs(p["qty"]) > 0 for p in positions.values())
 
 
-def test_execute_plan_tool_resumes_mid_execution_submitted_plan(tmp_registry):
+def test_execute_plan_tool_resumes_mid_execution_submitted_plan(tmp_registry,
+                                                                monkeypatch):
     """A plan that crashed mid-execution is persisted as 'submitted' (one leg
     already booked). Resuming it must fill only the remaining legs, replay the
     already-filled leg without re-applying its cash/position delta, and reach
@@ -411,6 +414,7 @@ def test_execute_plan_tool_resumes_mid_execution_submitted_plan(tmp_registry):
     """
     from qlab.mcp.quant_trader import TraderState, register_trader_tools
 
+    monkeypatch.setenv("QLAB_HEADLESS_EXECUTE", "1")
     reg = tmp_registry
     st1 = TraderState(registry=reg, offline=True)
     targets = {t: 1.0 / len(st1.mandate.universe_whitelist)
@@ -452,13 +456,15 @@ def test_execute_plan_tool_resumes_mid_execution_submitted_plan(tmp_registry):
     assert reg.get_account()["cash"] != pytest.approx(cash_after_prefill)
 
 
-def test_execute_plan_tool_refuses_legacy_plan_with_no_persisted_legs(tmp_registry):
+def test_execute_plan_tool_refuses_legacy_plan_with_no_persisted_legs(tmp_registry,
+                                                                       monkeypatch):
     """A plan row from before the ``legs`` column existed (or any row somehow
     missing persisted legs) must never silently 'execute' zero legs -- it must
     refuse and point the caller at re-proposing.
     """
     from qlab.mcp.quant_trader import TraderState, register_trader_tools
 
+    monkeypatch.setenv("QLAB_HEADLESS_EXECUTE", "1")
     reg = tmp_registry
     reg.create_plan("legacy-plan-1", "dec-legacy", {"ACWI": 1.0}, {"n_legs": 1})
     reg.set_plan_state("legacy-plan-1", "checked")
@@ -530,7 +536,8 @@ def test_execute_refuses_a_plan_checked_against_a_stale_book(reg_and_broker):
         execute_plan(reg, broker, p2, mandate)
 
 
-def test_execute_plan_tool_is_not_agent_reachable_without_human(tmp_registry):
+def test_execute_plan_tool_is_not_agent_reachable_without_human(tmp_registry,
+                                                                monkeypatch):
     from qlab.mcp.quant_trader import TraderState, register_trader_tools
 
     class _App:
@@ -547,9 +554,18 @@ def test_execute_plan_tool_is_not_agent_reachable_without_human(tmp_registry):
     app = _App()
     register_trader_tools(app, st)
     # No human_confirmed → refused, execution is not agent-reachable.
+    monkeypatch.delenv("QLAB_HEADLESS_EXECUTE", raising=False)
     out = app.tools["execute_plan"]("any-plan")
     assert out["executed"] is False
     assert "human_confirmed" in out["error"]
+
+    # A bare human_confirmed=True is self-attestation an agent can forge; it is
+    # NOT sufficient without the operator's out-of-band process authorization
+    # (authority-matrix invariant #14). It must still refuse when the operator
+    # has not set QLAB_HEADLESS_EXECUTE.
+    out = app.tools["execute_plan"]("any-plan", human_confirmed=True)
+    assert out["executed"] is False
+    assert "not agent-reachable" in out["error"]
 
 
 def test_daily_order_cap_is_cumulative_across_plans(reg_and_broker):
@@ -568,3 +584,141 @@ def test_daily_order_cap_is_cumulative_across_plans(reg_and_broker):
     t2 = {w[0]: 0.4, w[3]: 0.3, w[4]: 0.3}
     with pytest.raises(MandateViolation, match="daily cap"):
         build_plan(reg, broker, mandate, t2, "dec-day2")
+
+
+# --- governance-batch regressions (Phase 0 hardening) ------------------------
+
+
+def test_costconfig_rejects_nonfinite_fields():
+    """A NaN gate bound makes every comparison false, so the net-alpha gate
+    would silently pass. Direct construction (bypassing the YAML loader's
+    finiteness check) must still fail closed.
+    """
+    from qlab.trader.mandate import CostConfig
+
+    for field_name in ("safety_multiplier", "live_haircut",
+                       "rebalance_benefit_bps", "max_cost_bps_of_equity"):
+        with pytest.raises(ValueError, match="finite"):
+            CostConfig(**{field_name: float("nan")})
+
+
+def test_cost_gate_refuses_negative_cost_even_on_initial_deployment():
+    """A malformed cost decomposition (negative total) is a data fault that must
+    fail closed BEFORE the all-cash initial-deployment exemption — otherwise a
+    plan with garbage costs deploys unchecked on first use.
+    """
+    from qlab.governance.referee import cost_gate
+
+    mandate = load_mandate()
+    pre_trade = {"n_legs": 2,
+                 "expected_cost": {"total": -5.0,
+                                   "legs": [{"notional": 100.0},
+                                            {"notional": 100.0}]}}
+    reasons = cost_gate(pre_trade, 10000.0, 0.0, 0, mandate)
+    assert reasons, "negative cost on an all-cash book must not be exempted"
+    assert any("negative" in r for r in reasons)
+
+
+def test_simulator_sell_never_oversells_into_a_short(reg):
+    """A sell notional fixed at plan time can exceed the position if the price
+    fell before execution; the simulator must clamp the sell to the held
+    quantity so a full liquidation lands at flat, never short (long-only).
+    """
+    broker = _broker(reg)
+    broker.submit_notional("coid-buy", "GLD", "buy", 1000.0)
+    held = reg.get_positions()["GLD"]["qty"]
+    assert held > 0
+    fill = broker.submit_notional("coid-sell", "GLD", "sell", 100000.0)
+    assert fill["qty"] == pytest.approx(held)
+    assert reg.get_positions().get("GLD", {}).get("qty", 0.0) >= -1e-9
+    assert reg.get_positions().get("GLD", {}).get("qty", 0.0) == pytest.approx(0.0)
+
+
+def test_execute_revalidates_submitted_plan_with_zero_fills(reg_and_broker):
+    """A plan that reached 'submitted' but crashed before ANY fill must still
+    revalidate against the live book. Two all-cash plans, the first executed:
+    the second, forced to 'submitted' with zero fills, must refuse rather than
+    deploy on top of the positions the first created.
+    """
+    reg, broker = reg_and_broker
+    mandate = load_mandate()
+    w = mandate.universe_whitelist
+    full = {t: 1.0 / len(w) for t in w}
+    p1 = build_plan(reg, broker, mandate, full, "dec-a")
+    p2 = build_plan(reg, broker, mandate, dict(full), "dec-b")
+    reg.log_verdict("dec-a", "PASS", [], "deterministic", targets=full)
+    reg.log_verdict("dec-b", "PASS", [], "deterministic", targets=full)
+    execute_plan(reg, broker, p1, mandate)  # deploys the book
+
+    reg.set_plan_state(p2.plan_id, "submitted")  # crashed before any fill
+    p2_submitted = OrderPlan(p2.plan_id, p2.decision_id, p2.targets, p2.legs,
+                             p2.pre_trade, state="submitted")
+    with pytest.raises(MandateViolation, match="stale book"):
+        execute_plan(reg, broker, p2_submitted, mandate)
+
+
+def test_rotation_into_a_new_name_is_not_a_liquidation(reg_and_broker):
+    """Aggregate gross reduction alone must NOT count as a liquidation: a plan
+    that lowers total gross while RAISING a new position is a rotation. The old
+    code waived the fully-invested rule for any gross reduction; a rotation must
+    instead be held to it and rejected (not silently granted the waiver).
+    """
+    reg, broker = reg_and_broker
+    mandate = replace(load_mandate(), max_turnover_per_rebalance=3.0)
+    w = mandate.universe_whitelist
+    full = {w[0]: 0.4, w[1]: 0.35, w[2]: 0.25}
+    p1 = build_plan(reg, broker, mandate, full, "dec-full")
+    reg.log_verdict("dec-full", "PASS", [], "deterministic", targets=full)
+    execute_plan(reg, broker, p1, mandate)
+
+    # Gross falls 1.0 -> 0.9, but w[3] grows 0 -> 0.3: a rotation, not de-risking.
+    # Not a liquidation → fully-invested is enforced → the sub-1.0 book refuses.
+    rot = {w[0]: 0.3, w[1]: 0.3, w[3]: 0.3}
+    with pytest.raises(MandateViolation, match="fully-invested"):
+        build_plan(reg, broker, mandate, rot, "dec-rot")
+
+
+def test_genuine_liquidation_executes_under_halt(reg_and_broker):
+    """A halted account must still permit a genuine de-risking to execute — the
+    kill switch stops new risk, it must not trap the desk in its positions.
+    """
+    reg, broker = reg_and_broker
+    mandate = replace(load_mandate(), max_turnover_per_rebalance=3.0)
+    w = mandate.universe_whitelist
+    full = {t: 1.0 / len(w) for t in w}
+    p1 = build_plan(reg, broker, mandate, full, "dec-full")
+    reg.log_verdict("dec-full", "PASS", [], "deterministic", targets=full)
+    execute_plan(reg, broker, p1, mandate)
+
+    reg.set_halt(True)
+    # Halve every weight: gross falls, no position grows — a pure liquidation.
+    reduced = {t: 0.5 / len(w) for t in w}
+    p2 = build_plan(reg, broker, mandate, reduced, "dec-liq")
+    assert p2.pre_trade["liquidating"] is True
+    reg.log_verdict("dec-liq", "PASS", [], "deterministic", targets=reduced)
+    result = execute_plan(reg, broker, p2, mandate)
+    assert result["state"] == "reconciled"
+
+
+def test_non_liquidation_refused_under_halt(reg_and_broker):
+    """The other side of the halt gate: a plan that is NOT a genuine de-risking
+    must be refused while the account is halted.
+    """
+    reg, broker = reg_and_broker
+    mandate = replace(load_mandate(), max_turnover_per_rebalance=3.0)
+    w = mandate.universe_whitelist
+    full = {t: 1.0 / len(w) for t in w}
+    p1 = build_plan(reg, broker, mandate, full, "dec-full")
+    reg.log_verdict("dec-full", "PASS", [], "deterministic", targets=full)
+    execute_plan(reg, broker, p1, mandate)
+
+    reg.set_halt(True)
+    # Keep gross == 1.0 by moving weight between two names (raising one, lowering
+    # another): a non-liquidation move that must be refused under the halt.
+    reshuffle = {t: 1.0 / len(w) for t in w}
+    reshuffle[w[0]] = reshuffle[w[0]] + 0.02
+    reshuffle[w[1]] = reshuffle[w[1]] - 0.02
+    p2 = build_plan(reg, broker, mandate, reshuffle, "dec-reshuffle")
+    reg.log_verdict("dec-reshuffle", "PASS", [], "deterministic", targets=reshuffle)
+    with pytest.raises(MandateViolation, match="halted"):
+        execute_plan(reg, broker, p2, mandate)

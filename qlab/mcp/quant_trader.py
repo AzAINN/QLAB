@@ -86,23 +86,30 @@ def register_trader_tools(app, st: TraderState) -> None:
         """Phase 2: execute a checked (or resumed submitted) plan. Idempotent;
         refuses anything else.
 
-        Execution is not agent-reachable: ``human_confirmed=True`` is required,
-        the same affirmation the owner runtime demands, so an autonomous agent
-        connected to the headless server cannot book a trade on its own. The
-        net-alpha cost gate runs here too, matching the owner path.
+        Execution is NOT agent-reachable. ``human_confirmed=True`` is a boolean
+        in the tool arguments — self-attestation an autonomous agent can forge —
+        so it never suffices on its own (authority-matrix invariant #14). The
+        headless server books a trade only when the operator authorized THIS
+        process out of band by setting ``QLAB_HEADLESS_EXECUTE=1``, which an
+        agent connected over MCP cannot set. Per-plan persisted approvals that
+        bind a specific plan to a specific human replace this coarse gate in a
+        later phase; until then a bare confirmation cannot execute.
 
         A fresh session (``st.plans`` empty after a restart) rebuilds the plan
         from the registry-persisted row, including its real order legs -- a
         legacy row with no persisted legs is refused rather than silently
         "executed" with zero legs.
         """
-        if human_confirmed is not True:
+        operator_authorized = os.environ.get("QLAB_HEADLESS_EXECUTE") == "1"
+        if human_confirmed is not True or not operator_authorized:
             return {"executed": False,
-                    "error": "human_confirmed=true is required to execute a "
-                             "paper plan; execution is not agent-reachable"}
+                    "error": "execution is not agent-reachable: a bare "
+                             "human_confirmed flag cannot book a paper trade; "
+                             "the operator must authorize this process out of "
+                             "band (QLAB_HEADLESS_EXECUTE=1)"}
         plan = st.plans.get(plan_id)
+        stored = st.registry.get_plan(plan_id)
         if plan is None:
-            stored = st.registry.get_plan(plan_id)
             if not stored:
                 return {"executed": False, "error": f"unknown plan_id {plan_id!r}"}
             stored_legs = stored.get("legs") or []
@@ -112,20 +119,38 @@ def register_trader_tools(app, st: TraderState) -> None:
             legs = [OrderLeg(**leg) for leg in stored_legs]
             plan = OrderPlan(plan_id, stored["decision_id"], stored["targets"],
                              legs, stored["pre_trade"], state=stored["state"])
-        # Net-alpha gate before execution, matching the owner path: a refused
-        # plan is marked terminally refused so it cannot execute here either.
-        from qlab.governance.referee import cost_gate
 
-        book = st.broker.portfolio_state(st.tickers)
-        weights = book.get("weights", {})
-        gate_reasons = cost_gate(
-            plan.pre_trade, float(book["equity"]),
-            sum(abs(float(w)) for w in weights.values()),
-            len(book.get("positions", {})), st.mandate)
-        if gate_reasons:
-            st.registry.set_plan_state(plan.plan_id, "refused")
-            return {"executed": False, "blocked_by": "cost_gate",
-                    "reasons": gate_reasons}
+        # The book must reconcile with the ledger before ANY new booking: a
+        # dirty book means broker truth and our ledger disagree, and trading on
+        # top of that compounds the divergence.
+        recon = _reconcile(st.registry, st.broker, st.tickers)
+        if not recon.get("clean", False):
+            return {"executed": False, "blocked_by": "reconcile",
+                    "diffs": recon.get("diffs", {})}
+
+        # The net-alpha cost gate runs ONLY for a fresh, not-yet-started plan.
+        # A plan that already began executing (some legs filled) or is terminal
+        # must delegate straight to execute_plan for an idempotent replay or a
+        # clean terminal refusal — re-gating it against the now-invested book
+        # would spuriously refuse it and, worse, rewrite a terminal 'reconciled'
+        # plan to 'refused'.
+        stored_state = stored["state"] if stored else plan.state
+        started = any(
+            (st.registry.get_order(leg.client_order_id) or {}).get("state") == "filled"
+            for leg in plan.legs)
+        if stored_state == "checked" and not started:
+            from qlab.governance.referee import cost_gate
+
+            book = st.broker.portfolio_state(st.tickers)
+            weights = book.get("weights", {})
+            gate_reasons = cost_gate(
+                plan.pre_trade, float(book["equity"]),
+                sum(abs(float(w)) for w in weights.values()),
+                len(book.get("positions", {})), st.mandate)
+            if gate_reasons:
+                st.registry.set_plan_state(plan.plan_id, "refused")
+                return {"executed": False, "blocked_by": "cost_gate",
+                        "reasons": gate_reasons}
         try:
             result = execute_plan(st.registry, st.broker, plan, st.mandate)
             return {"executed": True, **result}

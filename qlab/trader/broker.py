@@ -98,11 +98,19 @@ class SimulatedPaperBroker(Broker):
                         notional: float) -> dict:
         price = self.prices([ticker])[ticker]
         qty = notional / price
+        if side == "sell":
+            # Never sell more than is held: a sell notional fixed at plan time
+            # can exceed the position if the price fell before execution, which
+            # would open a short. Long-only is enforced at the fill boundary,
+            # so a full liquidation lands at exactly flat, never short.
+            held = float(self.reg.get_positions().get(ticker, {}).get("qty", 0.0))
+            qty = min(qty, max(held, 0.0))
+        filled_notional = qty * price
         dqty = qty if side == "buy" else -qty
-        cash_delta = -notional if side == "buy" else notional
+        cash_delta = -filled_notional if side == "buy" else filled_notional
         self.reg.apply_fill(ticker, dqty, price, cash_delta)
         return {"client_order_id": client_order_id, "ticker": ticker, "side": side,
-                "qty": qty, "price": price, "notional": notional, "state": "filled"}
+                "qty": qty, "price": price, "notional": filled_notional, "state": "filled"}
 
 
 class AlpacaPaperBroker(Broker):
@@ -147,9 +155,12 @@ class AlpacaPaperBroker(Broker):
                    for t in positions}
         # Persist a monotone high-water mark: returning the current equity as
         # the HWM would make drawdown always zero and silently disable the
-        # kill switch and drawdown tiers on the live account.
-        self.registry.update_high_water_mark(equity)
-        hwm = float(self.registry.get_account().get("high_water_mark", equity)
+        # kill switch and drawdown tiers on the live account. Seed the account
+        # row on first read so the monotone update has something to raise.
+        if not self.reg.get_account():
+            self.reg.init_account(equity)
+        self.reg.update_high_water_mark(equity)
+        hwm = float(self.reg.get_account().get("high_water_mark", equity)
                     or equity)
         return {"cash": float(acct.cash), "equity": equity, "positions": positions,
                 "weights": weights, "high_water_mark": max(hwm, equity),
@@ -173,7 +184,14 @@ def get_broker(registry: Registry, *, offline: bool = False,
                starting_cash: float = 10000.0, seed: int = 7,
                universe: list[str] | None = None) -> Broker:
     """Return the Alpaca paper broker if credentials exist, else the simulator."""
-    if os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_API_SECRET"):
+    key, secret = os.environ.get("ALPACA_API_KEY"), os.environ.get("ALPACA_API_SECRET")
+    if bool(key) != bool(secret):
+        # Partial credentials signal Alpaca intent with a broken setup: fail
+        # loud rather than silently simulating against the wrong venue.
+        raise RuntimeError(
+            "only one of ALPACA_API_KEY / ALPACA_API_SECRET is set; set both to "
+            "use the Alpaca paper broker, or neither to use the simulator")
+    if key and secret:
         # Credentials present means the operator asked for Alpaca: a failure to
         # build it must be loud, never a silent downgrade to simulation (which
         # would book against the wrong venue without telling anyone).

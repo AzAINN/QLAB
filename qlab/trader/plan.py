@@ -131,9 +131,15 @@ def build_plan(
 
     current_gross = sum(abs(float(w)) for w in current_w.values())
     target_gross = sum(abs(float(w)) for w in targets.values())
-    # A de-risking plan (strictly lower gross exposure) is a "liquidation": it
-    # is permitted past the kill switch and need not be fully invested.
-    is_liquidating = target_gross < current_gross - 1e-6
+    # A "liquidation" is PURE de-risking: overall gross strictly falls AND no
+    # single position grows in magnitude. A plan that rotates into a new name —
+    # raising one weight while lowering aggregate gross — is NOT a liquidation
+    # and stays subject to the kill switch and the fully-invested rule, so it
+    # cannot use the liquidation waiver to open a position under a halt.
+    no_position_increased = all(
+        abs(float(targets.get(t, 0.0))) <= abs(float(current_w.get(t, 0.0))) + 1e-6
+        for t in set(current_w) | set(targets))
+    is_liquidating = (target_gross < current_gross - 1e-6) and no_position_increased
 
     # kill-switch — a breached mandate refuses everything EXCEPT de-risking.
     if mandate.drawdown_breached(equity, float(state.get("high_water_mark", equity))):
@@ -231,8 +237,6 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan,
         raise MandateViolation(
             f"plan {plan.plan_id} is {stored['state']!r} in the registry "
             "(terminal); re-propose")
-    if registry.get_account().get("halted"):
-        raise MandateViolation("account is halted; only liquidation is permitted")
     v = registry.get_verdict(plan.decision_id)
     if not v or v.get("verdict") != "PASS":
         raise MandateViolation(
@@ -265,11 +269,31 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan,
     already_started = any(
         (registry.get_order(leg.client_order_id) or {}).get("state") == "filled"
         for leg in stored_legs)
-    if stored["state"] == "checked" and not already_started:
+    # A plan with NO filled legs must revalidate against the book regardless of
+    # its persisted state: a plan that reached 'submitted' and crashed before
+    # any fill would otherwise skip this and deploy on top of positions a
+    # sibling plan created.
+    if not already_started:
         assumed = (stored.get("pre_trade") or {}).get("current_weights", {})
         live = broker.portfolio_state(
             sorted(set(assumed) | set(stored_targets)))
         live_w = live.get("weights", {})
+        # Recompute liquidation status against the LIVE book, never trusting the
+        # plan's stored flag: pure de-risking (gross strictly falls, no position
+        # grows) is the only thing permitted to execute under a halt.
+        target_gross = sum(abs(float(w)) for w in stored_targets.values())
+        current_gross = sum(abs(float(w)) for w in live_w.values())
+        no_position_increased = all(
+            abs(float(stored_targets.get(t, 0.0)))
+            <= abs(float(live_w.get(t, 0.0))) + 1e-6
+            for t in set(live_w) | set(stored_targets))
+        is_liquidating = (target_gross < current_gross - 1e-6) and no_position_increased
+        # A halted account (kill switch already latched) executes ONLY a genuine
+        # liquidation; a fresh non-liquidation plan is refused even if its own
+        # drawdown check would pass.
+        if registry.get_account().get("halted") and not is_liquidating:
+            raise MandateViolation(
+                "account is halted; only liquidation may execute")
         drift = max((abs(float(live_w.get(t, 0.0)) - float(assumed.get(t, 0.0)))
                      for t in set(assumed) | set(live_w)), default=0.0)
         if drift > 1e-3:
@@ -280,9 +304,7 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan,
         if mandate.drawdown_breached(
                 float(live["equity"]),
                 float(live.get("high_water_mark", live["equity"]))):
-            target_gross = sum(abs(float(w)) for w in stored_targets.values())
-            current_gross = sum(abs(float(w)) for w in live_w.values())
-            if target_gross >= current_gross - 1e-6:
+            if not is_liquidating:
                 registry.set_halt(True)
                 raise MandateViolation(
                     "trailing-drawdown kill-switch fired since this plan was "

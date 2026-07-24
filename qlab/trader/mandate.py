@@ -110,6 +110,15 @@ class CostConfig:
     max_cost_bps_of_equity: float = 25.0
 
     def __post_init__(self) -> None:
+        # Non-finite bounds must fail closed: NaN makes every comparison below
+        # false, so a NaN multiplier would silently pass the gate (direct
+        # construction bypasses the YAML loader's finiteness check).
+        for name, value in (("live_haircut", self.live_haircut),
+                            ("safety_multiplier", self.safety_multiplier),
+                            ("rebalance_benefit_bps", self.rebalance_benefit_bps),
+                            ("max_cost_bps_of_equity", self.max_cost_bps_of_equity)):
+            if not math.isfinite(value):
+                raise ValueError(f"costs.{name} must be finite, got {value!r}")
         # The gate's semantics require these ranges; a "haircut" above 1
         # would amplify benefit and a multiplier below 1 would shrink the
         # safety margin — silently inverting the gate.

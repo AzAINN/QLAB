@@ -40,28 +40,33 @@ def cost_gate(pre_trade: dict, equity: float, gross_exposure: float,
         return ["cost gate requires finite positive equity"]
     if not np.isfinite(gross_exposure):
         return ["cost gate requires finite gross exposure"]
+
+    # Validate the cost decomposition BEFORE any exemption: a malformed cost
+    # (missing, non-finite, or negative) is a data fault and must fail closed
+    # even on an otherwise-exempt initial deployment.
+    expected = pre_trade.get("expected_cost")
+    n_legs = int(pre_trade.get("n_legs", 0))
+    if n_legs > 0:
+        if not isinstance(expected, dict) or "total" not in expected:
+            return ["plan carries no expected_cost decomposition; refusing"]
+        cost_total = float(expected["total"])
+        legs = expected.get("legs")
+        if not isinstance(legs, list) or len(legs) != n_legs:
+            return ["expected_cost legs do not match the plan's legs; refusing"]
+        traded_notional = sum(abs(float(leg.get("notional", 0.0))) for leg in legs)
+        if not np.isfinite(cost_total) or not np.isfinite(traded_notional):
+            return ["non-finite cost or traded notional; refusing"]
+        if cost_total < 0:
+            return [f"expected cost is negative ({cost_total:.2f}); malformed "
+                    "decomposition, refusing"]
+
     if n_positions == 0 and gross_exposure < 0.01:
         return []  # true all-cash initial deployment
     if gross_exposure < 0.01:
         return ["inconsistent portfolio state: positions exist with ~zero "
                 "gross exposure"]
-
-    expected = pre_trade.get("expected_cost")
-    if not isinstance(expected, dict) or "total" not in expected:
-        return ["plan carries no expected_cost decomposition; refusing"]
-    cost_total = float(expected["total"])
-    legs = expected.get("legs")
-    n_legs = int(pre_trade.get("n_legs", 0))
     if n_legs == 0:
         return []  # nothing trades; nothing to gate
-    if not isinstance(legs, list) or len(legs) != n_legs:
-        return ["expected_cost legs do not match the plan's legs; refusing"]
-    traded_notional = sum(abs(float(leg.get("notional", 0.0))) for leg in legs)
-    if not np.isfinite(cost_total) or not np.isfinite(traded_notional):
-        return ["non-finite cost or traded notional; refusing"]
-    if cost_total < 0:
-        return [f"expected cost is negative ({cost_total:.2f}); malformed "
-                "decomposition, refusing"]
 
     reasons: list[str] = []
     cap = equity * costs.max_cost_bps_of_equity / 1e4

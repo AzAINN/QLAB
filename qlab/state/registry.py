@@ -527,6 +527,9 @@ class Registry:
         ``_deps`` so resumption re-reads the same graph.
         """
         request = dict(request)
+        # "_deps" is a registry-owned key: only the panel builder writes it.
+        # A caller-supplied value could reorder or orphan the gate phases.
+        request.pop("_deps", None)
         if kind == "panel":
             variants = request.get("variants")
             if not isinstance(variants, list) or not all(
@@ -591,7 +594,15 @@ class Registry:
                 return workflow
             raise RuntimeError(f"completed phase {phase!r} cannot be reopened")
         instance_deps = (workflow.get("request") or {}).get("_deps")
-        deps_map = instance_deps if isinstance(instance_deps, dict) else _WORKFORCE_DEPS
+        # Honor a stored DAG only when it covers exactly this workflow's
+        # phases; anything else falls back to the static map so a malformed
+        # request can never orphan the judge/referee gates.
+        deps_map = (
+            instance_deps
+            if isinstance(instance_deps, dict)
+            and set(instance_deps) == set(by_phase)
+            else _WORKFORCE_DEPS
+        )
         for dependency in deps_map.get(phase, ()):
             dependency_step = by_phase.get(dependency)
             if dependency_step is None or dependency_step["status"] != "done":
@@ -692,6 +703,7 @@ class Registry:
                 raise ValueError(
                     "referee 'targets' do not match the judge's winning targets"
                 )
+            return self._require_pass_verdict(artifacts, reviewed_hash)
         optimizer_step = by_phase.get("optimizer")
         if optimizer_step is not None:
             optimizer_targets = (optimizer_step.get("artifacts") or {}).get("targets")
@@ -702,6 +714,9 @@ class Registry:
                 raise ValueError(
                     "referee 'targets' do not match the optimizer's persisted targets"
                 )
+        self._require_pass_verdict(artifacts, reviewed_hash)
+
+    def _require_pass_verdict(self, artifacts: dict, reviewed_hash: str) -> None:
         verdict_rows = self._rows(
             "SELECT * FROM verdicts WHERE verdict_id=?",
             [str(artifacts.get("verdict_id"))],

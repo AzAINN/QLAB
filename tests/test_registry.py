@@ -369,3 +369,46 @@ def test_panel_workflow_validates_variants(reg):
         reg.start_workflow("panel", {"goal": "x"})
     with pytest.raises(ValueError, match="2\\.\\.5"):
         reg.start_workflow("panel", {"goal": "x", "variants": [{"w": 1}]})
+
+
+def test_referee_binding_judge_takes_precedence_over_literal_optimizer(reg):
+    """A mixed workflow (judge + literal optimizer phase) binds to the judge."""
+    workflow = reg.start_workflow(
+        "portfolio_review", {"goal": "mixed"},
+        phases=("analyst", "challenger", "optimizer", "judge", "referee",
+                "reporter"))
+    workflow_id = workflow["workflow_id"]
+    reg.update_workflow_phase(
+        workflow_id, "analyst", "done",
+        artifacts={"moment_set_id": "m", "objective_id": "o",
+                   "decision_id": "d"})
+    reg.update_workflow_phase(
+        workflow_id, "challenger", "done",
+        artifacts={"challenger_view": "c"})
+    a, b = {"GLD": 1.0}, {"EMB": 1.0}
+    reg.update_workflow_phase(
+        workflow_id, "optimizer", "done",
+        artifacts={"targets": b, "algorithm_id": "hrp"})
+    reg.update_workflow_phase(
+        workflow_id, "judge", "done",
+        artifacts={"winner_phase": "optimizer", "winning_targets": b,
+                   "evidence": "only branch"})
+    # Judge crowned B; a PASS for B must complete even though a literal
+    # optimizer phase also exists (the checks are exclusive, not additive).
+    vid = reg.log_verdict("d", "PASS", ["ok"], targets=b)
+    done = reg.update_workflow_phase(
+        workflow_id, "referee", "done",
+        artifacts={"verdict": "PASS", "verdict_id": vid, "targets": b})
+    by_phase = {s["phase"]: s for s in done["steps"]}
+    assert by_phase["referee"]["status"] == "done"
+
+
+def test_request_deps_key_is_registry_owned(reg):
+    """A caller-supplied _deps cannot reorder the standard pipeline."""
+    workflow = reg.start_workflow(
+        "portfolio_review",
+        {"goal": "x", "_deps": {"reporter": []}})
+    assert "_deps" not in workflow["request"]
+    import pytest
+    with pytest.raises(RuntimeError, match="cannot start"):
+        reg.update_workflow_phase(workflow["workflow_id"], "reporter", "working")

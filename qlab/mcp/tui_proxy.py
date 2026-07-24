@@ -220,14 +220,20 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         views: list[dict],
         kl_budget: float = 0.25,
         dry: bool = True,
+        excerpt: str = "",
     ) -> dict:
-        """Validate and apply dry research risk views through the owner."""
+        """Validate and apply dry research risk views through the owner.
+
+        Pass the operator's source text as ``excerpt`` so every view's
+        ``source_quote`` is checked against it deterministically.
+        """
         return lab("research.apply_views", {
             "as_of": as_of,
             "universe": universe,
             "views": views,
             "kl_budget": kl_budget,
             "dry": dry,
+            "excerpt": excerpt,
         })
 
     # -- regime indicators (options for the analyst's regime call) --------

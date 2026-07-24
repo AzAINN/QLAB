@@ -82,6 +82,27 @@ def _view_number(value: object, field: str, index: int) -> float:
     return number
 
 
+def _verify_view_provenance(canonical_views: list[dict], excerpt: str) -> bool:
+    """Every view's quote must be grounded in the operator's source text.
+
+    Returns False (unverified, but permitted) when no excerpt was supplied so
+    the audit trail is explicit; raises when an excerpt is supplied and a quote
+    is not a whitespace-normalized substring of it — a fabricated or
+    laundered quote cannot then reach the analyst's context.
+    """
+    normalized_excerpt = " ".join(excerpt.split()).lower()
+    if not normalized_excerpt:
+        return False
+    for index, view in enumerate(canonical_views, start=1):
+        quote = " ".join(str(view.get("source_quote", "")).split()).lower()
+        if not quote or quote not in normalized_excerpt:
+            raise ValueError(
+                f"view {index} source_quote is not found in the supplied "
+                "excerpt; every risk view must quote the operator's text"
+            )
+    return True
+
+
 def _validated_risk_views(
     views: list[dict],
 ) -> tuple[list[VolView | CorrView | TailView], list[dict]]:
@@ -946,12 +967,19 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         views: list[dict],
         kl_budget: float = 0.25,
         dry: bool = True,
+        excerpt: str = "",
     ) -> dict:
         """Validate and apply up to three risk views to a scenario panel.
 
         This is a dry research diagnostic only. It records the bounded
         entropy-pooling result, but does not persist conditioned tensors or
         feed a downstream objective, solver, workflow phase, or paper plan.
+
+        ``excerpt`` is the operator-supplied source text. When provided, every
+        view's ``source_quote`` must be a whitespace-normalized substring of
+        it — a deterministic provenance gate so the quarantine does not rest on
+        the extractor's prompt alone. The audit run records whether provenance
+        was verified.
         """
         st.budget.charge("research.apply_views")
         if not isinstance(dry, bool):
@@ -961,10 +989,13 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                 "research.apply_views supports dry=true only; downstream "
                 "conditioning is not wired"
             )
+        if not isinstance(excerpt, str):
+            raise TypeError("excerpt must be a string")
         budget = _view_number(kl_budget, "kl_budget", 0)
         if budget <= 0.0:
             raise ValueError("kl_budget must be positive")
         typed_views, canonical_views = _validated_risk_views(views)
+        provenance_verified = _verify_view_provenance(canonical_views, excerpt)
 
         d = check_as_of(as_of)
         tickers = load_universe().tickers(universe)
@@ -989,6 +1020,7 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
             "moments_before": result.moments_before,
             "moments_after": result.moments_after,
             "applied_labels": list(result.labels),
+            "provenance_verified": provenance_verified,
         }
         run_id = st.registry.log_run("views", {
             "algorithm_id": "entropy_pooling_views",

@@ -62,8 +62,10 @@ def test_apply_views_round_trips_offline_and_records_only_a_research_run(reg):
         "moments_before",
         "moments_after",
         "applied_labels",
+        "provenance_verified",
     }
     assert result["applied_labels"] == ["tail(ACWI fatter)"]
+    assert result["provenance_verified"] is False  # no excerpt supplied
     assert 0.0 <= result["kl_total"] <= 0.25
     assert set(result["moments_before"]) == set(result["moments_after"])
     for ticker in result["moments_before"]:
@@ -199,6 +201,44 @@ def test_tui_proxy_forwards_apply_views_to_the_owner():
             "views": [_tail_view()],
             "kl_budget": 0.25,
             "dry": True,
+            "excerpt": "",
             "offline": True,
         },
     )]
+
+
+def test_apply_views_provenance_gate_when_excerpt_supplied(reg):
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    excerpt = ("Dealers report options markets imply unusually wide outcomes "
+               "for global equities into year end.")
+    grounded = {
+        "type": "vol", "ticker": "ACWI", "target_vol": 0.02, "confidence": 0.5,
+        "source_quote": "options markets imply unusually wide outcomes",
+    }
+    ok = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "views": [grounded],
+         "excerpt": excerpt}, offline=True)
+    assert ok["provenance_verified"] is True
+
+    fabricated = dict(grounded, source_quote="ACWI will rally hard next week")
+    with pytest.raises(ValueError, match="not found in the supplied excerpt"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core", "views": [fabricated],
+             "excerpt": excerpt}, offline=True)
+
+
+def test_apply_views_marks_unverified_without_excerpt(reg):
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    view = {"type": "vol", "ticker": "ACWI", "target_vol": 0.02,
+            "confidence": 0.5, "source_quote": "options imply wide outcomes"}
+    out = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "views": [view]},
+        offline=True)
+    assert out["provenance_verified"] is False

@@ -118,3 +118,18 @@ def test_conditioned_moments_validation():
     panel, _ = _panel()
     with pytest.raises(ValueError, match="distribution"):
         conditioned_moments(panel, np.full(panel.shape[0], 0.5))
+
+
+def test_noop_tiny_vol_view_is_rejected_not_reported_applied():
+    """A tiny second-moment target must not slip through as a silent no-op."""
+    rng = np.random.default_rng(3)
+    # Deliberately tiny returns so var ~ 1e-10 stresses the residual scale.
+    panel = rng.normal(0.0, 3e-5, size=(755, 3))
+    tickers = ["ACWI", "BBB", "CCC"]
+    realized = float(np.std(panel[:, 0], ddof=0))
+    # Halve an already-tiny vol at 0.5 confidence — the exact case the
+    # reviewer reproduced as a KL=0 no-op reported as applied.
+    with pytest.raises(ValueError, match="did not achieve|infeasible|clamp"):
+        apply_views(panel, tickers,
+                    [VolView("ACWI", realized * 0.5, confidence=0.5)],
+                    kl_budget=5.0)

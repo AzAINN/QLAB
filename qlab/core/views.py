@@ -233,8 +233,31 @@ def apply_views(panel: np.ndarray, tickers: list[str],
         else:  # pragma: no cover - typing guards this
             raise TypeError(f"unknown view type {type(view)!r}")
 
+        # The view's own risk-moment constraint is always the last row; the
+        # rows before it only pin means (and, for a pair, variances).
+        primary_row, primary_target = rows[-1], targets[-1]
+        prev_primary = float(p_prev @ primary_row)
+
         p_view = _solve_tilt(p_prev, np.column_stack(rows), np.array(targets))
         p_next = view.confidence * p_view + (1.0 - view.confidence) * p_prev
+
+        # Achieved-moment postcondition, independent of the dual's internal
+        # tolerance: the tilt must have moved the requested moment to its
+        # confidence-blended target. A near-zero second moment can otherwise
+        # let the solver keep its starting distribution and still "succeed",
+        # so a no-op on a real request is caught here as a scale-aware
+        # relative miss rather than reported as applied.
+        achieved = float(p_next @ primary_row)
+        expected = view.confidence * primary_target + (
+            1.0 - view.confidence) * prev_primary
+        denominator = abs(expected) + abs(prev_primary) + 1e-12
+        if abs(achieved - expected) > 1e-4 * denominator:
+            raise ValueError(
+                f"{view.label()}: the reweighting did not achieve the "
+                f"requested risk moment (achieved {achieved:.3e}, expected "
+                f"{expected:.3e}); the view is infeasible or too small to "
+                "express on this panel")
+
         kl_per_view[view.label()] = _kl(p_next, p_prev)
         p_prev = p_next
         labels.append(view.label())

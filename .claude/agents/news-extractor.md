@@ -33,10 +33,12 @@ For the assigned `as_of` and universe:
    Tail `direction` is only `fatter` or `thinner`. Never emit fields such as
    `target_return`, `expected_return`, `price_target`, or `return_direction`.
 4. Make one `research.apply_views` call with that exact JSON array as `views`,
-   the brief's exact `as_of` and universe, and `dry=true`. The tool is the
-   deterministic schema validator and entropy-pooling engine; do not claim a
-   view was accepted until it returns successfully. Correct a rejected schema
-   at most once and never weaken or evade a clamp.
+   the brief's exact `as_of` and universe, `dry=true`, and `excerpt` set to the
+   operator's source text verbatim. The tool is the deterministic schema
+   validator and entropy-pooling engine; it also checks each `source_quote`
+   against the `excerpt`, so a quote you did not copy from the operator's text
+   is rejected. Do not claim a view was accepted until it returns successfully.
+   Correct a rejected schema at most once and never weaken or evade a clamp.
 5. After a successful call, return exactly the tool's JSON run summary and no
    additional analysis. This is dry research context only: it does not
    condition a downstream moment set, objective, solver, workflow phase, or

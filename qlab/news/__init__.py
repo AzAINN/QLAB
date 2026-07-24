@@ -3,6 +3,7 @@
 from qlab.news.feed import (
     PROVIDERS,
     NewsItem,
+    cached_news_provenance,
     fetch_news,
     load_news_sources,
 )
@@ -10,6 +11,7 @@ from qlab.news.feed import (
 __all__ = [
     "NewsItem",
     "PROVIDERS",
+    "cached_news_provenance",
     "fetch_news",
     "load_news_sources",
 ]

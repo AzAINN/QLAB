@@ -17,9 +17,11 @@ import calendar
 import hashlib
 import os
 import random
+import threading
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ElementTree
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -59,6 +61,8 @@ class NewsItem:
 
 ProviderFetch = Callable[[datetime, tuple[str, ...]], list[NewsItem]]
 PROVIDERS: dict[str, ProviderFetch] = {}
+_NEWS_CACHE: dict[tuple[str, ...], tuple[NewsItem, ...]] = {}
+_CACHE_LOCK = threading.RLock()
 
 
 def fetch_news(
@@ -120,7 +124,7 @@ def fetch_news(
             )
         )
 
-    return sorted(
+    ordered = sorted(
         items,
         key=lambda item: (
             -_as_datetime(item.published).timestamp(),
@@ -129,6 +133,23 @@ def fetch_news(
             item.url,
         ),
     )
+    with _CACHE_LOCK:
+        _NEWS_CACHE[tickers] = tuple(ordered)
+    return ordered
+
+
+def cached_news_provenance(
+    universe: Sequence[str],
+) -> tuple[str, int] | None:
+    """Return provider/count provenance from the last in-process fetch."""
+    tickers = _normalize_universe(universe)
+    with _CACHE_LOCK:
+        items = _NEWS_CACHE.get(tickers)
+    if not items:
+        return None
+    counts = Counter(item.provider for item in items)
+    top_provider = min(counts, key=lambda name: (-counts[name], name))
+    return top_provider, len(items)
 
 
 @lru_cache(maxsize=4)

@@ -55,6 +55,7 @@ def test_synthetic_fetch_is_deterministic_filtered_and_provider_tagged(
     assert all(set(item.tickers) <= set(CORE) for item in first)
     cutoff = as_of - timedelta(hours=48)
     assert all(cutoff <= _timestamp(item.published) <= as_of for item in first)
+    assert news.cached_news_provenance(CORE) == ("synthetic", len(narrow))
     expected_order = sorted(
         first,
         key=lambda item: (

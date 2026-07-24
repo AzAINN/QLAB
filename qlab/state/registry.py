@@ -51,9 +51,42 @@ _WORKFORCE_REQUIRED_ARTIFACTS = {
     "analyst": ("moment_set_id", "objective_id", "decision_id"),
     "challenger": ("challenger_view",),
     "optimizer": ("targets", "algorithm_id"),
+    "judge": ("winner_phase", "winning_targets", "evidence"),
     "referee": ("verdict", "verdict_id", "targets"),
     "reporter": ("recommendation",),
 }
+_MAX_PANEL_VARIANTS = 5
+
+
+def _phase_type(phase: str) -> str:
+    """'analyst-3' → 'analyst'; panel branches share their base type's rules."""
+    base, dash, suffix = phase.rpartition("-")
+    if dash and suffix.isdigit():
+        return base
+    return phase
+
+
+def panel_phases(n_variants: int) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """Phases + dependency DAG for a tournament of analyst variants.
+
+    Each branch runs its own analyst → optimizer; the judge joins every
+    branch and picks a winner on evidence; the referee gates the winner and
+    the reporter closes. The judgment-is-defended property is preserved by
+    the judge's completion contract instead of a per-branch challenger.
+    """
+    if not 2 <= n_variants <= _MAX_PANEL_VARIANTS:
+        raise ValueError(
+            f"panel needs 2..{_MAX_PANEL_VARIANTS} variants, got {n_variants}")
+    analysts = tuple(f"analyst-{i}" for i in range(1, n_variants + 1))
+    optimizers = tuple(f"optimizer-{i}" for i in range(1, n_variants + 1))
+    phases = (*analysts, *optimizers, "judge", "referee", "reporter")
+    deps: dict[str, tuple[str, ...]] = {phase: () for phase in analysts}
+    for analyst, optimizer in zip(analysts, optimizers):
+        deps[optimizer] = (analyst,)
+    deps["judge"] = optimizers
+    deps["referee"] = ("judge",)
+    deps["reporter"] = ("referee",)
+    return phases, deps
 
 
 def targets_hash(targets: dict[str, float]) -> str:
@@ -486,10 +519,27 @@ class Registry:
         request: dict,
         phases: tuple[str, ...] = WORKFORCE_PHASES,
     ) -> dict:
-        """Create one durable, phase-ordered Claude workforce run."""
+        """Create one durable, phase-ordered Claude workforce run.
+
+        ``kind="panel"`` builds a tournament from ``request["variants"]`` —
+        a list of analyst stances (window/shrinkage/regime dicts) — with its
+        instance-specific dependency DAG persisted in the request under
+        ``_deps`` so resumption re-reads the same graph.
+        """
+        request = dict(request)
+        if kind == "panel":
+            variants = request.get("variants")
+            if not isinstance(variants, list) or not all(
+                    isinstance(v, dict) for v in variants):
+                raise ValueError("panel requires request['variants']: list[dict]")
+            phases, deps = panel_phases(len(variants))
+            request["_deps"] = {phase: list(d) for phase, d in deps.items()}
         if not phases or len(set(phases)) != len(phases):
             raise ValueError("workflow phases must be non-empty and unique")
-        unknown = set(phases) - set(WORKFORCE_PHASES)
+        unknown = {
+            phase for phase in phases
+            if _phase_type(phase) not in _WORKFORCE_REQUIRED_ARTIFACTS
+        }
         if unknown:
             raise ValueError(f"unknown workforce phases: {sorted(unknown)}")
 
@@ -520,7 +570,8 @@ class Registry:
         artifacts: dict | None = None,
     ) -> dict:
         """Advance one role-bound phase while enforcing the dependency DAG."""
-        if phase not in WORKFORCE_PHASES:
+        phase_type = _phase_type(phase)
+        if phase_type not in _WORKFORCE_REQUIRED_ARTIFACTS:
             raise ValueError(f"unknown workforce phase {phase!r}")
         if status not in {"working", "done", "failed", "blocked"}:
             raise ValueError("status must be working, done, failed, or blocked")
@@ -539,7 +590,9 @@ class Registry:
                 # persisted result.
                 return workflow
             raise RuntimeError(f"completed phase {phase!r} cannot be reopened")
-        for dependency in _WORKFORCE_DEPS.get(phase, ()):
+        instance_deps = (workflow.get("request") or {}).get("_deps")
+        deps_map = instance_deps if isinstance(instance_deps, dict) else _WORKFORCE_DEPS
+        for dependency in deps_map.get(phase, ()):
             dependency_step = by_phase.get(dependency)
             if dependency_step is None or dependency_step["status"] != "done":
                 raise RuntimeError(
@@ -554,16 +607,18 @@ class Registry:
             raise ValueError("workflow phase artifacts exceed 32 KiB")
         if status == "done":
             missing = [
-                key for key in _WORKFORCE_REQUIRED_ARTIFACTS[phase]
+                key for key in _WORKFORCE_REQUIRED_ARTIFACTS[phase_type]
                 if key not in artifacts or artifacts[key] in (None, "", {})
             ]
             if missing:
                 raise ValueError(
                     f"phase {phase!r} cannot complete without artifacts {missing}"
                 )
-            if phase == "optimizer" and not isinstance(artifacts["targets"], dict):
+            if phase_type == "optimizer" and not isinstance(artifacts["targets"], dict):
                 raise ValueError("optimizer artifact 'targets' must be an object")
-            if phase == "referee":
+            if phase_type == "judge":
+                self._check_judge_binding(by_phase, artifacts)
+            if phase_type == "referee":
                 if artifacts["verdict"] != "PASS":
                     raise ValueError(
                         "referee may complete only with PASS; use blocked for FAIL"
@@ -625,6 +680,18 @@ class Registry:
                 "referee completion requires the reviewed 'targets' object"
             )
         reviewed_hash = targets_hash(referee_targets)
+        # In a panel, the judge's evidence-chosen winner is what the referee
+        # reviews; in the standard pipeline it is the single optimizer.
+        judge_step = by_phase.get("judge")
+        if judge_step is not None:
+            winning = (judge_step.get("artifacts") or {}).get("winning_targets")
+            if (
+                not isinstance(winning, dict)
+                or targets_hash(winning) != reviewed_hash
+            ):
+                raise ValueError(
+                    "referee 'targets' do not match the judge's winning targets"
+                )
         optimizer_step = by_phase.get("optimizer")
         if optimizer_step is not None:
             optimizer_targets = (optimizer_step.get("artifacts") or {}).get("targets")
@@ -646,6 +713,35 @@ class Registry:
         ):
             raise ValueError(
                 "verdict_id must reference a persisted PASS bound to these targets"
+            )
+
+    def _check_judge_binding(self, by_phase: dict, artifacts: dict) -> None:
+        """A judge may only crown a winner that a completed branch produced.
+
+        The tournament's honesty rests here: ``winning_targets`` must be the
+        verbatim output of the named ``winner_phase`` optimizer, so a judge
+        cannot synthesize a "winner" no branch computed.
+        """
+        winner_phase = str(artifacts.get("winner_phase") or "")
+        winner_step = by_phase.get(winner_phase)
+        if winner_step is None or _phase_type(winner_phase) != "optimizer":
+            raise ValueError(
+                f"judge winner_phase {winner_phase!r} must name an optimizer "
+                "branch of this workflow"
+            )
+        if winner_step.get("status") != "done":
+            raise ValueError(
+                f"judge winner_phase {winner_phase!r} has not completed")
+        winning = artifacts.get("winning_targets")
+        branch_targets = (winner_step.get("artifacts") or {}).get("targets")
+        if (
+            not isinstance(winning, dict) or not winning
+            or not isinstance(branch_targets, dict)
+            or targets_hash(winning) != targets_hash(branch_targets)
+        ):
+            raise ValueError(
+                "judge 'winning_targets' must equal the winning branch's "
+                "persisted optimizer targets"
             )
 
     def get_workflow(self, workflow_id: str) -> dict | None:
@@ -718,10 +814,13 @@ class Registry:
 
 
 def _agent_for_phase(phase: str) -> str:
+    # The judge is the referee agent wearing its comparison hat: it holds the
+    # evidence-reading tools and no solver, which is exactly a judge's kit.
     return {
         "analyst": "moments-analyst",
         "challenger": "challenger",
         "optimizer": "optimization-runner",
+        "judge": "referee",
         "referee": "referee",
         "reporter": "reporter",
-    }[phase]
+    }[_phase_type(phase)]

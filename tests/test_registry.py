@@ -285,3 +285,87 @@ def test_challenger_view_attaches_to_existing_decision(reg):
     decision_id = reg.log_decision(dec)
     reg.attach_challenger_view(decision_id, "A shorter window may catch the regime.")
     assert reg.recent_decisions(limit=1)[0]["challenger_view"].startswith("A shorter")
+
+
+def test_panel_workflow_runs_a_judged_tournament(reg):
+    import pytest
+
+    variants = [{"window": 252}, {"window": 504}, {"window": 756}]
+    workflow = reg.start_workflow("panel", {"goal": "tournament",
+                                            "variants": variants})
+    workflow_id = workflow["workflow_id"]
+    phases = [step["phase"] for step in workflow["steps"]]
+    assert phases == ["analyst-1", "analyst-2", "analyst-3",
+                      "optimizer-1", "optimizer-2", "optimizer-3",
+                      "judge", "referee", "reporter"]
+    assert workflow["steps"][6]["agent"] == "referee"  # judge = comparison hat
+
+    # Branches are independent: optimizer-2 may run once analyst-2 is done,
+    # regardless of branch 1; the judge must wait for every branch.
+    with pytest.raises(RuntimeError, match="cannot start"):
+        reg.update_workflow_phase(workflow_id, "optimizer-2", "working")
+    reg.update_workflow_phase(
+        workflow_id, "analyst-2", "done",
+        artifacts={"moment_set_id": "m2", "objective_id": "o2",
+                   "decision_id": "d2"})
+    reg.update_workflow_phase(workflow_id, "optimizer-2", "working")
+    with pytest.raises(RuntimeError, match="cannot start"):
+        reg.update_workflow_phase(workflow_id, "judge", "working")
+
+    targets = {1: {"GLD": 1.0}, 2: {"GLD": 0.5, "EMB": 0.5},
+               3: {"EMB": 1.0}}
+    for i in (1, 3):
+        reg.update_workflow_phase(
+            workflow_id, f"analyst-{i}", "done",
+            artifacts={"moment_set_id": f"m{i}", "objective_id": f"o{i}",
+                       "decision_id": f"d{i}"})
+    for i in (1, 2, 3):
+        reg.update_workflow_phase(
+            workflow_id, f"optimizer-{i}", "done",
+            artifacts={"targets": targets[i], "algorithm_id": "hrp"})
+
+    # The judge cannot crown targets no branch produced, a non-optimizer
+    # phase, or a mismatched winner/targets pair.
+    with pytest.raises(ValueError, match="winning branch"):
+        reg.update_workflow_phase(
+            workflow_id, "judge", "done",
+            artifacts={"winner_phase": "optimizer-2",
+                       "winning_targets": {"GLD": 0.9, "EMB": 0.1},
+                       "evidence": "fabricated"})
+    with pytest.raises(ValueError, match="optimizer branch"):
+        reg.update_workflow_phase(
+            workflow_id, "judge", "done",
+            artifacts={"winner_phase": "analyst-1",
+                       "winning_targets": targets[2],
+                       "evidence": "wrong phase"})
+    reg.update_workflow_phase(
+        workflow_id, "judge", "done",
+        artifacts={"winner_phase": "optimizer-2",
+                   "winning_targets": targets[2],
+                   "evidence": "branch 2 best walk-forward sortino"})
+
+    # The referee binds to the judge's winner, not any other branch.
+    vid_wrong = reg.log_verdict("d1", "PASS", ["?"], targets=targets[1])
+    with pytest.raises(ValueError, match="judge's winning targets"):
+        reg.update_workflow_phase(
+            workflow_id, "referee", "done",
+            artifacts={"verdict": "PASS", "verdict_id": vid_wrong,
+                       "targets": targets[1]})
+    vid = reg.log_verdict("d2", "PASS", ["winner ok"], targets=targets[2])
+    reg.update_workflow_phase(
+        workflow_id, "referee", "done",
+        artifacts={"verdict": "PASS", "verdict_id": vid,
+                   "targets": targets[2]})
+    done = reg.update_workflow_phase(
+        workflow_id, "reporter", "done",
+        artifacts={"recommendation": "adopt branch 2"})
+    assert done["status"] == "complete"
+
+
+def test_panel_workflow_validates_variants(reg):
+    import pytest
+
+    with pytest.raises(ValueError, match="variants"):
+        reg.start_workflow("panel", {"goal": "x"})
+    with pytest.raises(ValueError, match="2\\.\\.5"):
+        reg.start_workflow("panel", {"goal": "x", "variants": [{"w": 1}]})

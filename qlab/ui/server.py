@@ -23,6 +23,8 @@ GET  /api/workflows/<id>/debate    debates, turns, and adjudication
 GET  /api/models/invocations   model tier/route audit records
 GET  /api/bob/status           BobTheQuant desk-manager mode and lifecycle state
 GET  /api/bob/tasks            Bob's deduplicated autonomous task history
+GET  /api/bob/templates        the registered workflow templates Bob may start
+GET  /api/bob/startable        queued tasks Bob may start now, with refusals
 POST /api/bob/observe          run one deterministic Bob observe tick
 POST /api/bob/mode             set Bob mode (observe|research|propose|paused)
 POST /api/bob/pause            pause Bob's autonomous work
@@ -1359,6 +1361,16 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "GET" and path == "/api/bob/tasks":
         return 200, {"tasks": session.registry.list_bob_tasks(50)}
+
+    if method == "GET" and path == "/api/bob/templates":
+        from qlab.operator.templates import TEMPLATES
+
+        return 200, {"templates": [t.to_dict() for t in TEMPLATES.values()]}
+
+    if method == "GET" and path == "/api/bob/startable":
+        offline = _qbool(query, "offline", session.offline_default)
+        facts = session.bob_facts(offline)
+        return 200, {"startable": session.bob.startable_tasks(facts)}
 
     if method == "POST" and path == "/api/bob/observe":
         return 200, session.bob_observe(off)

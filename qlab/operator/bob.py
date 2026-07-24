@@ -49,6 +49,9 @@ class BobConfig:
     max_bob_turns_per_task: int = 6
     regime_cooldown_sessions: int = 1
     drift_threshold: float = 0.05
+    # One corrected retry per failed task; a second failure blocks rather than
+    # looping (plan §8.6: "no automatic loop after a second failure").
+    max_task_attempts: int = 2
 
 
 @dataclass(frozen=True)
@@ -160,6 +163,100 @@ class BobSupervisor:
             "brief": self.desk_brief(facts),
         }
 
+    # -- research mode: start registered templates only ---------------------
+    def startable_tasks(self, facts: dict) -> list[dict]:
+        """Queued tasks whose template Bob may start right now, with reasons.
+
+        Deterministic and side-effect free: it reports what *could* run under
+        the current mode and data state, and why anything is refused.
+        """
+        from qlab.operator.templates import (
+            TemplateNotAllowed, check_startable, template_for_trigger)
+
+        mode = (self.registry.get_bob_state(MANAGER_ID) or {}).get("mode", "observe")
+        out: list[dict] = []
+        for task in self.registry.list_bob_tasks(50):
+            if task.get("status") != "queued":
+                continue
+            template_id = task.get("template_id") or template_for_trigger(
+                str(task.get("trigger_kind")))
+            if not template_id:
+                continue
+            entry = {"task_id": task["task_id"], "template_id": template_id}
+            try:
+                template = check_startable(template_id, mode, facts)
+            except TemplateNotAllowed as exc:
+                entry.update({"startable": False, "reason": str(exc)})
+            else:
+                entry.update({"startable": True,
+                              "needs_coordinator": template.needs_coordinator,
+                              "creates_plan": template.creates_plan})
+            out.append(entry)
+        return out
+
+    def start_task(self, task_id: str, facts: dict, *,
+                   runner: Callable[[dict, str], dict] | None = None) -> dict:
+        """Start one queued task's registered template.
+
+        ``runner(task, template_id) -> conclusion`` performs the actual work
+        (the coordinator dispatch); it is injected so the authority checks and
+        task lifecycle are testable without a live model. Authority is checked
+        here, before any runner is called.
+        """
+        from qlab.operator.templates import TemplateNotAllowed, check_startable
+
+        task = self.registry.get_bob_task(task_id)
+        if task is None:
+            raise KeyError(f"unknown task {task_id!r}")
+        if task.get("status") not in ("queued", "failed"):
+            raise PermissionError(
+                f"task {task_id!r} is {task.get('status')!r}; only a queued or "
+                "failed task may start")
+        attempts = int(task.get("attempt_count") or 0)
+        if attempts >= self.config.max_task_attempts:
+            self.registry.update_bob_task(
+                task_id, status="blocked",
+                error=f"exhausted {attempts} attempt(s); no automatic retry")
+            self._patch_state(state=BLOCKED,
+                              blocked_reason=f"task {task_id} exhausted retries")
+            return {"started": False, "blocked_by": "retry_budget"}
+
+        mode = (self.registry.get_bob_state(MANAGER_ID) or {}).get("mode", "observe")
+        template_id = str(task.get("template_id") or "")
+        try:
+            template = check_startable(template_id, mode, facts)
+        except TemplateNotAllowed as exc:
+            self.registry.update_bob_task(task_id, status="blocked",
+                                          error=str(exc))
+            return {"started": False, "blocked_by": "authority",
+                    "reason": str(exc)}
+
+        self.registry.update_bob_task(task_id, status="running", bump_attempt=True)
+        self._patch_state(state=COORDINATING, current_task_id=task_id)
+        self.registry.record_event(
+            "bob_task_started", {"task_id": task_id, "template_id": template_id})
+
+        if runner is None:
+            # Nothing to run the work: the task stays running for a supervisor
+            # with a coordinator; report honestly rather than faking a result.
+            return {"started": True, "template_id": template_id,
+                    "needs_coordinator": template.needs_coordinator,
+                    "conclusion": None}
+        try:
+            conclusion = runner(task, template_id)
+        except Exception as exc:
+            self.registry.update_bob_task(task_id, status="failed", error=str(exc))
+            self._patch_state(state=OBSERVING, current_task_id=None)
+            self.registry.record_event(
+                "bob_task_failed", {"task_id": task_id, "error": str(exc)[:300]})
+            return {"started": True, "completed": False, "error": str(exc)}
+
+        self.registry.update_bob_task(task_id, status="completed",
+                                      conclusion=conclusion)
+        self._patch_state(state=OBSERVING, current_task_id=None)
+        self.registry.record_event("bob_task_completed", {"task_id": task_id})
+        return {"started": True, "completed": True, "conclusion": conclusion}
+
     # -- deterministic desk brief (no LLM) ----------------------------------
     def desk_brief(self, facts: dict) -> dict:
         data = facts.get("data", {})
@@ -232,7 +329,12 @@ class BobSupervisor:
 
     def _t(self, kind: str, action: str, template: str | None,
            payload: dict) -> Trigger:
-        return Trigger(kind=kind, action=action, template_id=template,
+        # The trigger->template map is the single source of truth; a trigger
+        # that maps to no template starts no workflow.
+        from qlab.operator.templates import template_for_trigger
+
+        return Trigger(kind=kind, action=action,
+                       template_id=template_for_trigger(kind) or template,
                        payload=payload, state_hash=_hash(payload))
 
     def _dedupe_key(self, trig: Trigger, trading_date: str, facts: dict) -> str:

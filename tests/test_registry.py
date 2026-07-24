@@ -93,6 +93,56 @@ def test_recall_similar_decisions_ranks_nearest_reflected_regime_first(reg):
     assert recalled[0]["similarity_score"] > recalled[1]["similarity_score"]
 
 
+def test_recall_is_point_in_time_and_excludes_future_outcomes(reg):
+    def reflected(as_of, window_end, label="stress"):
+        did = reg.log_decision(Decision(
+            as_of=as_of, kind="regime",
+            choice={"vol_percentile": 0.80, "turbulence_percentile": 0.75,
+                    "regime_label": label, "regime": label},
+            rationale="fixture"))
+        reg.update_reflection(did, {"regime_call": label, "window_end": window_end},
+                              "lesson")
+        return did
+
+    past = reflected(date(2022, 1, 31), "2022-02-15")     # resolved before query
+    reflected(date(2022, 2, 28), "2022-03-30")            # outcome closes AFTER query
+    reflected(date(2022, 3, 15), "2022-03-20")            # decided AFTER query
+
+    recalled = reg.recall_similar_decisions(
+        {"vol_percentile": 0.80, "turbulence_percentile": 0.75,
+         "regime_label": "stress"},
+        kind="regime", limit=5, as_of="2022-03-01")
+    # Only the fully-resolved-before-query decision may be recalled.
+    assert [row["decision_id"] for row in recalled] == [past]
+
+
+def test_recall_min_similarity_drops_weak_matches(reg):
+    did = reg.log_decision(Decision(
+        as_of=date(2022, 1, 31), kind="regime",
+        choice={"vol_percentile": 0.10, "turbulence_percentile": 0.05,
+                "regime_label": "calm", "regime": "calm"},
+        rationale="far"))
+    reg.update_reflection(did, {"regime_call": "calm"}, "lesson")
+    # Query a very different (stress) regime with a high threshold.
+    recalled = reg.recall_similar_decisions(
+        {"vol_percentile": 0.95, "turbulence_percentile": 0.95,
+         "regime_label": "stress"},
+        kind="regime", limit=5, min_similarity=0.6)
+    assert recalled == []
+
+
+def test_reflection_outcome_is_write_once(reg):
+    did = reg.log_decision(Decision(
+        as_of=date(2022, 1, 31), kind="regime",
+        choice={"regime": "stress"}, rationale="fixture"))
+    reg.update_reflection(did, {"realized_vol": 0.20}, "first")
+    # A second resolution must not overwrite the immutable outcome.
+    reg.update_reflection(did, {"realized_vol": 0.99}, "tampered")
+    row = reg.get_decision(did)
+    assert row["realized_outcome"]["realized_vol"] == 0.20
+    assert row["reflection"] == "first"
+
+
 def test_account_and_fills(reg):
     reg.init_account(10000.0)
     reg.apply_fill("GLD", 5.0, 180.0, -900.0)

@@ -101,7 +101,9 @@ def run_once(
     regime = detect_regime(snap)
     regime_fingerprint = _regime_fingerprint(snap, regime)
     analogous_decisions = (
-        reg.recall_similar_decisions(regime_fingerprint, kind="regime", limit=2)
+        reg.recall_similar_decisions(
+            regime_fingerprint, kind="regime", limit=2,
+            as_of=as_of, min_similarity=0.5)
         if regime_fingerprint
         else []
     )

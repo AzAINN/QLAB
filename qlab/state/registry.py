@@ -293,8 +293,13 @@ class Registry:
 
     def update_reflection(self, decision_id: str, realized_outcome: dict,
                           reflection: str) -> None:
+        # Write-once: a resolved outcome is immutable, so a re-resolution is a
+        # silent no-op rather than an overwrite (the same pending idiom as
+        # ``pending_decisions`` — SQL NULL or the JSON literal ``null``).
         self.con.execute(
-            "UPDATE decisions SET realized_outcome=?, reflection=? WHERE decision_id=?",
+            "UPDATE decisions SET realized_outcome=?, reflection=? "
+            "WHERE decision_id=? AND (realized_outcome IS NULL "
+            "OR CAST(realized_outcome AS VARCHAR) = 'null')",
             [_j(realized_outcome), reflection, decision_id],
         )
 
@@ -329,6 +334,9 @@ class Registry:
         fingerprint: dict,
         kind: str | None = None,
         limit: int = 10,
+        *,
+        as_of: str | None = None,
+        min_similarity: float = 0.0,
     ) -> list[dict]:
         """Return reflected decisions nearest to a regime fingerprint.
 
@@ -337,6 +345,13 @@ class Registry:
         regime label adds a small bonus; the resulting ``similarity_score`` is
         normalized back to ``[0, 1]``. Older decisions without a complete,
         valid fingerprint are not comparable and are skipped.
+
+        Point-in-time (no look-ahead): when ``as_of`` is given, a candidate is
+        recallable only if it was BOTH decided and fully resolved strictly
+        before ``as_of`` — a decision from the query's future, or one whose
+        outcome window closes on/after ``as_of``, would leak future information
+        into the recall and is excluded. ``min_similarity`` drops weak matches
+        so unrelated regimes are not forced into context.
         """
         numeric_fields = ("vol_percentile", "turbulence_percentile")
         query_values: dict[str, float] = {}
@@ -373,10 +388,22 @@ class Registry:
             params.append(kind)
         q += " ORDER BY created_at DESC, decision_id DESC"
 
+        as_of_key = str(as_of).strip() if as_of else None
+
         scored: list[tuple[float, dict]] = []
         for row in self._rows(q, params):
             choice = row.get("choice") or {}
             outcome = row.get("realized_outcome") or {}
+
+            # Point-in-time guard: exclude any candidate decided on/after the
+            # query date, or whose outcome window closes on/after it. Either
+            # would recall information from the query's own future.
+            if as_of_key is not None:
+                if str(row.get("as_of") or "") >= as_of_key:
+                    continue
+                window_end = str(outcome.get("window_end") or "")
+                if not window_end or window_end >= as_of_key:
+                    continue
 
             candidate_values: dict[str, float] = {}
             comparable = True
@@ -410,6 +437,8 @@ class Registry:
             ) / len(numeric_fields)
             label_bonus = 0.25 if candidate_label == query_label else 0.0
             similarity = (1.0 - numeric_distance + label_bonus) / 1.25
+            if similarity < min_similarity:
+                continue
             recalled = dict(row)
             recalled["similarity_score"] = float(similarity)
             scored.append((similarity, recalled))

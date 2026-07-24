@@ -269,11 +269,13 @@ def test_run_once_cites_recalled_analogous_reflections(
 ):
     captured = {}
 
-    def recall(fingerprint, kind=None, limit=10):
+    def recall(fingerprint, kind=None, limit=10, *, as_of=None, min_similarity=0.0):
         captured.update({
             "fingerprint": fingerprint,
             "kind": kind,
             "limit": limit,
+            "as_of": as_of,
+            "min_similarity": min_similarity,
         })
         return [
             {

@@ -118,6 +118,7 @@ def _snapshot():
             "mode": "paper", "mcp_configured": True, "claude_available": True,
             "governed_available": False,
             "governed_lock_reason": "single-owner runtime required",
+            "autopilot": {"last_run_at": None, "triggers_fired": 0},
         },
         "algorithms": [
             {"id": "hrp", "stage": "operational"},
@@ -408,6 +409,50 @@ def test_headless_shell_has_no_header_and_switches_context():
 
             await pilot.press("~")
             assert app.query_one("#timeline").styles.display == "block"
+
+    asyncio.run(run())
+
+
+def test_owner_system_status_reads_latest_autopilot_event():
+    client = InProcessClient()
+    client.session.registry.record_event(
+        "autopilot_trigger",
+        {"kind": "drift", "detail": {}},
+    )
+    client.session.registry.record_event(
+        "daily_ops",
+        {
+            "triggers": [
+                {"kind": "drift", "detail": {}},
+                {"kind": "regime", "detail": {}},
+            ],
+        },
+    )
+
+    status = client.get("/api/system", offline=True)
+    assert status["autopilot"]["last_run_at"]
+    assert status["autopilot"]["triggers_fired"] == 2
+
+
+def test_status_strip_shows_autopilot_last_run_and_trigger_count():
+    from qlab.tui.app import QlabTui
+
+    class AutopilotClient(StubClient):
+        def get(self, path, **params):
+            snapshot = super().get(path, **params)
+            if path == "/api/tui":
+                snapshot["system"]["autopilot"] = {
+                    "last_run_at": "2026-07-24T16:30:00+00:00",
+                    "triggers_fired": 2,
+                }
+            return snapshot
+
+    async def run():
+        app = QlabTui(AutopilotClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 42)) as pilot:
+            await pilot.pause(0.2)
+            status = str(app.query_one("#system-status").content)
+            assert "AUTO 07-24 16:30·2" in status
 
     asyncio.run(run())
 

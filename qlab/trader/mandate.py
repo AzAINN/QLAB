@@ -155,6 +155,7 @@ class Mandate:
     drift_band_pct: float = 0.05
     cadence: str = "quarterly"
     regime_triggered: bool = True
+    defensive_targets: dict[str, float] = field(default_factory=dict)
     allow_fractional: bool = True
     operational_policy: str = "hrp"
     costs: CostConfig = field(default_factory=CostConfig)
@@ -267,6 +268,30 @@ def _load_costs(raw: object) -> CostConfig:
     )
 
 
+def _load_defensive_targets(raw: object) -> dict[str, float]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("mandate defensive_targets must be a non-empty mapping")
+    targets: dict[str, float] = {}
+    for raw_ticker, raw_weight in raw.items():
+        ticker = str(raw_ticker)
+        if isinstance(raw_weight, bool):
+            raise ValueError(f"mandate defensive_targets.{ticker} must be numeric")
+        try:
+            weight = float(raw_weight)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"mandate defensive_targets.{ticker} must be numeric"
+            ) from exc
+        if not math.isfinite(weight):
+            raise ValueError(
+                f"mandate defensive_targets.{ticker} must be finite"
+            )
+        targets[ticker] = weight
+    return targets
+
+
 def load_mandate(path: str | Path | None = None) -> Mandate:
     """Load and flatten ``mandate.yaml`` into a :class:`Mandate`."""
     p = Path(path) if path else data_path("mandate.yaml")
@@ -311,7 +336,8 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
         breaker=float(tier_raw.get("breaker_pct", 0.15)),
     )
     costs = _load_costs(raw.get("costs", {}))
-    return Mandate(
+    defensive_targets = _load_defensive_targets(raw.get("defensive_targets"))
+    mandate = Mandate(
         paper_capital=float(acct.get("paper_capital", 10000.0)),
         base_currency=acct.get("base_currency", "USD"),
         universe_whitelist=universe_whitelist,
@@ -330,7 +356,14 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
         drift_band_pct=float(rb.get("drift_band_pct", 0.05)),
         cadence=rb.get("cadence", "quarterly"),
         regime_triggered=bool(rb.get("regime_triggered", True)),
+        defensive_targets=defensive_targets,
         allow_fractional=bool(ex.get("allow_fractional", True)),
         operational_policy=str(allocation.get("operational_policy", "hrp")),
         costs=costs,
     )
+    if defensive_targets:
+        try:
+            mandate.check_targets(defensive_targets)
+        except MandateViolation as exc:
+            raise MandateViolation(f"invalid defensive_targets: {exc}") from exc
+    return mandate

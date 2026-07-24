@@ -3,6 +3,7 @@
     qlab run-once   [--offline] [--dry-run]            one full pipeline iteration
     qlab watch      --interval 15m [--offline]         run run-once on a loop
     qlab daily-ops  [--offline]                        heartbeat (never trades)
+    qlab autopilot  [--offline] [--once]               trading-day proposal loop
     qlab batch      <spec.yaml> [--offline]            the reproducible ablation
     qlab recommend  [--as-of DATE] [--offline]         print an allocation, no trade
     qlab prewarm    [--universe core|candidates]       pre-fill the data cache
@@ -24,8 +25,11 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from qlab.autopilot.loop import daily_ops, render_summary, run_once
+from qlab.autopilot.scheduler import is_trading_day, next_trading_morning
 from qlab.paths import workspace_root
 
 
@@ -65,6 +69,65 @@ def _cmd_watch(args) -> int:
 def _cmd_daily_ops(args) -> int:
     result = daily_ops(offline=args.offline)
     print(render_summary(result))
+    return 0
+
+
+def _print_autopilot_triggers(result: dict) -> None:
+    triggers = result.get("triggers") or []
+    if not triggers:
+        print("[qlab] autopilot triggers: none")
+        return
+    print(f"[qlab] autopilot triggers fired: {len(triggers)}")
+    for trigger in triggers:
+        detail = json.dumps(
+            trigger.get("detail", {}),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        print(f"  {trigger.get('kind', 'unknown')}: {detail}")
+    plan_ids = result.get("proposal_plan_ids") or []
+    if plan_ids:
+        print(f"[qlab] proposal plan_ids: {', '.join(map(str, plan_ids))}")
+
+
+def _cmd_autopilot(args) -> int:
+    """Run proposal-only daily ops once or each supported trading morning."""
+    eastern = ZoneInfo("America/New_York")
+    if args.once:
+        today = datetime.now(eastern).date()
+        if not is_trading_day(today):
+            print(f"[qlab] autopilot skipped: {today} is not an NYSE trading day")
+            return 0
+        result = daily_ops(offline=args.offline)
+        _print_autopilot_triggers(result)
+        return 0
+
+    print(
+        "[qlab] autopilot: proposal-only daily ops at 09:30 America/New_York "
+        "(Ctrl-C to stop)."
+    )
+    last_run_date = None
+    try:
+        while True:
+            now = datetime.now(eastern)
+            after_morning = (now.hour, now.minute) >= (9, 30)
+            if (
+                is_trading_day(now.date())
+                and after_morning
+                and last_run_date != now.date()
+            ):
+                result = daily_ops(offline=args.offline)
+                _print_autopilot_triggers(result)
+                last_run_date = now.date()
+                now = datetime.now(eastern)
+
+            next_run = next_trading_morning(now)
+            delay = max(0.0, (next_run - now).total_seconds())
+            print(f"[qlab] next proposal check: {next_run.isoformat()}")
+            time.sleep(delay)
+    except KeyboardInterrupt:
+        print("\n[qlab] autopilot stopped.")
     return 0
 
 
@@ -247,6 +310,18 @@ def build_parser() -> argparse.ArgumentParser:
     do = sub.add_parser("daily-ops", help="heartbeat; reconcile + risk, never trades")
     add_common(do)
     do.set_defaults(func=_cmd_daily_ops)
+
+    ap = sub.add_parser(
+        "autopilot",
+        help="run proposal-only daily ops on NYSE trading mornings",
+    )
+    add_common(ap)
+    ap.add_argument(
+        "--once",
+        action="store_true",
+        help="run once on a trading day (for cron/tests), then exit",
+    )
+    ap.set_defaults(func=_cmd_autopilot)
 
     b = sub.add_parser("batch", help="run the reproducible ablation from a spec")
     add_common(b)

@@ -15,11 +15,13 @@ Everything is booked against the registry, so a dying session resumes cleanly an
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
 
+from qlab.autopilot.scheduler import evaluate_triggers
 from qlab.arms import MomentsConfig, solve_arm
 from qlab.algorithms import get_operational_policy
 from qlab.core import data as market
@@ -28,6 +30,7 @@ from qlab.core.types import Decision
 from qlab.governance.referee import cost_gate, deterministic_referee
 from qlab.governance.reflection import resolve_pending
 from qlab.paths import state_path
+from qlab.signals.hard import detect_regime_robust
 from qlab.solvers.base import Constraints
 from qlab.trader.broker import get_broker
 from qlab.trader.mandate import Mandate, MandateViolation, load_mandate
@@ -207,34 +210,256 @@ def daily_ops(
     snap = market.snapshot(tickers, date.today().isoformat(), offline=offline, seed=seed)
     reflections_resolved = resolve_pending(reg, snap.prices)
     regime = detect_regime(snap)
-
-    # drift vs the last logged decision's targets
-    last = reg.recent_decisions(limit=1)
-    triggers = []
-    if last:
-        targets = last[0].get("choice", {}).get("targets", {})
-        for t, tgt in targets.items():
-            cur = state["weights"].get(t, 0.0)
-            if abs(cur - tgt) > mandate.drift_band_pct:
-                triggers.append(f"drift:{t}({cur:.2f}vs{tgt:.2f})")
-    if mandate.regime_triggered and regime["regime"] == "stress":
-        triggers.append("regime:stress")
+    robust_regime = detect_regime_robust(snap)
 
     dd_breached = mandate.drawdown_breached(state["equity"],
                                             state.get("high_water_mark", state["equity"]))
+    alerts = []
     if dd_breached:
         reg.set_halt(True)
-        triggers.append("kill_switch:drawdown")
+        alerts.append("kill_switch:drawdown")
+
+    today = date.today()
+    targets = _latest_policy_targets(reg)
+    triggers = evaluate_triggers({
+        "as_of": today,
+        "last_rebalance_date": _last_rebalance_date(reg),
+        "mandate": mandate,
+        "current_weights": state.get("weights", {}),
+        "target_weights": targets,
+        "robust_regime": robust_regime.regime,
+    })
+
+    recommendation = None
+    proposals = []
+    proposal_plan_ids = []
+    for trigger in triggers:
+        if trigger["kind"] == "regime":
+            proposal_targets = dict(mandate.defensive_targets)
+            moments_summary = None
+        else:
+            if recommendation is None:
+                from qlab.experiment import recommend
+
+                recommendation = recommend(
+                    as_of=today.isoformat(),
+                    universe=mandate.universe_tier,
+                    constraints=constraints_from_mandate(mandate),
+                    offline=offline,
+                    seed=seed,
+                    policy_id=mandate.operational_policy,
+                )
+            proposal_targets = {
+                str(ticker): float(weight)
+                for ticker, weight in recommendation["recommended_weights"].items()
+            }
+            diagnostics = recommendation.get("diagnostics", {})
+            moments_summary = (
+                diagnostics.get("moments")
+                if isinstance(diagnostics, dict)
+                else None
+            )
+
+        proposal = _build_trigger_proposal(
+            reg,
+            broker,
+            mandate,
+            trigger,
+            proposal_targets,
+            today,
+            state,
+            rec,
+            robust_regime.regime,
+            moments_summary=moments_summary,
+        )
+        proposals.append({
+            "trigger_kind": trigger["kind"],
+            **proposal,
+        })
+        if proposal.get("plan_id"):
+            proposal_plan_ids.append(proposal["plan_id"])
+        reg.record_event("autopilot_trigger", {
+            "kind": trigger["kind"],
+            "detail": trigger["detail"],
+            "proposal": proposal,
+        })
 
     result = {
         "kind": "daily_ops", "equity": state["equity"], "regime": regime["regime"],
+        "robust_regime": robust_regime.regime,
         "triggers": triggers, "rebalance_recommended": bool(triggers),
+        "proposals": proposals, "proposal_plan_ids": proposal_plan_ids,
+        "alerts": alerts,
         "halted": state["halted"] or dd_breached, "reconcile": rec,
         "reflections_resolved": reflections_resolved,
     }
     reg.record_event("daily_ops", result)
     _write_summary(result, prefix="dailyops")
     return result
+
+
+def _latest_policy_targets(registry: Registry) -> dict[str, float]:
+    """Return the newest non-autopilot target judgment for drift comparison."""
+    for decision in registry.recent_decisions(limit=100):
+        choice = decision.get("choice")
+        if not isinstance(choice, dict) or choice.get("source") == "autopilot_trigger":
+            continue
+        targets = choice.get("targets")
+        if not isinstance(targets, dict) or not targets:
+            continue
+        return {
+            str(ticker): float(weight)
+            for ticker, weight in targets.items()
+        }
+    return {}
+
+
+def _last_rebalance_date(registry: Registry) -> date | None:
+    """Read the latest actual execution date; checked proposals do not count."""
+    for event in reversed(registry.read_events(limit=500)):
+        if event.get("kind") != "plan_executed":
+            continue
+        timestamp = str(event.get("ts") or "")
+        try:
+            return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date()
+        except ValueError as exc:
+            raise ValueError(
+                f"plan_executed event has invalid timestamp {timestamp!r}"
+            ) from exc
+    return None
+
+
+def _build_trigger_proposal(
+    registry: Registry,
+    broker,
+    mandate: Mandate,
+    trigger: dict,
+    targets: dict[str, float],
+    as_of: date,
+    portfolio_state: dict,
+    reconcile_result: dict,
+    robust_regime: str,
+    *,
+    moments_summary: dict | None,
+) -> dict:
+    """Persist one referee-bound, cost-gated proposal without executing it."""
+    detail = json.dumps(trigger["detail"], sort_keys=True, separators=(",", ":"))
+    decision = Decision(
+        as_of=as_of,
+        kind="rebalance_gate",
+        choice={
+            "source": "autopilot_trigger",
+            "trigger": trigger["kind"],
+            "trigger_detail": trigger["detail"],
+            "targets": targets,
+            "regime": robust_regime,
+            "operational_policy": mandate.operational_policy,
+        },
+        rationale=(
+            f"Deterministic {trigger['kind']} trigger proposed a checked plan "
+            f"without execution authority. detail={detail}"
+        ),
+        challenger_view=(
+            "The trigger establishes proposal timing only; mandate, referee, "
+            "cost gate, and explicit human confirmation still govern execution."
+        ),
+        alternatives_considered=[
+            "hold current allocation",
+            "explicit human-confirmed run-once",
+        ],
+    )
+    decision_id = registry.log_decision(decision)
+    verdict, reasons = deterministic_referee(
+        targets,
+        mandate,
+        as_of,
+        moments_summary=moments_summary,
+        portfolio_state=portfolio_state,
+    )
+    registry.log_verdict(
+        decision_id,
+        verdict,
+        reasons,
+        source="deterministic",
+        targets=targets,
+    )
+    if verdict != "PASS":
+        return {
+            "accepted": False,
+            "decision_id": decision_id,
+            "blocked_by": "referee",
+            "reasons": reasons,
+        }
+    if not reconcile_result.get("clean"):
+        return {
+            "accepted": False,
+            "decision_id": decision_id,
+            "blocked_by": "reconcile",
+            "reconcile": reconcile_result,
+        }
+    try:
+        plan = build_plan(registry, broker, mandate, targets, decision_id)
+    except MandateViolation as exc:
+        registry.record_event("mandate_violation", {
+            "decision_id": decision_id,
+            "trigger": trigger["kind"],
+            "error": str(exc),
+        })
+        return {
+            "accepted": False,
+            "decision_id": decision_id,
+            "blocked_by": "mandate",
+            "mandate_violation": str(exc),
+        }
+
+    weights = portfolio_state.get("weights", {})
+    gate_reasons = cost_gate(
+        plan.pre_trade,
+        float(portfolio_state["equity"]),
+        sum(abs(float(weight)) for weight in weights.values()),
+        len(portfolio_state.get("positions", {})),
+        mandate,
+    )
+    if gate_reasons:
+        registry.set_plan_state(plan.plan_id, "refused")
+        registry.log_verdict(
+            decision_id,
+            "FAIL",
+            gate_reasons,
+            source="deterministic",
+            targets=targets,
+        )
+        registry.record_event("cost_gate_refusal", {
+            "decision_id": decision_id,
+            "plan_id": plan.plan_id,
+            "reasons": gate_reasons,
+        })
+        return {
+            "accepted": False,
+            "decision_id": decision_id,
+            "plan_id": plan.plan_id,
+            "state": "refused",
+            "blocked_by": "cost_gate",
+            "reasons": gate_reasons,
+            "expected_cost": plan.pre_trade.get("expected_cost"),
+        }
+    if plan.state != "checked":
+        return {
+            "accepted": False,
+            "decision_id": decision_id,
+            "plan_id": plan.plan_id,
+            "state": plan.state,
+            "blocked_by": "plan_state",
+        }
+    return {
+        "accepted": True,
+        "decision_id": decision_id,
+        "plan_id": plan.plan_id,
+        "state": "checked",
+        "pre_trade": plan.pre_trade,
+        "n_legs": len(plan.legs),
+        "note": "proposal only; execution requires explicit human confirmation",
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -523,6 +523,24 @@ class UISession:
         proxy_available = importlib.util.find_spec("fastmcp") is not None
         # Cache-only provenance: never a network fetch from a status poll.
         provenance = data.cached_provenance(self.mandate.universe_whitelist)
+        events = self.registry.read_events(500)
+        last_daily_ops = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("kind") == "daily_ops"
+            ),
+            None,
+        )
+        triggers = (
+            (last_daily_ops.get("payload") or {}).get("triggers", [])
+            if last_daily_ops
+            else []
+        )
+        autopilot = {
+            "last_run_at": last_daily_ops.get("ts") if last_daily_ops else None,
+            "triggers_fired": len(triggers) if isinstance(triggers, list) else 0,
+        }
         return {
             "mode": "paper",
             "offline": offline,
@@ -540,6 +558,7 @@ class UISession:
             ),
             "data_source": provenance[0] if provenance else "none",
             "data_age_days": provenance[1] if provenance else None,
+            "autopilot": autopilot,
         }
 
     def allocation_policy(self) -> dict:

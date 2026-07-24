@@ -7,6 +7,26 @@ from qlab.experiment import recommend
 from qlab.state.registry import Registry
 
 
+def test_defensive_targets_are_validated_when_mandate_loads(tmp_path):
+    import pytest
+    import yaml
+
+    from qlab.paths import data_path
+    from qlab.trader.mandate import MandateViolation, load_mandate
+
+    mandate = load_mandate()
+    mandate.check_targets(mandate.defensive_targets)
+    assert mandate.defensive_targets["BNDW"] == 0.40
+    assert mandate.defensive_targets["GLD"] == 0.30
+
+    raw = yaml.safe_load(data_path("mandate.yaml").read_text(encoding="utf-8"))
+    raw["defensive_targets"]["GLD"] = 0.90
+    invalid = tmp_path / "mandate.yaml"
+    invalid.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    with pytest.raises(MandateViolation, match="invalid defensive_targets"):
+        load_mandate(invalid)
+
+
 def test_run_once_deploys_and_conserves_equity():
     reg = Registry(":memory:")
     summary = run_once(registry=reg, offline=True, as_of="2026-07-13")
@@ -25,6 +45,72 @@ def test_daily_ops_never_trades_and_reports_triggers():
     # daily_ops must not create any order plans
     assert reg._rows("SELECT * FROM orders", []) == []
     reg.close()
+
+
+def test_daily_ops_drift_trigger_builds_proposal_without_execution(monkeypatch):
+    from datetime import date
+
+    import qlab.autopilot.loop as loop
+    from qlab.core.types import Decision
+    from qlab.signals.robust import RobustRegime
+    from qlab.trader.mandate import load_mandate
+
+    reg = Registry(":memory:")
+    mandate = load_mandate()
+    targets = {
+        ticker: 1.0 / len(mandate.universe_whitelist)
+        for ticker in mandate.universe_whitelist
+    }
+    reg.log_decision(Decision(
+        as_of=date.today(),
+        kind="regime",
+        choice={"targets": targets, "regime": "calm"},
+        rationale="drift trigger fixture",
+    ))
+    # Calendar cadence is current; only the all-cash-versus-target drift fires.
+    reg.record_event("plan_executed", {"plan_id": "prior-fixture"})
+    monkeypatch.setattr(
+        loop,
+        "detect_regime_robust",
+        lambda _snapshot: RobustRegime("calm", 1.0, 1.0),
+    )
+
+    orders_before = reg.list_orders()
+    result = loop.daily_ops(registry=reg, mandate=mandate, offline=True)
+
+    assert [trigger["kind"] for trigger in result["triggers"]] == ["drift"]
+    assert result["proposal_plan_ids"]
+    plans = reg.list_plans()
+    assert {plan["plan_id"] for plan in plans} == set(result["proposal_plan_ids"])
+    assert all(plan["state"] in {"checked", "refused"} for plan in plans)
+    assert reg.list_orders() == orders_before
+    trigger_events = [
+        event for event in reg.read_events(100)
+        if event["kind"] == "autopilot_trigger"
+    ]
+    assert len(trigger_events) == 1
+    assert trigger_events[0]["payload"]["kind"] == "drift"
+    reg.close()
+
+
+def test_autopilot_cli_once_prints_fired_triggers(monkeypatch, capsys):
+    import qlab.autopilot.cli as cli
+
+    monkeypatch.setattr(cli, "is_trading_day", lambda _day: True)
+    monkeypatch.setattr(
+        cli,
+        "daily_ops",
+        lambda **_kwargs: {
+            "triggers": [{"kind": "calendar", "detail": {"due_date": "2026-07-24"}}],
+            "proposal_plan_ids": ["plan-1"],
+        },
+    )
+
+    assert cli.main(["autopilot", "--offline", "--once"]) == 0
+    output = capsys.readouterr().out
+    assert "autopilot triggers fired: 1" in output
+    assert "calendar" in output
+    assert "plan-1" in output
 
 
 def test_recommendation_is_reproducible():

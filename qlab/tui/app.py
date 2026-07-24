@@ -116,7 +116,7 @@ _PULSE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 _REFRESH_EVENT_KINDS = {
     "workflow_started", "workflow_phase", "referee_verdict",
     "plan_built", "order_filled", "decision_logged", "ablation_complete",
-    "cost_gate_refusal",
+    "cost_gate_refusal", "autopilot_trigger", "daily_ops",
 }
 _QUOTE_REPAINT_INTERVAL = 1.0
 COMMAND_TABLE = {
@@ -2234,8 +2234,26 @@ class QlabTui(App[None]):
             data_token = "DATA none"
         else:
             data_token = f"DATA {data_source}·{age}d"
+        autopilot = system.get("autopilot", {})
+        last_run = autopilot.get("last_run_at") if isinstance(autopilot, dict) else None
+        trigger_count = (
+            int(autopilot.get("triggers_fired", 0))
+            if isinstance(autopilot, dict)
+            else 0
+        )
+        if last_run:
+            try:
+                last_run_text = datetime.fromisoformat(
+                    str(last_run).replace("Z", "+00:00")
+                ).strftime("%m-%d %H:%M")
+            except ValueError:
+                last_run_text = str(last_run)
+            autopilot_token = f"AUTO {last_run_text}·{trigger_count}"
+        else:
+            autopilot_token = "AUTO —·0"
         self.query_one("#system-status", Static).update(
-            f"PAPER · {source}/DAILY · {mcp} · {claude} · {data_token}")
+            f"PAPER · {source}/DAILY · {mcp} · {claude} · "
+            f"{data_token} · {autopilot_token}")
         self.query_one("#chat-exit", Button).label = (
             "■ stop" if self.claude.running else "exit")
         self._sync_chat_input()

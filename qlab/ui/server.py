@@ -44,7 +44,7 @@ import threading
 import uuid
 import webbrowser
 from collections import deque
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -65,6 +65,10 @@ _LOCK = threading.Lock()
 _MARKET_EVENT_LIMIT = 500
 _QUOTE_REFRESH_TTL_SECONDS = 30.0
 _QUOTE_MIN_INTERVAL_SECONDS = 5.0
+_MARKET_THREAD_NAME = "qlab-market-topics"
+_MARKET_THREAD_JOIN_TIMEOUT_SECONDS = 5.0
+_MARKET_THREAD_LOCK = threading.Lock()
+_ACTIVE_MARKET_THREAD: threading.Thread | None = None
 
 
 # These research operations may be reached through the TUI's stateless MCP
@@ -486,6 +490,64 @@ def _run_market_topics(
         stop_event.wait(interval)
 
 
+def _start_market_topics(
+    session: UISession,
+    refresh_seconds: float = _QUOTE_REFRESH_TTL_SECONDS,
+) -> tuple[threading.Event, threading.Thread]:
+    """Start the one process-wide transient market producer."""
+    global _ACTIVE_MARKET_THREAD
+
+    with _MARKET_THREAD_LOCK:
+        if (
+            _ACTIVE_MARKET_THREAD is not None
+            and _ACTIVE_MARKET_THREAD.is_alive()
+        ):
+            raise RuntimeError("market topic producer is already running")
+        stop_event = threading.Event()
+        producer = threading.Thread(
+            target=_run_market_topics,
+            args=(session, stop_event, refresh_seconds),
+            daemon=True,
+            name=_MARKET_THREAD_NAME,
+        )
+        _ACTIVE_MARKET_THREAD = producer
+        try:
+            producer.start()
+        except Exception:
+            _ACTIVE_MARKET_THREAD = None
+            raise
+    return stop_event, producer
+
+
+def _stop_market_topics(
+    stop_event: threading.Event,
+    producer: threading.Thread,
+    *,
+    timeout: float = _MARKET_THREAD_JOIN_TIMEOUT_SECONDS,
+) -> None:
+    """Signal and join a producer before another owner may start one."""
+    global _ACTIVE_MARKET_THREAD
+
+    stop_event.set()
+    producer.join(timeout=max(0.0, float(timeout)))
+    if producer.is_alive():
+        raise RuntimeError(
+            f"market topic producer did not stop within {float(timeout):g}s"
+        )
+    with _MARKET_THREAD_LOCK:
+        if _ACTIVE_MARKET_THREAD is producer:
+            _ACTIVE_MARKET_THREAD = None
+
+
+def _overlap_stream_cursor(cursor: str) -> str:
+    """Return a cursor just before the boundary for same-ts deduplication."""
+    try:
+        parsed = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return cursor
+    return (parsed - timedelta(microseconds=1)).isoformat()
+
+
 # ---------------------------------------------------------------------------
 # API dispatch (pure functions of the session; easy to unit-test)
 # ---------------------------------------------------------------------------
@@ -724,12 +786,15 @@ class _Handler(BaseHTTPRequestHandler):
         Each connection runs on its own ThreadingHTTPServer thread and takes
         the dispatch lock only for the brief per-poll registry read, so a
         live stream never starves normal API calls. ``after`` resumes from an
-        ISO timestamp cursor; ``kind`` filters events; a comment heartbeat is
-        emitted while idle so clients can detect a dead socket.
+        ISO timestamp cursor; once connected, the cursor also retains event ids
+        delivered at its timestamp boundary. ``kind`` filters events; a comment
+        heartbeat is emitted while idle so clients can detect a dead socket.
         """
         import time
 
         cursor = (query.get("after") or [None])[0]
+        boundary_event_ids: set[str] = set()
+        tracks_boundary = cursor is None
         kind = (query.get("kind") or [None])[0]
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -741,9 +806,19 @@ class _Handler(BaseHTTPRequestHandler):
             while True:
                 # A fresh connection gets a short primer backlog, not history.
                 limit = 200 if cursor else 25
+                read_limit = limit
+                read_after = cursor
+                if cursor and tracks_boundary:
+                    read_after = _overlap_stream_cursor(cursor)
+                    read_limit = min(
+                        _MARKET_EVENT_LIMIT,
+                        limit + len(boundary_event_ids),
+                    )
                 with _LOCK:
-                    audit_events = self.session.registry.read_events(limit, cursor)
-                market_events = self.session.read_market_events(limit, cursor)
+                    audit_events = self.session.registry.read_events(
+                        read_limit, read_after)
+                market_events = self.session.read_market_events(
+                    read_limit, read_after)
                 events = sorted(
                     [*audit_events, *market_events],
                     key=lambda event: (
@@ -754,11 +829,30 @@ class _Handler(BaseHTTPRequestHandler):
                 # Cursor reads page the merged timeline so a newer quote cannot
                 # advance past an audit row waiting in the next registry page.
                 if cursor:
+                    if tracks_boundary:
+                        events = [
+                            event for event in events
+                            if (
+                                str(event.get("ts") or "") > cursor
+                                or (
+                                    str(event.get("ts") or "") == cursor
+                                    and str(event.get("event_id") or "")
+                                    not in boundary_event_ids
+                                )
+                            )
+                        ]
                     events = events[:limit]
                 if events:
                     idle_polls = 0
                     for event in events:
-                        cursor = str(event.get("ts") or cursor)
+                        event_ts = str(event.get("ts") or cursor or "")
+                        event_id = str(event.get("event_id") or "")
+                        if cursor is None or event_ts > cursor:
+                            cursor = event_ts
+                            boundary_event_ids.clear()
+                            tracks_boundary = True
+                        if event_ts == cursor:
+                            boundary_event_ids.add(event_id)
                         if kind and event.get("kind") != kind:
                             continue
                         payload = json.dumps(
@@ -797,14 +891,11 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) 
     _Handler.session = session
     httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     httpd.daemon_threads = True
-    market_stop = threading.Event()
-    market_thread = threading.Thread(
-        target=_run_market_topics,
-        args=(session, market_stop),
-        daemon=True,
-        name="qlab-market-topics",
-    )
-    market_thread.start()
+    try:
+        market_stop, market_thread = _start_market_topics(session)
+    except Exception:
+        httpd.server_close()
+        raise
     url = f"http://127.0.0.1:{port}/"
     print(f"[qlab] UI at {url}  (offline={'on' if offline else 'off'}; paper capital only)")
     print("[qlab] press Ctrl-C to stop.")
@@ -815,5 +906,7 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) 
     except KeyboardInterrupt:
         print("\n[qlab] UI stopped.")
     finally:
-        market_stop.set()
-        httpd.server_close()
+        try:
+            _stop_market_topics(market_stop, market_thread)
+        finally:
+            httpd.server_close()

@@ -251,6 +251,156 @@ def test_cache_without_provenance_is_invalid(tmp_path, monkeypatch):
     assert refreshed.attrs == {"source": "yfinance", "synthetic": False}
 
 
+def test_cache_pair_write_serializes_real_synthetic_interleaving(
+    tmp_path, monkeypatch,
+):
+    """Concurrent writers cannot pair a synthetic payload with live metadata."""
+    import threading
+
+    tickers = ["AAA"]
+    start, end = "2024-01-01", "2024-01-05"
+    cache_path = tmp_path / (
+        f"{market._cache_key(tickers, start, end, 'yfinance')}.parquet"
+    )
+    live = _panel(tickers)
+    live.attrs.update({"source": "yfinance", "synthetic": False})
+    synthetic = _panel(tickers) + 1_000.0
+    synthetic.attrs.update({"source": "synthetic", "synthetic": True})
+
+    live_payload_written = threading.Event()
+    release_live_writer = threading.Event()
+    synthetic_finished = threading.Event()
+    original_to_parquet = market.pd.DataFrame.to_parquet
+
+    def gated_to_parquet(frame, *args, **kwargs):
+        result = original_to_parquet(frame, *args, **kwargs)
+        if frame.attrs.get("source") == "yfinance":
+            live_payload_written.set()
+            if not release_live_writer.wait(2.0):
+                raise TimeoutError("test did not release live cache writer")
+        return result
+
+    monkeypatch.setattr(market.pd.DataFrame, "to_parquet", gated_to_parquet)
+    errors = []
+
+    def write(frame, finished=None):
+        try:
+            market._write_cache(cache_path, frame, "yfinance")
+        except Exception as exc:  # surfaced on the test thread below
+            errors.append(exc)
+        finally:
+            if finished is not None:
+                finished.set()
+
+    live_thread = threading.Thread(target=write, args=(live,))
+    synthetic_thread = threading.Thread(
+        target=write, args=(synthetic, synthetic_finished))
+    live_thread.start()
+    assert live_payload_written.wait(2.0)
+    synthetic_thread.start()
+    try:
+        assert not synthetic_finished.wait(0.1)
+    finally:
+        release_live_writer.set()
+        live_thread.join(2.0)
+        synthetic_thread.join(2.0)
+
+    assert not live_thread.is_alive()
+    assert not synthetic_thread.is_alive()
+    assert errors == []
+    cached = market._read_cache(cache_path, "yfinance")
+    assert cached is not None
+    assert cached.equals(synthetic)
+    assert cached.attrs == {"source": "synthetic", "synthetic": True}
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_cache_payload_must_match_provenance_sidecar(tmp_path):
+    """A crash/interleaving mismatch is invalid, never trusted as live data."""
+    tickers = ["AAA"]
+    start, end = "2024-01-01", "2024-01-05"
+    cache_path = tmp_path / (
+        f"{market._cache_key(tickers, start, end, 'yfinance')}.parquet"
+    )
+    live = _panel(tickers)
+    live.attrs.update({"source": "yfinance", "synthetic": False})
+    synthetic = _panel(tickers) + 1_000.0
+    synthetic.attrs.update({"source": "synthetic", "synthetic": True})
+
+    market._write_cache(cache_path, live, "yfinance")
+    live_metadata = market._cache_metadata_path(cache_path).read_text(
+        encoding="utf-8")
+    market._write_cache(cache_path, synthetic, "yfinance")
+    market._cache_metadata_path(cache_path).write_text(
+        live_metadata, encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError,
+        match="offline cache.*payload identity does not match provenance metadata",
+    ):
+        market.get_prices(
+            tickers,
+            start,
+            end,
+            offline=True,
+            cache_dir=tmp_path,
+            provider="yfinance",
+        )
+
+
+def test_offline_migrates_verified_legacy_yfinance_cache(tmp_path):
+    """The pre-provider cache key remains usable with explicit provenance."""
+    tickers = ["AAA"]
+    start, end = "2024-01-01", "2024-01-05"
+    legacy_path = tmp_path / (
+        f"{market._legacy_cache_key(tickers, start, end)}.parquet"
+    )
+    legacy = _panel(tickers)
+    legacy.attrs.update({"source": "yfinance", "synthetic": False})
+    legacy.to_parquet(legacy_path)
+
+    cached = market.get_prices(
+        tickers,
+        start,
+        end,
+        offline=True,
+        cache_dir=tmp_path,
+        provider="yfinance",
+    )
+
+    current_path = tmp_path / (
+        f"{market._cache_key(tickers, start, end, 'yfinance')}.parquet"
+    )
+    assert cached.equals(legacy)
+    assert cached.attrs == {"source": "yfinance", "synthetic": False}
+    assert current_path.exists() or current_path.with_suffix(".pkl").exists()
+    assert market._cache_metadata_path(current_path).exists()
+    assert market._read_cache(current_path, "yfinance").equals(legacy)
+
+
+def test_offline_refuses_unverifiable_legacy_cache(tmp_path):
+    """An attrless legacy payload cannot silently become synthetic data."""
+    tickers = ["AAA"]
+    start, end = "2024-01-01", "2024-01-05"
+    legacy_path = tmp_path / (
+        f"{market._legacy_cache_key(tickers, start, end)}.parquet"
+    )
+    _panel(tickers).to_parquet(legacy_path)
+
+    with pytest.raises(
+        RuntimeError,
+        match="offline cache.*legacy cache provenance is missing",
+    ):
+        market.get_prices(
+            tickers,
+            start,
+            end,
+            offline=True,
+            cache_dir=tmp_path,
+            provider="yfinance",
+        )
+
+
 def test_snapshot_forwards_explicit_provider(tmp_path, monkeypatch):
     monkeypatch.setitem(
         market.PROVIDERS,

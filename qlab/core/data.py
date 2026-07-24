@@ -18,6 +18,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import uuid
 import warnings
 from datetime import date
 from pathlib import Path
@@ -35,7 +37,8 @@ _CACHE_DIR: Path | None = None
 _FETCH_TIMEOUT_S = 15  # hard timeout — a hung fetch must not stall the pipeline
 ProviderFetch = Callable[[list[str], str, str], pd.DataFrame | None]
 PROVIDERS: dict[str, ProviderFetch] = {}
-_CACHE_METADATA_VERSION = 1
+_CACHE_METADATA_VERSION = 2
+_CACHE_LOCK = threading.RLock()
 
 
 class _InvalidCacheError(RuntimeError):
@@ -76,9 +79,14 @@ def get_prices(
 
     key = _cache_key(tickers, start, end, provider_name)
     cache_path = cache_dir / f"{key}.parquet"
+    legacy_path = cache_dir / f"{_legacy_cache_key(tickers, start, end)}.parquet"
 
     try:
-        cached = _read_cache(cache_path, provider_name)
+        cached = _read_cache(
+            cache_path,
+            provider_name,
+            legacy_path=legacy_path if provider_name == "yfinance" else None,
+        )
     except _InvalidCacheError as exc:
         if offline:
             raise RuntimeError(
@@ -196,8 +204,13 @@ def cached_provenance(
     cache_path = cache_dir / (
         f"{_cache_key(tickers, start, end, provider_name)}.parquet"
     )
+    legacy_path = cache_dir / f"{_legacy_cache_key(tickers, start, end)}.parquet"
     try:
-        cached = _read_cache(cache_path, provider_name)
+        cached = _read_cache(
+            cache_path,
+            provider_name,
+            legacy_path=legacy_path if provider_name == "yfinance" else None,
+        )
     except _InvalidCacheError:
         return None
     if cached is None or cached.empty:
@@ -428,6 +441,11 @@ def _provider_name(provider: str | None) -> str:
     return (provider or os.environ.get("QLAB_DATA_PROVIDER") or "yfinance").strip().lower()
 
 
+def _legacy_cache_key(tickers: list[str], start, end) -> str:
+    raw = f"{'-'.join(sorted(tickers))}|{start}|{end}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def _cache_key(tickers: list[str], start, end, provider: str) -> str:
     raw = f"{provider}|{'-'.join(sorted(tickers))}|{start}|{end}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -460,7 +478,40 @@ def _cache_metadata_path(path: Path) -> Path:
     return path.with_suffix(".metadata.json")
 
 
-def _read_cache(path: Path, expected_provider: str) -> pd.DataFrame | None:
+def _payload_identity(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as payload:
+        for chunk in iter(lambda: payload.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _read_cache(
+    path: Path,
+    expected_provider: str,
+    *,
+    legacy_path: Path | None = None,
+) -> pd.DataFrame | None:
+    with _CACHE_LOCK:
+        payload_exists = path.exists() or path.with_suffix(".pkl").exists()
+        metadata_exists = _cache_metadata_path(path).exists()
+        if not payload_exists and not metadata_exists and legacy_path is not None:
+            legacy_exists = (
+                legacy_path.exists()
+                or legacy_path.with_suffix(".pkl").exists()
+            )
+            if legacy_exists:
+                return _migrate_legacy_cache(
+                    legacy_path, path, expected_provider)
+        return _read_current_cache(path, expected_provider)
+
+
+def _read_current_cache(
+    path: Path,
+    expected_provider: str,
+) -> pd.DataFrame | None:
     pkl = path.with_suffix(".pkl")
     metadata_path = _cache_metadata_path(path)
     payload_exists = path.exists() or pkl.exists()
@@ -484,6 +535,9 @@ def _read_cache(path: Path, expected_provider: str) -> pd.DataFrame | None:
     source = metadata.get("source")
     synthetic = metadata.get("synthetic")
     storage = metadata.get("storage")
+    payload_file = metadata.get("payload_file")
+    payload_sha256 = metadata.get("payload_sha256")
+    payload_size = metadata.get("payload_size")
     if provider != expected_provider:
         raise _InvalidCacheError(
             f"cache belongs to provider {provider!r}, not {expected_provider!r}"
@@ -512,17 +566,104 @@ def _read_cache(path: Path, expected_provider: str) -> pd.DataFrame | None:
         raise _InvalidCacheError(
             f"cache metadata points to missing {storage} payload"
         )
+    if payload_file != payload_path.name:
+        raise _InvalidCacheError(
+            "cache metadata points to an unexpected payload file"
+        )
+    if (
+        not isinstance(payload_sha256, str)
+        or len(payload_sha256) != 64
+        or type(payload_size) is not int
+        or payload_size < 0
+    ):
+        raise _InvalidCacheError("cache payload identity metadata is missing")
+    try:
+        identity_before = _payload_identity(payload_path)
+    except OSError as exc:
+        raise _InvalidCacheError(
+            f"cache {storage} payload is unreadable") from exc
+    if identity_before != (payload_sha256, payload_size):
+        raise _InvalidCacheError(
+            "cache payload identity does not match provenance metadata"
+        )
     try:
         df = reader(payload_path)
     except Exception as exc:
         raise _InvalidCacheError(f"cache {storage} payload is unreadable") from exc
     if not isinstance(df, pd.DataFrame):
         raise _InvalidCacheError("cache payload is not a DataFrame")
+    try:
+        identity_after = _payload_identity(payload_path)
+    except OSError as exc:
+        raise _InvalidCacheError(
+            f"cache {storage} payload changed while being read") from exc
+    if identity_after != identity_before:
+        raise _InvalidCacheError(
+            f"cache {storage} payload changed while being read"
+        )
 
     df = _normalize_daily_prices(df)
     df.attrs.clear()
     df.attrs.update({"source": source, "synthetic": synthetic})
     return df
+
+
+def _migrate_legacy_cache(
+    legacy_path: Path,
+    current_path: Path,
+    expected_provider: str,
+) -> pd.DataFrame:
+    if expected_provider != "yfinance":
+        raise _InvalidCacheError(
+            "legacy cache can only be migrated as provider 'yfinance'"
+        )
+    legacy_pkl = legacy_path.with_suffix(".pkl")
+    candidates = [
+        (legacy_path, "parquet", pd.read_parquet),
+        (legacy_pkl, "pickle", pd.read_pickle),
+    ]
+    existing = [
+        (payload_path, storage, reader)
+        for payload_path, storage, reader in candidates
+        if payload_path.exists()
+    ]
+    if len(existing) != 1:
+        raise _InvalidCacheError(
+            "legacy cache must contain exactly one readable payload"
+        )
+    payload_path, storage, reader = existing[0]
+    try:
+        legacy = reader(payload_path)
+    except Exception as exc:
+        raise _InvalidCacheError(
+            f"legacy cache {storage} payload is unreadable") from exc
+    if not isinstance(legacy, pd.DataFrame):
+        raise _InvalidCacheError("legacy cache payload is not a DataFrame")
+
+    source = legacy.attrs.get("source")
+    synthetic = legacy.attrs.get("synthetic")
+    if not isinstance(source, str) or not source.strip():
+        raise _InvalidCacheError("legacy cache provenance is missing")
+    source = source.strip().lower()
+    if not isinstance(synthetic, bool):
+        raise _InvalidCacheError("legacy cache synthetic provenance is missing")
+    if source == "synthetic":
+        if not synthetic:
+            raise _InvalidCacheError(
+                "legacy synthetic cache provenance is inconsistent")
+    elif source != "yfinance" or synthetic:
+        raise _InvalidCacheError(
+            f"legacy cache source {source!r} is not valid yfinance provenance"
+        )
+
+    legacy = _normalize_daily_prices(legacy)
+    legacy.attrs.clear()
+    legacy.attrs.update({"source": source, "synthetic": synthetic})
+    _write_cache(current_path, legacy, "yfinance")
+    migrated = _read_current_cache(current_path, "yfinance")
+    if migrated is None:
+        raise _InvalidCacheError("legacy cache migration did not publish a cache")
+    return migrated
 
 
 def _write_cache(path: Path, df: pd.DataFrame, provider: str) -> None:
@@ -538,26 +679,54 @@ def _write_cache(path: Path, df: pd.DataFrame, provider: str) -> None:
             f"market data source {source!r} does not match provider {provider!r}"
         )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        df.to_parquet(path)
-        storage = "parquet"
-    except Exception:
-        # pyarrow not installed — pickle sidecar keeps caching working
-        df.to_pickle(path.with_suffix(".pkl"))
-        storage = "pickle"
+    with _CACHE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        token = uuid.uuid4().hex
+        parquet_temp = path.with_name(f".{path.name}.{token}.tmp")
+        pkl_path = path.with_suffix(".pkl")
+        pickle_temp = pkl_path.with_name(f".{pkl_path.name}.{token}.tmp")
+        metadata_path = _cache_metadata_path(path)
+        metadata_temp = metadata_path.with_name(
+            f".{metadata_path.name}.{token}.tmp")
+        temporary_paths = (parquet_temp, pickle_temp, metadata_temp)
+        try:
+            try:
+                df.to_parquet(parquet_temp)
+                storage = "parquet"
+                payload_temp = parquet_temp
+                payload_path = path
+                stale_payload = pkl_path
+            except Exception:
+                parquet_temp.unlink(missing_ok=True)
+                # pyarrow not installed — pickle sidecar keeps caching working
+                df.to_pickle(pickle_temp)
+                storage = "pickle"
+                payload_temp = pickle_temp
+                payload_path = pkl_path
+                stale_payload = path
 
-    metadata = {
-        "version": _CACHE_METADATA_VERSION,
-        "provider": provider,
-        "source": source,
-        "synthetic": synthetic,
-        "storage": storage,
-    }
-    _cache_metadata_path(path).write_text(
-        json.dumps(metadata, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+            payload_sha256, payload_size = _payload_identity(payload_temp)
+            metadata = {
+                "version": _CACHE_METADATA_VERSION,
+                "provider": provider,
+                "source": source,
+                "synthetic": synthetic,
+                "storage": storage,
+                "payload_file": payload_path.name,
+                "payload_sha256": payload_sha256,
+                "payload_size": payload_size,
+            }
+            metadata_temp.write_text(
+                json.dumps(metadata, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            payload_temp.replace(payload_path)
+            metadata_temp.replace(metadata_path)
+            stale_payload.unlink(missing_ok=True)
+        finally:
+            for temporary_path in temporary_paths:
+                temporary_path.unlink(missing_ok=True)
 
 
 def _as_date(d: str | date) -> date:

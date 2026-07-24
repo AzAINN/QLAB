@@ -306,6 +306,117 @@ def test_sse_stream_delivers_transient_quote_events(session, monkeypatch):
         httpd.server_close()
 
 
+def test_sse_stream_delivers_late_same_timestamp_audit_event_once(session):
+    """A quote cursor cannot skip an audit row committed later at the same ts."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    import qlab.state.registry as registry_module
+    import qlab.ui.server as server_module
+
+    boundary_ts = "2026-07-24T12:34:56+00:00"
+    quote = {
+        "event_id": "quote-at-boundary",
+        "ts": boundary_ts,
+        "kind": "quote",
+        "payload": {"rows": []},
+    }
+    with session._market_lock:
+        session._market_events.append(quote)
+
+    handler = type("H", (server_module._Handler,), {"session": session})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    response = None
+    try:
+        response = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/stream", timeout=10)
+        first = json.loads(
+            response.readline().decode().removeprefix("data:").strip())
+        assert first["event_id"] == quote["event_id"]
+
+        original_now = registry_module._now
+        registry_module._now = lambda: boundary_ts
+        try:
+            with server_module._LOCK:
+                late_id = session.registry.record_event("late-audit", {"n": 1})
+            registry_module._now = lambda: "2026-07-24T12:34:57+00:00"
+            with server_module._LOCK:
+                sentinel_id = session.registry.record_event("sentinel", {"n": 2})
+        finally:
+            registry_module._now = original_now
+
+        received = [first]
+        while not any(event["event_id"] == sentinel_id for event in received):
+            line = response.readline().decode()
+            if line.startswith("data:"):
+                received.append(json.loads(
+                    line.removeprefix("data:").strip()))
+
+        registry_module._now = lambda: "2026-07-24T12:34:58+00:00"
+        try:
+            with server_module._LOCK:
+                final_id = session.registry.record_event("final", {"n": 3})
+        finally:
+            registry_module._now = original_now
+        while not any(event["event_id"] == final_id for event in received):
+            line = response.readline().decode()
+            if line.startswith("data:"):
+                received.append(json.loads(
+                    line.removeprefix("data:").strip()))
+
+        assert [
+            event["event_id"] for event in received
+        ].count(late_id) == 1
+    finally:
+        if response is not None:
+            response.close()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_market_topic_producer_lifecycles_leave_no_threads(
+    session, monkeypatch,
+):
+    """Sequential in-process owners stop and join their quote producers."""
+    import threading
+
+    import qlab.ui.server as server_module
+
+    monkeypatch.setattr(
+        session,
+        "market",
+        lambda offline: {
+            "assets": [
+                {"ticker": "ACWI", "price": 100.0, "change_1d": 0.01},
+            ],
+        },
+    )
+
+    def live_producers():
+        return [
+            thread for thread in threading.enumerate()
+            if thread.name == server_module._MARKET_THREAD_NAME
+        ]
+
+    assert live_producers() == []
+    for _ in range(2):
+        stop_event, producer = server_module._start_market_topics(session)
+        try:
+            assert producer.is_alive()
+            with pytest.raises(RuntimeError, match="already running"):
+                server_module._start_market_topics(session)
+        finally:
+            server_module._stop_market_topics(stop_event, producer, timeout=2.0)
+        assert not producer.is_alive()
+        assert live_producers() == []
+
+
 def test_quote_event_cli_format_shows_three_tickers_and_total():
     from qlab.desk_cli import format_event
 

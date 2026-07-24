@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import yaml
 import pytest
+import yaml
 
 from qlab.core.universe import Universe, load_universe
 from qlab.paths import data_path
-from qlab.trader.mandate import load_mandate
+from qlab.trader.mandate import MandateViolation, load_mandate
 
 
 CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
@@ -135,12 +135,29 @@ def test_default_mandate_whitelist_stays_core():
     assert mandate.universe_whitelist == CORE
 
 
-def test_mandate_universe_tier_resolves_whitelist(tmp_path):
+@pytest.mark.parametrize(
+    ("tier", "expected_whitelist"),
+    [("core", CORE), ("extended", EXTENDED)],
+)
+def test_mandate_etf_universe_tier_resolves_whitelist(
+    tmp_path, tier, expected_whitelist
+):
     raw = yaml.safe_load(data_path("mandate.yaml").read_text(encoding="utf-8"))
-    raw["universe_tier"] = "extended"
+    raw["universe_tier"] = tier
     mandate_path = tmp_path / "mandate.yaml"
     mandate_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     mandate = load_mandate(mandate_path)
-    assert mandate.universe_tier == "extended"
-    assert mandate.universe_whitelist == EXTENDED
+    assert mandate.universe_tier == tier
+    assert mandate.universe_whitelist == expected_whitelist
+
+
+@pytest.mark.parametrize("tier", ["stocks", "candidates", "future_pool"])
+def test_mandate_rejects_tiers_without_catalog_promotion(tmp_path, tier):
+    raw = yaml.safe_load(data_path("mandate.yaml").read_text(encoding="utf-8"))
+    raw["universe_tier"] = tier
+    mandate_path = tmp_path / "mandate.yaml"
+    mandate_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(MandateViolation, match=rf"{tier}.*catalog promotion"):
+        load_mandate(mandate_path)

@@ -23,6 +23,8 @@ from qlab.core.costs import (
 from qlab.core.universe import load_universe
 from qlab.paths import data_path
 
+_PERMITTED_UNIVERSE_TIERS = frozenset({"core", "extended"})
+
 
 class MandateViolation(Exception):
     """Raised when a proposed action breaches the mandate. Fatal by design."""
@@ -167,6 +169,12 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     ):
         raise ValueError("mandate universe_tier must be a non-empty string")
     universe_tier = configured_tier.strip() if configured_tier else "core"
+    if universe_tier not in _PERMITTED_UNIVERSE_TIERS:
+        permitted = ", ".join(sorted(_PERMITTED_UNIVERSE_TIERS))
+        raise MandateViolation(
+            f"mandate universe_tier {universe_tier!r} requires algorithm catalog "
+            f"promotion before paper trading; permitted tiers: {permitted}"
+        )
 
     if configured_tier is not None or "universe_whitelist" not in raw:
         universe_whitelist = load_universe().tickers(universe_tier)

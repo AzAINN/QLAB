@@ -10,6 +10,7 @@ import pandas as pd
 from qlab.core.moments import ledoit_wolf
 
 _FACTOR_CONDITION_CAP = 1e10
+_RESIDUAL_DEGENERACY_RATIO = 1e-10
 _VARIANCE_FLOOR = 1e-12
 
 
@@ -71,6 +72,20 @@ def factor_covariance(
 
     residuals = centered_stocks - centered_factors @ coefficients
     residual_variances = np.sum(residuals**2, axis=0) / residual_dof
+    total_variances = np.var(stock_values, axis=0, ddof=1)
+    degenerate = residual_variances <= (
+        _RESIDUAL_DEGENERACY_RATIO * total_variances
+    )
+    if np.any(degenerate):
+        names = ", ".join(
+            str(stocks.columns[index]) for index in np.flatnonzero(degenerate)
+        )
+        raise ValueError(
+            f"stock(s) {names} have residual variance at or below "
+            f"{_RESIDUAL_DEGENERACY_RATIO:.0e} of total variance; an exact "
+            "factor replica is an ETF in disguise, so the factor model is "
+            "misspecified"
+        )
     residual_variances = np.maximum(residual_variances, _VARIANCE_FLOOR)
     factor_cov, _ = ledoit_wolf(factor_values)
 

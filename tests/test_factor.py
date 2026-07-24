@@ -14,19 +14,24 @@ def test_single_factor_betas_are_recovered() -> None:
     rng = np.random.default_rng(21)
     observations = 1500
     index = pd.date_range("2020-01-01", periods=observations, freq="B")
-    factor = rng.normal(0.0004, 0.012, observations)
+    factor = rng.normal(0.006, 0.01, observations)
     true_betas = np.array([0.55, 0.9, 1.2, 1.6])
-    noise = rng.normal(0.0, 0.003, (observations, len(true_betas)))
-    stock_values = 0.0001 + np.outer(factor, true_betas) + noise
+    alphas = np.array([0.004, -0.003, 0.005, -0.004])
+    noise = rng.normal(0.0, 0.001, (observations, len(true_betas)))
+    stock_values = alphas + np.outer(factor, true_betas) + noise
 
     stocks = pd.DataFrame(
         stock_values, index=index, columns=["LOW", "MID", "HIGH", "TOP"]
     )
     factors = pd.DataFrame({"market": factor}, index=index)
     model = factor_covariance(stocks, factors)
+    through_origin_betas = np.linalg.lstsq(
+        factor[:, np.newaxis], stock_values, rcond=None
+    )[0][0]
 
+    assert np.min(np.abs(through_origin_betas - true_betas)) > 0.1
     assert model.B.shape == (len(true_betas), 1)
-    np.testing.assert_allclose(model.B[:, 0], true_betas, atol=0.025)
+    np.testing.assert_allclose(model.B[:, 0], true_betas, atol=0.01)
     assert model.Sigma_f.shape == (1, 1)
     assert np.all(model.D >= 1e-12)
     assert model.stock_names == tuple(stocks.columns)
@@ -81,6 +86,37 @@ def test_collinear_factors_fail_loudly() -> None:
 
     with pytest.raises(ValueError, match="collinear.*condition number"):
         factor_covariance(stocks, factors)
+
+
+def test_exact_factor_replica_fails_loudly_and_names_stock() -> None:
+    rng = np.random.default_rng(25)
+    market = rng.normal(0.001, 0.01, 150)
+    factors = pd.DataFrame({"market": market})
+    stocks = pd.DataFrame(
+        {
+            "ORDINARY_STOCK": 0.7 * market
+            + rng.normal(0.0, 0.002, len(market)),
+            "ETF_IN_DISGUISE": 0.004 + 1.2 * market,
+        }
+    )
+
+    with pytest.raises(
+        ValueError, match=r"ETF_IN_DISGUISE.*residual variance.*misspecified"
+    ):
+        factor_covariance(stocks, factors)
+
+
+def test_small_nonzero_residual_variance_keeps_epsilon_floor() -> None:
+    rng = np.random.default_rng(26)
+    market = rng.normal(0.0, 0.01, 200)
+    factors = pd.DataFrame({"market": market})
+    stocks = pd.DataFrame(
+        {"SMALL_NOISE": market + rng.normal(0.0, 3e-7, len(market))}
+    )
+
+    model = factor_covariance(stocks, factors)
+
+    np.testing.assert_array_equal(model.D, np.array([1e-12]))
 
 
 @pytest.mark.parametrize("panel_name", ["stocks", "factors"])

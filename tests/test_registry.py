@@ -466,3 +466,36 @@ def test_request_deps_key_is_registry_owned(reg):
     import pytest
     with pytest.raises(RuntimeError, match="cannot start"):
         reg.update_workflow_phase(workflow["workflow_id"], "reporter", "working")
+
+
+def test_referee_verdict_must_bind_the_workflows_own_decision(reg):
+    """A PASS logged for a DIFFERENT decision (same targets) cannot complete
+    the referee phase of this workflow."""
+    import pytest
+
+    workflow = reg.start_workflow("portfolio_review", {"goal": "bind"})
+    workflow_id = workflow["workflow_id"]
+    targets = {"GLD": 1.0}
+    reg.update_workflow_phase(
+        workflow_id, "analyst", "done",
+        artifacts={"moment_set_id": "m", "objective_id": "o",
+                   "decision_id": "d-this"})
+    reg.update_workflow_phase(
+        workflow_id, "challenger", "done", artifacts={"challenger_view": "c"})
+    reg.update_workflow_phase(
+        workflow_id, "optimizer", "done",
+        artifacts={"targets": targets, "algorithm_id": "hrp"})
+
+    # A PASS bound to the right targets but a DIFFERENT decision must not pass.
+    other = reg.log_verdict("d-other", "PASS", ["ok"], targets=targets)
+    with pytest.raises(ValueError, match="different decision"):
+        reg.update_workflow_phase(
+            workflow_id, "referee", "done",
+            artifacts={"verdict": "PASS", "verdict_id": other, "targets": targets})
+
+    # The workflow's own decision passes.
+    mine = reg.log_verdict("d-this", "PASS", ["ok"], targets=targets)
+    done = reg.update_workflow_phase(
+        workflow_id, "referee", "done",
+        artifacts={"verdict": "PASS", "verdict_id": mine, "targets": targets})
+    assert {s["phase"]: s["status"] for s in done["steps"]}["referee"] == "done"

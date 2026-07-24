@@ -1072,7 +1072,12 @@ class Registry:
                 raise ValueError(
                     "referee 'targets' do not match the judge's winning targets"
                 )
-            return self._require_pass_verdict(artifacts, reviewed_hash)
+            # The reviewed decision is the winning branch's own analyst decision.
+            winner = str((judge_step.get("artifacts") or {}).get("winner_phase", ""))
+            branch = winner.rpartition("-")[2]
+            expected_decision = self._phase_decision_id(by_phase, f"analyst-{branch}")
+            return self._require_pass_verdict(
+                artifacts, reviewed_hash, expected_decision)
         optimizer_step = by_phase.get("optimizer")
         if optimizer_step is not None:
             optimizer_targets = (optimizer_step.get("artifacts") or {}).get("targets")
@@ -1083,9 +1088,19 @@ class Registry:
                 raise ValueError(
                     "referee 'targets' do not match the optimizer's persisted targets"
                 )
-        self._require_pass_verdict(artifacts, reviewed_hash)
+        expected_decision = self._phase_decision_id(by_phase, "analyst")
+        self._require_pass_verdict(artifacts, reviewed_hash, expected_decision)
 
-    def _require_pass_verdict(self, artifacts: dict, reviewed_hash: str) -> None:
+    @staticmethod
+    def _phase_decision_id(by_phase: dict, phase: str) -> str | None:
+        step = by_phase.get(phase)
+        if step is None:
+            return None
+        decision_id = (step.get("artifacts") or {}).get("decision_id")
+        return str(decision_id) if decision_id else None
+
+    def _require_pass_verdict(self, artifacts: dict, reviewed_hash: str,
+                             expected_decision: str | None = None) -> None:
         verdict_rows = self._rows(
             "SELECT * FROM verdicts WHERE verdict_id=?",
             [str(artifacts.get("verdict_id"))],
@@ -1097,6 +1112,14 @@ class Registry:
         ):
             raise ValueError(
                 "verdict_id must reference a persisted PASS bound to these targets"
+            )
+        # The PASS must review THIS workflow's decision, not merely some
+        # decision that happens to share the targets hash.
+        if (expected_decision is not None
+                and str(verdict_rows[0]["decision_id"]) != expected_decision):
+            raise ValueError(
+                "verdict_id belongs to a different decision than the workflow's "
+                "analyst decision; re-review this run's decision"
             )
 
     def _check_judge_binding(self, by_phase: dict, artifacts: dict) -> None:

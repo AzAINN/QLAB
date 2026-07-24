@@ -162,6 +162,15 @@ CREATE TABLE IF NOT EXISTS bob_tasks (
     trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
     conclusion JSON, error VARCHAR, attempt_count INTEGER,
     created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS debates (
+    debate_id VARCHAR PRIMARY KEY, workflow_id VARCHAR,
+    original_decision_id VARCHAR, status VARCHAR, max_rounds INTEGER,
+    panel_snapshot_id VARCHAR, material_claims JSON, adjudication JSON,
+    created_at VARCHAR, updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS debate_turns (
+    turn_id VARCHAR PRIMARY KEY, debate_id VARCHAR, round INTEGER, role VARCHAR,
+    claim_id VARCHAR, position VARCHAR, argument VARCHAR, evidence_refs JSON,
+    created_at VARCHAR);
 CREATE TABLE IF NOT EXISTS reflection_lessons (
     lesson_id VARCHAR PRIMARY KEY, decision_id VARCHAR, outcome_hash VARCHAR,
     lesson JSON, prompt_version VARCHAR, model_record_id VARCHAR,
@@ -1060,6 +1069,17 @@ class Registry:
             and set(instance_deps) == set(by_phase)
             else _WORKFORCE_DEPS
         )
+        # An open material disagreement blocks the reporter *as a dependency*:
+        # the desk does not report while the analyst and challenger are still
+        # arguing. Checked with the phase DAG so it cannot be ordered around.
+        if _phase_type(phase) == "reporter":
+            unresolved = self._rows(
+                "SELECT debate_id FROM debates "
+                "WHERE workflow_id = ? AND status = 'open'", [workflow_id])
+            if unresolved:
+                raise RuntimeError(
+                    "reporter cannot start with unadjudicated debates: "
+                    f"{[row['debate_id'] for row in unresolved]}")
         for dependency in deps_map.get(phase, ()):
             dependency_step = by_phase.get(dependency)
             if dependency_step is None or dependency_step["status"] != "done":
@@ -1384,6 +1404,52 @@ class Registry:
                 [day_iso[:10]])
         return int(rows[0]["n"]) if rows else 0
 
+    # -- bounded debate (registry-enforced, not prompt policy) --------------
+    def create_debate(self, debate: dict) -> str:
+        did = str(debate["debate_id"])
+        self.con.execute(
+            "INSERT INTO debates VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [did, debate.get("workflow_id"), debate.get("original_decision_id"),
+             debate.get("status", "open"), int(debate.get("max_rounds", 2)),
+             debate.get("panel_snapshot_id"),
+             _j(debate.get("material_claims") or []), None, _now(), _now()])
+        return did
+
+    def get_debate(self, debate_id: str) -> dict | None:
+        rows = self._rows("SELECT * FROM debates WHERE debate_id = ?", [debate_id])
+        return rows[0] if rows else None
+
+    def list_debates(self, workflow_id: str | None = None) -> list[dict]:
+        if workflow_id is not None:
+            return self._rows(
+                "SELECT * FROM debates WHERE workflow_id = ? "
+                "ORDER BY created_at DESC", [workflow_id])
+        return self._rows("SELECT * FROM debates ORDER BY created_at DESC")
+
+    def add_debate_turn(self, turn: dict) -> str:
+        tid = str(turn["turn_id"])
+        self.con.execute(
+            "INSERT INTO debate_turns VALUES (?,?,?,?,?,?,?,?,?)",
+            [tid, turn.get("debate_id"), int(turn.get("round", 1)),
+             turn.get("role"), turn.get("claim_id"), turn.get("position"),
+             turn.get("argument"), _j(turn.get("evidence_refs") or []), _now()])
+        self.con.execute(
+            "UPDATE debates SET updated_at = ? WHERE debate_id = ?",
+            [_now(), turn.get("debate_id")])
+        return tid
+
+    def list_debate_turns(self, debate_id: str) -> list[dict]:
+        return self._rows(
+            "SELECT * FROM debate_turns WHERE debate_id = ? "
+            "ORDER BY created_at ASC, turn_id ASC", [debate_id])
+
+    def close_debate(self, debate_id: str, status: str,
+                     adjudication: dict) -> None:
+        self.con.execute(
+            "UPDATE debates SET status = ?, adjudication = ?, updated_at = ? "
+            "WHERE debate_id = ?",
+            [status, _j(adjudication), _now(), debate_id])
+
     # -- reflection lessons (advisory language over an immutable outcome) ---
     def record_lesson(self, lesson: dict) -> str:
         """Persist a grounded lesson bound to an outcome hash."""
@@ -1546,7 +1612,8 @@ class Registry:
                          "targets", "pre_trade", "payload", "reasons",
                          "legs", "request", "result", "artifacts",
                          "permit", "trigger_payload", "conclusion",
-                         "expected_cost", "lesson") and isinstance(v, str):
+                         "expected_cost", "lesson", "material_claims",
+                         "adjudication", "evidence_refs") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:

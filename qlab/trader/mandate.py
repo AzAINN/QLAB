@@ -25,6 +25,7 @@ from qlab.core.universe import load_universe
 from qlab.paths import data_path
 
 _PERMITTED_UNIVERSE_TIERS = frozenset({"core", "extended"})
+_DRAWDOWN_EPSILON = 1e-9
 DrawdownTier = Literal["none", "warning", "control", "breaker"]
 
 
@@ -49,11 +50,11 @@ def tier(
         raise ValueError(
             "drawdown tiers must satisfy 0 < warning < control < breaker <= 1"
         )
-    if values["drawdown"] >= values["breaker"]:
+    if values["drawdown"] >= values["breaker"] - _DRAWDOWN_EPSILON:
         return "breaker"
-    if values["drawdown"] >= values["control"]:
+    if values["drawdown"] >= values["control"] - _DRAWDOWN_EPSILON:
         return "control"
-    if values["drawdown"] >= values["warning"]:
+    if values["drawdown"] >= values["warning"] - _DRAWDOWN_EPSILON:
         return "warning"
     return "none"
 
@@ -207,7 +208,7 @@ class Mandate:
         if high_water_mark <= 0:
             return False
         drawdown = 1.0 - equity / high_water_mark
-        return drawdown > self.trailing_drawdown_pct
+        return drawdown >= self.trailing_drawdown_pct - _DRAWDOWN_EPSILON
 
     def drawdown_tier(self, drawdown: float) -> DrawdownTier:
         """Return the configured pre-kill-switch tier for ``drawdown``."""

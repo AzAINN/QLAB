@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from qlab.autopilot.scheduler import evaluate_triggers
-from qlab.arms import MomentsConfig, solve_arm
+from qlab.arms import MomentsConfig, estimate, solve_arm
 from qlab.algorithms import get_operational_policy
 from qlab.core import data as market
 from qlab.core.moments import detect_regime
@@ -38,9 +38,25 @@ from qlab.trader.plan import build_plan, execute_plan
 from qlab.trader.reconcile import reconcile
 from qlab.state.registry import Registry
 
+
 def constraints_from_mandate(m: Mandate) -> Constraints:
     return Constraints(long_only=m.long_only, budget=1.0, min_weight=m.min_weight_per_asset,
                        max_weight=m.max_weight_per_asset)
+
+
+def _asset_vols_from_moments(snapshot, config: MomentsConfig) -> dict[str, float]:
+    """Return daily standalone vols from the covariance used by the solver."""
+    moment_set = estimate(snapshot, config, higher=False)
+    variances = np.diag(moment_set.cov)
+    if not np.all(np.isfinite(variances)) or np.any(variances < -1e-12):
+        raise ValueError("solved covariance has invalid per-asset variances")
+    return {
+        ticker: float(vol)
+        for ticker, vol in zip(
+            moment_set.tickers,
+            np.sqrt(np.clip(variances, 0.0, None)),
+        )
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +91,20 @@ def run_once(
     # 2. solve the configured operational policy under the mandate ------------
     policy = get_operational_policy(mandate.operational_policy)
     champion = policy.arm()
-    weights, diag = solve_arm(champion, snap, moments=MomentsConfig(lookback_days=lookback_days),
-                              constraints=constraints)
+    moments_config = MomentsConfig(lookback_days=lookback_days)
+    weights, diag = solve_arm(
+        champion,
+        snap,
+        moments=moments_config,
+        constraints=constraints,
+    )
     targets = {t: float(v) for t, v in zip(weights.tickers, weights.values)}
+    daily_asset_vols = _asset_vols_from_moments(snap, moments_config)
+    diag["portfolio_moments"]["asset_daily_vols"] = daily_asset_vols
+    annualized_asset_vols = {
+        ticker: daily_vol * np.sqrt(252.0)
+        for ticker, daily_vol in daily_asset_vols.items()
+    }
     est_vol = float(diag["portfolio_moments"]["vol"]) * np.sqrt(252)
 
     alt_lookback = 252 if lookback_days != 252 else 504
@@ -121,13 +148,19 @@ def run_once(
     decision_id = reg.log_decision(decision)
 
     # 3b. referee gate + reconcile (must run before any trade; research-plan §3) --
-    verdict, reasons = deterministic_referee(targets, mandate, _as_date(as_of),
-                                             moments_summary=diag.get("moments"))
+    state_before = broker.portfolio_state(tickers)
+    verdict, reasons = deterministic_referee(
+        targets,
+        mandate,
+        _as_date(as_of),
+        moments_summary=diag.get("moments"),
+        portfolio_state=state_before,
+        vols=annualized_asset_vols,
+    )
     reg.log_verdict(decision_id, verdict, reasons, source="deterministic", targets=targets)
     rec = reconcile(reg, broker, tickers)
 
     # 4. propose + execute (two-phase, mandate-checked) ----------------------
-    state_before = broker.portfolio_state(tickers)
     trade_result: dict = {"executed": False}
     if verdict != "PASS":
         trade_result = {"executed": False, "blocked_by": "referee", "reasons": reasons}
@@ -210,7 +243,13 @@ def daily_ops(
     snap = market.snapshot(tickers, date.today().isoformat(), offline=offline, seed=seed)
     reflections_resolved = resolve_pending(reg, snap.prices)
     regime = detect_regime(snap)
-    robust_regime = detect_regime_robust(snap)
+    robust_history = _latest_robust_regime_history(reg)
+    robust_regime = detect_regime_robust(snap, history=robust_history)
+    robust_observation = robust_regime.observation or robust_regime.regime
+    robust_history = [
+        *robust_history,
+        robust_observation,
+    ]
 
     dd_breached = mandate.drawdown_breached(state["equity"],
                                             state.get("high_water_mark", state["equity"]))
@@ -287,6 +326,8 @@ def daily_ops(
     result = {
         "kind": "daily_ops", "equity": state["equity"], "regime": regime["regime"],
         "robust_regime": robust_regime.regime,
+        "robust_regime_observation": robust_observation,
+        "robust_regime_history": robust_history,
         "triggers": triggers, "rebalance_recommended": bool(triggers),
         "proposals": proposals, "proposal_plan_ids": proposal_plan_ids,
         "alerts": alerts,
@@ -296,6 +337,36 @@ def daily_ops(
     reg.record_event("daily_ops", result)
     _write_summary(result, prefix="dailyops")
     return result
+
+
+def _latest_robust_regime_history(registry: Registry) -> list[str]:
+    """Recover raw observations persisted by the newest daily-ops heartbeat."""
+    permitted = {"calm", "normal", "stress", "uncertain"}
+    events = registry._rows(
+        "SELECT * FROM events WHERE kind=? "
+        "ORDER BY ts DESC, event_id DESC LIMIT 1",
+        ["daily_ops"],
+    )
+    if not events:
+        return []
+    payload = events[0].get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("daily_ops event payload must be a mapping")
+    raw_history = payload.get("robust_regime_history")
+    if raw_history is None:
+        prior = payload.get("robust_regime")
+        if prior is None:
+            return []
+        raw_history = [prior]
+    if not isinstance(raw_history, list):
+        raise ValueError("daily_ops robust_regime_history must be a list")
+    history = [str(observation).strip().lower() for observation in raw_history]
+    invalid = sorted(set(history) - permitted)
+    if invalid:
+        raise ValueError(
+            f"daily_ops robust_regime_history has invalid states: {invalid}"
+        )
+    return history
 
 
 def _latest_policy_targets(registry: Registry) -> dict[str, float]:

@@ -42,6 +42,9 @@ def test_daily_ops_never_trades_and_reports_triggers():
     result = daily_ops(registry=reg, offline=True)
     assert result["kind"] == "daily_ops"
     assert "triggers" in result
+    assert result["robust_regime_history"][-1] == (
+        result["robust_regime_observation"]
+    )
     # daily_ops must not create any order plans
     assert reg._rows("SELECT * FROM orders", []) == []
     reg.close()
@@ -72,7 +75,7 @@ def test_daily_ops_drift_trigger_builds_proposal_without_execution(monkeypatch):
     monkeypatch.setattr(
         loop,
         "detect_regime_robust",
-        lambda _snapshot: RobustRegime("calm", 1.0, 1.0),
+        lambda _snapshot, history=(): RobustRegime("calm", 1.0, 1.0),
     )
 
     orders_before = reg.list_orders()
@@ -124,6 +127,126 @@ def test_run_once_logs_verdict_and_reconciles(tmp_registry):
     summary = run_once(registry=tmp_registry, offline=True, execute=True, as_of="2021-06-30")
     assert summary["referee"]["verdict"] == "PASS"
     assert summary["reconcile"]["clean"] is True
+
+
+def test_run_once_referee_receives_portfolio_state_and_annualized_asset_vols(
+    monkeypatch,
+):
+    import dataclasses
+
+    import numpy as np
+    import pytest
+
+    import qlab.autopilot.loop as loop
+    from qlab.trader.mandate import load_mandate
+
+    reg = Registry(":memory:")
+    reg.init_account(10_000.0)
+    reg.con.execute(
+        "UPDATE account SET high_water_mark=? WHERE id=1",
+        [11_000.0],
+    )
+    mandate = dataclasses.replace(load_mandate(), stress_vol_limit=1e-9)
+    captured = {}
+    referee = loop.deterministic_referee
+
+    def capture_referee(*args, **kwargs):
+        captured.update(kwargs)
+        return referee(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "deterministic_referee", capture_referee)
+    summary = loop.run_once(
+        registry=reg,
+        mandate=mandate,
+        offline=True,
+        execute=False,
+        as_of="2021-06-30",
+    )
+
+    assert captured["portfolio_state"]["high_water_mark"] == 11_000.0
+    daily_vols = summary["diagnostics"]["portfolio_moments"]["asset_daily_vols"]
+    assert set(captured["vols"]) == set(summary["targets"])
+    for ticker, daily_vol in daily_vols.items():
+        assert captured["vols"][ticker] == pytest.approx(
+            daily_vol * np.sqrt(252.0)
+        )
+    reasons = summary["referee"]["reasons"]
+    assert any(reason.startswith("drawdown tier: warning") for reason in reasons)
+    assert any(reason.startswith("stress: WARNING") for reason in reasons)
+    assert reg.get_verdict(summary["decision_id"])["reasons"] == reasons
+    reg.close()
+
+
+def test_referee_breaker_liquidation_is_the_only_budget_exception():
+    from datetime import date
+
+    from qlab.governance.referee import deterministic_referee
+    from qlab.trader.mandate import load_mandate
+
+    mandate = load_mandate()
+    invested = {
+        ticker: 1.0 / len(mandate.universe_whitelist)
+        for ticker in mandate.universe_whitelist
+    }
+    zero = {ticker: 0.0 for ticker in mandate.universe_whitelist}
+    breaker_state = {
+        "drawdown": mandate.drawdown_tiers.breaker,
+        "weights": invested,
+    }
+
+    verdict, reasons = deterministic_referee(
+        zero,
+        mandate,
+        date(2020, 1, 1),
+        portfolio_state=breaker_state,
+    )
+    assert verdict == "PASS"
+    assert any("liquidation mode" in reason for reason in reasons)
+
+    verdict, reasons = deterministic_referee(
+        invested,
+        mandate,
+        date(2020, 1, 1),
+        portfolio_state=breaker_state,
+    )
+    assert verdict == "FAIL"
+    assert any("permits liquidation only" in reason for reason in reasons)
+
+    verdict, reasons = deterministic_referee(
+        zero,
+        mandate,
+        date(2020, 1, 1),
+        portfolio_state={"drawdown": 0.0, "weights": invested},
+    )
+    assert verdict == "FAIL"
+    assert any("budget violated" in reason for reason in reasons)
+
+
+def test_drawdown_boundaries_tolerate_float_noise_on_both_sides():
+    from qlab.trader.mandate import load_mandate, tier
+
+    epsilon_noise = 5e-10
+    for threshold, expected in (
+        (0.05, "warning"),
+        (0.10, "control"),
+        (0.15, "breaker"),
+    ):
+        assert tier(threshold - epsilon_noise) == expected
+        assert tier(threshold + epsilon_noise) == expected
+    assert tier(0.05 - 2e-9) == "none"
+
+    mandate = load_mandate()
+    limit = mandate.trailing_drawdown_pct
+    high_water_mark = 10_000.0
+    for drawdown in (
+        limit - epsilon_noise,
+        limit,
+        limit + epsilon_noise,
+    ):
+        equity = high_water_mark * (1.0 - drawdown)
+        assert mandate.drawdown_breached(equity, high_water_mark)
+    equity = high_water_mark * (1.0 - (limit - 2e-9))
+    assert not mandate.drawdown_breached(equity, high_water_mark)
 
 
 def test_run_once_records_challenger_view(tmp_registry):

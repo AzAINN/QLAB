@@ -85,8 +85,23 @@ def deterministic_referee(targets: dict[str, float], mandate: Mandate,
                           vols: Mapping[str, float] | Sequence[float] | None = None,
                           ) -> tuple[str, list[str]]:
     failures: list[str] = []
-    warnings: list[str] = []
+    audit_reasons: list[str] = []
     vals = np.array(list(targets.values()), dtype=float)
+    target_gross = float(np.abs(vals).sum())
+    drawdown: float | None = None
+    drawdown_tier: str | None = None
+    if portfolio_state is not None:
+        try:
+            drawdown = _portfolio_drawdown(portfolio_state)
+            drawdown_tier = mandate.drawdown_tier(drawdown)
+        except (TypeError, ValueError) as exc:
+            failures.append(f"invalid portfolio drawdown state: {exc}")
+    liquidation_mode = (
+        drawdown_tier == "breaker"
+        and np.isfinite(target_gross)
+        and target_gross <= 1e-4
+    )
+
     if not np.all(np.isfinite(vals)):
         failures.append("non-finite weight")
     for t in targets:
@@ -94,9 +109,12 @@ def deterministic_referee(targets: dict[str, float], mandate: Mandate,
             failures.append(f"{t} outside universe whitelist")
     if mandate.long_only and np.any(vals < -1e-4):
         failures.append("long-only violated")
-    if mandate.fully_invested and abs(vals.sum() - 1.0) > 1e-2:
+    if (
+        mandate.fully_invested
+        and not liquidation_mode
+        and abs(vals.sum() - 1.0) > 1e-2
+    ):
         failures.append(f"budget violated: sum={vals.sum():.4f}")
-    target_gross = float(np.abs(vals).sum())
     if np.isfinite(target_gross) and (
         target_gross > mandate.max_gross_exposure + 1e-4
     ):
@@ -112,33 +130,36 @@ def deterministic_referee(targets: dict[str, float], mandate: Mandate,
     if moments_summary and moments_summary.get("condition_number", 0) > 1e8:
         failures.append("ill-conditioned covariance")
 
-    if portfolio_state is not None:
-        try:
-            drawdown = _portfolio_drawdown(portfolio_state)
-            drawdown_tier = mandate.drawdown_tier(drawdown)
-        except (TypeError, ValueError) as exc:
-            failures.append(f"invalid portfolio drawdown state: {exc}")
+    if drawdown_tier is not None and drawdown is not None:
+        if liquidation_mode:
+            audit_reasons.append(
+                "drawdown tier: breaker; liquidation mode permits target gross "
+                f"exposure {target_gross:.4f}"
+            )
         else:
-            if drawdown_tier in {"control", "breaker"} and np.isfinite(target_gross):
-                try:
-                    current_gross = _current_gross_exposure(portfolio_state)
-                except (TypeError, ValueError) as exc:
-                    failures.append(f"invalid current gross exposure: {exc}")
-                else:
-                    if target_gross > current_gross + 1e-4:
-                        failures.append(
-                            f"drawdown {drawdown_tier} tier blocks gross exposure "
-                            f"increase ({current_gross:.4f} -> {target_gross:.4f})"
-                        )
-            if (
-                drawdown_tier == "breaker"
-                and np.isfinite(target_gross)
-                and target_gross > 1e-4
-            ):
-                failures.append(
-                    "drawdown breaker tier permits liquidation only; "
-                    f"target gross exposure is {target_gross:.4f}"
-                )
+            audit_reasons.append(
+                f"drawdown tier: {drawdown_tier} at {drawdown:.2%}"
+            )
+        if drawdown_tier in {"control", "breaker"} and np.isfinite(target_gross):
+            try:
+                current_gross = _current_gross_exposure(portfolio_state)
+            except (TypeError, ValueError) as exc:
+                failures.append(f"invalid current gross exposure: {exc}")
+            else:
+                if target_gross > current_gross + 1e-4:
+                    failures.append(
+                        f"drawdown {drawdown_tier} tier blocks gross exposure "
+                        f"increase ({current_gross:.4f} -> {target_gross:.4f})"
+                    )
+        if (
+            drawdown_tier == "breaker"
+            and np.isfinite(target_gross)
+            and target_gross > 1e-4
+        ):
+            failures.append(
+                "drawdown breaker tier permits liquidation only; "
+                f"target gross exposure is {target_gross:.4f}"
+            )
 
     if vols is not None:
         try:
@@ -153,13 +174,19 @@ def deterministic_referee(targets: dict[str, float], mandate: Mandate,
             if stressed_vol > mandate.stress_vol_limit:
                 # Correlation-to-one is a conservative bound, not a forecast, so
                 # exceeding it is audited as a warning without vetoing a valid plan.
-                warnings.append(
+                audit_reasons.append(
                     "stress: WARNING correlation-to-one volatility "
                     f"{stressed_vol:.2%} exceeds limit "
                     f"{mandate.stress_vol_limit:.2%}"
                 )
+            else:
+                audit_reasons.append(
+                    "stress: correlation-to-one volatility "
+                    f"{stressed_vol:.2%} is within limit "
+                    f"{mandate.stress_vol_limit:.2%}"
+                )
 
-    return ("PASS" if not failures else "FAIL"), [*failures, *warnings]
+    return ("PASS" if not failures else "FAIL"), [*failures, *audit_reasons]
 
 
 def _portfolio_drawdown(portfolio_state: dict) -> float:

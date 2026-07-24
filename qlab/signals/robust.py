@@ -22,6 +22,7 @@ class RobustRegime:
     regime: Literal["calm", "normal", "stress", "uncertain"]
     confidence: float
     effective_risk_fraction: float
+    observation: Literal["calm", "normal", "stress", "uncertain"] | None = None
 
 
 def _label(value: object, *, allow_uncertain: bool = False) -> str:
@@ -120,7 +121,9 @@ def robust_regime(
 ) -> RobustRegime:
     """Guard a daily regime observation against likely misclassification.
 
-    ``history`` contains prior raw daily observations, oldest first.  The
+    ``history`` contains prior raw daily observations, oldest first.  Persist
+    the returned ``observation`` and thread it into the next call; ``regime``
+    is the delayed effective state and must not be used as raw history.  The
     current observation is derived from the HMM's highest-probability state
     when supplied, otherwise from the deterministic detector plurality.
     Uncertainty takes effect immediately; a confident state change takes
@@ -150,7 +153,7 @@ def robust_regime(
     )
     current = "uncertain" if uncertain else candidate
     if current == "uncertain":
-        return RobustRegime("uncertain", confidence, 0.5)
+        return RobustRegime("uncertain", confidence, 0.5, current)
 
     prior = [_label(regime, allow_uncertain=True) for regime in history]
     observations = [*prior, current]
@@ -165,4 +168,4 @@ def robust_regime(
     else:
         days_after_switch = len(observations) - 1 - switch_index
         risk_fraction = _RISK_RAMP[min(days_after_switch, len(_RISK_RAMP) - 1)]
-    return RobustRegime(effective, confidence, risk_fraction)
+    return RobustRegime(effective, confidence, risk_fraction, current)

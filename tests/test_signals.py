@@ -166,6 +166,48 @@ def test_robust_regime_holds_then_confirms_a_three_day_change():
     assert flipped.effective_risk_fraction == 0.5
 
 
+def test_public_robust_detector_gates_a_switch_across_consecutive_calls(
+    monkeypatch,
+):
+    from qlab.core.types import DataSnapshot
+    import qlab.signals.hard as hard
+
+    returns = _two_regime_returns()
+    prices = (1 + returns).cumprod() * 100
+    days = list(prices.index[-5:])
+    raw_by_day = dict(zip(
+        (day.date() for day in days),
+        ["calm", "calm", "stress", "stress", "stress"],
+    ))
+
+    def votes_for_day(snapshot, *, quantile=0.80):
+        observation = raw_by_day[snapshot.as_of]
+        return {
+            "turbulence": observation,
+            "absorption": observation,
+            "volatility": observation,
+        }
+
+    monkeypatch.setattr(hard, "regime_detector_votes", votes_for_day)
+    history = []
+    effective = []
+    risk_fractions = []
+    for day in days:
+        snapshot = DataSnapshot(
+            list(prices.columns),
+            prices,
+            day.date(),
+        )
+        result = hard.detect_regime_robust(snapshot, history=history)
+        assert result.observation is not None
+        history.append(result.observation)
+        effective.append(result.regime)
+        risk_fractions.append(result.effective_risk_fraction)
+
+    assert effective == ["calm", "calm", "calm", "calm", "stress"]
+    assert risk_fractions[-1] == 0.5
+
+
 def test_robust_regime_ramps_risk_after_a_confirmed_switch():
     from qlab.signals.robust import robust_regime
 

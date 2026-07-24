@@ -441,7 +441,13 @@ class UISession:
             and "realized_vol" in asset
         }
         gross = sum(abs(weight) for weight in weights.values())
-        drawdown = float(portfolio["drawdown"])
+        equity = float(portfolio["equity"])
+        high_water_mark = float(portfolio.get("high_water_mark", equity))
+        drawdown = (
+            1.0 - equity / high_water_mark
+            if high_water_mark > 0
+            else 0.0
+        )
         stressed_vol = stress_correlation_to_one(weights, vols)
 
         refusals = []
@@ -598,7 +604,7 @@ class UISession:
 
         portfolio = self.portfolio(offline)
         market_snapshot = self.market(offline)
-        events = self.registry.read_events(event_limit)
+        events = self.read_audit_stream_events(event_limit, after=None)
         plans = self.registry.list_plans(20)
         decisions = self.registry.recent_decisions(limit=30)
         verdicts = self.registry.verdicts_for(

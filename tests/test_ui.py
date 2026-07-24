@@ -91,6 +91,61 @@ def test_tui_snapshot_is_provenance_first(session):
     assert snap["workflows"] == []
 
 
+def test_tui_stress_scan_keeps_same_timestamp_refusal_at_window_edge(session):
+    import json
+
+    timestamp = "2026-07-24T12:34:56+00:00"
+    rows = [
+        (
+            f"event-{index:03d}",
+            timestamp,
+            "filler",
+            json.dumps({"n": index}),
+        )
+        for index in range(100)
+    ]
+    rows.append((
+        "zz-refusal",
+        timestamp,
+        "cost_gate_refusal",
+        json.dumps({
+            "plan_id": "same-ts-refusal",
+            "reasons": ["net-alpha gate"],
+        }),
+    ))
+    session.registry.con.executemany(
+        "INSERT INTO events VALUES (?,?,?,?)",
+        rows,
+    )
+
+    snapshot = session.tui_snapshot(offline=True, event_limit=100)
+
+    assert len(snapshot["events"]) == 100
+    assert any(event["event_id"] == "zz-refusal" for event in snapshot["events"])
+    assert snapshot["stress"]["cost_gate_refusals"][0]["plan_id"] == (
+        "same-ts-refusal"
+    )
+
+
+def test_stress_tier_uses_unrounded_drawdown_not_display_value(session):
+    ticker = session.mandate.universe_whitelist[0]
+    raw_drawdown = session.mandate.drawdown_tiers.control - 4e-5
+    high_water_mark = 10_000.0
+    portfolio = {
+        "equity": high_water_mark * (1.0 - raw_drawdown),
+        "high_water_mark": high_water_mark,
+        "drawdown": round(raw_drawdown, 4),
+        "weights": {ticker: 0.10},
+    }
+    market = {
+        "assets": [{"ticker": ticker, "realized_vol": 0.20}],
+    }
+
+    assert session.mandate.drawdown_tier(portfolio["drawdown"]) == "control"
+    stress = session.stress_payload(portfolio, market, replays={}, events=[])
+    assert stress["drawdown_tier"] == "warning"
+
+
 def test_owner_exposes_safe_lab_tools_and_durable_workflows(session):
     status, result = handle_api(
         session, "POST", "/api/lab/data.fetch_universe", {},

@@ -144,6 +144,62 @@ def test_data_health_withdraws_execution_when_quotes_stale(session):
     assert health["quote_health"]["fresh"] is False
 
 
+def test_regime_panel_endpoint_is_a_diagnostic_not_a_signal(session):
+    status, panel = handle_api(session, "GET", "/api/regime/panel",
+                               {"offline": ["1"]}, {})
+    assert status == 200
+    assert panel["robust_state"] in ("calm", "stress", "uncertain")
+    assert len(panel["readings"]) == 5
+    assert panel["fingerprint"]["snapshot_id"] == panel["snapshot_id"]
+    # A panel describes state; it must not carry weights or a recommendation.
+    assert "targets" not in panel and "recommendation" not in panel
+
+
+def test_decision_outcome_and_lesson_routes(session):
+    from datetime import date as _date
+
+    from qlab.core.types import Decision
+
+    did = session.registry.log_decision(Decision(
+        as_of=_date(2026, 7, 1), kind="regime", choice={"regime": "calm"},
+        rationale="fixture"))
+    session.registry.update_reflection(did, {"realized_vol": 0.2,
+                                             "outcome_hash": "abc123"}, "lesson")
+    status, out = handle_api(session, "GET", f"/api/decisions/{did}/outcome", {}, {})
+    assert status == 200 and out["outcome"]["realized_vol"] == 0.2
+
+    status, les = handle_api(session, "GET", f"/api/decisions/{did}/lesson", {}, {})
+    assert status == 200 and les["lesson"] is None  # none generated yet
+
+    status, missing = handle_api(
+        session, "GET", "/api/decisions/nope/outcome", {}, {})
+    assert status == 404
+
+
+def test_workflow_debate_route_does_not_shadow_the_workflow_route(session):
+    from qlab.governance.debate import open_debate
+
+    wf = session.registry.start_workflow("portfolio_review", {"goal": "t"})
+    wid = wf["workflow_id"] if isinstance(wf, dict) else wf
+    open_debate(session.registry, workflow_id=wid,
+                original_decision_id="dec-1",
+                material_claims=["estimation_window"])
+    status, out = handle_api(session, "GET", f"/api/workflows/{wid}/debate", {}, {})
+    assert status == 200 and len(out["debates"]) == 1
+    assert out["debates"][0]["turns"] == []
+    # The plain workflow route still resolves.
+    status, workflow = handle_api(session, "GET", f"/api/workflows/{wid}", {}, {})
+    assert status == 200 and workflow["workflow_id"] == wid
+
+
+def test_model_invocations_route(session):
+    from qlab.operator.model_routing import record_invocation, resolve_route
+
+    record_invocation(session.registry, resolve_route("reporter"))
+    status, out = handle_api(session, "GET", "/api/models/invocations", {}, {})
+    assert status == 200 and out["invocations"][0]["role"] == "reporter"
+
+
 def test_bob_status_starts_in_observe(session):
     status, out = handle_api(session, "GET", "/api/bob/status", {}, {})
     assert status == 200

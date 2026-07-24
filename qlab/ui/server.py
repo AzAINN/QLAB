@@ -15,6 +15,12 @@ GET  /api/system               runtime health and authority state
 GET  /api/data/health          data-policy provenance, freshness, eligibility
 GET  /api/data/permit/current  the latest recorded data permit for a purpose
 GET  /api/quotes               latest cached quotes + live market-stream health
+GET  /api/regime/panel         all regime indicators on one snapshot (diagnostic)
+GET  /api/decisions/similar    point-in-time recall of analogous decisions
+GET  /api/decisions/<id>/outcome   the immutable resolved outcome
+GET  /api/decisions/<id>/lesson    advisory lesson over that outcome (if any)
+GET  /api/workflows/<id>/debate    debates, turns, and adjudication
+GET  /api/models/invocations   model tier/route audit records
 GET  /api/bob/status           BobTheQuant desk-manager mode and lifecycle state
 GET  /api/bob/tasks            Bob's deduplicated autonomous task history
 POST /api/bob/observe          run one deterministic Bob observe tick
@@ -805,6 +811,38 @@ class UISession:
         return {"purpose": purpose, "permit": (permit or {}).get("permit")
                 if permit else None}
 
+    def regime_panel(self, offline: bool) -> dict:
+        """All regime indicators read off ONE snapshot, with a fingerprint.
+
+        A diagnostic of market state — never a trading signal, forecast, or
+        weight recommendation.
+        """
+        from qlab.core import data as market
+        from qlab.signals.panel import build_panel
+
+        snap = market.snapshot(
+            self.mandate.universe_whitelist, date.today().isoformat(),
+            lookback_days=504, offline=offline, seed=self.seed)
+        return build_panel(snap).to_dict()
+
+    def similar_decisions(self, query: dict) -> dict:
+        """Point-in-time recall of analogous reflected decisions."""
+        def _one(key, default=None):
+            values = query.get(key)
+            return values[0] if isinstance(values, list) and values else default
+
+        as_of = _one("as_of")
+        fingerprint = {
+            "vol_percentile": float(_one("vol_percentile", 0.5)),
+            "turbulence_percentile": float(_one("turbulence_percentile", 0.5)),
+            "regime_label": _one("regime_label", "calm"),
+        }
+        rows = self.registry.recall_similar_decisions(
+            fingerprint, kind=_one("kind", "regime"),
+            limit=int(_one("limit", 5)), as_of=as_of,
+            min_similarity=float(_one("min_similarity", 0.5)))
+        return {"as_of": as_of, "fingerprint": fingerprint, "decisions": rows}
+
     # -- BobTheQuant desk manager -------------------------------------------
     def bob_facts(self, offline: bool) -> dict:
         """Assemble the deterministic owner facts Bob observes (no LLM)."""
@@ -1252,6 +1290,17 @@ def handle_api(session: UISession, method: str, path: str,
         limit = max(1, min(int(query.get("limit", ["10"])[0]), 50))
         return 200, {"workflows": session.registry.list_workflows(limit)}
 
+    # The suffix route must precede the generic one, which would otherwise
+    # match "<id>/debate" as a workflow id and 404.
+    if (method == "GET" and path.startswith("/api/workflows/")
+            and path.endswith("/debate")):
+        workflow_id = path.removeprefix("/api/workflows/").removesuffix("/debate")
+        debates = session.registry.list_debates(workflow_id)
+        for debate in debates:
+            debate["turns"] = session.registry.list_debate_turns(
+                debate["debate_id"])
+        return 200, {"workflow_id": workflow_id, "debates": debates}
+
     if method == "GET" and path.startswith("/api/workflows/"):
         workflow_id = path.removeprefix("/api/workflows/")
         workflow = session.registry.get_workflow(workflow_id)
@@ -1276,6 +1325,34 @@ def handle_api(session: UISession, method: str, path: str,
         raw = query.get("symbols", [None])[0]
         symbols = [s.strip() for s in raw.split(",")] if raw else None
         return 200, session.quotes(symbols)
+
+    if method == "GET" and path == "/api/regime/panel":
+        offline = _qbool(query, "offline", session.offline_default)
+        return 200, session.regime_panel(offline)
+
+    if method == "GET" and path == "/api/decisions/similar":
+        return 200, session.similar_decisions(query)
+
+    if (method == "GET" and path.startswith("/api/decisions/")
+            and path.endswith("/outcome")):
+        decision_id = path.removeprefix("/api/decisions/").removesuffix("/outcome")
+        decision = session.registry.get_decision(decision_id)
+        if decision is None:
+            return 404, {"error": f"unknown decision_id {decision_id!r}"}
+        return 200, {"decision_id": decision_id,
+                     "outcome": decision.get("realized_outcome"),
+                     "reflection": decision.get("reflection")}
+
+    if (method == "GET" and path.startswith("/api/decisions/")
+            and path.endswith("/lesson")):
+        decision_id = path.removeprefix("/api/decisions/").removesuffix("/lesson")
+        lesson = session.registry.get_lesson(decision_id)
+        return 200, {"decision_id": decision_id,
+                     "lesson": (lesson or {}).get("lesson") if lesson else None,
+                     "stale": bool((lesson or {}).get("stale")) if lesson else None}
+
+    if method == "GET" and path == "/api/models/invocations":
+        return 200, {"invocations": session.registry.list_model_invocations(50)}
 
     if method == "GET" and path == "/api/bob/status":
         return 200, session.bob.status()

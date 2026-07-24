@@ -102,6 +102,48 @@ def test_data_permit_current_is_null_before_any_evaluation(session):
     assert status == 200 and current["permit"] is None
 
 
+def test_quotes_endpoint_reports_no_stream_in_demo(session):
+    status, out = handle_api(session, "GET", "/api/quotes", {}, {})
+    assert status == 200
+    assert out["live_stream"] is False
+    assert out["quotes"] == {} and out["health"] is None
+
+
+def test_quotes_endpoint_surfaces_injected_stream(session):
+    from qlab.data.stream import MarketStreamSupervisor
+
+    clock = type("C", (), {"t": 0.0, "__call__": lambda self: self.t})()
+    stream = MarketStreamSupervisor(["ACWI", "BNDW"], "sip", clock=clock)
+    stream.mark_connected()
+    stream.on_quote("ACWI", 101.0)
+    stream.on_quote("BNDW", 50.0)
+    session.market_stream = stream
+
+    status, out = handle_api(session, "GET", "/api/quotes",
+                             {"symbols": ["ACWI,BNDW"]}, {})
+    assert status == 200
+    assert out["live_stream"] is True and out["feed"] == "sip"
+    assert out["quotes"]["ACWI"]["price"] == 101.0
+    assert out["health"]["fresh"] is True
+
+
+def test_data_health_withdraws_execution_when_quotes_stale(session):
+    from qlab.data.stream import MarketStreamSupervisor
+
+    # A live stream that has gone stale must withdraw execution eligibility even
+    # though (in demo) the daily bar path is what we can exercise offline.
+    clock = type("C", (), {"t": 100.0, "__call__": lambda self: self.t})()
+    stream = MarketStreamSupervisor(["ACWI"], "iex", stale_after_s=5.0, clock=clock)
+    stream.mark_connected()  # no quotes → stale
+    session.market_stream = stream
+
+    status, health = handle_api(
+        session, "GET", "/api/data/health", {"offline": ["1"]}, {})
+    assert status == 200
+    assert health["eligible_for_execution"] is False
+    assert health["quote_health"]["fresh"] is False
+
+
 def test_live_portfolio_marks_to_market_with_provenance(session):
     # Deploy the book, then evaluate it live.
     handle_api(session, "POST", "/api/run_once", {}, {"offline": True})

@@ -97,13 +97,16 @@ def evaluate_panel_health(
     *,
     tickers: list[str] | None = None,
     now: datetime | None = None,
+    quotes_fresh: bool | None = None,
 ) -> DataHealth:
     """Evaluate freshness, provenance match, and eligibility for ``prices``.
 
     ``prices`` must carry ``attrs['source']``/``attrs['synthetic']`` (every
     panel from :func:`qlab.core.data.get_prices` does). ``now`` is a
     timezone-aware instant used for session-aware freshness; tests pass it
-    explicitly for determinism.
+    explicitly for determinism. ``quotes_fresh`` is the live market stream's
+    verdict (P2): when it is ``False`` execution eligibility is withdrawn even
+    though the daily bar is current — a stale quote must block execution.
     """
     tickers = list(tickers or (list(prices.columns) if prices is not None else []))
     source = str((prices.attrs.get("source") if prices is not None else "") or "unknown")
@@ -140,9 +143,14 @@ def evaluate_panel_health(
         and execution_grade
         and (fresh or not policy.require_fresh)
     )
-    # Quote-level freshness (P2) is an additional AND on top of this; a policy
-    # that is not itself execution-eligible can never yield execution-grade data.
+    # Quote-level freshness is an additional AND on top of the daily-bar gate;
+    # a policy that is not itself execution-eligible can never yield
+    # execution-grade data. When a live stream reports stale quotes, execution
+    # is withdrawn and the reason recorded.
     eligible_exec = eligible_paper and policy.execution_eligible and fresh
+    if quotes_fresh is False and eligible_exec:
+        eligible_exec = False
+        reasons.append("live quote stream is stale; execution withdrawn")
 
     return DataHealth(
         provider=source,

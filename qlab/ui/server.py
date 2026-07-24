@@ -14,6 +14,7 @@ GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
 GET  /api/data/health          data-policy provenance, freshness, eligibility
 GET  /api/data/permit/current  the latest recorded data permit for a purpose
+GET  /api/quotes               latest cached quotes + live market-stream health
 GET  /api/events               event stream with cursor and limit
 GET  /api/plans                recent order plans
 GET  /api/orders               recent orders
@@ -151,6 +152,9 @@ class UISession:
         self._market_lock = threading.Lock()
         self._last_quote_signature: tuple[tuple[str, float, float], ...] | None = None
         self._regime_hmm_cache: dict[str, dict[str, object]] = {}
+        # The live market stream is attached only under an operational policy
+        # (a real Alpaca feed); it stays None for demo/offline runtimes.
+        self.market_stream = None
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -415,6 +419,8 @@ class UISession:
         hwm = float(state.get("high_water_mark", equity))
         dd = 1.0 - equity / hwm if hwm > 0 else 0.0
         live = broker.name == "alpaca_paper"
+        stream = self.market_stream
+        quotes_fresh = stream.quotes_fresh() if stream else None
         return {
             "blocked": False,
             "broker": broker.name,
@@ -433,10 +439,12 @@ class UISession:
                 "live": live,
                 "source": "alpaca" if live else policy.provider,
                 "feed": policy.feed if live else None,
-                "execution_grade": live and policy.execution_eligible,
-                # A per-quote timestamp lands with the market stream (next phase);
-                # until then the marks are the broker's latest available prices.
-                "quote_as_of": None,
+                # Execution-grade requires an operational policy AND a fresh
+                # live quote stream; a stale stream withdraws it.
+                "execution_grade": bool(
+                    live and policy.execution_eligible and quotes_fresh),
+                "quotes_fresh": quotes_fresh,
+                "quote_health": stream.health() if stream else None,
             },
         }
 
@@ -720,14 +728,41 @@ class UISession:
                 "eligible_for_paper_proposal": False,
                 "eligible_for_execution": False,
             }
-        health = evaluate_panel_health(snap.prices, policy, tickers=tickers)
+        quotes_fresh = (
+            self.market_stream.quotes_fresh() if self.market_stream else None)
+        health = evaluate_panel_health(
+            snap.prices, policy, tickers=tickers, quotes_fresh=quotes_fresh)
         permit = build_permit(
             snapshot_id=snap.content_hash(), purpose=purpose, policy=policy,
             health=health, universe=tickers, as_of=str(snap.as_of))
         self.registry.record_data_permit(permit.to_dict())
         return {
             "blocked": False, "mode": policy.mode, "feed": policy.feed,
-            "permit_id": permit.permit_id, **health.to_dict(),
+            "permit_id": permit.permit_id,
+            "quote_health": (
+                self.market_stream.health() if self.market_stream else None),
+            **health.to_dict(),
+        }
+
+    def quotes(self, symbols: list[str] | None = None) -> dict:
+        """Latest cached quotes and stream health, or a no-stream report."""
+        stream = self.market_stream
+        wanted = symbols or self.mandate.universe_whitelist
+        if stream is None:
+            return {"live_stream": False,
+                    "reason": "no live market stream (demo/offline runtime)",
+                    "quotes": {}, "health": None}
+        snap = stream.snapshot()
+        health = stream.health()
+        ages = health.get("quote_ages", {})
+        return {
+            "live_stream": True,
+            "feed": stream.feed,
+            "quotes": {
+                s: {"price": q.price, "age_seconds": ages.get(s)}
+                for s, q in snap.items() if s in wanted
+            },
+            "health": health,
         }
 
     def data_permit_current(self, purpose: str = "paper_proposal") -> dict:
@@ -1013,6 +1048,11 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/data/permit/current":
         purpose = query.get("purpose", ["paper_proposal"])[0]
         return 200, session.data_permit_current(purpose)
+
+    if method == "GET" and path == "/api/quotes":
+        raw = query.get("symbols", [None])[0]
+        symbols = [s.strip() for s in raw.split(",")] if raw else None
+        return 200, session.quotes(symbols)
 
     if method == "GET" and path == "/api/events":
         limit = int(query.get("limit", ["100"])[0])

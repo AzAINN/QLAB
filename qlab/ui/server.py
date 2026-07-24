@@ -92,6 +92,7 @@ OWNER_LAB_TOOLS = frozenset({
     "algorithms.solve",
     "solve.classical",
     "backtest.run",
+    "research.window_evidence",
     "registry.list_runs",
     "registry.report",
     "registry.log_decision",

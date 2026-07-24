@@ -9,6 +9,7 @@ Namespaced, ref-passing tools the orchestrator's subagents call:
     algorithms.*  list, describe, and run staged algorithms
     solve.*       compatibility alias for staged prepared-objective solvers
     backtest.*   walk-forward an arm and return metrics
+    research.*   produce cited sensitivity evidence for agent judgments
     registry.*   list runs, fetch a report, log a decision (reflection loop),
                   log_verdict (referee gate)
     report.*     compile a full recommendation
@@ -36,6 +37,7 @@ from qlab.core.objective import build_objective
 from qlab.core.selection import MAX_EXACT_ASSETS, select_k_of_n
 from qlab.core.types import DataSnapshot, Decision
 from qlab.core.universe import load_universe
+from qlab.core.window_evidence import window_evidence
 from qlab.experiment import recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
 from qlab.solvers.base import Constraints
@@ -303,6 +305,71 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         st.registry.log_solution(run_id or "adhoc", solver, res,
                                  objective_hash=objective_id, objective_form=obj.form)
         return res.to_dict()
+
+    # -- estimation-window evidence ----------------------------------------
+    @app.tool(name="research.window_evidence")
+    def research_window_evidence(
+        as_of: str,
+        universe: str = "core",
+        cadence: str = "quarterly",
+    ) -> dict:
+        """Rank window/shrinkage evidence for the configured operational policy."""
+        from qlab.algorithms import get_operational_policy
+        from qlab.trader.mandate import load_mandate
+
+        st.budget.charge("research.window_evidence")
+        d = check_as_of(as_of)
+        tickers = load_universe().tickers(universe)
+        snapshot = market.snapshot(
+            tickers, d, offline=st.offline, seed=st.seed
+        )
+        policy = get_operational_policy(load_mandate().operational_policy)
+        table = window_evidence(
+            snapshot,
+            policy_solver=policy.id,
+            cadence=cadence,
+        )
+        snapshot_span = {
+            "start": snapshot.prices.index[0].date().isoformat(),
+            "end": snapshot.prices.index[-1].date().isoformat(),
+            "n_obs": int(len(snapshot.prices)),
+        }
+        caveats = {
+            "source": snapshot.source,
+            "snapshot_span": snapshot_span,
+            "cost_model": "flat",
+            "cost_bps": 5.0,
+            "dsr_trial_counted": False,
+            "ranking": (
+                "Sortino descending, then lower annualized realized volatility, "
+                "shallower maximum drawdown, and lower turnover."
+            ),
+            "limitations": [
+                "This is descriptive sensitivity evidence, not proof that the "
+                "top row will remain best out of sample.",
+                "Early rebalances use the history then available; compare each "
+                "row's n_rebalances and span before drawing conclusions.",
+            ],
+        }
+        best = table[0]
+        run_id = st.registry.log_run("window_evidence", {
+            "as_of": str(d),
+            "universe": universe,
+            "tickers": tickers,
+            "cadence": cadence,
+            "policy_solver": policy.id,
+            "table": table,
+            "best": best,
+            "caveats": caveats,
+        })
+        # Evidence rows are deliberately not written to ``backtests``: this
+        # diagnostic sweep must not enlarge the registry's DSR trial universe.
+        return {
+            "run_id": run_id,
+            "table": table,
+            "best": best,
+            "caveats": caveats,
+        }
 
     # -- backtest -----------------------------------------------------------
     @app.tool(name="backtest.run")

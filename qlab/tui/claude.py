@@ -68,6 +68,7 @@ _LAB_TOOL_BASES = {
     "algorithms.solve",
     "solve.classical",
     "backtest.run",
+    "research.window_evidence",
     "registry.list_runs",
     "registry.report",
     "registry.log_decision",

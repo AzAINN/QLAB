@@ -44,6 +44,7 @@ def test_combined_registration_exposes_both_namespaces():
     register_lab_tools(app, LabState(offline=True, registry=reg))
     register_trader_tools(app, TraderState(registry=reg, offline=True))
     assert "moments.estimate" in app.names
+    assert "research.window_evidence" in app.names
     # Research-stage executables are owner-only: agent-facing surfaces —
     # headless included — must not mount them (catalog stage boundary).
     assert "selection.run" not in app.names
@@ -52,6 +53,7 @@ def test_combined_registration_exposes_both_namespaces():
     register_lab_tools(
         owner_app, LabState(offline=True, registry=reg), owner_only=True)
     assert "selection.run" in owner_app.names
+    assert "research.window_evidence" in owner_app.names
     assert "selection_run" not in owner_app.names
     assert {"algorithms.list", "algorithms.describe", "algorithms.solve"} <= set(app.names)
     assert "registry.log_verdict" in app.names
@@ -61,6 +63,21 @@ def test_combined_registration_exposes_both_namespaces():
         "solve.quantum", "solve.compare", "solve.qubo_resource_count",
         "solve.constructed_resource_count",
     ))
+
+
+def test_window_evidence_is_in_owner_and_moments_analyst_scopes():
+    from qlab.tui.claude import (
+        _LAB_TOOL_BASES,
+        _claude_tool,
+        build_workforce_agents,
+    )
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    base = "research.window_evidence"
+    assert base in OWNER_LAB_TOOLS
+    assert base in _LAB_TOOL_BASES
+    analyst_tools = build_workforce_agents()["moments-analyst"]["tools"]
+    assert _claude_tool(base) in analyst_tools
 
 
 def test_lab_and_trader_share_one_registry():

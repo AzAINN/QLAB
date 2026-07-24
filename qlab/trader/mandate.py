@@ -40,6 +40,16 @@ class CostConfig:
     adv_notional: dict[str, float] = field(
         default_factory=lambda: {"default": DEFAULT_ADV_NOTIONAL}
     )
+    # Net-alpha gate assumptions (quant-book bands): a rebalance must "buy"
+    # more than it costs. The benefit of closing drift toward the reviewed
+    # policy is a mandated assumption, not a forecast; the haircut discounts
+    # backtest evidence to live expectations; the multiplier is the safety
+    # margin on estimated costs; the equity cap refuses pathological plans
+    # outright.
+    rebalance_benefit_bps: float = 20.0
+    live_haircut: float = 0.5
+    safety_multiplier: float = 1.5
+    max_cost_bps_of_equity: float = 25.0
 
     def adv_for(self, ticker: str) -> float:
         """Return a ticker override or the conservative configured default."""
@@ -152,6 +162,17 @@ def _load_costs(raw: object) -> CostConfig:
         ),
         impact_k=_cost_number(raw.get("impact_k", DEFAULT_IMPACT_K), "impact_k"),
         adv_notional=adv_notional,
+        rebalance_benefit_bps=_cost_number(
+            raw.get("rebalance_benefit_bps", 20.0), "rebalance_benefit_bps",
+            positive=True),
+        live_haircut=_cost_number(
+            raw.get("live_haircut", 0.5), "live_haircut", positive=True),
+        safety_multiplier=_cost_number(
+            raw.get("safety_multiplier", 1.5), "safety_multiplier",
+            positive=True),
+        max_cost_bps_of_equity=_cost_number(
+            raw.get("max_cost_bps_of_equity", 25.0), "max_cost_bps_of_equity",
+            positive=True),
     )
 
 

@@ -25,7 +25,7 @@ from qlab.algorithms import get_operational_policy
 from qlab.core import data as market
 from qlab.core.moments import detect_regime
 from qlab.core.types import Decision
-from qlab.governance.referee import deterministic_referee
+from qlab.governance.referee import cost_gate, deterministic_referee
 from qlab.governance.reflection import resolve_pending
 from qlab.paths import state_path
 from qlab.solvers.base import Constraints
@@ -135,7 +135,22 @@ def run_once(
         try:
             plan = build_plan(reg, broker, mandate, targets, decision_id,
                               cost_bps=5.0)
-            if execute:
+            # Net-alpha gate: with the plan's realistic cost known, a failed
+            # gate logs a superseding FAIL verdict — execute_plan's
+            # latest-verdict check then refuses this plan everywhere, not
+            # just on this code path.
+            gate_reasons = cost_gate(
+                plan.pre_trade, float(state_before["equity"]),
+                state_before.get("weights", {}), targets, mandate)
+            if gate_reasons:
+                reg.log_verdict(decision_id, "FAIL", gate_reasons,
+                                source="deterministic", targets=targets)
+                trade_result = {"executed": False, "blocked_by": "cost_gate",
+                                "reasons": gate_reasons,
+                                "expected_cost": plan.pre_trade.get("expected_cost")}
+                reg.record_event("cost_gate_refusal", {
+                    "decision_id": decision_id, "reasons": gate_reasons})
+            elif execute:
                 trade_result = execute_plan(reg, broker, plan)
                 trade_result["executed"] = True
             else:

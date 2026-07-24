@@ -112,3 +112,67 @@ def test_reconcile_detects_stub_broker_mismatch():
     reg = Registry(":memory:")
     out = reconcile(reg, StubBroker(), ["ACWI"])
     assert out["clean"] is False and "ACWI" in out["diffs"]
+
+
+def test_cost_gate_pure_cases():
+    import dataclasses
+
+    from qlab.governance.referee import cost_gate
+    from qlab.trader.mandate import CostConfig, load_mandate
+
+    mandate = dataclasses.replace(load_mandate(), costs=CostConfig())
+    swap = ({"ACWI": 0.5, "BNDW": 0.5}, {"ACWI": 0.0, "BNDW": 1.0})
+
+    # An all-cash initial deployment is exempt regardless of cost.
+    assert cost_gate({"expected_cost": {"total": 500.0}}, 100_000.0,
+                     {}, swap[1], mandate) == []
+
+    # Big drift, modest cost: benefit 50k*20bps*0.5 = 50 > 1.5*10 → pass.
+    assert cost_gate({"expected_cost": {"total": 10.0}}, 100_000.0,
+                     swap[0], swap[1], mandate) == []
+
+    # Tiny drift, same cost: benefit 1 <= 15 → net-alpha refusal.
+    near = {"ACWI": 0.51, "BNDW": 0.49}
+    reasons = cost_gate({"expected_cost": {"total": 10.0}}, 100_000.0,
+                        swap[0], near, mandate)
+    assert any("net-alpha gate" in reason for reason in reasons)
+
+    # Cost above the absolute equity cap refuses even with maximal drift.
+    reasons = cost_gate({"expected_cost": {"total": 300.0}}, 100_000.0,
+                        swap[0], swap[1], mandate)
+    assert any("absolute cap" in reason for reason in reasons)
+
+    assert cost_gate({"expected_cost": {"total": 1.0}}, 0.0,
+                     swap[0], swap[1], mandate) == [
+        "cost gate requires positive equity"]
+
+
+def test_run_once_cost_gate_blocks_and_supersedes_verdict():
+    import dataclasses
+
+    from qlab.trader.mandate import CostConfig, load_mandate
+
+    reg = Registry(":memory:")
+    absurd = dataclasses.replace(
+        load_mandate(),
+        costs=CostConfig(impact_k=1e9, rebalance_benefit_bps=1e-6))
+
+    first = run_once(registry=reg, mandate=absurd, offline=True,
+                     execute=True, as_of="2021-06-30")
+    assert first["trade"]["executed"] is True  # initial deployment is exempt
+
+    second = run_once(registry=reg, mandate=absurd, offline=True,
+                      execute=True, as_of="2021-09-30")
+    trade = second["trade"]
+    if trade.get("blocked_by") == "cost_gate":
+        assert any("net-alpha gate" in r or "absolute cap" in r
+                   for r in trade["reasons"])
+        # The superseding FAIL is the latest verdict → execute_plan would
+        # refuse this plan on any other path too.
+        verdict = reg.get_verdict(second["decision_id"])
+        assert verdict["verdict"] == "FAIL"
+        assert trade["executed"] is False
+    else:
+        # Zero-drift second run can no-op before the gate; force the claim
+        # only when a real rebalance was proposed.
+        assert trade.get("mandate_violation") or trade["executed"] is False

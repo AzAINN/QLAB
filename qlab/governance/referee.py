@@ -14,6 +14,48 @@ import numpy as np
 from qlab.trader.mandate import Mandate
 
 
+def cost_gate(pre_trade: dict, equity: float,
+              current_weights: dict[str, float],
+              targets: dict[str, float], mandate: Mandate) -> list[str]:
+    """The net-alpha gate, in deterministic code: reasons why costs refuse a plan.
+
+    qlab forecasts no returns, so "expected alpha" is replaced by a mandated,
+    documented benefit assumption: closing drift toward the reviewed policy is
+    worth ``costs.rebalance_benefit_bps`` per unit of traded notional, taken
+    with the ``costs.live_haircut`` backtest-to-live discount. A plan passes
+    only when that haircut benefit exceeds ``costs.safety_multiplier`` times
+    its expected cost, and its cost stays under an absolute equity cap. An
+    all-cash initial deployment is not a rebalance and is exempt, mirroring
+    ``build_plan``'s turnover exemption.
+    """
+    reasons: list[str] = []
+    if sum(current_weights.values()) < 0.01:
+        return reasons  # initial deployment: nothing is being "rebalanced"
+    cost_total = float((pre_trade.get("expected_cost") or {}).get("total", 0.0))
+    if equity <= 0:
+        return ["cost gate requires positive equity"]
+    costs = mandate.costs
+    cap = equity * costs.max_cost_bps_of_equity / 1e4
+    if cost_total > cap:
+        reasons.append(
+            f"expected cost {cost_total:.2f} exceeds the absolute cap "
+            f"{cap:.2f} ({costs.max_cost_bps_of_equity:.0f} bps of equity)")
+    tickers = set(current_weights) | set(targets)
+    drift_closed = 0.5 * sum(
+        abs(float(targets.get(t, 0.0)) - float(current_weights.get(t, 0.0)))
+        for t in tickers) * equity
+    benefit = drift_closed * costs.rebalance_benefit_bps / 1e4 * costs.live_haircut
+    hurdle = cost_total * costs.safety_multiplier
+    if benefit <= hurdle:
+        reasons.append(
+            f"net-alpha gate: haircut benefit {benefit:.2f} does not clear "
+            f"{costs.safety_multiplier:.1f}x expected cost {cost_total:.2f} "
+            f"(drift closed {drift_closed:.2f}, benefit assumption "
+            f"{costs.rebalance_benefit_bps:.0f} bps, haircut "
+            f"{costs.live_haircut:.2f})")
+    return reasons
+
+
 def deterministic_referee(targets: dict[str, float], mandate: Mandate,
                           as_of: date, moments_summary: dict | None = None,
                           ) -> tuple[str, list[str]]:

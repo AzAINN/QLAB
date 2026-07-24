@@ -162,6 +162,10 @@ CREATE TABLE IF NOT EXISTS bob_tasks (
     trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
     conclusion JSON, error VARCHAR, attempt_count INTEGER,
     created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS reflection_lessons (
+    lesson_id VARCHAR PRIMARY KEY, decision_id VARCHAR, outcome_hash VARCHAR,
+    lesson JSON, prompt_version VARCHAR, model_record_id VARCHAR,
+    stale BOOLEAN, created_at VARCHAR);
 CREATE TABLE IF NOT EXISTS model_invocations (
     invocation_id VARCHAR PRIMARY KEY, role VARCHAR, requested_tier VARCHAR,
     resolved_model VARCHAR, backend VARCHAR, status VARCHAR, latency_ms DOUBLE,
@@ -1380,6 +1384,46 @@ class Registry:
                 [day_iso[:10]])
         return int(rows[0]["n"]) if rows else 0
 
+    # -- reflection lessons (advisory language over an immutable outcome) ---
+    def record_lesson(self, lesson: dict) -> str:
+        """Persist a grounded lesson bound to an outcome hash."""
+        lid = str(lesson["lesson_id"])
+        self.con.execute(
+            "INSERT OR REPLACE INTO reflection_lessons VALUES (?,?,?,?,?,?,?,?)",
+            [lid, lesson.get("decision_id"), lesson.get("outcome_hash"),
+             _j(lesson), lesson.get("prompt_version"),
+             lesson.get("model_record_id"), False, _now()])
+        self.record_event("reflection.lesson_generated",
+                          {"lesson_id": lid,
+                           "decision_id": lesson.get("decision_id")})
+        return lid
+
+    def get_lesson(self, decision_id: str) -> dict | None:
+        """The most recent lesson for a decision, if any."""
+        rows = self._rows(
+            "SELECT * FROM reflection_lessons WHERE decision_id = ? "
+            "ORDER BY created_at DESC LIMIT 1", [decision_id])
+        return rows[0] if rows else None
+
+    def mark_lessons_stale(self, decision_id: str, current_outcome_hash: str) -> int:
+        """Mark any lesson written against a superseded outcome as stale.
+
+        Returns how many were marked. Called after an outcome correction so a
+        lesson can never be read as describing the current outcome.
+        """
+        rows = self._rows(
+            "SELECT lesson_id FROM reflection_lessons "
+            "WHERE decision_id = ? AND outcome_hash <> ? AND stale = FALSE",
+            [decision_id, current_outcome_hash])
+        for row in rows:
+            self.con.execute(
+                "UPDATE reflection_lessons SET stale = TRUE WHERE lesson_id = ?",
+                [row["lesson_id"]])
+            self.record_event("reflection.lesson_stale",
+                              {"lesson_id": row["lesson_id"],
+                               "decision_id": decision_id})
+        return len(rows)
+
     # -- model invocation audit ---------------------------------------------
     def record_model_invocation(self, record: dict) -> str:
         """Persist which tier was requested and which model actually served it."""
@@ -1502,7 +1546,7 @@ class Registry:
                          "targets", "pre_trade", "payload", "reasons",
                          "legs", "request", "result", "artifacts",
                          "permit", "trigger_payload", "conclusion",
-                         "expected_cost") and isinstance(v, str):
+                         "expected_cost", "lesson") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:

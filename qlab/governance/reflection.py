@@ -9,6 +9,9 @@ bookkeeping against the configured 60/40 arm, not a return forecast.
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -17,6 +20,21 @@ from qlab.core.types import DataSnapshot
 
 _TRADING_DAYS = 252
 _REGIME_QUANTILE = 0.80
+# Bump when the outcome's fields or formulas change, so a lesson written against
+# an older definition can be recognized as stale rather than silently reused.
+OUTCOME_SCHEMA_VERSION = 2
+
+
+def outcome_hash(outcome: dict) -> str:
+    """Content address of a resolved outcome (its immutable identity).
+
+    A lesson is bound to this hash; if the outcome is ever corrected, the hash
+    changes and any lesson written against the old one is stale by construction.
+    """
+    material = {k: v for k, v in outcome.items() if k != "outcome_hash"}
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":"),
+                   default=str).encode()).hexdigest()[:16]
 _SIXTY_FORTY_ARM = Arm(
     id="reflection_6040",
     objective="sixty_forty",
@@ -142,6 +160,7 @@ def resolve_pending(registry, prices: pd.DataFrame, horizon_days: int = 63) -> i
         regime_consistent = regime_call == regime_realized
 
         outcome = {
+            "schema_version": OUTCOME_SCHEMA_VERSION,
             "realized_vol": realized_vol,
             "est_vol": estimated_vol,
             "vol_ratio": vol_ratio,
@@ -156,6 +175,8 @@ def resolve_pending(registry, prices: pd.DataFrame, horizon_days: int = 63) -> i
             "realized_6040_return": realized_6040_return,
             "realized_alpha_vs_6040": realized_alpha_vs_6040,
         }
+        # The outcome's immutable identity; a lesson binds to this.
+        outcome["outcome_hash"] = outcome_hash(outcome)
 
         if vol_ratio is None:
             estimate_assessment = "No positive volatility estimate was recorded."

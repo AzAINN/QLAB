@@ -33,6 +33,7 @@ from qlab.research.prediction import (
     IC_ADMISSION_THRESHOLD,
     IC_STABILITY_THRESHOLD,
 )
+from qlab.tui.atlas_view import AtlasView
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
@@ -69,7 +70,8 @@ from qlab.tui.theme import (
 _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 _VIEWS = (
-    "dashboard", "market", "workforce", "research", "book", "audit", "settings",
+    "dashboard", "market", "workforce", "research", "book", "audit", "atlas",
+    "settings",
 )
 _DASHBOARD_TILE_KEYS = (
     "equity", "allocation", "regime", "market-pulse", "verdict", "run", "alerts",
@@ -213,6 +215,7 @@ COMMAND_TABLE = {
     ("view", "research"): "action_view",
     ("view", "book"): "action_view",
     ("view", "audit"): "action_view",
+    ("view", "atlas"): "action_view",
     ("view", "settings"): "action_view",
     ("view", "agents"): "action_agent_focus",
     ("agents", None): "action_agent_focus",
@@ -718,14 +721,16 @@ class QlabTui(App[None]):
         Binding("4", "view('research')", "Research", show=False),
         Binding("5", "view('book')", "Book", show=False),
         Binding("6", "view('audit')", "Audit", show=False),
-        Binding("7", "view('settings')", "Settings", show=False),
+        Binding("7", "view('atlas')", "Atlas", show=False),
+        Binding("8", "view('settings')", "Settings", show=False),
         Binding("f1", "view('dashboard')", "Dashboard", show=False),
         Binding("f2", "view('market')", "Market", show=False),
         Binding("f3", "view('workforce')", "Workforce", show=False),
         Binding("f4", "view('research')", "Research", show=False),
         Binding("f5", "view('book')", "Book", show=False),
         Binding("f6", "view('audit')", "Audit", show=False),
-        Binding("f7", "view('settings')", "Settings", show=False),
+        Binding("f7", "view('atlas')", "Atlas", show=False),
+        Binding("f8", "view('settings')", "Settings", show=False),
         Binding("a", "agent_focus", "Agents", show=False),
         Binding("j", "next_symbol", "Next symbol", show=False),
         Binding("k", "previous_symbol", "Previous symbol", show=False),
@@ -768,6 +773,7 @@ class QlabTui(App[None]):
         self.bootstrap: dict[str, Any] | None = None
         self._bootstrap_started = False
         self._bootstrap_error = ""
+        self._atlas_started = False
         self._claude_buffer = ""
         self._claude_saw_delta = False
         self._claude_offer_handled = False
@@ -915,6 +921,7 @@ class QlabTui(App[None]):
                     yield Static(f"[{AMBER}]\u258d[/] AUDIT", classes="canvas-title", markup=True)
                     yield Static(id="audit-summary", markup=True)
                     yield DataTable(id="audit-table", cursor_type="row")
+                yield AtlasView(id="atlas", classes="canvas-view")
                 with Vertical(id="settings", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] SETTINGS", classes="canvas-title", markup=True)
                     yield Static(
@@ -1053,6 +1060,30 @@ class QlabTui(App[None]):
         self.bootstrap = bootstrap
         self._bootstrap_error = error
         self._render_settings()
+
+    def _start_atlas_fetch(self) -> None:
+        """Fetch the curated catalog once, when Atlas is first shown."""
+        if self._atlas_started:
+            return
+        self._atlas_started = True
+
+        def run() -> None:
+            try:
+                payload = self.client.get("/api/atlas")
+                self.call_from_thread(self._finish_atlas, payload, "")
+            except Exception as exc:
+                self.call_from_thread(self._finish_atlas, None, repr(exc))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _finish_atlas(self, payload: dict[str, Any] | None, error: str) -> None:
+        view = self.query_one("#atlas", AtlasView)
+        if payload is None:
+            self.query_one("#atlas-detail", Static).update(
+                f"[{DOWN}]atlas unavailable: {escape(error)}[/]")
+            self._atlas_started = False  # allow retry on the next visit
+            return
+        view.set_entries(payload.get("entries") or [])
 
     def _start_live_stream(self) -> None:
         """Subscribe to the owner's SSE bus so state and quotes land instantly.
@@ -2525,11 +2556,16 @@ class QlabTui(App[None]):
         self.query_one("#canvas", ContentSwitcher).current = view
         self._render_nav()
         if view == "workforce":
-            # Chat-first focus claims digits as text; F1-F7 still switch views,
+            # Chat-first focus claims digits as text; F1-F8 still switch views,
             # and Escape blurs the input so digit navigation works again.
             field = self.query_one("#chat-input", Input)
             if not field.disabled:  # a running turn owns the box; don't grab it
                 field.focus()
+        elif view == "atlas":
+            # Master-detail only reads if the index is navigable on arrival; the
+            # ListView claims no digit keys, so view switching keeps working.
+            self.query_one("#atlas-list", ListView).focus()
+            self._start_atlas_fetch()
         elif view == "settings":
             self._start_bootstrap()
 
@@ -2685,7 +2721,7 @@ class QlabTui(App[None]):
     def action_help(self) -> None:
         self._set_selected_work(
             "COMMANDS\n\n"
-            "view dashboard|desk|market|workforce|research|book|audit|settings\n"
+            "view dashboard|desk|market|workforce|research|book|audit|atlas|settings\n"
             "view agents\n"
             "symbol TICKER\n"
             "chat MESSAGE      (read-only desk assistant)\n"
@@ -2699,7 +2735,7 @@ class QlabTui(App[None]):
             "batch\n"
             "ask PROMPT  (isolated, no tools)\n"
             "timeline\n\n"
-            "1–7 or F1–F7 switch views · j/k select instrument · "
+            "1–8 or F1–F8 switch views · j/k select instrument · "
             "A toggles agents · Ctrl-Q quits"
         )
 

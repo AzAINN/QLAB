@@ -160,6 +160,28 @@ def _bootstrap():
     }
 
 
+def _atlas():
+    """Owner-shaped atlas payload, built from the real curated catalog.
+
+    Deriving the fixture from ``ATLAS_ENTRIES`` means the stub cannot drift
+    away from the content the owner actually serves.
+    """
+    from dataclasses import asdict
+
+    from qlab.core.atlas import ATLAS_ENTRIES
+
+    entries = []
+    for entry in ATLAS_ENTRIES:
+        row = asdict(entry)
+        row["stage"] = "operational" if entry.algorithm_key == "hrp" else None
+        row["champion"] = entry.algorithm_key == "hrp"
+        row["ablation"] = (
+            {"sharpe": 0.91, "max_drawdown": -0.124}
+            if entry.arm_id == "B2" else None)
+        entries.append(row)
+    return {"entries": entries, "champion_policy": "hrp"}
+
+
 class StubClient:
     def __init__(self):
         self.posts = []
@@ -169,6 +191,8 @@ class StubClient:
             return _snapshot()
         if path == "/api/bootstrap":
             return _bootstrap()
+        if path == "/api/atlas":
+            return _atlas()
         raise AssertionError(path)
 
     def post(self, path, body=None):
@@ -1490,7 +1514,7 @@ def test_settings_view_fetches_bootstrap_once_and_renders_read_only_bulletins():
         app = QlabTui(client, refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
-            await pilot.press("7")
+            await pilot.press("8")
             for _ in range(20):
                 if app.bootstrap is not None:
                     break
@@ -1513,7 +1537,7 @@ def test_settings_view_fetches_bootstrap_once_and_renders_read_only_bulletins():
             assert "• palette" in theme
 
             await pilot.press("1")
-            await pilot.press("f7")
+            await pilot.press("f8")
             await pilot.pause(0.05)
             assert client.bootstrap_calls == 1
 
@@ -1540,7 +1564,7 @@ def test_settings_bootstrap_error_is_capped_with_an_explicit_ellipsis():
         )
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
-            await pilot.press("7")
+            await pilot.press("8")
             for _ in range(20):
                 if app._bootstrap_error:
                     break
@@ -1560,8 +1584,114 @@ def test_settings_bootstrap_error_is_capped_with_an_explicit_ellipsis():
     asyncio.run(run())
 
 
+def test_atlas_view_leads_with_method_names_and_marks_champion():
+    from textual.widgets import Label
+
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            assert app.active_view == "atlas"
+            await pilot.pause(0.3)
+            list_text = "\n".join(
+                str(item.query_one(Label).content)
+                for item in app.query_one("#atlas-list").children)
+            detail = str(app.query_one("#atlas-detail").content)
+            # First arm renders in the detail pane by default.
+            assert "60/40" in detail
+            # Champion is starred in the list without exposing the arm code.
+            assert "★" in list_text and "HRP" in list_text
+            assert "B2" not in list_text
+            # Codes appear only as the dim footnote, never in titles.
+            assert "ablation id: B0" in detail
+
+    asyncio.run(run())
+
+
+def test_atlas_detail_states_absent_ablation_and_shows_champion_numbers():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            await pilot.pause(0.3)
+            # 60/40 has no ablation row in the fixture: say so, never blank.
+            benchmark_detail = str(app.query_one("#atlas-detail").content)
+            assert "no ablation recorded" in benchmark_detail
+
+            # The index has focus on arrival, so arrows walk the catalog and
+            # the detail pane follows the highlight.
+            assert app.focused is app.query_one("#atlas-list")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            assert "Equal-weight benchmark" in str(
+                app.query_one("#atlas-detail").content)
+
+            # Third arm is HRP, the champion in this fixture.
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            detail = str(app.query_one("#atlas-detail").content)
+            assert "Hierarchical risk parity" in detail
+            assert "★ CHAMPION" in detail
+            assert "operational" in detail
+            assert "sharpe" in detail and "0.910" in detail
+            assert "ablation id: B2" in detail
+
+            # A focused list must not swallow view navigation.
+            await pilot.press("1")
+            assert app.active_view == "dashboard"
+
+    asyncio.run(run())
+
+
+def test_atlas_fetch_failure_is_visible_and_retried_on_the_next_visit():
+    from qlab.tui.app import QlabTui
+
+    class FailingAtlasClient(StubClient):
+        def __init__(self):
+            super().__init__()
+            self.atlas_calls = 0
+            self.fail = True
+
+        def get(self, path, **params):
+            if path == "/api/atlas":
+                self.atlas_calls += 1
+                if self.fail:
+                    raise RuntimeError("owner atlas unavailable")
+            return super().get(path, **params)
+
+    async def run():
+        client = FailingAtlasClient()
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            for _ in range(40):
+                if "unavailable" in str(app.query_one("#atlas-detail").content):
+                    break
+                await pilot.pause(0.02)
+            assert "atlas unavailable" in str(app.query_one("#atlas-detail").content)
+
+            client.fail = False
+            await pilot.press("1")
+            await pilot.press("7")
+            for _ in range(40):
+                if "60/40" in str(app.query_one("#atlas-detail").content):
+                    break
+                await pilot.pause(0.02)
+            assert client.atlas_calls == 2
+            assert "60/40" in str(app.query_one("#atlas-detail").content)
+
+    asyncio.run(run())
+
+
 def test_nav_menu_rows_are_clickable():
-    """Each of the seven spine rows switches to its matching view on click.
+    """Each of the eight spine rows switches to its matching view on click.
 
     The row clicked is the click's y within the widget, so this pins the
     mapping as well as the fact that a Static-based menu is now clickable.
@@ -1574,7 +1704,7 @@ def test_nav_menu_rows_are_clickable():
             await pilot.pause(0.2)
             for row, view in enumerate(
                     ("dashboard", "market", "workforce", "research", "book",
-                     "audit", "settings")):
+                     "audit", "atlas", "settings")):
                 # start elsewhere so each click is a genuine transition
                 app.action_view("audit" if view != "audit" else "dashboard")
                 await pilot.pause(0.02)

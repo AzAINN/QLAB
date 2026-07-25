@@ -590,6 +590,15 @@ def _cell(value: Any, fmt: str = "{:.2f}") -> str:
     return "—" if value is None else fmt.format(value)
 
 
+def _marks_label(performance: dict[str, Any]) -> str:
+    """Mark count, stated as a fraction whenever the owner capped the read."""
+    shown = int(performance.get("marks") or 0)
+    total = int(performance.get("marks_total") or shown)
+    if performance.get("marks_capped") and total > shown:
+        return f"{shown:,} of {total:,} marks"
+    return f"{shown:,} marks"
+
+
 def _record(value: Any) -> dict[str, Any]:
     """Return one owner record, or an empty record for a sparse payload."""
     return value if isinstance(value, dict) else {}
@@ -2214,20 +2223,28 @@ class QlabTui(App[None]):
         The curve is the recorded equity marks, not a backtest: an empty series
         is a real state of the book (nothing marked yet), and metrics that the
         owner could not compute carry its note instead of blank cells.
+
+        Every number states its own basis. The headline is the live broker equity
+        and is labelled ``live``; the percentage is ``window_change``, measured
+        across exactly the marks this chart draws, and dated from the first of
+        them — so it can never be read from a point off the chart's left edge.
+        The cadence the metrics were annualized on, a capped history, and marks
+        excluded as another book's are all disclosed rather than assumed.
         """
         performance = (self.snapshot.get("performance") or {}) if self.snapshot else {}
         rows = performance.get("series") or []
         series = [float(row["equity"]) for row in rows]
         lines: list[str] = []
         if series:
-            since = performance.get("since_start")
-            tone = TEXT if since is None else (UP if float(since) >= 0 else DOWN)
-            header = f"[bold {TEXT_HI}]{money(portfolio.get('equity'))}[/]"
-            if since is not None:
-                sign = "+" if float(since) >= 0 else ""
-                header += f"   [{tone}]{sign}{pct(float(since))} since start[/]"
-            header += (
-                f"   [{LABEL_GOLD}]{int(performance.get('marks') or 0)} marks[/]")
+            change = performance.get("window_change")
+            tone = TEXT if change is None else (UP if float(change) >= 0 else DOWN)
+            header = (f"[bold {TEXT_HI}]{money(portfolio.get('equity'))}[/]"
+                      f" [{DIM}]live[/]")
+            if change is not None:
+                sign = "+" if float(change) >= 0 else ""
+                header += (f"   [{tone}]{sign}{pct(float(change))} since "
+                           f"{escape(str(rows[0].get('ts', '—')))}[/]")
+            header += f"   [{LABEL_GOLD}]{_marks_label(performance)}[/]"
             lines.append(header)
             lines.append("")
             for bar in braille_chart(series, width=56, height=4):
@@ -2236,6 +2253,12 @@ class QlabTui(App[None]):
                 f"{str(rows[0].get('ts', '—'))} → {str(rows[-1].get('ts', '—'))}"
                 if len(rows) > 1 else str(rows[-1].get("ts", "—")))
             lines.append(f"[{DIM}]{escape(span)}  ·  daily equity marks[/]")
+            cadence = performance.get("cadence")
+            if isinstance(cadence, dict) and cadence.get("periods_per_year"):
+                lines.append(
+                    f"[{DIM}]annualized at "
+                    f"{cadence['periods_per_year']:.0f}/yr from the observed "
+                    f"cadence[/]")
             lines.append("")
             metrics = performance.get("metrics")
             if metrics:
@@ -2246,9 +2269,11 @@ class QlabTui(App[None]):
                     f"[{LABEL_GOLD}]maxdd[/] [{TEXT}]{pct(metrics['max_drawdown'])}[/]   "
                     f"[{LABEL_GOLD}]cvar95[/] [{TEXT}]{pct(metrics['cvar_95'])}[/]   "
                     f"[{LABEL_GOLD}]obs[/] [{TEXT}]{int(metrics['n_obs'])}[/]")
-            else:
-                lines.append(
-                    f"[{MUTED}]{escape(str(performance.get('note') or ''))}[/]")
+            # The owner's note carries every exclusion and cap; it is a
+            # disclosure, not a fallback, so it prints alongside real metrics.
+            note = str(performance.get("note") or "")
+            if note:
+                lines.append(f"[{MUTED}]{escape(note)}[/]")
         else:
             lines.append(
                 f"[{MUTED}]No equity history yet — marks are recorded by daily "

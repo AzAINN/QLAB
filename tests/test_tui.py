@@ -141,7 +141,14 @@ def _snapshot():
                         "cvar_95": -0.006, "realized_skew": -0.2,
                         "realized_kurtosis": 0.8, "deflated_sharpe": 0.6,
                         "n_obs": 29},
-            "since_start": 0.0124, "note": None, "marks": 30,
+            "since_start": 0.0124,
+            # Measured across `series` — the window the chart actually draws.
+            "window_change": 0.0294,
+            "cadence": {"periods_per_year": 365.25, "observed_span_days": 29.0,
+                        "mean_step_days": 1.0, "basis": "observed mark cadence"},
+            "note": None, "marks": 30, "marks_total": 30, "mark_limit": 5000,
+            "marks_capped": False, "excluded_marks": 0,
+            "book": "simulated_paper",
         },
         "equilibrium_returns": {
             "run_id": "eq-run-1",
@@ -1202,11 +1209,47 @@ def test_book_renders_equity_curve_metrics_and_position_pnl():
             await pilot.press("5")
             equity_panel = str(app.query_one("#book-equity").content)
             assert "sharpe" in equity_panel and "0.50" in equity_panel
-            assert "$10,100.00" in equity_panel
-            assert "+1.2% since start" in equity_panel
+            # The headline is the live broker equity and says so; the percentage
+            # is measured over the charted window, from its first mark's date.
+            assert "$10,100.00" in equity_panel and "live" in equity_panel
+            assert "+2.9% since 2026-06-01" in equity_panel
+            assert "since start" not in equity_panel
+            # The annualization convention is disclosed, never assumed.
+            assert "365/yr" in equity_panel and "observed" in equity_panel
             positions = str(app.query_one("#book-positions").content)
             assert "P&L" in positions
             assert "$40.00" in positions and "$-15.00" in positions
+
+    asyncio.run(run())
+
+
+def test_book_equity_discloses_a_capped_history_and_a_foreign_book():
+    """A capped window must not read as the whole book, nor mix two books."""
+    from qlab.tui.app import QlabTui
+
+    class CappedClient(StubClient):
+        def get(self, path, **params):
+            snapshot = super().get(path, **params)
+            if path == "/api/tui":
+                snapshot["performance"] = {
+                    **snapshot["performance"],
+                    "marks": 5000, "marks_total": 7321, "marks_capped": True,
+                    "excluded_marks": 42,
+                    "note": "42 mark(s) from another book excluded; this series "
+                            "is simulated_paper only; history capped at the "
+                            "newest 5000 marks of 7321",
+                }
+            return snapshot
+
+    async def run():
+        app = QlabTui(CappedClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("5")
+            panel = str(app.query_one("#book-equity").content)
+            assert "5,000 of 7,321 marks" in panel
+            assert "capped" in panel
+            assert "another book excluded" in panel
 
     asyncio.run(run())
 

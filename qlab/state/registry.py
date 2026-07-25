@@ -162,6 +162,12 @@ CREATE TABLE IF NOT EXISTS bob_tasks (
     trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
     conclusion JSON, error VARCHAR, attempt_count INTEGER,
     created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, updated_at VARCHAR);
+CREATE TABLE IF NOT EXISTS authority_grants (
+    grant_id VARCHAR PRIMARY KEY, mode VARCHAR, allowed_universe JSON,
+    max_notional DOUBLE, max_turnover DOUBLE, max_orders INTEGER,
+    allowed_policy VARCHAR, valid_from VARCHAR, expires_at VARCHAR,
+    revoked_at VARCHAR, revoked_reason VARCHAR, granted_by VARCHAR,
+    created_at VARCHAR);
 CREATE TABLE IF NOT EXISTS debates (
     debate_id VARCHAR PRIMARY KEY, workflow_id VARCHAR,
     original_decision_id VARCHAR, status VARCHAR, max_rounds INTEGER,
@@ -1404,6 +1410,41 @@ class Registry:
                 [day_iso[:10]])
         return int(rows[0]["n"]) if rows else 0
 
+    # -- standing authority grants (inert unless a human creates one) -------
+    def create_authority_grant(self, grant: dict) -> str:
+        gid = str(grant["grant_id"])
+        self.con.execute(
+            "INSERT INTO authority_grants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [gid, grant.get("mode"), _j(grant.get("allowed_universe") or []),
+             grant.get("max_notional"), grant.get("max_turnover"),
+             grant.get("max_orders"), grant.get("allowed_policy"),
+             grant.get("valid_from"), grant.get("expires_at"), None, None,
+             grant.get("granted_by"), _now()])
+        self.record_event("authority.granted",
+                          {"grant_id": gid, "mode": grant.get("mode"),
+                           "expires_at": grant.get("expires_at")})
+        return gid
+
+    def get_authority_grant(self, grant_id: str) -> dict | None:
+        rows = self._rows(
+            "SELECT * FROM authority_grants WHERE grant_id = ?", [grant_id])
+        return rows[0] if rows else None
+
+    def list_authority_grants(self, limit: int = 50) -> list[dict]:
+        return self._rows(
+            "SELECT * FROM authority_grants ORDER BY created_at DESC LIMIT ?",
+            [limit])
+
+    def revoke_authority_grant(self, grant_id: str, reason: str,
+                               now_iso: str | None = None) -> None:
+        """Revoke immediately. Revocation is always available and never expires."""
+        self.con.execute(
+            "UPDATE authority_grants SET revoked_at = ?, revoked_reason = ? "
+            "WHERE grant_id = ? AND revoked_at IS NULL",
+            [now_iso or _now(), reason, grant_id])
+        self.record_event("authority.revoked",
+                          {"grant_id": grant_id, "reason": reason})
+
     # -- bounded debate (registry-enforced, not prompt policy) --------------
     def create_debate(self, debate: dict) -> str:
         did = str(debate["debate_id"])
@@ -1613,7 +1654,8 @@ class Registry:
                          "legs", "request", "result", "artifacts",
                          "permit", "trigger_payload", "conclusion",
                          "expected_cost", "lesson", "material_claims",
-                         "adjudication", "evidence_refs") and isinstance(v, str):
+                         "adjudication", "evidence_refs",
+                         "allowed_universe") and isinstance(v, str):
                     try:
                         d[k] = json.loads(v)
                     except Exception:

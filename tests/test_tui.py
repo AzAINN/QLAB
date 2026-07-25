@@ -2095,6 +2095,78 @@ def test_bulletin_cleans_markdown_ids_empty_lines_and_length():
     assert bulletin(["abcdefgh"], max_len=4) == ["abcd"]
 
 
+def test_report_lines_normalizes_agent_markdown():
+    from qlab.tui.formatting import report_lines
+
+    out = report_lines([
+        "## How news is currently used",
+        "",
+        "",
+        "News is a quarantined research input, not a trading signal.",
+        "- first point",
+        "* second point",
+        "1. numbered step",
+        "### The extractor cannot trade",
+        "| source | quality |",
+        "    conditioned = reweight(scenarios)",
+    ])
+    kinds = [kind for kind, _ in out]
+    texts = {text for _, text in out}
+    assert ("h1", "How news is currently used") in out
+    assert ("h2", "The extractor cannot trade") in out
+    assert kinds.count("bullet") == 3
+    assert ("bullet", "first point") in out
+    assert ("bullet", "1. numbered step") in out       # numbering preserved
+    assert ("table", "| source | quality |") in out    # tables pass untruncated
+    assert ("code", "    conditioned = reweight(scenarios)") in out
+    assert kinds.count("blank") == 1                   # blank runs collapse
+    assert not any("##" in text for text in texts)     # markers consumed
+
+
+def test_report_lines_wraps_long_paragraphs_without_truncating():
+    from qlab.tui.formatting import report_lines
+
+    long = "word " * 100
+    out = report_lines([long])
+    assert all(kind == "text" for kind, _ in out)
+    assert len(out) > 1                                 # wrapped, not cut
+    assert sum(len(text.split()) for _, text in out) == 100
+
+
+def test_report_lines_keeps_fenced_code_and_deep_headers_verbatim():
+    """A fenced block is code even when it is not indented, and a deeper header
+    is still a header — otherwise both reach the console as literal markdown."""
+    from qlab.tui.formatting import report_lines
+
+    out = report_lines([
+        "#### Deeper section",
+        "```python",
+        "weights = solve(objective)   # alignment must survive",
+        "```",
+        "**Held** the `checked plan` â€” watch vol.",
+    ])
+    assert ("h2", "Deeper section") in out
+    assert ("code", "weights = solve(objective)   # alignment must survive") in out
+    assert not any("```" in text for _kind, text in out)
+    # inline emphasis and back-ticks render literally in a RichLog; mojibake too
+    assert ("text", "Held the checked plan — watch vol.") in out
+
+
+def test_report_lines_reads_indented_list_items_as_bullets_not_code():
+    """A nested list item is indented markdown; dimming it as code would read as
+    a broken report."""
+    from qlab.tui.formatting import report_lines
+
+    out = report_lines([
+        "- outer point",
+        "    - nested point",
+        "\t2. nested step",
+    ])
+    assert [kind for kind, _ in out] == ["bullet", "bullet", "bullet"]
+    assert ("bullet", "nested point") in out
+    assert ("bullet", "2. nested step") in out
+
+
 def test_tui_app_uses_theme_tokens_instead_of_literal_hex_colors():
     import re
     from pathlib import Path
@@ -2421,6 +2493,46 @@ def test_results_fallback_cleans_markdown_mojibake_and_ids():
             assert "decision_id" not in rendered and "dec_a1b2" not in rendered
             assert "UNCERTAINTY / WATCH ITEMS (NON-BLOCKING)" in rendered
             assert "Recommendation: hold the HRP targets." in rendered
+
+    asyncio.run(run())
+
+
+def test_console_renders_markdown_report_styled():
+    """A streamed agent report reaches the console as sections, aligned bullets
+    and verbatim tables/code — never literal markdown or truncated prose."""
+    from qlab.tui.app import QlabTui
+    from textual.widgets import RichLog
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            app._console_stream_text(
+                "## How news is currently used\n"
+                "News is a quarantined research input, not a trading signal.\n"
+                "- referee passed\n"
+                "1. bind the targets\n"
+                "| source | quality |\n"
+                "```python\n"
+                "conditioned = reweight(scenarios)\n"
+                "```\n"
+            )
+            log = app.query_one("#workforce-console", RichLog)
+            rendered = "\n".join(strip.text for strip in log.lines)
+            flat = " ".join(rendered.split())
+
+            assert "##" not in rendered and "```" not in rendered
+            assert "How news is currently used" in flat
+            # plain prose still reads as prose: whole, unbulleted, untruncated
+            assert ("News is a quarantined research input, not a trading signal."
+                    in flat)
+            assert "• referee passed" in flat
+            assert "1. bind the targets" in flat
+            assert "• 1. bind the targets" not in flat   # numbering is the marker
+            assert "| source | quality |" in rendered    # table alignment kept
+            assert "conditioned = reweight(scenarios)" in flat
 
     asyncio.run(run())
 

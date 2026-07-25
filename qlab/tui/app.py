@@ -39,7 +39,7 @@ from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
     braille_chart, bulletin, connection_chip, key_number_lines, money, pct,
-    phase_elapsed, sparkline, verdict_chip, weight_bar,
+    phase_elapsed, report_lines, sparkline, verdict_chip, weight_bar,
 )
 from qlab.tui.theme import (
     ALLOCATION_TRACK,
@@ -254,6 +254,19 @@ def _bulletin_markup(
             lines, max_len=max_len, strip_ids=strip_ids
         )
     ]
+
+
+# Theme skin for the kinds report_lines() emits. The renderer stays tone-free;
+# only this table knows the palette.
+_REPORT_TONES = {
+    "h1": f"[bold {AMBER}]▍{{}}[/]",
+    "h2": f"[bold {TEXT_HI}]{{}}[/]",
+    "bullet": f"[{MUTED}]  • [/][{TEXT}]{{}}[/]",
+    "code": f"[{DIM}]{{}}[/]",
+    "table": f"[{DIM}]{{}}[/]",
+    "text": f"[{TEXT}]{{}}[/]",
+    "blank": "{}",
+}
 
 
 def _key_number_markup(
@@ -1304,16 +1317,27 @@ class QlabTui(App[None]):
         for line in bulletin([nxt], max_len=260):
             self._console_write(f"[{MUTED}]  • {escape(line)}[/]")
 
+    def _console_report(self, lines: list[str]) -> None:
+        """Write agent-report markdown as styled console rows.
+
+        A report is a document, not a list of facts: headers become section
+        titles, bullets align, tables and code pass through verbatim. Numbered
+        items already carry their own marker, so they skip the bullet glyph.
+        """
+        for kind, text in report_lines(lines):
+            if kind == "bullet" and text[:1].isdigit():
+                self._console_write(f"[{MUTED}]  [/][{TEXT}]{escape(text)}[/]")
+            else:
+                self._console_write(_REPORT_TONES[kind].format(escape(text)))
+
     def _console_stream_text(self, text: str) -> None:
         """Append streamed narrative, emitting only completed lines."""
         self._console_partial += text
         *complete, self._console_partial = self._console_partial.split("\n")
-        for line in _bulletin_markup(complete):
-            self._console_write(line)
+        self._console_report(complete)
 
     def _console_flush(self) -> None:
-        for line in _bulletin_markup([self._console_partial]):
-            self._console_write(line)
+        self._console_report([self._console_partial])
         self._console_partial = ""
 
     def _tick_pulse(self) -> None:

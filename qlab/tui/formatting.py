@@ -116,6 +116,70 @@ def bulletin(
     return rendered
 
 
+_REPORT_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+_REPORT_BULLET = re.compile(r"^[-*•]\s+(.*)$")
+_REPORT_NUMBERED = re.compile(r"^\d+[.)]\s")
+# A box-drawing or pipe lead means the sender aligned the line by hand; wrapping
+# or truncating it destroys the alignment that makes the table readable.
+_REPORT_TABLE_LEAD = "|┌┬┐├┼┤└┴┘─━│┃┏┳┓┡╇┩┗┻┛╭╮╰╯═╔╗╚╝"
+
+
+def _plain(text: str) -> str:
+    """Drop the inline markers a RichLog would otherwise print literally."""
+    return text.replace("**", "").replace("`", "").strip()
+
+
+def report_lines(lines: list[str], max_len: int = 260) -> list[tuple[str, str]]:
+    """Normalize agent-report markdown into (kind, text) console lines.
+
+    Tone-free by design — the app maps kinds to theme markup. Tables and
+    code stay verbatim (truncating them mangles alignment); paragraphs wrap
+    instead of truncating so long reports stay readable.
+    """
+    import textwrap
+
+    out: list[tuple[str, str]] = []
+    fenced = False
+    for raw in lines:
+        line = demojibake(str(raw)).rstrip()
+        stripped = line.strip()
+        if not stripped:
+            if out and out[-1][0] != "blank":
+                out.append(("blank", ""))
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fenced = not fenced
+            continue                       # fence markers carry no content
+        if fenced:
+            out.append(("code", line))     # fenced code needs no indent to be code
+            continue
+        heading = _REPORT_HEADING.match(stripped)
+        if heading:
+            kind = "h1" if len(heading.group(1)) <= 2 else "h2"
+            out.append((kind, _plain(heading.group(2))))
+            continue
+        if stripped[0] in _REPORT_TABLE_LEAD:
+            out.append(("table", line))
+            continue
+        # List items are tested before the indent rule: a nested item is indented
+        # markdown, not code, and dimming it as code reads as a broken report.
+        bullet = _REPORT_BULLET.match(stripped)
+        if bullet:
+            for piece in textwrap.wrap(_plain(bullet.group(1)), max_len) or [""]:
+                out.append(("bullet", piece))
+            continue
+        if _REPORT_NUMBERED.match(stripped):
+            for piece in textwrap.wrap(_plain(stripped), max_len) or [""]:
+                out.append(("bullet", piece))
+            continue
+        if line.startswith(("    ", "\t")):
+            out.append(("code", line))
+            continue
+        for piece in textwrap.wrap(_plain(stripped), max_len):
+            out.append(("text", piece))
+    return out
+
+
 def sparkline(values: list[float]) -> str:
     """Render a stable unicode sparkline; flat and empty series are valid."""
     ticks = "▁▂▃▄▅▆▇█"

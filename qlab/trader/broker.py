@@ -137,6 +137,7 @@ class AlpacaPaperBroker(Broker):
         # paper=True is NOT configurable here — this class only ever paper-trades
         self.trading = TradingClient(key, secret, paper=True)
         self.data = StockHistoricalDataClient(key, secret)
+        self._asset_cache: dict[str, dict] = {}
 
     def prices(self, tickers: list[str]) -> dict[str, float]:
         from alpaca.data.requests import StockLatestTradeRequest
@@ -144,6 +145,72 @@ class AlpacaPaperBroker(Broker):
         req = StockLatestTradeRequest(symbol_or_symbols=tickers)
         trades = self.data.get_stock_latest_trade(req)
         return {t: float(trades[t].price) for t in tickers}
+
+    def quote(self, ticker: str) -> tuple[float, float]:
+        """Current (bid, ask) for pricing a marketable limit."""
+        from alpaca.data.requests import StockLatestQuoteRequest
+
+        req = StockLatestQuoteRequest(symbol_or_symbols=[ticker])
+        quotes = self.data.get_stock_latest_quote(req)
+        quote = quotes[ticker]
+        return float(quote.bid_price), float(quote.ask_price)
+
+    def assert_tradable(self, ticker: str, *, fractional: bool = True) -> dict:
+        """Refuse a symbol the venue will not trade the way we intend to.
+
+        Checked BEFORE submission so an untradable or non-fractionable symbol
+        fails loudly against the plan rather than as a broker reject mid-plan.
+        Results are cached per broker instance — asset status is static within
+        a session.
+        """
+        cached = self._asset_cache.get(ticker)
+        if cached is None:
+            asset = self.trading.get_asset(ticker)
+            cached = {
+                "tradable": bool(getattr(asset, "tradable", False)),
+                "fractionable": bool(getattr(asset, "fractionable", False)),
+                "status": str(getattr(asset, "status", "")),
+                "shortable": bool(getattr(asset, "shortable", False)),
+            }
+            self._asset_cache[ticker] = cached
+        if not cached["tradable"]:
+            raise RuntimeError(
+                f"{ticker} is not tradable at the venue "
+                f"(status {cached['status']!r}); refusing to submit")
+        if fractional and not cached["fractionable"]:
+            raise RuntimeError(
+                f"{ticker} is not fractionable; notional orders would be "
+                "rounded to whole shares and the target weights would be "
+                "fiction. Refusing rather than silently changing the plan.")
+        return cached
+
+    def open_orders(self) -> dict[str, dict]:
+        """Live open orders keyed by client_order_id, for REST recovery.
+
+        After a trade-update stream gap the owner re-reads broker truth here
+        and replays each order through the lifecycle supervisor, rather than
+        assuming what happened while it was disconnected.
+        """
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        request = GetOrdersRequest(status=QueryOrderStatus.ALL)
+        out: dict[str, dict] = {}
+        for order in self.trading.get_orders(request):
+            coid = str(getattr(order, "client_order_id", "") or "")
+            if not coid:
+                continue
+            out[coid] = {
+                "client_order_id": coid,
+                "id": str(getattr(order, "id", "")),
+                "symbol": str(getattr(order, "symbol", "")),
+                "state": str(getattr(order, "status", "")),
+                "filled_qty": float(getattr(order, "filled_qty", 0.0) or 0.0),
+                "filled_avg_price": (
+                    float(order.filled_avg_price)
+                    if getattr(order, "filled_avg_price", None) else None),
+            }
+        return out
 
     def portfolio_state(self, tickers: list[str]) -> dict:
         acct = self.trading.get_account()
@@ -168,16 +235,57 @@ class AlpacaPaperBroker(Broker):
 
     def submit_notional(self, client_order_id: str, ticker: str, side: str,
                         notional: float) -> dict:
-        from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import MarketOrderRequest
+        """Submit one leg and return its ACKNOWLEDGED state — never a fill.
 
-        req = MarketOrderRequest(
-            symbol=ticker, notional=round(notional, 2),
-            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-            time_in_force=TimeInForce.DAY, client_order_id=client_order_id)
-        order = self.trading.submit_order(req)
-        return {"client_order_id": client_order_id, "ticker": ticker, "side": side,
-                "notional": notional, "state": str(order.status), "id": str(order.id)}
+        Alpaca acknowledges first and fills later, so the returned ``state`` is
+        whatever the venue said (``new``/``accepted``/…). The caller must not
+        read that as a fill: the trade-update supervisor advances the leg to
+        ``filled`` only when the venue reports a fill.
+
+        Pricing: a notional market order gives no control over the price paid,
+        so when a live quote is available the order is priced as a marketable
+        limit that crosses the spread by a bounded band. If the quote is
+        unusable (crossed, empty) the order is refused rather than sent
+        unpriced — an unpriced order in a thin book is how a paper desk learns
+        an expensive lesson.
+        """
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+
+        from qlab.trader.lifecycle import marketable_limit_price
+
+        self.assert_tradable(ticker, fractional=True)
+        order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
+        limit_price = None
+        try:
+            bid, ask = self.quote(ticker)
+            limit_price = marketable_limit_price(side, bid, ask)
+        except ValueError:
+            # A crossed or empty quote is a refusal, not a reason to fall back
+            # to an unpriced market order.
+            raise
+        except Exception:
+            # No quote service available (e.g. outside data entitlement): fall
+            # back to a notional market order, which is the documented paper
+            # behavior, rather than blocking the desk entirely.
+            limit_price = None
+
+        if limit_price is not None:
+            qty = round(notional / limit_price, 6)
+            request = LimitOrderRequest(
+                symbol=ticker, qty=qty, side=order_side,
+                time_in_force=TimeInForce.DAY, limit_price=limit_price,
+                client_order_id=client_order_id)
+        else:
+            request = MarketOrderRequest(
+                symbol=ticker, notional=round(notional, 2), side=order_side,
+                time_in_force=TimeInForce.DAY, client_order_id=client_order_id)
+
+        order = self.trading.submit_order(request)
+        return {"client_order_id": client_order_id, "ticker": ticker,
+                "side": side, "notional": notional, "limit_price": limit_price,
+                "state": str(order.status), "id": str(order.id),
+                "acknowledged": True}
 
 
 def get_broker(registry: Registry, *, offline: bool = False,

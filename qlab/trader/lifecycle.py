@@ -141,6 +141,57 @@ class TradeUpdateSupervisor:
         return transition
 
 
+def recover_from_broker(
+    supervisor: TradeUpdateSupervisor,
+    open_orders: dict,
+    *,
+    client_order_ids: list[str] | None = None,
+) -> list[OrderTransition]:
+    """Reconcile local order state against broker truth after a stream gap.
+
+    While disconnected, a leg may have filled, been rejected, or expired
+    without us hearing about it. This replays the venue's current state for
+    each order through the same idempotent state machine, so recovery cannot
+    double-book and cannot regress a terminal state. Orders the venue does not
+    know about are left alone — absence is not evidence of a fill.
+    """
+    wanted = set(client_order_ids or open_orders)
+    transitions: list[OrderTransition] = []
+    for coid in sorted(wanted):
+        broker_order = open_orders.get(coid)
+        if broker_order is None:
+            continue
+        event = _BROKER_STATE_TO_EVENT.get(
+            str(broker_order.get("state", "")).lower().split(".")[-1])
+        if event is None:
+            continue
+        transition = supervisor.on_update(OrderUpdate(
+            client_order_id=coid,
+            event=event,
+            filled_qty=float(broker_order.get("filled_qty") or 0.0),
+            filled_avg_price=broker_order.get("filled_avg_price"),
+        ))
+        if transition is not None:
+            transitions.append(transition)
+    return transitions
+
+
+# Alpaca order STATUS values (as opposed to trade-update EVENT names) mapped to
+# the event vocabulary the state machine speaks.
+_BROKER_STATE_TO_EVENT = {
+    "new": "new",
+    "accepted": "accepted",
+    "pending_new": "pending_new",
+    "partially_filled": "partial_fill",
+    "filled": "fill",
+    "canceled": "canceled",
+    "cancelled": "canceled",
+    "rejected": "rejected",
+    "expired": "expired",
+    "done_for_day": "done_for_day",
+}
+
+
 def run_alpaca_trade_updates(  # pragma: no cover - requires a live Alpaca socket
     supervisor: TradeUpdateSupervisor,
     *,

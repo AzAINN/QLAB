@@ -26,6 +26,7 @@ GET  /api/bob/tasks            Bob's deduplicated autonomous task history
 GET  /api/bob/templates        the registered workflow templates Bob may start
 GET  /api/bob/startable        queued tasks Bob may start now, with refusals
 GET  /api/bob/shadow           shadow-rollout scorecard (evidence, not a grant)
+POST /api/bob/tasks/<id>/start start one queued task's registered template
 POST /api/bob/observe          run one deterministic Bob observe tick
 POST /api/bob/mode             set Bob mode (observe|research|propose|paused)
 POST /api/bob/pause            pause Bob's autonomous work
@@ -889,6 +890,42 @@ class UISession:
         facts = self.bob_facts(offline)
         return self.bob.observe(facts, trading_date=date.today().isoformat())
 
+    def bob_workflow_runner(self, task: dict, template_id: str) -> dict:
+        """Start the durable workforce run a Bob task selected.
+
+        This is the seam BobSupervisor.start_task calls once authority has
+        already been checked. It only *starts* a governed workflow — the same
+        one a human could start — and returns the handle. It grants nothing:
+        the workflow's own phase gates, referee binding, and approval
+        requirement are unchanged by having been started autonomously.
+        """
+        from qlab.operator.templates import get_template
+
+        template = get_template(template_id)
+        if not template.needs_coordinator:
+            # Deterministic templates (desk_brief) need no workforce at all.
+            return {"template_id": template_id, "workflow_id": None,
+                    "action_taken": False,
+                    "brief": self.bob.desk_brief(self.bob_facts(True))}
+        started = self.start_workflow({
+            "kind": "portfolio_review",
+            "goal": f"[{template_id}] {template.purpose} "
+                    f"(trigger: {task.get('trigger_kind')})",
+            "started_by": "bob-the-quant",
+        })
+        workflow_id = (started or {}).get("workflow_id")
+        if workflow_id:
+            self.registry.update_bob_task(
+                str(task.get("task_id")), workflow_id=str(workflow_id))
+        return {"template_id": template_id, "workflow_id": workflow_id,
+                "action_taken": True}
+
+    def bob_start_task(self, task_id: str, offline: bool) -> dict:
+        """Start one queued Bob task through the governed workflow runner."""
+        facts = self.bob_facts(offline)
+        return self.bob.start_task(task_id, facts,
+                                   runner=self.bob_workflow_runner)
+
     def bob_message(self, body: dict) -> dict:
         """Accept a human question or explicit workflow request.
 
@@ -1399,6 +1436,16 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "POST" and path == "/api/bob/resume":
         return 200, session.bob.resume(str(body.get("mode") or "observe"))
+
+    if (method == "POST" and path.startswith("/api/bob/tasks/")
+            and path.endswith("/start")):
+        task_id = path.removeprefix("/api/bob/tasks/").removesuffix("/start")
+        try:
+            return 200, session.bob_start_task(task_id, off)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
+        except PermissionError as exc:
+            return 400, {"error": str(exc)}
 
     if method == "POST" and path == "/api/bob/message":
         try:

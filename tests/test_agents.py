@@ -31,11 +31,11 @@ def _generated_claude_tool_ids(md_path: Path) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
-def test_all_eight_roles_present():
+def test_all_roles_present():
     agents = _by_name()
     assert set(agents) == {
         "news-extractor", "data-qa", "signal-qa", "moments-analyst", "challenger",
-        "optimization-runner", "referee", "reporter",
+        "optimization-runner", "referee", "reporter", "bob-the-quant",
     }
 
 
@@ -137,14 +137,42 @@ def test_least_privilege_separation():
         assert not any(base.startswith(("solve.", "workflow."))
                        for base in scopes["lab"])
 
-    # reporter is the ONLY role whose tools intersect the execution gateway.
+    # Only the reporter and Bob touch the execution gateway at all, and only
+    # the reporter may propose. Bob's trader tools are strictly read-only: the
+    # desk manager observes the book and can never act on it.
     with_trader = {name for name, ag in a.items()
                    if role_scopes(ag.tools)["trader"]}
-    assert with_trader == {"reporter"}
+    assert with_trader == {"reporter", "bob-the-quant"}
     reporter_trader = role_scopes(a["reporter"].tools)["trader"]
     assert reporter_trader and reporter_trader <= TRADER_TOOLS
     assert "propose_rebalance" in reporter_trader
     assert "execute_plan" not in reporter_trader
+
+    bob_trader = role_scopes(a["bob-the-quant"].tools)["trader"]
+    assert bob_trader == {"get_portfolio_state", "risk_report"}
+    for forbidden in ("propose_rebalance", "execute_plan", "reconcile",
+                      "halt", "resume"):
+        assert forbidden not in bob_trader
+
+
+def test_bob_source_states_its_authority_boundaries():
+    """Bob's own definition must say what it cannot do, in its own words.
+
+    The code already refuses execution structurally; the prompt must not imply
+    otherwise, or a reader (or the model) will describe authority it lacks.
+    """
+    bob = _by_name()["bob-the-quant"].body
+    assert "You do not trade" in bob
+    assert "no execution tool and no proposal tool" in bob
+    assert "cannot create, approve, or consume one" in bob
+    assert "You do not compute" in bob
+    assert "You do not forecast returns" in bob
+    assert "You do not overrule the referee" in bob
+    # It may only name registered templates.
+    assert "registered" in bob and "desk_rebalance_review" in bob
+    # Degraded inputs must be reported, not smoothed over.
+    assert "Report degraded state honestly" in bob
+    assert "uncertain" in bob
 
 
 def test_no_role_has_a_raw_order_tool():
@@ -180,8 +208,8 @@ def test_sync_writes_both_adapters(tmp_path: Path):
     claude_out = tmp_path / "claude"
     bob_out = tmp_path / "bob"
     written = sync(claude_out=claude_out, bob_out=bob_out)
-    assert len(written["claude"]) == 8
-    assert len(written["bob"]) == 8
+    assert len(written["claude"]) == 9
+    assert len(written["bob"]) == 9
     assert (claude_out / "news-extractor.md").exists()
     assert (bob_out / "news-extractor.yaml").exists()
     assert (claude_out / "data-qa.md").exists()

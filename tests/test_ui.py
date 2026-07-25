@@ -952,3 +952,38 @@ def test_quote_event_cli_format_shows_three_tickers_and_total():
     assert all(ticker in line for ticker in ("ACWI", "BNDW", "GSG"))
     assert "IGF" not in line
     assert "count=4" in line
+
+
+def test_bob_task_start_respects_mode_authority(session):
+    """Starting a Bob task through the owner runs the governed workflow — and
+    only when the mode allows it. Observe mode must refuse."""
+    facts = session.bob_facts(True)
+    facts["regime"]["flip"] = True
+    out = session.bob.observe(facts, trading_date="2020-01-02")
+    task_id = out["created_tasks"][0]["task_id"]
+
+    # Observe mode: refused before any workflow is created.
+    status, refused = handle_api(
+        session, "POST", f"/api/bob/tasks/{task_id}/start", {},
+        {"offline": True})
+    assert status == 200
+    assert refused["started"] is False and refused["blocked_by"] == "authority"
+    assert session.registry.list_workflows(10) == []
+
+    # Research mode: the template runs and a durable workflow is registered.
+    session.bob.set_mode("research")
+    session.registry.update_bob_task(task_id, status="queued")
+    status, started = handle_api(
+        session, "POST", f"/api/bob/tasks/{task_id}/start", {},
+        {"offline": True})
+    assert status == 200 and started["completed"] is True
+    assert started["conclusion"]["workflow_id"]
+    stored = session.registry.get_bob_task(task_id)
+    assert stored["status"] == "completed"
+    assert stored["workflow_id"] == started["conclusion"]["workflow_id"]
+
+
+def test_unknown_bob_task_start_is_404(session):
+    status, out = handle_api(
+        session, "POST", "/api/bob/tasks/nope/start", {}, {"offline": True})
+    assert status == 404

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import textwrap
 
 
 # A mis-decoded UTF-8 stream (locale cp1252 on Windows) turns common typographic
@@ -129,17 +130,43 @@ def _plain(text: str) -> str:
     return text.replace("**", "").replace("`", "").strip()
 
 
-def report_lines(lines: list[str], max_len: int = 260) -> list[tuple[str, str]]:
+def _is_fence(stripped: str) -> bool:
+    return stripped.startswith("```") or stripped.startswith("~~~")
+
+
+def is_numbered_item(text: str) -> bool:
+    """True when a list item already carries its own ordinal marker.
+
+    Distinguishes "1. bind the targets" from a bullet that merely opens with a
+    count ("3 of 7 arms admitted"), which still needs its glyph.
+    """
+    return _REPORT_NUMBERED.match(text) is not None
+
+
+def fence_state_after(lines: list[str], fenced: bool = False) -> bool:
+    """Fence state ``lines`` leave behind, so a caller can carry it forward.
+
+    The console streams one token at a time: a ``` opener and the code it
+    introduces usually arrive in different calls, so fence state cannot live
+    inside a single ``report_lines`` call. This is the caller's memory of it.
+    """
+    for raw in lines:
+        if _is_fence(str(raw).strip()):
+            fenced = not fenced
+    return fenced
+
+
+def report_lines(lines: list[str], max_len: int = 260, *,
+                 fenced: bool = False) -> list[tuple[str, str]]:
     """Normalize agent-report markdown into (kind, text) console lines.
 
     Tone-free by design — the app maps kinds to theme markup. Tables and
     code stay verbatim (truncating them mangles alignment); paragraphs wrap
-    instead of truncating so long reports stay readable.
+    instead of truncating so long reports stay readable. ``fenced`` says whether
+    the caller is already inside a ``` block; pair it with ``fence_state_after``
+    to render a report that arrives in pieces.
     """
-    import textwrap
-
     out: list[tuple[str, str]] = []
-    fenced = False
     for raw in lines:
         line = demojibake(str(raw)).rstrip()
         stripped = line.strip()
@@ -147,7 +174,7 @@ def report_lines(lines: list[str], max_len: int = 260) -> list[tuple[str, str]]:
             if out and out[-1][0] != "blank":
                 out.append(("blank", ""))
             continue
-        if stripped.startswith("```") or stripped.startswith("~~~"):
+        if _is_fence(stripped):
             fenced = not fenced
             continue                       # fence markers carry no content
         if fenced:

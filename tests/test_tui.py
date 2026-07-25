@@ -2240,6 +2240,37 @@ def test_report_lines_reads_indented_list_items_as_bullets_not_code():
     assert ("bullet", "2. nested step") in out
 
 
+def test_is_numbered_item_separates_ordinals_from_counts():
+    """Only a real ordinal marker replaces the bullet glyph — a bullet that
+    merely opens with a count still needs its marker."""
+    from qlab.tui.formatting import is_numbered_item
+
+    assert is_numbered_item("1. bind the targets")
+    assert is_numbered_item("2) challenge the window")
+    assert not is_numbered_item("3 of 7 arms admitted")
+    assert not is_numbered_item("2026 was the calm year")
+    assert not is_numbered_item("referee passed")
+    assert not is_numbered_item("")
+
+
+def test_fence_state_after_carries_across_streamed_chunks():
+    """The console renders one line per call, so fence state cannot live inside
+    report_lines; the caller threads it and report_lines accepts it."""
+    from qlab.tui.formatting import fence_state_after, report_lines
+
+    assert fence_state_after(["```python"]) is True
+    assert fence_state_after(["```python", "code", "```"]) is False
+    assert fence_state_after(["plain prose"], True) is True   # still open
+    assert fence_state_after(["```"], True) is False          # closed
+
+    # one unindented code line, arriving alone mid-block, is still code
+    assert report_lines(["weights = solve(`obj`)"], fenced=True) == [
+        ("code", "weights = solve(`obj`)")]
+    # and the closing fence is read as a close, not a fresh open
+    assert report_lines(["```", "back to prose"], fenced=True) == [
+        ("text", "back to prose")]
+
+
 def test_tui_app_uses_theme_tokens_instead_of_literal_hex_colors():
     import re
     from pathlib import Path
@@ -2606,6 +2637,97 @@ def test_console_renders_markdown_report_styled():
             assert "• 1. bind the targets" not in flat   # numbering is the marker
             assert "| source | quality |" in rendered    # table alignment kept
             assert "conditioned = reweight(scenarios)" in flat
+
+    asyncio.run(run())
+
+
+def test_console_keeps_fenced_code_verbatim_across_streamed_chunks():
+    """The real caller streams one token at a time, so a fenced block arrives
+    across many calls. Fence state must survive between them: unindented code
+    stays verbatim, and a chunk that closes the fence must not reopen it."""
+    from qlab.tui.app import QlabTui
+    from qlab.tui.theme import DIM, TEXT
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            written: list[str] = []
+            app._console_write = written.append
+            for chunk in (
+                "Here is the guard:\n",
+                "```python\n",
+                "weights = solve(`obj`)  # **kept**\n",
+                "    if weights.sum() != 1:\n",
+                # a close plus the next prose line inside one delta
+                "```\nThat guard is deterministic.\n",
+            ):
+                app._console_stream_text(chunk)
+
+            rendered = "\n".join(written)
+            assert "```" not in rendered                    # fences consumed
+            # code is verbatim: back-ticks, ** and indentation all survive
+            assert f"[{DIM}]weights = solve(`obj`)  # **kept**[/]" in written
+            assert f"[{DIM}]    if weights.sum() != 1:[/]" in written
+            # prose on both sides of the block is prose, never dim code
+            assert f"[{TEXT}]Here is the guard:[/]" in written
+            assert f"[{TEXT}]That guard is deterministic.[/]" in written
+            assert app._console_fenced is False             # block closed
+
+    asyncio.run(run())
+
+
+def test_console_bullet_glyph_survives_a_count_leading_bullet():
+    """A bullet that opens with a number is still a bullet; only a real ordinal
+    marker ("1.") stands in for the glyph."""
+    from qlab.tui.app import QlabTui
+    from textual.widgets import RichLog
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            app._console_stream_text(
+                "- 3 of 7 arms admitted\n"
+                "1. bind the targets\n"
+            )
+            flat = " ".join(" ".join(
+                strip.text for strip in app.query_one(
+                    "#workforce-console", RichLog).lines).split())
+
+            assert "• 3 of 7 arms admitted" in flat
+            assert "1. bind the targets" in flat
+            assert "• 1. bind the targets" not in flat
+
+    asyncio.run(run())
+
+
+def test_console_flush_writes_the_partial_line_and_never_leaks_fence_state():
+    """Text that never got its newline still reaches the console when the turn
+    ends, and an unclosed fence dies with the turn."""
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            written: list[str] = []
+            app._console_write = written.append
+
+            app._console_stream_text("Bottom line: ")
+            app._console_stream_text("nothing traded.")
+            assert written == []                    # an incomplete line waits
+            app._console_flush()
+            assert any("Bottom line: nothing traded." in line for line in written)
+            assert app._console_partial == ""
+
+            # a turn that ends mid-block must not render the next turn as code
+            app._console_stream_text("```python\n")
+            assert app._console_fenced is True
+            app._console_flush()
+            assert app._console_fenced is False
 
     asyncio.run(run())
 

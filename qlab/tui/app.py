@@ -38,8 +38,9 @@ from qlab.tui.atlas_view import AtlasView
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
-    braille_chart, bulletin, connection_chip, key_number_lines, money, pct,
-    phase_elapsed, report_lines, sparkline, verdict_chip, weight_bar,
+    braille_chart, bulletin, connection_chip, fence_state_after,
+    is_numbered_item, key_number_lines, money, pct, phase_elapsed,
+    report_lines, sparkline, verdict_chip, weight_bar,
 )
 from qlab.tui.theme import (
     ALLOCATION_TRACK,
@@ -818,6 +819,9 @@ class QlabTui(App[None]):
         self._last_quote_repaint_at = 0.0
         self._quote_repaint_timer = None
         self._console_partial = ""
+        # Streamed text arrives token by token, so the ``` opener and the code it
+        # introduces land in different calls; the console remembers the block.
+        self._console_fenced = False
         self._chat_sessions = {"workforce": "", "chat": ""}
         self._chat_mode = "workforce"
         self.claude = ClaudeSession(
@@ -1321,14 +1325,18 @@ class QlabTui(App[None]):
         """Write agent-report markdown as styled console rows.
 
         A report is a document, not a list of facts: headers become section
-        titles, bullets align, tables and code pass through verbatim. Numbered
-        items already carry their own marker, so they skip the bullet glyph.
+        titles, bullets align, tables and code pass through verbatim. An ordinal
+        marker ("1.") stands in for the bullet glyph; a bullet that merely opens
+        with a count keeps it. Carries `_console_fenced` across calls, because a
+        code block spans as many calls as the stream has tokens.
         """
-        for kind, text in report_lines(lines):
-            if kind == "bullet" and text[:1].isdigit():
+        fenced = self._console_fenced
+        for kind, text in report_lines(lines, fenced=fenced):
+            if kind == "bullet" and is_numbered_item(text):
                 self._console_write(f"[{MUTED}]  [/][{TEXT}]{escape(text)}[/]")
             else:
                 self._console_write(_REPORT_TONES[kind].format(escape(text)))
+        self._console_fenced = fence_state_after(lines, fenced)
 
     def _console_stream_text(self, text: str) -> None:
         """Append streamed narrative, emitting only completed lines."""
@@ -1337,8 +1345,14 @@ class QlabTui(App[None]):
         self._console_report(complete)
 
     def _console_flush(self) -> None:
+        """Emit the trailing partial line and end the block it belonged to.
+
+        A turn that stops mid-fence must not leave the flag set: the next report
+        would render entirely as code.
+        """
         self._console_report([self._console_partial])
         self._console_partial = ""
+        self._console_fenced = False
 
     def _tick_pulse(self) -> None:
         """Animate working-state glyphs only while something is running."""
@@ -3167,6 +3181,7 @@ class QlabTui(App[None]):
             return False
         if governed:
             self._console_partial = ""
+            self._console_fenced = False
             if not resume_session:
                 first_line = prompt.splitlines()[0]
                 self._console_write(

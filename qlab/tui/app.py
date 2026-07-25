@@ -28,16 +28,19 @@ from textual.widgets import (
     Static,
 )
 
+from qlab.core.atlas import arm_display_name
 from qlab.paths import workspace_root
 from qlab.research.prediction import (
     IC_ADMISSION_THRESHOLD,
     IC_STABILITY_THRESHOLD,
 )
+from qlab.tui.atlas_view import AtlasView
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
-    braille_chart, bulletin, key_number_lines, money, pct, phase_elapsed,
-    sparkline, verdict_chip, weight_bar,
+    braille_chart, bulletin, connection_chip, fence_state_after,
+    is_numbered_item, key_number_lines, money, pct, phase_elapsed,
+    report_lines, sparkline, verdict_chip, weight_bar,
 )
 from qlab.tui.theme import (
     ALLOCATION_TRACK,
@@ -70,7 +73,8 @@ from qlab.tui.theme import (
 _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 _VIEWS = (
-    "dashboard", "market", "workforce", "research", "book", "audit", "settings",
+    "dashboard", "market", "workforce", "research", "book", "audit", "atlas",
+    "settings",
 )
 _DASHBOARD_TILE_KEYS = (
     "equity", "allocation", "regime", "market-pulse", "verdict", "run", "alerts",
@@ -231,6 +235,7 @@ COMMAND_TABLE = {
     ("view", "research"): "action_view",
     ("view", "book"): "action_view",
     ("view", "audit"): "action_view",
+    ("view", "atlas"): "action_view",
     ("view", "settings"): "action_view",
     ("view", "agents"): "action_agent_focus",
     ("agents", None): "action_agent_focus",
@@ -268,6 +273,19 @@ def _bulletin_markup(
             lines, max_len=max_len, strip_ids=strip_ids
         )
     ]
+
+
+# Theme skin for the kinds report_lines() emits. The renderer stays tone-free;
+# only this table knows the palette.
+_REPORT_TONES = {
+    "h1": f"[bold {AMBER}]▍{{}}[/]",
+    "h2": f"[bold {TEXT_HI}]{{}}[/]",
+    "bullet": f"[{MUTED}]  • [/][{TEXT}]{{}}[/]",
+    "code": f"[{DIM}]{{}}[/]",
+    "table": f"[{DIM}]{{}}[/]",
+    "text": f"[{TEXT}]{{}}[/]",
+    "blank": "{}",
+}
 
 
 def _key_number_markup(
@@ -585,6 +603,20 @@ def _book_state_style(state: str) -> tuple[str, str]:
     return _STATE_STYLE.get(token, ("◌", DIM))
 
 
+def _cell(value: Any, fmt: str = "{:.2f}") -> str:
+    """Format a leaderboard metric, or an em dash when the metric is absent."""
+    return "—" if value is None else fmt.format(value)
+
+
+def _marks_label(performance: dict[str, Any]) -> str:
+    """Mark count, stated as a fraction whenever the owner capped the read."""
+    shown = int(performance.get("marks") or 0)
+    total = int(performance.get("marks_total") or shown)
+    if performance.get("marks_capped") and total > shown:
+        return f"{shown:,} of {total:,} marks"
+    return f"{shown:,} marks"
+
+
 def _record(value: Any) -> dict[str, Any]:
     """Return one owner record, or an empty record for a sparse payload."""
     return value if isinstance(value, dict) else {}
@@ -660,7 +692,7 @@ class FlowBoard(Horizontal):
 
 
 class NavMenu(Static):
-    """The seven-view switcher in the spine.
+    """The eight-view switcher in the spine.
 
     It renders one text line per view (in ``_VIEWS`` order), so a click selects
     the view on the clicked row — the click's y within the widget *is* the row
@@ -763,14 +795,16 @@ class QlabTui(App[None]):
         Binding("4", "view('research')", "Research", show=False),
         Binding("5", "view('book')", "Book", show=False),
         Binding("6", "view('audit')", "Audit", show=False),
-        Binding("7", "view('settings')", "Settings", show=False),
+        Binding("7", "view('atlas')", "Atlas", show=False),
+        Binding("8", "view('settings')", "Settings", show=False),
         Binding("f1", "view('dashboard')", "Dashboard", show=False),
         Binding("f2", "view('market')", "Market", show=False),
         Binding("f3", "view('workforce')", "Workforce", show=False),
         Binding("f4", "view('research')", "Research", show=False),
         Binding("f5", "view('book')", "Book", show=False),
         Binding("f6", "view('audit')", "Audit", show=False),
-        Binding("f7", "view('settings')", "Settings", show=False),
+        Binding("f7", "view('atlas')", "Atlas", show=False),
+        Binding("f8", "view('settings')", "Settings", show=False),
         Binding("a", "agent_focus", "Agents", show=False),
         Binding("j", "next_symbol", "Next symbol", show=False),
         Binding("k", "previous_symbol", "Previous symbol", show=False),
@@ -806,6 +840,8 @@ class QlabTui(App[None]):
         self.snapshot: dict[str, Any] = {}
         self._refreshing = False
         self._action_running = False
+        self._last_snapshot_at: float | None = None
+        self._refresh_failures = 0
         self._event_ids: set[str] = set()
         self._runs_signature: tuple = ()
         self._audit_signature: tuple = ()
@@ -837,6 +873,9 @@ class QlabTui(App[None]):
         self._last_quote_repaint_at = 0.0
         self._quote_repaint_timer = None
         self._console_partial = ""
+        # Streamed text arrives token by token, so the ``` opener and the code it
+        # introduces land in different calls; the console remembers the block.
+        self._console_fenced = False
         self._chat_sessions = {"workforce": "", "chat": ""}
         self._chat_mode = "workforce"
         self.claude = ClaudeSession(
@@ -923,9 +962,17 @@ class QlabTui(App[None]):
                 with Vertical(id="research", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] RESEARCH", classes="canvas-title", markup=True)
                     yield Static(id="research-summary", markup=True)
+                    yield Static("ABLATION LEADERBOARD", classes="book-section-title")
+                    yield Static(id="leaderboard", classes="book-section", markup=True)
                     yield DataTable(id="runs-table", cursor_type="row")
                 with Vertical(id="book", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] BOOK", classes="canvas-title", markup=True)
+                    yield Static("EQUITY", classes="book-section-title")
+                    yield Static(
+                        id="book-equity",
+                        classes="book-section",
+                        markup=True,
+                    )
                     yield Static("POSITIONS", classes="book-section-title")
                     yield Static(
                         id="book-positions",
@@ -961,6 +1008,7 @@ class QlabTui(App[None]):
                     yield Static(f"[{AMBER}]\u258d[/] AUDIT", classes="canvas-title", markup=True)
                     yield Static(id="audit-summary", markup=True)
                     yield DataTable(id="audit-table", cursor_type="row")
+                yield AtlasView(id="atlas", classes="canvas-view")
                 with Vertical(id="settings", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] SETTINGS", classes="canvas-title", markup=True)
                     yield Static(
@@ -1008,6 +1056,7 @@ class QlabTui(App[None]):
         yield Static("waiting for runtime snapshot", id="event-strip")
         with Horizontal(id="command-row"):
             yield Input(placeholder=": command or Ctrl-P", id="command")
+            yield Static("CONNECTING", id="conn-chip", markup=True)
             yield Static("PAPER · CONNECTING", id="system-status")
 
     def on_mount(self) -> None:
@@ -1075,6 +1124,7 @@ class QlabTui(App[None]):
             except Exception as exc:
                 self.call_from_thread(
                     self._write_local_event, "api.error", {"error": repr(exc)})
+                self.call_from_thread(self._note_refresh_failure)
             finally:
                 self.call_from_thread(self._finish_refresh)
 
@@ -1082,6 +1132,17 @@ class QlabTui(App[None]):
 
     def _finish_refresh(self) -> None:
         self._refreshing = False
+
+    def _note_refresh_failure(self) -> None:
+        self._refresh_failures += 1
+        self._render_conn_chip()
+
+    def _render_conn_chip(self) -> None:
+        age = (None if self._last_snapshot_at is None
+               else time.monotonic() - self._last_snapshot_at)
+        text, level = connection_chip(age, self._refresh_failures)
+        tone = {"ok": UP, "warn": AMBER, "down": DOWN}[level]
+        self.query_one("#conn-chip", Static).update(f"[{tone}]{text}[/]")
 
     def _start_bootstrap(self) -> None:
         """Fetch immutable owner configuration once, when Settings is first shown."""
@@ -1108,6 +1169,34 @@ class QlabTui(App[None]):
         self.bootstrap = bootstrap
         self._bootstrap_error = error
         self._render_settings()
+
+    def _start_atlas_fetch(self) -> None:
+        """Fetch the curated catalog on every visit to Atlas.
+
+        The payload carries live ablation evidence, and ``: batch`` writes new
+        ablation numbers mid-session. A once-per-session fetch would keep
+        asserting "latest ablation" with superseded numbers while the leaderboard
+        on the same evidence refreshed on the next tick. ``AtlasView.set_entries``
+        ignores an unchanged payload, so re-entry costs one request and no
+        rebuild flicker.
+        """
+
+        def run() -> None:
+            try:
+                payload = self.client.get("/api/atlas")
+                self.call_from_thread(self._finish_atlas, payload, "")
+            except Exception as exc:
+                self.call_from_thread(self._finish_atlas, None, repr(exc))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _finish_atlas(self, payload: dict[str, Any] | None, error: str) -> None:
+        view = self.query_one("#atlas", AtlasView)
+        if payload is None:
+            self.query_one("#atlas-detail", Static).update(
+                f"[{DOWN}]atlas unavailable: {escape(error)}[/]")
+            return
+        view.set_entries(payload.get("entries") or [])
 
     def _start_live_stream(self) -> None:
         """Subscribe to the owner's SSE bus so state and quotes land instantly.
@@ -1299,21 +1388,43 @@ class QlabTui(App[None]):
         for line in bulletin([nxt], max_len=260):
             self._console_write(f"[{MUTED}]  • {escape(line)}[/]")
 
+    def _console_report(self, lines: list[str]) -> None:
+        """Write agent-report markdown as styled console rows.
+
+        A report is a document, not a list of facts: headers become section
+        titles, bullets align, tables and code pass through verbatim. An ordinal
+        marker ("1.") stands in for the bullet glyph; a bullet that merely opens
+        with a count keeps it. Carries `_console_fenced` across calls, because a
+        code block spans as many calls as the stream has tokens.
+        """
+        fenced = self._console_fenced
+        for kind, text in report_lines(lines, fenced=fenced):
+            if kind == "bullet" and is_numbered_item(text):
+                self._console_write(f"[{MUTED}]  [/][{TEXT}]{escape(text)}[/]")
+            else:
+                self._console_write(_REPORT_TONES[kind].format(escape(text)))
+        self._console_fenced = fence_state_after(lines, fenced)
+
     def _console_stream_text(self, text: str) -> None:
         """Append streamed narrative, emitting only completed lines."""
         self._console_partial += text
         *complete, self._console_partial = self._console_partial.split("\n")
-        for line in _bulletin_markup(complete):
-            self._console_write(line)
+        self._console_report(complete)
 
     def _console_flush(self) -> None:
-        for line in _bulletin_markup([self._console_partial]):
-            self._console_write(line)
+        """Emit the trailing partial line and end the block it belonged to.
+
+        A turn that stops mid-fence must not leave the flag set: the next report
+        would render entirely as code.
+        """
+        self._console_report([self._console_partial])
         self._console_partial = ""
+        self._console_fenced = False
 
     def _tick_pulse(self) -> None:
         """Animate working-state glyphs only while something is running."""
         self._pulse += 1
+        self._render_conn_chip()
         states = set(self._agent_states.values())
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
         running = workflows and workflows[0].get("status") == "running"
@@ -1324,6 +1435,9 @@ class QlabTui(App[None]):
                 self._render_workforce()
 
     def _apply_snapshot(self, snapshot: dict) -> None:
+        self._last_snapshot_at = time.monotonic()
+        self._refresh_failures = 0
+        self._render_conn_chip()
         self.snapshot = snapshot
         assets = snapshot.get("market", {}).get("assets", [])
         self._sync_universe([row["ticker"] for row in assets])
@@ -2255,6 +2369,35 @@ class QlabTui(App[None]):
         summary.append("Run [bold]: batch[/] for the staged comparison suite.")
         self.query_one("#research-summary", Static).update("\n".join(summary))
 
+        board = self.snapshot.get("leaderboard") or []
+        if board:
+            lines = [
+                f"[{DIM}]METHOD                          SHARPE     RET   "
+                f"MAXDD   CVAR95    DSR[/]"
+            ]
+            for row in board:
+                if row.get("champion"):
+                    mark, mark_tone = "★", AMBER
+                elif row.get("benchmark"):
+                    mark, mark_tone = "BENCH", DIM
+                else:
+                    mark, mark_tone = "", DIM
+                # Markup tags occupy no cells: pad the plain text to the column
+                # width first, then wrap it, or every row type drifts.
+                name_cell = escape(f"{str(row.get('name', '')):<24}")
+                lines.append(
+                    f"[{TEXT_HI}]{name_cell}[/] [{mark_tone}]{mark:<5}[/]  "
+                    f"[{TEXT}]{_cell(row.get('sharpe')):>6}  "
+                    f"{_cell(row.get('ann_return'), '{:+.1%}'):>6}  "
+                    f"{_cell(row.get('max_drawdown'), '{:.1%}'):>6}  "
+                    f"{_cell(row.get('cvar_95'), '{:.2%}'):>7}  "
+                    f"{_cell(row.get('deflated_sharpe')):>5}[/]")
+            self.query_one("#leaderboard", Static).update("\n".join(lines))
+        else:
+            self.query_one("#leaderboard", Static).update(
+                f"[{MUTED}]No ablation recorded yet — run [bold]: batch[/] for the "
+                f"staged comparison.[/]")
+
         signature = tuple((r.get("run_id"), r.get("created_at")) for r in runs)
         if signature == self._runs_signature:
             return
@@ -2269,10 +2412,74 @@ class QlabTui(App[None]):
                 key=str(run.get("run_id", "")),
             )
 
+    def _render_book_equity(self, portfolio: dict) -> None:
+        """Realized equity curve and metrics — or why there are none yet.
+
+        The curve is the recorded equity marks, not a backtest: an empty series
+        is a real state of the book (nothing marked yet), and metrics that the
+        owner could not compute carry its note instead of blank cells.
+
+        Every number states its own basis. The headline is the live broker equity
+        and is labelled ``live``; the percentage is ``window_change``, measured
+        across exactly the marks this chart draws, and dated from the first of
+        them — so it can never be read from a point off the chart's left edge.
+        The cadence the metrics were annualized on, a capped history, and marks
+        excluded as another book's are all disclosed rather than assumed.
+        """
+        performance = (self.snapshot.get("performance") or {}) if self.snapshot else {}
+        rows = performance.get("series") or []
+        series = [float(row["equity"]) for row in rows]
+        lines: list[str] = []
+        if series:
+            change = performance.get("window_change")
+            tone = TEXT if change is None else (UP if float(change) >= 0 else DOWN)
+            header = (f"[bold {TEXT_HI}]{money(portfolio.get('equity'))}[/]"
+                      f" [{DIM}]live[/]")
+            if change is not None:
+                sign = "+" if float(change) >= 0 else ""
+                header += (f"   [{tone}]{sign}{pct(float(change))} since "
+                           f"{escape(str(rows[0].get('ts', '—')))}[/]")
+            header += f"   [{LABEL_GOLD}]{_marks_label(performance)}[/]"
+            lines.append(header)
+            lines.append("")
+            for bar in braille_chart(series, width=56, height=4):
+                lines.append(f"[{tone}]{escape(bar)}[/]")
+            span = (
+                f"{str(rows[0].get('ts', '—'))} → {str(rows[-1].get('ts', '—'))}"
+                if len(rows) > 1 else str(rows[-1].get("ts", "—")))
+            lines.append(f"[{DIM}]{escape(span)}  ·  daily equity marks[/]")
+            cadence = performance.get("cadence")
+            if isinstance(cadence, dict) and cadence.get("periods_per_year"):
+                lines.append(
+                    f"[{DIM}]annualized at "
+                    f"{cadence['periods_per_year']:.0f}/yr from the observed "
+                    f"cadence[/]")
+            lines.append("")
+            metrics = performance.get("metrics")
+            if metrics:
+                lines.append(
+                    f"[{LABEL_GOLD}]ret[/] [{TEXT}]{pct(metrics['ann_return'])}[/]   "
+                    f"[{LABEL_GOLD}]vol[/] [{TEXT}]{pct(metrics['ann_vol'])}[/]   "
+                    f"[{LABEL_GOLD}]sharpe[/] [{TEXT}]{metrics['sharpe']:.2f}[/]   "
+                    f"[{LABEL_GOLD}]maxdd[/] [{TEXT}]{pct(metrics['max_drawdown'])}[/]   "
+                    f"[{LABEL_GOLD}]cvar95[/] [{TEXT}]{pct(metrics['cvar_95'])}[/]   "
+                    f"[{LABEL_GOLD}]obs[/] [{TEXT}]{int(metrics['n_obs'])}[/]")
+            # The owner's note carries every exclusion and cap; it is a
+            # disclosure, not a fallback, so it prints alongside real metrics.
+            note = str(performance.get("note") or "")
+            if note:
+                lines.append(f"[{MUTED}]{escape(note)}[/]")
+        else:
+            lines.append(
+                f"[{MUTED}]No equity history yet — marks are recorded by daily "
+                f"ops, executions, and hourly polls.[/]")
+        self.query_one("#book-equity", Static).update("\n".join(lines))
+
     def _render_book(self) -> None:
         portfolio = self.snapshot.get("portfolio", {}) if self.snapshot else {}
         positions = portfolio.get("positions") or {}
         weights = portfolio.get("weights") or {}
+        self._render_book_equity(portfolio)
         tickers = sorted(
             set(positions) | {
                 ticker for ticker, weight in weights.items()
@@ -2281,18 +2488,26 @@ class QlabTui(App[None]):
             key=lambda ticker: (-float(weights.get(ticker, 0.0)), str(ticker)),
         )
         position_lines = [
-            f"[{DIM}]TICKER   WEIGHT        QUANTITY          VALUE[/]"
+            f"[{DIM}]TICKER   WEIGHT        QUANTITY          VALUE          P&L[/]"
         ]
         for ticker in tickers:
             position = positions.get(ticker) or {}
             quantity = position.get("qty")
             quantity_text = (
                 "—" if quantity is None else f"{float(quantity):,.4f}")
+            # Marks written before unrealized P&L existed carry no key at all;
+            # an em dash says "not known", which a $0.00 would misreport.
+            unrealized = position.get("unrealized_pl")
+            unrealized_text = "—" if unrealized is None else money(unrealized)
+            unrealized_tone = (
+                MUTED if unrealized is None
+                else (UP if float(unrealized) >= 0 else DOWN))
             position_lines.append(
                 f"[bold {TEXT_HI}]{escape(str(ticker)):<7}[/] "
                 f"[{AMBER}]{pct(float(weights.get(ticker, 0.0))):>7}[/]   "
                 f"[{TEXT}]{quantity_text:>12}[/]   "
-                f"[{TEXT_HI}]{money(position.get('value')):>12}[/]"
+                f"[{TEXT_HI}]{money(position.get('value')):>12}[/]   "
+                f"[{unrealized_tone}]{unrealized_text:>10}[/]"
             )
         if not tickers:
             position_lines.append(
@@ -2498,7 +2713,12 @@ class QlabTui(App[None]):
         self._audit_decisions = {}
         for decision in decisions:
             choice = decision.get("choice", {})
-            detail = choice.get("regime") or choice.get("arm") or decision.get("rationale", "")
+            arm = choice.get("arm")
+            detail = (
+                choice.get("regime")
+                or (arm_display_name(arm) if arm else None)
+                or decision.get("rationale", "")
+            )
             key = str(decision.get("decision_id", ""))
             self._audit_decisions[key] = decision
             rows.append((
@@ -2559,7 +2779,13 @@ class QlabTui(App[None]):
         ]
         if choice:
             card_lines.extend(_key_number_markup([
-                (str(choice_key), str(choice[choice_key])[:160])
+                (
+                    str(choice_key),
+                    str(
+                        arm_display_name(choice[choice_key])
+                        if choice_key == "arm" else choice[choice_key]
+                    )[:160],
+                )
                 for choice_key in list(choice)[:4]
             ]))
         else:
@@ -2734,11 +2960,16 @@ class QlabTui(App[None]):
         self.query_one("#canvas", ContentSwitcher).current = view
         self._render_nav()
         if view == "workforce":
-            # Chat-first focus claims digits as text; F1-F7 still switch views,
+            # Chat-first focus claims digits as text; F1-F8 still switch views,
             # and Escape blurs the input so digit navigation works again.
             field = self.query_one("#chat-input", Input)
             if not field.disabled:  # a running turn owns the box; don't grab it
                 field.focus()
+        elif view == "atlas":
+            # Master-detail only reads if the index is navigable on arrival; the
+            # ListView claims no digit keys, so view switching keeps working.
+            self.query_one("#atlas-list", ListView).focus()
+            self._start_atlas_fetch()
         elif view == "settings":
             self._start_bootstrap()
 
@@ -2894,7 +3125,7 @@ class QlabTui(App[None]):
     def action_help(self) -> None:
         self._set_selected_work(
             "COMMANDS\n\n"
-            "view dashboard|desk|market|workforce|research|book|audit|settings\n"
+            "view dashboard|desk|market|workforce|research|book|audit|atlas|settings\n"
             "view agents\n"
             "symbol TICKER\n"
             "chat MESSAGE      (read-only desk assistant)\n"
@@ -2908,7 +3139,7 @@ class QlabTui(App[None]):
             "batch\n"
             "ask PROMPT  (isolated, no tools)\n"
             "timeline\n\n"
-            "1–7 or F1–F7 switch views · j/k select instrument · "
+            "1–8 or F1–F8 switch views · j/k select instrument · "
             "A toggles agents · Ctrl-Q quits"
         )
 
@@ -3187,6 +3418,7 @@ class QlabTui(App[None]):
             return False
         if governed:
             self._console_partial = ""
+            self._console_fenced = False
             if not resume_session:
                 first_line = prompt.splitlines()[0]
                 self._console_write(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 
 import pytest
@@ -50,9 +51,12 @@ def _snapshot():
             "drawdown": 0.01,
             "kill_switch_at": 0.15,
             "positions": {
-                "ACWI": {"qty": 40.4, "price": 100.0, "value": 4_040.0},
-                "BNDW": {"qty": 30.0, "price": 101.0, "value": 3_030.0},
-                "GLD": {"qty": 29.7, "price": 102.0, "value": 3_029.4},
+                "ACWI": {"qty": 40.4, "price": 100.0, "value": 4_040.0,
+                         "unrealized_pl": 40.0},
+                "BNDW": {"qty": 30.0, "price": 101.0, "value": 3_030.0,
+                         "unrealized_pl": -15.0},
+                "GLD": {"qty": 29.7, "price": 102.0, "value": 3_029.4,
+                        "unrealized_pl": 29.4},
             },
             "weights": {"ACWI": 0.4, "BNDW": 0.3, "GLD": 0.3},
             "target_weights": {"ACWI": 0.35, "BNDW": 0.35, "GLD": 0.3},
@@ -127,6 +131,25 @@ def _snapshot():
             {"id": "qaoa_selection", "stage": "offline"},
         ],
         "policy": {"id": "hrp", "label": "Hierarchical risk parity"},
+        "performance": {
+            "series": [
+                {"ts": f"2026-06-{day:02d}", "equity": 10_000.0 * (1.001 ** day)}
+                for day in range(1, 31)
+            ],
+            "metrics": {"ann_return": 0.041, "ann_vol": 0.082, "sharpe": 0.50,
+                        "sortino": 0.71, "max_drawdown": -0.021,
+                        "cvar_95": -0.006, "realized_skew": -0.2,
+                        "realized_kurtosis": 0.8, "deflated_sharpe": 0.6,
+                        "n_obs": 29},
+            "since_start": 0.0124,
+            # Measured across `series` — the window the chart actually draws.
+            "window_change": 0.0294,
+            "cadence": {"periods_per_year": 365.25, "observed_span_days": 29.0,
+                        "mean_step_days": 1.0, "basis": "observed mark cadence"},
+            "note": None, "marks": 30, "marks_total": 30, "mark_limit": 5000,
+            "marks_capped": False, "excluded_marks": 0,
+            "book": "simulated_paper",
+        },
         "equilibrium_returns": {
             "run_id": "eq-run-1",
             "as_of": "2026-07-17",
@@ -137,6 +160,20 @@ def _snapshot():
             },
         },
         "workflows": [],
+        "leaderboard": [
+            {"arm_id": "B2", "name": "HRP", "champion": True, "benchmark": False,
+             "sharpe": 0.91, "ann_return": 0.062, "max_drawdown": -0.124,
+             "cvar_95": -0.011, "deflated_sharpe": 0.83},
+            {"arm_id": "B0", "name": "60/40", "champion": False, "benchmark": True,
+             "sharpe": 0.55, "ann_return": 0.050, "max_drawdown": -0.180,
+             "cvar_95": -0.015, "deflated_sharpe": 0.60},
+            {"arm_id": "B3", "name": "Risk Parity", "champion": False,
+             "benchmark": False, "sharpe": 0.74, "ann_return": 0.048,
+             "max_drawdown": -0.150, "cvar_95": -0.013, "deflated_sharpe": 0.71},
+            {"arm_id": "B4", "name": "Min Variance", "champion": False,
+             "benchmark": False, "sharpe": None, "ann_return": None,
+             "max_drawdown": None, "cvar_95": None, "deflated_sharpe": None},
+        ],
     }
 
 
@@ -160,6 +197,44 @@ def _bootstrap():
     }
 
 
+def _atlas():
+    """Owner-shaped atlas payload, built from the real curated catalog.
+
+    Deriving the fixture from ``ATLAS_ENTRIES`` means the stub cannot drift
+    away from the content the owner actually serves.
+    """
+    from dataclasses import asdict
+
+    from qlab.core.atlas import ATLAS_ENTRIES
+
+    # A full compute_metrics bundle, the shape the owner really serves: 13 keys,
+    # n_obs first, and a None where a metric could not be computed.
+    metrics = {
+        "n_obs": 504,
+        "ann_return": 0.0732,
+        "ann_vol": 0.0805,
+        "sharpe": 0.91,
+        "sortino": 1.243,
+        "downside_deviation": 0.0589,
+        "omega_ratio": 1.412,
+        "max_drawdown": -0.124,
+        "cvar_95": -0.0187,
+        "realized_skew": -0.312,
+        "realized_kurtosis": 4.118,
+        "deflated_sharpe": 0.634,
+        "turnover": None,
+    }
+
+    entries = []
+    for entry in ATLAS_ENTRIES:
+        row = asdict(entry)
+        row["stage"] = "operational" if entry.algorithm_key == "hrp" else None
+        row["champion"] = entry.algorithm_key == "hrp"
+        row["ablation"] = dict(metrics) if entry.arm_id == "B2" else None
+        entries.append(row)
+    return {"entries": entries, "champion_policy": "hrp"}
+
+
 class StubClient:
     def __init__(self):
         self.posts = []
@@ -169,6 +244,8 @@ class StubClient:
             return _snapshot()
         if path == "/api/bootstrap":
             return _bootstrap()
+        if path == "/api/atlas":
+            return _atlas()
         raise AssertionError(path)
 
     def post(self, path, body=None):
@@ -557,6 +634,25 @@ def test_status_strip_shows_autopilot_last_run_and_trigger_count():
             await pilot.pause(0.2)
             status = str(app.query_one("#system-status").content)
             assert "AUTO 07-24 16:30·2" in status
+
+    asyncio.run(run())
+
+
+def test_owner_failure_surfaces_in_conn_chip():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 42)) as pilot:
+            await pilot.pause(0.2)
+            # Drive the failure path directly rather than through real
+            # background-thread polling: three consecutive failures is the
+            # documented threshold, not a timing accident.
+            app._note_refresh_failure()
+            app._note_refresh_failure()
+            app._note_refresh_failure()
+            chip = str(app.query_one("#conn-chip").content)
+            assert "OWNER DOWN" in chip
 
     asyncio.run(run())
 
@@ -1104,6 +1200,119 @@ def test_book_view_renders_positions_plan_cards_and_specific_execute_flow():
     asyncio.run(run())
 
 
+def test_book_renders_equity_curve_metrics_and_position_pnl():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("5")
+            equity_panel = str(app.query_one("#book-equity").content)
+            assert "sharpe" in equity_panel and "0.50" in equity_panel
+            # The headline is the live broker equity and says so; the percentage
+            # is measured over the charted window, from its first mark's date.
+            assert "$10,100.00" in equity_panel and "live" in equity_panel
+            assert "+2.9% since 2026-06-01" in equity_panel
+            assert "since start" not in equity_panel
+            # The annualization convention is disclosed, never assumed.
+            assert "365/yr" in equity_panel and "observed" in equity_panel
+            positions = str(app.query_one("#book-positions").content)
+            assert "P&L" in positions
+            assert "$40.00" in positions and "$-15.00" in positions
+
+    asyncio.run(run())
+
+
+def test_book_equity_discloses_a_capped_history_and_a_foreign_book():
+    """A capped window must not read as the whole book, nor mix two books."""
+    from qlab.tui.app import QlabTui
+
+    class CappedClient(StubClient):
+        def get(self, path, **params):
+            snapshot = super().get(path, **params)
+            if path == "/api/tui":
+                snapshot["performance"] = {
+                    **snapshot["performance"],
+                    "marks": 5000, "marks_total": 7321, "marks_capped": True,
+                    "excluded_marks": 42,
+                    "note": "42 mark(s) from another book excluded; this series "
+                            "is simulated_paper only; history capped at the "
+                            "newest 5000 marks of 7321",
+                }
+            return snapshot
+
+    async def run():
+        app = QlabTui(CappedClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("5")
+            panel = str(app.query_one("#book-equity").content)
+            assert "5,000 of 7,321 marks" in panel
+            assert "capped" in panel
+            assert "another book excluded" in panel
+
+    asyncio.run(run())
+
+
+def test_book_is_honest_when_no_equity_history():
+    from qlab.tui.app import QlabTui
+
+    class NoHistoryClient(StubClient):
+        def get(self, path, **params):
+            snapshot = super().get(path, **params)
+            if path == "/api/tui":
+                snapshot["performance"] = {
+                    "series": [], "metrics": None, "since_start": None,
+                    "note": "no equity history yet", "marks": 0}
+            return snapshot
+
+    async def run():
+        app = QlabTui(NoHistoryClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("5")
+            panel = str(app.query_one("#book-equity").content)
+            assert "No equity history yet" in panel
+            assert "daily ops" in panel
+
+    asyncio.run(run())
+
+
+def test_book_equity_reports_note_when_metrics_are_unavailable():
+    """A short mark history is a contractual state: note, never NaN cells."""
+    from qlab.tui.app import QlabTui
+
+    class ThinHistoryClient(StubClient):
+        def get(self, path, **params):
+            snapshot = super().get(path, **params)
+            if path == "/api/tui":
+                snapshot["performance"] = {
+                    "series": [{"ts": "2026-07-23", "equity": 10_000.0},
+                               {"ts": "2026-07-24", "equity": 10_100.0}],
+                    "metrics": None, "since_start": 0.01,
+                    "note": "insufficient history for realized metrics "
+                            "(need >=4 daily marks)",
+                    "marks": 2}
+                for position in snapshot["portfolio"]["positions"].values():
+                    position.pop("unrealized_pl")
+            return snapshot
+
+    async def run():
+        app = QlabTui(ThinHistoryClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("5")
+            panel = str(app.query_one("#book-equity").content)
+            assert "insufficient history for realized metrics" in panel
+            assert "nan" not in panel.lower()
+            positions = str(app.query_one("#book-positions").content)
+            # No unrealized P&L on the position: an em dash, never a zero.
+            assert "$40.00" not in positions and "—" in positions
+
+    asyncio.run(run())
+
+
 class AuditClient(StubClient):
     def get(self, path, **params):
         if path == "/api/bootstrap":
@@ -1432,6 +1641,89 @@ def test_research_view_renders_latest_prediction_admission_with_tone():
     asyncio.run(run())
 
 
+def test_research_leaderboard_shows_method_names_not_codes():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("4")
+            board = str(app.query_one("#leaderboard").content)
+            assert "HRP" in board and "60/40" in board
+            assert "★" in board            # champion marked
+            assert "BENCH" in board        # benchmark tagged
+            assert "B2" not in board       # codes never rendered here
+
+    asyncio.run(run())
+
+
+def test_research_leaderboard_columns_align_on_visible_width():
+    """Markup tags occupy no cells, so a field width must pad the plain text.
+
+    Champion (``★``), benchmark (``BENCH``) and unmarked rows carry different
+    amounts of markup; padding the tagged string lands the metric block at a
+    different offset in every row and the board stops being readable.
+    """
+    from qlab.tui.app import QlabTui
+
+    columns = ["SHARPE", "RET", "MAXDD", "CVAR95", "DSR"]
+    cells = {
+        "HRP": ["0.91", "+6.2%", "-12.4%", "-1.10%", "0.83"],
+        "60/40": ["0.55", "+5.0%", "-18.0%", "-1.50%", "0.60"],
+        "Risk Parity": ["0.74", "+4.8%", "-15.0%", "-1.30%", "0.71"],
+    }
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("4")
+            board = str(app.query_one("#leaderboard").content)
+            plain = re.sub(r"\[[^\]]*\]", "", board).splitlines()
+            header, rows = plain[0], plain[1:]
+
+            def row(name):
+                matches = [line for line in rows if line.startswith(name)]
+                assert len(matches) == 1, f"{name!r} in {rows}"
+                return matches[0]
+
+            edges = [header.index(token) + len(token) for token in columns]
+            starts = []
+            for name, values in cells.items():
+                line = row(name)
+                for token, value, edge in zip(columns, values, edges):
+                    assert line.index(value) + len(value) == edge, (
+                        f"{name} {token} off its column: {line!r}")
+                starts.append(line.index(values[0]))
+            assert len(set(starts)) == 1, f"metric block offsets differ: {starts}"
+
+            absent = row("Min Variance")
+            assert [m.end() for m in re.finditer("—", absent)] == edges, absent
+
+    asyncio.run(run())
+
+
+def test_research_leaderboard_renders_absent_metrics_as_em_dash():
+    """An unscored arm must read as absent — never blank, never ``nan``."""
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("4")
+            board = str(app.query_one("#leaderboard").content)
+            plain = re.sub(r"\[[^\]]*\]", "", board).splitlines()
+            absent = [line for line in plain if line.startswith("Min Variance")]
+            assert len(absent) == 1, plain
+            assert absent[0].count("—") == 5, absent[0]
+            assert "nan" not in absent[0].lower(), absent[0]
+            assert "None" not in absent[0], absent[0]
+
+    asyncio.run(run())
+
+
 def test_owner_refusals_reach_the_worker_with_their_reason():
     """An opaque 500 is what turns one bad call into an unbounded retry loop.
 
@@ -1491,7 +1783,7 @@ def test_settings_view_fetches_bootstrap_once_and_renders_read_only_bulletins():
         app = QlabTui(client, refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
-            await pilot.press("7")
+            await pilot.press("8")
             for _ in range(20):
                 if app.bootstrap is not None:
                     break
@@ -1514,7 +1806,7 @@ def test_settings_view_fetches_bootstrap_once_and_renders_read_only_bulletins():
             assert "• palette" in theme
 
             await pilot.press("1")
-            await pilot.press("f7")
+            await pilot.press("f8")
             await pilot.pause(0.05)
             assert client.bootstrap_calls == 1
 
@@ -1541,7 +1833,7 @@ def test_settings_bootstrap_error_is_capped_with_an_explicit_ellipsis():
         )
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
-            await pilot.press("7")
+            await pilot.press("8")
             for _ in range(20):
                 if app._bootstrap_error:
                     break
@@ -1561,8 +1853,224 @@ def test_settings_bootstrap_error_is_capped_with_an_explicit_ellipsis():
     asyncio.run(run())
 
 
+def test_atlas_view_leads_with_method_names_and_marks_champion():
+    from textual.widgets import Label
+
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            assert app.active_view == "atlas"
+            await pilot.pause(0.3)
+            list_text = "\n".join(
+                str(item.query_one(Label).content)
+                for item in app.query_one("#atlas-list").children)
+            detail = str(app.query_one("#atlas-detail").content)
+            # First arm renders in the detail pane by default.
+            assert "60/40" in detail
+            # Champion is starred in the list without exposing the arm code.
+            assert "★" in list_text and "HRP" in list_text
+            assert "B2" not in list_text
+            # Codes appear only as the dim footnote, never in titles.
+            assert "ablation id: B0" in detail
+
+    asyncio.run(run())
+
+
+def test_atlas_detail_states_absent_ablation_and_shows_champion_numbers():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            await pilot.pause(0.3)
+            # 60/40 has no ablation row in the fixture: say so, never blank.
+            benchmark_detail = str(app.query_one("#atlas-detail").content)
+            assert "no ablation recorded" in benchmark_detail
+
+            # The index has focus on arrival, so arrows walk the catalog and
+            # the detail pane follows the highlight.
+            assert app.focused is app.query_one("#atlas-list")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            assert "Equal-weight benchmark" in str(
+                app.query_one("#atlas-detail").content)
+
+            # Third arm is HRP, the champion in this fixture.
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            detail = str(app.query_one("#atlas-detail").content)
+            assert "Hierarchical risk parity" in detail
+            assert "★ CHAMPION" in detail
+            assert "operational" in detail
+            assert "ablation id: B2" in detail
+            # The overlay is a curated five in a fixed reading order, not an
+            # alphabetical dump of the whole metric bundle.
+            assert "sharpe" in detail and "0.910" in detail
+            assert "deflated_sharpe" in detail and "0.634" in detail
+            assert "n_obs" not in detail
+            assert "omega_ratio" not in detail
+            assert "realized_kurtosis" not in detail
+            overlay = next(
+                line for line in detail.splitlines()
+                if "latest ablation" in line)
+            curated = (
+                "sharpe", "ann_return", "max_drawdown", "cvar_95",
+                "deflated_sharpe")
+            # `]name[` matches the label markup only, so deflated_sharpe cannot
+            # be mistaken for sharpe.
+            positions = [overlay.index(f"]{name}[") for name in curated]
+            assert positions == sorted(positions), overlay
+
+            # A focused list must not swallow view navigation.
+            await pilot.press("1")
+            assert app.active_view == "dashboard"
+
+    asyncio.run(run())
+
+
+def test_atlas_ablation_without_curated_numbers_reads_as_absent():
+    from qlab.tui.app import QlabTui
+
+    class ShortWindowClient(StubClient):
+        def get(self, path, **params):
+            payload = super().get(path, **params)
+            if path == "/api/atlas":
+                for row in payload["entries"]:
+                    if row["ablation"]:
+                        # compute_metrics returns n_obs alone on a short series,
+                        # and a degenerate run can leave a non-finite behind.
+                        row["ablation"] = {
+                            "n_obs": 2,
+                            "sharpe": float("nan"),
+                            "ann_return": float("inf"),
+                        }
+            return payload
+
+    async def run():
+        app = QlabTui(
+            ShortWindowClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            await pilot.pause(0.3)
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            detail = str(app.query_one("#atlas-detail").content)
+            assert "Hierarchical risk parity" in detail
+            # No finite curated metric is honest absence, not a bare header.
+            assert "no ablation recorded" in detail
+            assert "latest ablation" not in detail
+            assert "nan" not in detail.lower() and "inf" not in detail.lower()
+
+    asyncio.run(run())
+
+
+def test_atlas_fetch_failure_is_visible_and_retried_on_the_next_visit():
+    from qlab.tui.app import QlabTui
+
+    class FailingAtlasClient(StubClient):
+        def __init__(self):
+            super().__init__()
+            self.atlas_calls = 0
+            self.fail = True
+
+        def get(self, path, **params):
+            if path == "/api/atlas":
+                self.atlas_calls += 1
+                if self.fail:
+                    raise RuntimeError("owner atlas unavailable")
+            return super().get(path, **params)
+
+    async def run():
+        client = FailingAtlasClient()
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            for _ in range(40):
+                if "unavailable" in str(app.query_one("#atlas-detail").content):
+                    break
+                await pilot.pause(0.02)
+            assert "atlas unavailable" in str(app.query_one("#atlas-detail").content)
+
+            client.fail = False
+            await pilot.press("1")
+            await pilot.press("7")
+            for _ in range(40):
+                if "60/40" in str(app.query_one("#atlas-detail").content):
+                    break
+                await pilot.pause(0.02)
+            assert client.atlas_calls == 2
+            assert "60/40" in str(app.query_one("#atlas-detail").content)
+
+    asyncio.run(run())
+
+
+def test_atlas_refetches_on_every_visit_so_a_new_ablation_is_never_stale():
+    """`: batch` writes new ablation numbers mid-session; the atlas must follow.
+
+    The leaderboard refreshes on the next 2s tick, so a once-per-session atlas
+    would keep asserting "latest ablation" with superseded numbers — two
+    surfaces reporting different states of the same evidence.
+    """
+    from qlab.tui.app import QlabTui
+
+    class ChangingAtlasClient(StubClient):
+        def __init__(self):
+            super().__init__()
+            self.atlas_calls = 0
+
+        def get(self, path, **params):
+            if path == "/api/atlas":
+                self.atlas_calls += 1
+                payload = _atlas()
+                if self.atlas_calls > 1:
+                    for row in payload["entries"]:
+                        if row["ablation"]:
+                            row["ablation"]["sharpe"] = 1.77
+                return payload
+            return super().get(path, **params)
+
+    async def run():
+        client = ChangingAtlasClient()
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            await pilot.pause(0.3)
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            assert "0.910" in str(app.query_one("#atlas-detail").content)
+            assert client.atlas_calls == 1
+
+            await pilot.press("1")
+            await pilot.press("7")
+            for _ in range(60):
+                if client.atlas_calls == 2:
+                    break
+                await pilot.pause(0.02)
+            await pilot.pause(0.3)
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            detail = str(app.query_one("#atlas-detail").content)
+            assert client.atlas_calls == 2
+            assert "Hierarchical risk parity" in detail
+            assert "1.770" in detail and "0.910" not in detail
+
+    asyncio.run(run())
+
+
 def test_nav_menu_rows_are_clickable():
-    """Each of the seven spine rows switches to its matching view on click.
+    """Each of the eight spine rows switches to its matching view on click.
 
     The row clicked is the click's y within the widget, so this pins the
     mapping as well as the fact that a Static-based menu is now clickable.
@@ -1575,7 +2083,7 @@ def test_nav_menu_rows_are_clickable():
             await pilot.pause(0.2)
             for row, view in enumerate(
                     ("dashboard", "market", "workforce", "research", "book",
-                     "audit", "settings")):
+                     "audit", "atlas", "settings")):
                 # start elsewhere so each click is a genuine transition
                 app.action_view("audit" if view != "audit" else "dashboard")
                 await pilot.pause(0.02)
@@ -1667,6 +2175,19 @@ def test_phase_elapsed_labels():
     assert phase_elapsed("2999-01-01T00:00:00+00:00", None) == "0s"
 
 
+def test_connection_chip_states():
+    from qlab.tui.formatting import connection_chip
+
+    assert connection_chip(None, 0) == ("CONNECTING", "warn")
+    assert connection_chip(2.0, 0) == ("LIVE", "ok")
+    assert connection_chip(10.0, 0) == ("LIVE", "ok")  # exactly 10s is still LIVE
+    assert connection_chip(75.0, 1) == ("STALE 1:15", "warn")
+    assert connection_chip(75.0, 2)[1] == "warn"  # 2 failures is not down yet
+    assert connection_chip(None, 3) == ("OWNER DOWN", "down")
+    text, level = connection_chip(120.0, 3)
+    assert level == "down" and "OWNER DOWN" in text
+
+
 def test_demojibake_repairs_cp1252_misread_utf8():
     from qlab.tui.formatting import demojibake
 
@@ -1745,6 +2266,109 @@ def test_bulletin_cleans_markdown_ids_empty_lines_and_length():
         strip_ids=False,
     ) == ["Held the checked plan (plan_id: plan-7)."]
     assert bulletin(["abcdefgh"], max_len=4) == ["abcd"]
+
+
+def test_report_lines_normalizes_agent_markdown():
+    from qlab.tui.formatting import report_lines
+
+    out = report_lines([
+        "## How news is currently used",
+        "",
+        "",
+        "News is a quarantined research input, not a trading signal.",
+        "- first point",
+        "* second point",
+        "1. numbered step",
+        "### The extractor cannot trade",
+        "| source | quality |",
+        "    conditioned = reweight(scenarios)",
+    ])
+    kinds = [kind for kind, _ in out]
+    texts = {text for _, text in out}
+    assert ("h1", "How news is currently used") in out
+    assert ("h2", "The extractor cannot trade") in out
+    assert kinds.count("bullet") == 3
+    assert ("bullet", "first point") in out
+    assert ("bullet", "1. numbered step") in out       # numbering preserved
+    assert ("table", "| source | quality |") in out    # tables pass untruncated
+    assert ("code", "    conditioned = reweight(scenarios)") in out
+    assert kinds.count("blank") == 1                   # blank runs collapse
+    assert not any("##" in text for text in texts)     # markers consumed
+
+
+def test_report_lines_wraps_long_paragraphs_without_truncating():
+    from qlab.tui.formatting import report_lines
+
+    long = "word " * 100
+    out = report_lines([long])
+    assert all(kind == "text" for kind, _ in out)
+    assert len(out) > 1                                 # wrapped, not cut
+    assert sum(len(text.split()) for _, text in out) == 100
+
+
+def test_report_lines_keeps_fenced_code_and_deep_headers_verbatim():
+    """A fenced block is code even when it is not indented, and a deeper header
+    is still a header — otherwise both reach the console as literal markdown."""
+    from qlab.tui.formatting import report_lines
+
+    out = report_lines([
+        "#### Deeper section",
+        "```python",
+        "weights = solve(objective)   # alignment must survive",
+        "```",
+        "**Held** the `checked plan` â€” watch vol.",
+    ])
+    assert ("h2", "Deeper section") in out
+    assert ("code", "weights = solve(objective)   # alignment must survive") in out
+    assert not any("```" in text for _kind, text in out)
+    # inline emphasis and back-ticks render literally in a RichLog; mojibake too
+    assert ("text", "Held the checked plan — watch vol.") in out
+
+
+def test_report_lines_reads_indented_list_items_as_bullets_not_code():
+    """A nested list item is indented markdown; dimming it as code would read as
+    a broken report."""
+    from qlab.tui.formatting import report_lines
+
+    out = report_lines([
+        "- outer point",
+        "    - nested point",
+        "\t2. nested step",
+    ])
+    assert [kind for kind, _ in out] == ["bullet", "bullet", "bullet"]
+    assert ("bullet", "nested point") in out
+    assert ("bullet", "2. nested step") in out
+
+
+def test_is_numbered_item_separates_ordinals_from_counts():
+    """Only a real ordinal marker replaces the bullet glyph — a bullet that
+    merely opens with a count still needs its marker."""
+    from qlab.tui.formatting import is_numbered_item
+
+    assert is_numbered_item("1. bind the targets")
+    assert is_numbered_item("2) challenge the window")
+    assert not is_numbered_item("3 of 7 arms admitted")
+    assert not is_numbered_item("2026 was the calm year")
+    assert not is_numbered_item("referee passed")
+    assert not is_numbered_item("")
+
+
+def test_fence_state_after_carries_across_streamed_chunks():
+    """The console renders one line per call, so fence state cannot live inside
+    report_lines; the caller threads it and report_lines accepts it."""
+    from qlab.tui.formatting import fence_state_after, report_lines
+
+    assert fence_state_after(["```python"]) is True
+    assert fence_state_after(["```python", "code", "```"]) is False
+    assert fence_state_after(["plain prose"], True) is True   # still open
+    assert fence_state_after(["```"], True) is False          # closed
+
+    # one unindented code line, arriving alone mid-block, is still code
+    assert report_lines(["weights = solve(`obj`)"], fenced=True) == [
+        ("code", "weights = solve(`obj`)")]
+    # and the closing fence is read as a close, not a fresh open
+    assert report_lines(["```", "back to prose"], fenced=True) == [
+        ("text", "back to prose")]
 
 
 def test_tui_app_uses_theme_tokens_instead_of_literal_hex_colors():
@@ -2073,6 +2697,137 @@ def test_results_fallback_cleans_markdown_mojibake_and_ids():
             assert "decision_id" not in rendered and "dec_a1b2" not in rendered
             assert "UNCERTAINTY / WATCH ITEMS (NON-BLOCKING)" in rendered
             assert "Recommendation: hold the HRP targets." in rendered
+
+    asyncio.run(run())
+
+
+def test_console_renders_markdown_report_styled():
+    """A streamed agent report reaches the console as sections, aligned bullets
+    and verbatim tables/code — never literal markdown or truncated prose."""
+    from qlab.tui.app import QlabTui
+    from textual.widgets import RichLog
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            app._console_stream_text(
+                "## How news is currently used\n"
+                "News is a quarantined research input, not a trading signal.\n"
+                "- referee passed\n"
+                "1. bind the targets\n"
+                "| source | quality |\n"
+                "```python\n"
+                "conditioned = reweight(scenarios)\n"
+                "```\n"
+            )
+            log = app.query_one("#workforce-console", RichLog)
+            rendered = "\n".join(strip.text for strip in log.lines)
+            flat = " ".join(rendered.split())
+
+            assert "##" not in rendered and "```" not in rendered
+            assert "How news is currently used" in flat
+            # plain prose still reads as prose: whole, unbulleted, untruncated
+            assert ("News is a quarantined research input, not a trading signal."
+                    in flat)
+            assert "• referee passed" in flat
+            assert "1. bind the targets" in flat
+            assert "• 1. bind the targets" not in flat   # numbering is the marker
+            assert "| source | quality |" in rendered    # table alignment kept
+            assert "conditioned = reweight(scenarios)" in flat
+
+    asyncio.run(run())
+
+
+def test_console_keeps_fenced_code_verbatim_across_streamed_chunks():
+    """The real caller streams one token at a time, so a fenced block arrives
+    across many calls. Fence state must survive between them: unindented code
+    stays verbatim, and a chunk that closes the fence must not reopen it."""
+    from qlab.tui.app import QlabTui
+    from qlab.tui.theme import DIM, TEXT
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            written: list[str] = []
+            app._console_write = written.append
+            for chunk in (
+                "Here is the guard:\n",
+                "```python\n",
+                "weights = solve(`obj`)  # **kept**\n",
+                "    if weights.sum() != 1:\n",
+                # a close plus the next prose line inside one delta
+                "```\nThat guard is deterministic.\n",
+            ):
+                app._console_stream_text(chunk)
+
+            rendered = "\n".join(written)
+            assert "```" not in rendered                    # fences consumed
+            # code is verbatim: back-ticks, ** and indentation all survive
+            assert f"[{DIM}]weights = solve(`obj`)  # **kept**[/]" in written
+            assert f"[{DIM}]    if weights.sum() != 1:[/]" in written
+            # prose on both sides of the block is prose, never dim code
+            assert f"[{TEXT}]Here is the guard:[/]" in written
+            assert f"[{TEXT}]That guard is deterministic.[/]" in written
+            assert app._console_fenced is False             # block closed
+
+    asyncio.run(run())
+
+
+def test_console_bullet_glyph_survives_a_count_leading_bullet():
+    """A bullet that opens with a number is still a bullet; only a real ordinal
+    marker ("1.") stands in for the glyph."""
+    from qlab.tui.app import QlabTui
+    from textual.widgets import RichLog
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            app._console_stream_text(
+                "- 3 of 7 arms admitted\n"
+                "1. bind the targets\n"
+            )
+            flat = " ".join(" ".join(
+                strip.text for strip in app.query_one(
+                    "#workforce-console", RichLog).lines).split())
+
+            assert "• 3 of 7 arms admitted" in flat
+            assert "1. bind the targets" in flat
+            assert "• 1. bind the targets" not in flat
+
+    asyncio.run(run())
+
+
+def test_console_flush_writes_the_partial_line_and_never_leaks_fence_state():
+    """Text that never got its newline still reaches the console when the turn
+    ends, and an unclosed fence dies with the turn."""
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            written: list[str] = []
+            app._console_write = written.append
+
+            app._console_stream_text("Bottom line: ")
+            app._console_stream_text("nothing traded.")
+            assert written == []                    # an incomplete line waits
+            app._console_flush()
+            assert any("Bottom line: nothing traded." in line for line in written)
+            assert app._console_partial == ""
+
+            # a turn that ends mid-block must not render the next turn as code
+            app._console_stream_text("```python\n")
+            assert app._console_fenced is True
+            app._console_flush()
+            assert app._console_fenced is False
 
     asyncio.run(run())
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from qlab.core.types import Decision, SolveResult, Weights
+from qlab.state.registry import Registry
 
 
 def test_run_logging_is_idempotent(reg):
@@ -549,3 +550,82 @@ def test_referee_verdict_must_bind_the_workflows_own_decision(reg):
         workflow_id, "referee", "done",
         artifacts={"verdict": "PASS", "verdict_id": mine, "targets": targets})
     assert {s["phase"]: s["status"] for s in done["steps"]}["referee"] == "done"
+
+
+def test_equity_marks_are_idempotent_and_ordered():
+    reg = Registry(":memory:")
+    assert reg.log_equity_mark(
+        "2026-06-02T21:00:00+00:00", 10_050.0, cash=500.0, source="daily")
+    assert reg.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 10_000.0, cash=500.0, source="daily")
+    # Same (ts, source) is a silent no-op that keeps the first value.
+    assert not reg.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 99.0, cash=0.0, source="daily")
+    # A different source at the same instant is a distinct observation.
+    assert reg.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 10_000.0, cash=None, source="alpaca_backfill")
+    marks = reg.equity_marks()
+    assert [m["equity"] for m in marks if m["source"] == "daily"] == [10_000.0, 10_050.0]
+    assert marks[0]["ts"] == "2026-06-01T21:00:00+00:00"
+
+
+def test_reset_book_discards_the_equity_marks_of_the_discarded_book():
+    """Resetting the book wipes its history: a reset is not a market move."""
+    reg = Registry(":memory:")
+    reg.init_account(10_000.0)
+    reg.apply_fill("ACWI", 10.0, 50.0, -500.0)
+    reg.add_order("order-1", "plan-1", "ACWI", "buy", 500.0)
+    reg.log_equity_mark("2026-06-01T21:00:00+00:00", 10_500.0, cash=500.0,
+                        source="daily", book="simulated_paper")
+
+    reg.reset_book(10_000.0)
+
+    assert reg.get_positions() == {}
+    assert reg.list_orders() == []
+    assert reg.equity_marks() == []
+    assert reg.count_equity_marks() == 0
+
+
+def test_equity_marks_are_partitioned_by_book():
+    """One book's marks are readable without another book's equity level."""
+    reg = Registry(":memory:")
+    reg.log_equity_mark("2026-06-01T21:00:00+00:00", 10_000.0, cash=None,
+                        source="daily", book="simulated_paper")
+    reg.log_equity_mark("2026-06-02T21:00:00+00:00", 250_000.0, cash=None,
+                        source="daily", book="alpaca_paper")
+
+    assert [m["equity"] for m in reg.equity_marks(book="simulated_paper")] == [10_000.0]
+    assert [m["equity"] for m in reg.equity_marks(book="alpaca_paper")] == [250_000.0]
+    assert reg.count_equity_marks() == 2
+    assert reg.count_equity_marks(book="simulated_paper") == 1
+    # An unattributed mark belongs to no book and is never claimed by one.
+    reg.log_equity_mark("2026-06-03T21:00:00+00:00", 1.0, cash=None,
+                        source="daily")
+    assert reg.count_equity_marks(book="simulated_paper") == 1
+    assert reg.count_equity_marks() == 3
+
+
+def test_equity_marks_gains_the_book_column_on_an_existing_table(tmp_path):
+    """An equity_marks table created before `book` existed must be migrated.
+
+    _SCHEMA never touches an already-created table, so without the explicit
+    ALTER a pre-`book` registry breaks every mark write and every read.
+    """
+    path = tmp_path / "registry.duckdb"
+    reg = Registry(str(path))
+    reg.con.execute("DROP TABLE equity_marks")
+    reg.con.execute(
+        "CREATE TABLE equity_marks (ts VARCHAR, source VARCHAR, "
+        "equity DOUBLE, cash DOUBLE, PRIMARY KEY (ts, source))")
+    reg.close()
+
+    reg = Registry(str(path))
+    try:
+        assert reg.log_equity_mark("2026-06-01T21:00:00+00:00", 10_000.0,
+                                   cash=500.0, source="daily",
+                                   book="alpaca_paper")
+        assert [m["equity"] for m in reg.equity_marks(book="alpaca_paper")] \
+            == [10_000.0]
+        assert reg.count_equity_marks(book="alpaca_paper") == 1
+    finally:
+        reg.close()

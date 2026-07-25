@@ -192,6 +192,12 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     expected_cost JSON, summary JSON, status VARCHAR, challenge_digest VARCHAR,
     expires_at VARCHAR, decided_at VARCHAR, consumed_at VARCHAR,
     invalidated_reason VARCHAR, created_at VARCHAR);
+-- `book` is the broker the equity belongs to. Two books' equity levels can
+-- never compose one return series, so every mark carries its own; the
+-- idempotency key stays (ts, source).
+CREATE TABLE IF NOT EXISTS equity_marks (
+    ts VARCHAR, source VARCHAR, book VARCHAR, equity DOUBLE, cash DOUBLE,
+    PRIMARY KEY (ts, source));
 """
 
 
@@ -229,6 +235,7 @@ class Registry:
         self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_qty DOUBLE")
         self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS avg_fill_price DOUBLE")
         self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS fee DOUBLE")
+        self.con.execute("ALTER TABLE equity_marks ADD COLUMN IF NOT EXISTS book VARCHAR")
 
     def close(self) -> None:
         self.con.close()
@@ -841,9 +848,17 @@ class Registry:
                          [halted, _now()])
 
     def reset_book(self, cash: float) -> None:
-        """Flatten positions and reset the account to starting capital (for demos)."""
+        """Discard the book: positions, orders, marks, and the account state.
+
+        The equity marks go with it. Keeping them would splice the discarded
+        book's equity level onto the fresh one, and the first mark after a reset
+        would read as a market loss the size of the discarded gains — a
+        fabricated return that then propagates into max_drawdown, ann_vol and
+        cvar_95. A reset is already a destructive wipe; the history goes too.
+        """
         self.con.execute("DELETE FROM positions")
         self.con.execute("DELETE FROM orders")
+        self.con.execute("DELETE FROM equity_marks")
         self.con.execute(
             "UPDATE account SET cash=?, high_water_mark=?, halted=FALSE, updated_at=? "
             "WHERE id=1", [cash, cash, _now()])
@@ -927,6 +942,40 @@ class Registry:
         """Return recent order records for the audit surface."""
         return self._rows(
             "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", [limit])
+
+    def log_equity_mark(self, ts: str, equity: float, cash: float | None,
+                        source: str, book: str = "") -> bool:
+        """One equity observation per (ts, source); duplicates are no-ops.
+
+        ``book`` names the broker the equity belongs to. An empty book is an
+        unattributed observation: it is stored, but no book will ever claim it
+        as part of its return series.
+        """
+        row = self.con.execute(
+            "INSERT OR IGNORE INTO equity_marks (ts, source, book, equity, cash) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [str(ts), str(source), str(book), float(equity),
+             None if cash is None else float(cash)],
+        ).fetchone()
+        return bool(row and row[0])
+
+    def equity_marks(self, limit: int = 5000,
+                     book: str | None = None) -> list[dict]:
+        """Newest ``limit`` marks oldest-first; one book only when given."""
+        where = "" if book is None else "WHERE book = ? "
+        params: list = [] if book is None else [str(book)]
+        rows = self._rows(
+            f"SELECT ts, source, book, equity, cash FROM equity_marks {where}"
+            "ORDER BY ts DESC LIMIT ?", [*params, int(limit)])
+        return list(reversed(rows))
+
+    def count_equity_marks(self, book: str | None = None) -> int:
+        """Total marks recorded — the honest denominator behind a capped read."""
+        where = "" if book is None else "WHERE book = ?"
+        params: list = [] if book is None else [str(book)]
+        rows = self._rows(
+            f"SELECT COUNT(*) AS n FROM equity_marks {where}", params)
+        return int(rows[0]["n"]) if rows else 0
 
     def count_orders_on(self, day_iso: str) -> int:
         """Orders created on a given UTC date (for the cumulative daily cap)."""

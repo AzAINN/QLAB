@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import textwrap
 
 
 # A mis-decoded UTF-8 stream (locale cp1252 on Windows) turns common typographic
@@ -116,6 +117,96 @@ def bulletin(
     return rendered
 
 
+_REPORT_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+_REPORT_BULLET = re.compile(r"^[-*•]\s+(.*)$")
+_REPORT_NUMBERED = re.compile(r"^\d+[.)]\s")
+# A box-drawing or pipe lead means the sender aligned the line by hand; wrapping
+# or truncating it destroys the alignment that makes the table readable.
+_REPORT_TABLE_LEAD = "|┌┬┐├┼┤└┴┘─━│┃┏┳┓┡╇┩┗┻┛╭╮╰╯═╔╗╚╝"
+
+
+def _plain(text: str) -> str:
+    """Drop the inline markers a RichLog would otherwise print literally."""
+    return text.replace("**", "").replace("`", "").strip()
+
+
+def _is_fence(stripped: str) -> bool:
+    return stripped.startswith("```") or stripped.startswith("~~~")
+
+
+def is_numbered_item(text: str) -> bool:
+    """True when a list item already carries its own ordinal marker.
+
+    Distinguishes "1. bind the targets" from a bullet that merely opens with a
+    count ("3 of 7 arms admitted"), which still needs its glyph.
+    """
+    return _REPORT_NUMBERED.match(text) is not None
+
+
+def fence_state_after(lines: list[str], fenced: bool = False) -> bool:
+    """Fence state ``lines`` leave behind, so a caller can carry it forward.
+
+    The console streams one token at a time: a ``` opener and the code it
+    introduces usually arrive in different calls, so fence state cannot live
+    inside a single ``report_lines`` call. This is the caller's memory of it.
+    """
+    for raw in lines:
+        if _is_fence(str(raw).strip()):
+            fenced = not fenced
+    return fenced
+
+
+def report_lines(lines: list[str], max_len: int = 260, *,
+                 fenced: bool = False) -> list[tuple[str, str]]:
+    """Normalize agent-report markdown into (kind, text) console lines.
+
+    Tone-free by design — the app maps kinds to theme markup. Tables and
+    code stay verbatim (truncating them mangles alignment); paragraphs wrap
+    instead of truncating so long reports stay readable. ``fenced`` says whether
+    the caller is already inside a ``` block; pair it with ``fence_state_after``
+    to render a report that arrives in pieces.
+    """
+    out: list[tuple[str, str]] = []
+    for raw in lines:
+        line = demojibake(str(raw)).rstrip()
+        stripped = line.strip()
+        if not stripped:
+            if out and out[-1][0] != "blank":
+                out.append(("blank", ""))
+            continue
+        if _is_fence(stripped):
+            fenced = not fenced
+            continue                       # fence markers carry no content
+        if fenced:
+            out.append(("code", line))     # fenced code needs no indent to be code
+            continue
+        heading = _REPORT_HEADING.match(stripped)
+        if heading:
+            kind = "h1" if len(heading.group(1)) <= 2 else "h2"
+            out.append((kind, _plain(heading.group(2))))
+            continue
+        if stripped[0] in _REPORT_TABLE_LEAD:
+            out.append(("table", line))
+            continue
+        # List items are tested before the indent rule: a nested item is indented
+        # markdown, not code, and dimming it as code reads as a broken report.
+        bullet = _REPORT_BULLET.match(stripped)
+        if bullet:
+            for piece in textwrap.wrap(_plain(bullet.group(1)), max_len) or [""]:
+                out.append(("bullet", piece))
+            continue
+        if _REPORT_NUMBERED.match(stripped):
+            for piece in textwrap.wrap(_plain(stripped), max_len) or [""]:
+                out.append(("bullet", piece))
+            continue
+        if line.startswith(("    ", "\t")):
+            out.append(("code", line))
+            continue
+        for piece in textwrap.wrap(_plain(stripped), max_len):
+            out.append(("text", piece))
+    return out
+
+
 def sparkline(values: list[float]) -> str:
     """Render a stable unicode sparkline; flat and empty series are valid."""
     ticks = "▁▂▃▄▅▆▇█"
@@ -199,6 +290,24 @@ def braille_chart(values: list[float], width: int, height: int) -> list[str]:
         "".join(chr(0x2800 + cell) for cell in row)
         for row in grid
     ]
+
+
+def connection_chip(age_seconds: float | None, failures: int) -> tuple[str, str]:
+    """(text, level) for snapshot freshness; level is ok | warn | down.
+
+    Three consecutive refresh failures mean the owner is gone, not merely a
+    slow request — one timeout must not scream OWNER DOWN during an action.
+    """
+    if failures >= 3:
+        if age_seconds is None:
+            return "OWNER DOWN", "down"
+        return f"OWNER DOWN · last {int(age_seconds)}s", "down"
+    if age_seconds is None:
+        return "CONNECTING", "warn"
+    if age_seconds > 10:
+        minutes, seconds = divmod(int(age_seconds), 60)
+        return f"STALE {minutes}:{seconds:02d}", "warn"
+    return "LIVE", "ok"
 
 
 def pct(value: float | None, digits: int = 1) -> str:

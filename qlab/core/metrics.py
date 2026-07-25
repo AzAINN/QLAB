@@ -128,7 +128,7 @@ def downside_capture(returns, benchmark_returns) -> float | None:
 def compute_metrics(
     returns: pd.Series,
     *,
-    periods_per_year: int = _TRADING_DAYS,
+    periods_per_year: float = _TRADING_DAYS,
     turnover: float | None = None,
     n_trials: int = 1,
     trial_sharpe_var: float | None = None,
@@ -136,6 +136,9 @@ def compute_metrics(
     """Compute the standard metric bundle for a return series.
 
     ``returns`` are simple per-period returns of the portfolio.
+    ``periods_per_year`` may be fractional: a series whose observations are not
+    on a trading calendar (realized equity marks, say) annualizes on its own
+    observed cadence, and the caller is responsible for disclosing which it used.
     """
     r = pd.Series(returns).dropna()
     if len(r) < 3:

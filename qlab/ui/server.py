@@ -38,6 +38,8 @@ GET  /api/orders               recent orders
 GET  /api/agents               deployed agent definitions
 GET  /api/algorithms           categorized algorithm deployment catalog
 GET  /api/policy               configured operational allocation policy
+GET  /api/atlas                curated component catalog + live champion/stage overlay
+GET  /api/performance          realized equity curve + metrics from the equity marks
 GET  /api/workflows            durable Claude-workforce runs and phase state
 GET  /api/workflows/<id>       one durable workflow and its ordered steps
 GET  /api/stream               durable audit + transient market events (live)
@@ -52,6 +54,7 @@ GET  /api/approvals            list approval requests (optionally by status)
 GET  /api/approvals/<id>       one approval request
 POST /api/approvals/<id>/approve|reject|challenge   the human decision
 POST /api/plans/<id>/execute   execute by consuming a matching human approval
+POST /api/performance/backfill merge the broker's own equity history into the marks
 POST /api/recommend            an operational allocation recommendation
 POST /api/run_once             one autopilot iteration (analyze -> solve -> trade)
 POST /api/daily_ops            heartbeat (reconcile/risk/triggers; never trades)
@@ -67,6 +70,7 @@ import importlib.util
 import json
 import shutil
 import threading
+import time
 import uuid
 import webbrowser
 from collections import deque
@@ -96,6 +100,13 @@ _MARKET_THREAD_NAME = "qlab-market-topics"
 _MARKET_THREAD_JOIN_TIMEOUT_SECONDS = 5.0
 _MARKET_THREAD_LOCK = threading.Lock()
 _ACTIVE_MARKET_THREAD: threading.Thread | None = None
+
+# Realized-performance window. `_MARK_WINDOW` is the newest-N read cap; when the
+# book has more marks than that, the payload says so rather than letting a
+# truncated series pass for the whole history.
+_MARK_WINDOW = 5000
+_CHART_DAYS = 365
+_DAYS_PER_YEAR = 365.25
 
 _GATED_WORKFORCE_ROLES = frozenset({
     "moments-analyst",
@@ -177,6 +188,7 @@ class UISession:
         # The live market stream is attached only under an operational policy
         # (a real Alpaca feed); it stays None for demo/offline runtimes.
         self.market_stream = None
+        self._last_poll_mark = 0.0
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -416,6 +428,13 @@ class UISession:
         operational policy it fails loud into a ``blocked`` report when live data
         is unavailable rather than valuing the book on fabricated prices.
 
+        Two P&L views exist and must never be shown under one label: the broker's
+        own ``unrealized_pl`` (in ``portfolio_state``) is the venue's view and is
+        the reconcile target, while the ``unrealized_pnl`` computed here is the
+        registry-booked view, marked against the average price qlab recorded.
+        Disagreement between them is a reconciliation finding, not a display
+        choice.
+
         Quote-level (seconds) freshness arrives with the market stream; here the
         marks are the broker's latest available prices and provenance is reported
         at the daily-bar level.
@@ -491,6 +510,117 @@ class UISession:
                 "quote_health": stream.health() if stream else None,
             },
         }
+
+    # -- realized performance ----------------------------------------------
+    def current_book(self, offline: bool) -> str:
+        """Name of the book being traded now — the marks' partition key.
+
+        Constructing the broker is the only honest answer: the venue is chosen
+        by credentials, so the book can change between sessions without anything
+        in the registry changing.
+        """
+        from qlab.trader.broker import get_broker
+
+        return get_broker(
+            self.registry, offline=offline,
+            starting_cash=self.mandate.paper_capital, seed=self.seed,
+            universe=self.mandate.universe_whitelist).name
+
+    def record_equity_mark(self, source: str, offline: bool) -> None:
+        state = self.portfolio(offline)
+        self.registry.log_equity_mark(
+            datetime.now(timezone.utc).isoformat(),
+            state["equity"], cash=state["cash"], source=source,
+            book=state["broker"])
+
+    def performance(self, offline: bool) -> dict:
+        """Realized equity curve and metrics for the CURRENT book's marks.
+
+        Two invariants the payload has to carry, not assume:
+
+        * One book per series. A simulated book near $10k and an Alpaca account
+          at a different equity level share a marks table but not a return
+          series — a venue switch is a bookkeeping event, not a market move.
+          Marks from another book are excluded and the exclusion is stated in
+          ``note``; they are never silently dropped.
+        * The annualization factor is observed, not assumed. Marks land whenever
+          the desk ran (hourly polls on any day the TUI was open, weekends
+          included; ``daily`` marks whenever daily ops ran), so 252 periods a
+          year is a claim the data cannot support. ``cadence`` reports the factor
+          actually used and the span it came from.
+        """
+        import pandas as pd
+
+        from qlab.core.metrics import compute_metrics
+
+        book = self.current_book(offline)
+        rows = self.registry.equity_marks(_MARK_WINDOW, book=book)
+        total = self.registry.count_equity_marks(book=book)
+        excluded = self.registry.count_equity_marks() - total
+        notes: list[str] = []
+        if excluded:
+            notes.append(f"{excluded} mark(s) from another book excluded; "
+                         f"this series is {book} only")
+        if total > len(rows):
+            notes.append(f"history capped at the newest {_MARK_WINDOW} "
+                         f"marks of {total}")
+        payload = {
+            "book": book, "marks": len(rows), "marks_total": total,
+            "marks_capped": total > len(rows), "mark_limit": _MARK_WINDOW,
+            "excluded_marks": excluded,
+        }
+        if not rows:
+            notes.insert(0, "no equity history yet")
+            return {"series": [], "metrics": None, "since_start": None,
+                    "window_change": None, "cadence": None,
+                    "note": "; ".join(notes), **payload}
+        frame = pd.DataFrame(rows)
+        frame["ts"] = pd.to_datetime(frame["ts"], utc=True, format="ISO8601")
+        daily = (frame.set_index("ts").sort_index()["equity"]
+                 .resample("1D").last().dropna())
+        window = daily.tail(_CHART_DAYS)
+        series = [{"ts": stamp.date().isoformat(), "equity": float(value)}
+                  for stamp, value in window.items()]
+        returns = daily.pct_change().dropna()
+        cadence = _observed_cadence(daily)
+        metrics = (compute_metrics(
+            returns, periods_per_year=cadence["periods_per_year"])
+            if cadence is not None and len(returns) >= 3 else None)
+        # compute_metrics reports only n_obs below three observations; a partial
+        # bundle must not reach the client as if it were a full one.
+        if metrics is not None and "sharpe" not in metrics:
+            metrics = None
+        if metrics is None:
+            notes.append("insufficient history for realized metrics "
+                         "(need >=4 daily marks)")
+        start = float(daily.iloc[0])
+        since_start = float(daily.iloc[-1] / start - 1.0) if start > 0 else None
+        # The chart draws `series`; the percentage rendered beside it must come
+        # from that same window, not from a first mark off its left edge.
+        first = float(window.iloc[0])
+        window_change = (float(window.iloc[-1] / first - 1.0)
+                         if first > 0 else None)
+        return {"series": series, "metrics": metrics,
+                "since_start": since_start, "window_change": window_change,
+                "cadence": cadence, "note": "; ".join(notes) or None, **payload}
+
+    def backfill_equity_history(self, offline: bool) -> dict:
+        """Merge the broker's own equity history into the marks, idempotently."""
+        from qlab.trader.broker import get_broker
+
+        broker = get_broker(
+            self.registry, offline=offline,
+            starting_cash=self.mandate.paper_capital, seed=self.seed,
+            universe=self.mandate.universe_whitelist)
+        if not hasattr(broker, "portfolio_history"):
+            raise RuntimeError(
+                f"broker {broker.name!r} exposes no portfolio history to backfill")
+        inserted = sum(
+            self.registry.log_equity_mark(
+                row["ts"], row["equity"], cash=None, source="alpaca_backfill",
+                book=broker.name)
+            for row in broker.portfolio_history())
+        return {"backfilled": int(inserted)}
 
     def market(self, offline: bool) -> dict:
         """Compact, provenance-first daily-bar snapshot for terminal clients."""
@@ -1103,10 +1233,89 @@ class UISession:
             }
         return None
 
+    def latest_ablation_metrics(self) -> dict[str, dict]:
+        """Per-arm metrics from the newest staged ablation run.
+
+        Only ``kind == "ablation"`` runs are comparable: ``backtest.run`` and
+        ``research.apply_views`` also write the backtests table, one raw arm id
+        at a time, and a newer one of those must never displace the ablation.
+        ``list_runs`` is already newest-first, and filtering before ``report``
+        keeps the TUI poll path off an N+1 scan of unrelated research history.
+        """
+        from qlab.experiment import ABLATION_RUN_KIND
+
+        for run in self.registry.list_runs(200):
+            if run.get("kind") != ABLATION_RUN_KIND:
+                continue
+            backtests = self.registry.report(run["run_id"]).get("backtests") or []
+            if backtests:
+                return {bt["arm_id"]: bt["metrics"] for bt in backtests}
+        return {}
+
+    def atlas(self) -> dict:
+        """The curated catalog with live facts overlaid, never stored in prose."""
+        from dataclasses import asdict
+
+        from qlab.algorithms import list_algorithms
+        from qlab.core.atlas import ATLAS_ENTRIES
+
+        catalog = {row["id"]: row for row in list_algorithms()}
+        champion = self.mandate.operational_policy
+        ablation = self.latest_ablation_metrics()
+        entries = []
+        for entry in ATLAS_ENTRIES:
+            row = asdict(entry)
+            spec = catalog.get(entry.algorithm_key) if entry.algorithm_key else None
+            row["stage"] = spec["stage"] if spec else None
+            row["champion"] = bool(
+                entry.group == "arm" and entry.algorithm_key == champion)
+            # Absent ablation evidence stays absent — never a zero.
+            row["ablation"] = (
+                ablation.get(entry.arm_id) if entry.arm_id else None)
+            entries.append(row)
+        return {"entries": entries, "champion_policy": champion}
+
+    def leaderboard(self) -> list[dict]:
+        """Newest ablation ranked by Sharpe, in operator-readable method names."""
+        from qlab.algorithms import list_algorithms
+        from qlab.core.atlas import (
+            OVERLAY_METRICS,
+            arm_algorithm_key,
+            arm_display_name,
+        )
+
+        catalog = {row["id"]: row for row in list_algorithms()}
+        champion = self.mandate.operational_policy
+        rows = []
+        for arm_id, metrics in self.latest_ablation_metrics().items():
+            key = arm_algorithm_key(arm_id)
+            spec = catalog.get(key) if key else None
+            rows.append({
+                "arm_id": arm_id,
+                "name": arm_display_name(arm_id),
+                "champion": bool(key == champion),
+                "benchmark": bool(spec and spec["category"] == "benchmark"),
+                **{name: metrics.get(name) for name in OVERLAY_METRICS},
+            })
+        # Arms without a Sharpe sort last instead of claiming a rank.
+        rows.sort(key=lambda row: -(
+            row["sharpe"] if row["sharpe"] is not None else float("-inf")))
+        return rows
+
     def tui_snapshot(self, offline: bool, event_limit: int = 100) -> dict:
         """One consistent payload for a complete TUI refresh."""
         from qlab.algorithms import list_algorithms
 
+        # One poll-sourced mark an hour keeps intraday granularity while the TUI
+        # is open without turning the 2s refresh into 43k rows a day.
+        # The throttle is advanced BEFORE the write on purpose: a failing mark is
+        # then not retried on the next 2s tick (it waits an hour and self-heals),
+        # and the write reads the broker exactly as self.portfolio(offline) does
+        # on the next line — so leaving it unguarded adds no new failure class.
+        # Do not "fix" this ordering into write-then-advance.
+        if time.time() - self._last_poll_mark > 3600.0:
+            self._last_poll_mark = time.time()
+            self.record_equity_mark("poll", offline)
         portfolio = self.portfolio(offline)
         market_snapshot = self.market(offline)
         events = self.read_audit_stream_events(event_limit, after=None)
@@ -1148,6 +1357,8 @@ class UISession:
             "algorithms": list_algorithms(),
             "policy": self.allocation_policy(),
             "equilibrium_returns": self.latest_equilibrium_returns(),
+            "leaderboard": self.leaderboard(),
+            "performance": self.performance(offline),
             "workflows": self.registry.list_workflows(10),
         }
 
@@ -1294,6 +1505,46 @@ def _overlap_stream_cursor(cursor: str) -> str:
     return (parsed - timedelta(microseconds=1)).isoformat()
 
 
+def _observed_cadence(daily) -> dict | None:
+    """Annualization basis derived from the marks that actually exist.
+
+    The equity marks are not a trading calendar: a Fri→Mon step and a Tue→Wed
+    step are both one observation, and marks appear on weekends whenever the TUI
+    was open. Annualizing that at 252 periods a year is an unstated, unstable
+    time-base error, so the factor here is the observed number of return
+    observations per year across the observed span. It is returned for the
+    payload as well as used, because the convention must never be implicit.
+    """
+    steps = len(daily) - 1
+    if steps < 1:
+        return None
+    span_days = (daily.index[-1] - daily.index[0]).total_seconds() / 86400.0
+    if span_days <= 0.0:
+        return None
+    return {
+        "periods_per_year": round(_DAYS_PER_YEAR * steps / span_days, 4),
+        "observed_span_days": round(span_days, 4),
+        "mean_step_days": round(span_days / steps, 4),
+        "basis": "observed mark cadence",
+    }
+
+
+def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None:
+    """Mark the book after a mutation; a failed mark must never hide the result.
+
+    ``record_equity_mark`` re-reads the broker, so it can fail (a network hiccup)
+    right after real legs filled. The trade already happened: refusing the
+    response would hide reality from the operator, so the failure fails loud into
+    the audit bus instead. Only the post-mutation hooks are guarded — the backfill
+    route still surfaces its RuntimeError to the client as a 400.
+    """
+    try:
+        session.record_equity_mark(source, offline)
+    except Exception as exc:  # the mutation's own result must still reach the client
+        session.registry.record_event(
+            "equity_mark_failed", {"source": source, "error": repr(exc)})
+
+
 # ---------------------------------------------------------------------------
 # API dispatch (pure functions of the session; easy to unit-test)
 # ---------------------------------------------------------------------------
@@ -1330,6 +1581,13 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "GET" and path == "/api/policy":
         return 200, session.allocation_policy()
+
+    if method == "GET" and path == "/api/atlas":
+        return 200, session.atlas()
+
+    if method == "GET" and path == "/api/performance":
+        return 200, session.performance(
+            _qbool(query, "offline", session.offline_default))
 
     if method == "GET" and path == "/api/workflows":
         limit = max(1, min(int(query.get("limit", ["10"])[0]), 50))
@@ -1540,7 +1798,18 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.rebalance_preview(body, off)
 
     if method == "POST" and path == "/api/plans/execute":
-        return 200, session.execute_checked_plan(body, off)
+        result = session.execute_checked_plan(body, off)
+        # A mark sourced "execution" asserts that legs filled; a refused or
+        # mandate-violating plan must not forge that provenance.
+        if result.get("executed") is True:
+            _mark_after_mutation(session, "execution", off)
+        return 200, result
+
+    if method == "POST" and path == "/api/performance/backfill":
+        try:
+            return 200, session.backfill_equity_history(off)
+        except RuntimeError as exc:
+            return 400, {"error": str(exc)}
 
     if method == "POST" and path.startswith("/api/workflows/"):
         phase = path.removeprefix("/api/workflows/")
@@ -1563,8 +1832,10 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "POST" and path == "/api/daily_ops":
         from qlab.autopilot.loop import daily_ops
 
-        return 200, daily_ops(registry=session.registry, mandate=session.mandate,
-                              offline=off, seed=session.seed)
+        summary = daily_ops(registry=session.registry, mandate=session.mandate,
+                            offline=off, seed=session.seed)
+        _mark_after_mutation(session, "daily", off)
+        return 200, summary
 
     if method == "POST" and path == "/api/batch":
         from qlab.experiment import run_ablation

@@ -138,7 +138,7 @@ APP_CSS_TEMPLATE = Template("""
         text-style: bold;
     }
     #nav {
-        height: 7;
+        height: 8;
         color: $muted;
     }
     #universe-label {
@@ -394,6 +394,41 @@ APP_CSS_TEMPLATE = Template("""
         margin-left: 2;
     }
 
+    #atlas-split {
+        height: 1fr;
+    }
+    #atlas-list {
+        width: 34;
+        background: transparent;
+        border: none;
+        border-right: solid $border;
+        scrollbar-size: 1 1;
+    }
+    #atlas-list ListItem {
+        height: 1;
+        padding: 0 1;
+        background: transparent;
+        color: $text;
+    }
+    #atlas-list ListItem.-highlight {
+        background: $sel_bg;
+        color: $text_hi;
+    }
+    #atlas-list ListItem:disabled {
+        background: transparent;
+    }
+    #atlas-detail-scroll {
+        width: 1fr;
+        height: 1fr;
+        padding: 0 2;
+        scrollbar-size: 1 1;
+    }
+    #atlas-detail {
+        width: 1fr;
+        height: auto;
+        color: $text;
+    }
+
     .settings-card {
         width: 1fr;
         height: auto;
@@ -463,6 +498,13 @@ APP_CSS_TEMPLATE = Template("""
     }
     #command:focus {
         border: none;
+    }
+    #conn-chip {
+        width: auto;
+        padding: 0 1;
+        height: 1;
+        text-align: right;
+        color: $muted;
     }
     #system-status {
         width: auto;

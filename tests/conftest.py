@@ -6,6 +6,7 @@ revision). All data is the deterministic synthetic feed — no network, ever.
 
 from __future__ import annotations
 
+import os
 import warnings
 
 import pytest
@@ -26,6 +27,25 @@ CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 def isolated_market_cache(tmp_path, monkeypatch):
     """Keep offline tests independent of the operator's real-data cache."""
     monkeypatch.setattr(market, "_CACHE_DIR", tmp_path / "market-cache")
+
+
+@pytest.fixture(autouse=True)
+def isolated_alpaca_credentials(tmp_path, monkeypatch):
+    """No test may discover the operator's real Alpaca login.
+
+    ``get_broker`` selects the Alpaca book whenever credentials are
+    discoverable, so on a machine where ``alpaca profile login`` has run the
+    offline suite would otherwise reach the operator's real paper account.
+    Point the CLI config at a directory that does not exist and clear the env
+    credentials. The opt-in integration suite needs the real ones, so it is
+    left untouched.
+    """
+    if os.environ.get("QLAB_ALPACA_INTEGRATION") == "1":
+        return
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path / "no-alpaca-config"))
+    monkeypatch.delenv("ALPACA_PROFILE", raising=False)
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
 
 
 @pytest.fixture

@@ -10,12 +10,13 @@ offline. ``AlpacaPaperBroker`` is the real paper account; live is unimplemented.
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from typing import Callable
 
 from qlab.core import data as market
 from qlab.state.registry import Registry
+from qlab.trader.alpaca_auth import (
+    AlpacaAuthError, AlpacaCredentials, resolve_alpaca_credentials)
 
 PriceProvider = Callable[[list[str]], dict[str, float]]
 
@@ -117,27 +118,36 @@ class SimulatedPaperBroker(Broker):
 class AlpacaPaperBroker(Broker):
     """Alpaca paper-trading adapter. PAPER IS HARD-CODED; live is unimplemented.
 
-    Requires ``alpaca-py`` and ``ALPACA_API_KEY`` / ``ALPACA_API_SECRET``. Uses
-    fractional/notional orders (whole shares of a $250 ETF give ~2.5% weight
-    granularity — the weights would be fiction; research-plan §8.1).
+    Requires ``alpaca-py`` and either an `alpaca profile login` session or
+    ``ALPACA_API_KEY`` / ``ALPACA_API_SECRET``. Uses fractional/notional orders
+    (whole shares of a $250 ETF give ~2.5% weight granularity — the weights
+    would be fiction; research-plan §8.1).
     """
 
     name = "alpaca_paper"
 
-    def __init__(self, registry: Registry):
+    def __init__(self, registry: Registry,
+                 credentials: AlpacaCredentials | None = None):
         self.reg = registry
-        key = os.environ.get("ALPACA_API_KEY")
-        secret = os.environ.get("ALPACA_API_SECRET")
-        if not (key and secret):
-            raise RuntimeError("ALPACA_API_KEY / ALPACA_API_SECRET not set")
+        creds = credentials or resolve_alpaca_credentials()
+        if creds is None:
+            raise AlpacaAuthError(
+                "no Alpaca credentials found — run `alpaca profile login` or "
+                "set ALPACA_API_KEY / ALPACA_API_SECRET")
         try:
             from alpaca.trading.client import TradingClient
             from alpaca.data.historical import StockHistoricalDataClient
         except ImportError as exc:
             raise RuntimeError(f"alpaca-py not installed ({exc}); pip install qlab[trader]")
-        # paper=True is NOT configurable here — this class only ever paper-trades
-        self.trading = TradingClient(key, secret, paper=True)
-        self.data = StockHistoricalDataClient(key, secret)
+        # paper=True is NOT configurable here — this class only ever paper-trades.
+        # An OAuth token from `alpaca profile login` is paper-only at the source,
+        # which is why that flow is the preferred credential.
+        if creds.kind == "oauth":
+            self.trading = TradingClient(oauth_token=creds.oauth_token, paper=True)
+            self.data = StockHistoricalDataClient(oauth_token=creds.oauth_token)
+        else:
+            self.trading = TradingClient(creds.api_key, creds.secret_key, paper=True)
+            self.data = StockHistoricalDataClient(creds.api_key, creds.secret_key)
         self._asset_cache: dict[str, dict] = {}
 
     def prices(self, tickers: list[str]) -> dict[str, float]:
@@ -311,27 +321,34 @@ class AlpacaPaperBroker(Broker):
 
 def get_broker(registry: Registry, *, offline: bool = False,
                starting_cash: float = 10000.0, seed: int = 7,
-               universe: list[str] | None = None) -> Broker:
-    """Return the Alpaca paper broker if credentials exist, else the simulator."""
-    key, secret = os.environ.get("ALPACA_API_KEY"), os.environ.get("ALPACA_API_SECRET")
-    if bool(key) != bool(secret):
-        # Partial credentials signal Alpaca intent with a broken setup: fail
-        # loud rather than silently simulating against the wrong venue.
+               universe: list[str] | None = None,
+               book: str | None = None) -> Broker:
+    """Return the broker for the chosen ``book``.
+
+    ``book`` is the operator's explicit decision (``"simulated"`` or
+    ``"alpaca"``). ``None`` keeps the historical behaviour — Alpaca when
+    credentials exist — so callers that have no mode yet are unaffected.
+    Credential presence must never *by itself* select the real paper account.
+    """
+    if book == "simulated":
+        return SimulatedPaperBroker(
+            registry, default_price_provider(offline=offline, seed=seed),
+            starting_cash, universe=universe)
+
+    creds = resolve_alpaca_credentials()   # raises on partial env credentials
+    if book == "alpaca" and creds is None:
         raise RuntimeError(
-            "only one of ALPACA_API_KEY / ALPACA_API_SECRET is set; set both to "
-            "use the Alpaca paper broker, or neither to use the simulator")
-    if key and secret:
-        # Credentials present means the operator asked for Alpaca: a failure to
-        # build it must be loud, never a silent downgrade to simulation (which
-        # would book against the wrong venue without telling anyone).
+            "the Alpaca book was selected but no credentials were found — run "
+            "`alpaca profile login`, or choose the simulated book")
+    if book == "alpaca" or (book is None and creds is not None):
+        # A failure here must be loud, never a silent downgrade to simulation
+        # (which would book against the wrong venue without telling anyone).
         try:
-            return AlpacaPaperBroker(registry)
+            return AlpacaPaperBroker(registry, credentials=creds)
         except Exception as exc:
             raise RuntimeError(
-                "Alpaca credentials are set but the Alpaca paper broker could "
-                f"not be initialized ({exc}); refusing to silently fall back to "
-                "the simulator. Unset ALPACA_API_KEY/SECRET to use the "
-                "simulator deliberately."
+                "the Alpaca paper broker could not be initialized "
+                f"({exc}); refusing to silently fall back to the simulator"
             ) from exc
     return SimulatedPaperBroker(
         registry, default_price_provider(offline=offline, seed=seed),

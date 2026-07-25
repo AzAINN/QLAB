@@ -739,3 +739,58 @@ def test_simulated_broker_has_no_portfolio_history():
     reg = Registry(":memory:")
     broker = SimulatedPaperBroker(reg)
     assert not hasattr(broker, "portfolio_history")
+
+
+def test_simulated_book_wins_over_discoverable_credentials(monkeypatch):
+    """The regression this design exists to prevent.
+
+    A discoverable `alpaca profile login` token must not silently route an
+    operator who chose the simulated book to their real paper account.
+    """
+    from qlab.trader import broker as broker_mod
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+
+    monkeypatch.setattr(
+        broker_mod, "resolve_alpaca_credentials",
+        lambda: AlpacaCredentials("oauth", None, None, "tok", "paper", "/x"))
+    got = broker_mod.get_broker(Registry(":memory:"), offline=True,
+                                book="simulated")
+    assert got.name == "simulated_paper"
+
+
+def test_alpaca_book_without_credentials_refuses_with_the_remedy(monkeypatch):
+    from qlab.trader import broker as broker_mod
+
+    monkeypatch.setattr(broker_mod, "resolve_alpaca_credentials", lambda: None)
+    with pytest.raises(RuntimeError, match="alpaca profile login"):
+        broker_mod.get_broker(Registry(":memory:"), book="alpaca")
+
+
+def test_oauth_credentials_build_the_clients_with_a_token(monkeypatch):
+    """OAuth must reach BOTH the trading and the market-data client."""
+    from qlab.trader import broker as broker_mod
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+
+    seen = {}
+
+    class FakeTrading:
+        def __init__(self, *args, **kwargs):
+            seen["trading"] = kwargs
+
+    class FakeData:
+        def __init__(self, *args, **kwargs):
+            seen["data"] = kwargs
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "alpaca.trading.client",
+        type("M", (), {"TradingClient": FakeTrading}))
+    monkeypatch.setitem(
+        __import__("sys").modules, "alpaca.data.historical",
+        type("M", (), {"StockHistoricalDataClient": FakeData}))
+
+    creds = AlpacaCredentials("oauth", None, None, "tok-123", "paper", "/x")
+    broker_mod.AlpacaPaperBroker(Registry(":memory:"), credentials=creds)
+    assert seen["trading"]["oauth_token"] == "tok-123"
+    assert seen["trading"]["paper"] is True      # never configurable
+    assert seen["data"]["oauth_token"] == "tok-123"
+    assert "api_key" not in seen["trading"] or seen["trading"]["api_key"] is None

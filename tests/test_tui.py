@@ -626,14 +626,16 @@ def test_status_strip_shows_autopilot_last_run_and_trigger_count():
 def test_owner_failure_surfaces_in_conn_chip():
     from qlab.tui.app import QlabTui
 
-    class FailingClient(StubClient):
-        def get(self, path, **params):
-            raise RuntimeError("owner gone")
-
     async def run():
-        app = QlabTui(FailingClient(), refresh_interval=0.05)
+        app = QlabTui(StubClient(), refresh_interval=0)
         async with app.run_test(size=(160, 42)) as pilot:
-            await pilot.pause(0.6)
+            await pilot.pause(0.2)
+            # Drive the failure path directly rather than through real
+            # background-thread polling: three consecutive failures is the
+            # documented threshold, not a timing accident.
+            app._note_refresh_failure()
+            app._note_refresh_failure()
+            app._note_refresh_failure()
             chip = str(app.query_one("#conn-chip").content)
             assert "OWNER DOWN" in chip
 
@@ -2005,7 +2007,9 @@ def test_connection_chip_states():
 
     assert connection_chip(None, 0) == ("CONNECTING", "warn")
     assert connection_chip(2.0, 0) == ("LIVE", "ok")
+    assert connection_chip(10.0, 0) == ("LIVE", "ok")  # exactly 10s is still LIVE
     assert connection_chip(75.0, 1) == ("STALE 1:15", "warn")
+    assert connection_chip(75.0, 2)[1] == "warn"  # 2 failures is not down yet
     assert connection_chip(None, 3) == ("OWNER DOWN", "down")
     text, level = connection_chip(120.0, 3)
     assert level == "down" and "OWNER DOWN" in text

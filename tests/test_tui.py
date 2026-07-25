@@ -428,6 +428,37 @@ def test_workforce_agents_route_models_with_source_override_precedence(monkeypat
     assert routed["reporter"]["model"] == "sonnet"
 
 
+def test_news_tool_reaches_the_regime_roles_and_the_contract_has_five_regimes():
+    """The macro-news read is granted to the regime-judgment roles, its Claude
+    name matches the sanitized base, and the analyst contract lists five regimes.
+    """
+    from qlab.tui.claude import (
+        _ANALYST_REGIMES, _PHASE_ARTIFACT_CONTRACT, build_workforce_agents)
+
+    assert _ANALYST_REGIMES == (
+        "crisis", "stress", "neutral", "calm", "expansion")
+    contract = _PHASE_ARTIFACT_CONTRACT["analyst"]
+    for regime in _ANALYST_REGIMES:
+        assert regime in contract
+    assert "regime_summary" in contract          # the news-driven description
+
+    agents = build_workforce_agents()
+    news = "mcp__qlab-operator__news_market"      # base news.market -> sanitized
+    # only the two roles that actually judge the regime get news access
+    assert news in agents["moments-analyst"]["tools"]
+    assert news in agents["challenger"]["tools"]
+    for role in ("optimization-runner", "referee", "reporter"):
+        assert news not in agents[role]["tools"], role
+
+    # analyst prompt: batch the reads for speed, treat headlines as untrusted,
+    # and choose on the five-level ladder
+    prompt = agents["moments-analyst"]["prompt"]
+    assert "ONE turn" in prompt and "news_market" in prompt
+    assert "untrusted" in prompt and "FIVE-level" in prompt
+    # the analyst-only block must not leak into other roles
+    assert "FIVE-level" not in agents["referee"]["prompt"]
+
+
 def test_session_agent_files_preserve_workforce_authority(tmp_path):
     from qlab.tui.claude import build_workforce_agents, write_session_agents
 
@@ -2451,7 +2482,10 @@ def test_workforce_view_shows_the_selected_regime_and_reasoning():
                     {"phase": "analyst", "agent": "moments-analyst",
                      "status": "done", "summary": "252d window",
                      "artifacts": {"regime": "stress",
-                                   "regime_reasoning": reason}},
+                                   "regime_reasoning": reason,
+                                   "regime_summary": (
+                                       "Rate-hike fears and a growth scare are "
+                                       "driving cross-asset de-risking.")}},
                 ],
             }]
             return snap
@@ -2464,8 +2498,35 @@ def test_workforce_view_shows_the_selected_regime_and_reasoning():
             content = str(app.query_one("#workforce-content").content)
             assert "REGIME" in content and "STRESS" in content
             assert "Turbulence and absorption" in content
+            # the news backdrop that drove the regime is shown too
+            assert "news backdrop" in content
+            assert "growth scare" in content
 
     asyncio.run(run())
+
+
+def test_regime_line_covers_the_five_level_ladder_and_news():
+    """Each of the five regimes gets its own colour, and the news summary is
+    appended as a second line — pure, so the mapping is pinned without an app."""
+    from qlab.tui.app import _REGIME_TONE, _regime_line
+
+    assert set(_REGIME_TONE) == {
+        "crisis", "stress", "neutral", "calm", "expansion"}
+
+    steps = {"analyst": {"artifacts": {
+        "regime": "expansion",
+        "regime_reasoning": "All indicators benign; low turbulence.",
+        "regime_summary": "Cooling inflation and easing bets lift risk assets.",
+    }}}
+    line = _regime_line(steps)
+    assert "EXPANSION" in line
+    assert _REGIME_TONE["expansion"] in line       # its own heat-scale colour
+    assert "news backdrop" in line
+    assert "Cooling inflation" in line
+
+    # no analyst artifacts → no regime line, never an exception
+    assert _regime_line({}) is None
+    assert _regime_line({"analyst": {"artifacts": {}}}) is None
 
 
 def test_new_run_clears_the_previous_run_from_the_flowchart_immediately():

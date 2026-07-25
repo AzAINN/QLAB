@@ -395,16 +395,29 @@ def workforce_note(phase: str, status: str, summary: str,
 
 # The regime a run selected is a first-class read for the operator, so it gets
 # its own colored line rather than living only in a hover card.
+# The analyst's five-level regime ladder, most to least stressed, as a red→cyan
+# heat scale. Exactly the rungs in qlab.tui.claude._ANALYST_REGIMES — nothing else
+# belongs here, so the two stay verifiably in sync.
 _REGIME_TONE = {
+    "crisis": DOWN,
+    "stress": GOLD,
+    "neutral": AMBER_HI,
     "calm": UP,
+    "expansion": CYAN,
+}
+# The HMM posterior speaks a different vocabulary than the analyst's ladder
+# (`normal`/`uncertain` are not rungs). The dashboard tile subscripts this map
+# directly for ("calm", "normal", "stress"), so those keys must exist; ladder
+# rungs are inherited so an analyst-worded regime still gets its heat colour.
+_HMM_STATE_TONE = {
+    **_REGIME_TONE,
     "normal": CYAN,
-    "stress": DOWN,
     "uncertain": AMBER,
 }
 
 
-def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
-    """The analyst's selected regime and its one-line reasoning, or None.
+def _regime_readout(steps_by_phase: dict) -> tuple[str, str, str] | None:
+    """The analyst's regime, its one-line reasoning, and the news summary, or None.
 
     Sourced from the durable analyst-phase artifacts the agent persists, so the
     operator sees the exact call the run made rather than a re-derived one.
@@ -431,19 +444,31 @@ def _regime_readout(steps_by_phase: dict) -> tuple[str, str] | None:
             max_len=220,
         )
     )
-    return regime, reasoning
+    # The news backdrop is model-written text quoting untrusted headlines, so it
+    # gets the same cleaning as the reasoning rather than a raw whitespace join.
+    summary = " · ".join(
+        bulletin(
+            str(artifacts.get("regime_summary") or "").splitlines(),
+            max_len=320,
+        )
+    )
+    return regime, reasoning, summary
 
 
 def _regime_line(steps_by_phase: dict, *, indent: str = "") -> str | None:
-    """A ready-to-print rich-markup regime line, coloured calm/stress, or None."""
+    """Rich-markup regime block: the coloured call, its reasoning, and the 1-3
+    line news backdrop that informed it (from market_news), or None."""
     readout = _regime_readout(steps_by_phase)
     if readout is None:
         return None
-    regime, reasoning = readout
+    regime, reasoning, summary = readout
     tone = _REGIME_TONE.get(regime.lower(), AMBER)
     line = f"{indent}[{CYAN}]◆ REGIME[/]  [bold {tone}]{escape(regime.upper())}[/]"
     if reasoning:
         line += f"  [{MUTED}]{escape(reasoning[:220])}[/]"
+    if summary:
+        line += (f"\n{indent}  [{LABEL_GOLD}]news backdrop[/]  "
+                 f"[{TEXT}]{escape(summary[:320])}[/]")
     return line
 
 
@@ -1639,7 +1664,7 @@ class QlabTui(App[None]):
             ("SOURCE / BAR AGE", f"{source} / {age_text}"),
         ]
         regime_tones = [
-            _REGIME_TONE.get(regime_name.lower(), TEXT_HI),
+            _HMM_STATE_TONE.get(regime_name.lower(), TEXT_HI),
             TEXT,
             TEXT,
         ]
@@ -1668,12 +1693,12 @@ class QlabTui(App[None]):
                 token = f"{state} {round(probability * 100):.0f}"
                 if selected == state:
                     posterior_parts.append(
-                        f"[bold {_REGIME_TONE[state]}]{token}[/]"
+                        f"[bold {_HMM_STATE_TONE[state]}]{token}[/]"
                     )
                 else:
                     posterior_parts.append(f"[{MUTED}]{token}[/]")
             if posterior_parts:
-                state_tone = _REGIME_TONE.get(selected, AMBER)
+                state_tone = _HMM_STATE_TONE.get(selected, AMBER)
                 posterior_parts.append(
                     f"[bold {state_tone}]{escape(regime_name)}[/]"
                 )

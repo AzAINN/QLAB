@@ -47,7 +47,10 @@ _WORKFORCE_DEPS = {
     "reporter": ("referee",),
 }
 _WORKFORCE_REQUIRED_ARTIFACTS = {
-    "analyst": ("moment_set_id", "objective_id", "decision_id"),
+    # regime + regime_summary are required so the run always carries the analyst's
+    # five-level regime call and the news-driven reasoning the desk surfaces.
+    "analyst": ("moment_set_id", "objective_id", "decision_id",
+                "regime", "regime_summary"),
     "challenger": ("challenger_view",),
     "optimizer": ("targets", "algorithm_id"),
     "judge": ("winner_phase", "winning_targets", "evidence"),

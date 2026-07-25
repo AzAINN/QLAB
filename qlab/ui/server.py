@@ -132,6 +132,7 @@ OWNER_LAB_TOOLS = frozenset({
     "regime.volatility_term_structure",
     "regime.drawdown",
     "regime.tail_risk",
+    "news.market",
     "objective.build",
     "algorithms.list",
     "algorithms.describe",

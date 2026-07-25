@@ -229,7 +229,8 @@ def test_workforce_is_durable_ordered_and_role_bound(reg):
     verdict_id = reg.log_verdict("d1", "PASS", ["within mandate"], targets=targets)
     artifacts = {
         "analyst": {"moment_set_id": "m1", "objective_id": "o1",
-                    "decision_id": "d1"},
+                    "decision_id": "d1", "regime": "neutral",
+                    "regime_summary": "mixed data; news backdrop balanced"},
         "challenger": {"challenger_view": "shorter window may react faster"},
         "optimizer": {"targets": targets, "algorithm_id": "hrp"},
         "referee": {"verdict": "PASS", "verdict_id": verdict_id,
@@ -275,7 +276,8 @@ def test_workforce_optimizer_waits_for_the_debate(reg):
 
     reg.update_workflow_phase(
         workflow_id, "analyst", "done",
-        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+                   "regime": "neutral", "regime_summary": "offline synthetic backdrop"},
     )
     # Analyst done is not enough — the debate has not settled.
     with pytest.raises(RuntimeError, match="cannot start before 'challenger'"):
@@ -309,7 +311,8 @@ def test_workforce_refuses_unstructured_completion_and_referee_fail(reg):
 
     reg.update_workflow_phase(
         workflow_id, "analyst", "done",
-        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+                   "regime": "neutral", "regime_summary": "offline synthetic backdrop"},
     )
     reg.update_workflow_phase(
         workflow_id, "challenger", "done",
@@ -335,7 +338,8 @@ def test_workforce_referee_pass_is_bound_to_optimizer_targets(reg):
     workflow_id = workflow["workflow_id"]
     reg.update_workflow_phase(
         workflow_id, "analyst", "done",
-        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1"},
+        artifacts={"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+                   "regime": "neutral", "regime_summary": "offline synthetic backdrop"},
     )
     reg.update_workflow_phase(
         workflow_id, "challenger", "done", artifacts={"challenger_view": "c"},
@@ -412,7 +416,8 @@ def test_panel_workflow_runs_a_judged_tournament(reg):
     reg.update_workflow_phase(
         workflow_id, "analyst-2", "done",
         artifacts={"moment_set_id": "m2", "objective_id": "o2",
-                   "decision_id": "d2"})
+                   "decision_id": "d2", "regime": "neutral",
+                   "regime_summary": "offline synthetic backdrop"})
     reg.update_workflow_phase(workflow_id, "optimizer-2", "working")
     with pytest.raises(RuntimeError, match="cannot start"):
         reg.update_workflow_phase(workflow_id, "judge", "working")
@@ -423,7 +428,8 @@ def test_panel_workflow_runs_a_judged_tournament(reg):
         reg.update_workflow_phase(
             workflow_id, f"analyst-{i}", "done",
             artifacts={"moment_set_id": f"m{i}", "objective_id": f"o{i}",
-                       "decision_id": f"d{i}"})
+                       "decision_id": f"d{i}", "regime": "neutral",
+                       "regime_summary": "offline synthetic backdrop"})
     for i in (1, 2, 3):
         reg.update_workflow_phase(
             workflow_id, f"optimizer-{i}", "done",
@@ -486,7 +492,8 @@ def test_referee_binding_judge_takes_precedence_over_literal_optimizer(reg):
     reg.update_workflow_phase(
         workflow_id, "analyst", "done",
         artifacts={"moment_set_id": "m", "objective_id": "o",
-                   "decision_id": "d"})
+                   "decision_id": "d", "regime": "neutral",
+                   "regime_summary": "offline synthetic backdrop"})
     reg.update_workflow_phase(
         workflow_id, "challenger", "done",
         artifacts={"challenger_view": "c"})
@@ -530,7 +537,8 @@ def test_referee_verdict_must_bind_the_workflows_own_decision(reg):
     reg.update_workflow_phase(
         workflow_id, "analyst", "done",
         artifacts={"moment_set_id": "m", "objective_id": "o",
-                   "decision_id": "d-this"})
+                   "decision_id": "d-this", "regime": "neutral",
+                   "regime_summary": "offline synthetic backdrop"})
     reg.update_workflow_phase(
         workflow_id, "challenger", "done", artifacts={"challenger_view": "c"})
     reg.update_workflow_phase(

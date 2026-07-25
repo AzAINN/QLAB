@@ -758,6 +758,64 @@ def test_simulated_book_wins_over_discoverable_credentials(monkeypatch):
     assert got.name == "simulated_paper"
 
 
+def _discoverable_oauth_profile(tmp_path, monkeypatch):
+    """Lay out a real `alpaca profile login` session on disk, as the CLI does."""
+    (tmp_path / "profiles").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config.yaml").write_text(
+        "default_profile: paper\noutput: json\n", encoding="utf-8")
+    (tmp_path / "profiles" / "paper.yaml").write_text(
+        "access_token: tok-on-disk\nscopes: account:write trading\n",
+        encoding="utf-8")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+
+
+def test_book_none_infers_from_the_environment_only(tmp_path, monkeypatch):
+    """A discoverable CLI login must not move a caller that chose no book.
+
+    ``book=None`` is the historical default of every caller that predates the
+    desk mode, and its signal has always been ALPACA_API_KEY/SECRET. Inferring
+    the Alpaca book from a profile on disk instead would put autopilot on a real
+    paper account the moment the operator logs in with the Alpaca CLI.
+    """
+    from qlab.trader import broker as broker_mod
+
+    _discoverable_oauth_profile(tmp_path, monkeypatch)
+    # The profile really is discoverable: the simulator below is a decision,
+    # not a failure to find the credentials.
+    assert broker_mod.resolve_alpaca_credentials() is not None
+
+    got = broker_mod.get_broker(Registry(":memory:"), offline=True)
+    assert got.name == "simulated_paper"
+
+
+def test_the_alpaca_book_still_reaches_a_disk_profile(tmp_path, monkeypatch):
+    """The other side of env-only inference: asking for Alpaca uses the login."""
+    from qlab.trader import broker as broker_mod
+
+    _discoverable_oauth_profile(tmp_path, monkeypatch)
+    seen = {}
+
+    class Recorder:
+        name = "alpaca_paper"
+
+        def __init__(self, _registry, credentials=None):
+            seen["kind"] = credentials.kind
+            seen["profile"] = credentials.profile_name
+
+    monkeypatch.setattr(broker_mod, "AlpacaPaperBroker", Recorder)
+    got = broker_mod.get_broker(Registry(":memory:"), book="alpaca")
+    assert got.name == "alpaca_paper"
+    assert (seen["kind"], seen["profile"]) == ("oauth", "paper")
+
+
+def test_an_unknown_book_is_refused():
+    """Garbage must not resolve to a venue by accident, in either direction."""
+    from qlab.trader import broker as broker_mod
+
+    with pytest.raises(ValueError, match="unknown book"):
+        broker_mod.get_broker(Registry(":memory:"), book="alpaca_paper")
+
+
 def test_alpaca_book_without_credentials_refuses_with_the_remedy(monkeypatch):
     from qlab.trader import broker as broker_mod
 

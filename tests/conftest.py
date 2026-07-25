@@ -6,7 +6,6 @@ revision). All data is the deterministic synthetic feed — no network, ever.
 
 from __future__ import annotations
 
-import os
 import warnings
 
 import pytest
@@ -22,6 +21,9 @@ warnings.filterwarnings("ignore")
 
 CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 
+# The only module allowed to see the operator's real Alpaca credentials.
+_INTEGRATION_MODULE = "test_alpaca_integration.py"
+
 
 @pytest.fixture(autouse=True)
 def isolated_market_cache(tmp_path, monkeypatch):
@@ -30,17 +32,21 @@ def isolated_market_cache(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolated_alpaca_credentials(tmp_path, monkeypatch):
+def isolated_alpaca_credentials(request, tmp_path, monkeypatch):
     """No test may discover the operator's real Alpaca login.
 
-    ``get_broker`` selects the Alpaca book whenever credentials are
-    discoverable, so on a machine where ``alpaca profile login`` has run the
-    offline suite would otherwise reach the operator's real paper account.
-    Point the CLI config at a directory that does not exist and clear the env
-    credentials. The opt-in integration suite needs the real ones, so it is
-    left untouched.
+    ``get_broker`` can select the Alpaca book from discoverable credentials, so
+    on a machine where ``alpaca profile login`` has run the offline suite would
+    otherwise reach the operator's real paper account. Point the CLI config at a
+    directory that does not exist and clear the env credentials.
+
+    ``tests/test_alpaca_integration.py`` is the one module that is *supposed* to
+    reach the real paper account, and it is skipped unless
+    ``QLAB_ALPACA_INTEGRATION=1``. The exemption is per-module rather than per
+    environment variable so enabling that suite cannot expose every other test
+    to live credentials.
     """
-    if os.environ.get("QLAB_ALPACA_INTEGRATION") == "1":
+    if request.path.name == _INTEGRATION_MODULE:
         return
     monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path / "no-alpaca-config"))
     monkeypatch.delenv("ALPACA_PROFILE", raising=False)

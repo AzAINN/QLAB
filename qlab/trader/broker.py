@@ -10,6 +10,7 @@ offline. ``AlpacaPaperBroker`` is the real paper account; live is unimplemented.
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from typing import Callable
 
@@ -319,6 +320,17 @@ class AlpacaPaperBroker(Broker):
         return rows
 
 
+def _env_credential_signal() -> bool:
+    """Whether the environment carries an Alpaca key/secret at all.
+
+    Truthiness only — the values are never bound to a name or logged. A partial
+    pair counts as a signal so ``resolve_alpaca_credentials`` gets to refuse it
+    by name instead of this function quietly choosing the simulator.
+    """
+    return any(os.environ.get(name, "").strip()
+               for name in ("ALPACA_API_KEY", "ALPACA_API_SECRET"))
+
+
 def get_broker(registry: Registry, *, offline: bool = False,
                starting_cash: float = 10000.0, seed: int = 7,
                universe: list[str] | None = None,
@@ -326,30 +338,34 @@ def get_broker(registry: Registry, *, offline: bool = False,
     """Return the broker for the chosen ``book``.
 
     ``book`` is the operator's explicit decision (``"simulated"`` or
-    ``"alpaca"``). ``None`` keeps the historical behaviour — Alpaca when
-    credentials exist — so callers that have no mode yet are unaffected.
-    Credential presence must never *by itself* select the real paper account.
+    ``"alpaca"``). ``None`` keeps the historical behaviour for callers that have
+    no desk mode yet, and that behaviour is inferred from
+    ``ALPACA_API_KEY``/``ALPACA_API_SECRET`` **alone**: an `alpaca profile login`
+    session discovered on disk is reachable only when a caller explicitly asks
+    for the Alpaca book. Otherwise logging in with the Alpaca CLI would move
+    every default caller onto the real paper account without anyone choosing it.
     """
-    if book == "simulated":
+    if book not in (None, "simulated", "alpaca"):
+        raise ValueError(f"unknown book {book!r}; choose 'simulated' or 'alpaca'")
+    if book == "simulated" or (book is None and not _env_credential_signal()):
         return SimulatedPaperBroker(
             registry, default_price_provider(offline=offline, seed=seed),
             starting_cash, universe=universe)
 
-    creds = resolve_alpaca_credentials()   # raises on partial env credentials
-    if book == "alpaca" and creds is None:
+    # Reached only by an explicit "alpaca", or by env credentials that already
+    # signalled Alpaca intent. The resolver prefers those env credentials and
+    # refuses a partial pair by name.
+    creds = resolve_alpaca_credentials()
+    if creds is None:
         raise RuntimeError(
             "the Alpaca book was selected but no credentials were found — run "
             "`alpaca profile login`, or choose the simulated book")
-    if book == "alpaca" or (book is None and creds is not None):
-        # A failure here must be loud, never a silent downgrade to simulation
-        # (which would book against the wrong venue without telling anyone).
-        try:
-            return AlpacaPaperBroker(registry, credentials=creds)
-        except Exception as exc:
-            raise RuntimeError(
-                "the Alpaca paper broker could not be initialized "
-                f"({exc}); refusing to silently fall back to the simulator"
-            ) from exc
-    return SimulatedPaperBroker(
-        registry, default_price_provider(offline=offline, seed=seed),
-        starting_cash, universe=universe)
+    # A failure here must be loud, never a silent downgrade to simulation
+    # (which would book against the wrong venue without telling anyone).
+    try:
+        return AlpacaPaperBroker(registry, credentials=creds)
+    except Exception as exc:
+        raise RuntimeError(
+            "the Alpaca paper broker could not be initialized "
+            f"({exc}); refusing to silently fall back to the simulator"
+        ) from exc

@@ -2154,14 +2154,21 @@ class QlabTui(App[None]):
         board = self.snapshot.get("leaderboard") or []
         if board:
             lines = [
-                f"[{DIM}]METHOD                      SHARPE     RET    MAXDD   "
-                f"CVAR95     DSR[/]"
+                f"[{DIM}]METHOD                          SHARPE     RET   "
+                f"MAXDD   CVAR95    DSR[/]"
             ]
             for row in board:
-                mark = f" [{AMBER}]★[/]" if row.get("champion") else (
-                    f" [{DIM}]BENCH[/]" if row.get("benchmark") else "")
+                if row.get("champion"):
+                    mark, mark_tone = "★", AMBER
+                elif row.get("benchmark"):
+                    mark, mark_tone = "BENCH", DIM
+                else:
+                    mark, mark_tone = "", DIM
+                # Markup tags occupy no cells: pad the plain text to the column
+                # width first, then wrap it, or every row type drifts.
+                name_cell = escape(f"{str(row.get('name', '')):<24}")
                 lines.append(
-                    f"[{TEXT_HI}]{escape(str(row.get('name', ''))):<24}[/]{mark:<12} "
+                    f"[{TEXT_HI}]{name_cell}[/] [{mark_tone}]{mark:<5}[/]  "
                     f"[{TEXT}]{_cell(row.get('sharpe')):>6}  "
                     f"{_cell(row.get('ann_return'), '{:+.1%}'):>6}  "
                     f"{_cell(row.get('max_drawdown'), '{:.1%}'):>6}  "

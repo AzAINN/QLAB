@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 
 import pytest
@@ -159,6 +160,12 @@ def _snapshot():
             {"arm_id": "B0", "name": "60/40", "champion": False, "benchmark": True,
              "sharpe": 0.55, "ann_return": 0.050, "max_drawdown": -0.180,
              "cvar_95": -0.015, "deflated_sharpe": 0.60},
+            {"arm_id": "B3", "name": "Risk Parity", "champion": False,
+             "benchmark": False, "sharpe": 0.74, "ann_return": 0.048,
+             "max_drawdown": -0.150, "cvar_95": -0.013, "deflated_sharpe": 0.71},
+            {"arm_id": "B4", "name": "Min Variance", "champion": False,
+             "benchmark": False, "sharpe": None, "ann_return": None,
+             "max_drawdown": None, "cvar_95": None, "deflated_sharpe": None},
         ],
     }
 
@@ -1603,6 +1610,72 @@ def test_research_leaderboard_shows_method_names_not_codes():
             assert "★" in board            # champion marked
             assert "BENCH" in board        # benchmark tagged
             assert "B2" not in board       # codes never rendered here
+
+    asyncio.run(run())
+
+
+def test_research_leaderboard_columns_align_on_visible_width():
+    """Markup tags occupy no cells, so a field width must pad the plain text.
+
+    Champion (``★``), benchmark (``BENCH``) and unmarked rows carry different
+    amounts of markup; padding the tagged string lands the metric block at a
+    different offset in every row and the board stops being readable.
+    """
+    from qlab.tui.app import QlabTui
+
+    columns = ["SHARPE", "RET", "MAXDD", "CVAR95", "DSR"]
+    cells = {
+        "HRP": ["0.91", "+6.2%", "-12.4%", "-1.10%", "0.83"],
+        "60/40": ["0.55", "+5.0%", "-18.0%", "-1.50%", "0.60"],
+        "Risk Parity": ["0.74", "+4.8%", "-15.0%", "-1.30%", "0.71"],
+    }
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("4")
+            board = str(app.query_one("#leaderboard").content)
+            plain = re.sub(r"\[[^\]]*\]", "", board).splitlines()
+            header, rows = plain[0], plain[1:]
+
+            def row(name):
+                matches = [line for line in rows if line.startswith(name)]
+                assert len(matches) == 1, f"{name!r} in {rows}"
+                return matches[0]
+
+            edges = [header.index(token) + len(token) for token in columns]
+            starts = []
+            for name, values in cells.items():
+                line = row(name)
+                for token, value, edge in zip(columns, values, edges):
+                    assert line.index(value) + len(value) == edge, (
+                        f"{name} {token} off its column: {line!r}")
+                starts.append(line.index(values[0]))
+            assert len(set(starts)) == 1, f"metric block offsets differ: {starts}"
+
+            absent = row("Min Variance")
+            assert [m.end() for m in re.finditer("—", absent)] == edges, absent
+
+    asyncio.run(run())
+
+
+def test_research_leaderboard_renders_absent_metrics_as_em_dash():
+    """An unscored arm must read as absent — never blank, never ``nan``."""
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("4")
+            board = str(app.query_one("#leaderboard").content)
+            plain = re.sub(r"\[[^\]]*\]", "", board).splitlines()
+            absent = [line for line in plain if line.startswith("Min Variance")]
+            assert len(absent) == 1, plain
+            assert absent[0].count("—") == 5, absent[0]
+            assert "nan" not in absent[0].lower(), absent[0]
+            assert "None" not in absent[0], absent[0]
 
     asyncio.run(run())
 

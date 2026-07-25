@@ -16,6 +16,7 @@ Everything is booked against the registry, so a dying session resumes cleanly an
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime
 from pathlib import Path
 
@@ -221,8 +222,17 @@ def run_once(
                     "decision_id": decision_id, "plan_id": plan.plan_id,
                     "reasons": gate_reasons})
             elif execute:
-                trade_result = execute_plan(reg, broker, plan)
-                trade_result["executed"] = True
+                # Proposal-only by default. A checked plan that clears the
+                # referee and the cost gate becomes an APPROVAL REQUEST, not a
+                # fill: an autonomous cycle cannot move the book on its own.
+                # Booking requires the operator to authorize this process out
+                # of band (QLAB_AUTOPILOT_EXECUTE=1), which no agent can set.
+                if os.environ.get("QLAB_AUTOPILOT_EXECUTE") == "1":
+                    trade_result = execute_plan(reg, broker, plan)
+                    trade_result["executed"] = True
+                else:
+                    trade_result = _propose_for_approval(
+                        reg, broker, mandate, plan)
             else:
                 trade_result = {"executed": False, "plan": plan.to_dict(),
                                 "note": "execute=False (dry run)"}
@@ -604,3 +614,37 @@ def _write_summary(summary: dict, prefix: str = "run") -> Path:
 
 def _as_date(d: str) -> date:
     return date.fromisoformat(d) if isinstance(d, str) else d
+
+
+def _propose_for_approval(registry, broker, mandate, plan) -> dict:
+    """Turn a checked plan into a pending human approval instead of a fill.
+
+    The plan is already referee-PASSed and cost-gated; this records the exact,
+    expiring approval a human must grant before anything books. Returning
+    ``executed: False`` is the honest answer — nothing moved.
+    """
+    from qlab.governance.approval import book_revision, build_approval_request
+
+    stored = registry.get_plan(plan.plan_id) or plan.to_dict()
+    permit = registry.current_data_permit("execution")
+    approval = build_approval_request(
+        stored,
+        broker=broker.name,
+        data_permit_id=(permit or {}).get("permit_id"),
+        current_book_revision=book_revision(registry.get_positions()),
+        summary={"n_legs": plan.pre_trade.get("n_legs"),
+                 "turnover": plan.pre_trade.get("turnover"),
+                 "source": "autopilot"})
+    registry.create_approval_request(approval)
+    registry.record_event("approval_created",
+                          {"approval_id": approval["approval_id"],
+                           "plan_id": plan.plan_id, "source": "autopilot"})
+    return {
+        "executed": False,
+        "blocked_by": "approval_required",
+        "plan_id": plan.plan_id,
+        "approval_id": approval["approval_id"],
+        "expires_at": approval["expires_at"],
+        "note": ("autopilot is proposal-only; a human must approve this exact "
+                 "plan before it can execute"),
+    }

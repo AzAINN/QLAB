@@ -252,8 +252,16 @@ two-writer topology.
     qlab events --kind workflow_phase
 
 run-once performs analysis, solves the configured operational policy, logs the decision,
-runs the deterministic referee, reconciles the book, and then either proposes
-or executes the mandate-checked paper plan.
+runs the deterministic referee, reconciles the book, and proposes a
+mandate-checked paper plan.
+
+**run-once is proposal-only.** A plan that clears the referee and the net-alpha
+cost gate becomes a pending, exact-plan-bound approval request — an autonomous
+cycle never books a fill on its own. A human grants the approval (through the
+TUI or `POST /api/approvals/<id>/approve`), and executing it consumes that
+approval. Booking directly from the cycle requires the operator to authorize
+that process out of band with `QLAB_AUTOPILOT_EXECUTE=1`, which nothing
+connected to the process can set for itself.
 
 daily-ops only reconciles, reports risk, resolves reflections, and checks
 triggers. It cannot trade.

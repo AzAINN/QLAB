@@ -56,11 +56,13 @@ def test_recommend_and_run_once_and_reset(session):
                              {"as_of": "2026-07-13", "offline": True})
     assert status == 200 and abs(sum(rec["recommended_weights"].values()) - 1.0) < 1e-2
 
+    # run_once is proposal-only: it opens an approval rather than booking.
     status, summ = handle_api(session, "POST", "/api/run_once", {}, {"offline": True})
-    assert status == 200 and summ["trade"]["executed"] is True
+    assert status == 200 and summ["trade"]["executed"] is False
+    assert summ["trade"]["blocked_by"] == "approval_required"
 
     status, port = handle_api(session, "GET", "/api/portfolio", {"offline": ["1"]}, {})
-    assert status == 200 and len(port["positions"]) == 7
+    assert status == 200 and port["positions"] == {}
 
     status, r = handle_api(session, "POST", "/api/reset", {}, {})
     assert status == 200 and r["reset"] is True
@@ -238,8 +240,10 @@ def test_bob_message_never_grants_authority(session):
     assert "note" in out
 
 
-def test_live_portfolio_marks_to_market_with_provenance(session):
-    # Deploy the book, then evaluate it live.
+def test_live_portfolio_marks_to_market_with_provenance(session, monkeypatch):
+    # Deploy the book (autopilot is proposal-only, so authorize booking here),
+    # then evaluate it live.
+    monkeypatch.setenv("QLAB_AUTOPILOT_EXECUTE", "1")
     handle_api(session, "POST", "/api/run_once", {}, {"offline": True})
     status, live = handle_api(
         session, "GET", "/api/portfolio/live", {"offline": ["1"]}, {})

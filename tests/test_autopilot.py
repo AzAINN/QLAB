@@ -27,13 +27,36 @@ def test_defensive_targets_are_validated_when_mandate_loads(tmp_path):
         load_mandate(invalid)
 
 
-def test_run_once_deploys_and_conserves_equity():
+def test_run_once_is_proposal_only_and_opens_an_approval():
+    """An autonomous cycle proposes; it never books on its own.
+
+    A checked plan that clears the referee and the cost gate becomes a pending,
+    exact-plan-bound approval — nothing moves until a human grants it.
+    """
+    reg = Registry(":memory:")
+    summary = run_once(registry=reg, offline=True, as_of="2026-07-13")
+    trade = summary["trade"]
+    assert trade["executed"] is False
+    assert trade["blocked_by"] == "approval_required"
+    assert trade["approval_id"] and trade["expires_at"]
+    # The book did not move.
+    assert reg._rows("SELECT * FROM orders", []) == []
+    approval = reg.get_approval_request(trade["approval_id"])
+    assert approval["status"] == "pending"
+    assert approval["plan_id"] == trade["plan_id"]
+    assert summary["algorithm_id"] == "hrp"
+    assert summary["operational_policy"]["id"] == "hrp"
+    reg.close()
+
+
+def test_run_once_books_only_with_out_of_band_operator_authorization(monkeypatch):
+    """The escape hatch is an environment variable the operator sets, which no
+    agent connected to this process can set for itself."""
+    monkeypatch.setenv("QLAB_AUTOPILOT_EXECUTE", "1")
     reg = Registry(":memory:")
     summary = run_once(registry=reg, offline=True, as_of="2026-07-13")
     assert summary["trade"]["executed"] is True
     assert abs(summary["equity_after"] - 10000.0) < 5.0
-    assert summary["algorithm_id"] == "hrp"
-    assert summary["operational_policy"]["id"] == "hrp"
     reg.close()
 
 
@@ -466,13 +489,16 @@ def test_cost_config_rejects_inverted_gate_assumptions():
         CostConfig(rebalance_benefit_bps=0.0)
 
 
-def test_run_once_cost_gate_refuses_terminally():
+def test_run_once_cost_gate_refuses_terminally(monkeypatch):
     import dataclasses
 
     from qlab.trader.mandate import CostConfig, load_mandate
     from qlab.trader.plan import MandateViolation, OrderLeg, OrderPlan, execute_plan
     from qlab.trader.broker import get_broker
 
+    # The cost gate is what is under test here, so authorize booking to reach
+    # the invested state the second cycle needs.
+    monkeypatch.setenv("QLAB_AUTOPILOT_EXECUTE", "1")
     reg = Registry(":memory:")
     absurd = dataclasses.replace(
         load_mandate(),

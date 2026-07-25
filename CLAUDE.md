@@ -17,6 +17,8 @@ python -m pytest tests/test_ui.py  -q          # one module while iterating
 qlab tui                            # terminal workstation (starts/attaches owner)
 qlab ui --no-browser                # same owner runtime, web client
 qlab run-once --offline --dry-run   # one governed autopilot cycle, no orders
+                                    # (run-once is proposal-only: it opens an
+                                    # approval request, never books a fill)
 qlab batch configs/specs/ablation_v1.yaml --offline   # staged ablation
 qlab desk                           # one-card desk status (owner must be up)
 qlab workforce run "GOAL"           # headless governed run, streamed live

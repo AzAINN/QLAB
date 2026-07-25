@@ -56,6 +56,26 @@ def _yaml_parse_error(path: Path, exc: yaml.YAMLError) -> AlpacaAuthError:
     return AlpacaAuthError(f"{path} is not valid YAML{where}")
 
 
+def _load_yaml_mapping(path: Path) -> dict:
+    """Parse a YAML file that must hold a mapping.
+
+    Both the config and the profile need the same three outcomes, and neither
+    may reach ``.get`` on a hand-edited file that parses to a list or a scalar:
+    a broken source is an ``AlpacaAuthError``, never a raw ``AttributeError``.
+    An empty file is an empty mapping.
+    """
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        # `from None`: the chained PyYAML error carries the source snippet.
+        raise _yaml_parse_error(path, exc) from None
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise AlpacaAuthError(f"{path} does not contain a YAML mapping")
+    return loaded
+
+
 def _config_dir() -> Path:
     override = os.environ.get("ALPACA_CONFIG_DIR", "").strip()
     if override:
@@ -69,10 +89,7 @@ def _active_profile_name(config_dir: Path) -> str:
         return explicit
     config = config_dir / "config.yaml"
     if config.exists():
-        try:
-            loaded = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as exc:
-            raise _yaml_parse_error(config, exc) from None
+        loaded = _load_yaml_mapping(config)
         name = str(loaded.get("default_profile") or "").strip()
         if name:
             return name
@@ -99,13 +116,10 @@ def resolve_alpaca_credentials() -> AlpacaCredentials | None:
     path = config_dir / "profiles" / f"{name}.yaml"
     if not path.exists():
         return None
-    try:
-        profile = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as exc:
-        raise _yaml_parse_error(path, exc) from None
-    if not isinstance(profile, dict):
-        raise AlpacaAuthError(f"{path} does not contain a profile mapping")
-    if str(profile.get("live", "")).strip().lower() == "true":
+    profile = _load_yaml_mapping(path)
+    # Any truthy value refuses: `live: 1` and `live: true` both declare live, and
+    # ambiguity in a paper-only desk has to resolve toward refusing.
+    if bool(profile.get("live")):
         raise AlpacaAuthError(
             f"profile {name!r} at {path} is a live-trading profile; qlab is "
             "paper-only. Use a paper profile (`alpaca profile login`).")

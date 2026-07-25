@@ -8,6 +8,13 @@ from qlab.trader.alpaca_auth import (
     AlpacaAuthError, describe_credentials, resolve_alpaca_credentials)
 
 
+@pytest.fixture(autouse=True)
+def _forget_ambient_profile(monkeypatch):
+    """Most tests write a profile named `paper` and rely on it being the default,
+    so an operator or CI shell exporting ALPACA_PROFILE must not reach us."""
+    monkeypatch.delenv("ALPACA_PROFILE", raising=False)
+
+
 def _write_profile(tmp_path, name="paper", body=None):
     """Lay out an Alpaca CLI config dir the way the real CLI does."""
     (tmp_path / "profiles").mkdir(parents=True, exist_ok=True)
@@ -116,6 +123,49 @@ def test_a_live_profile_is_refused(tmp_path, monkeypatch):
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
     with pytest.raises(AlpacaAuthError, match="paper"):
+        resolve_alpaca_credentials()
+
+
+def test_any_truthy_live_flag_is_refused(tmp_path, monkeypatch):
+    # `live: 1` is truthy but is not the string "true"; a paper-only desk has to
+    # refuse every declaration of live, not just the ones YAML types as a bool.
+    _write_profile(tmp_path, body="access_token: tok-live\nlive: 1\n")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    with pytest.raises(AlpacaAuthError, match="paper"):
+        resolve_alpaca_credentials()
+
+
+def test_a_non_mapping_profile_is_refused(tmp_path, monkeypatch):
+    _write_profile(tmp_path, body="- paper\n- not a mapping\n")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    with pytest.raises(AlpacaAuthError, match="mapping"):
+        resolve_alpaca_credentials()
+
+
+def test_a_non_mapping_config_is_refused(tmp_path, monkeypatch):
+    # A hand-edited config.yaml that parses but is not a mapping must still be a
+    # loud AlpacaAuthError, not a raw AttributeError from `.get`.
+    _write_profile(tmp_path)
+    (tmp_path / "config.yaml").write_text("- paper\n- other\n", encoding="utf-8")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    with pytest.raises(AlpacaAuthError, match="mapping"):
+        resolve_alpaca_credentials()
+
+
+def test_malformed_config_raises_naming_the_config(tmp_path, monkeypatch):
+    _write_profile(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "default_profile: '{{{\n", encoding="utf-8")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    with pytest.raises(AlpacaAuthError, match="config.yaml"):
         resolve_alpaca_credentials()
 
 

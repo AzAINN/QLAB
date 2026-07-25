@@ -2012,6 +2012,62 @@ def test_atlas_fetch_failure_is_visible_and_retried_on_the_next_visit():
     asyncio.run(run())
 
 
+def test_atlas_refetches_on_every_visit_so_a_new_ablation_is_never_stale():
+    """`: batch` writes new ablation numbers mid-session; the atlas must follow.
+
+    The leaderboard refreshes on the next 2s tick, so a once-per-session atlas
+    would keep asserting "latest ablation" with superseded numbers — two
+    surfaces reporting different states of the same evidence.
+    """
+    from qlab.tui.app import QlabTui
+
+    class ChangingAtlasClient(StubClient):
+        def __init__(self):
+            super().__init__()
+            self.atlas_calls = 0
+
+        def get(self, path, **params):
+            if path == "/api/atlas":
+                self.atlas_calls += 1
+                payload = _atlas()
+                if self.atlas_calls > 1:
+                    for row in payload["entries"]:
+                        if row["ablation"]:
+                            row["ablation"]["sharpe"] = 1.77
+                return payload
+            return super().get(path, **params)
+
+    async def run():
+        client = ChangingAtlasClient()
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("7")
+            await pilot.pause(0.3)
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            assert "0.910" in str(app.query_one("#atlas-detail").content)
+            assert client.atlas_calls == 1
+
+            await pilot.press("1")
+            await pilot.press("7")
+            for _ in range(60):
+                if client.atlas_calls == 2:
+                    break
+                await pilot.pause(0.02)
+            await pilot.pause(0.3)
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            detail = str(app.query_one("#atlas-detail").content)
+            assert client.atlas_calls == 2
+            assert "Hierarchical risk parity" in detail
+            assert "1.770" in detail and "0.910" not in detail
+
+    asyncio.run(run())
+
+
 def test_nav_menu_rows_are_clickable():
     """Each of the eight spine rows switches to its matching view on click.
 

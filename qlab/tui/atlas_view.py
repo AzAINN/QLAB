@@ -8,6 +8,7 @@ from rich.markup import escape
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Label, ListItem, ListView, Static
 
+from qlab.core.atlas import OVERLAY_METRICS
 from qlab.tui.theme import AMBER, DIM, LABEL_GOLD, MUTED, TEXT, TEXT_HI
 
 _GROUP_TITLES = (
@@ -16,12 +17,6 @@ _GROUP_TITLES = (
     ("role", "WORKFORCE ROLES"),
     ("governance", "GOVERNANCE"),
 )
-# The ablation payload is a full compute_metrics bundle (13 keys, n_obs first).
-# The overlay shows the same five the owner's leaderboard ranks on, in reading
-# order, so the champion's line stays one glance instead of a metric dump.
-_OVERLAY_METRICS = (
-    "sharpe", "ann_return", "max_drawdown", "cvar_95", "deflated_sharpe",
-)
 
 
 def _overlay_cells(ablation: object) -> str:
@@ -29,7 +24,7 @@ def _overlay_cells(ablation: object) -> str:
     if not isinstance(ablation, dict):
         return ""
     cells = []
-    for key in _OVERLAY_METRICS:
+    for key in OVERLAY_METRICS:
         value = ablation.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
@@ -46,6 +41,9 @@ class AtlasView(Vertical):
         super().__init__(**kwargs)
         # Row index -> entry dict; None rows are group headers.
         self._row_entries: list[dict | None] = []
+        # The payload the visible index was built from, so a re-fetch that
+        # changed nothing changes nothing on screen.
+        self._entries: list[dict] | None = None
 
     def compose(self):
         yield Static(f"[{AMBER}]▍[/] ATLAS", classes="canvas-title",
@@ -59,7 +57,15 @@ class AtlasView(Vertical):
                 id="atlas-detail-scroll")
 
     def set_entries(self, entries: list[dict]) -> None:
-        """Rebuild the index from an owner payload and show its first entry."""
+        """Rebuild the index from an owner payload and show its first entry.
+
+        An unchanged payload is a no-op. The atlas is re-fetched on every visit
+        so live ablation evidence cannot go stale, and rebuilding an identical
+        index would blank the list for a frame and throw away the reader's place.
+        """
+        if entries == self._entries:
+            return
+        self._entries = entries
         rows: list[dict | None] = []
         items = []
         for group, group_title in _GROUP_TITLES:

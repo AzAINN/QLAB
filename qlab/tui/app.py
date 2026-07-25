@@ -804,7 +804,6 @@ class QlabTui(App[None]):
         self.bootstrap: dict[str, Any] | None = None
         self._bootstrap_started = False
         self._bootstrap_error = ""
-        self._atlas_started = False
         self._claude_buffer = ""
         self._claude_saw_delta = False
         self._claude_offer_handled = False
@@ -1117,10 +1116,15 @@ class QlabTui(App[None]):
         self._render_settings()
 
     def _start_atlas_fetch(self) -> None:
-        """Fetch the curated catalog once, when Atlas is first shown."""
-        if self._atlas_started:
-            return
-        self._atlas_started = True
+        """Fetch the curated catalog on every visit to Atlas.
+
+        The payload carries live ablation evidence, and ``: batch`` writes new
+        ablation numbers mid-session. A once-per-session fetch would keep
+        asserting "latest ablation" with superseded numbers while the leaderboard
+        on the same evidence refreshed on the next tick. ``AtlasView.set_entries``
+        ignores an unchanged payload, so re-entry costs one request and no
+        rebuild flicker.
+        """
 
         def run() -> None:
             try:
@@ -1136,7 +1140,6 @@ class QlabTui(App[None]):
         if payload is None:
             self.query_one("#atlas-detail", Static).update(
                 f"[{DOWN}]atlas unavailable: {escape(error)}[/]")
-            self._atlas_started = False  # allow retry on the next visit
             return
         view.set_entries(payload.get("entries") or [])
 

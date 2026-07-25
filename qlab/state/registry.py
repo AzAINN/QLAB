@@ -192,6 +192,7 @@ class Registry:
         self.con.execute("ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS targets_hash VARCHAR")
         self.con.execute("ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS seq BIGINT")
         self.con.execute("ALTER TABLE plans ADD COLUMN IF NOT EXISTS legs VARCHAR")
+        self.con.execute("ALTER TABLE equity_marks ADD COLUMN IF NOT EXISTS book VARCHAR")
 
     def close(self) -> None:
         self.con.close()

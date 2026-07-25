@@ -553,3 +553,29 @@ def test_equity_marks_are_partitioned_by_book():
                         source="daily")
     assert reg.count_equity_marks(book="simulated_paper") == 1
     assert reg.count_equity_marks() == 3
+
+
+def test_equity_marks_gains_the_book_column_on_an_existing_table(tmp_path):
+    """An equity_marks table created before `book` existed must be migrated.
+
+    _SCHEMA never touches an already-created table, so without the explicit
+    ALTER a pre-`book` registry breaks every mark write and every read.
+    """
+    path = tmp_path / "registry.duckdb"
+    reg = Registry(str(path))
+    reg.con.execute("DROP TABLE equity_marks")
+    reg.con.execute(
+        "CREATE TABLE equity_marks (ts VARCHAR, source VARCHAR, "
+        "equity DOUBLE, cash DOUBLE, PRIMARY KEY (ts, source))")
+    reg.close()
+
+    reg = Registry(str(path))
+    try:
+        assert reg.log_equity_mark("2026-06-01T21:00:00+00:00", 10_000.0,
+                                   cash=500.0, source="daily",
+                                   book="alpaca_paper")
+        assert [m["equity"] for m in reg.equity_marks(book="alpaca_paper")] \
+            == [10_000.0]
+        assert reg.count_equity_marks(book="alpaca_paper") == 1
+    finally:
+        reg.close()

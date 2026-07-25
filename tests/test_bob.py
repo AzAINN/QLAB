@@ -117,6 +117,32 @@ def test_daily_workflow_budget_blocks_further_launches(reg):
     assert "budget" in (bob.status()["blocked_reason"] or "")
 
 
+def test_daily_budget_counts_the_trading_date_not_the_wall_clock(reg):
+    """The budget must survive UTC rollover.
+
+    Tasks are stamped with created_at in wall-clock UTC, which rolls at 00:00
+    while a trading date does not. Counting by created_at silently dropped the
+    budget for anything recorded after midnight UTC; the trading date in the
+    dedupe key is the authority.
+    """
+    bob = _bob(reg, config=BobConfig(max_autonomous_workflows_per_day=1))
+    facts = _healthy_facts()
+    facts["portfolio"]["drift"] = 0.2
+    bob.observe(facts, trading_date="2020-01-02")  # a date that is never "today"
+
+    facts2 = _healthy_facts()
+    facts2["regime"]["flip"] = True
+    out = bob.observe(facts2, trading_date="2020-01-02")
+    assert out["state"] == BLOCKED
+    assert "budget" in (bob.status()["blocked_reason"] or "")
+
+    # A different trading date has its own budget.
+    facts3 = _healthy_facts()
+    facts3["regime"]["flip"] = True
+    out3 = bob.observe(facts3, trading_date="2020-01-03")
+    assert out3["created_tasks"]
+
+
 def test_paused_mode_creates_no_tasks_but_keeps_monitoring(reg):
     bob = _bob(reg)
     bob.pause()

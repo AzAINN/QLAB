@@ -342,12 +342,16 @@ class BobSupervisor:
         return f"{trig.kind}|{trading_date}|{universe}|{trig.state_hash}"
 
     def _within_daily_budget(self, trading_date: str) -> bool:
-        # Bounds autonomous WORKFLOW launches per day (briefs/alerts do not
-        # count). Task volume per day is tiny, so a bounded scan is fine.
+        # Bounds autonomous WORKFLOW launches per TRADING day (briefs/alerts do
+        # not count). The trading date is read from the dedupe key, never from
+        # created_at: wall-clock UTC rolls over at 00:00 while a trading date
+        # does not, so counting by created_at would silently drop the budget
+        # for any task recorded after midnight UTC. Task volume per day is
+        # tiny, so a bounded scan is fine.
         day = trading_date[:10]
         used = sum(
             1 for task in self.registry.list_bob_tasks(200)
-            if str(task.get("created_at", "")).startswith(day)
+            if _dedupe_trading_date(task.get("dedupe_key")) == day
             and task.get("trigger_kind") in _WORKFLOW_TRIGGERS)
         return used < self.config.max_autonomous_workflows_per_day
 
@@ -378,6 +382,12 @@ class BobSupervisor:
             "coordinator_session_id": current.get("coordinator_session_id"),
         }
         self.registry.save_bob_state(merged, MANAGER_ID)
+
+
+def _dedupe_trading_date(dedupe_key) -> str:
+    """The trading date segment of ``kind|trading_date|universe|state_hash``."""
+    parts = str(dedupe_key or "").split("|")
+    return parts[1][:10] if len(parts) > 1 else ""
 
 
 def _hash(payload: dict) -> str:

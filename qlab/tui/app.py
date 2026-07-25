@@ -28,6 +28,7 @@ from textual.widgets import (
     Static,
 )
 
+from qlab.core.atlas import arm_display_name
 from qlab.paths import workspace_root
 from qlab.research.prediction import (
     IC_ADMISSION_THRESHOLD,
@@ -570,6 +571,11 @@ def _book_state_style(state: str) -> tuple[str, str]:
     return _STATE_STYLE.get(token, ("◌", DIM))
 
 
+def _cell(value: Any, fmt: str = "{:.2f}") -> str:
+    """Format a leaderboard metric, or an em dash when the metric is absent."""
+    return "—" if value is None else fmt.format(value)
+
+
 def _record(value: Any) -> dict[str, Any]:
     """Return one owner record, or an empty record for a sparse payload."""
     return value if isinstance(value, dict) else {}
@@ -885,6 +891,8 @@ class QlabTui(App[None]):
                 with Vertical(id="research", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] RESEARCH", classes="canvas-title", markup=True)
                     yield Static(id="research-summary", markup=True)
+                    yield Static("ABLATION LEADERBOARD", classes="book-section-title")
+                    yield Static(id="leaderboard", classes="book-section", markup=True)
                     yield DataTable(id="runs-table", cursor_type="row")
                 with Vertical(id="book", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] BOOK", classes="canvas-title", markup=True)
@@ -2119,6 +2127,28 @@ class QlabTui(App[None]):
         summary.append("Run [bold]: batch[/] for the staged comparison suite.")
         self.query_one("#research-summary", Static).update("\n".join(summary))
 
+        board = self.snapshot.get("leaderboard") or []
+        if board:
+            lines = [
+                f"[{DIM}]METHOD                      SHARPE     RET    MAXDD   "
+                f"CVAR95     DSR[/]"
+            ]
+            for row in board:
+                mark = f" [{AMBER}]★[/]" if row.get("champion") else (
+                    f" [{DIM}]BENCH[/]" if row.get("benchmark") else "")
+                lines.append(
+                    f"[{TEXT_HI}]{escape(str(row.get('name', ''))):<24}[/]{mark:<12} "
+                    f"[{TEXT}]{_cell(row.get('sharpe')):>6}  "
+                    f"{_cell(row.get('ann_return'), '{:+.1%}'):>6}  "
+                    f"{_cell(row.get('max_drawdown'), '{:.1%}'):>6}  "
+                    f"{_cell(row.get('cvar_95'), '{:.2%}'):>7}  "
+                    f"{_cell(row.get('deflated_sharpe')):>5}[/]")
+            self.query_one("#leaderboard", Static).update("\n".join(lines))
+        else:
+            self.query_one("#leaderboard", Static).update(
+                f"[{MUTED}]No ablation recorded yet — run [bold]: batch[/] for the "
+                f"staged comparison.[/]")
+
         signature = tuple((r.get("run_id"), r.get("created_at")) for r in runs)
         if signature == self._runs_signature:
             return
@@ -2417,7 +2447,12 @@ class QlabTui(App[None]):
         self._audit_decisions = {}
         for decision in decisions:
             choice = decision.get("choice", {})
-            detail = choice.get("regime") or choice.get("arm") or decision.get("rationale", "")
+            arm = choice.get("arm")
+            detail = (
+                choice.get("regime")
+                or (arm_display_name(arm) if arm else None)
+                or decision.get("rationale", "")
+            )
             key = str(decision.get("decision_id", ""))
             self._audit_decisions[key] = decision
             rows.append((
@@ -2478,7 +2513,13 @@ class QlabTui(App[None]):
         ]
         if choice:
             card_lines.extend(_key_number_markup([
-                (str(choice_key), str(choice[choice_key])[:160])
+                (
+                    str(choice_key),
+                    str(
+                        arm_display_name(choice[choice_key])
+                        if choice_key == "arm" else choice[choice_key]
+                    )[:160],
+                )
                 for choice_key in list(choice)[:4]
             ]))
         else:

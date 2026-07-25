@@ -152,6 +152,14 @@ def _snapshot():
             },
         },
         "workflows": [],
+        "leaderboard": [
+            {"arm_id": "B2", "name": "HRP", "champion": True, "benchmark": False,
+             "sharpe": 0.91, "ann_return": 0.062, "max_drawdown": -0.124,
+             "cvar_95": -0.011, "deflated_sharpe": 0.83},
+            {"arm_id": "B0", "name": "60/40", "champion": False, "benchmark": True,
+             "sharpe": 0.55, "ann_return": 0.050, "max_drawdown": -0.180,
+             "cvar_95": -0.015, "deflated_sharpe": 0.60},
+        ],
     }
 
 
@@ -1576,6 +1584,23 @@ def test_research_view_renders_latest_prediction_admission_with_tone():
             expected = "vol forecast IC 0.029 (stable) — not usable"
             assert expected in summary
             assert f"[{DOWN}]{expected}[/]" in summary
+
+    asyncio.run(run())
+
+
+def test_research_leaderboard_shows_method_names_not_codes():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("4")
+            board = str(app.query_one("#leaderboard").content)
+            assert "HRP" in board and "60/40" in board
+            assert "★" in board            # champion marked
+            assert "BENCH" in board        # benchmark tagged
+            assert "B2" not in board       # codes never rendered here
 
     asyncio.run(run())
 

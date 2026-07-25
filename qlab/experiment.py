@@ -44,6 +44,12 @@ from qlab.state.registry import Registry
 # ---------------------------------------------------------------------------
 # Batch mode
 # ---------------------------------------------------------------------------
+# The run kind the staged ablation writes. Read surfaces (the owner's
+# leaderboard and atlas overlay) filter on it, so producer and consumer share
+# this name instead of two string literals that can drift apart silently.
+ABLATION_RUN_KIND = "ablation"
+
+
 def run_ablation(
     spec: str | Path | dict,
     *,
@@ -58,7 +64,7 @@ def run_ablation(
             "ablation; use qlab.algorithms.offline explicitly"
         )
     reg = registry or Registry()
-    run_id = reg.log_run("ablation", spec)
+    run_id = reg.log_run(ABLATION_RUN_KIND, spec)
 
     uni = load_universe()
     tickers = uni.tickers(spec.get("data", {}).get("universe", "core"))

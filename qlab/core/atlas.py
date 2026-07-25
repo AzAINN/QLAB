@@ -271,6 +271,13 @@ ATLAS_ENTRIES: tuple[AtlasEntry, ...] = (
     ),
 )
 
+# The curated five an arm is judged on, in reading order. The full ablation
+# payload is a 13-key compute_metrics bundle; both the owner's leaderboard and
+# the TUI atlas overlay report exactly this subset, from one definition.
+OVERLAY_METRICS: tuple[str, ...] = (
+    "sharpe", "ann_return", "max_drawdown", "cvar_95", "deflated_sharpe",
+)
+
 ARM_NAMES: dict[str, str] = {
     entry.arm_id: entry.title
     for entry in ATLAS_ENTRIES if entry.arm_id is not None

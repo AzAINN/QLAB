@@ -57,6 +57,7 @@ from qlab.tui.theme import (
     LABEL_GOLD,
     MUTED,
     PALETTE_NAME,
+    BOB_DRAWER_CSS,
     PAPER_MODAL_CSS,
     SEL_BG,
     STATE_STYLE,
@@ -78,6 +79,23 @@ _DASHBOARD_TILE_KEYS = (
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
 )
+# What each Bob mode may do. Stated plainly in the drawer because the mode IS
+# the authority: a reader must never have to infer what Bob is allowed to do.
+_BOB_STATE_TONES = {
+    "observing": UP,
+    "blocked": DOWN,
+    "degraded": AMBER,
+    "paused": MUTED,
+}
+_BOB_MODE_AUTHORITY = {
+    "observe": "Observe: monitors and briefs. Starts no workflows.",
+    "research": "Research: may start approved research workflows. "
+                "May not create a paper plan.",
+    "propose": "Propose: may request a checked plan and open an approval "
+               "request. Cannot approve or execute it.",
+    "paused": "Paused: no new autonomous work. Monitoring and approval "
+              "expiry continue.",
+}
 # Standard-run fallback before an owner workflow has registered. Once a durable
 # row exists, the board is rebuilt from that workflow's ordered steps.
 _FLOW = (
@@ -704,6 +722,33 @@ class PaperConfirmScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm-paper")
 
 
+class BobDrawerScreen(ModalScreen[None]):
+    """Bob's full detail: state, triggers, task history, pending approvals.
+
+    Read-only by construction. Approving a plan is a deliberate act through the
+    owner's approvals API, never a keystroke inside a status drawer.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close", show=False),
+        Binding("ctrl+b", "cancel", "Close", show=False),
+    ]
+    CSS = BOB_DRAWER_CSS
+
+    def __init__(self, body: str = ""):
+        super().__init__()
+        self.body = body
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="bob-drawer"):
+            yield Static("BOB · DESK MANAGER", id="bob-drawer-title")
+            yield Static(self.body, id="bob-drawer-body", markup=True)
+            yield Static("esc or ctrl+b to close", id="bob-drawer-hint")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class QlabTui(App[None]):
     """Border-light terminal workspace for portfolio and agent operations."""
 
@@ -732,6 +777,7 @@ class QlabTui(App[None]):
         Binding("colon", "command", "Command", show=False),
         Binding("ctrl+p", "command", "Command", show=False),
         Binding("tilde", "timeline", "Timeline", show=False),
+        Binding("ctrl+b", "bob_drawer", "Bob", show=False),
         Binding("escape", "escape", "Back", show=False),
         Binding("ctrl+q", "quit", "Quit", show=False),
     ]
@@ -939,6 +985,15 @@ class QlabTui(App[None]):
                     )
 
             with Vertical(id="agent-rail"):
+                # Bob sits at the top of the rail because the desk manager is
+                # always present: its mode is the standing authority statement,
+                # visible in every view rather than only where work happens.
+                yield Static("BOB · DESK MANAGER", id="bob-label")
+                yield Static(
+                    "waiting for runtime snapshot",
+                    id="bob-rail",
+                    markup=True,
+                )
                 yield Static("AGENTS", id="agent-label")
                 yield Static(id="agent-list", markup=True)
                 yield Static("SELECTED WORK", id="work-label")
@@ -1289,6 +1344,7 @@ class QlabTui(App[None]):
                 for agent in snapshot.get("agents", [])
             }
         self._render_agents()
+        self._render_bob_rail()
         self._render_status()
         self._ingest_events(snapshot.get("events", []))
         self._maybe_offer_workforce()
@@ -1652,6 +1708,85 @@ class QlabTui(App[None]):
         }
         self._update_dashboard_tiles(contents)
 
+    def action_bob_drawer(self) -> None:
+        """Ctrl+B: open Bob's detail drawer over the current view."""
+        if isinstance(self.screen, BobDrawerScreen):
+            self.pop_screen()
+            return
+        self.push_screen(BobDrawerScreen(self._bob_drawer_content()))
+
+    def _render_bob_rail(self) -> None:
+        """The always-present rail summary: authority first, then state."""
+        bob = _record(self.snapshot.get("bob"))
+        rail = self.query_one("#bob-rail", Static)
+        if not bob:
+            rail.update(f"[{MUTED}]desk manager unavailable[/]")
+            return
+        mode = str(bob.get("mode", "—"))
+        state = str(bob.get("state", "—"))
+        state_tone = _BOB_STATE_TONES.get(state, TEXT_HI)
+        approvals = _records(self.snapshot.get("approvals"))
+        tasks = _records(self.snapshot.get("bob_tasks"))
+        active = [t for t in tasks if t.get("status") in ("queued", "running")]
+        lines = _key_number_markup(
+            [
+                ("MODE", mode.upper()),
+                ("STATE", state.upper()),
+                ("APPROVALS", str(len(approvals))),
+                ("OPEN TASKS", str(len(active))),
+            ],
+            value_tones=[
+                AMBER if mode == "propose" else TEXT_HI,
+                state_tone,
+                AMBER if approvals else MUTED,
+                TEXT_HI if active else MUTED,
+            ],
+            bold_values={0, 1},
+        )
+        reason = str(bob.get("blocked_reason") or "").strip()
+        if reason:
+            lines.extend(_bulletin_markup([reason], tone=DOWN, max_len=60))
+        elif not bob.get("coordinator_available"):
+            lines.extend(_bulletin_markup(
+                ["coordinator unavailable"], tone=MUTED, max_len=60))
+        lines.append(f"[{DIM}]ctrl+b for detail[/]")
+        rail.update("\n".join(lines))
+
+    def _bob_drawer_content(self) -> str:
+        """Full Bob detail: authority, state, approvals, and task history."""
+        bob = _record(self.snapshot.get("bob"))
+        if not bob:
+            return f"[{MUTED}]desk manager unavailable[/]"
+        mode = str(bob.get("mode", "—"))
+        lines = [self._bob_panel_content(), ""]
+        lines.append(f"[{LABEL_GOLD}]AUTHORITY[/]")
+        lines.extend(_bulletin_markup(
+            [_BOB_MODE_AUTHORITY.get(mode, "unknown mode"),
+             "Bob never executes: paper execution consumes a persisted human "
+             "approval bound to the exact plan."],
+            tone=MUTED, max_len=110))
+
+        tasks = _records(self.snapshot.get("bob_tasks"))
+        lines.append("")
+        lines.append(f"[{LABEL_GOLD}]RECENT TASKS[/]")
+        if not tasks:
+            lines.extend(_bulletin_markup(
+                ["no autonomous tasks recorded"], tone=MUTED, max_len=100))
+        for task in tasks[:8]:
+            status = str(task.get("status", "—"))
+            tone = {
+                "completed": UP, "failed": DOWN, "blocked": DOWN,
+                "running": AMBER,
+            }.get(status, MUTED)
+            created = str(task.get("created_at", ""))[5:16].replace("T", " ")
+            lines.append(
+                f"  [{tone}]{status:<10}[/] {str(task.get('trigger_kind','')):<18} "
+                f"[{DIM}]{created}[/]")
+            error = str(task.get("error") or "").strip()
+            if error:
+                lines.extend(_bulletin_markup([error], tone=DOWN, max_len=100))
+        return "\n".join(lines)
+
     def _bob_panel_content(self) -> str:
         """Bob's mode, lifecycle state, pending approvals, and recent tasks.
 
@@ -1664,10 +1799,7 @@ class QlabTui(App[None]):
             return f"[{MUTED}]desk manager unavailable[/]"
         mode = str(bob.get("mode", "—"))
         state = str(bob.get("state", "—"))
-        state_tone = {
-            "observing": UP, "blocked": DOWN, "degraded": AMBER,
-            "paused": MUTED,
-        }.get(state, TEXT_HI)
+        state_tone = _BOB_STATE_TONES.get(state, TEXT_HI)
         approvals = _records(self.snapshot.get("approvals"))
         tasks = _records(self.snapshot.get("bob_tasks"))
         active = [t for t in tasks if t.get("status") in ("queued", "running")]

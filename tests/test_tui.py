@@ -2624,3 +2624,86 @@ def test_bob_panel_reports_degraded_coordinator_without_failing():
             assert "monitoring continues" in panel
 
     asyncio.run(run())
+
+
+def test_bob_rail_is_present_in_every_view():
+    from qlab.tui.app import QlabTui
+
+    snap = _bob_snapshot(
+        bob={"manager_id": "bob-the-quant", "mode": "research",
+             "state": "observing", "blocked_reason": None,
+             "coordinator_available": True},
+        approvals=[{"approval_id": "appr-1", "plan_id": "plan-1",
+                    "expires_at": "2026-07-24T18:45:00+00:00"}])
+
+    async def run():
+        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(180, 48)) as pilot:
+            await pilot.pause(0.2)
+            for view in ("dashboard", "market", "book", "audit"):
+                app.action_view(view)
+                await pilot.pause(0.05)
+                rail = str(app.query_one("#bob-rail").content)
+                assert "RESEARCH" in rail and "OBSERVING" in rail
+                assert "ctrl+b for detail" in rail
+
+    asyncio.run(run())
+
+
+def test_ctrl_b_opens_and_closes_the_bob_drawer():
+    from qlab.tui.app import BobDrawerScreen, QlabTui
+
+    snap = _bob_snapshot(
+        bob={"manager_id": "bob-the-quant", "mode": "propose",
+             "state": "observing", "blocked_reason": None,
+             "coordinator_available": True},
+        bob_tasks=[{"task_id": "task-1", "status": "completed",
+                    "trigger_kind": "regime_flip",
+                    "created_at": "2026-07-24T10:00:00+00:00"},
+                   {"task_id": "task-2", "status": "failed",
+                    "trigger_kind": "drift_breach", "error": "coordinator died",
+                    "created_at": "2026-07-24T11:00:00+00:00"}])
+
+    async def run():
+        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(180, 48)) as pilot:
+            await pilot.pause(0.2)
+            app.action_bob_drawer()
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, BobDrawerScreen)
+            body = str(app.screen.query_one("#bob-drawer-body").content)
+            # The mode's authority is stated plainly, never left to inference.
+            assert "may request a checked plan" in body
+            assert "Bob never executes" in body
+            assert "regime_flip" in body and "drift_breach" in body
+            assert "coordinator died" in body
+            # Ctrl+B toggles it closed again.
+            app.action_bob_drawer()
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, BobDrawerScreen)
+
+    asyncio.run(run())
+
+
+def test_bob_drawer_states_authority_for_each_mode():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        for mode, expected in (
+            ("observe", "Starts no workflows"),
+            ("research", "May not create a paper plan"),
+            ("propose", "Cannot approve or execute"),
+            ("paused", "no new autonomous work"),
+        ):
+            snap = _bob_snapshot(bob={
+                "manager_id": "bob-the-quant", "mode": mode,
+                "state": "observing", "blocked_reason": None,
+                "coordinator_available": True})
+            app = QlabTui(_BobStubClient(snap), refresh_interval=0,
+                          claude_start="off")
+            async with app.run_test(size=(180, 48)) as pilot:
+                await pilot.pause(0.2)
+                body = app._bob_drawer_content()
+                assert expected.lower() in body.lower(), mode
+
+    asyncio.run(run())

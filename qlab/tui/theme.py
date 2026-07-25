@@ -412,9 +412,13 @@ APP_CSS_TEMPLATE = Template("""
         background: $bg_panel;
         border-left: solid $border;
     }
-    #agent-label, #work-label {
+    #agent-label, #work-label, #bob-label {
         height: 2;
         color: $label_gold;
+    }
+    #bob-rail {
+        height: auto;
+        margin-bottom: 1;
     }
     #agent-list {
         height: 16;
@@ -527,6 +531,36 @@ PAPER_MODAL_CSS_TEMPLATE = Template("""
     """)
 
 PAPER_MODAL_CSS = PAPER_MODAL_CSS_TEMPLATE.substitute(TOKENS)
+
+
+BOB_DRAWER_CSS_TEMPLATE = Template("""
+    BobDrawerScreen {
+        align: right middle;
+        background: $overlay;
+    }
+    #bob-drawer {
+        width: 76;
+        height: 100%;
+        padding: 2 3;
+        background: $bg_raised;
+        border-left: solid $gold;
+    }
+    #bob-drawer-title {
+        color: $text_hi;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #bob-drawer-body {
+        height: 1fr;
+        color: $text;
+    }
+    #bob-drawer-hint {
+        height: 2;
+        color: $muted;
+    }
+    """)
+
+BOB_DRAWER_CSS = BOB_DRAWER_CSS_TEMPLATE.substitute(TOKENS)
 
 
 WORKFORCE_MODAL_CSS_TEMPLATE = Template("""

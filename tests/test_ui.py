@@ -99,6 +99,37 @@ def test_leaderboard_is_empty_without_any_ablation_evidence(session):
     assert session.latest_ablation_metrics() == {}
 
 
+def test_leaderboard_reads_a_real_ablation_run(session):
+    """Bind producer to consumer: run_ablation's run kind is what the filter reads.
+
+    Every other leaderboard test writes ``log_run("ablation", …)`` by hand, so a
+    rename inside ``run_ablation`` would leave the suite green and both the
+    leaderboard and the atlas overlay silently blank.
+    """
+    from qlab.experiment import ABLATION_RUN_KIND, run_ablation
+
+    spec = {
+        "name": "leaderboard-binding",
+        "data": {"universe": "core", "start": "2018-01-01", "end": "2020-12-31"},
+        "backtest": {"rebalance": "quarterly", "lookback_days": 252},
+        "arms": [
+            {"id": "B1", "objective": "equal_weight", "solver": "none"},
+            {"id": "B0", "objective": "sixty_forty", "solver": "none"},
+        ],
+    }
+    run_ablation(spec, registry=session.registry, offline=True)
+
+    assert session.registry.list_runs(1)[0]["kind"] == ABLATION_RUN_KIND
+    rows = session.leaderboard()
+    assert {row["arm_id"] for row in rows} == {"B1", "B0"}
+    assert {row["name"] for row in rows} == {"Equal weight", "60/40"}
+    assert all(row["sharpe"] is not None for row in rows)
+    status, payload = handle_api(session, "GET", "/api/atlas", {}, {})
+    by_id = {entry["entry_id"]: entry for entry in payload["entries"]}
+    assert by_id["b1"]["ablation"]["sharpe"] == rows[
+        next(i for i, r in enumerate(rows) if r["arm_id"] == "B1")]["sharpe"]
+
+
 def test_tui_snapshot_carries_the_leaderboard(session):
     run_id = session.registry.log_run("ablation", {"note": "snapshot"})
     session.registry.log_backtest(run_id, "B0", {"sharpe": 0.42})
@@ -892,7 +923,7 @@ def test_performance_payload_from_synthetic_marks(session):
         equity *= 1.002 if day % 2 else 1.0005
         session.registry.log_equity_mark(
             f"2026-06-{day:02d}T21:00:00+00:00", equity, cash=500.0,
-            source="daily")
+            source="daily", book="simulated_paper")
     status, payload = handle_api(session, "GET", "/api/performance", {}, {})
     assert status == 200
     assert len(payload["series"]) == 30
@@ -903,11 +934,137 @@ def test_performance_payload_from_synthetic_marks(session):
 
 def test_performance_is_honest_about_insufficient_history(session):
     session.registry.log_equity_mark(
-        "2026-06-01T21:00:00+00:00", 10_000.0, cash=None, source="daily")
+        "2026-06-01T21:00:00+00:00", 10_000.0, cash=None, source="daily",
+        book="simulated_paper")
     status, payload = handle_api(session, "GET", "/api/performance", {}, {})
     assert status == 200
     assert payload["metrics"] is None
     assert "insufficient" in payload["note"]
+
+
+def test_reset_discards_the_marks_of_the_discarded_book(session):
+    """A reset is a book wipe: its marks must not fabricate a later drawdown.
+
+    Book grows to $10,500, the operator resets to $10,000, the next mark lands
+    at $10,000. If the pre-reset marks survive, ``performance`` reads a −4.8%
+    daily return that no market produced and feeds it to max_drawdown, cvar_95
+    and ann_vol.
+    """
+    for day in range(1, 6):
+        session.registry.log_equity_mark(
+            f"2026-06-{day:02d}T21:00:00+00:00", 10_000.0 + 100.0 * day,
+            cash=None, source="daily", book="simulated_paper")
+    status, reset = handle_api(session, "POST", "/api/reset", {}, {})
+    assert (status, reset["reset"]) == (200, True)
+    assert session.registry.equity_marks() == []
+
+    session.registry.log_equity_mark(
+        "2026-06-06T21:00:00+00:00", 10_000.0, cash=None, source="daily",
+        book="simulated_paper")
+    _, payload = handle_api(session, "GET", "/api/performance", {}, {})
+    assert [row["equity"] for row in payload["series"]] == [10_000.0]
+    assert payload["metrics"] is None
+    assert payload["since_start"] == 0.0
+
+
+def test_marks_from_two_books_never_compose_one_return_series(session):
+    """A venue switch is a bookkeeping event, not a market move.
+
+    A simulated book near $10k and an Alpaca account at $250k must never share
+    one return series; the excluded marks are disclosed, never silently dropped.
+    """
+    for day in range(1, 6):
+        session.registry.log_equity_mark(
+            f"2026-06-{day:02d}T21:00:00+00:00", 10_000.0 + 10.0 * day,
+            cash=None, source="daily", book="simulated_paper")
+    for day in range(6, 11):
+        session.registry.log_equity_mark(
+            f"2026-06-{day:02d}T21:00:00+00:00", 250_000.0, cash=None,
+            source="alpaca_backfill", book="alpaca_paper")
+
+    status, payload = handle_api(session, "GET", "/api/performance", {}, {})
+    assert status == 200
+    assert payload["book"] == "simulated_paper"
+    assert [row["equity"] for row in payload["series"]] == [
+        10_010.0, 10_020.0, 10_030.0, 10_040.0, 10_050.0]
+    assert payload["marks"] == 5
+    assert payload["excluded_marks"] == 5
+    assert "another book" in payload["note"]
+    # The 25x step between books would dominate realized vol; separated, the
+    # simulated book's own vol is a rounding error.
+    assert payload["metrics"]["ann_vol"] < 0.01
+
+
+def test_realized_metrics_annualize_on_the_observed_cadence(session):
+    """Weekly marks must annualize at ~52/yr, not at the 252-day default.
+
+    Fifteen weekly marks take the book from $10,000 to $10,500 over exactly 98
+    days, so the only defensible annualized return is the compound rate over
+    that span: 1.05 ** (365.25 / 98) - 1 ≈ 19.9%. At the silent 252 default the
+    same series reports 1.05 ** (252 / 14) - 1 ≈ 141%.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    first = datetime(2026, 3, 2, 21, 0, tzinfo=timezone.utc)
+    for step in range(15):
+        # Path-independent endpoints with a non-zero step-to-step wobble, so
+        # realized vol is real while the total return stays exactly +5%.
+        equity = 10_000.0 * (1.05 ** (step / 14)) * (1.002 if step % 2 else 1.0)
+        session.registry.log_equity_mark(
+            (first + timedelta(days=7 * step)).isoformat(), equity,
+            cash=None, source="daily", book="simulated_paper")
+
+    status, payload = handle_api(session, "GET", "/api/performance", {}, {})
+    assert status == 200
+    cadence = payload["cadence"]
+    assert cadence["observed_span_days"] == pytest.approx(98.0)
+    assert cadence["mean_step_days"] == pytest.approx(7.0)
+    assert cadence["periods_per_year"] == pytest.approx(52.1786, abs=1e-3)
+    assert payload["metrics"]["n_obs"] == 14
+    assert payload["metrics"]["ann_return"] == pytest.approx(0.19943, abs=1e-4)
+    # The 252-day assumption would have claimed a ~141% annual return.
+    assert payload["metrics"]["ann_return"] < 0.25
+
+
+def test_capped_mark_history_cannot_masquerade_as_complete(session, monkeypatch):
+    """The newest-N window is a cap, not the whole book — the payload says so."""
+    from qlab.ui import server as server_module
+
+    monkeypatch.setattr(server_module, "_MARK_WINDOW", 3)
+    for day in range(1, 6):
+        session.registry.log_equity_mark(
+            f"2026-06-{day:02d}T21:00:00+00:00", 10_000.0 + 10.0 * day,
+            cash=None, source="daily", book="simulated_paper")
+
+    status, payload = handle_api(session, "GET", "/api/performance", {}, {})
+    assert status == 200
+    assert payload["marks"] == 3
+    assert payload["marks_total"] == 5
+    assert payload["marks_capped"] is True
+    assert payload["mark_limit"] == 3
+    assert "capped" in payload["note"]
+    assert [row["equity"] for row in payload["series"]] == [
+        10_030.0, 10_040.0, 10_050.0]
+
+
+def test_window_change_is_measured_over_the_charted_window(session):
+    """The percentage a client renders beside the chart comes from that chart."""
+    from datetime import datetime, timedelta, timezone
+
+    first = datetime(2024, 1, 1, 21, 0, tzinfo=timezone.utc)
+    for step in range(400):
+        session.registry.log_equity_mark(
+            (first + timedelta(days=step)).isoformat(), 10_000.0 + step,
+            cash=None, source="daily", book="simulated_paper")
+
+    _, payload = handle_api(session, "GET", "/api/performance", {}, {})
+    series = payload["series"]
+    assert len(series) == 365
+    assert payload["window_change"] == pytest.approx(
+        series[-1]["equity"] / series[0]["equity"] - 1.0)
+    # The full history rose further than the charted window: two different
+    # numbers that must never share one label.
+    assert payload["since_start"] > payload["window_change"]
 
 
 def test_backfill_refuses_without_history_capable_broker(session):
@@ -988,6 +1145,33 @@ def test_failed_mark_never_masks_a_completed_execution(session, monkeypatch):
                 if event["kind"] == "equity_mark_failed"]
     assert [event["payload"]["source"] for event in failures] == ["execution"]
     assert "alpaca account read failed" in failures[0]["payload"]["error"]
+
+
+def test_daily_ops_records_a_daily_equity_mark(session):
+    """The Book view promises daily ops marks the book; pin the hook itself."""
+    status, summary = handle_api(
+        session, "POST", "/api/daily_ops", {}, {"offline": True})
+    assert status == 200
+    assert "rebalance_recommended" in summary
+    marks = [row for row in session.registry.equity_marks()
+             if row["source"] == "daily"]
+    assert len(marks) == 1
+    assert marks[0]["book"] == "simulated_paper"
+    assert marks[0]["equity"] > 0.0
+
+
+def test_successful_execution_records_an_execution_mark(session):
+    """The mark hook on a real fill, asserted on success rather than on failure."""
+    plan_id = _checked_plan(session)
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+    assert (status, result["executed"]) == (200, True)
+    marks = [row for row in session.registry.equity_marks()
+             if row["source"] == "execution"]
+    assert len(marks) == 1
+    assert marks[0]["book"] == "simulated_paper"
+    assert marks[0]["equity"] > 0.0
 
 
 def test_snapshot_poll_marks_are_throttled_to_one_an_hour(session):

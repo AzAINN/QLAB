@@ -78,6 +78,13 @@ _MARKET_THREAD_JOIN_TIMEOUT_SECONDS = 5.0
 _MARKET_THREAD_LOCK = threading.Lock()
 _ACTIVE_MARKET_THREAD: threading.Thread | None = None
 
+# Realized-performance window. `_MARK_WINDOW` is the newest-N read cap; when the
+# book has more marks than that, the payload says so rather than letting a
+# truncated series pass for the whole history.
+_MARK_WINDOW = 5000
+_CHART_DAYS = 365
+_DAYS_PER_YEAR = 365.25
+
 _GATED_WORKFORCE_ROLES = frozenset({
     "moments-analyst",
     "challenger",
@@ -373,6 +380,13 @@ class UISession:
         operational policy it fails loud into a ``blocked`` report when live data
         is unavailable rather than valuing the book on fabricated prices.
 
+        Two P&L views exist and must never be shown under one label: the broker's
+        own ``unrealized_pl`` (in ``portfolio_state``) is the venue's view and is
+        the reconcile target, while the ``unrealized_pnl`` computed here is the
+        registry-booked view, marked against the average price qlab recorded.
+        Disagreement between them is a reconciliation finding, not a display
+        choice.
+
         Quote-level (seconds) freshness arrives with the market stream; here the
         marks are the broker's latest available prices and provenance is reported
         at the daily-bar level.
@@ -446,41 +460,97 @@ class UISession:
         }
 
     # -- realized performance ----------------------------------------------
+    def current_book(self, offline: bool) -> str:
+        """Name of the book being traded now — the marks' partition key.
+
+        Constructing the broker is the only honest answer: the venue is chosen
+        by credentials, so the book can change between sessions without anything
+        in the registry changing.
+        """
+        from qlab.trader.broker import get_broker
+
+        return get_broker(
+            self.registry, offline=offline,
+            starting_cash=self.mandate.paper_capital, seed=self.seed,
+            universe=self.mandate.universe_whitelist).name
+
     def record_equity_mark(self, source: str, offline: bool) -> None:
         state = self.portfolio(offline)
         self.registry.log_equity_mark(
             datetime.now(timezone.utc).isoformat(),
-            state["equity"], cash=state["cash"], source=source)
+            state["equity"], cash=state["cash"], source=source,
+            book=state["broker"])
 
     def performance(self, offline: bool) -> dict:
-        """Realized equity curve and metrics from the marks, or an honest note."""
+        """Realized equity curve and metrics for the CURRENT book's marks.
+
+        Two invariants the payload has to carry, not assume:
+
+        * One book per series. A simulated book near $10k and an Alpaca account
+          at a different equity level share a marks table but not a return
+          series — a venue switch is a bookkeeping event, not a market move.
+          Marks from another book are excluded and the exclusion is stated in
+          ``note``; they are never silently dropped.
+        * The annualization factor is observed, not assumed. Marks land whenever
+          the desk ran (hourly polls on any day the TUI was open, weekends
+          included; ``daily`` marks whenever daily ops ran), so 252 periods a
+          year is a claim the data cannot support. ``cadence`` reports the factor
+          actually used and the span it came from.
+        """
         import pandas as pd
 
         from qlab.core.metrics import compute_metrics
 
-        rows = self.registry.equity_marks()
+        book = self.current_book(offline)
+        rows = self.registry.equity_marks(_MARK_WINDOW, book=book)
+        total = self.registry.count_equity_marks(book=book)
+        excluded = self.registry.count_equity_marks() - total
+        notes: list[str] = []
+        if excluded:
+            notes.append(f"{excluded} mark(s) from another book excluded; "
+                         f"this series is {book} only")
+        if total > len(rows):
+            notes.append(f"history capped at the newest {_MARK_WINDOW} "
+                         f"marks of {total}")
+        payload = {
+            "book": book, "marks": len(rows), "marks_total": total,
+            "marks_capped": total > len(rows), "mark_limit": _MARK_WINDOW,
+            "excluded_marks": excluded,
+        }
         if not rows:
+            notes.insert(0, "no equity history yet")
             return {"series": [], "metrics": None, "since_start": None,
-                    "note": "no equity history yet", "marks": 0}
+                    "window_change": None, "cadence": None,
+                    "note": "; ".join(notes), **payload}
         frame = pd.DataFrame(rows)
         frame["ts"] = pd.to_datetime(frame["ts"], utc=True, format="ISO8601")
         daily = (frame.set_index("ts").sort_index()["equity"]
                  .resample("1D").last().dropna())
+        window = daily.tail(_CHART_DAYS)
         series = [{"ts": stamp.date().isoformat(), "equity": float(value)}
-                  for stamp, value in daily.tail(365).items()]
+                  for stamp, value in window.items()]
         returns = daily.pct_change().dropna()
-        metrics = compute_metrics(returns) if len(returns) >= 3 else None
+        cadence = _observed_cadence(daily)
+        metrics = (compute_metrics(
+            returns, periods_per_year=cadence["periods_per_year"])
+            if cadence is not None and len(returns) >= 3 else None)
         # compute_metrics reports only n_obs below three observations; a partial
         # bundle must not reach the client as if it were a full one.
         if metrics is not None and "sharpe" not in metrics:
             metrics = None
+        if metrics is None:
+            notes.append("insufficient history for realized metrics "
+                         "(need >=4 daily marks)")
         start = float(daily.iloc[0])
         since_start = float(daily.iloc[-1] / start - 1.0) if start > 0 else None
-        note = (None if metrics is not None
-                else "insufficient history for realized metrics "
-                     "(need >=4 daily marks)")
-        return {"series": series, "metrics": metrics, "since_start": since_start,
-                "note": note, "marks": len(rows)}
+        # The chart draws `series`; the percentage rendered beside it must come
+        # from that same window, not from a first mark off its left edge.
+        first = float(window.iloc[0])
+        window_change = (float(window.iloc[-1] / first - 1.0)
+                         if first > 0 else None)
+        return {"series": series, "metrics": metrics,
+                "since_start": since_start, "window_change": window_change,
+                "cadence": cadence, "note": "; ".join(notes) or None, **payload}
 
     def backfill_equity_history(self, offline: bool) -> dict:
         """Merge the broker's own equity history into the marks, idempotently."""
@@ -495,7 +565,8 @@ class UISession:
                 f"broker {broker.name!r} exposes no portfolio history to backfill")
         inserted = sum(
             self.registry.log_equity_mark(
-                row["ts"], row["equity"], cash=None, source="alpaca_backfill")
+                row["ts"], row["equity"], cash=None, source="alpaca_backfill",
+                book=broker.name)
             for row in broker.portfolio_history())
         return {"backfilled": int(inserted)}
 
@@ -835,8 +906,10 @@ class UISession:
         ``list_runs`` is already newest-first, and filtering before ``report``
         keeps the TUI poll path off an N+1 scan of unrelated research history.
         """
+        from qlab.experiment import ABLATION_RUN_KIND
+
         for run in self.registry.list_runs(200):
-            if run.get("kind") != "ablation":
+            if run.get("kind") != ABLATION_RUN_KIND:
                 continue
             backtests = self.registry.report(run["run_id"]).get("backtests") or []
             if backtests:
@@ -869,7 +942,11 @@ class UISession:
     def leaderboard(self) -> list[dict]:
         """Newest ablation ranked by Sharpe, in operator-readable method names."""
         from qlab.algorithms import list_algorithms
-        from qlab.core.atlas import arm_algorithm_key, arm_display_name
+        from qlab.core.atlas import (
+            OVERLAY_METRICS,
+            arm_algorithm_key,
+            arm_display_name,
+        )
 
         catalog = {row["id"]: row for row in list_algorithms()}
         champion = self.mandate.operational_policy
@@ -882,11 +959,7 @@ class UISession:
                 "name": arm_display_name(arm_id),
                 "champion": bool(key == champion),
                 "benchmark": bool(spec and spec["category"] == "benchmark"),
-                "sharpe": metrics.get("sharpe"),
-                "ann_return": metrics.get("ann_return"),
-                "max_drawdown": metrics.get("max_drawdown"),
-                "cvar_95": metrics.get("cvar_95"),
-                "deflated_sharpe": metrics.get("deflated_sharpe"),
+                **{name: metrics.get(name) for name in OVERLAY_METRICS},
             })
         # Arms without a Sharpe sort last instead of claiming a rank.
         rows.sort(key=lambda row: -(
@@ -899,6 +972,11 @@ class UISession:
 
         # One poll-sourced mark an hour keeps intraday granularity while the TUI
         # is open without turning the 2s refresh into 43k rows a day.
+        # The throttle is advanced BEFORE the write on purpose: a failing mark is
+        # then not retried on the next 2s tick (it waits an hour and self-heals),
+        # and the write reads the broker exactly as self.portfolio(offline) does
+        # on the next line — so leaving it unguarded adds no new failure class.
+        # Do not "fix" this ordering into write-then-advance.
         if time.time() - self._last_poll_mark > 3600.0:
             self._last_poll_mark = time.time()
             self.record_equity_mark("poll", offline)
@@ -1084,6 +1162,30 @@ def _overlap_stream_cursor(cursor: str) -> str:
     except (TypeError, ValueError):
         return cursor
     return (parsed - timedelta(microseconds=1)).isoformat()
+
+
+def _observed_cadence(daily) -> dict | None:
+    """Annualization basis derived from the marks that actually exist.
+
+    The equity marks are not a trading calendar: a Fri→Mon step and a Tue→Wed
+    step are both one observation, and marks appear on weekends whenever the TUI
+    was open. Annualizing that at 252 periods a year is an unstated, unstable
+    time-base error, so the factor here is the observed number of return
+    observations per year across the observed span. It is returned for the
+    payload as well as used, because the convention must never be implicit.
+    """
+    steps = len(daily) - 1
+    if steps < 1:
+        return None
+    span_days = (daily.index[-1] - daily.index[0]).total_seconds() / 86400.0
+    if span_days <= 0.0:
+        return None
+    return {
+        "periods_per_year": round(_DAYS_PER_YEAR * steps / span_days, 4),
+        "observed_span_days": round(span_days, 4),
+        "mean_step_days": round(span_days / steps, 4),
+        "basis": "observed mark cadence",
+    }
 
 
 def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None:

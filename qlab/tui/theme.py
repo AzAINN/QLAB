@@ -495,6 +495,13 @@ APP_CSS_TEMPLATE = Template("""
     #command:focus {
         border: none;
     }
+    #conn-chip {
+        width: auto;
+        padding: 0 1;
+        height: 1;
+        text-align: right;
+        color: $muted;
+    }
     #system-status {
         width: auto;
         min-width: 28;

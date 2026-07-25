@@ -37,8 +37,8 @@ from qlab.tui.atlas_view import AtlasView
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
-    braille_chart, bulletin, key_number_lines, money, pct, phase_elapsed,
-    sparkline, verdict_chip, weight_bar,
+    braille_chart, bulletin, connection_chip, key_number_lines, money, pct,
+    phase_elapsed, sparkline, verdict_chip, weight_bar,
 )
 from qlab.tui.theme import (
     ALLOCATION_TRACK,
@@ -765,6 +765,8 @@ class QlabTui(App[None]):
         self.snapshot: dict[str, Any] = {}
         self._refreshing = False
         self._action_running = False
+        self._last_snapshot_at: float | None = None
+        self._refresh_failures = 0
         self._event_ids: set[str] = set()
         self._runs_signature: tuple = ()
         self._audit_signature: tuple = ()
@@ -966,6 +968,7 @@ class QlabTui(App[None]):
         yield Static("waiting for runtime snapshot", id="event-strip")
         with Horizontal(id="command-row"):
             yield Input(placeholder=": command or Ctrl-P", id="command")
+            yield Static("CONNECTING", id="conn-chip", markup=True)
             yield Static("PAPER · CONNECTING", id="system-status")
 
     def on_mount(self) -> None:
@@ -1033,6 +1036,7 @@ class QlabTui(App[None]):
             except Exception as exc:
                 self.call_from_thread(
                     self._write_local_event, "api.error", {"error": repr(exc)})
+                self.call_from_thread(self._note_refresh_failure)
             finally:
                 self.call_from_thread(self._finish_refresh)
 
@@ -1040,6 +1044,17 @@ class QlabTui(App[None]):
 
     def _finish_refresh(self) -> None:
         self._refreshing = False
+
+    def _note_refresh_failure(self) -> None:
+        self._refresh_failures += 1
+        self._render_conn_chip()
+
+    def _render_conn_chip(self) -> None:
+        age = (None if self._last_snapshot_at is None
+               else time.monotonic() - self._last_snapshot_at)
+        text, level = connection_chip(age, self._refresh_failures)
+        tone = {"ok": UP, "warn": AMBER, "down": DOWN}[level]
+        self.query_one("#conn-chip", Static).update(f"[{tone}]{text}[/]")
 
     def _start_bootstrap(self) -> None:
         """Fetch immutable owner configuration once, when Settings is first shown."""
@@ -1296,6 +1311,7 @@ class QlabTui(App[None]):
     def _tick_pulse(self) -> None:
         """Animate working-state glyphs only while something is running."""
         self._pulse += 1
+        self._render_conn_chip()
         states = set(self._agent_states.values())
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
         running = workflows and workflows[0].get("status") == "running"
@@ -1306,6 +1322,9 @@ class QlabTui(App[None]):
                 self._render_workforce()
 
     def _apply_snapshot(self, snapshot: dict) -> None:
+        self._last_snapshot_at = time.monotonic()
+        self._refresh_failures = 0
+        self._render_conn_chip()
         self.snapshot = snapshot
         assets = snapshot.get("market", {}).get("assets", [])
         self._sync_universe([row["ticker"] for row in assets])

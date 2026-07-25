@@ -201,6 +201,24 @@ def braille_chart(values: list[float], width: int, height: int) -> list[str]:
     ]
 
 
+def connection_chip(age_seconds: float | None, failures: int) -> tuple[str, str]:
+    """(text, level) for snapshot freshness; level is ok | warn | down.
+
+    Three consecutive refresh failures mean the owner is gone, not merely a
+    slow request — one timeout must not scream OWNER DOWN during an action.
+    """
+    if failures >= 3:
+        if age_seconds is None:
+            return "OWNER DOWN", "down"
+        return f"OWNER DOWN · last {int(age_seconds)}s", "down"
+    if age_seconds is None:
+        return "CONNECTING", "warn"
+    if age_seconds > 10:
+        minutes, seconds = divmod(int(age_seconds), 60)
+        return f"STALE {minutes}:{seconds:02d}", "warn"
+    return "LIVE", "ok"
+
+
 def pct(value: float | None, digits: int = 1) -> str:
     return "—" if value is None else f"{value:.{digits}%}"
 

@@ -185,10 +185,16 @@ class UISession:
 
         self.registry = registry or Registry()
         self.mandate = load_mandate()
-        self.offline_default = offline_default
         # The operator's explicit choice; the persisted value is authoritative
-        # when the caller passes none, and synthetic is the safe default.
-        self.desk_mode = desk_mode or load_desk_mode() or DEFAULT_DESK_MODE
+        # when the caller passes none, and ``offline_default`` only seeds the
+        # mode nobody has chosen yet — never a second opinion about it.
+        self.desk_mode = desk_mode or load_desk_mode() or (
+            DEFAULT_DESK_MODE if offline_default else DeskMode("live", "simulated"))
+        # Derived, never carried alongside: a launcher flag and a persisted (or
+        # POSTed) mode used to disagree, and the disagreement reconstructed
+        # `synthetic` + `alpaca` — synthetic quotes on the SSE bus and a
+        # synthetic portfolio for a real Alpaca book.
+        self.offline_default = self.desk_mode.offline
         self.seed = seed
         self._market_events: deque[dict] = deque(maxlen=_MARKET_EVENT_LIMIT)
         self._market_lock = threading.Lock()
@@ -201,7 +207,7 @@ class UISession:
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
-            offline=offline_default, seed=seed,
+            offline=self.offline_default, seed=seed,
         )
         owner_tools = _OwnerToolApp()
         register_lab_tools(owner_tools, self.lab_state, owner_only=True)
@@ -526,6 +532,11 @@ class UISession:
     # -- desk mode ----------------------------------------------------------
     def set_desk_mode(self, mode: DeskMode) -> DeskMode:
         self.desk_mode = mode
+        # The mode owns the data lane too: the TUI retunes an owner that was
+        # spawned with no flags, so leaving these behind would keep publishing
+        # synthetic quotes and pricing a real book off the synthetic feed.
+        self.offline_default = mode.offline
+        self.lab_state.offline = mode.offline
         save_desk_mode(mode)
         return mode
 
@@ -2175,7 +2186,9 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
     """Start the UI server (blocking). Ctrl-C to stop.
 
     ``desk_mode=None`` means no launcher flag chose one, so the session loads
-    the operator's persisted choice rather than being handed a guess.
+    the operator's persisted choice rather than being handed a guess — and
+    ``offline`` only seeds a desk that has never been chosen. The mode the
+    session settles on is what the banner reports.
     """
     session = UISession(offline_default=offline, desk_mode=desk_mode)
     market_stop, market_thread = _start_market_topics(session)
@@ -2187,7 +2200,9 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
     httpd.daemon_threads = True
     _Handler.session = session
     url = f"http://127.0.0.1:{port}/"
-    print(f"[qlab] UI at {url}  (offline={'on' if offline else 'off'}; paper capital only)")
+    print(f"[qlab] UI at {url}  "
+          f"(offline={'on' if session.offline_default else 'off'}; "
+          f"{session.desk_mode.label}; paper capital only)")
     print("[qlab] press Ctrl-C to stop.")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()

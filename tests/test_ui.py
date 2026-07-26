@@ -1417,6 +1417,40 @@ def test_setting_the_desk_mode_switches_the_book(session, monkeypatch):
     assert session.current_book(offline=False) == "simulated_paper"
 
 
+def test_a_persisted_live_desk_owns_the_default_data_lane():
+    """``offline_default`` must not be a second, contradictable answer.
+
+    Bare ``qlab ui`` computes ``offline=True`` from its flags while the session
+    loads a persisted live mode from disk. Serving synthetic data under a real
+    book is ``synthetic`` + ``alpaca`` — the state ``DeskMode`` forbids —
+    rebuilt at runtime out of two independent fields.
+    """
+    from qlab.core.desk_mode import DeskMode, save_desk_mode
+
+    save_desk_mode(DeskMode("live", "alpaca"))
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    assert session.desk_mode == DeskMode("live", "alpaca")
+    assert session.offline_default is False
+    assert session.lab_state.offline is False
+
+
+def test_retuning_the_desk_mode_moves_the_default_data_lane(session):
+    """The TUI's only path: an owner spawned with no flags, then POSTed into."""
+    from qlab.core.desk_mode import DeskMode
+
+    assert session.offline_default is True
+    status, _payload = handle_api(
+        session, "POST", "/api/desk_mode", {},
+        {"data": "live", "book": "simulated"})
+    assert status == 200
+    assert session.offline_default is False
+    assert session.lab_state.offline is False
+
+    session.set_desk_mode(DeskMode("synthetic", "simulated"))
+    assert session.offline_default is True
+    assert session.lab_state.offline is True
+
+
 def _write_unreadable_profile(tmp_path, secret: str) -> None:
     """An Alpaca CLI config dir whose active profile cannot be decoded."""
     (tmp_path / "profiles").mkdir(parents=True, exist_ok=True)

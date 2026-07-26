@@ -195,8 +195,8 @@ def _alpaca_credentials_resolve() -> bool:
         return False
 
 
-def startup_desk_mode(args) -> DeskMode | None:
-    """The mode to start with, or None when the operator has to be asked.
+def startup_desk_mode(flagged: DeskMode | None) -> DeskMode | None:
+    """The mode to start with given what a flag said, or None to ask.
 
     Precedence: explicit flag, then the persisted choice, then the modal. A flag
     is the operator speaking now, so it wins over — and replaces — what was
@@ -209,7 +209,6 @@ def startup_desk_mode(args) -> DeskMode | None:
     no safer-looking mode is assumed; the choice goes back to the operator,
     which is what a credential that has gone away actually means.
     """
-    flagged = desk_mode_from_args(args)
     if flagged is not None:
         save_desk_mode(flagged)
         return flagged
@@ -225,6 +224,11 @@ def _cmd_ui(args) -> int:
     # No modal on this surface, so an unflagged run is handed no guess: the
     # session loads the persisted mode itself (and defaults to synthetic).
     mode = desk_mode_from_args(args)
+    if mode is not None:
+        # The session holds its mode in memory only, and `qlab ui` is a
+        # first-class entry point: without this, a later `qlab tui` attaching to
+        # this owner would read a stale file and show a desk nobody is trading.
+        save_desk_mode(mode)
     serve(port=args.port,
           offline=not args.online if mode is None else mode.offline,
           open_browser=not args.no_browser, desk_mode=mode)
@@ -243,10 +247,11 @@ def _cmd_tui(args) -> int:
             f"(original error: {exc})"
         ) from exc
 
-    # Only a flag may retune an owner that is already running, so remember
-    # whether one was given. None means the TUI asks on mount.
-    from_flag = desk_mode_from_args(args) is not None
-    mode = startup_desk_mode(args)
+    # Only a flag may retune an owner that is already running, so what the flags
+    # said is kept apart from what startup resolved. A resolved mode of None
+    # means the TUI asks on mount.
+    flagged = desk_mode_from_args(args)
+    mode = startup_desk_mode(flagged)
     offline = not args.online if mode is None else mode.offline
 
     def port_open() -> bool:
@@ -326,7 +331,7 @@ def _cmd_tui(args) -> int:
         raise SystemExit(
             f"port {args.port} is open but is not a compatible qlab runtime: {exc}") from exc
 
-    if owner is None and from_flag:
+    if owner is None and flagged is not None:
         # An owner we did not spawn read its mode at construction; a flag has to
         # reach it over the API or the TUI would show a book the owner is not
         # trading. Refuse loudly rather than run with the two disagreeing.

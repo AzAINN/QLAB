@@ -141,27 +141,25 @@ def test_a_persisted_mode_makes_startup_silent():
     synthetic" from "the operator has never chosen"; both look identical in the
     resolved mode, so only persistence can tell them apart.
     """
-    import argparse
-
-    from qlab.autopilot.cli import startup_desk_mode
+    from qlab.autopilot.cli import (
+        build_parser, desk_mode_from_args, startup_desk_mode)
     from qlab.core.desk_mode import DeskMode, save_desk_mode
 
-    args = argparse.Namespace(live=False, alpaca_book=False, online=False)
-    assert startup_desk_mode(args) is None            # never chosen: ask
+    no_flag = desk_mode_from_args(build_parser().parse_args(["tui"]))
+    assert startup_desk_mode(no_flag) is None         # never chosen: ask
 
     save_desk_mode(DeskMode("synthetic", "simulated"))
-    assert startup_desk_mode(args) == DeskMode("synthetic", "simulated")
+    assert startup_desk_mode(no_flag) == DeskMode("synthetic", "simulated")
 
 
 def test_a_flag_beats_a_conflicting_persisted_mode():
-    import argparse
-
-    from qlab.autopilot.cli import startup_desk_mode
+    from qlab.autopilot.cli import (
+        build_parser, desk_mode_from_args, startup_desk_mode)
     from qlab.core.desk_mode import DeskMode, load_desk_mode, save_desk_mode
 
     save_desk_mode(DeskMode("synthetic", "simulated"))
     chosen = startup_desk_mode(
-        argparse.Namespace(live=False, alpaca_book=True, online=False))
+        desk_mode_from_args(build_parser().parse_args(["tui", "--alpaca-book"])))
     assert chosen == DeskMode("live", "alpaca")
     # The flag is the operator speaking now, so it also becomes the persisted one.
     assert load_desk_mode() == DeskMode("live", "alpaca")
@@ -170,24 +168,23 @@ def test_a_flag_beats_a_conflicting_persisted_mode():
 def test_a_persisted_live_mode_without_credentials_asks_again(monkeypatch):
     """A credential that has gone away hands the choice back, silently neither
     starting live nor rewriting the persisted mode to something safer-looking."""
-    import argparse
-
-    from qlab.autopilot.cli import startup_desk_mode
+    from qlab.autopilot.cli import (
+        build_parser, desk_mode_from_args, startup_desk_mode)
     from qlab.core.desk_mode import DeskMode, load_desk_mode, save_desk_mode
 
-    args = argparse.Namespace(live=False, alpaca_book=False, online=False)
+    no_flag = desk_mode_from_args(build_parser().parse_args(["tui"]))
     save_desk_mode(DeskMode("live", "alpaca"))
 
     # conftest points ALPACA_CONFIG_DIR at a directory that does not exist and
     # clears the env keys, so nothing resolves here.
-    assert startup_desk_mode(args) is None
+    assert startup_desk_mode(no_flag) is None
     assert load_desk_mode() == DeskMode("live", "alpaca")   # untouched
 
     # A resolvable credential (env pair; file/env only, never a network call)
     # makes the same persisted mode silent again.
     monkeypatch.setenv("ALPACA_API_KEY", "PKFAKEKEYFORTESTS")
     monkeypatch.setenv("ALPACA_API_SECRET", "fake-secret-for-tests")
-    assert startup_desk_mode(args) == DeskMode("live", "alpaca")
+    assert startup_desk_mode(no_flag) == DeskMode("live", "alpaca")
 
 
 def _drive_cmd_tui(monkeypatch, argv, *, owner_running):
@@ -309,3 +306,23 @@ def test_cmd_ui_hands_the_flagged_mode_to_the_owner_session(monkeypatch):
     # modal, so it must not be handed a guess.
     assert calls["desk_mode"] is None
     assert calls["offline"] is True
+
+
+def test_cmd_ui_persists_an_explicitly_flagged_mode(monkeypatch):
+    """`qlab ui` is a first-class entry point, not only the helper `qlab tui`
+    spawns, and the session holds its mode in memory only. If the flag never
+    reaches desk_mode.json, a later bare `qlab tui` attaching to this owner
+    reads an absent or stale file and displays a safer-looking desk than the one
+    actually being traded.
+    """
+    from qlab.autopilot import cli
+    from qlab.core.desk_mode import DeskMode, load_desk_mode
+    from qlab.ui import server as ui_server
+
+    monkeypatch.setattr(ui_server, "serve", lambda **kwargs: None)
+
+    assert cli.main(["ui", "--no-browser"]) == 0
+    assert load_desk_mode() is None             # no flag invents no choice
+
+    assert cli.main(["ui", "--alpaca-book", "--no-browser"]) == 0
+    assert load_desk_mode() == DeskMode("live", "alpaca")

@@ -1113,7 +1113,17 @@ class UISession:
             # from a genuinely quiet market, and those mean opposite things.
             items = []
             news_error = str(exc)
-        news = read_news(items)
+        # Ground the window before interpreting it: enforce the point-in-time
+        # boundary, hash each record so an edited headline is a new record
+        # rather than a silent rewrite, and cluster so corroboration is visible.
+        from qlab.news.grounding import ground
+
+        provider_name = ("synthetic" if offline else
+                         os.environ.get("QLAB_NEWS_PROVIDER", "synthetic"))
+        grounded = ground(
+            items, as_of=datetime.now(timezone.utc).isoformat(),
+            provider=provider_name, universe=universe)
+        news = read_news(grounded.items)
         portfolio = {"drawdown_tier": self.mandate.drawdown_tier(
             float(self.portfolio(offline).get("drawdown", 0.0)))}
         decisions = self.registry.recent_decisions(limit=10)
@@ -1124,8 +1134,13 @@ class UISession:
             recent_verdicts=[v for v in verdicts.values() if v])
         payload = read.to_dict()
         payload["news_source"] = (
-            "synthetic (demo)" if offline else
-            os.environ.get("QLAB_NEWS_PROVIDER", "synthetic"))
+            "synthetic (demo)" if offline else provider_name)
+        payload["grounding"] = grounded.to_dict()
+        # Claims a human should actually weigh: primary documents and
+        # multi-publisher stories. Single secondary takes stay visible in the
+        # full window but are not promoted as established.
+        payload["supported_claims"] = [
+            c.to_dict() for c in grounded.corroborated_claims[:6]]
         if news_error:
             payload["news_error"] = news_error[:400]
             payload["observations"] = [

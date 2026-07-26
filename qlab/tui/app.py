@@ -2027,10 +2027,26 @@ class QlabTui(App[None]):
             lines.append(f"[{LABEL_GOLD}]WOULD CHANGE THIS[/]")
             lines.extend(_bulletin_markup(changers, tone=MUTED, max_len=200))
 
+        supported = read.get("supported_claims") or []
+        if supported:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]WELL-SUPPORTED CLAIMS[/]  "
+                         f"[{DIM}]primary documents or multi-publisher[/]")
+            for claim in supported[:5]:
+                tier_tone = UP if claim.get("tier") == "primary" else CYAN
+                lines.append(
+                    f"  [{tier_tone}]•[/] {str(claim.get('headline',''))[:88]} "
+                    f"[{DIM}]({claim.get('support','')})[/]")
+
+        grounding = read.get("grounding") or {}
+        for flag in (grounding.get("quality_flags") or [])[:3]:
+            lines.extend(_bulletin_markup([str(flag)], tone=AMBER, max_len=140))
+
         headlines = (read.get("news") or {}).get("headlines") or []
         if headlines:
             lines.append("")
-            lines.append(f"[{LABEL_GOLD}]QUALITATIVE RECORD[/]")
+            lines.append(f"[{LABEL_GOLD}]QUALITATIVE RECORD[/]  "
+                         f"[{DIM}]everything in the window[/]")
             for item in headlines[:6]:
                 item_tone = {
                     "risk_off": DOWN, "risk_on": UP, "mixed": AMBER,

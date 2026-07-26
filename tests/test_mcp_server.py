@@ -166,6 +166,54 @@ def test_prediction_tool_round_trip_is_offline_and_dsr_excluded(reg):
     assert (reg.trial_count(), reg.backtest_trial_count()) == trials_before
 
 
+def test_objective_build_refuses_research_only_forms_but_runs_operational(reg):
+    """The analyst->optimizer handoff completes for an operational objective,
+    and a research-only form (mvsk) is refused loudly at build time — so the
+    dead-end that used to hard-block the optimizer never reaches it.
+    """
+    from qlab.algorithms.catalog import operational_objective_forms
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+
+    app = StubApp()
+    register_lab_tools(
+        app, LabState(offline=True, registry=reg, seed=7), owner_only=True)
+
+    moment_set_id = app.tools["moments.estimate"](
+        as_of="2022-06-30", universe="core", lookback_days=504,
+        higher_moments=False,
+    )["moment_set_id"]
+
+    # Only forms an operational prepared-objective algorithm can solve are
+    # buildable on the staged surface; this is the catalog, not a hard-coded set.
+    assert operational_objective_forms() == {"min_variance", "max_utility"}
+
+    # The exact staged pipeline the workforce optimizer runs: build the
+    # operational objective, then solve it through the configured policy. No
+    # block.
+    policy = app.tools["policy.current"]()
+    built = app.tools["objective.build"](
+        moment_set_id=moment_set_id, form="min_variance")
+    assert built["form"] == "min_variance"
+    solved = app.tools["algorithms.solve"](
+        objective_id=built["objective_id"],
+        algorithm_id=policy["algorithm_id"],
+        max_weight=policy["constraints"]["max_weight"],
+    )
+    assert solved["status"] in ("optimal", "suboptimal")
+    assert abs(sum(solved["weights"].values()) - 1.0) < 1e-6
+
+    # max_utility is also operationally solvable (the min_variance algorithm),
+    # so it builds too.
+    assert app.tools["objective.build"](
+        moment_set_id=moment_set_id, form="max_utility")["form"] == "max_utility"
+
+    # mvsk has no operational solver: refuse at build, in the analyst phase,
+    # instead of letting the optimizer phase block the whole run.
+    with pytest.raises(PermissionError, match="no operational solver"):
+        app.tools["objective.build"](moment_set_id=moment_set_id, form="mvsk")
+
+
 def test_data_integrity_is_in_every_agent_visible_registration_scope():
     from qlab.tui.claude import (
         _LAB_TOOL_BASES,

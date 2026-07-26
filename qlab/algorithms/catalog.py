@@ -179,6 +179,24 @@ def operational_solver_names() -> set[str]:
     }
 
 
+def operational_objective_forms() -> set[str]:
+    """Objective forms an operational prepared-objective algorithm can solve.
+
+    A prepared objective built on the staged agent surface is only useful if
+    some operational catalog entry can consume it through ``algorithms.solve``.
+    Research/offline forms (e.g. ``mvsk``) have no operational solver, so an
+    objective built in that form is a dead end: nothing downstream can execute
+    it. Callers use this to refuse such a build early rather than let it reach
+    the optimizer and hard-block a governed run.
+    """
+    return {
+        form
+        for spec in _ALGORITHMS
+        if spec.stage == "operational" and spec.prepared_objective
+        for form in spec.objective_forms
+    }
+
+
 def operational_algorithm_for_solver(
     solver: str, objective_form: str
 ) -> AlgorithmSpec:

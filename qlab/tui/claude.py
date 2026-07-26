@@ -422,8 +422,13 @@ champion instruction above):
   the explicitly labelled, prompt-only `DEBATE_FOLLOW_UP` for that role. Do not
   spawn other agents. Use owner MCP facts; never invent ids, data, solver output,
   a verdict, or a completed phase.
-- MVSK is a research hypothesis, not an assumed live champion. Preserve it in
-  comparisons, but use the catalog and current qlab policy for operational work.
+- MVSK is a research hypothesis, not an assumed live champion, and the governed
+  optimizer runs operational objective forms only. Build the objective with the
+  operational form (min_variance / max_utility) that the current qlab policy and
+  catalog support; never build an mvsk objective here — it has no operational
+  solver, objective_build will refuse it, and the higher-moment comparison lives
+  in the offline ablation, not this pipeline. Panel variants differ by
+  window / shrinkage / regime, never by objective form.
 - No Claude role can execute a paper order. The reporter may request daily ops
   or a dry rebalance preview only; human confirmation remains outside Claude.
 """.strip()

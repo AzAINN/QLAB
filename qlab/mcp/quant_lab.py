@@ -31,6 +31,7 @@ from qlab.algorithms.catalog import (
     get_algorithm,
     list_algorithms,
     operational_algorithm_for_solver,
+    operational_objective_forms,
     solve_prepared_objective,
 )
 from qlab.core import data as market
@@ -798,6 +799,22 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                         skew_lambda: float = 0.5, kurt_lambda: float = 0.5) -> dict:
         """Build the one-true objective from a moment set. Returns an objective_id."""
         st.budget.charge("objective.build")
+        # Refuse a form no operational algorithm can solve (e.g. mvsk): the
+        # staged optimizer only runs operational catalog entries, so such an
+        # objective is a dead end that would hard-block the run at the solve
+        # step. Fail loud and early here instead — the same catalog boundary
+        # that keeps research arms off the agent surface (invariant 4). MVSK
+        # and other higher-moment forms are research-only; compare them through
+        # the offline ablation, never the governed optimizer.
+        runnable = operational_objective_forms()
+        if form not in runnable:
+            raise PermissionError(
+                f"objective form {form!r} has no operational solver on the "
+                f"staged surface, so nothing downstream could execute it; build "
+                f"one of {sorted(runnable)} instead. Higher-moment forms like "
+                f"'mvsk' are research-only and are exercised through the offline "
+                f"ablation, not the governed optimizer."
+            )
         ms = st.get_moment_set(moment_set_id)
         obj = build_objective(form, ms, skew_lambda=skew_lambda, kurt_lambda=kurt_lambda)
         oid = st.put_objective(obj)

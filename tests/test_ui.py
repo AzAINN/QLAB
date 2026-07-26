@@ -1526,6 +1526,79 @@ def test_autopilot_routes_run_the_book_the_desk_mode_chose(
     assert requested == ["alpaca"]
 
 
+def test_run_once_and_daily_ops_clamp_offline_to_desk_mode_on_the_alpaca_book(
+    session, monkeypatch,
+):
+    """The data lane can never contradict the book.
+
+    The bundled web dashboard's offline checkbox re-defaults to True on every
+    page load, so on a live/alpaca desk a body of ``{"offline": true}`` must
+    not reach either route as-is: honouring it would run synthetic moments
+    into a referee verdict and a cost-gated plan (``run_once``), or evaluate
+    the drawdown kill switch on synthetic data while latching it against the
+    real book (``daily_ops``) — exactly the pairing ``DeskMode`` forbids.
+    """
+    from qlab.autopilot import loop
+    from qlab.core.desk_mode import DeskMode
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    calls: dict[str, dict] = {}
+
+    def fake_run_once(**kwargs):
+        calls["run_once"] = kwargs
+        return {"rebalance_recommended": False}
+
+    def fake_daily_ops(**kwargs):
+        calls["daily_ops"] = kwargs
+        return {"rebalance_recommended": False}
+
+    monkeypatch.setattr(loop, "run_once", fake_run_once)
+    monkeypatch.setattr(loop, "daily_ops", fake_daily_ops)
+
+    status, _ = handle_api(
+        session, "POST", "/api/run_once", {}, {"offline": True, "execute": False})
+    assert status == 200
+    assert calls["run_once"]["offline"] is False
+    assert calls["run_once"]["book"] == "alpaca"
+
+    status, _ = handle_api(session, "POST", "/api/daily_ops", {}, {"offline": True})
+    assert status == 200
+    assert calls["daily_ops"]["offline"] is False
+    assert calls["daily_ops"]["book"] == "alpaca"
+
+
+def test_run_once_and_daily_ops_still_honor_body_offline_on_the_simulated_book(
+    session, monkeypatch,
+):
+    """The clamp is narrow: a non-Alpaca desk keeps the operator's own flag."""
+    from qlab.autopilot import loop
+
+    assert session.desk_mode.book == "simulated"  # default fixture desk mode
+    calls: dict[str, dict] = {}
+
+    def fake_run_once(**kwargs):
+        calls["run_once"] = kwargs
+        return {"rebalance_recommended": False}
+
+    def fake_daily_ops(**kwargs):
+        calls["daily_ops"] = kwargs
+        return {"rebalance_recommended": False}
+
+    monkeypatch.setattr(loop, "run_once", fake_run_once)
+    monkeypatch.setattr(loop, "daily_ops", fake_daily_ops)
+
+    status, _ = handle_api(
+        session, "POST", "/api/run_once", {}, {"offline": False, "execute": False})
+    assert status == 200
+    assert calls["run_once"]["offline"] is False
+    assert calls["run_once"]["book"] == "simulated"
+
+    status, _ = handle_api(session, "POST", "/api/daily_ops", {}, {"offline": False})
+    assert status == 200
+    assert calls["daily_ops"]["offline"] is False
+    assert calls["daily_ops"]["book"] == "simulated"
+
+
 def test_tui_snapshot_carries_the_desk_mode(session):
     status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
     assert status == 200

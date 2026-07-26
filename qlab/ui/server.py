@@ -1579,6 +1579,20 @@ def _observed_cadence(daily) -> dict | None:
     }
 
 
+def _offline_for_book(session: UISession, off: bool) -> bool:
+    """The data lane can never contradict the book.
+
+    ``off`` is the request body's operator-supplied flag, and the bundled web
+    dashboard's checkbox re-defaults it to True on every page load — honouring
+    it verbatim on an Alpaca-book desk could reconstruct the synthetic+alpaca
+    pairing ``DeskMode.__post_init__`` forbids. The real book always runs on
+    the desk mode's own data lane instead.
+    """
+    if session.desk_mode.book == "alpaca":
+        return session.desk_mode.offline
+    return off
+
+
 def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None:
     """Mark the book after a mutation; a failed mark must never hide the result.
 
@@ -1883,7 +1897,8 @@ def handle_api(session: UISession, method: str, path: str,
         from qlab.autopilot.loop import run_once
 
         summary = run_once(
-            registry=session.registry, mandate=session.mandate, offline=off,
+            registry=session.registry, mandate=session.mandate,
+            offline=_offline_for_book(session, off),
             execute=bool(body.get("execute", True)),
             skew_lambda=float(body.get("skew", 0.5)),
             kurt_lambda=float(body.get("kurt", 0.5)),
@@ -1895,7 +1910,7 @@ def handle_api(session: UISession, method: str, path: str,
         from qlab.autopilot.loop import daily_ops
 
         summary = daily_ops(registry=session.registry, mandate=session.mandate,
-                            offline=off, seed=session.seed,
+                            offline=_offline_for_book(session, off), seed=session.seed,
                             book=session.desk_mode.book)
         _mark_after_mutation(session, "daily", off)
         return 200, summary

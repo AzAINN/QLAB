@@ -827,6 +827,57 @@ def test_mode_chip_never_claims_synthetic_before_it_knows():
     asyncio.run(run())
 
 
+def test_mode_chip_does_not_read_the_pre_choice_snapshot():
+    """Choosing a real book must not leave a muted SYNTHETIC chip behind.
+
+    ``chosen()`` repaints the chip while ``self.snapshot`` still holds the
+    payload the owner sent *before* it was told, and the renderer prefers the
+    snapshot. Snapshot-first is right; the stale entry has to go.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.theme import DOWN
+
+    class StaleSnapshotClient(StubClient):
+        """One pre-choice snapshot, then silence — the window being tested.
+
+        The next poll is at least a refresh interval away and further still if
+        the owner is busy; whatever the chip says meanwhile is what is read.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.served = 0
+
+        def get(self, path, **params):
+            if path == "/api/tui":
+                self.served += 1
+                if self.served > 1:
+                    raise RuntimeError("the owner has not answered again yet")
+                snap = super().get(path, **params)
+                snap["desk_mode"] = {"data": "synthetic", "book": "simulated",
+                                     "label": "SYNTHETIC"}
+                return snap
+            return super().get(path, **params)
+
+    async def run():
+        app = QlabTui(StaleSnapshotClient(), refresh_interval=0, desk_mode=_SYNTH)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            assert str(app.query_one("#mode-chip").content).strip() == "SYNTHETIC"
+            app._ask_desk_mode({"credentials": "Alpaca browser login",
+                                "credentials_ok": True})
+            await pilot.pause(0.1)
+            app.screen.dismiss(DeskMode("live", "alpaca"))
+            await pilot.pause(0.2)
+            widget = app.query_one("#mode-chip")
+            assert str(widget.content).strip() == "LIVE · ALPACA BOOK"
+            assert widget.styles.color == Color.parse(DOWN)
+
+    asyncio.run(run())
+
+
 def test_mode_chip_claims_no_mode_while_the_chooser_is_still_up():
     """No desk mode chosen yet is not the same as "synthetic"."""
     from qlab.tui.app import QlabTui

@@ -1220,6 +1220,10 @@ class QlabTui(App[None]):
             # behind would run governed reviews on synthetic data under a LIVE
             # chip — the one contradiction this screen exists to prevent.
             self.claude.offline = mode.offline
+            # The snapshot in hand predates this choice and the chip prefers it,
+            # so a real book would read as the muted demo until the next poll.
+            if self.snapshot:
+                self.snapshot.pop("desk_mode", None)
             self._post_desk_mode(mode)
             self._render_mode_chip()
             self._start_refresh()

@@ -30,15 +30,38 @@ shows when the Claude CLI is ready without interrupting the desk.
 The complete screen map is available from either the digit or matching function
 key:
 
-- `1` / `F1` — Dashboard: portfolio, regime, allocation, and alerts.
-- `2` / `F2` — Market: daily price context and provenance.
-- `3` / `F3` — Workforce: governed coordinator chat and phase progress.
-- `4` / `F4` — Research: experiment runs and algorithm evidence.
-- `5` / `F5` — Book: positions, checked plans, confirmation, and paper orders.
-- `6` / `F6` — Audit: decisions, challenges, verdicts, and reflections.
-- `7` / `F7` — Atlas: what every arm, metric, role, and rule is, with the live
+- `1` / `F1` — **Bob**: the desk manager's read — what the signals, the news,
+  and the research add up to, and where they disagree. This is the default view.
+- `2` / `F2` — Dashboard: portfolio, regime, allocation, and alerts.
+- `3` / `F3` — Market: daily price context and provenance.
+- `4` / `F4` — Workforce: governed coordinator chat and phase progress.
+- `5` / `F5` — Research: experiment runs and algorithm evidence.
+- `6` / `F6` — Book: positions, checked plans, confirmation, and paper orders.
+- `7` / `F7` — Audit: decisions, challenges, verdicts, and reflections.
+- `8` / `F8` — Atlas: what every arm, metric, role, and rule is, with the live
   champion and its latest ablation numbers.
-- `8` / `F8` — Settings: read-only mandate, data, agent, and theme bulletins.
+- `9` / `F9` — Settings: read-only mandate, data, agent, and theme bulletins.
+
+### BobTheQuant, the desk manager
+
+Bob runs continuously inside the owner on a heartbeat (`QLAB_BOB_INTERVAL_S`,
+default 30s). Each tick it evaluates deterministic triggers against owner facts
+and recomposes its **read**: one view across the regime panel, the news record,
+and what the workforce concluded.
+
+The read leads with the part a number cannot express — the **tensions**, where
+the evidence disagrees with itself. "Prices are calm but the coverage is not"
+is the case Bob exists to surface. Conviction describes how much the evidence
+agrees, never how likely a price move is.
+
+Bob escalates a material disagreement into the same registry-enforced debate
+the workforce uses — allowlisted claim, two-round ceiling, adjudication the
+reporter waits on. It holds read-only tools and cannot trade, approve, or
+create a paper plan in any mode; `Ctrl-B` opens its detail drawer from any view.
+
+Modes: `observe` (monitor and brief), `research` (may start approved research
+workflows), `propose` (may request a checked plan for human approval), and
+`paused`. The mode is the authority statement and is shown wherever Bob is.
 
     qlab tui --claude offer   # default: show readiness, never prompt
     qlab tui --claude auto    # start the workforce after the first snapshot
@@ -51,9 +74,17 @@ the console stays quiet, printing one short note per agent (what it settled,
 what runs next) and the run's results at the end. Full tool traffic remains on
 the timeline (`~`). Follow-up messages continue the same session, the `■ stop`
 button interrupts without losing durable phase state, and a run that stalls is
-stopped by a watchdog rather than hanging the desk. `: workforce GOAL`,
-`: workforce status`, and `: workforce resume ID` drive the same machinery from
-the command row.
+stopped by a watchdog rather than hanging the desk. Stop terminates the entire
+Claude/coordinator/Agent/MCP child-process tree, marks the active durable phase
+`interrupted`, and fences late child writes until an explicit resume. A
+successful Claude exit that leaves a phase open is treated the same way rather
+than leaving the desk painted `working`. Owner startup recovers orphaned
+`running` rows, and the owner also expires rows older than the coordinator
+lease. `: workforce GOAL`, `: workforce status`, `: workforce resume ID`,
+`: workforce stop`, and `: workforce abandon [ID]` drive the same machinery
+from the command row. Abandon permanently closes unfinished phases but retains
+completed evidence, events, and the audit record; it does not delete registry
+state.
 
 `: chat MESSAGE` switches the same chat box to a read-only desk assistant —
 ask about the portfolio, market, runs, or audit trail conversationally; it
@@ -251,6 +282,8 @@ two-writer topology.
     qlab desk
     qlab workforce run "Review the desk and challenge the estimation window"
     qlab workforce status
+    qlab workforce interrupt --id WORKFLOW_ID
+    qlab workforce abandon --id WORKFLOW_ID
     qlab events --kind workflow_phase
 
 run-once performs analysis, solves the configured operational policy, logs the decision,
@@ -271,7 +304,10 @@ triggers. It cannot trade.
 The desk verbs are the research-CLI face of the owner runtime: `qlab desk`
 prints one status card, `qlab workforce run` drives a governed run headless
 and streams the coordinator plus the owner's live audit bus, and `qlab
-events` tails that bus (`GET /api/stream`, server-sent events). The TUI
+events` tails that bus (`GET /api/stream`, server-sent events). Ctrl-C during a
+headless run interrupts its durable workflow and terminates the full reasoning
+process tree. `workforce interrupt` fences an orphan for later resumption;
+`workforce abandon` closes it while retaining its audit. The TUI
 subscribes to the same stream, so phase changes and verdicts land on every
 surface the moment they are recorded. None of these verbs can execute a
 paper trade.

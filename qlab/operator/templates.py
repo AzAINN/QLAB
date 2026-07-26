@@ -64,6 +64,14 @@ TEMPLATES: dict[str, WorkflowTemplate] = {
         purpose="Analyze a drawdown-tier or kill-switch event and brief the human.",
         phases=("analyst", "challenger", "referee", "reporter"),
         requires=("data_eligible_for_research",)),
+    "news_read": WorkflowTemplate(
+        template_id="news_read",
+        purpose="Interpret the grounded news window: what the record supports, "
+                "what is merely circulating, and what it bears on.",
+        phases=("news-analyst",),
+        requires=("grounded_news_window",),
+        notes="Atlas's qualitative helper. Reads a window it is handed; it "
+              "cannot fetch, forecast, or propose."),
     "news_risk_review": WorkflowTemplate(
         template_id="news_risk_review",
         purpose="Turn operator-pasted excerpts into dry, corroborated risk views.",
@@ -136,6 +144,13 @@ def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplat
             raise TemplateNotAllowed(
                 f"{template_id!r} needs operator-pasted excerpts; Atlas does not "
                 "fetch news on its own")
+    if "grounded_news_window" in template.requires:
+        # The analyst interprets a window it is handed. Refusing when there is
+        # nothing to read keeps it from narrating an empty record.
+        if not facts.get("news_window_items"):
+            raise TemplateNotAllowed(
+                f"{template_id!r} needs a non-empty grounded news window; "
+                "there is nothing to interpret right now")
     return template
 
 

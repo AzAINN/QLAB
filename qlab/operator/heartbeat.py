@@ -125,6 +125,9 @@ def build_owner_tick(session, lock, *, offline: bool,
 
     def tick() -> dict:
         with lock:
+            # Read the switch each tick so the UI toggle takes effect
+            # immediately rather than at the next owner restart.
+            live_autonomous = getattr(session, "autonomous", autonomous)
             result = session.atlas_observe(offline)
             # The qualitative read is what a human actually looks at; refresh it
             # on the same tick so the rail and the drawer never disagree.
@@ -133,7 +136,8 @@ def build_owner_tick(session, lock, *, offline: bool,
             except Exception:
                 # A read failure must not stop the supervisor from observing.
                 pass
-            if autonomous:
+            result["autonomous_enabled"] = bool(live_autonomous)
+            if live_autonomous:
                 try:
                     result["autonomous"] = session.atlas_run_startable(offline)
                 except Exception as exc:

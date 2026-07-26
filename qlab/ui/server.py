@@ -209,6 +209,9 @@ class UISession:
         # Atlas's composed qualitative read, refreshed by the heartbeat.
         self._desk_read: dict | None = None
         self.heartbeat = None
+        # Autonomy is a runtime switch the operator owns from the UI.
+        # The env var only seeds its initial value.
+        self.autonomous = os.environ.get("QLAB_ATLAS_AUTONOMOUS") == "1"
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -1074,6 +1077,12 @@ class UISession:
             "open_workflows": len(self.registry.list_workflows(50)),
             "pending_approvals": 0,
             "order_anomaly": anomaly,
+            # The grounded window the news-analyst would interpret. Present so
+            # template preconditions can refuse an empty record rather than
+            # letting the analyst narrate silence.
+            "news_window_items": len(
+                (self.desk_read(offline).get("grounding") or {})
+                .get("hashes", [])),
         }
 
     def atlas_observe(self, offline: bool) -> dict:
@@ -1150,6 +1159,28 @@ class UISession:
             ]
         self._desk_read = payload
         return self._desk_read
+
+    def set_autonomy(self, enabled: bool) -> dict:
+        """Turn autonomous work on or off at runtime.
+
+        This does not widen authority: the mode still decides what may run, so
+        enabling autonomy in Observe mode still launches nothing. It only
+        removes the need for a human to press start on permitted work.
+        """
+        self.autonomous = bool(enabled)
+        mode = self.atlas.status().get("mode", "observe")
+        self.registry.record_event(
+            "atlas_autonomy", {"enabled": self.autonomous, "mode": mode})
+        return {
+            "autonomous": self.autonomous,
+            "mode": mode,
+            "effect": (
+                "Atlas will start work its mode permits on each heartbeat"
+                if self.autonomous and mode in ("research", "propose")
+                else f"enabled, but {mode!r} mode starts no workflows"
+                if self.autonomous
+                else "Atlas will queue work and wait for you to start it"),
+        }
 
     def atlas_escalate_debate(self, offline: bool) -> dict:
         """Open a bounded debate when Atlas's read finds material disagreement.
@@ -1530,8 +1561,11 @@ class UISession:
             "stress": stress,
             "atlas": self.atlas.status(),
             "atlas_read": self.desk_read(offline),
-            "atlas_heartbeat": (self.heartbeat.status() if self.heartbeat
-                              else {"running": False, "ticks": 0}),
+            "atlas_heartbeat": {
+                **(self.heartbeat.status() if self.heartbeat
+                   else {"running": False, "ticks": 0}),
+                "autonomous": self.autonomous,
+            },
             "atlas_tasks": self.registry.list_atlas_tasks(10),
             "approvals": self.registry.list_approval_requests(10, "pending"),
             "quotes": self.quotes(),
@@ -1902,6 +1936,12 @@ def handle_api(session: UISession, method: str, path: str,
             return 404, {"error": str(exc)}
         except PermissionError as exc:
             return 400, {"error": str(exc)}
+
+    if method == "POST" and path == "/api/atlas/autonomy":
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return 400, {"error": "enabled must be true or false"}
+        return 200, session.set_autonomy(enabled)
 
     if method == "POST" and path == "/api/atlas/escalate":
         return 200, session.atlas_escalate_debate(off)

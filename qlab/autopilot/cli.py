@@ -338,6 +338,13 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--universe", default="core", choices=["core", "candidates"])
     pw.set_defaults(func=_cmd_prewarm)
 
+    nc = sub.add_parser(
+        "news-check",
+        help="authenticate the news integration and show what it returns")
+    nc.add_argument("--provider", default=None,
+                    help="override QLAB_NEWS_PROVIDER for this check")
+    nc.set_defaults(func=_cmd_news_check)
+
     ui = sub.add_parser("ui", help="launch the single-page web UI (no CLI needed after)")
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--online", action="store_true",
@@ -365,7 +372,24 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+
+def _cmd_news_check(args) -> int:
+    """Authenticate the news integration and report what it actually does."""
+    from qlab.news.check import check_news, render
+    from qlab.trader.mandate import load_mandate
+
+    universe = load_mandate().universe_whitelist
+    report = check_news(universe, provider=getattr(args, "provider", None))
+    print(render(report))
+    return 0 if report.get("ok") else 1
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Load .env before anything reads a credential. Without this, filling in
+    # .env.example did nothing and the desk silently stayed on synthetic data.
+    from qlab.env import load_once
+
+    load_once()
     args = build_parser().parse_args(argv if argv is not None else sys.argv[1:])
     return args.func(args)
 

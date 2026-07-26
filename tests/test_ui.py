@@ -1524,3 +1524,50 @@ def test_snapshot_poll_marks_are_throttled_to_one_an_hour(session):
     session.tui_snapshot(offline=True, event_limit=10)
     assert len([row for row in session.registry.equity_marks()
                 if row["source"] == "poll"]) == 1
+
+
+def test_autonomy_is_a_runtime_toggle_that_never_widens_authority(session):
+    """The UI switch removes the button press, not the boundary."""
+    session.atlas.set_mode("observe")
+    status, out = handle_api(session, "POST", "/api/atlas/autonomy", {},
+                             {"enabled": True})
+    assert status == 200 and out["autonomous"] is True
+    # Enabled, but Observe mode still starts nothing — said plainly.
+    assert "starts no workflows" in out["effect"]
+
+    session.atlas.set_mode("research")
+    _, out = handle_api(session, "POST", "/api/atlas/autonomy", {},
+                        {"enabled": True})
+    assert "on each heartbeat" in out["effect"]
+
+    _, out = handle_api(session, "POST", "/api/atlas/autonomy", {},
+                        {"enabled": False})
+    assert out["autonomous"] is False
+    assert "wait for you" in out["effect"]
+
+
+def test_autonomy_rejects_a_non_boolean(session):
+    status, out = handle_api(session, "POST", "/api/atlas/autonomy", {},
+                             {"enabled": "yes"})
+    assert status == 400 and "true or false" in out["error"]
+
+
+def test_autonomy_state_reaches_the_tui_snapshot(session):
+    handle_api(session, "POST", "/api/atlas/autonomy", {}, {"enabled": True})
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert snap["atlas_heartbeat"]["autonomous"] is True
+
+
+def test_news_read_template_refuses_an_empty_window(session):
+    """The analyst interprets a window it is handed; with nothing to read it
+    must refuse rather than narrate silence."""
+    from qlab.operator.templates import TemplateNotAllowed, check_startable
+
+    facts = session.atlas_facts(True)
+    facts["news_window_items"] = 0
+    with pytest.raises(TemplateNotAllowed, match="nothing to interpret"):
+        check_startable("news_read", "research", facts)
+
+    facts["news_window_items"] = 5
+    assert check_startable("news_read", "research", facts).template_id == "news_read"

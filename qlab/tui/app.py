@@ -990,6 +990,18 @@ class QlabTui(App[None]):
                             classes="view-action-button",
                             compact=True,
                         )
+                        yield Button(
+                            "MODE",
+                            id="btn-atlas-mode",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "AUTONOMY",
+                            id="btn-atlas-autonomy",
+                            classes="view-action-button",
+                            compact=True,
+                        )
 
                 with Vertical(id="dashboard", classes="canvas-view"):
                     yield Static(
@@ -2062,6 +2074,7 @@ class QlabTui(App[None]):
             f"state {str(atlas.get('state','—')).upper()} · "
             f"heartbeat {'live' if beat.get('running') else 'stopped'} "
             f"({int(beat.get('ticks', 0))} ticks) · "
+            f"autonomy {'ON' if beat.get('autonomous') else 'off'} · "
             f"news {read.get('news_source','—')} · "
             f"as of {read.get('as_of','—')}[/]")
         lines.append(
@@ -3549,6 +3562,25 @@ class QlabTui(App[None]):
             "atlas observe", "/api/atlas/observe", {"offline": self.offline},
             active_agent=None)
 
+    def action_atlas_cycle_mode(self) -> None:
+        """Step Atlas through its authority modes from the desk."""
+        order = ("observe", "research", "propose", "paused")
+        current = str(_record(self.snapshot.get("atlas")).get("mode", "observe"))
+        nxt = order[(order.index(current) + 1) % len(order)] if current in order \
+            else "observe"
+        self._run_api_action(
+            f"atlas mode {nxt}", "/api/atlas/mode",
+            {"mode": nxt, "offline": self.offline}, active_agent=None)
+
+    def action_atlas_toggle_autonomy(self) -> None:
+        """Turn autonomous work on or off. Never widens what a mode permits."""
+        beat = _record(self.snapshot.get("atlas_heartbeat"))
+        enabled = not bool(beat.get("autonomous"))
+        self._run_api_action(
+            f"atlas autonomy {'on' if enabled else 'off'}",
+            "/api/atlas/autonomy",
+            {"enabled": enabled, "offline": self.offline}, active_agent=None)
+
     def action_atlas_escalate(self) -> None:
         """Ask Atlas to open a bounded debate on the current disagreement."""
         self._run_api_action(
@@ -3674,6 +3706,12 @@ class QlabTui(App[None]):
             return
         if button_id == "btn-atlas-observe":
             self.action_atlas_observe()
+            return
+        if button_id == "btn-atlas-mode":
+            self.action_atlas_cycle_mode()
+            return
+        if button_id == "btn-atlas-autonomy":
+            self.action_atlas_toggle_autonomy()
             return
         if button_id == "btn-rebalance-dry":
             self.action_rebalance_dry()

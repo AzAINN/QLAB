@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from qlab.news.feed import NewsItem
@@ -194,3 +196,68 @@ def test_a_window_of_only_primary_releases_is_not_flagged_as_unsupported():
               source="European Central Bank", url="http://e/3"),
     ], as_of=AS_OF, provider="test")
     assert not any("corroborated" in f for f in grounded.quality_flags)
+
+
+# --- dotenv + integration check ----------------------------------------------
+
+
+def test_dotenv_never_overrides_an_exported_variable(tmp_path, monkeypatch):
+    from qlab.env import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text("ALPACA_API_KEY=from_file\nQLAB_NEWS_PROVIDER=rss\n")
+    monkeypatch.setenv("ALPACA_API_KEY", "from_shell")
+    monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+
+    applied = load_dotenv(env)
+    # An explicitly exported credential outranks the file.
+    assert os.environ["ALPACA_API_KEY"] == "from_shell"
+    assert "ALPACA_API_KEY" not in applied
+    assert os.environ["QLAB_NEWS_PROVIDER"] == "rss"
+
+
+def test_dotenv_parsing_handles_quotes_exports_and_comments():
+    from qlab.env import parse_env
+
+    parsed = parse_env(
+        '# comment\n'
+        'export ALPACA_API_KEY=abc123  # trailing\n'
+        'QUOTED="has # hash"\n'
+        "SINGLE='sq'\n"
+        '\n'
+        'NOT_A_LINE\n')
+    assert parsed["ALPACA_API_KEY"] == "abc123"
+    assert parsed["QUOTED"] == "has # hash"     # quoted hash is not a comment
+    assert parsed["SINGLE"] == "sq"
+    assert "NOT_A_LINE" not in parsed
+
+
+def test_check_reports_synthetic_as_not_real_news(monkeypatch):
+    from qlab.news.check import check_news, render
+
+    monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+    report = check_news(["ACWI"])
+    assert report["ok"] is False
+    assert "deterministic fixtures" in report["error"]
+    assert "NOT WORKING" in render(report)
+
+
+def test_check_names_missing_alpaca_credentials(monkeypatch):
+    from qlab.news.check import check_news
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDER", "alpaca")
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    report = check_news(["ACWI"])
+    assert report["ok"] is False
+    assert "ALPACA_API_KEY" in report["error"]
+
+
+def test_check_never_echoes_a_credential(monkeypatch):
+    from qlab.news.check import check_news, render
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDER", "alpaca")
+    monkeypatch.setenv("ALPACA_API_KEY", "SUPERSECRETKEY")
+    monkeypatch.setenv("ALPACA_API_SECRET", "SUPERSECRETSECRET")
+    rendered = render(check_news(["ACWI"]))
+    assert "SUPERSECRET" not in rendered

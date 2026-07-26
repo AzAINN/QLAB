@@ -2197,6 +2197,21 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(status, obj)
 
 
+def _startup_banner(mode: DeskMode, url: str) -> str:
+    """The owner's one startup line — deliberately pure ASCII.
+
+    ``qlab tui`` spawns this process with ``stdout=DEVNULL``, so CPython encodes
+    here with the locale ANSI codepage under ``errors='strict'``, not UTF-8. The
+    chip's ``label`` carries U+00B7, which cp932 and cp874 cannot encode — and
+    this line runs after the port bind and before ``serve_forever()``, so an
+    encode error would take the owner down on every launch in those locales.
+    The mode's own words are ASCII and say more than the decorated label anyway.
+    """
+    return (f"[qlab] UI at {url}  "
+            f"(offline={'on' if mode.offline else 'off'}; "
+            f"data={mode.data} book={mode.book}; paper capital only)")
+
+
 def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
           desk_mode: DeskMode | None = None) -> None:
     """Start the UI server (blocking). Ctrl-C to stop.
@@ -2216,9 +2231,7 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
     httpd.daemon_threads = True
     _Handler.session = session
     url = f"http://127.0.0.1:{port}/"
-    print(f"[qlab] UI at {url}  "
-          f"(offline={'on' if session.offline_default else 'off'}; "
-          f"{session.desk_mode.label}; paper capital only)")
+    print(_startup_banner(session.desk_mode, url))
     print("[qlab] press Ctrl-C to stop.")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()

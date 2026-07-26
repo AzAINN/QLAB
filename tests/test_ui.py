@@ -1649,6 +1649,32 @@ def test_plan_execution_still_honors_body_offline_on_the_simulated_book(
     assert calls["execute"][1] is True
 
 
+@pytest.mark.parametrize(
+    "data, book",
+    [("synthetic", "simulated"), ("live", "simulated"), ("live", "alpaca")])
+def test_the_startup_banner_survives_a_non_utf8_console(data, book):
+    """The owner's startup line must encode in any locale codepage.
+
+    ``qlab tui`` spawns the owner with ``stdout=subprocess.DEVNULL``, so CPython
+    encodes this line with the locale ANSI codepage under ``errors='strict'``
+    rather than UTF-8. U+00B7 — carried by the live mode labels — has no mapping
+    in cp932 (Japanese) or cp874 (Thai). The print sits after the port bind and
+    before ``serve_forever()``, so an encode error there takes the owner down on
+    every launch for those locales, which is exactly the desk mode this branch
+    exists to serve. ASCII is the tightest pin: it encodes in every codepage.
+    """
+    from qlab.core.desk_mode import DeskMode
+    from qlab.ui.server import _startup_banner
+
+    banner = _startup_banner(DeskMode(data, book), "http://127.0.0.1:8765/")
+    banner.encode("ascii")
+    for codepage in ("cp932", "cp874", "cp1252"):
+        banner.encode(codepage)
+    # It still has to say the two things the operator reads it for.
+    assert "127.0.0.1:8765" in banner
+    assert data in banner and book in banner
+
+
 def test_tui_snapshot_carries_the_desk_mode(session):
     status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
     assert status == 200

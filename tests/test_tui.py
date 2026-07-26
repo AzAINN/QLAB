@@ -3607,6 +3607,78 @@ def test_desk_modal_hides_the_book_row_until_live_is_chosen():
     assert result["mode"] == DeskMode("live", "alpaca")
 
 
+def test_desk_modal_going_back_to_synthetic_forces_the_simulated_book():
+    """The illegal pair is unreachable, not merely rejected on the way out."""
+    import asyncio
+    from textual.app import App, ComposeResult
+    from qlab.core.desk_mode import DeskMode
+    from qlab.tui.desk_mode_screen import DeskModeScreen
+
+    result = {}
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            return iter(())
+
+        async def on_mount(self) -> None:
+            self.push_screen(
+                DeskModeScreen(credentials="Alpaca browser login from profile "
+                                           "'paper'", credentials_ok=True),
+                lambda mode: result.__setitem__("mode", mode))
+
+    async def run():
+        app = Host()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            screen = app.screen
+            await pilot.click("#desk-data-live")
+            await pilot.click("#desk-book-alpaca")
+            await pilot.pause(0.1)
+            # Changing your mind about the data source takes the book with it.
+            await pilot.click("#desk-data-synthetic")
+            await pilot.pause(0.1)
+            assert screen.query_one("#desk-book-row").styles.display == "none"
+            await pilot.click("#desk-confirm")
+            await pilot.pause(0.2)
+
+    asyncio.run(run())
+    assert result["mode"] == DeskMode("synthetic", "simulated")
+
+
+def test_desk_modal_escape_leaves_the_desk_synthetic():
+    """Escape is the route out for an operator who does not follow the dialog."""
+    import asyncio
+    from textual.app import App, ComposeResult
+    from qlab.core.desk_mode import DeskMode
+    from qlab.tui.desk_mode_screen import DeskModeScreen
+
+    result = {}
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            return iter(())
+
+        async def on_mount(self) -> None:
+            self.push_screen(
+                DeskModeScreen(credentials="Alpaca browser login from profile "
+                                           "'paper'", credentials_ok=True),
+                lambda mode: result.__setitem__("mode", mode))
+
+    async def run():
+        app = Host()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            # Even with live selected, escaping never yields a live desk.
+            await pilot.click("#desk-data-live")
+            await pilot.click("#desk-book-alpaca")
+            await pilot.pause(0.1)
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+
+    asyncio.run(run())
+    assert result["mode"] == DeskMode("synthetic", "simulated")
+
+
 def test_desk_modal_without_credentials_cannot_return_a_live_mode():
     import asyncio
     from textual.app import App, ComposeResult
@@ -3711,6 +3783,9 @@ def test_tui_asks_for_the_desk_mode_on_startup_and_applies_the_answer():
             await pilot.pause(0.3)
             assert app.desk_mode == DeskMode("live", "alpaca")
             assert app.offline is False
+            # The workforce lane moves with the desk: a governed review spawned
+            # after this must not quietly ask the owner for synthetic data.
+            assert app.claude.offline is False
             assert ("/api/desk_mode",
                     {"data": "live", "book": "alpaca"}) in client.posts
 

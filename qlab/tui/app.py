@@ -1207,6 +1207,11 @@ class QlabTui(App[None]):
                 return
             self.desk_mode = mode
             self.offline = mode.offline
+            # The workforce reads its own flag when a coordinator spawns, and it
+            # is stamped onto every owner call the MCP proxy makes. Leaving it
+            # behind would run governed reviews on synthetic data under a LIVE
+            # chip — the one contradiction this screen exists to prevent.
+            self.claude.offline = mode.offline
             self._post_desk_mode(mode)
             self._render_status()
             self._start_refresh()

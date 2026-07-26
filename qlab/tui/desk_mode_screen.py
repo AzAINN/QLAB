@@ -35,7 +35,9 @@ class DeskModeScreen(ModalScreen[DeskMode]):
                 yield Button("SYNTHETIC", id="desk-data-synthetic")
                 yield Button("LIVE", id="desk-data-live",
                              disabled=not self.credentials_ok)
-            yield Static(self.credentials, id="desk-credentials")
+            # Owner text and exception reprs, not markup the TUI authored: a
+            # bracketed word would be parsed as a tag and silently dropped.
+            yield Static(self.credentials, id="desk-credentials", markup=False)
             with Vertical(id="desk-book-row"):
                 yield Static("WHICH BOOK", id="desk-book-title")
                 with Horizontal(id="desk-book-buttons"):

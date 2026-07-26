@@ -121,6 +121,37 @@ def test_both_launchers_accept_the_desk_mode_flags():
             parser.parse_args([command, "--online"])) == DeskMode("live", "simulated")
 
 
+def _flag_help(command: str, flag: str) -> str:
+    import argparse
+
+    from qlab.autopilot.cli import build_parser
+
+    sub = next(action for action in build_parser()._actions
+               if isinstance(action, argparse._SubParsersAction))
+    for action in sub.choices[command]._actions:
+        if flag in action.option_strings:
+            return (action.help or "").lower()
+    raise AssertionError(f"{command} has no {flag}")
+
+
+@pytest.mark.parametrize("command", ["tui", "ui"])
+def test_the_live_flags_do_not_promise_alpaca_market_data(command):
+    """``--live`` only clears ``offline``; it does not pick a data provider.
+
+    The provider still comes from ``QLAB_DATA_PROVIDER`` (yfinance by default),
+    and the Alpaca provider reads ``ALPACA_API_KEY``/``ALPACA_API_SECRET`` from
+    the environment directly — the browser login reaches the *book* lane only.
+    Help promising "live Alpaca market data" describes something the desk does
+    not do, and an OAuth-only operator cannot make true.
+    """
+    live = _flag_help(command, "--live")
+    assert "alpaca market data" not in live and "alpaca prices" not in live
+    assert "qlab_data_provider" in live
+    assert "simulated book" in live
+    # --online resolves to the same desk mode, so it must not read as another.
+    assert "same as --live" in _flag_help(command, "--online")
+
+
 def test_desk_mode_argv_reproduces_the_mode_for_the_owner():
     from qlab.autopilot.cli import build_parser, desk_mode_argv, desk_mode_from_args
     from qlab.core.desk_mode import DeskMode

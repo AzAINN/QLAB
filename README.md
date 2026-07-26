@@ -72,11 +72,21 @@ agent definitions. Runtime state is never written into site-packages.
 ### Real market data and whose book
 
 The desk opens on offline synthetic data with a simulated book, so it runs with
-no account at all. For real prices, authorize a paper account in your browser:
+no account at all. Two independent things can be switched on: the data lane and
+the book.
 
     alpaca profile login      # browser OAuth; paper-only by construction
-    qlab tui --live           # real Alpaca prices, qlab's own simulated book
-    qlab tui --alpaca-book    # real prices and your Alpaca paper book
+    qlab tui --live           # online market data, qlab's own simulated book
+    qlab tui --alpaca-book    # online market data and your Alpaca paper book
+
+`--live` (equivalently `--online`) only takes the data lane online; which
+provider serves it is `QLAB_DATA_PROVIDER`, and that defaults to `yfinance`.
+Alpaca market data is a separate, additional choice: it needs
+`QLAB_DATA_PROVIDER=alpaca` **and** exported `ALPACA_API_KEY` /
+`ALPACA_API_SECRET`, because the daily-bar provider reads those environment
+variables directly. The `alpaca profile login` session reaches the **book**
+lane only — with an OAuth-only login, `--alpaca-book` trades your real Alpaca
+paper account while prices still come from yfinance.
 
 `--alpaca-book` implies `--live`: reaching the real paper account is never a
 side effect of asking for real prices. The same three modes are offered by the
@@ -315,9 +325,11 @@ The current operator surface is research and paper-first:
   `synthetic`), and the as-of date and bar age are shown to the operator.
 - Alpaca support requires the trader extra plus one credential source: an
   `alpaca profile login` session, or exported `ALPACA_API_KEY` and
-  `ALPACA_API_SECRET` values (qlab reads no `.env` file). It remains paper-only
-  and daily-bar-only: there is no streaming quote tape or complete
-  order-lifecycle integration.
+  `ALPACA_API_SECRET` values (qlab reads no `.env` file). The browser login
+  currently reaches the **broker** only — the `alpaca` daily-bar provider reads
+  the two environment variables directly, so Alpaca market data still needs
+  exported keys. It remains paper-only and daily-bar-only: there is no
+  streaming quote tape or complete order-lifecycle integration.
 - Selecting Alpaca without its package or credentials fails loudly; qlab does
   not silently switch the request back to yfinance.
 - The simulated broker remains the zero-account default.

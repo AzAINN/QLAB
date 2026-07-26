@@ -433,16 +433,19 @@ def build_parser() -> argparse.ArgumentParser:
     def add_desk_mode(sp):
         # Two words, because the safe choice is the default: bare --live keeps
         # the simulated book, so reaching the real paper account is never a
-        # side effect of asking for real prices.
+        # side effect of asking for real prices. --live switches the data lane
+        # online only; which provider serves it is QLAB_DATA_PROVIDER's job, and
+        # its `alpaca` option reads env API keys, not the browser login.
         sp.add_argument("--live", action="store_true",
-                        help="use live Alpaca market data (simulated book)")
+                        help="online market data from QLAB_DATA_PROVIDER "
+                             "(yfinance by default; simulated book)")
         sp.add_argument("--alpaca-book", action="store_true",
                         help="trade your Alpaca paper book (implies --live)")
 
     ui = sub.add_parser("ui", help="launch the single-page web UI (no CLI needed after)")
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--online", action="store_true",
-                    help="use live yfinance data (default: offline synthetic)")
+                    help="same as --live (default: offline synthetic)")
     add_desk_mode(ui)
     ui.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
     ui.set_defaults(func=_cmd_ui)
@@ -450,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     tui = sub.add_parser("tui", help="launch the terminal operator console")
     tui.add_argument("--port", type=int, default=8765)
     tui.add_argument("--online", action="store_true",
-                     help="use live/cached yfinance daily bars (default: offline synthetic)")
+                     help="same as --live (default: offline synthetic)")
     add_desk_mode(tui)
     tui.add_argument("--refresh", type=float, default=2.0,
                      help="snapshot refresh interval in seconds")

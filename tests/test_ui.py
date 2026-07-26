@@ -1050,7 +1050,7 @@ def test_refused_second_serve_preserves_first_handler_session(
     monkeypatch.setattr(
         server_module,
         "UISession",
-        lambda offline_default=True: second_session,
+        lambda offline_default=True, desk_mode=None: second_session,
     )
 
     stop_event, producer = server_module._start_market_topics(session)

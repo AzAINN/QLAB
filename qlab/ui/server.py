@@ -2168,9 +2168,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(status, obj)
 
 
-def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) -> None:
-    """Start the UI server (blocking). Ctrl-C to stop."""
-    session = UISession(offline_default=offline)
+def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
+          desk_mode: DeskMode | None = None) -> None:
+    """Start the UI server (blocking). Ctrl-C to stop.
+
+    ``desk_mode=None`` means no launcher flag chose one, so the session loads
+    the operator's persisted choice rather than being handed a guess.
+    """
+    session = UISession(offline_default=offline, desk_mode=desk_mode)
     market_stop, market_thread = _start_market_topics(session)
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)

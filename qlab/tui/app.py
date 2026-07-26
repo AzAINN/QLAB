@@ -863,6 +863,9 @@ class QlabTui(App[None]):
         self.desk_mode = desk_mode
         self.offline = offline if desk_mode is None else desk_mode.offline
         self._desk_mode_prompted = False
+        # Set when the owner would not accept a chosen mode: the two are then
+        # trading different desks and the chip has to say so.
+        self._desk_mode_error: str | None = None
         self.refresh_interval = refresh_interval
         self.owned_server = owned_server
         self.claude_start = claude_start
@@ -1244,11 +1247,47 @@ class QlabTui(App[None]):
                 self.client.post("/api/desk_mode",
                                  {"data": mode.data, "book": mode.book})
             except Exception as exc:
-                self.call_from_thread(
-                    self._write_local_event, "desk_mode.error",
-                    {"error": repr(exc)})
+                self.call_from_thread(self._note_desk_mode_failure, repr(exc))
+            else:
+                self.call_from_thread(self._clear_desk_mode_failure)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _note_desk_mode_failure(self, error: str) -> None:
+        """Make a rejected mode visible, without taking the desk down.
+
+        ``chosen()`` has already committed the mode here, so the TUI is now
+        sending ``offline`` and running the workforce against a desk the owner
+        never accepted. The CLI's attached-owner path exits loudly on the same
+        failure; this path cannot, so the always-visible chip carries the error
+        instead of a timeline line that scrolls away.
+        """
+        self._desk_mode_error = error
+        self._write_local_event("desk_mode.error", {"error": error})
+        self._render_mode_chip()
+
+    def _clear_desk_mode_failure(self) -> None:
+        if self._desk_mode_error is None:
+            return
+        self._desk_mode_error = None
+        self._render_mode_chip()
+
+    def _reconcile_desk_mode(self, snapshot: dict) -> None:
+        """Retire a rejected-mode error once the owner is demonstrably in sync.
+
+        A refused POST may still have applied, or the operator may have retuned
+        the owner another way. The snapshot is the owner's own answer about
+        which desk it is serving, so a match ends the disagreement — leaving the
+        error up after that would be its own misread.
+        """
+        if self._desk_mode_error is None or self.desk_mode is None:
+            return
+        mode = snapshot.get("desk_mode") or {}
+        agrees = (
+            str(mode.get("data", "")).strip().lower() == self.desk_mode.data
+            and str(mode.get("book", "")).strip().lower() == self.desk_mode.book)
+        if agrees:
+            self._desk_mode_error = None
 
     def _start_bootstrap(self) -> None:
         """Fetch immutable owner configuration once, when Settings is first shown."""
@@ -1565,6 +1604,7 @@ class QlabTui(App[None]):
             }
         self._render_agents()
         self._render_bob_rail()
+        self._reconcile_desk_mode(snapshot)
         self._render_mode_chip()
         self._ingest_events(snapshot.get("events", []))
         self._maybe_offer_workforce()
@@ -2985,7 +3025,14 @@ class QlabTui(App[None]):
         label = str(mode.get("label")
                     or (fallback.label if fallback else "")).strip()
         chip = self.query_one("#mode-chip", Static)
-        if not label:
+        if self._desk_mode_error is not None:
+            # The owner rejected the mode this client already committed to, so
+            # neither label is true: naming either desk would be a claim about
+            # whose money is at risk that nothing currently supports.
+            chip.set_class(True, "live-book")
+            chip.set_class(False, "live-data")
+            chip.update("MODE NOT APPLIED")
+        elif not label:
             # Nobody has said which desk this is yet — the chooser is still up.
             # "SYNTHETIC" here would be a positive and possibly wrong answer to
             # "whose money is this", so the chip claims nothing instead.

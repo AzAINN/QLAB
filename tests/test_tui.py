@@ -878,6 +878,56 @@ def test_mode_chip_does_not_read_the_pre_choice_snapshot():
     asyncio.run(run())
 
 
+def test_a_refused_desk_mode_post_is_rendered_not_just_logged():
+    """A desk mode the owner never accepted must not read as in force.
+
+    ``chosen()`` has already committed the mode to the TUI, which then sends
+    ``offline=0`` and stamps ``QLAB_OFFLINE=0`` on every workforce call while
+    the owner is still on the old mode and the old book. The CLI's
+    attached-owner path raises SystemExit on exactly this failure; the modal
+    path only wrote a timeline line that scrolls away.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.theme import DOWN
+
+    class RefusingClient(StubClient):
+        def post(self, path, body=None):
+            if path == "/api/desk_mode":
+                raise RuntimeError("owner refused the desk mode")
+            return super().post(path, body)
+
+    async def run():
+        app = QlabTui(RefusingClient(), refresh_interval=0, desk_mode=_SYNTH)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            logged = []
+            timeline = app._write_local_event
+
+            def spy(kind, payload):
+                logged.append(kind)
+                timeline(kind, payload)
+
+            app._write_local_event = spy
+            app._ask_desk_mode({"credentials": "Alpaca browser login",
+                                "credentials_ok": True})
+            await pilot.pause(0.1)
+            app.screen.dismiss(DeskMode("live", "alpaca"))
+            await pilot.pause(0.4)
+            widget = app.query_one("#mode-chip")
+            label = str(widget.content).strip()
+            # Not the mode it failed to apply, and not the muted demo either.
+            assert "LIVE · ALPACA BOOK" not in label
+            assert "NOT APPLIED" in label
+            assert widget.styles.color == Color.parse(DOWN)
+            # The detail still reaches the audit timeline.
+            assert "desk_mode.error" in logged
+            assert "owner refused the desk mode" in (app._desk_mode_error or "")
+
+    asyncio.run(run())
+
+
 def test_mode_chip_claims_no_mode_while_the_chooser_is_still_up():
     """No desk mode chosen yet is not the same as "synthetic"."""
     from qlab.tui.app import QlabTui

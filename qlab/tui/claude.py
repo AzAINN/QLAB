@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -814,6 +815,92 @@ CHAT_TIMEOUT_S = 600.0
 # No stream event at all for this long means the CLI is wedged (a backgrounded
 # worker nobody is waiting on, a dead child), not thinking.
 WORKFORCE_SILENCE_S = 420.0
+PROCESS_STOP_GRACE_S = 3.0
+
+
+def _process_group_options() -> dict:
+    """Platform-specific Popen isolation for one disposable Claude tree."""
+    if os.name == "nt":
+        return {
+            "creationflags": getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        }
+    return {"start_new_session": True}
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen[str],
+    *,
+    grace_s: float = PROCESS_STOP_GRACE_S,
+) -> None:
+    """Stop Claude plus every Agent/MCP child it launched.
+
+    Terminating only the `.cmd`/shell launcher can orphan the real Node process,
+    which then keeps reasoning and can write a late phase update. Process-group
+    isolation plus a bounded force-kill closes that race.
+    """
+    pid = getattr(process, "pid", None)
+    if pid is None:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=max(0.0, grace_s))
+        except subprocess.TimeoutExpired:
+            kill = getattr(process, "kill", None)
+            if kill is not None:
+                kill()
+        return
+
+    if os.name == "nt":
+        if process.poll() is not None:
+            return
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            process.kill()
+        try:
+            process.wait(timeout=max(0.0, grace_s))
+        except subprocess.TimeoutExpired:
+            process.kill()
+        return
+
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except (PermissionError, OSError):
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=max(0.0, grace_s))
+        except subprocess.TimeoutExpired:
+            process.kill()
+        return
+
+    deadline = time.monotonic() + max(0.0, grace_s)
+    group_alive = True
+    while time.monotonic() < deadline:
+        process.poll()  # reap the group leader so a lone zombie is not "alive"
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            group_alive = False
+            break
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    if group_alive:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
 
 
 class ClaudeSession:
@@ -838,6 +925,8 @@ class ClaudeSession:
         self.last_error = ""
         self._last_event_at = 0.0
         self._timed_out = ""
+        self._termination_reasons: dict[int, str] = {}
+        self._stop_lock = threading.Lock()
 
     @property
     def available(self) -> bool:
@@ -888,7 +977,7 @@ class ClaudeSession:
             argv[0] = executable
             if os.name == "nt" and executable.lower().endswith((".cmd", ".bat")):
                 argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", *argv]
-            
+
             self.process = subprocess.Popen(
                 argv,
                 cwd=process_cwd,
@@ -903,6 +992,7 @@ class ClaudeSession:
                 errors="replace",
                 bufsize=1,
                 env=env,
+                **_process_group_options(),
             )
         except OSError as exc:
             self.process = None
@@ -915,12 +1005,18 @@ class ClaudeSession:
             return False
         self._timed_out = ""
         self._last_event_at = time.monotonic()
-        self._thread = threading.Thread(target=self._read, daemon=True)
+        process = self.process
+        session_dir = self._session_dir
+        self._thread = threading.Thread(
+            target=self._read,
+            args=(process, session_dir),
+            daemon=True,
+        )
         self._thread.start()
         threading.Thread(
             target=self._watchdog,
             args=(
-                self.process,
+                process,
                 WORKFORCE_TIMEOUT_S if governed else CHAT_TIMEOUT_S,
                 WORKFORCE_SILENCE_S if governed else 0.0,
             ),
@@ -928,9 +1024,15 @@ class ClaudeSession:
         ).start()
         return True
 
-    def stop(self) -> None:
-        if self.running and self.process is not None:
-            self.process.terminate()
+    def stop(self, reason: str = "operator requested stop") -> None:
+        process = self.process
+        if process is None:
+            return
+        with self._stop_lock:
+            if process.poll() is not None:
+                return
+            self._termination_reasons[id(process)] = reason
+            _terminate_process_tree(process)
 
     def _watchdog(self, process: subprocess.Popen[str],
                   budget_s: float, silence_s: float) -> None:
@@ -950,46 +1052,69 @@ class ClaudeSession:
                     f"silent for {int(silence_s // 60)} minutes — the "
                     "coordinator is not making progress")
             if self._timed_out:
-                process.terminate()
-                try:
-                    process.wait(timeout=10.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+                with self._stop_lock:
+                    self._termination_reasons[id(process)] = (
+                        f"qlab watchdog: {self._timed_out}")
+                    _terminate_process_tree(process, grace_s=10.0)
                 return
             time.sleep(1.0)
 
-    def _read(self) -> None:
-        assert self.process is not None
-        assert self.process.stdout is not None
+    def _read(
+        self,
+        process: subprocess.Popen[str],
+        session_dir: tempfile.TemporaryDirectory | None,
+    ) -> None:
+        assert process.stdout is not None
         # stderr must be drained concurrently: a long verbose workforce run
         # can fill the stderr pipe buffer before stdout closes, deadlocking
         # both the child (blocked write) and this reader (blocked read).
         stderr_tail: list[str] = []
+        saw_terminal_event = False
 
         def drain_stderr() -> None:
-            if self.process is None or self.process.stderr is None:
+            if process.stderr is None:
                 return
-            for line in self.process.stderr:
+            for line in process.stderr:
                 stderr_tail.append(line)
                 del stderr_tail[:-40]
 
         stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
         stderr_thread.start()
-        for line in self.process.stdout:
+        for line in process.stdout:
             self._last_event_at = time.monotonic()
             for event in parse_stream_line(line):
+                if event.kind in {"result", "error"}:
+                    saw_terminal_event = True
                 self.on_event(event)
-        returncode = self.process.wait()
+        returncode = process.wait()
         stderr_thread.join(timeout=5.0)
-        if self._timed_out:
-            # A watchdog kill closes stdout without a `result` line, so the
-            # console would otherwise just stop mid-run with no explanation.
+        reason = self._termination_reasons.pop(id(process), "")
+        stderr = "".join(stderr_tail).strip()
+        if reason and not saw_terminal_event:
             self.on_event(ClaudeEvent(
                 "error",
-                f"session stopped by the qlab watchdog: {self._timed_out}. "
-                "Durable phase state is kept — resume it from the workforce view.",
+                f"session stopped: {reason}. The active workflow is interrupted "
+                "and can be explicitly resumed from the workforce view.",
             ))
-            return
-        stderr = "".join(stderr_tail).strip()
-        if returncode and stderr:
-            self.on_event(ClaudeEvent("error", stderr[-2000:]))
+        elif returncode and not saw_terminal_event:
+            detail = stderr[-2000:] if stderr else (
+                f"Claude exited with status {returncode} without a result")
+            self.on_event(ClaudeEvent("error", detail))
+        elif not saw_terminal_event:
+            self.on_event(ClaudeEvent(
+                "error", "Claude exited without a terminal result"))
+        try:
+            if session_dir is not None:
+                try:
+                    session_dir.cleanup()
+                except OSError:
+                    # Antivirus/indexers on Windows can briefly retain one of
+                    # Claude's generated agent files. The disposable directory
+                    # must never keep the reader thread from releasing session
+                    # ownership and reopening the operator controls.
+                    pass
+        finally:
+            if self._session_dir is session_dir:
+                self._session_dir = None
+            if self.process is process:
+                self.process = None

@@ -8,7 +8,7 @@ from rich.markup import escape
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Label, ListItem, ListView, Static
 
-from qlab.core.atlas import OVERLAY_METRICS
+from qlab.core.reference import OVERLAY_METRICS
 from qlab.tui.theme import AMBER, DIM, LABEL_GOLD, MUTED, TEXT, TEXT_HI
 
 _GROUP_TITLES = (
@@ -34,7 +34,7 @@ def _overlay_cells(ablation: object) -> str:
     return "  ".join(cells)
 
 
-class AtlasView(Vertical):
+class ReferenceView(Vertical):
     """Grouped index on the left, one entry's prose and live facts on the right."""
 
     def __init__(self, **kwargs) -> None:
@@ -46,20 +46,20 @@ class AtlasView(Vertical):
         self._entries: list[dict] | None = None
 
     def compose(self):
-        yield Static(f"[{AMBER}]▍[/] ATLAS", classes="canvas-title",
+        yield Static(f"[{AMBER}]▍[/] REFERENCE", classes="canvas-title",
                      markup=True)
-        with Horizontal(id="atlas-split"):
-            yield ListView(id="atlas-list")
+        with Horizontal(id="reference-split"):
+            yield ListView(id="reference-list")
             yield VerticalScroll(
                 Static(
-                    f"[{MUTED}]Waiting for the owner's atlas payload…[/]",
-                    id="atlas-detail", markup=True),
-                id="atlas-detail-scroll")
+                    f"[{MUTED}]Waiting for the owner's reference payload…[/]",
+                    id="reference-detail", markup=True),
+                id="reference-detail-scroll")
 
     def set_entries(self, entries: list[dict]) -> None:
         """Rebuild the index from an owner payload and show its first entry.
 
-        An unchanged payload is a no-op. The atlas is re-fetched on every visit
+        An unchanged payload is a no-op. The reference is re-fetched on every visit
         so live ablation evidence cannot go stale, and rebuilding an identical
         index would blank the list for a frame and throw away the reader's place.
         """
@@ -82,7 +82,7 @@ class AtlasView(Vertical):
                     f"[{TEXT}]{escape(entry['title'])}[/]{star}",
                     markup=True)))
                 rows.append(entry)
-        view = self.query_one("#atlas-list", ListView)
+        view = self.query_one("#reference-list", ListView)
 
         async def rebuild() -> None:
             # ListView.clear() only schedules the removal, so the mount has to
@@ -100,7 +100,7 @@ class AtlasView(Vertical):
             view.index = first
             self._render_detail(rows[first])
 
-        self.run_worker(rebuild(), group="atlas-rebuild", exclusive=True)
+        self.run_worker(rebuild(), group="reference-rebuild", exclusive=True)
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         index = event.list_view.index
@@ -131,4 +131,4 @@ class AtlasView(Vertical):
                 parts.append(f"[{MUTED}]no ablation recorded for this arm yet[/]")
         if entry.get("arm_id"):
             parts.extend(["", f"[{DIM}]ablation id: {entry['arm_id']}[/]"])
-        self.query_one("#atlas-detail", Static).update("\n".join(parts))
+        self.query_one("#reference-detail", Static).update("\n".join(parts))

@@ -30,7 +30,7 @@ shows when the Claude CLI is ready without interrupting the desk.
 The complete screen map is available from either the digit or matching function
 key:
 
-- `1` / `F1` — **Bob**: the desk manager's read — what the signals, the news,
+- `1` / `F1` — **Atlas**: the desk manager's read — what the signals, the news,
   and the research add up to, and where they disagree. This is the default view.
 - `2` / `F2` — Dashboard: portfolio, regime, allocation, and alerts.
 - `3` / `F3` — Market: daily price context and provenance.
@@ -42,26 +42,26 @@ key:
   champion and its latest ablation numbers.
 - `9` / `F9` — Settings: read-only mandate, data, agent, and theme bulletins.
 
-### BobTheQuant, the desk manager
+### Atlas, the desk manager
 
-Bob runs continuously inside the owner on a heartbeat (`QLAB_BOB_INTERVAL_S`,
+Atlas runs continuously inside the owner on a heartbeat (`QLAB_BOB_INTERVAL_S`,
 default 30s). Each tick it evaluates deterministic triggers against owner facts
 and recomposes its **read**: one view across the regime panel, the news record,
 and what the workforce concluded.
 
 The read leads with the part a number cannot express — the **tensions**, where
 the evidence disagrees with itself. "Prices are calm but the coverage is not"
-is the case Bob exists to surface. Conviction describes how much the evidence
+is the case Atlas exists to surface. Conviction describes how much the evidence
 agrees, never how likely a price move is.
 
-Bob escalates a material disagreement into the same registry-enforced debate
+Atlas escalates a material disagreement into the same registry-enforced debate
 the workforce uses — allowlisted claim, two-round ceiling, adjudication the
 reporter waits on. It holds read-only tools and cannot trade, approve, or
 create a paper plan in any mode; `Ctrl-B` opens its detail drawer from any view.
 
 Modes: `observe` (monitor and brief), `research` (may start approved research
 workflows), `propose` (may request a checked plan for human approval), and
-`paused`. The mode is the authority statement and is shown wherever Bob is.
+`paused`. The mode is the authority statement and is shown wherever Atlas is.
 
     qlab tui --claude offer   # default: show readiness, never prompt
     qlab tui --claude auto    # start the workforce after the first snapshot
@@ -172,7 +172,7 @@ the TUI workforce view.
   phase state in the owner registry, so a stopped CLI session is inspectable and
   resumable from a new one.
 - Five least-privilege roles are generated from one neutral source for Claude
-  Code and IBM Bob: moments analyst, challenger, optimization runner, referee,
+  Code and IBM Atlas: moments analyst, challenger, optimization runner, referee,
   and reporter.
 
 ## One writer, always
@@ -248,7 +248,7 @@ formats with:
 This writes:
 
 - .claude/agents/*.md for Claude Code.
-- .bob/personas/*.yaml for IBM Bob.
+- .bob/personas/*.yaml for IBM Atlas.
 
 The generated optimization-runner receives algorithm discovery and staged solve
 tools. It can inspect research and offline catalog entries, but the server
@@ -358,7 +358,7 @@ workspace, not the Python environment.
 
     qlab/
       algorithms/   categorized deployment catalog and offline research boundary
-      agents/       neutral-definition loader and Claude/Bob adapters
+      agents/       neutral-definition loader and Claude/Atlas adapters
       core/         data, moments, objective, metrics, backtest, types
       governance/   deterministic referee and reflection loop
       mcp/          combined server, tool namespaces, propose-only owner proxy
@@ -386,7 +386,7 @@ runtime-path tests cover the same boundary in the suite.
 The next research work should explain why MVSK loses before adding more solver
 complexity: lambda sweeps, estimator sensitivity, and bounded,
 provenance-carrying news views. The next operations work is real Alpaca paper
-integration, market-calendar scheduling, and exercising the Bob adapters.
+integration, market-calendar scheduling, and exercising the Atlas adapters.
 
 Offline algorithm experiments can continue independently, but promotion into
 the desk requires evidence, a catalog stage change, tool review, and new

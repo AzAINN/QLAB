@@ -32,6 +32,21 @@ class ApiClient:
         response.raise_for_status()
         return response.json()
 
+    def post_control(self, path: str, body: dict | None = None) -> dict:
+        """Post a lifecycle control with a short, operator-safe deadline.
+
+        Research calls may legitimately run for minutes. Stop, resume, and
+        abandon may not: a wedged owner must never make the stop button hang
+        behind the same 30-minute request timeout.
+        """
+        response = httpx.post(
+            self.base_url + path,
+            json=body or {},
+            timeout=httpx.Timeout(5.0, connect=2.0),
+        )
+        response.raise_for_status()
+        return response.json()
+
 
     def stream(self, path: str, **params: Any):
         """Yield durable audit and transient topic events from the owner.

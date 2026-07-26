@@ -35,7 +35,7 @@ def test_all_roles_present():
     agents = _by_name()
     assert set(agents) == {
         "news-extractor", "data-qa", "signal-qa", "moments-analyst", "challenger",
-        "optimization-runner", "referee", "reporter", "bob-the-quant",
+        "optimization-runner", "referee", "reporter", "atlas",
     }
 
 
@@ -137,42 +137,42 @@ def test_least_privilege_separation():
         assert not any(base.startswith(("solve.", "workflow."))
                        for base in scopes["lab"])
 
-    # Only the reporter and Bob touch the execution gateway at all, and only
-    # the reporter may propose. Bob's trader tools are strictly read-only: the
+    # Only the reporter and Atlas touch the execution gateway at all, and only
+    # the reporter may propose. Atlas's trader tools are strictly read-only: the
     # desk manager observes the book and can never act on it.
     with_trader = {name for name, ag in a.items()
                    if role_scopes(ag.tools)["trader"]}
-    assert with_trader == {"reporter", "bob-the-quant"}
+    assert with_trader == {"reporter", "atlas"}
     reporter_trader = role_scopes(a["reporter"].tools)["trader"]
     assert reporter_trader and reporter_trader <= TRADER_TOOLS
     assert "propose_rebalance" in reporter_trader
     assert "execute_plan" not in reporter_trader
 
-    bob_trader = role_scopes(a["bob-the-quant"].tools)["trader"]
+    bob_trader = role_scopes(a["atlas"].tools)["trader"]
     assert bob_trader == {"get_portfolio_state", "risk_report"}
     for forbidden in ("propose_rebalance", "execute_plan", "reconcile",
                       "halt", "resume"):
         assert forbidden not in bob_trader
 
 
-def test_bob_source_states_its_authority_boundaries():
-    """Bob's own definition must say what it cannot do, in its own words.
+def test_atlas_source_states_its_authority_boundaries():
+    """Atlas's own definition must say what it cannot do, in its own words.
 
     The code already refuses execution structurally; the prompt must not imply
     otherwise, or a reader (or the model) will describe authority it lacks.
     """
-    bob = _by_name()["bob-the-quant"].body
-    assert "You do not trade" in bob
-    assert "no execution tool and no proposal tool" in bob
-    assert "cannot create, approve, or consume one" in bob
-    assert "You do not compute" in bob
-    assert "You do not forecast returns" in bob
-    assert "You do not overrule the referee" in bob
+    atlas = _by_name()["atlas"].body
+    assert "You do not trade" in atlas
+    assert "no execution tool and no proposal tool" in atlas
+    assert "cannot create, approve, or consume one" in atlas
+    assert "You do not compute" in atlas
+    assert "You do not forecast returns" in atlas
+    assert "You do not overrule the referee" in atlas
     # It may only name registered templates.
-    assert "registered" in bob and "desk_rebalance_review" in bob
+    assert "registered" in atlas and "desk_rebalance_review" in atlas
     # Degraded inputs must be reported, not smoothed over.
-    assert "Report degraded state honestly" in bob
-    assert "uncertain" in bob
+    assert "Report degraded state honestly" in atlas
+    assert "uncertain" in atlas
 
 
 def test_no_role_has_a_raw_order_tool():

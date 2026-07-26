@@ -401,36 +401,36 @@ APP_CSS_TEMPLATE = Template("""
         margin-left: 2;
     }
 
-    #atlas-split {
+    #reference-split {
         height: 1fr;
     }
-    #atlas-list {
+    #reference-list {
         width: 34;
         background: transparent;
         border: none;
         border-right: solid $border;
         scrollbar-size: 1 1;
     }
-    #atlas-list ListItem {
+    #reference-list ListItem {
         height: 1;
         padding: 0 1;
         background: transparent;
         color: $text;
     }
-    #atlas-list ListItem.-highlight {
+    #reference-list ListItem.-highlight {
         background: $sel_bg;
         color: $text_hi;
     }
-    #atlas-list ListItem:disabled {
+    #reference-list ListItem:disabled {
         background: transparent;
     }
-    #atlas-detail-scroll {
+    #reference-detail-scroll {
         width: 1fr;
         height: 1fr;
         padding: 0 2;
         scrollbar-size: 1 1;
     }
-    #atlas-detail {
+    #reference-detail {
         width: 1fr;
         height: auto;
         color: $text;
@@ -454,11 +454,11 @@ APP_CSS_TEMPLATE = Template("""
         background: $bg_panel;
         border-left: solid $border;
     }
-    #agent-label, #work-label, #bob-label {
+    #agent-label, #work-label, #atlas-label {
         height: 2;
         color: $label_gold;
     }
-    #bob-rail {
+    #atlas-rail {
         height: auto;
         margin-bottom: 1;
     }
@@ -582,34 +582,34 @@ PAPER_MODAL_CSS_TEMPLATE = Template("""
 PAPER_MODAL_CSS = PAPER_MODAL_CSS_TEMPLATE.substitute(TOKENS)
 
 
-BOB_DRAWER_CSS_TEMPLATE = Template("""
-    BobDrawerScreen {
+ATLAS_DRAWER_CSS_TEMPLATE = Template("""
+    AtlasDrawerScreen {
         align: right middle;
         background: $overlay;
     }
-    #bob-drawer {
+    #atlas-drawer {
         width: 76;
         height: 100%;
         padding: 2 3;
         background: $bg_raised;
         border-left: solid $gold;
     }
-    #bob-drawer-title {
+    #atlas-drawer-title {
         color: $text_hi;
         text-style: bold;
         margin-bottom: 1;
     }
-    #bob-drawer-body {
+    #atlas-drawer-body {
         height: 1fr;
         color: $text;
     }
-    #bob-drawer-hint {
+    #atlas-drawer-hint {
         height: 2;
         color: $muted;
     }
     """)
 
-BOB_DRAWER_CSS = BOB_DRAWER_CSS_TEMPLATE.substitute(TOKENS)
+ATLAS_DRAWER_CSS = ATLAS_DRAWER_CSS_TEMPLATE.substitute(TOKENS)
 
 
 WORKFORCE_MODAL_CSS_TEMPLATE = Template("""

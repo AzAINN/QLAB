@@ -1,4 +1,4 @@
-"""Bob research mode: registered templates only, authority before work (P6)."""
+"""Atlas research mode: registered templates only, authority before work (P6)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import itertools
 
 import pytest
 
-from qlab.operator.bob import BLOCKED, BobConfig, BobSupervisor
+from qlab.operator.atlas import BLOCKED, AtlasConfig, AtlasSupervisor
 from qlab.operator.templates import (
     TEMPLATES,
     TemplateNotAllowed,
@@ -24,10 +24,10 @@ def reg():
     r.close()
 
 
-def _bob(reg, config=None):
+def _atlas(reg, config=None):
     counter = itertools.count(1)
-    return BobSupervisor(reg, coordinator_available=lambda: True,
-                         config=config or BobConfig(),
+    return AtlasSupervisor(reg, coordinator_available=lambda: True,
+                         config=config or AtlasConfig(),
                          id_gen=lambda: f"task-{next(counter)}")
 
 
@@ -105,22 +105,22 @@ def test_trigger_template_map_covers_the_workflow_triggers():
 
 
 def test_startable_tasks_explains_refusals_in_observe(reg):
-    bob = _bob(reg)
+    atlas = _atlas(reg)
     facts = _facts()
     facts["regime"]["flip"] = True
-    bob.observe(facts, trading_date="2026-07-24")
-    startable = bob.startable_tasks(facts)
+    atlas.observe(facts, trading_date="2026-07-24")
+    startable = atlas.startable_tasks(facts)
     assert startable and all(not s["startable"] for s in startable)
     assert any("Observe mode" in s["reason"] for s in startable)
 
 
 def test_research_mode_runs_a_registered_template(reg):
-    bob = _bob(reg)
+    atlas = _atlas(reg)
     facts = _facts()
     facts["regime"]["flip"] = True
-    out = bob.observe(facts, trading_date="2026-07-24")
+    out = atlas.observe(facts, trading_date="2026-07-24")
     task_id = out["created_tasks"][0]["task_id"]
-    bob.set_mode("research")
+    atlas.set_mode("research")
 
     seen = {}
 
@@ -128,48 +128,48 @@ def test_research_mode_runs_a_registered_template(reg):
         seen.update({"task_id": task["task_id"], "template_id": template_id})
         return {"summary": "regime re-read; no change recommended"}
 
-    result = bob.start_task(task_id, facts, runner=runner)
+    result = atlas.start_task(task_id, facts, runner=runner)
     assert result["completed"] is True
     assert seen["template_id"] == "regime_review"
-    stored = reg.get_bob_task(task_id)
+    stored = reg.get_atlas_task(task_id)
     assert stored["status"] == "completed"
     assert stored["conclusion"]["summary"].startswith("regime re-read")
 
 
 def test_a_failed_task_retries_once_then_blocks(reg):
-    bob = _bob(reg, config=BobConfig(max_task_attempts=2))
+    atlas = _atlas(reg, config=AtlasConfig(max_task_attempts=2))
     facts = _facts()
     facts["regime"]["flip"] = True
-    out = bob.observe(facts, trading_date="2026-07-24")
+    out = atlas.observe(facts, trading_date="2026-07-24")
     task_id = out["created_tasks"][0]["task_id"]
-    bob.set_mode("research")
+    atlas.set_mode("research")
 
     def boom(task, template_id):
         raise RuntimeError("coordinator died")
 
-    first = bob.start_task(task_id, facts, runner=boom)
+    first = atlas.start_task(task_id, facts, runner=boom)
     assert first["completed"] is False
-    second = bob.start_task(task_id, facts, runner=boom)
+    second = atlas.start_task(task_id, facts, runner=boom)
     assert second["completed"] is False
     # A third attempt is refused: no automatic loop after a second failure.
-    third = bob.start_task(task_id, facts, runner=boom)
+    third = atlas.start_task(task_id, facts, runner=boom)
     assert third["started"] is False and third["blocked_by"] == "retry_budget"
-    assert reg.get_bob_task(task_id)["status"] == "blocked"
-    assert bob.status()["state"] == BLOCKED
+    assert reg.get_atlas_task(task_id)["status"] == "blocked"
+    assert atlas.status()["state"] == BLOCKED
 
 
 def test_plan_creating_template_is_refused_in_research_at_dispatch(reg):
-    bob = _bob(reg)
+    atlas = _atlas(reg)
     facts = _facts()
     facts["portfolio"]["drift"] = 0.5  # drift_breach -> desk_rebalance_review
-    out = bob.observe(facts, trading_date="2026-07-24")
+    out = atlas.observe(facts, trading_date="2026-07-24")
     task_id = out["created_tasks"][0]["task_id"]
-    bob.set_mode("research")
+    atlas.set_mode("research")
 
     def runner(task, template_id):  # must never be called
         raise AssertionError("runner ran despite an authority refusal")
 
-    result = bob.start_task(task_id, facts, runner=runner)
+    result = atlas.start_task(task_id, facts, runner=runner)
     assert result["started"] is False and result["blocked_by"] == "authority"
     assert "Propose mode" in result["reason"]
-    assert reg.get_bob_task(task_id)["status"] == "blocked"
+    assert reg.get_atlas_task(task_id)["status"] == "blocked"

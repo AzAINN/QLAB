@@ -1,6 +1,6 @@
-"""Shadow-rollout scorecard: is Bob worth trusting with more authority?
+"""Shadow-rollout scorecard: is Atlas worth trusting with more authority?
 
-Phase 9 is an operator-run evaluation, not an automatic promotion. Bob runs in
+Phase 9 is an operator-run evaluation, not an automatic promotion. Atlas runs in
 Observe/Research, produces alerts and proposals, the human decides, and nothing
 executes automatically. This module computes the evidence that comparison needs
 from what is already persisted — task history, approvals, and model invocations
@@ -8,7 +8,7 @@ from what is already persisted — task history, approvals, and model invocation
 
 Deliberately NOT here: any standing paper-authority grant. Promotion requires a
 separate design review of the grant schema, revocation, and anomaly pauses, so
-nothing in this module can widen Bob's authority.
+nothing in this module can widen Atlas's authority.
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ def _day(row: dict, field: str = "created_at") -> str:
 
 def shadow_scorecard(registry, *, since: str | None = None,
                      limit: int = 500) -> dict:
-    """Summarize Bob's shadow behavior over recent history.
+    """Summarize Atlas's shadow behavior over recent history.
 
     ``since`` is an ISO date; rows created before it are ignored. Every figure
     is a count of persisted facts — nothing is inferred or modeled.
     """
-    tasks = [t for t in registry.list_bob_tasks(limit)
+    tasks = [t for t in registry.list_atlas_tasks(limit)
              if not since or _day(t) >= since[:10]]
     approvals = [a for a in registry.list_approval_requests(limit)
                  if not since or _day(a) >= since[:10]]

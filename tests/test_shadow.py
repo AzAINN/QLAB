@@ -16,9 +16,9 @@ def reg():
 
 
 def _task(reg, task_id, trigger, status, *, action_taken=None):
-    reg.create_bob_task(task_id, f"{task_id}-key", trigger, {}, "regime_review")
+    reg.create_atlas_task(task_id, f"{task_id}-key", trigger, {}, "regime_review")
     conclusion = None if action_taken is None else {"action_taken": action_taken}
-    reg.update_bob_task(task_id, status=status, conclusion=conclusion)
+    reg.update_atlas_task(task_id, status=status, conclusion=conclusion)
 
 
 def _approval(reg, approval_id, status):

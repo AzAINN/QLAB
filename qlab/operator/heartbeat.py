@@ -1,6 +1,6 @@
-"""Bob's heartbeat: the loop that makes the desk manager actually run.
+"""Atlas's heartbeat: the loop that makes the desk manager actually run.
 
-Without this, ``BobSupervisor`` is inert — it can evaluate triggers, but only
+Without this, ``AtlasSupervisor`` is inert — it can evaluate triggers, but only
 when something calls it, so it sits in ``starting`` forever and the operator
 sees a desk manager that never manages anything.
 
@@ -24,7 +24,7 @@ DEFAULT_INTERVAL_S = 30.0
 MIN_INTERVAL_S = 5.0
 
 
-class BobHeartbeat:
+class AtlasHeartbeat:
     """Ticks the supervisor on an interval; owns no state of its own."""
 
     def __init__(
@@ -50,10 +50,10 @@ class BobHeartbeat:
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
-            raise RuntimeError("Bob heartbeat is already running")
+            raise RuntimeError("Atlas heartbeat is already running")
         self._stop.clear()
         thread = threading.Thread(
-            target=self._run, name="qlab-bob-heartbeat", daemon=True)
+            target=self._run, name="qlab-atlas-heartbeat", daemon=True)
         self._thread = thread
         thread.start()
 
@@ -108,7 +108,7 @@ class BobHeartbeat:
 
 
 def build_owner_tick(session, lock, *, offline: bool) -> Callable[[], dict]:
-    """The owner's tick: observe under the dispatch lock, then let Bob read.
+    """The owner's tick: observe under the dispatch lock, then let Atlas read.
 
     Bound to ``session`` rather than importing it, so tests drive the same code
     with a stub. The lock is the owner's HTTP dispatch lock — holding it makes a
@@ -118,7 +118,7 @@ def build_owner_tick(session, lock, *, offline: bool) -> Callable[[], dict]:
 
     def tick() -> dict:
         with lock:
-            result = session.bob_observe(offline)
+            result = session.atlas_observe(offline)
             # The qualitative read is what a human actually looks at; refresh it
             # on the same tick so the rail and the drawer never disagree.
             try:

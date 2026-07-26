@@ -1,4 +1,4 @@
-"""Bob's desk read: one qualitative view across three kinds of evidence.
+"""Atlas's desk read: one qualitative view across three kinds of evidence.
 
 The desk already has three separate truths and no one holding them together:
 
@@ -91,7 +91,7 @@ class NewsRead:
 
 @dataclass(frozen=True)
 class DeskRead:
-    """Bob's composed view. Structure is deterministic; prose is layered on."""
+    """Atlas's composed view. Structure is deterministic; prose is layered on."""
 
     as_of: str
     quantitative_state: str        # calm | stress | uncertain | unknown
@@ -332,7 +332,7 @@ def _conviction(agreement: str, panel: dict, news: NewsRead) -> float:
 def should_open_debate(read) -> tuple[bool, str | None]:
     """Whether this read is a genuine material disagreement worth debating.
 
-    Bob escalates when the *evidence* conflicts, not when it merely feels
+    Atlas escalates when the *evidence* conflicts, not when it merely feels
     uncertain — the debate protocol is for material claims about how an
     estimate was formed, and "the news disagrees with the tape" is exactly a
     claim about the regime read. A thin, quiet divergence is still reported as

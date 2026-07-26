@@ -1,6 +1,6 @@
-"""The deterministic BobSupervisor: lifecycle, triggers, dedupe, budgets.
+"""The deterministic AtlasSupervisor: lifecycle, triggers, dedupe, budgets.
 
-Bob is a supervisor plus an interpreting agent. Everything here is the
+Atlas is a supervisor plus an interpreting agent. Everything here is the
 *supervisor* — deterministic code that decides when something is worth a human's
 or an agent's attention, deduplicates it, and persists it. Crucially, basic
 health monitoring and "nothing changed" operation need no LLM call: the
@@ -8,7 +8,7 @@ observer evaluates triggers and assembles the desk brief from owner facts alone.
 
 Authority is structural: this class exposes no execute or propose method in any
 mode. In Observe mode it never launches a workforce — it records tasks and
-alerts and produces briefs. Coordinator (Claude) unavailability degrades Bob to
+alerts and produces briefs. Coordinator (Claude) unavailability degrades Atlas to
 ``degraded`` while the owner, data, and book remain usable; it is never an owner
 failure.
 """
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from qlab.state.registry import Registry
 
-MANAGER_ID = "bob-the-quant"
+MANAGER_ID = "atlas"
 
 # Modes (authority) and states (lifecycle).
 MODES = ("observe", "research", "propose", "paused")
@@ -44,9 +44,9 @@ _WORKFLOW_TRIGGERS = frozenset({
 
 
 @dataclass(frozen=True)
-class BobConfig:
+class AtlasConfig:
     max_autonomous_workflows_per_day: int = 3
-    max_bob_turns_per_task: int = 6
+    max_atlas_turns_per_task: int = 6
     regime_cooldown_sessions: int = 1
     drift_threshold: float = 0.05
     # One corrected retry per failed task; a second failure blocks rather than
@@ -63,7 +63,7 @@ class Trigger:
     state_hash: str
 
 
-class BobSupervisor:
+class AtlasSupervisor:
     """Deterministic desk supervisor. No execution or proposal authority."""
 
     def __init__(
@@ -71,20 +71,20 @@ class BobSupervisor:
         registry: Registry,
         *,
         coordinator_available: Callable[[], bool],
-        config: BobConfig | None = None,
+        config: AtlasConfig | None = None,
         id_gen: Callable[[], str] | None = None,
     ):
         self.registry = registry
         self._coordinator_available = coordinator_available
-        self.config = config or BobConfig()
+        self.config = config or AtlasConfig()
         self._id_gen = id_gen or (lambda: uuid.uuid4().hex[:16])
-        if self.registry.get_bob_state() is None:
-            self.registry.save_bob_state(
+        if self.registry.get_atlas_state() is None:
+            self.registry.save_atlas_state(
                 {"mode": "observe", "state": STARTING}, MANAGER_ID)
 
     # -- mode / lifecycle controls ------------------------------------------
     def status(self) -> dict:
-        state = self.registry.get_bob_state(MANAGER_ID) or {}
+        state = self.registry.get_atlas_state(MANAGER_ID) or {}
         return {
             "manager_id": MANAGER_ID,
             "mode": state.get("mode", "observe"),
@@ -100,7 +100,7 @@ class BobSupervisor:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self._patch_state(mode=mode)
-        self.registry.record_event("bob_mode", {"mode": mode})
+        self.registry.record_event("atlas_mode", {"mode": mode})
         return self.status()
 
     def pause(self) -> dict:
@@ -120,7 +120,7 @@ class BobSupervisor:
         no workforce is launched; workflow-action triggers are recorded as
         queued tasks for a human or a higher mode to act on.
         """
-        state_row = self.registry.get_bob_state(MANAGER_ID) or {}
+        state_row = self.registry.get_atlas_state(MANAGER_ID) or {}
         mode = state_row.get("mode", "observe")
         coordinator = bool(self._coordinator_available())
 
@@ -143,10 +143,10 @@ class BobSupervisor:
                     continue
                 dedupe = self._dedupe_key(trig, trading_date, facts)
                 task_id = self._id_gen()
-                if self.registry.create_bob_task(
+                if self.registry.create_atlas_task(
                         task_id, dedupe, trig.kind, trig.payload, trig.template_id):
                     self.registry.record_event(
-                        "bob_task", {"task_id": task_id, "trigger": trig.kind,
+                        "atlas_task", {"task_id": task_id, "trigger": trig.kind,
                                      "action": trig.action})
                     created.append({"task_id": task_id, "trigger": trig.kind,
                                     "action": trig.action})
@@ -165,7 +165,7 @@ class BobSupervisor:
 
     # -- research mode: start registered templates only ---------------------
     def startable_tasks(self, facts: dict) -> list[dict]:
-        """Queued tasks whose template Bob may start right now, with reasons.
+        """Queued tasks whose template Atlas may start right now, with reasons.
 
         Deterministic and side-effect free: it reports what *could* run under
         the current mode and data state, and why anything is refused.
@@ -173,9 +173,9 @@ class BobSupervisor:
         from qlab.operator.templates import (
             TemplateNotAllowed, check_startable, template_for_trigger)
 
-        mode = (self.registry.get_bob_state(MANAGER_ID) or {}).get("mode", "observe")
+        mode = (self.registry.get_atlas_state(MANAGER_ID) or {}).get("mode", "observe")
         out: list[dict] = []
-        for task in self.registry.list_bob_tasks(50):
+        for task in self.registry.list_atlas_tasks(50):
             if task.get("status") != "queued":
                 continue
             template_id = task.get("template_id") or template_for_trigger(
@@ -205,7 +205,7 @@ class BobSupervisor:
         """
         from qlab.operator.templates import TemplateNotAllowed, check_startable
 
-        task = self.registry.get_bob_task(task_id)
+        task = self.registry.get_atlas_task(task_id)
         if task is None:
             raise KeyError(f"unknown task {task_id!r}")
         if task.get("status") not in ("queued", "failed"):
@@ -214,27 +214,27 @@ class BobSupervisor:
                 "failed task may start")
         attempts = int(task.get("attempt_count") or 0)
         if attempts >= self.config.max_task_attempts:
-            self.registry.update_bob_task(
+            self.registry.update_atlas_task(
                 task_id, status="blocked",
                 error=f"exhausted {attempts} attempt(s); no automatic retry")
             self._patch_state(state=BLOCKED,
                               blocked_reason=f"task {task_id} exhausted retries")
             return {"started": False, "blocked_by": "retry_budget"}
 
-        mode = (self.registry.get_bob_state(MANAGER_ID) or {}).get("mode", "observe")
+        mode = (self.registry.get_atlas_state(MANAGER_ID) or {}).get("mode", "observe")
         template_id = str(task.get("template_id") or "")
         try:
             template = check_startable(template_id, mode, facts)
         except TemplateNotAllowed as exc:
-            self.registry.update_bob_task(task_id, status="blocked",
+            self.registry.update_atlas_task(task_id, status="blocked",
                                           error=str(exc))
             return {"started": False, "blocked_by": "authority",
                     "reason": str(exc)}
 
-        self.registry.update_bob_task(task_id, status="running", bump_attempt=True)
+        self.registry.update_atlas_task(task_id, status="running", bump_attempt=True)
         self._patch_state(state=COORDINATING, current_task_id=task_id)
         self.registry.record_event(
-            "bob_task_started", {"task_id": task_id, "template_id": template_id})
+            "atlas_task_started", {"task_id": task_id, "template_id": template_id})
 
         if runner is None:
             # Nothing to run the work: the task stays running for a supervisor
@@ -245,16 +245,16 @@ class BobSupervisor:
         try:
             conclusion = runner(task, template_id)
         except Exception as exc:
-            self.registry.update_bob_task(task_id, status="failed", error=str(exc))
+            self.registry.update_atlas_task(task_id, status="failed", error=str(exc))
             self._patch_state(state=OBSERVING, current_task_id=None)
             self.registry.record_event(
-                "bob_task_failed", {"task_id": task_id, "error": str(exc)[:300]})
+                "atlas_task_failed", {"task_id": task_id, "error": str(exc)[:300]})
             return {"started": True, "completed": False, "error": str(exc)}
 
-        self.registry.update_bob_task(task_id, status="completed",
+        self.registry.update_atlas_task(task_id, status="completed",
                                       conclusion=conclusion)
         self._patch_state(state=OBSERVING, current_task_id=None)
-        self.registry.record_event("bob_task_completed", {"task_id": task_id})
+        self.registry.record_event("atlas_task_completed", {"task_id": task_id})
         return {"started": True, "completed": True, "conclusion": conclusion}
 
     # -- deterministic desk brief (no LLM) ----------------------------------
@@ -350,7 +350,7 @@ class BobSupervisor:
         # tiny, so a bounded scan is fine.
         day = trading_date[:10]
         used = sum(
-            1 for task in self.registry.list_bob_tasks(200)
+            1 for task in self.registry.list_atlas_tasks(200)
             if _dedupe_trading_date(task.get("dedupe_key")) == day
             and task.get("trigger_kind") in _WORKFLOW_TRIGGERS)
         return used < self.config.max_autonomous_workflows_per_day
@@ -367,7 +367,7 @@ class BobSupervisor:
         return OBSERVING
 
     def _patch_state(self, **fields) -> None:
-        current = self.registry.get_bob_state(MANAGER_ID) or {}
+        current = self.registry.get_atlas_state(MANAGER_ID) or {}
         merged = {
             "mode": fields.get("mode", current.get("mode", "observe")),
             "state": fields.get("state", current.get("state", STARTING)),
@@ -381,7 +381,7 @@ class BobSupervisor:
             if "blocked_reason" in fields else current.get("blocked_reason"),
             "coordinator_session_id": current.get("coordinator_session_id"),
         }
-        self.registry.save_bob_state(merged, MANAGER_ID)
+        self.registry.save_atlas_state(merged, MANAGER_ID)
 
 
 def _dedupe_trading_date(dedupe_key) -> str:

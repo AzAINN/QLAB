@@ -28,13 +28,13 @@ from textual.widgets import (
     Static,
 )
 
-from qlab.core.atlas import arm_display_name
+from qlab.core.reference import arm_display_name
 from qlab.paths import workspace_root
 from qlab.research.prediction import (
     IC_ADMISSION_THRESHOLD,
     IC_STABILITY_THRESHOLD,
 )
-from qlab.tui.atlas_view import AtlasView
+from qlab.tui.reference_view import ReferenceView
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.formatting import (
@@ -60,7 +60,7 @@ from qlab.tui.theme import (
     LABEL_GOLD,
     MUTED,
     PALETTE_NAME,
-    BOB_DRAWER_CSS,
+    ATLAS_DRAWER_CSS,
     PAPER_MODAL_CSS,
     SEL_BG,
     STATE_STYLE,
@@ -73,8 +73,8 @@ from qlab.tui.theme import (
 _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 _VIEWS = (
-    "bob", "dashboard", "market", "workforce", "research", "book", "audit",
-    "atlas", "settings",
+    "atlas", "dashboard", "market", "workforce", "research", "book", "audit",
+    "reference", "settings",
 )
 _DASHBOARD_TILE_KEYS = (
     "equity", "allocation", "regime", "market-pulse", "verdict", "run", "alerts",
@@ -83,15 +83,15 @@ _DASHBOARD_TILE_KEYS = (
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
 )
-# What each Bob mode may do. Stated plainly in the drawer because the mode IS
-# the authority: a reader must never have to infer what Bob is allowed to do.
-_BOB_STATE_TONES = {
+# What each Atlas mode may do. Stated plainly in the drawer because the mode IS
+# the authority: a reader must never have to infer what Atlas is allowed to do.
+_ATLAS_STATE_TONES = {
     "observing": UP,
     "blocked": DOWN,
     "degraded": AMBER,
     "paused": MUTED,
 }
-_BOB_MODE_AUTHORITY = {
+_ATLAS_MODE_AUTHORITY = {
     "observe": "Observe: monitors and briefs. Starts no workflows.",
     "research": "Research: may start approved research workflows. "
                 "May not create a paper plan.",
@@ -236,8 +236,8 @@ COMMAND_TABLE = {
     ("view", "research"): "action_view",
     ("view", "book"): "action_view",
     ("view", "audit"): "action_view",
+    ("view", "reference"): "action_view",
     ("view", "atlas"): "action_view",
-    ("view", "bob"): "action_view",
     ("view", "settings"): "action_view",
     ("view", "agents"): "action_agent_focus",
     ("agents", None): "action_agent_focus",
@@ -810,8 +810,8 @@ class PaperConfirmScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm-paper")
 
 
-class BobDrawerScreen(ModalScreen[None]):
-    """Bob's full detail: state, triggers, task history, pending approvals.
+class AtlasDrawerScreen(ModalScreen[None]):
+    """Atlas's full detail: state, triggers, task history, pending approvals.
 
     Read-only by construction. Approving a plan is a deliberate act through the
     owner's approvals API, never a keystroke inside a status drawer.
@@ -821,17 +821,17 @@ class BobDrawerScreen(ModalScreen[None]):
         Binding("escape", "cancel", "Close", show=False),
         Binding("ctrl+b", "cancel", "Close", show=False),
     ]
-    CSS = BOB_DRAWER_CSS
+    CSS = ATLAS_DRAWER_CSS
 
     def __init__(self, body: str = ""):
         super().__init__()
         self.body = body
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="bob-drawer"):
-            yield Static("BOB · DESK MANAGER", id="bob-drawer-title")
-            yield Static(self.body, id="bob-drawer-body", markup=True)
-            yield Static("esc or ctrl+b to close", id="bob-drawer-hint")
+        with Vertical(id="atlas-drawer"):
+            yield Static("ATLAS · DESK MANAGER", id="atlas-drawer-title")
+            yield Static(self.body, id="atlas-drawer-body", markup=True)
+            yield Static("esc or ctrl+b to close", id="atlas-drawer-hint")
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -845,23 +845,23 @@ class QlabTui(App[None]):
     CSS = APP_CSS
 
     BINDINGS = [
-        Binding("1", "view('bob')", "Bob", show=False),
+        Binding("1", "view('atlas')", "Atlas", show=False),
         Binding("2", "view('dashboard')", "Dashboard", show=False),
         Binding("3", "view('market')", "Market", show=False),
         Binding("4", "view('workforce')", "Workforce", show=False),
         Binding("5", "view('research')", "Research", show=False),
         Binding("6", "view('book')", "Book", show=False),
         Binding("7", "view('audit')", "Audit", show=False),
-        Binding("8", "view('atlas')", "Atlas", show=False),
+        Binding("8", "view('reference')", "Reference", show=False),
         Binding("9", "view('settings')", "Settings", show=False),
-        Binding("f1", "view('bob')", "Bob", show=False),
+        Binding("f1", "view('atlas')", "Atlas", show=False),
         Binding("f2", "view('dashboard')", "Dashboard", show=False),
         Binding("f3", "view('market')", "Market", show=False),
         Binding("f4", "view('workforce')", "Workforce", show=False),
         Binding("f5", "view('research')", "Research", show=False),
         Binding("f6", "view('book')", "Book", show=False),
         Binding("f7", "view('audit')", "Audit", show=False),
-        Binding("f8", "view('atlas')", "Atlas", show=False),
+        Binding("f8", "view('reference')", "Reference", show=False),
         Binding("f9", "view('settings')", "Settings", show=False),
         Binding("a", "agent_focus", "Agents", show=False),
         Binding("j", "next_symbol", "Next symbol", show=False),
@@ -869,7 +869,7 @@ class QlabTui(App[None]):
         Binding("colon", "command", "Command", show=False),
         Binding("ctrl+p", "command", "Command", show=False),
         Binding("tilde", "timeline", "Timeline", show=False),
-        Binding("ctrl+b", "bob_drawer", "Bob", show=False),
+        Binding("ctrl+b", "atlas_drawer", "Atlas", show=False),
         Binding("escape", "escape", "Back", show=False),
         Binding("ctrl+q", "quit", "Quit", show=False),
     ]
@@ -890,8 +890,8 @@ class QlabTui(App[None]):
         self.refresh_interval = refresh_interval
         self.owned_server = owned_server
         self.claude_start = claude_start
-        # The desk opens on Bob: the manager is the front door, not a tab.
-        self.active_view = "bob"
+        # The desk opens on Atlas: the manager is the front door, not a tab.
+        self.active_view = "atlas"
         # Placeholder until the first snapshot; the owner's mandate universe
         # (market.assets) replaces it so a config change never desyncs the TUI.
         self.universe_tickers: list[str] = list(_DEFAULT_TICKERS)
@@ -963,30 +963,30 @@ class QlabTui(App[None]):
                     id="universe",
                 )
 
-            with ContentSwitcher(initial="bob", id="canvas"):
-                with Vertical(id="bob", classes="canvas-view"):
+            with ContentSwitcher(initial="atlas", id="canvas"):
+                with Vertical(id="atlas", classes="canvas-view"):
                     yield Static(
-                        f"[{AMBER}]▍[/] BOB · DESK MANAGER",
+                        f"[{AMBER}]▍[/] ATLAS · DESK MANAGER",
                         classes="canvas-title",
                         markup=True,
                     )
-                    yield Static(id="bob-read", markup=True)
-                    with Horizontal(id="bob-actions"):
+                    yield Static(id="atlas-read", markup=True)
+                    with Horizontal(id="atlas-actions"):
                         yield Button(
                             "REFRESH READ",
-                            id="btn-bob-refresh",
+                            id="btn-atlas-refresh",
                             classes="view-action-button",
                             compact=True,
                         )
                         yield Button(
                             "ESCALATE DEBATE",
-                            id="btn-bob-escalate",
+                            id="btn-atlas-escalate",
                             classes="view-action-button",
                             compact=True,
                         )
                         yield Button(
                             "OBSERVE NOW",
-                            id="btn-bob-observe",
+                            id="btn-atlas-observe",
                             classes="view-action-button",
                             compact=True,
                         )
@@ -1109,7 +1109,7 @@ class QlabTui(App[None]):
                     yield Static(f"[{AMBER}]\u258d[/] AUDIT", classes="canvas-title", markup=True)
                     yield Static(id="audit-summary", markup=True)
                     yield DataTable(id="audit-table", cursor_type="row")
-                yield AtlasView(id="atlas", classes="canvas-view")
+                yield ReferenceView(id="reference", classes="canvas-view")
                 with Vertical(id="settings", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] SETTINGS", classes="canvas-title", markup=True)
                     yield Static(
@@ -1134,13 +1134,13 @@ class QlabTui(App[None]):
                     )
 
             with Vertical(id="agent-rail"):
-                # Bob sits at the top of the rail because the desk manager is
+                # Atlas sits at the top of the rail because the desk manager is
                 # always present: its mode is the standing authority statement,
                 # visible in every view rather than only where work happens.
-                yield Static("BOB · DESK MANAGER", id="bob-label")
+                yield Static("ATLAS · DESK MANAGER", id="atlas-label")
                 yield Static(
                     "waiting for runtime snapshot",
-                    id="bob-rail",
+                    id="atlas-rail",
                     markup=True,
                 )
                 yield Static("AGENTS", id="agent-label")
@@ -1288,31 +1288,31 @@ class QlabTui(App[None]):
         self._bootstrap_error = error
         self._render_settings()
 
-    def _start_atlas_fetch(self) -> None:
-        """Fetch the curated catalog on every visit to Atlas.
+    def _start_reference_fetch(self) -> None:
+        """Fetch the curated catalog on every visit to Reference.
 
         The payload carries live ablation evidence, and ``: batch`` writes new
         ablation numbers mid-session. A once-per-session fetch would keep
         asserting "latest ablation" with superseded numbers while the leaderboard
-        on the same evidence refreshed on the next tick. ``AtlasView.set_entries``
+        on the same evidence refreshed on the next tick. ``ReferenceView.set_entries``
         ignores an unchanged payload, so re-entry costs one request and no
         rebuild flicker.
         """
 
         def run() -> None:
             try:
-                payload = self.client.get("/api/atlas")
-                self.call_from_thread(self._finish_atlas, payload, "")
+                payload = self.client.get("/api/reference")
+                self.call_from_thread(self._finish_reference, payload, "")
             except Exception as exc:
-                self.call_from_thread(self._finish_atlas, None, repr(exc))
+                self.call_from_thread(self._finish_reference, None, repr(exc))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _finish_atlas(self, payload: dict[str, Any] | None, error: str) -> None:
-        view = self.query_one("#atlas", AtlasView)
+    def _finish_reference(self, payload: dict[str, Any] | None, error: str) -> None:
+        view = self.query_one("#reference", ReferenceView)
         if payload is None:
-            self.query_one("#atlas-detail", Static).update(
-                f"[{DOWN}]atlas unavailable: {escape(error)}[/]")
+            self.query_one("#reference-detail", Static).update(
+                f"[{DOWN}]reference unavailable: {escape(error)}[/]")
             return
         view.set_entries(payload.get("entries") or [])
 
@@ -1598,8 +1598,8 @@ class QlabTui(App[None]):
                 for agent in snapshot.get("agents", [])
             }
         self._render_agents()
-        self._render_bob()
-        self._render_bob_rail()
+        self._render_atlas()
+        self._render_atlas_rail()
         self._render_status()
         self._ingest_events(snapshot.get("events", []))
         self._maybe_offer_workforce()
@@ -1963,19 +1963,19 @@ class QlabTui(App[None]):
         }
         self._update_dashboard_tiles(contents)
 
-    def _render_bob(self) -> None:
-        """The desk-manager view: Bob's read, in the order a human asks it.
+    def _render_atlas(self) -> None:
+        """The desk-manager view: Atlas's read, in the order a human asks it.
 
         Conclusion first (what does this add up to), then the tensions that
         make it interesting, then the evidence under them.
         """
-        read = _record(self.snapshot.get("bob_read"))
-        bob = _record(self.snapshot.get("bob"))
-        beat = _record(self.snapshot.get("bob_heartbeat"))
-        target = self.query_one("#bob-read", Static)
+        read = _record(self.snapshot.get("atlas_read"))
+        atlas = _record(self.snapshot.get("atlas"))
+        beat = _record(self.snapshot.get("atlas_heartbeat"))
+        target = self.query_one("#atlas-read", Static)
         if not read:
             target.update(
-                f"[{MUTED}]Bob has not composed a read yet. "
+                f"[{MUTED}]Atlas has not composed a read yet. "
                 "The heartbeat writes one on its first tick.[/]")
             return
 
@@ -2042,36 +2042,36 @@ class QlabTui(App[None]):
 
         lines.append("")
         lines.append(
-            f"[{DIM}]mode {str(bob.get('mode','—')).upper()} · "
-            f"state {str(bob.get('state','—')).upper()} · "
+            f"[{DIM}]mode {str(atlas.get('mode','—')).upper()} · "
+            f"state {str(atlas.get('state','—')).upper()} · "
             f"heartbeat {'live' if beat.get('running') else 'stopped'} "
             f"({int(beat.get('ticks', 0))} ticks) · "
             f"news {read.get('news_source','—')} · "
             f"as of {read.get('as_of','—')}[/]")
         lines.append(
             f"[{DIM}]This is interpretation over persisted facts — advisory, "
-            f"never an instruction. Bob cannot trade.[/]")
+            f"never an instruction. Atlas cannot trade.[/]")
         target.update("\n".join(lines))
 
-    def action_bob_drawer(self) -> None:
-        """Ctrl+B: open Bob's detail drawer over the current view."""
-        if isinstance(self.screen, BobDrawerScreen):
+    def action_atlas_drawer(self) -> None:
+        """Ctrl+B: open Atlas's detail drawer over the current view."""
+        if isinstance(self.screen, AtlasDrawerScreen):
             self.pop_screen()
             return
-        self.push_screen(BobDrawerScreen(self._bob_drawer_content()))
+        self.push_screen(AtlasDrawerScreen(self._atlas_drawer_content()))
 
-    def _render_bob_rail(self) -> None:
+    def _render_atlas_rail(self) -> None:
         """The always-present rail summary: authority first, then state."""
-        bob = _record(self.snapshot.get("bob"))
-        rail = self.query_one("#bob-rail", Static)
-        if not bob:
+        atlas = _record(self.snapshot.get("atlas"))
+        rail = self.query_one("#atlas-rail", Static)
+        if not atlas:
             rail.update(f"[{MUTED}]desk manager unavailable[/]")
             return
-        mode = str(bob.get("mode", "—"))
-        state = str(bob.get("state", "—"))
-        state_tone = _BOB_STATE_TONES.get(state, TEXT_HI)
+        mode = str(atlas.get("mode", "—"))
+        state = str(atlas.get("state", "—"))
+        state_tone = _ATLAS_STATE_TONES.get(state, TEXT_HI)
         approvals = _records(self.snapshot.get("approvals"))
-        tasks = _records(self.snapshot.get("bob_tasks"))
+        tasks = _records(self.snapshot.get("atlas_tasks"))
         active = [t for t in tasks if t.get("status") in ("queued", "running")]
         lines = _key_number_markup(
             [
@@ -2088,30 +2088,30 @@ class QlabTui(App[None]):
             ],
             bold_values={0, 1},
         )
-        reason = str(bob.get("blocked_reason") or "").strip()
+        reason = str(atlas.get("blocked_reason") or "").strip()
         if reason:
             lines.extend(_bulletin_markup([reason], tone=DOWN, max_len=60))
-        elif not bob.get("coordinator_available"):
+        elif not atlas.get("coordinator_available"):
             lines.extend(_bulletin_markup(
                 ["coordinator unavailable"], tone=MUTED, max_len=60))
         lines.append(f"[{DIM}]ctrl+b for detail[/]")
         rail.update("\n".join(lines))
 
-    def _bob_drawer_content(self) -> str:
-        """Full Bob detail: authority, state, approvals, and task history."""
-        bob = _record(self.snapshot.get("bob"))
-        if not bob:
+    def _atlas_drawer_content(self) -> str:
+        """Full Atlas detail: authority, state, approvals, and task history."""
+        atlas = _record(self.snapshot.get("atlas"))
+        if not atlas:
             return f"[{MUTED}]desk manager unavailable[/]"
-        mode = str(bob.get("mode", "—"))
-        lines = [self._bob_panel_content(), ""]
+        mode = str(atlas.get("mode", "—"))
+        lines = [self._atlas_panel_content(), ""]
         lines.append(f"[{LABEL_GOLD}]AUTHORITY[/]")
         lines.extend(_bulletin_markup(
-            [_BOB_MODE_AUTHORITY.get(mode, "unknown mode"),
-             "Bob never executes: paper execution consumes a persisted human "
+            [_ATLAS_MODE_AUTHORITY.get(mode, "unknown mode"),
+             "Atlas never executes: paper execution consumes a persisted human "
              "approval bound to the exact plan."],
             tone=MUTED, max_len=110))
 
-        tasks = _records(self.snapshot.get("bob_tasks"))
+        tasks = _records(self.snapshot.get("atlas_tasks"))
         lines.append("")
         lines.append(f"[{LABEL_GOLD}]RECENT TASKS[/]")
         if not tasks:
@@ -2132,21 +2132,21 @@ class QlabTui(App[None]):
                 lines.extend(_bulletin_markup([error], tone=DOWN, max_len=100))
         return "\n".join(lines)
 
-    def _bob_panel_content(self) -> str:
-        """Bob's mode, lifecycle state, pending approvals, and recent tasks.
+    def _atlas_panel_content(self) -> str:
+        """Atlas's mode, lifecycle state, pending approvals, and recent tasks.
 
         Mode is the authority statement (observe never launches work; only
         propose can put a plan up for approval), so it is shown first and
         never abbreviated away.
         """
-        bob = _record(self.snapshot.get("bob"))
-        if not bob:
+        atlas = _record(self.snapshot.get("atlas"))
+        if not atlas:
             return f"[{MUTED}]desk manager unavailable[/]"
-        mode = str(bob.get("mode", "—"))
-        state = str(bob.get("state", "—"))
-        state_tone = _BOB_STATE_TONES.get(state, TEXT_HI)
+        mode = str(atlas.get("mode", "—"))
+        state = str(atlas.get("state", "—"))
+        state_tone = _ATLAS_STATE_TONES.get(state, TEXT_HI)
         approvals = _records(self.snapshot.get("approvals"))
-        tasks = _records(self.snapshot.get("bob_tasks"))
+        tasks = _records(self.snapshot.get("atlas_tasks"))
         active = [t for t in tasks if t.get("status") in ("queued", "running")]
         pairs = [
             ("MODE", mode.upper()),
@@ -2160,13 +2160,13 @@ class QlabTui(App[None]):
             AMBER if approvals else MUTED,
             TEXT_HI if active else MUTED,
         ]
-        lines = [f"[{LABEL_GOLD}]BOB · DESK MANAGER[/]"]
+        lines = [f"[{LABEL_GOLD}]ATLAS · DESK MANAGER[/]"]
         lines.extend(_key_number_markup(
             pairs, value_tones=tones, bold_values={0, 1}))
-        reason = str(bob.get("blocked_reason") or "").strip()
+        reason = str(atlas.get("blocked_reason") or "").strip()
         if reason:
             lines.extend(_bulletin_markup([reason], tone=DOWN, max_len=90))
-        elif not bob.get("coordinator_available"):
+        elif not atlas.get("coordinator_available"):
             lines.extend(_bulletin_markup(
                 ["coordinator unavailable — monitoring continues"],
                 tone=MUTED, max_len=90))
@@ -3047,7 +3047,7 @@ class QlabTui(App[None]):
         self.query_one("#audit-summary", Static).update(
             "Every judgment, challenge, verdict, and reflection remains inspectable.\n\n"
             f"{len(decisions)} decisions   ·   plans and orders are in Book\n\n"
-            f"{self._bob_panel_content()}"
+            f"{self._atlas_panel_content()}"
         )
         rows = []
         self._audit_decisions = {}
@@ -3240,10 +3240,10 @@ class QlabTui(App[None]):
                 f"ALPACA·{feed}" if health.get("fresh") else f"ALPACA·{feed} STALE")
         else:
             feed_token = "FEED —"
-        bob = self.snapshot.get("bob") or {}
+        atlas = self.snapshot.get("atlas") or {}
         bob_token = (
-            f"BOB {str(bob.get('mode', '—')).upper()}/"
-            f"{str(bob.get('state', '—')).upper()}" if bob else "BOB —")
+            f"ATLAS {str(atlas.get('mode', '—')).upper()}/"
+            f"{str(atlas.get('state', '—')).upper()}" if atlas else "ATLAS —")
         approvals = self.snapshot.get("approvals") or []
         approval_token = f" · APPROVALS {len(approvals)}" if approvals else ""
         self.query_one("#system-status", Static).update(
@@ -3301,11 +3301,11 @@ class QlabTui(App[None]):
             field = self.query_one("#chat-input", Input)
             if not field.disabled:  # a running turn owns the box; don't grab it
                 field.focus()
-        elif view == "atlas":
+        elif view == "reference":
             # Master-detail only reads if the index is navigable on arrival; the
             # ListView claims no digit keys, so view switching keeps working.
-            self.query_one("#atlas-list", ListView).focus()
-            self._start_atlas_fetch()
+            self.query_one("#reference-list", ListView).focus()
+            self._start_reference_fetch()
         elif view == "settings":
             self._start_bootstrap()
 
@@ -3521,22 +3521,22 @@ class QlabTui(App[None]):
             active_agent="reporter",
         )
 
-    def action_bob_refresh(self) -> None:
-        """Recompose Bob's read now instead of waiting for the next heartbeat."""
+    def action_atlas_refresh(self) -> None:
+        """Recompose Atlas's read now instead of waiting for the next heartbeat."""
         self._run_api_action(
-            "bob read", "/api/bob/observe", {"offline": self.offline},
+            "atlas read", "/api/atlas/observe", {"offline": self.offline},
             active_agent=None)
 
-    def action_bob_observe(self) -> None:
+    def action_atlas_observe(self) -> None:
         """Force one supervisor tick — evaluate triggers against current facts."""
         self._run_api_action(
-            "bob observe", "/api/bob/observe", {"offline": self.offline},
+            "atlas observe", "/api/atlas/observe", {"offline": self.offline},
             active_agent=None)
 
-    def action_bob_escalate(self) -> None:
-        """Ask Bob to open a bounded debate on the current disagreement."""
+    def action_atlas_escalate(self) -> None:
+        """Ask Atlas to open a bounded debate on the current disagreement."""
         self._run_api_action(
-            "bob escalate", "/api/bob/escalate", {"offline": self.offline},
+            "atlas escalate", "/api/atlas/escalate", {"offline": self.offline},
             active_agent=None)
 
     def action_batch(self) -> None:
@@ -3550,7 +3550,7 @@ class QlabTui(App[None]):
     def action_help(self) -> None:
         self._set_selected_work(
             "COMMANDS\n\n"
-            "view dashboard|desk|market|workforce|research|book|audit|atlas|settings\n"
+            "view dashboard|desk|market|workforce|research|book|audit|reference|settings\n"
             "view agents\n"
             "symbol TICKER\n"
             "chat MESSAGE      (read-only desk assistant)\n"
@@ -3650,14 +3650,14 @@ class QlabTui(App[None]):
         if button_id in self._book_plan_ids:
             self._confirm_plan_execution(self._book_plan_ids[button_id])
             return
-        if button_id == "btn-bob-refresh":
-            self.action_bob_refresh()
+        if button_id == "btn-atlas-refresh":
+            self.action_atlas_refresh()
             return
-        if button_id == "btn-bob-escalate":
-            self.action_bob_escalate()
+        if button_id == "btn-atlas-escalate":
+            self.action_atlas_escalate()
             return
-        if button_id == "btn-bob-observe":
-            self.action_bob_observe()
+        if button_id == "btn-atlas-observe":
+            self.action_atlas_observe()
             return
         if button_id == "btn-rebalance-dry":
             self.action_rebalance_dry()

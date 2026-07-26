@@ -1,6 +1,6 @@
-"""The registered workflow templates Bob may start, and nothing else.
+"""The registered workflow templates Atlas may start, and nothing else.
 
-Bob does not compose arbitrary work. In Research mode it may start one of these
+Atlas does not compose arbitrary work. In Research mode it may start one of these
 named templates, chosen deterministically by the trigger that woke it; the
 interpreting agent may argue for a different registered template but cannot
 invent one. Each template declares what it needs before it can start and what
@@ -101,12 +101,12 @@ def get_template(template_id: str) -> WorkflowTemplate:
         return TEMPLATES[template_id]
     except KeyError as exc:
         raise TemplateNotAllowed(
-            f"unknown workflow template {template_id!r}; Bob may start only "
+            f"unknown workflow template {template_id!r}; Atlas may start only "
             f"registered templates: {sorted(TEMPLATES)}") from exc
 
 
 def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplate:
-    """Return the template if Bob may start it now, else raise.
+    """Return the template if Atlas may start it now, else raise.
 
     Authority first, then preconditions — so a mode violation is never masked
     by a data problem.
@@ -116,7 +116,7 @@ def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplat
         raise TemplateNotAllowed(
             f"Observe mode may not start workflows; {template_id!r} refused")
     if mode == "paused":
-        raise TemplateNotAllowed("Bob is paused; no autonomous work starts")
+        raise TemplateNotAllowed("Atlas is paused; no autonomous work starts")
     if template.creates_plan and mode != "propose":
         raise TemplateNotAllowed(
             f"{template_id!r} creates a paper plan, which requires Propose "
@@ -134,7 +134,7 @@ def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplat
     if "operator_supplied_excerpts" in template.requires:
         if not facts.get("operator_excerpts"):
             raise TemplateNotAllowed(
-                f"{template_id!r} needs operator-pasted excerpts; Bob does not "
+                f"{template_id!r} needs operator-pasted excerpts; Atlas does not "
                 "fetch news on its own")
     return template
 

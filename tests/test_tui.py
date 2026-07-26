@@ -197,15 +197,15 @@ def _bootstrap():
     }
 
 
-def _atlas():
-    """Owner-shaped atlas payload, built from the real curated catalog.
+def _reference():
+    """Owner-shaped reference payload, built from the real curated catalog.
 
-    Deriving the fixture from ``ATLAS_ENTRIES`` means the stub cannot drift
+    Deriving the fixture from ``REFERENCE_ENTRIES`` means the stub cannot drift
     away from the content the owner actually serves.
     """
     from dataclasses import asdict
 
-    from qlab.core.atlas import ATLAS_ENTRIES
+    from qlab.core.reference import REFERENCE_ENTRIES
 
     # A full compute_metrics bundle, the shape the owner really serves: 13 keys,
     # n_obs first, and a None where a metric could not be computed.
@@ -226,7 +226,7 @@ def _atlas():
     }
 
     entries = []
-    for entry in ATLAS_ENTRIES:
+    for entry in REFERENCE_ENTRIES:
         row = asdict(entry)
         row["stage"] = "operational" if entry.algorithm_key == "hrp" else None
         row["champion"] = entry.algorithm_key == "hrp"
@@ -244,8 +244,8 @@ class StubClient:
             return _snapshot()
         if path == "/api/bootstrap":
             return _bootstrap()
-        if path == "/api/atlas":
-            return _atlas()
+        if path == "/api/reference":
+            return _reference()
         raise AssertionError(path)
 
     def post(self, path, body=None):
@@ -659,7 +659,7 @@ def test_headless_shell_has_no_header_and_switches_context():
             assert app.query_one("#spine") is not None
             assert app.query_one("#agent-rail") is not None
             assert app.query_one("#system-status").content.startswith("PAPER")
-            assert app.active_view == "bob"
+            assert app.active_view == "atlas"
 
             await pilot.press("3")
             await pilot.press("j")
@@ -1490,7 +1490,7 @@ def test_dry_rebalance_button_routes_through_owner_api():
         app = QlabTui(client, refresh_interval=0)
         async with app.run_test(size=(140, 60)) as pilot:
             await pilot.pause(0.1)
-            # The desk opens on Bob now; the dashboard action lives one view over.
+            # The desk opens on Atlas now; the dashboard action lives one view over.
             app.action_view("dashboard")
             await pilot.pause(0.05)
             await pilot.click("#btn-rebalance-dry")
@@ -1943,7 +1943,7 @@ def test_settings_bootstrap_error_is_capped_with_an_explicit_ellipsis():
     asyncio.run(run())
 
 
-def test_atlas_view_leads_with_method_names_and_marks_champion():
+def test_reference_view_leads_with_method_names_and_marks_champion():
     from textual.widgets import Label
 
     from qlab.tui.app import QlabTui
@@ -1953,12 +1953,12 @@ def test_atlas_view_leads_with_method_names_and_marks_champion():
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("8")
-            assert app.active_view == "atlas"
+            assert app.active_view == "reference"
             await pilot.pause(0.3)
             list_text = "\n".join(
                 str(item.query_one(Label).content)
-                for item in app.query_one("#atlas-list").children)
-            detail = str(app.query_one("#atlas-detail").content)
+                for item in app.query_one("#reference-list").children)
+            detail = str(app.query_one("#reference-detail").content)
             # First arm renders in the detail pane by default.
             assert "60/40" in detail
             # Champion is starred in the list without exposing the arm code.
@@ -1970,7 +1970,7 @@ def test_atlas_view_leads_with_method_names_and_marks_champion():
     asyncio.run(run())
 
 
-def test_atlas_detail_states_absent_ablation_and_shows_champion_numbers():
+def test_reference_detail_states_absent_ablation_and_shows_champion_numbers():
     from qlab.tui.app import QlabTui
 
     async def run():
@@ -1980,21 +1980,21 @@ def test_atlas_detail_states_absent_ablation_and_shows_champion_numbers():
             await pilot.press("8")
             await pilot.pause(0.3)
             # 60/40 has no ablation row in the fixture: say so, never blank.
-            benchmark_detail = str(app.query_one("#atlas-detail").content)
+            benchmark_detail = str(app.query_one("#reference-detail").content)
             assert "no ablation recorded" in benchmark_detail
 
             # The index has focus on arrival, so arrows walk the catalog and
             # the detail pane follows the highlight.
-            assert app.focused is app.query_one("#atlas-list")
+            assert app.focused is app.query_one("#reference-list")
             await pilot.press("down")
             await pilot.pause(0.1)
             assert "Equal-weight benchmark" in str(
-                app.query_one("#atlas-detail").content)
+                app.query_one("#reference-detail").content)
 
             # Third arm is HRP, the champion in this fixture.
             await pilot.press("down")
             await pilot.pause(0.1)
-            detail = str(app.query_one("#atlas-detail").content)
+            detail = str(app.query_one("#reference-detail").content)
             assert "Hierarchical risk parity" in detail
             assert "★ CHAMPION" in detail
             assert "operational" in detail
@@ -2024,13 +2024,13 @@ def test_atlas_detail_states_absent_ablation_and_shows_champion_numbers():
     asyncio.run(run())
 
 
-def test_atlas_ablation_without_curated_numbers_reads_as_absent():
+def test_reference_ablation_without_curated_numbers_reads_as_absent():
     from qlab.tui.app import QlabTui
 
     class ShortWindowClient(StubClient):
         def get(self, path, **params):
             payload = super().get(path, **params)
-            if path == "/api/atlas":
+            if path == "/api/reference":
                 for row in payload["entries"]:
                     if row["ablation"]:
                         # compute_metrics returns n_obs alone on a short series,
@@ -2052,7 +2052,7 @@ def test_atlas_ablation_without_curated_numbers_reads_as_absent():
             await pilot.press("down")
             await pilot.press("down")
             await pilot.pause(0.1)
-            detail = str(app.query_one("#atlas-detail").content)
+            detail = str(app.query_one("#reference-detail").content)
             assert "Hierarchical risk parity" in detail
             # No finite curated metric is honest absence, not a bare header.
             assert "no ablation recorded" in detail
@@ -2062,66 +2062,66 @@ def test_atlas_ablation_without_curated_numbers_reads_as_absent():
     asyncio.run(run())
 
 
-def test_atlas_fetch_failure_is_visible_and_retried_on_the_next_visit():
+def test_reference_fetch_failure_is_visible_and_retried_on_the_next_visit():
     from qlab.tui.app import QlabTui
 
-    class FailingAtlasClient(StubClient):
+    class FailingReferenceClient(StubClient):
         def __init__(self):
             super().__init__()
-            self.atlas_calls = 0
+            self.reference_calls = 0
             self.fail = True
 
         def get(self, path, **params):
-            if path == "/api/atlas":
-                self.atlas_calls += 1
+            if path == "/api/reference":
+                self.reference_calls += 1
                 if self.fail:
-                    raise RuntimeError("owner atlas unavailable")
+                    raise RuntimeError("owner reference unavailable")
             return super().get(path, **params)
 
     async def run():
-        client = FailingAtlasClient()
+        client = FailingReferenceClient()
         app = QlabTui(client, refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("8")
             for _ in range(40):
-                if "unavailable" in str(app.query_one("#atlas-detail").content):
+                if "unavailable" in str(app.query_one("#reference-detail").content):
                     break
                 await pilot.pause(0.02)
-            assert "atlas unavailable" in str(app.query_one("#atlas-detail").content)
+            assert "reference unavailable" in str(app.query_one("#reference-detail").content)
 
             client.fail = False
             await pilot.press("2")
             await pilot.press("8")
             for _ in range(40):
-                if "60/40" in str(app.query_one("#atlas-detail").content):
+                if "60/40" in str(app.query_one("#reference-detail").content):
                     break
                 await pilot.pause(0.02)
-            assert client.atlas_calls == 2
-            assert "60/40" in str(app.query_one("#atlas-detail").content)
+            assert client.reference_calls == 2
+            assert "60/40" in str(app.query_one("#reference-detail").content)
 
     asyncio.run(run())
 
 
-def test_atlas_refetches_on_every_visit_so_a_new_ablation_is_never_stale():
-    """`: batch` writes new ablation numbers mid-session; the atlas must follow.
+def test_reference_refetches_on_every_visit_so_a_new_ablation_is_never_stale():
+    """`: batch` writes new ablation numbers mid-session; the reference must follow.
 
-    The leaderboard refreshes on the next 2s tick, so a once-per-session atlas
+    The leaderboard refreshes on the next 2s tick, so a once-per-session reference
     would keep asserting "latest ablation" with superseded numbers — two
     surfaces reporting different states of the same evidence.
     """
     from qlab.tui.app import QlabTui
 
-    class ChangingAtlasClient(StubClient):
+    class ChangingReferenceClient(StubClient):
         def __init__(self):
             super().__init__()
-            self.atlas_calls = 0
+            self.reference_calls = 0
 
         def get(self, path, **params):
-            if path == "/api/atlas":
-                self.atlas_calls += 1
-                payload = _atlas()
-                if self.atlas_calls > 1:
+            if path == "/api/reference":
+                self.reference_calls += 1
+                payload = _reference()
+                if self.reference_calls > 1:
                     for row in payload["entries"]:
                         if row["ablation"]:
                             row["ablation"]["sharpe"] = 1.77
@@ -2129,7 +2129,7 @@ def test_atlas_refetches_on_every_visit_so_a_new_ablation_is_never_stale():
             return super().get(path, **params)
 
     async def run():
-        client = ChangingAtlasClient()
+        client = ChangingReferenceClient()
         app = QlabTui(client, refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
@@ -2138,21 +2138,21 @@ def test_atlas_refetches_on_every_visit_so_a_new_ablation_is_never_stale():
             await pilot.press("down")
             await pilot.press("down")
             await pilot.pause(0.1)
-            assert "0.910" in str(app.query_one("#atlas-detail").content)
-            assert client.atlas_calls == 1
+            assert "0.910" in str(app.query_one("#reference-detail").content)
+            assert client.reference_calls == 1
 
             await pilot.press("2")
             await pilot.press("8")
             for _ in range(60):
-                if client.atlas_calls == 2:
+                if client.reference_calls == 2:
                     break
                 await pilot.pause(0.02)
             await pilot.pause(0.3)
             await pilot.press("down")
             await pilot.press("down")
             await pilot.pause(0.1)
-            detail = str(app.query_one("#atlas-detail").content)
-            assert client.atlas_calls == 2
+            detail = str(app.query_one("#reference-detail").content)
+            assert client.reference_calls == 2
             assert "Hierarchical risk parity" in detail
             assert "1.770" in detail and "0.910" not in detail
 
@@ -2172,8 +2172,8 @@ def test_nav_menu_rows_are_clickable():
         async with app.run_test(size=(160, 44)) as pilot:
             await pilot.pause(0.2)
             for row, view in enumerate(
-                    ("bob", "dashboard", "market", "workforce", "research",
-                     "book", "audit", "atlas", "settings")):
+                    ("atlas", "dashboard", "market", "workforce", "research",
+                     "book", "audit", "reference", "settings")):
                 # start elsewhere so each click is a genuine transition
                 app.action_view("audit" if view != "audit" else "dashboard")
                 await pilot.pause(0.02)
@@ -3483,14 +3483,14 @@ def test_audit_row_select_expands_decision_into_work_rail():
     asyncio.run(run())
 
 
-def _bob_snapshot(**over):
-    """The standard snapshot plus the Bob/approval/quote projections (P8)."""
+def _atlas_snapshot(**over):
+    """The standard snapshot plus the Atlas/approval/quote projections (P8)."""
     snap = _snapshot()
     snap.update({
-        "bob": {"manager_id": "bob-the-quant", "mode": "observe",
+        "atlas": {"manager_id": "atlas", "mode": "observe",
                 "state": "observing", "blocked_reason": None,
                 "coordinator_available": True},
-        "bob_tasks": [{"task_id": "task-1", "status": "queued",
+        "atlas_tasks": [{"task_id": "task-1", "status": "queued",
                        "trigger_kind": "regime_flip"}],
         "approvals": [],
         "quotes": {"live_stream": False, "quotes": {}, "health": None},
@@ -3499,7 +3499,7 @@ def _bob_snapshot(**over):
     return snap
 
 
-class _BobStubClient(StubClient):
+class _AtlasStubClient(StubClient):
     def __init__(self, snapshot):
         super().__init__()
         self._snapshot = snapshot
@@ -3510,22 +3510,22 @@ class _BobStubClient(StubClient):
         return super().get(path, **params)
 
 
-def test_status_line_shows_bob_mode_and_feed_identity():
+def test_status_line_shows_atlas_mode_and_feed_identity():
     from qlab.tui.app import QlabTui
 
-    snap = _bob_snapshot(quotes={
+    snap = _atlas_snapshot(quotes={
         "live_stream": True, "feed": "sip",
         "quotes": {"ACWI": {"price": 101.0, "age_seconds": 0.4}},
         "health": {"fresh": True, "state": "live"}})
 
     async def run():
-        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(200, 48)) as pilot:
             await pilot.pause(0.2)
             status = str(app.query_one("#system-status").content)
             # IEX/SIP is never collapsed into the word "live".
             assert "ALPACA·SIP" in status
-            assert "BOB OBSERVE/OBSERVING" in status
+            assert "ATLAS OBSERVE/OBSERVING" in status
 
     asyncio.run(run())
 
@@ -3533,12 +3533,12 @@ def test_status_line_shows_bob_mode_and_feed_identity():
 def test_status_line_marks_a_stale_quote_feed():
     from qlab.tui.app import QlabTui
 
-    snap = _bob_snapshot(quotes={
+    snap = _atlas_snapshot(quotes={
         "live_stream": True, "feed": "iex", "quotes": {},
         "health": {"fresh": False, "state": "stale"}})
 
     async def run():
-        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(200, 48)) as pilot:
             await pilot.pause(0.2)
             status = str(app.query_one("#system-status").content)
@@ -3547,11 +3547,11 @@ def test_status_line_marks_a_stale_quote_feed():
     asyncio.run(run())
 
 
-def test_audit_view_shows_bob_panel_and_pending_approvals():
+def test_audit_view_shows_atlas_panel_and_pending_approvals():
     from qlab.tui.app import QlabTui
 
-    snap = _bob_snapshot(
-        bob={"manager_id": "bob-the-quant", "mode": "propose",
+    snap = _atlas_snapshot(
+        atlas={"manager_id": "atlas", "mode": "propose",
              "state": "blocked", "blocked_reason": "data plane is blocked",
              "coordinator_available": True},
         approvals=[{"approval_id": "appr-abc123", "plan_id": "plan-xyz789",
@@ -3559,13 +3559,13 @@ def test_audit_view_shows_bob_panel_and_pending_approvals():
                     "status": "pending"}])
 
     async def run():
-        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             app.action_view("audit")
             await pilot.pause(0.2)
             panel = str(app.query_one("#audit-summary").content)
-            assert "BOB · DESK MANAGER" in panel
+            assert "ATLAS · DESK MANAGER" in panel
             assert "PROPOSE" in panel and "BLOCKED" in panel
             assert "data plane is blocked" in panel
             assert "PENDING APPROVALS" in panel
@@ -3576,15 +3576,15 @@ def test_audit_view_shows_bob_panel_and_pending_approvals():
     asyncio.run(run())
 
 
-def test_bob_panel_reports_degraded_coordinator_without_failing():
+def test_atlas_panel_reports_degraded_coordinator_without_failing():
     from qlab.tui.app import QlabTui
 
-    snap = _bob_snapshot(bob={
-        "manager_id": "bob-the-quant", "mode": "observe", "state": "degraded",
+    snap = _atlas_snapshot(atlas={
+        "manager_id": "atlas", "mode": "observe", "state": "degraded",
         "blocked_reason": None, "coordinator_available": False})
 
     async def run():
-        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             app.action_view("audit")
@@ -3597,38 +3597,38 @@ def test_bob_panel_reports_degraded_coordinator_without_failing():
     asyncio.run(run())
 
 
-def test_bob_rail_is_present_in_every_view():
+def test_atlas_rail_is_present_in_every_view():
     from qlab.tui.app import QlabTui
 
-    snap = _bob_snapshot(
-        bob={"manager_id": "bob-the-quant", "mode": "research",
+    snap = _atlas_snapshot(
+        atlas={"manager_id": "atlas", "mode": "research",
              "state": "observing", "blocked_reason": None,
              "coordinator_available": True},
         approvals=[{"approval_id": "appr-1", "plan_id": "plan-1",
                     "expires_at": "2026-07-24T18:45:00+00:00"}])
 
     async def run():
-        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(180, 48)) as pilot:
             await pilot.pause(0.2)
             for view in ("dashboard", "market", "book", "audit"):
                 app.action_view(view)
                 await pilot.pause(0.05)
-                rail = str(app.query_one("#bob-rail").content)
+                rail = str(app.query_one("#atlas-rail").content)
                 assert "RESEARCH" in rail and "OBSERVING" in rail
                 assert "ctrl+b for detail" in rail
 
     asyncio.run(run())
 
 
-def test_ctrl_b_opens_and_closes_the_bob_drawer():
-    from qlab.tui.app import BobDrawerScreen, QlabTui
+def test_ctrl_b_opens_and_closes_the_atlas_drawer():
+    from qlab.tui.app import AtlasDrawerScreen, QlabTui
 
-    snap = _bob_snapshot(
-        bob={"manager_id": "bob-the-quant", "mode": "propose",
+    snap = _atlas_snapshot(
+        atlas={"manager_id": "atlas", "mode": "propose",
              "state": "observing", "blocked_reason": None,
              "coordinator_available": True},
-        bob_tasks=[{"task_id": "task-1", "status": "completed",
+        atlas_tasks=[{"task_id": "task-1", "status": "completed",
                     "trigger_kind": "regime_flip",
                     "created_at": "2026-07-24T10:00:00+00:00"},
                    {"task_id": "task-2", "status": "failed",
@@ -3636,27 +3636,27 @@ def test_ctrl_b_opens_and_closes_the_bob_drawer():
                     "created_at": "2026-07-24T11:00:00+00:00"}])
 
     async def run():
-        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(180, 48)) as pilot:
             await pilot.pause(0.2)
-            app.action_bob_drawer()
+            app.action_atlas_drawer()
             await pilot.pause(0.1)
-            assert isinstance(app.screen, BobDrawerScreen)
-            body = str(app.screen.query_one("#bob-drawer-body").content)
+            assert isinstance(app.screen, AtlasDrawerScreen)
+            body = str(app.screen.query_one("#atlas-drawer-body").content)
             # The mode's authority is stated plainly, never left to inference.
             assert "may request a checked plan" in body
-            assert "Bob never executes" in body
+            assert "Atlas never executes" in body
             assert "regime_flip" in body and "drift_breach" in body
             assert "coordinator died" in body
             # Ctrl+B toggles it closed again.
-            app.action_bob_drawer()
+            app.action_atlas_drawer()
             await pilot.pause(0.1)
-            assert not isinstance(app.screen, BobDrawerScreen)
+            assert not isinstance(app.screen, AtlasDrawerScreen)
 
     asyncio.run(run())
 
 
-def test_bob_drawer_states_authority_for_each_mode():
+def test_atlas_drawer_states_authority_for_each_mode():
     from qlab.tui.app import QlabTui
 
     async def run():
@@ -3666,25 +3666,25 @@ def test_bob_drawer_states_authority_for_each_mode():
             ("propose", "Cannot approve or execute"),
             ("paused", "no new autonomous work"),
         ):
-            snap = _bob_snapshot(bob={
-                "manager_id": "bob-the-quant", "mode": mode,
+            snap = _atlas_snapshot(atlas={
+                "manager_id": "atlas", "mode": mode,
                 "state": "observing", "blocked_reason": None,
                 "coordinator_available": True})
-            app = QlabTui(_BobStubClient(snap), refresh_interval=0,
+            app = QlabTui(_AtlasStubClient(snap), refresh_interval=0,
                           claude_start="off")
             async with app.run_test(size=(180, 48)) as pilot:
                 await pilot.pause(0.2)
-                body = app._bob_drawer_content()
+                body = app._atlas_drawer_content()
                 assert expected.lower() in body.lower(), mode
 
     asyncio.run(run())
 
 
-def test_desk_opens_on_bob_and_renders_the_read():
-    """Bob is the front door: the desk opens on the manager's read."""
+def test_desk_opens_on_atlas_and_renders_the_read():
+    """Atlas is the front door: the desk opens on the manager's read."""
     from qlab.tui.app import QlabTui
 
-    snap = _bob_snapshot(bob_read={
+    snap = _atlas_snapshot(atlas_read={
         "as_of": "2026-07-25",
         "quantitative_state": "calm",
         "news": {"tone": "risk_off", "intensity": 0.4, "item_count": 5,
@@ -3698,14 +3698,14 @@ def test_desk_opens_on_bob_and_renders_the_read():
         "observations": ["Indicator panel reads calm with 5 of 5 agreeing."],
         "would_change_my_mind": ["A turbulence reading moving into its tail."],
         "evidence_refs": ["snapshot:abc"], "read_hash": "h1", "advisory": True},
-        bob_heartbeat={"running": True, "ticks": 12})
+        atlas_heartbeat={"running": True, "ticks": 12})
 
     async def run():
-        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(180, 50)) as pilot:
             await pilot.pause(0.2)
-            assert app.active_view == "bob"
-            read = str(app.query_one("#bob-read").content)
+            assert app.active_view == "atlas"
+            read = str(app.query_one("#atlas-read").content)
             # Conclusion first, then what makes it interesting.
             assert "THE READ" in read
             assert "DIVERGENT" in read
@@ -3713,44 +3713,44 @@ def test_desk_opens_on_bob_and_renders_the_read():
             assert "qualitative record is not" in read
             assert "WOULD CHANGE THIS" in read
             assert "Selloff deepens" in read
-            # The heartbeat is visible, so a dead Bob is obvious.
+            # The heartbeat is visible, so a dead Atlas is obvious.
             assert "heartbeat live" in read and "12 ticks" in read
             # And it never reads as an instruction.
             assert "advisory, never an instruction" in read
-            assert "Bob cannot trade" in read
+            assert "Atlas cannot trade" in read
 
     asyncio.run(run())
 
 
-def test_bob_view_says_so_when_no_read_exists_yet():
+def test_atlas_view_says_so_when_no_read_exists_yet():
     from qlab.tui.app import QlabTui
 
-    snap = _bob_snapshot()
-    snap.pop("bob_read", None)
+    snap = _atlas_snapshot()
+    snap.pop("atlas_read", None)
 
     async def run():
-        app = QlabTui(_BobStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 44)) as pilot:
             await pilot.pause(0.2)
-            read = str(app.query_one("#bob-read").content)
+            read = str(app.query_one("#atlas-read").content)
             assert "has not composed a read yet" in read
 
     asyncio.run(run())
 
 
-def test_bob_view_actions_route_through_the_owner():
+def test_atlas_view_actions_route_through_the_owner():
     from qlab.tui.app import QlabTui
 
     async def run():
-        client = _BobStubClient(_bob_snapshot())
+        client = _AtlasStubClient(_atlas_snapshot())
         app = QlabTui(client, refresh_interval=0, claude_start="off")
         async with app.run_test(size=(180, 50)) as pilot:
             await pilot.pause(0.1)
-            await pilot.click("#btn-bob-escalate")
+            await pilot.click("#btn-atlas-escalate")
             for _ in range(20):
                 if client.posts:
                     break
                 await pilot.pause(0.05)
-            assert client.posts and client.posts[0][0] == "/api/bob/escalate"
+            assert client.posts and client.posts[0][0] == "/api/atlas/escalate"
 
     asyncio.run(run())

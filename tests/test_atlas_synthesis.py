@@ -1,4 +1,4 @@
-"""Bob's heartbeat and desk read: the live worker and its qualitative view."""
+"""Atlas's heartbeat and desk read: the live worker and its qualitative view."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from qlab.news.feed import NewsItem
-from qlab.operator.heartbeat import BobHeartbeat
+from qlab.operator.heartbeat import AtlasHeartbeat
 from qlab.operator.synthesis import (
     ALIGNED,
     DIVERGENT,
@@ -35,7 +35,7 @@ def _panel(state="calm", agree=5, disagree=0, failed=0, reason=None):
 
 def test_heartbeat_ticks_and_reports_status():
     seen = []
-    hb = BobHeartbeat(lambda: seen.append(1) or {"state": "observing"},
+    hb = AtlasHeartbeat(lambda: seen.append(1) or {"state": "observing"},
                       interval_s=5.0)
     assert hb.tick_once() == {"state": "observing"}
     status = hb.status()
@@ -49,7 +49,7 @@ def test_a_failing_tick_never_kills_the_loop():
     def boom():
         raise RuntimeError("registry busy")
 
-    hb = BobHeartbeat(boom, on_error=errors.append)
+    hb = AtlasHeartbeat(boom, on_error=errors.append)
     assert hb.tick_once() is None
     assert hb.status()["errors"] == 1
     assert isinstance(errors[0], RuntimeError)
@@ -65,13 +65,13 @@ def test_an_error_handler_that_raises_cannot_take_the_loop_down():
     def bad_handler(_exc):
         raise ValueError("handler exploded")
 
-    hb = BobHeartbeat(boom, on_error=bad_handler)
+    hb = AtlasHeartbeat(boom, on_error=bad_handler)
     assert hb.tick_once() is None  # did not propagate
 
 
 def test_heartbeat_start_stop_is_idempotent_and_bounded():
     ticked = threading.Event()
-    hb = BobHeartbeat(lambda: ticked.set() or {"state": "observing"},
+    hb = AtlasHeartbeat(lambda: ticked.set() or {"state": "observing"},
                       interval_s=5.0)
     hb.start()
     try:
@@ -85,7 +85,7 @@ def test_heartbeat_start_stop_is_idempotent_and_bounded():
 
 
 def test_interval_has_a_floor_so_a_quiet_desk_cannot_spin():
-    assert BobHeartbeat(lambda: {}, interval_s=0.0).interval_s >= 5.0
+    assert AtlasHeartbeat(lambda: {}, interval_s=0.0).interval_s >= 5.0
 
 
 # --- news reading ------------------------------------------------------------
@@ -135,7 +135,7 @@ def test_top_tickers_are_ranked():
 
 
 def test_calm_tape_with_risk_off_news_is_divergent_even_when_thin():
-    """The case Bob exists for: the tape and the story disagree.
+    """The case Atlas exists for: the tape and the story disagree.
 
     Thin coverage scales conviction down; it must never silence the tension.
     """

@@ -21,26 +21,26 @@ GET  /api/decisions/<id>/outcome   the immutable resolved outcome
 GET  /api/decisions/<id>/lesson    advisory lesson over that outcome (if any)
 GET  /api/workflows/<id>/debate    debates, turns, and adjudication
 GET  /api/models/invocations   model tier/route audit records
-GET  /api/bob/status           BobTheQuant mode, lifecycle state, heartbeat
-GET  /api/bob/read             Bob's composed read: signals + news + research
-POST /api/bob/escalate         open a bounded debate on a material disagreement
-GET  /api/bob/tasks            Bob's deduplicated autonomous task history
-GET  /api/bob/templates        the registered workflow templates Bob may start
-GET  /api/bob/startable        queued tasks Bob may start now, with refusals
-GET  /api/bob/shadow           shadow-rollout scorecard (evidence, not a grant)
-POST /api/bob/tasks/<id>/start start one queued task's registered template
-POST /api/bob/observe          run one deterministic Bob observe tick
-POST /api/bob/mode             set Bob mode (observe|research|propose|paused)
-POST /api/bob/pause            pause Bob's autonomous work
-POST /api/bob/resume           resume Bob into a mode
-POST /api/bob/message          ask Bob a question (never grants authority)
+GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
+GET  /api/atlas/read             Atlas's composed read: signals + news + research
+POST /api/atlas/escalate         open a bounded debate on a material disagreement
+GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
+GET  /api/atlas/templates        the registered workflow templates Atlas may start
+GET  /api/atlas/startable        queued tasks Atlas may start now, with refusals
+GET  /api/atlas/shadow           shadow-rollout scorecard (evidence, not a grant)
+POST /api/atlas/tasks/<id>/start start one queued task's registered template
+POST /api/atlas/observe          run one deterministic Atlas observe tick
+POST /api/atlas/mode             set Atlas mode (observe|research|propose|paused)
+POST /api/atlas/pause            pause Atlas's autonomous work
+POST /api/atlas/resume           resume Atlas into a mode
+POST /api/atlas/message          ask Atlas a question (never grants authority)
 GET  /api/events               event stream with cursor and limit
 GET  /api/plans                recent order plans
 GET  /api/orders               recent orders
 GET  /api/agents               deployed agent definitions
 GET  /api/algorithms           categorized algorithm deployment catalog
 GET  /api/policy               configured operational allocation policy
-GET  /api/atlas                curated component catalog + live champion/stage overlay
+GET  /api/reference                curated component catalog + live champion/stage overlay
 GET  /api/performance          realized equity curve + metrics from the equity marks
 GET  /api/workflows            durable Claude-workforce runs and phase state
 GET  /api/workflows/<id>       one durable workflow and its ordered steps
@@ -206,7 +206,7 @@ class UISession:
         self.market_stream = None
         self._last_poll_mark = 0.0
         self._last_workflow_reap = 0.0
-        # Bob's composed qualitative read, refreshed by the heartbeat.
+        # Atlas's composed qualitative read, refreshed by the heartbeat.
         self._desk_read: dict | None = None
         self.heartbeat = None
         self.registry.init_account(self.mandate.paper_capital)
@@ -217,12 +217,12 @@ class UISession:
         owner_tools = _OwnerToolApp()
         register_lab_tools(owner_tools, self.lab_state, owner_only=True)
         self._lab_tools = owner_tools.tools
-        # BobTheQuant: the deterministic desk supervisor. It degrades (not fails)
+        # Atlas: the deterministic desk supervisor. It degrades (not fails)
         # when the coordinator (Claude) is absent and holds no execution or
         # proposal authority in Observe mode.
-        from qlab.operator.bob import BobSupervisor
+        from qlab.operator.atlas import AtlasSupervisor
 
-        self.bob = BobSupervisor(
+        self.atlas = AtlasSupervisor(
             self.registry,
             coordinator_available=lambda: bool(shutil.which("claude")))
 
@@ -1038,9 +1038,9 @@ class UISession:
             min_similarity=float(_one("min_similarity", 0.5)))
         return {"as_of": as_of, "fingerprint": fingerprint, "decisions": rows}
 
-    # -- BobTheQuant desk manager -------------------------------------------
-    def bob_facts(self, offline: bool) -> dict:
-        """Assemble the deterministic owner facts Bob observes (no LLM)."""
+    # -- Atlas desk manager -------------------------------------------
+    def atlas_facts(self, offline: bool) -> dict:
+        """Assemble the deterministic owner facts Atlas observes (no LLM)."""
         port = self.portfolio(offline)
         health = self.data_health(offline)
         weights = port.get("weights", {}) or {}
@@ -1076,13 +1076,13 @@ class UISession:
             "order_anomaly": anomaly,
         }
 
-    def bob_observe(self, offline: bool) -> dict:
-        """Run one deterministic Bob observe tick against current owner facts."""
-        facts = self.bob_facts(offline)
-        return self.bob.observe(facts, trading_date=date.today().isoformat())
+    def atlas_observe(self, offline: bool) -> dict:
+        """Run one deterministic Atlas observe tick against current owner facts."""
+        facts = self.atlas_facts(offline)
+        return self.atlas.observe(facts, trading_date=date.today().isoformat())
 
     def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:
-        """Bob's composed qualitative read across signals, news, and research.
+        """Atlas's composed qualitative read across signals, news, and research.
 
         Cached between heartbeats: composing it fetches news and builds the
         regime panel, which is too heavy to redo on every status poll.
@@ -1136,10 +1136,10 @@ class UISession:
         self._desk_read = payload
         return self._desk_read
 
-    def bob_escalate_debate(self, offline: bool) -> dict:
-        """Open a bounded debate when Bob's read finds material disagreement.
+    def atlas_escalate_debate(self, offline: bool) -> dict:
+        """Open a bounded debate when Atlas's read finds material disagreement.
 
-        Bob does not get a private argument channel: it opens the SAME
+        Atlas does not get a private argument channel: it opens the SAME
         registry-enforced debate the workforce uses, with an allowlisted claim,
         a two-round ceiling, and an adjudication the reporter waits on.
         """
@@ -1155,22 +1155,22 @@ class UISession:
         decision_id = decisions[0]["decision_id"] if decisions else "no-decision"
         try:
             debate_id = open_debate(
-                self.registry, workflow_id=f"bob-{read.get('read_hash')}",
+                self.registry, workflow_id=f"atlas-{read.get('read_hash')}",
                 original_decision_id=decision_id, material_claims=[claim],
                 panel_snapshot_id=(read.get("evidence_refs") or [None])[0])
         except DebateViolation as exc:
             return {"opened": False, "reason": str(exc)}
         self.registry.record_event(
-            "bob_opened_debate",
+            "atlas_opened_debate",
             {"debate_id": debate_id, "claim": claim,
              "tension": (read.get("tensions") or [""])[0][:200]})
         return {"opened": True, "debate_id": debate_id, "claim": claim,
                 "tensions": read.get("tensions")}
 
-    def bob_workflow_runner(self, task: dict, template_id: str) -> dict:
-        """Start the durable workforce run a Bob task selected.
+    def atlas_workflow_runner(self, task: dict, template_id: str) -> dict:
+        """Start the durable workforce run a Atlas task selected.
 
-        This is the seam BobSupervisor.start_task calls once authority has
+        This is the seam AtlasSupervisor.start_task calls once authority has
         already been checked. It only *starts* a governed workflow — the same
         one a human could start — and returns the handle. It grants nothing:
         the workflow's own phase gates, referee binding, and approval
@@ -1183,43 +1183,43 @@ class UISession:
             # Deterministic templates (desk_brief) need no workforce at all.
             return {"template_id": template_id, "workflow_id": None,
                     "action_taken": False,
-                    "brief": self.bob.desk_brief(self.bob_facts(True))}
+                    "brief": self.atlas.desk_brief(self.atlas_facts(True))}
         started = self.start_workflow({
             "kind": "portfolio_review",
             "goal": f"[{template_id}] {template.purpose} "
                     f"(trigger: {task.get('trigger_kind')})",
-            "started_by": "bob-the-quant",
+            "started_by": "atlas",
         })
         workflow_id = (started or {}).get("workflow_id")
         if workflow_id:
-            self.registry.update_bob_task(
+            self.registry.update_atlas_task(
                 str(task.get("task_id")), workflow_id=str(workflow_id))
         return {"template_id": template_id, "workflow_id": workflow_id,
                 "action_taken": True}
 
-    def bob_start_task(self, task_id: str, offline: bool) -> dict:
-        """Start one queued Bob task through the governed workflow runner."""
-        facts = self.bob_facts(offline)
-        return self.bob.start_task(task_id, facts,
-                                   runner=self.bob_workflow_runner)
+    def atlas_start_task(self, task_id: str, offline: bool) -> dict:
+        """Start one queued Atlas task through the governed workflow runner."""
+        facts = self.atlas_facts(offline)
+        return self.atlas.start_task(task_id, facts,
+                                   runner=self.atlas_workflow_runner)
 
-    def bob_message(self, body: dict) -> dict:
+    def atlas_message(self, body: dict) -> dict:
         """Accept a human question or explicit workflow request.
 
         This never grants authority. The message is recorded; a substantive
-        answer needs the coordinator, so when Claude is absent Bob acknowledges
+        answer needs the coordinator, so when Claude is absent Atlas acknowledges
         and reports itself degraded rather than fabricating an answer.
         """
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("message text is required")
-        self.registry.record_event("bob_message", {"text": text[:500]})
+        self.registry.record_event("atlas_message", {"text": text[:500]})
         available = bool(shutil.which("claude"))
         return {
             "received": True,
             "coordinator_available": available,
             "note": ("queued for the interpreting agent" if available
-                     else "coordinator unavailable; Bob is degraded and cannot "
+                     else "coordinator unavailable; Atlas is degraded and cannot "
                           "answer, but the owner, data, and book remain usable"),
         }
 
@@ -1399,18 +1399,18 @@ class UISession:
                 return {bt["arm_id"]: bt["metrics"] for bt in backtests}
         return {}
 
-    def atlas(self) -> dict:
+    def reference(self) -> dict:
         """The curated catalog with live facts overlaid, never stored in prose."""
         from dataclasses import asdict
 
         from qlab.algorithms import list_algorithms
-        from qlab.core.atlas import ATLAS_ENTRIES
+        from qlab.core.reference import REFERENCE_ENTRIES
 
         catalog = {row["id"]: row for row in list_algorithms()}
         champion = self.mandate.operational_policy
         ablation = self.latest_ablation_metrics()
         entries = []
-        for entry in ATLAS_ENTRIES:
+        for entry in REFERENCE_ENTRIES:
             row = asdict(entry)
             spec = catalog.get(entry.algorithm_key) if entry.algorithm_key else None
             row["stage"] = spec["stage"] if spec else None
@@ -1425,7 +1425,7 @@ class UISession:
     def leaderboard(self) -> list[dict]:
         """Newest ablation ranked by Sharpe, in operator-readable method names."""
         from qlab.algorithms import list_algorithms
-        from qlab.core.atlas import (
+        from qlab.core.reference import (
             OVERLAY_METRICS,
             arm_algorithm_key,
             arm_display_name,
@@ -1490,11 +1490,11 @@ class UISession:
             "live_portfolio": self.live_portfolio(offline),
             "market": market_snapshot,
             "stress": stress,
-            "bob": self.bob.status(),
-            "bob_read": self.desk_read(offline),
-            "bob_heartbeat": (self.heartbeat.status() if self.heartbeat
+            "atlas": self.atlas.status(),
+            "atlas_read": self.desk_read(offline),
+            "atlas_heartbeat": (self.heartbeat.status() if self.heartbeat
                               else {"running": False, "ticks": 0}),
-            "bob_tasks": self.registry.list_bob_tasks(10),
+            "atlas_tasks": self.registry.list_atlas_tasks(10),
             "approvals": self.registry.list_approval_requests(10, "pending"),
             "quotes": self.quotes(),
             "agents": self.agents(),
@@ -1732,8 +1732,8 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/policy":
         return 200, session.allocation_policy()
 
-    if method == "GET" and path == "/api/atlas":
-        return 200, session.atlas()
+    if method == "GET" and path == "/api/reference":
+        return 200, session.reference()
 
     if method == "GET" and path == "/api/performance":
         return 200, session.performance(
@@ -1808,69 +1808,69 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/models/invocations":
         return 200, {"invocations": session.registry.list_model_invocations(50)}
 
-    if method == "GET" and path == "/api/bob/status":
-        status = session.bob.status()
+    if method == "GET" and path == "/api/atlas/status":
+        status = session.atlas.status()
         status["heartbeat"] = (
             session.heartbeat.status() if session.heartbeat else
             {"running": False, "ticks": 0})
         return 200, status
 
-    if method == "GET" and path == "/api/bob/read":
+    if method == "GET" and path == "/api/atlas/read":
         offline = _qbool(query, "offline", session.offline_default)
         refresh = _qbool(query, "refresh", False)
         return 200, session.desk_read(offline, refresh=refresh)
 
-    if method == "GET" and path == "/api/bob/tasks":
-        return 200, {"tasks": session.registry.list_bob_tasks(50)}
+    if method == "GET" and path == "/api/atlas/tasks":
+        return 200, {"tasks": session.registry.list_atlas_tasks(50)}
 
-    if method == "GET" and path == "/api/bob/templates":
+    if method == "GET" and path == "/api/atlas/templates":
         from qlab.operator.templates import TEMPLATES
 
         return 200, {"templates": [t.to_dict() for t in TEMPLATES.values()]}
 
-    if method == "GET" and path == "/api/bob/shadow":
+    if method == "GET" and path == "/api/atlas/shadow":
         from qlab.operator.shadow import shadow_scorecard
 
         return 200, shadow_scorecard(
             session.registry, since=query.get("since", [None])[0])
 
-    if method == "GET" and path == "/api/bob/startable":
+    if method == "GET" and path == "/api/atlas/startable":
         offline = _qbool(query, "offline", session.offline_default)
-        facts = session.bob_facts(offline)
-        return 200, {"startable": session.bob.startable_tasks(facts)}
+        facts = session.atlas_facts(offline)
+        return 200, {"startable": session.atlas.startable_tasks(facts)}
 
-    if method == "POST" and path == "/api/bob/observe":
-        return 200, session.bob_observe(off)
+    if method == "POST" and path == "/api/atlas/observe":
+        return 200, session.atlas_observe(off)
 
-    if method == "POST" and path == "/api/bob/mode":
+    if method == "POST" and path == "/api/atlas/mode":
         mode = str(body.get("mode") or "")
         try:
-            return 200, session.bob.set_mode(mode)
+            return 200, session.atlas.set_mode(mode)
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
-    if method == "POST" and path == "/api/bob/pause":
-        return 200, session.bob.pause()
+    if method == "POST" and path == "/api/atlas/pause":
+        return 200, session.atlas.pause()
 
-    if method == "POST" and path == "/api/bob/resume":
-        return 200, session.bob.resume(str(body.get("mode") or "observe"))
+    if method == "POST" and path == "/api/atlas/resume":
+        return 200, session.atlas.resume(str(body.get("mode") or "observe"))
 
-    if (method == "POST" and path.startswith("/api/bob/tasks/")
+    if (method == "POST" and path.startswith("/api/atlas/tasks/")
             and path.endswith("/start")):
-        task_id = path.removeprefix("/api/bob/tasks/").removesuffix("/start")
+        task_id = path.removeprefix("/api/atlas/tasks/").removesuffix("/start")
         try:
-            return 200, session.bob_start_task(task_id, off)
+            return 200, session.atlas_start_task(task_id, off)
         except KeyError as exc:
             return 404, {"error": str(exc)}
         except PermissionError as exc:
             return 400, {"error": str(exc)}
 
-    if method == "POST" and path == "/api/bob/escalate":
-        return 200, session.bob_escalate_debate(off)
+    if method == "POST" and path == "/api/atlas/escalate":
+        return 200, session.atlas_escalate_debate(off)
 
-    if method == "POST" and path == "/api/bob/message":
+    if method == "POST" and path == "/api/atlas/message":
         try:
-            return 200, session.bob_message(body)
+            return 200, session.atlas_message(body)
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
@@ -2299,20 +2299,20 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(status, obj)
 
 
-def _start_bob_heartbeat(session: UISession, *, offline: bool,
+def _start_atlas_heartbeat(session: UISession, *, offline: bool,
                          interval_s: float | None = None):
     """Start the desk manager's heartbeat inside the owner process.
 
-    Ticks under the owner's dispatch lock, so Bob observing never races a
+    Ticks under the owner's dispatch lock, so Atlas observing never races a
     request — the one-writer rule is preserved.
     """
-    from qlab.operator.heartbeat import BobHeartbeat, build_owner_tick
+    from qlab.operator.heartbeat import AtlasHeartbeat, build_owner_tick
 
-    seconds = float(os.environ.get("QLAB_BOB_INTERVAL_S", interval_s or 30.0))
-    heartbeat = BobHeartbeat(
+    seconds = float(os.environ.get("QLAB_ATLAS_INTERVAL_S", interval_s or 30.0))
+    heartbeat = AtlasHeartbeat(
         build_owner_tick(session, _LOCK, offline=offline),
         interval_s=seconds,
-        on_error=lambda exc: print(f"[qlab] bob heartbeat: {exc!r}", flush=True),
+        on_error=lambda exc: print(f"[qlab] atlas heartbeat: {exc!r}", flush=True),
     )
     session.heartbeat = heartbeat
     heartbeat.start()
@@ -2331,7 +2331,7 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) 
     try:
         session = UISession(offline_default=offline)
         market_stop, market_thread = _start_market_topics(session)
-        _start_bob_heartbeat(session, offline=offline)
+        _start_atlas_heartbeat(session, offline=offline)
     except Exception:
         httpd.server_close()
         raise

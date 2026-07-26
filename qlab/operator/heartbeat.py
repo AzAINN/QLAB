@@ -107,13 +107,20 @@ class AtlasHeartbeat:
             }
 
 
-def build_owner_tick(session, lock, *, offline: bool) -> Callable[[], dict]:
+def build_owner_tick(session, lock, *, offline: bool,
+                     autonomous: bool = False) -> Callable[[], dict]:
     """The owner's tick: observe under the dispatch lock, then let Atlas read.
 
     Bound to ``session`` rather than importing it, so tests drive the same code
     with a stub. The lock is the owner's HTTP dispatch lock — holding it makes a
     tick mutually exclusive with request handling, which is what keeps the
     one-writer rule intact.
+
+    With ``autonomous`` the tick also STARTS work Atlas's mode already permits.
+    This flag does not widen authority by one inch: ``check_startable`` still
+    refuses anything the mode forbids, so autonomy in Research mode launches
+    research and still cannot create a paper plan. It only removes the need for
+    a human to press the button on work Atlas was already allowed to do.
     """
 
     def tick() -> dict:
@@ -126,6 +133,11 @@ def build_owner_tick(session, lock, *, offline: bool) -> Callable[[], dict]:
             except Exception:
                 # A read failure must not stop the supervisor from observing.
                 pass
+            if autonomous:
+                try:
+                    result["autonomous"] = session.atlas_run_startable(offline)
+                except Exception as exc:
+                    result["autonomous_error"] = str(exc)[:200]
             return result
 
     return tick

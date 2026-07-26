@@ -173,3 +173,73 @@ def test_plan_creating_template_is_refused_in_research_at_dispatch(reg):
     assert result["started"] is False and result["blocked_by"] == "authority"
     assert "Propose mode" in result["reason"]
     assert reg.get_atlas_task(task_id)["status"] == "blocked"
+
+
+# --- autonomy (opt-in, never an authority widening) --------------------------
+
+
+def test_autonomous_tick_runs_only_what_the_mode_permits(reg):
+    """QLAB_ATLAS_AUTONOMOUS removes the button press, not the boundary."""
+    from qlab.operator.heartbeat import build_owner_tick
+
+    class _Session:
+        def __init__(self, atlas):
+            self.atlas = atlas
+            self.started = []
+
+        def atlas_observe(self, offline):
+            facts = _facts()
+            facts["regime"]["flip"] = True
+            return self.atlas.observe(facts, trading_date="2020-01-02")
+
+        def refresh_desk_read(self, offline):
+            return {}
+
+        def atlas_facts(self, offline):
+            return _facts()
+
+        def atlas_workflow_runner(self, task, template_id):
+            self.started.append(template_id)
+            return {"template_id": template_id, "action_taken": True}
+
+        def atlas_run_startable(self, offline, limit=1):
+            facts = self.atlas_facts(offline)
+            out = []
+            for c in self.atlas.startable_tasks(facts):
+                if c.get("startable") and len(out) < limit:
+                    self.atlas.start_task(c["task_id"], facts,
+                                          runner=self.atlas_workflow_runner)
+                    out.append(c)
+            return out
+
+    import threading
+
+    atlas = _atlas(reg)
+    session = _Session(atlas)
+    tick = build_owner_tick(session, threading.Lock(), offline=True,
+                            autonomous=True)
+
+    # Observe mode: the trigger fires, but autonomy launches nothing.
+    tick()
+    assert session.started == []
+
+    # Research mode: the same autonomy now runs the permitted template.
+    atlas.set_mode("research")
+    tick()
+    assert session.started == ["regime_review"]
+
+
+def test_autonomy_still_cannot_create_a_paper_plan(reg):
+    """The plan-creation boundary survives autonomy in Research mode."""
+    atlas = _atlas(reg)
+    atlas.set_mode("research")
+    facts = _facts()
+    facts["portfolio"]["drift"] = 0.5      # -> desk_rebalance_review
+    out = atlas.observe(facts, trading_date="2020-01-02")
+    task_id = out["created_tasks"][0]["task_id"]
+
+    def runner(task, template_id):
+        raise AssertionError("a plan-creating template ran in Research mode")
+
+    result = atlas.start_task(task_id, facts, runner=runner)
+    assert result["started"] is False and result["blocked_by"] == "authority"

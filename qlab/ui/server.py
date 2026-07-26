@@ -1212,6 +1212,29 @@ class UISession:
         return {"template_id": template_id, "workflow_id": workflow_id,
                 "action_taken": True}
 
+    def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
+        """Start the queued work Atlas's current mode already permits.
+
+        Autonomy is a *convenience*, never an authority widening: every task
+        still goes through ``start_task``, so mode checks, the retry budget,
+        and the plan-creation boundary all apply unchanged. In Research mode
+        this launches research and still cannot create a paper plan.
+        """
+        facts = self.atlas_facts(offline)
+        started: list[dict] = []
+        for candidate in self.atlas.startable_tasks(facts):
+            if len(started) >= limit:
+                break
+            if not candidate.get("startable"):
+                continue
+            result = self.atlas.start_task(
+                candidate["task_id"], facts, runner=self.atlas_workflow_runner)
+            started.append({"task_id": candidate["task_id"],
+                            "template_id": candidate.get("template_id"),
+                            **{k: v for k, v in result.items()
+                               if k in ("started", "completed", "blocked_by")}})
+        return started
+
     def atlas_start_task(self, task_id: str, offline: bool) -> dict:
         """Start one queued Atlas task through the governed workflow runner."""
         facts = self.atlas_facts(offline)
@@ -2324,8 +2347,13 @@ def _start_atlas_heartbeat(session: UISession, *, offline: bool,
     from qlab.operator.heartbeat import AtlasHeartbeat, build_owner_tick
 
     seconds = float(os.environ.get("QLAB_ATLAS_INTERVAL_S", interval_s or 30.0))
+    # Autonomy is opt-in and does not widen authority: the mode still decides
+    # what may run, so QLAB_ATLAS_AUTONOMOUS=1 in Observe mode still launches
+    # nothing.
+    autonomous = os.environ.get("QLAB_ATLAS_AUTONOMOUS") == "1"
     heartbeat = AtlasHeartbeat(
-        build_owner_tick(session, _LOCK, offline=offline),
+        build_owner_tick(session, _LOCK, offline=offline,
+                         autonomous=autonomous),
         interval_s=seconds,
         on_error=lambda exc: print(f"[qlab] atlas heartbeat: {exc!r}", flush=True),
     )

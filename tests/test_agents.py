@@ -36,6 +36,7 @@ def test_all_roles_present():
     assert set(agents) == {
         "news-extractor", "data-qa", "signal-qa", "moments-analyst", "challenger",
         "optimization-runner", "referee", "reporter", "atlas",
+        "news-analyst",
     }
 
 
@@ -208,8 +209,8 @@ def test_sync_writes_both_adapters(tmp_path: Path):
     claude_out = tmp_path / "claude"
     bob_out = tmp_path / "bob"
     written = sync(claude_out=claude_out, bob_out=bob_out)
-    assert len(written["claude"]) == 9
-    assert len(written["bob"]) == 9
+    assert len(written["claude"]) == 10
+    assert len(written["bob"]) == 10
     assert (claude_out / "news-extractor.md").exists()
     assert (bob_out / "news-extractor.yaml").exists()
     assert (claude_out / "data-qa.md").exists()
@@ -229,3 +230,27 @@ def test_sync_writes_both_adapters(tmp_path: Path):
         assert generated.read_text(encoding="utf-8") == checked_in.read_text(
             encoding="utf-8"
         ), f"{checked_in} is out of sync with agents/"
+
+
+def test_news_analyst_is_quarantined_and_forecasts_nothing():
+    """The news role interprets a supplied window and nothing else.
+
+    It must hold no feed access (the grounded window is handed to it, so every
+    record it reasons over has auditable provenance) and must never emit a
+    price view — the desk forecasts no returns by design.
+    """
+    analyst = _by_name()["news-analyst"]
+    scopes = role_scopes(analyst.tools)
+    assert scopes["trader"] == set()
+    assert scopes["lab"] <= {"registry.recent_decisions", "registry.log_decision"}
+    assert not any("research.apply_views" in t for t in analyst.tools)
+
+    body = analyst.body
+    assert "may not recall events from memory" in body
+    assert "may not fetch anything" in body
+    assert "No price views, no directions, no weights" in body
+    assert "No sentiment scores" in body
+    assert "Uncertainty is an answer" in body
+    # Support tiers must be respected, not re-derived by article count.
+    assert "Primary source" in body and "Single secondary" in body
+    assert "one claim, not five confirmations" in body

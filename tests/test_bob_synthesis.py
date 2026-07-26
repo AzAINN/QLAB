@@ -235,3 +235,44 @@ def test_uncertain_panel_always_warrants_a_debate():
         news=read_news([]))
     should, claim = should_open_debate(read)
     assert should is True and claim == "regime_read"
+
+
+def test_a_broken_news_feed_is_visible_not_silently_quiet():
+    """An empty news window and a broken feed mean opposite things.
+
+    Silently reporting 'quiet' when the fetch failed would let a dead feed read
+    as a calm market.
+    """
+    from qlab.state.registry import Registry
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("source 'CNBC' at 'http://x' is unavailable (404)")
+
+    import qlab.news.feed as feed_module
+
+    original = feed_module.fetch_news
+    feed_module.fetch_news = boom
+    try:
+        read = session.refresh_desk_read(True)
+    finally:
+        feed_module.fetch_news = original
+
+    assert read["news_error"]
+    assert "404" in read["news_error"]
+    assert any("UNAVAILABLE" in o for o in read["observations"])
+    assert any("not quiet" in o for o in read["observations"])
+
+
+def test_read_reports_which_news_source_it_used():
+    from qlab.state.registry import Registry
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    read = session.refresh_desk_read(True)
+    # Offline always means synthetic, and it must say so rather than implying
+    # the headlines are real.
+    assert read["news_source"] == "synthetic (demo)"
+    assert "news_error" not in read

@@ -1103,12 +1103,16 @@ class UISession:
         except Exception as exc:
             panel = {"robust_state": "unknown",
                      "uncertainty_reason": f"panel unavailable: {exc}"}
+        news_error = None
         try:
             items = fetch_news(as_of, universe, lookback_hours=48,
                                offline=offline)
-        except Exception:
-            # A news outage weakens the read; it never breaks the desk.
+        except Exception as exc:
+            # A news outage weakens the read but never breaks the desk. It must
+            # still be VISIBLE: a silently empty news window is indistinguishable
+            # from a genuinely quiet market, and those mean opposite things.
             items = []
+            news_error = str(exc)
         news = read_news(items)
         portfolio = {"drawdown_tier": self.mandate.drawdown_tier(
             float(self.portfolio(offline).get("drawdown", 0.0)))}
@@ -1118,7 +1122,18 @@ class UISession:
         read = compose_read(
             as_of=as_of, panel=panel, news=news, portfolio=portfolio,
             recent_verdicts=[v for v in verdicts.values() if v])
-        self._desk_read = read.to_dict()
+        payload = read.to_dict()
+        payload["news_source"] = (
+            "synthetic (demo)" if offline else
+            os.environ.get("QLAB_NEWS_PROVIDER", "synthetic"))
+        if news_error:
+            payload["news_error"] = news_error[:400]
+            payload["observations"] = [
+                f"News feed is UNAVAILABLE ({news_error[:160]}); the "
+                "qualitative side of this read is missing, not quiet.",
+                *payload["observations"],
+            ]
+        self._desk_read = payload
         return self._desk_read
 
     def bob_escalate_debate(self, offline: bool) -> dict:

@@ -2001,6 +2001,13 @@ class QlabTui(App[None]):
             bold_values={2, 3},
         ))
 
+        if read.get("news_error"):
+            lines.append("")
+            lines.extend(_bulletin_markup(
+                [f"NEWS FEED UNAVAILABLE — {read['news_error']}",
+                 "The qualitative side of this read is missing, not quiet."],
+                tone=DOWN, max_len=200))
+
         tensions = [str(t) for t in (read.get("tensions") or [])]
         if tensions:
             lines.append("")
@@ -2039,6 +2046,7 @@ class QlabTui(App[None]):
             f"state {str(bob.get('state','—')).upper()} · "
             f"heartbeat {'live' if beat.get('running') else 'stopped'} "
             f"({int(beat.get('ticks', 0))} ticks) · "
+            f"news {read.get('news_source','—')} · "
             f"as of {read.get('as_of','—')}[/]")
         lines.append(
             f"[{DIM}]This is interpretation over persisted facts — advisory, "

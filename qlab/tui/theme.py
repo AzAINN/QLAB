@@ -109,6 +109,8 @@ STATE_STYLE = {
     "done": ("✓", UP),
     "failed": ("×", DOWN),
     "blocked": ("!", AMBER),
+    "interrupted": ("Ⅱ", GOLD),
+    "abandoned": ("×", DIM),
     "idle": ("◌", DIM),
 }
 
@@ -138,7 +140,7 @@ APP_CSS_TEMPLATE = Template("""
         text-style: bold;
     }
     #nav {
-        height: 8;
+        height: 9;
         color: $muted;
     }
     #universe-label {
@@ -279,6 +281,11 @@ APP_CSS_TEMPLATE = Template("""
     FlowNode.-done { border: round $flow_done_border; color: $flow_done_text; }
     FlowNode.-failed { border: round $flow_failed_border; color: $flow_failed_text; }
     FlowNode.-blocked { border: round $flow_blocked_border; color: $flow_blocked_text; }
+    FlowNode.-interrupted {
+        border: round $flow_queued_border;
+        color: $flow_queued_text;
+    }
+    FlowNode.-abandoned { border: round $border; color: $dim; }
     .flow-arrow {
         width: 3;
         height: 4;

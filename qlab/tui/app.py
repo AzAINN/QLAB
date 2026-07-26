@@ -73,8 +73,8 @@ from qlab.tui.theme import (
 _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 _VIEWS = (
-    "dashboard", "market", "workforce", "research", "book", "audit", "atlas",
-    "settings",
+    "bob", "dashboard", "market", "workforce", "research", "book", "audit",
+    "atlas", "settings",
 )
 _DASHBOARD_TILE_KEYS = (
     "equity", "allocation", "regime", "market-pulse", "verdict", "run", "alerts",
@@ -223,6 +223,7 @@ _PULSE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 # Bus events that mean durable state changed and a full refresh is worth it.
 _REFRESH_EVENT_KINDS = {
     "workflow_started", "workflow_phase", "referee_verdict",
+    "workflow_interrupted", "workflow_resumed", "workflow_abandoned",
     "plan_built", "order_filled", "decision_logged", "ablation_complete",
     "cost_gate_refusal", "autopilot_trigger", "daily_ops",
 }
@@ -236,6 +237,7 @@ COMMAND_TABLE = {
     ("view", "book"): "action_view",
     ("view", "audit"): "action_view",
     ("view", "atlas"): "action_view",
+    ("view", "bob"): "action_view",
     ("view", "settings"): "action_view",
     ("view", "agents"): "action_agent_focus",
     ("agents", None): "action_agent_focus",
@@ -248,10 +250,13 @@ COMMAND_TABLE = {
     ("workforce", "status"): "action_workforce_status",
     ("workforce", "resume"): "action_workforce_resume",
     ("workforce", "stop"): "action_workforce_stop",
+    ("workforce", "abandon"): "action_workforce_abandon",
+    ("workforce", "clean"): "action_workforce_abandon",
     ("governed", None): "action_workforce_new",
     ("governed", "status"): "action_workforce_status",
     ("governed", "resume"): "action_workforce_resume",
     ("governed", "stop"): "action_workforce_stop",
+    ("governed", "abandon"): "action_workforce_abandon",
     ("rebalance", "dry"): "action_rebalance_dry",
     ("rebalance", "paper"): "action_rebalance_paper",
     ("daily", None): "action_daily_ops",
@@ -346,6 +351,18 @@ def workforce_note(phase: str, status: str, summary: str,
         return (f"{short} blocked — {detail or 'a governance gate was not met'}",
                 "A hard gate refused, so nothing downstream may proceed. Nothing "
                 "was traded; this is the gate working.")
+    if status == "interrupted":
+        return (
+            f"{short} interrupted — {detail or 'the coordinator stopped'}",
+            "The run is paused, not working. Resume it explicitly or abandon it "
+            "to close the incomplete review.",
+        )
+    if status == "abandoned":
+        return (
+            f"{short} abandoned — {detail or 'the operator closed the run'}",
+            "The incomplete review is closed and remains in the audit trail. "
+            "Start a new review for fresh reasoning.",
+        )
 
     # The worker's own summary is the specific account; the role clause is only
     # the fallback, so the note never repeats what the summary already says.
@@ -504,6 +521,8 @@ def _result_banner(status: str) -> tuple[str, str]:
         "complete": (UP, "WORKFORCE COMPLETE"),
         "blocked": (AMBER, "STOPPED AT A SAFETY GATE"),
         "failed": (DOWN, "STOPPED ON AN ERROR"),
+        "interrupted": (GOLD, "WORKFORCE INTERRUPTED"),
+        "abandoned": (MUTED, "WORKFORCE ABANDONED"),
     }.get(status, (GOLD, "ENDED EARLY"))
 
 
@@ -518,6 +537,10 @@ def _result_headline(status: str, verdict: str) -> str:
         return "A safety gate stopped the run before any trade. Nothing was traded."
     if status == "failed":
         return "The run hit an error before finishing. Its completed steps are saved."
+    if status == "interrupted":
+        return "The coordinator stopped. Completed steps are saved and resumable."
+    if status == "abandoned":
+        return "The incomplete run was closed by the operator. Nothing was traded."
     return "The run ended before completing. The steps it reached are below."
 
 
@@ -557,6 +580,10 @@ def _agent_brief(phase: str, step: dict | None,
         return "◌", DIM, name, "did not run"
     if state == "working":
         return glyph, colour, name, "was still running when the run stopped"
+    if state == "interrupted":
+        return glyph, colour, name, "paused safely before completing"
+    if state == "abandoned":
+        return glyph, colour, name, "did not complete before the run was abandoned"
     if state in ("failed", "blocked"):
         reason = " · ".join(
             bulletin(
@@ -606,6 +633,10 @@ def _result_meaning(status: str, verdict: str, has_targets: bool,
                 "proposing a trade. This is the guardrail working as intended.")
     if status == "failed":
         return "Nothing was traded. You can resume the run once the cause is fixed."
+    if status == "interrupted":
+        return "Nothing was traded. Resume explicitly when you are ready to continue."
+    if status == "abandoned":
+        return "Nothing was traded. Start a new review if you want fresh reasoning."
     return "Nothing was traded. You can resume the run to finish it."
 
 
@@ -814,22 +845,24 @@ class QlabTui(App[None]):
     CSS = APP_CSS
 
     BINDINGS = [
-        Binding("1", "view('dashboard')", "Dashboard", show=False),
-        Binding("2", "view('market')", "Market", show=False),
-        Binding("3", "view('workforce')", "Workforce", show=False),
-        Binding("4", "view('research')", "Research", show=False),
-        Binding("5", "view('book')", "Book", show=False),
-        Binding("6", "view('audit')", "Audit", show=False),
-        Binding("7", "view('atlas')", "Atlas", show=False),
-        Binding("8", "view('settings')", "Settings", show=False),
-        Binding("f1", "view('dashboard')", "Dashboard", show=False),
-        Binding("f2", "view('market')", "Market", show=False),
-        Binding("f3", "view('workforce')", "Workforce", show=False),
-        Binding("f4", "view('research')", "Research", show=False),
-        Binding("f5", "view('book')", "Book", show=False),
-        Binding("f6", "view('audit')", "Audit", show=False),
-        Binding("f7", "view('atlas')", "Atlas", show=False),
-        Binding("f8", "view('settings')", "Settings", show=False),
+        Binding("1", "view('bob')", "Bob", show=False),
+        Binding("2", "view('dashboard')", "Dashboard", show=False),
+        Binding("3", "view('market')", "Market", show=False),
+        Binding("4", "view('workforce')", "Workforce", show=False),
+        Binding("5", "view('research')", "Research", show=False),
+        Binding("6", "view('book')", "Book", show=False),
+        Binding("7", "view('audit')", "Audit", show=False),
+        Binding("8", "view('atlas')", "Atlas", show=False),
+        Binding("9", "view('settings')", "Settings", show=False),
+        Binding("f1", "view('bob')", "Bob", show=False),
+        Binding("f2", "view('dashboard')", "Dashboard", show=False),
+        Binding("f3", "view('market')", "Market", show=False),
+        Binding("f4", "view('workforce')", "Workforce", show=False),
+        Binding("f5", "view('research')", "Research", show=False),
+        Binding("f6", "view('book')", "Book", show=False),
+        Binding("f7", "view('audit')", "Audit", show=False),
+        Binding("f8", "view('atlas')", "Atlas", show=False),
+        Binding("f9", "view('settings')", "Settings", show=False),
         Binding("a", "agent_focus", "Agents", show=False),
         Binding("j", "next_symbol", "Next symbol", show=False),
         Binding("k", "previous_symbol", "Previous symbol", show=False),
@@ -857,7 +890,8 @@ class QlabTui(App[None]):
         self.refresh_interval = refresh_interval
         self.owned_server = owned_server
         self.claude_start = claude_start
-        self.active_view = "dashboard"
+        # The desk opens on Bob: the manager is the front door, not a tab.
+        self.active_view = "bob"
         # Placeholder until the first snapshot; the owner's mandate universe
         # (market.assets) replaces it so a config change never desyncs the TUI.
         self.universe_tickers: list[str] = list(_DEFAULT_TICKERS)
@@ -889,6 +923,14 @@ class QlabTui(App[None]):
         # sets _pending_workflow, so the chart never keeps painting the previous
         # run's outcome in the seconds before the coordinator calls workflow.start.
         self._active_workflow_id = ""
+        # The workflow this TUI launched or explicitly resumed. Unlike
+        # _active_workflow_id, this never points at passive history and is safe
+        # to interrupt automatically when the owned coordinator exits.
+        self._launched_workflow_id = ""
+        # A stop can race workflow.start: the coordinator process is already
+        # ours, but the durable id has not reached the event stream yet. Keep
+        # the requested transition and apply it as soon as the id is observed.
+        self._pending_workflow_control: tuple[str, str] | None = None
         self._pending_workflow = False
         self._seen_workflow_ids: set[str] = set()
         self._phase_reported: dict[str, str] = {}
@@ -921,7 +963,34 @@ class QlabTui(App[None]):
                     id="universe",
                 )
 
-            with ContentSwitcher(initial="dashboard", id="canvas"):
+            with ContentSwitcher(initial="bob", id="canvas"):
+                with Vertical(id="bob", classes="canvas-view"):
+                    yield Static(
+                        f"[{AMBER}]▍[/] BOB · DESK MANAGER",
+                        classes="canvas-title",
+                        markup=True,
+                    )
+                    yield Static(id="bob-read", markup=True)
+                    with Horizontal(id="bob-actions"):
+                        yield Button(
+                            "REFRESH READ",
+                            id="btn-bob-refresh",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "ESCALATE DEBATE",
+                            id="btn-bob-escalate",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "OBSERVE NOW",
+                            id="btn-bob-observe",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+
                 with Vertical(id="dashboard", classes="canvas-view"):
                     yield Static(
                         f"[{AMBER}]\u258d[/] DASHBOARD",
@@ -979,6 +1048,13 @@ class QlabTui(App[None]):
                         yield Button(
                             "RESUME LAST",
                             id="btn-workforce-resume",
+                            classes="view-action-button",
+                            disabled=True,
+                            compact=True,
+                        )
+                        yield Button(
+                            "ABANDON",
+                            id="btn-workforce-abandon",
                             classes="view-action-button",
                             disabled=True,
                             compact=True,
@@ -1111,7 +1187,24 @@ class QlabTui(App[None]):
 
     def on_unmount(self) -> None:
         self._live_stream_stop = True
-        self.claude.stop()
+        owned_workflow = (
+            self._launched_workflow_id
+            if self.claude.mode == "workforce" and self.claude.running
+            else ""
+        )
+        self.claude.stop("TUI closed before the coordinator completed")
+        if owned_workflow:
+            try:
+                post_control = getattr(
+                    self.client, "post_control", self.client.post)
+                post_control(
+                    f"/api/workflows/{owned_workflow}/interrupt",
+                    {"reason": "TUI closed before the coordinator completed"},
+                )
+            except Exception:
+                # The owned server may already be exiting. Its next startup
+                # performs the same orphan recovery before serving snapshots.
+                pass
         if self.owned_server is not None and self.owned_server.poll() is None:
             self.owned_server.terminate()
 
@@ -1363,6 +1456,19 @@ class QlabTui(App[None]):
         else:
             field.placeholder = "message the coordinator — Enter sends · : chat to switch"
 
+    def _note_workflow_started(self, payload: dict) -> None:
+        """Bind a pending launch before its first phase update can race a stop."""
+        workflow_id = str(payload.get("workflow_id") or "")
+        if (
+            self._pending_workflow
+            and workflow_id
+            and workflow_id not in self._seen_workflow_ids
+        ):
+            self._active_workflow_id = workflow_id
+            self._launched_workflow_id = workflow_id
+            self._pending_workflow = False
+            self._apply_pending_workflow_control(workflow_id)
+
     def _note_workflow_phase(self, payload: dict) -> None:
         """One short paragraph per completed agent: what happened, what's next.
 
@@ -1383,6 +1489,11 @@ class QlabTui(App[None]):
                 return
         elif not self._pending_workflow or workflow_id in self._seen_workflow_ids:
             return
+        else:
+            self._active_workflow_id = workflow_id
+            self._launched_workflow_id = workflow_id
+            self._pending_workflow = False
+            self._apply_pending_workflow_control(workflow_id)
         if self._phase_reported.get(phase) == status:
             return
         self._phase_reported[phase] = status
@@ -1391,7 +1502,9 @@ class QlabTui(App[None]):
                 f"[{CYAN}]▶ {escape(_phase_short(phase))}[/] "
                 f"[{LABEL_GOLD}]working[/]")
             return
-        if status not in ("done", "failed", "blocked"):
+        if status not in (
+            "done", "failed", "blocked", "interrupted", "abandoned",
+        ):
             return
         done = {name for name, state in self._flow_states.items() if state == "done"}
         if status == "done":
@@ -1407,6 +1520,8 @@ class QlabTui(App[None]):
             "done": ("✓", UP),
             "failed": ("×", DOWN),
             "blocked": ("!", AMBER),
+            "interrupted": ("Ⅱ", GOLD),
+            "abandoned": ("×", MUTED),
         }[status]
         for line in bulletin([head], max_len=260):
             self._console_write(f"[{tone}]{glyph} {escape(line)}[/]")
@@ -1483,6 +1598,7 @@ class QlabTui(App[None]):
                 for agent in snapshot.get("agents", [])
             }
         self._render_agents()
+        self._render_bob()
         self._render_bob_rail()
         self._render_status()
         self._ingest_events(snapshot.get("events", []))
@@ -1847,6 +1963,88 @@ class QlabTui(App[None]):
         }
         self._update_dashboard_tiles(contents)
 
+    def _render_bob(self) -> None:
+        """The desk-manager view: Bob's read, in the order a human asks it.
+
+        Conclusion first (what does this add up to), then the tensions that
+        make it interesting, then the evidence under them.
+        """
+        read = _record(self.snapshot.get("bob_read"))
+        bob = _record(self.snapshot.get("bob"))
+        beat = _record(self.snapshot.get("bob_heartbeat"))
+        target = self.query_one("#bob-read", Static)
+        if not read:
+            target.update(
+                f"[{MUTED}]Bob has not composed a read yet. "
+                "The heartbeat writes one on its first tick.[/]")
+            return
+
+        agreement = str(read.get("agreement", "—"))
+        conviction = _finite_number(read.get("conviction"))
+        tone = str((read.get("news") or {}).get("tone", "—"))
+        quant = str(read.get("quantitative_state", "—"))
+        agreement_tone = {
+            "divergent": AMBER, "aligned": UP, "quiet": MUTED,
+        }.get(agreement, TEXT_HI)
+
+        lines = [f"[{LABEL_GOLD}]THE READ[/]"]
+        lines.extend(_key_number_markup(
+            [
+                ("SIGNALS", quant.upper()),
+                ("NEWS TONE", tone.replace("_", " ").upper()),
+                ("AGREEMENT", agreement.upper()),
+                ("CONVICTION", pct(conviction) if conviction is not None else "—"),
+            ],
+            value_tones=[TEXT_HI, TEXT_HI, agreement_tone,
+                         UP if (conviction or 0) >= 0.6
+                         else AMBER if (conviction or 0) >= 0.35 else MUTED],
+            bold_values={2, 3},
+        ))
+
+        tensions = [str(t) for t in (read.get("tensions") or [])]
+        if tensions:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]TENSIONS[/]  "
+                         f"[{DIM}]where the evidence disagrees[/]")
+            lines.extend(_bulletin_markup(tensions, tone=AMBER, max_len=220))
+
+        observations = [str(o) for o in (read.get("observations") or [])]
+        if observations:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]OBSERVATIONS[/]")
+            lines.extend(_bulletin_markup(observations, tone=TEXT, max_len=200))
+
+        changers = [str(c) for c in (read.get("would_change_my_mind") or [])]
+        if changers:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]WOULD CHANGE THIS[/]")
+            lines.extend(_bulletin_markup(changers, tone=MUTED, max_len=200))
+
+        headlines = (read.get("news") or {}).get("headlines") or []
+        if headlines:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]QUALITATIVE RECORD[/]")
+            for item in headlines[:6]:
+                item_tone = {
+                    "risk_off": DOWN, "risk_on": UP, "mixed": AMBER,
+                }.get(str(item.get("tone")), DIM)
+                tickers = ",".join(item.get("tickers") or [])[:20]
+                lines.append(
+                    f"  [{item_tone}]•[/] {str(item.get('headline',''))[:96]} "
+                    f"[{DIM}]{item.get('source','')} {tickers}[/]")
+
+        lines.append("")
+        lines.append(
+            f"[{DIM}]mode {str(bob.get('mode','—')).upper()} · "
+            f"state {str(bob.get('state','—')).upper()} · "
+            f"heartbeat {'live' if beat.get('running') else 'stopped'} "
+            f"({int(beat.get('ticks', 0))} ticks) · "
+            f"as of {read.get('as_of','—')}[/]")
+        lines.append(
+            f"[{DIM}]This is interpretation over persisted facts — advisory, "
+            f"never an instruction. Bob cannot trade.[/]")
+        target.update("\n".join(lines))
+
     def action_bob_drawer(self) -> None:
         """Ctrl+B: open Bob's detail drawer over the current view."""
         if isinstance(self.screen, BobDrawerScreen):
@@ -2113,7 +2311,10 @@ class QlabTui(App[None]):
             f"[bold]{escape(node.short)}[/]\n"
             f"[{color}]{glyph} {escape(state)}[/]"
         )
-        for token in ("working", "queued", "done", "failed", "blocked"):
+        for token in (
+            "working", "queued", "done", "failed", "blocked",
+            "interrupted", "abandoned",
+        ):
             node.set_class(token == state, f"-{token}")
         node.tooltip = self._flow_details.get(node.phase) or (
             f"{node.agent}\n\nnot yet started"
@@ -2161,6 +2362,7 @@ class QlabTui(App[None]):
                 workflow_id = str(row.get("workflow_id", ""))
                 if workflow_id and workflow_id not in self._seen_workflow_ids:
                     self._active_workflow_id = workflow_id
+                    self._launched_workflow_id = workflow_id
                     self._pending_workflow = False
                     return row
             return None
@@ -2169,12 +2371,20 @@ class QlabTui(App[None]):
     def _render_workforce(self) -> None:
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
         resumable_id = self._latest_resumable_workflow_id()
+        abandonable_id = self._latest_abandonable_workflow_id()
         resume_button = self.query_one("#btn-workforce-resume", Button)
+        abandon_button = self.query_one("#btn-workforce-abandon", Button)
         resume_button.disabled = not bool(resumable_id)
+        abandon_button.disabled = not bool(abandonable_id)
         resume_button.tooltip = (
             f"Resume {resumable_id}"
             if resumable_id else
             "No incomplete workforce review to resume"
+        )
+        abandon_button.tooltip = (
+            f"Permanently close {abandonable_id}; its audit record is retained"
+            if abandonable_id else
+            "No incomplete workforce review to abandon"
         )
         workflow = self._select_workflow(workflows)
         if workflow is None:
@@ -2290,10 +2500,15 @@ class QlabTui(App[None]):
                     f"{plan_id} → : rebalance paper to confirm",
                 ))
             lines.extend(_key_number_markup(result_pairs))
-        elif status in ("failed", "blocked"):
-            tone = DOWN if status == "failed" else AMBER
+        elif status in ("failed", "blocked", "interrupted", "abandoned"):
+            tone = {
+                "failed": DOWN,
+                "blocked": AMBER,
+                "interrupted": GOLD,
+                "abandoned": MUTED,
+            }[status]
             broken = next(
-                (s for s in steps if s.get("status") in ("failed", "blocked")),
+                (s for s in steps if s.get("status") == status),
                 None)
             why = str((broken or {}).get("summary") or "").strip()
             lines.extend([
@@ -2307,10 +2522,19 @@ class QlabTui(App[None]):
                 max_len=200,
                 strip_ids=False,
             ))
-            lines.append(
-                f"[{LABEL_GOLD}]Resume with : workforce resume "
-                f"{escape(str(workflow.get('workflow_id', '')))}[/]"
-            )
+            workflow_id = escape(str(workflow.get("workflow_id", "")))
+            if status != "abandoned":
+                lines.append(
+                    f"[{LABEL_GOLD}]Resume with : workforce resume "
+                    f"{workflow_id} · close permanently with "
+                    f": workforce abandon {workflow_id}[/]"
+                )
+            else:
+                lines.append(
+                    f"[{MUTED}]This run is closed. Its completed evidence and "
+                    "audit trail remain available; start a new workforce run "
+                    "to continue research.[/]"
+                )
 
         earlier = [row for row in workflows
                    if str(row.get("workflow_id", "")) != self._active_workflow_id
@@ -2327,12 +2551,95 @@ class QlabTui(App[None]):
     def _latest_resumable_workflow_id(self) -> str:
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
         for workflow in workflows:
-            if str(workflow.get("status", "")).lower() == "complete":
+            if str(workflow.get("status", "")).lower() not in {
+                "interrupted", "failed", "blocked",
+            }:
                 continue
             workflow_id = str(workflow.get("workflow_id", "")).strip()
             if workflow_id:
                 return workflow_id
         return ""
+
+    def _latest_abandonable_workflow_id(self) -> str:
+        workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        for workflow in workflows:
+            if str(workflow.get("status", "")).lower() in {
+                "complete", "abandoned",
+            }:
+                continue
+            workflow_id = str(workflow.get("workflow_id", "")).strip()
+            if workflow_id:
+                return workflow_id
+        return ""
+
+    def _workflow_row(self, workflow_id: str) -> dict | None:
+        workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        return next((
+            row for row in workflows
+            if str(row.get("workflow_id", "")) == workflow_id
+        ), None)
+
+    def _merge_workflow(self, workflow: dict) -> None:
+        """Merge an owner control response into the view before the next poll."""
+        workflow_id = str(workflow.get("workflow_id") or "")
+        if not workflow_id:
+            return
+        workflows = list(
+            self.snapshot.get("workflows", []) if self.snapshot else [])
+        for index, row in enumerate(workflows):
+            if str(row.get("workflow_id", "")) == workflow_id:
+                workflows[index] = workflow
+                break
+        else:
+            workflows.insert(0, workflow)
+        self.snapshot["workflows"] = workflows
+        self._active_workflow_id = workflow_id
+        self._pending_workflow = False
+
+    def _control_workflow(
+        self,
+        workflow_id: str,
+        action: str,
+        reason: str,
+        *,
+        quiet: bool = False,
+    ) -> dict | None:
+        """Fence a workflow through the owner; never mutate DuckDB in the TUI."""
+        if not workflow_id:
+            return None
+        try:
+            post_control = getattr(
+                self.client, "post_control", self.client.post)
+            workflow = post_control(
+                f"/api/workflows/{workflow_id}/{action}",
+                {"reason": reason},
+            )
+        except Exception as exc:
+            if not quiet:
+                detail = str(exc) or repr(exc)
+                self._console_write(
+                    f"[{DOWN}]workflow {escape(action)} failed: "
+                    f"{escape(detail[-240:])}[/]")
+                self._set_selected_work(
+                    f"WORKFLOW {action.upper()} FAILED\n\n{detail[-2000:]}"
+                )
+            return None
+        self._merge_workflow(workflow)
+        self._write_local_event(
+            f"claude.workflow_{action}",
+            {"workflow_id": workflow_id, "reason": reason},
+        )
+        self._render_workforce()
+        self._start_refresh()
+        return workflow
+
+    def _apply_pending_workflow_control(self, workflow_id: str) -> None:
+        pending = self._pending_workflow_control
+        if pending is None or not workflow_id:
+            return
+        self._pending_workflow_control = None
+        action, reason = pending
+        self._control_workflow(workflow_id, action, reason)
 
     def _maybe_offer_workforce(self) -> None:
         if self._claude_offer_handled:
@@ -2870,14 +3177,7 @@ class QlabTui(App[None]):
         for agent in agents:
             name = agent["name"]
             state = self._agent_states.get(name, agent.get("state", "idle"))
-            glyph, color = {
-                "working": ("●", CYAN),
-                "queued": ("◐", GOLD),
-                "waiting": ("◐", GOLD),
-                "done": ("✓", UP),
-                "failed": ("×", DOWN),
-                "blocked": ("!", AMBER),
-            }.get(state, ("◌", DIM))
+            glyph, color = _STATE_STYLE.get(state, ("◌", DIM))
             if state == "working":
                 glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
             lines.append(
@@ -2954,7 +3254,10 @@ class QlabTui(App[None]):
             if event_id:
                 self._event_ids.add(event_id)
             self._append_event(event)
-            if str(event.get("kind", "")) == "workflow_phase":
+            kind = str(event.get("kind", ""))
+            if kind == "workflow_started":
+                self._note_workflow_started(event.get("payload") or {})
+            elif kind == "workflow_phase":
                 self._note_workflow_phase(event.get("payload") or {})
 
     def _append_event(self, event: dict) -> None:
@@ -3087,12 +3390,83 @@ class QlabTui(App[None]):
     def action_workforce_stop(self) -> None:
         self._chat_mode = "workforce"
         self._render_chat_mode()
-        self.claude.stop()
+        reason = "operator stopped the coordinator before completion"
+        workflow_id = self._launched_workflow_id
+        if not workflow_id and not self._pending_workflow:
+            workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+            workflow_id = next((
+                str(row.get("workflow_id", ""))
+                for row in workflows
+                if str(row.get("status", "")).lower() == "running"
+            ), "")
+        if self.claude.mode == "workforce":
+            # Stop the local process tree first. The following owner call is
+            # short-bounded, but process cleanup must not depend on owner health.
+            self.claude.stop(reason)
+        if workflow_id:
+            self._control_workflow(workflow_id, "interrupt", reason)
+        elif self._pending_workflow:
+            # workflow.start may already be in flight. The process tree is
+            # stopped now; the first durable id is fenced when its event lands.
+            self._pending_workflow_control = ("interrupt", reason)
+        if workflow_id or self._pending_workflow_control:
+            self._set_selected_work(
+                "CLAUDE WORKFORCE INTERRUPTED\n\nThe full coordinator/agent "
+                "process tree was stopped. Completed evidence is retained and "
+                "the active phase is frozen; use : workforce resume ID to "
+                "continue or : workforce abandon ID to close it permanently."
+            )
+            self._console_write(
+                f"[{GOLD}]Ⅱ interrupted — child agents were stopped; durable "
+                "phase state is resumable[/]")
+        else:
+            self._set_selected_work(
+                "NO ACTIVE WORKFORCE\n\nThere is no running or incomplete "
+                "coordinator owned by this desk to stop."
+            )
+        self._write_local_event(
+            "claude.workforce_stopped", {"workflow_id": workflow_id})
+        self._render_status()
+
+    def action_workforce_abandon(self, workflow_id: str = "") -> None:
+        """Close an incomplete run without deleting its evidence or audit."""
+        self._chat_mode = "workforce"
+        self._render_chat_mode()
+        explicit_id = bool(workflow_id.strip())
+        workflow_id = workflow_id.strip() or self._latest_abandonable_workflow_id()
+        reason = "operator permanently closed the incomplete workflow"
+        if not workflow_id and self._pending_workflow:
+            self._pending_workflow_control = ("abandon", reason)
+        elif not workflow_id:
+            self._set_selected_work(
+                "NO REVIEW TO ABANDON\n\nThere is no incomplete workflow. "
+                "Completed and already-abandoned records are retained."
+            )
+            return
+        else:
+            row = self._workflow_row(workflow_id)
+            if row is None and not explicit_id:
+                self._set_selected_work(
+                    f"UNKNOWN WORKFLOW\n\nNo recent workflow has id {workflow_id}."
+                )
+                return
+        if self.claude.mode == "workforce" and self.claude.running:
+            owned = self._launched_workflow_id
+            if not owned or not workflow_id or owned == workflow_id:
+                self.claude.stop(reason)
+        if workflow_id and self._control_workflow(
+                workflow_id, "abandon", reason) is None:
+            return
         self._set_selected_work(
-            "CLAUDE WORKFORCE STOPPED\n\nThe owner kept its durable phase state. "
-            "Use : workforce resume ID to continue."
+            "WORKFLOW ABANDONED\n\nThe run is permanently closed, and every "
+            "unfinished phase is non-running. Completed results and the full "
+            "audit trail were retained; no market or execution records were "
+            "deleted."
         )
-        self._write_local_event("claude.workforce_stopped", {})
+        self._console_write(
+            f"[{MUTED}]× abandoned — audit retained; start a new run to "
+            "continue[/]")
+        self._render_status()
 
     def action_rebalance_dry(self) -> None:
         self._run_api_action(
@@ -3139,6 +3513,24 @@ class QlabTui(App[None]):
             active_agent="reporter",
         )
 
+    def action_bob_refresh(self) -> None:
+        """Recompose Bob's read now instead of waiting for the next heartbeat."""
+        self._run_api_action(
+            "bob read", "/api/bob/observe", {"offline": self.offline},
+            active_agent=None)
+
+    def action_bob_observe(self) -> None:
+        """Force one supervisor tick — evaluate triggers against current facts."""
+        self._run_api_action(
+            "bob observe", "/api/bob/observe", {"offline": self.offline},
+            active_agent=None)
+
+    def action_bob_escalate(self) -> None:
+        """Ask Bob to open a bounded debate on the current disagreement."""
+        self._run_api_action(
+            "bob escalate", "/api/bob/escalate", {"offline": self.offline},
+            active_agent=None)
+
     def action_batch(self) -> None:
         self.action_view("research")
         self._run_api_action(
@@ -3157,7 +3549,8 @@ class QlabTui(App[None]):
             "workforce GOAL    (governed five-role pipeline)\n"
             "workforce status\n"
             "workforce resume ID\n"
-            "workforce stop\n"
+            "workforce stop      (interrupt + stop every child process)\n"
+            "workforce abandon [ID]  (close without deleting its audit)\n"
             "rebalance dry\n"
             "rebalance paper\n"
             "daily\n"
@@ -3203,9 +3596,44 @@ class QlabTui(App[None]):
             self._start_claude(message, governed=False, chat=True,
                                resume_session=resume)
         elif self._chat_sessions["workforce"]:
-            self._start_claude(
+            workflow_id = self._launched_workflow_id
+            row = self._workflow_row(workflow_id) if workflow_id else None
+            status = str((row or {}).get("status") or "").lower()
+            if status == "abandoned":
+                self._set_selected_work(
+                    "WORKFLOW CLOSED\n\nThis workforce run was abandoned and "
+                    "cannot be reopened. Start a new run for further research."
+                )
+                return
+            if status == "running":
+                # No local process is running, so this is a live-looking orphan
+                # from an earlier turn. Fence it before explicitly reopening.
+                if self._control_workflow(
+                    workflow_id,
+                    "interrupt",
+                    "previous coordinator turn ended before a follow-up",
+                ) is None:
+                    return
+                status = "interrupted"
+            if status in {"interrupted", "failed", "blocked"}:
+                if self._control_workflow(
+                    workflow_id, "resume",
+                    "operator continued the coordinator conversation",
+                ) is None:
+                    return
+                self._bind_run(workflow_id)
+            started = self._start_claude(
                 message, governed=True,
                 resume_session=self._chat_sessions["workforce"])
+            if not started and status in {
+                "running", "interrupted", "failed", "blocked",
+            }:
+                self._control_workflow(
+                    workflow_id,
+                    "interrupt",
+                    "Claude could not restart the resumed workflow",
+                    quiet=True,
+                )
         else:
             self._start_workforce(message)
 
@@ -3213,6 +3641,15 @@ class QlabTui(App[None]):
         button_id = event.button.id
         if button_id in self._book_plan_ids:
             self._confirm_plan_execution(self._book_plan_ids[button_id])
+            return
+        if button_id == "btn-bob-refresh":
+            self.action_bob_refresh()
+            return
+        if button_id == "btn-bob-escalate":
+            self.action_bob_escalate()
+            return
+        if button_id == "btn-bob-observe":
+            self.action_bob_observe()
             return
         if button_id == "btn-rebalance-dry":
             self.action_rebalance_dry()
@@ -3238,14 +3675,19 @@ class QlabTui(App[None]):
                     "workforce review."
                 )
             return
+        if button_id == "btn-workforce-abandon":
+            self.action_workforce_abandon(
+                self._latest_abandonable_workflow_id())
+            return
         if button_id != "chat-exit":
             return
         if self.claude.running:
-            self.claude.stop()
-            self._console_write(
-                f"[{GOLD}]■ stopped — durable phase state is kept; send a "
-                "message to continue or use : workforce resume ID[/]")
-            self._write_local_event("claude.workforce_stopped", {})
+            if self.claude.mode == "workforce":
+                self.action_workforce_stop()
+            else:
+                self.claude.stop("operator stopped the chat session")
+                self._console_write(f"[{GOLD}]■ chat stopped[/]")
+                self._render_status()
         else:
             self.action_view("dashboard")
 
@@ -3269,6 +3711,8 @@ class QlabTui(App[None]):
                 action_args = (argument,)
             else:
                 action_name = None
+        elif action_name == "action_workforce_abandon":
+            action_args = (argument,)
         elif action_name is not None and argument:
             action_name = None
 
@@ -3374,6 +3818,12 @@ class QlabTui(App[None]):
             if not workflow_id.replace("-", "").isalnum():
                 self._set_selected_work("Invalid workflow id.")
                 return
+            if self._control_workflow(
+                workflow_id,
+                "resume",
+                "operator explicitly resumed the workflow",
+            ) is None:
+                return
             prompt = (
                 f"RESUME_WORKFLOW_ID: {workflow_id}\n"
                 "Inspect workflow.status first. Continue at the first non-done phase; "
@@ -3389,6 +3839,13 @@ class QlabTui(App[None]):
             # rather than an empty chart waiting on a run that never starts.
             self._active_workflow_id = ""
             self._pending_workflow = False
+            if workflow_id:
+                self._control_workflow(
+                    workflow_id,
+                    "interrupt",
+                    "Claude could not start the resumed workflow",
+                    quiet=True,
+                )
             self._render_workforce()
 
     def _bind_run(self, workflow_id: str = "") -> None:
@@ -3403,6 +3860,8 @@ class QlabTui(App[None]):
         self._seen_workflow_ids = {
             str(row.get("workflow_id", "")) for row in workflows}
         self._active_workflow_id = workflow_id
+        self._launched_workflow_id = workflow_id
+        self._pending_workflow_control = None
         self._pending_workflow = not workflow_id
         self._phase_reported = {}
         self._results_printed = False
@@ -3519,6 +3978,13 @@ class QlabTui(App[None]):
         elif event.kind == "error":
             self._write_local_event("claude.failed", {"error": event.text[-400:]})
             if workforce:
+                workflow_id = self._launched_workflow_id
+                reason = f"coordinator exited before completion: {event.text[-600:]}"
+                if workflow_id:
+                    self._control_workflow(
+                        workflow_id, "interrupt", reason, quiet=True)
+                elif self._pending_workflow:
+                    self._pending_workflow_control = ("interrupt", reason)
                 self._console_write(f"[{DOWN}]✗ {escape(event.text[-240:])}[/]")
                 # A terminal error still owes the operator the run's state: the
                 # durable phases reached before it stopped.
@@ -3533,6 +3999,17 @@ class QlabTui(App[None]):
         elif event.kind == "result":
             self._write_local_event("claude.completed", {})
             if workforce:
+                # A successful CLI result is not proof that all durable phases
+                # finished. If the coordinator returned early, freeze the
+                # live-looking phase instead of leaving every agent "working".
+                workflow_id = self._launched_workflow_id
+                reason = (
+                    "coordinator returned before the durable workflow completed")
+                if workflow_id:
+                    self._control_workflow(
+                        workflow_id, "interrupt", reason, quiet=True)
+                elif self._pending_workflow:
+                    self._pending_workflow_control = ("interrupt", reason)
                 # Reporter is done and the run is complete: the one block that
                 # lands in the chat is the run's synthesized results.
                 self._print_workforce_results(event.text)

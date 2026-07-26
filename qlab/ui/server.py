@@ -21,7 +21,9 @@ GET  /api/decisions/<id>/outcome   the immutable resolved outcome
 GET  /api/decisions/<id>/lesson    advisory lesson over that outcome (if any)
 GET  /api/workflows/<id>/debate    debates, turns, and adjudication
 GET  /api/models/invocations   model tier/route audit records
-GET  /api/bob/status           BobTheQuant desk-manager mode and lifecycle state
+GET  /api/bob/status           BobTheQuant mode, lifecycle state, heartbeat
+GET  /api/bob/read             Bob's composed read: signals + news + research
+POST /api/bob/escalate         open a bounded debate on a material disagreement
 GET  /api/bob/tasks            Bob's deduplicated autonomous task history
 GET  /api/bob/templates        the registered workflow templates Bob may start
 GET  /api/bob/startable        queued tasks Bob may start now, with refusals
@@ -47,6 +49,9 @@ GET  /api/tui                  one consistent terminal snapshot
 POST /api/lab/<tool>           bounded research tool executed by this owner
 POST /api/workflows/start      begin a standard or panel workforce run
 POST /api/workflows/<phase>    update one role-bound workflow phase
+POST /api/workflows/<id>/interrupt  pause a run for explicit resumption
+POST /api/workflows/<id>/resume     reopen an interrupted/failed/blocked run
+POST /api/workflows/<id>/abandon    permanently close an incomplete run
 POST /api/rebalance_preview    build an exact, referee-bound checked plan
 POST /api/plans/execute        human-confirm one existing checked paper plan
 POST /api/approvals            create a plan-bound, expiring approval request
@@ -68,6 +73,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import threading
 import time
@@ -100,6 +106,10 @@ _MARKET_THREAD_NAME = "qlab-market-topics"
 _MARKET_THREAD_JOIN_TIMEOUT_SECONDS = 5.0
 _MARKET_THREAD_LOCK = threading.Lock()
 _ACTIVE_MARKET_THREAD: threading.Thread | None = None
+# Claude's hard session ceiling is 30 minutes. A running registry row with no
+# update beyond this grace cannot belong to a healthy qlab coordinator.
+_WORKFLOW_STALE_AFTER_SECONDS = 35 * 60
+_WORKFLOW_REAP_INTERVAL_SECONDS = 60.0
 
 # Realized-performance window. `_MARK_WINDOW` is the newest-N read cap; when the
 # book has more marks than that, the payload says so rather than letting a
@@ -179,6 +189,11 @@ class UISession:
         from qlab.state.registry import Registry
 
         self.registry = registry or Registry()
+        # A coordinator is process-local. If a new owner acquired this registry,
+        # no old coordinator lease survived with it; leave completed evidence
+        # intact and turn only live-looking rows into resumable interruptions.
+        self.registry.interrupt_running_workflows(
+            "owner runtime restarted before the coordinator completed")
         self.mandate = load_mandate()
         self.offline_default = offline_default
         self.seed = seed
@@ -190,6 +205,10 @@ class UISession:
         # (a real Alpaca feed); it stays None for demo/offline runtimes.
         self.market_stream = None
         self._last_poll_mark = 0.0
+        self._last_workflow_reap = 0.0
+        # Bob's composed qualitative read, refreshed by the heartbeat.
+        self._desk_read: dict | None = None
+        self.heartbeat = None
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -259,6 +278,46 @@ class UISession:
             str(body.get("status") or "working"),
             str(body.get("summary") or ""),
             body.get("artifacts") if isinstance(body.get("artifacts"), dict) else {},
+        )
+
+    def control_workflow(
+        self,
+        workflow_id: str,
+        action: str,
+        body: dict,
+    ) -> dict:
+        """Apply a human/operator lifecycle transition through the sole writer."""
+        reason = str(body.get("reason") or "").strip()
+        if action == "interrupt":
+            return self.registry.interrupt_workflow(
+                workflow_id,
+                reason or "operator stopped the coordinator before completion",
+            )
+        if action == "resume":
+            return self.registry.resume_workflow(workflow_id)
+        if action == "abandon":
+            return self.registry.abandon_workflow(
+                workflow_id,
+                reason or "operator abandoned the incomplete workflow",
+            )
+        raise ValueError(f"unknown workflow control action {action!r}")
+
+    def reap_stale_workflows(self, *, force: bool = False) -> list[dict]:
+        """Turn expired live-looking rows into resumable interruptions."""
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_workflow_reap < _WORKFLOW_REAP_INTERVAL_SECONDS
+        ):
+            return []
+        self._last_workflow_reap = now
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=_WORKFLOW_STALE_AFTER_SECONDS)
+        ).isoformat()
+        return self.registry.interrupt_running_workflows(
+            "coordinator lease expired after the workforce time limit",
+            updated_before=cutoff,
         )
 
     def rebalance_preview(self, body: dict, offline: bool) -> dict:
@@ -801,6 +860,7 @@ class UISession:
         """Agent definitions shaped for the persistent work rail."""
         from qlab.agents.loader import load_agents
 
+        self.reap_stale_workflows()
         latest = self.registry.list_workflows(limit=1)
         step_states = {
             step["agent"]: step["status"]
@@ -1020,6 +1080,77 @@ class UISession:
         """Run one deterministic Bob observe tick against current owner facts."""
         facts = self.bob_facts(offline)
         return self.bob.observe(facts, trading_date=date.today().isoformat())
+
+    def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:
+        """Bob's composed qualitative read across signals, news, and research.
+
+        Cached between heartbeats: composing it fetches news and builds the
+        regime panel, which is too heavy to redo on every status poll.
+        """
+        if not refresh and self._desk_read is not None:
+            return self._desk_read
+        return self.refresh_desk_read(offline)
+
+    def refresh_desk_read(self, offline: bool) -> dict:
+        """Recompose the desk read from current evidence."""
+        from qlab.news.feed import fetch_news
+        from qlab.operator.synthesis import compose_read, read_news
+
+        universe = self.mandate.universe_whitelist
+        as_of = date.today().isoformat()
+        try:
+            panel = self.regime_panel(offline)
+        except Exception as exc:
+            panel = {"robust_state": "unknown",
+                     "uncertainty_reason": f"panel unavailable: {exc}"}
+        try:
+            items = fetch_news(as_of, universe, lookback_hours=48,
+                               offline=offline)
+        except Exception:
+            # A news outage weakens the read; it never breaks the desk.
+            items = []
+        news = read_news(items)
+        portfolio = {"drawdown_tier": self.mandate.drawdown_tier(
+            float(self.portfolio(offline).get("drawdown", 0.0)))}
+        decisions = self.registry.recent_decisions(limit=10)
+        verdicts = self.registry.verdicts_for(
+            [d["decision_id"] for d in decisions])
+        read = compose_read(
+            as_of=as_of, panel=panel, news=news, portfolio=portfolio,
+            recent_verdicts=[v for v in verdicts.values() if v])
+        self._desk_read = read.to_dict()
+        return self._desk_read
+
+    def bob_escalate_debate(self, offline: bool) -> dict:
+        """Open a bounded debate when Bob's read finds material disagreement.
+
+        Bob does not get a private argument channel: it opens the SAME
+        registry-enforced debate the workforce uses, with an allowlisted claim,
+        a two-round ceiling, and an adjudication the reporter waits on.
+        """
+        from qlab.governance.debate import DebateViolation, open_debate
+        from qlab.operator.synthesis import should_open_debate
+
+        read = self.desk_read(offline)
+        should, claim = should_open_debate(read)
+        if not should:
+            return {"opened": False,
+                    "reason": "no material disagreement in the current read"}
+        decisions = self.registry.recent_decisions(limit=1)
+        decision_id = decisions[0]["decision_id"] if decisions else "no-decision"
+        try:
+            debate_id = open_debate(
+                self.registry, workflow_id=f"bob-{read.get('read_hash')}",
+                original_decision_id=decision_id, material_claims=[claim],
+                panel_snapshot_id=(read.get("evidence_refs") or [None])[0])
+        except DebateViolation as exc:
+            return {"opened": False, "reason": str(exc)}
+        self.registry.record_event(
+            "bob_opened_debate",
+            {"debate_id": debate_id, "claim": claim,
+             "tension": (read.get("tensions") or [""])[0][:200]})
+        return {"opened": True, "debate_id": debate_id, "claim": claim,
+                "tensions": read.get("tensions")}
 
     def bob_workflow_runner(self, task: dict, template_id: str) -> dict:
         """Start the durable workforce run a Bob task selected.
@@ -1345,6 +1476,9 @@ class UISession:
             "market": market_snapshot,
             "stress": stress,
             "bob": self.bob.status(),
+            "bob_read": self.desk_read(offline),
+            "bob_heartbeat": (self.heartbeat.status() if self.heartbeat
+                              else {"running": False, "ticks": 0}),
             "bob_tasks": self.registry.list_bob_tasks(10),
             "approvals": self.registry.list_approval_requests(10, "pending"),
             "quotes": self.quotes(),
@@ -1591,6 +1725,7 @@ def handle_api(session: UISession, method: str, path: str,
             _qbool(query, "offline", session.offline_default))
 
     if method == "GET" and path == "/api/workflows":
+        session.reap_stale_workflows()
         limit = max(1, min(int(query.get("limit", ["10"])[0]), 50))
         return 200, {"workflows": session.registry.list_workflows(limit)}
 
@@ -1659,7 +1794,16 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, {"invocations": session.registry.list_model_invocations(50)}
 
     if method == "GET" and path == "/api/bob/status":
-        return 200, session.bob.status()
+        status = session.bob.status()
+        status["heartbeat"] = (
+            session.heartbeat.status() if session.heartbeat else
+            {"running": False, "ticks": 0})
+        return 200, status
+
+    if method == "GET" and path == "/api/bob/read":
+        offline = _qbool(query, "offline", session.offline_default)
+        refresh = _qbool(query, "refresh", False)
+        return 200, session.desk_read(offline, refresh=refresh)
 
     if method == "GET" and path == "/api/bob/tasks":
         return 200, {"tasks": session.registry.list_bob_tasks(50)}
@@ -1705,6 +1849,9 @@ def handle_api(session: UISession, method: str, path: str,
             return 404, {"error": str(exc)}
         except PermissionError as exc:
             return 400, {"error": str(exc)}
+
+    if method == "POST" and path == "/api/bob/escalate":
+        return 200, session.bob_escalate_debate(off)
 
     if method == "POST" and path == "/api/bob/message":
         try:
@@ -1813,9 +1960,27 @@ def handle_api(session: UISession, method: str, path: str,
             return 400, {"error": str(exc)}
 
     if method == "POST" and path.startswith("/api/workflows/"):
+        rest = path.removeprefix("/api/workflows/")
+        workflow_id, separator, action = rest.rpartition("/")
+        if separator and action in {"interrupt", "resume", "abandon"}:
+            try:
+                return 200, session.control_workflow(
+                    workflow_id, action, body)
+            except KeyError as exc:
+                return 404, {"error": str(exc)}
+            except RuntimeError as exc:
+                return 409, {"error": str(exc)}
+            except ValueError as exc:
+                return 400, {"error": str(exc)}
+
+    if method == "POST" and path.startswith("/api/workflows/"):
         phase = path.removeprefix("/api/workflows/")
         try:
             return 200, session.update_workflow(phase, body)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
+        except RuntimeError as exc:
+            return 409, {"error": str(exc)}
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
@@ -2119,14 +2284,41 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(status, obj)
 
 
+def _start_bob_heartbeat(session: UISession, *, offline: bool,
+                         interval_s: float | None = None):
+    """Start the desk manager's heartbeat inside the owner process.
+
+    Ticks under the owner's dispatch lock, so Bob observing never races a
+    request — the one-writer rule is preserved.
+    """
+    from qlab.operator.heartbeat import BobHeartbeat, build_owner_tick
+
+    seconds = float(os.environ.get("QLAB_BOB_INTERVAL_S", interval_s or 30.0))
+    heartbeat = BobHeartbeat(
+        build_owner_tick(session, _LOCK, offline=offline),
+        interval_s=seconds,
+        on_error=lambda exc: print(f"[qlab] bob heartbeat: {exc!r}", flush=True),
+    )
+    session.heartbeat = heartbeat
+    heartbeat.start()
+    return heartbeat
+
+
 def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) -> None:
     """Start the UI server (blocking). Ctrl-C to stop."""
-    session = UISession(offline_default=offline)
-    market_stop, market_thread = _start_market_topics(session)
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     except Exception:
-        _stop_market_topics(market_stop, market_thread)
+        # Resolve ownership before opening DuckDB or recovering workflows. A
+        # second process that cannot bind this port must remain a pure refusal,
+        # never a transient second writer that interrupts the real owner's run.
+        raise
+    try:
+        session = UISession(offline_default=offline)
+        market_stop, market_thread = _start_market_topics(session)
+        _start_bob_heartbeat(session, offline=offline)
+    except Exception:
+        httpd.server_close()
         raise
     httpd.daemon_threads = True
     _Handler.session = session
@@ -2141,6 +2333,10 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) 
         print("\n[qlab] UI stopped.")
     finally:
         try:
-            _stop_market_topics(market_stop, market_thread)
+            if session.heartbeat is not None:
+                session.heartbeat.stop()
         finally:
-            httpd.server_close()
+            try:
+                _stop_market_topics(market_stop, market_thread)
+            finally:
+                httpd.server_close()

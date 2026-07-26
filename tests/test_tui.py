@@ -746,6 +746,103 @@ def test_mode_chip_tones_a_real_book_apart_from_a_simulated_one():
     asyncio.run(run())
 
 
+def test_mode_chip_reads_the_owner_payload_over_the_launcher_flag():
+    """The owner holds the book lane, so its ``desk_mode`` payload wins.
+
+    Production ``/api/tui`` always carries the key, so this — not the launcher
+    fallback the other chip tests exercise — is the live path. The casing case
+    is deliberate: a real book must never be downgraded to the muted tone by
+    something as cosmetic as capitalisation.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.theme import DOWN
+
+    class OwnerDeskModeClient(StubClient):
+        def __init__(self, payload):
+            super().__init__()
+            self.payload = payload
+
+        def get(self, path, **params):
+            snap = super().get(path, **params)
+            if path == "/api/tui":
+                snap["desk_mode"] = self.payload
+            return snap
+
+    async def chip(payload):
+        # Launcher says synthetic; the owner says a real book. The owner wins.
+        app = QlabTui(OwnerDeskModeClient(payload), refresh_interval=0,
+                      desk_mode=_SYNTH)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            widget = app.query_one("#mode-chip")
+            return str(widget.content).strip(), widget.styles.color
+
+    async def run():
+        label, tone = await chip({"data": "live", "book": "alpaca",
+                                  "label": "LIVE · ALPACA BOOK"})
+        assert label == "LIVE · ALPACA BOOK"
+        assert tone == Color.parse(DOWN)
+
+        label, tone = await chip({"data": " Live ", "book": "Alpaca",
+                                  "label": "LIVE · ALPACA BOOK"})
+        assert label == "LIVE · ALPACA BOOK"
+        assert tone == Color.parse(DOWN)
+
+    asyncio.run(run())
+
+
+def test_mode_chip_never_claims_synthetic_before_it_knows():
+    """A dead or slow owner must not turn a real book into the demo.
+
+    ``--live --alpaca-book`` is authoritative and skips the chooser, so nothing
+    but mount itself paints the chip; if the owner never answers, whatever
+    mount left there is what the operator reads for as long as the desk is up.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.theme import DOWN, MUTED
+
+    class DeadOwnerClient(StubClient):
+        def get(self, path, **params):
+            if path == "/api/tui":
+                raise RuntimeError("owner has not finished booting")
+            return super().get(path, **params)
+
+    async def run():
+        app = QlabTui(DeadOwnerClient(), refresh_interval=0,
+                      desk_mode=DeskMode("live", "alpaca"))
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            assert not app.snapshot          # no snapshot ever arrived
+            widget = app.query_one("#mode-chip")
+            label = str(widget.content).strip()
+            assert label != "SYNTHETIC"
+            assert label == "LIVE · ALPACA BOOK"
+            assert widget.styles.color != Color.parse(MUTED)
+            assert widget.styles.color == Color.parse(DOWN)
+
+    asyncio.run(run())
+
+
+def test_mode_chip_claims_no_mode_while_the_chooser_is_still_up():
+    """No desk mode chosen yet is not the same as "synthetic"."""
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        # desk_mode=None is the app's signal to ask; the modal owns the screen
+        # while the chip must stand behind it saying nothing about the book.
+        app = QlabTui(StubClient(), refresh_interval=0)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            assert str(app.query_one("#mode-chip").content).strip() == (
+                "CONNECTING")
+
+    asyncio.run(run())
+
+
 def test_settings_keeps_every_fact_the_banner_used_to_show():
     from qlab.tui.app import QlabTui
 

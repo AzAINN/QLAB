@@ -1095,7 +1095,7 @@ class QlabTui(App[None]):
         with Horizontal(id="command-row"):
             yield Input(placeholder=": command or Ctrl-P", id="command")
             yield Static("CONNECTING", id="conn-chip", markup=True)
-            yield Static("SYNTHETIC", id="mode-chip")
+            yield Static("CONNECTING", id="mode-chip")
 
     def on_mount(self) -> None:
         self.query_one("#runs-table", DataTable).add_columns("run", "kind", "created")
@@ -1116,6 +1116,10 @@ class QlabTui(App[None]):
         self._render_book()
         self._render_settings()
         self._render_agents()
+        # A launcher flag is authoritative and skips the chooser, so mount is
+        # the only chance to paint the chip before the first snapshot — and if
+        # the owner never answers, it is the only chance at all.
+        self._render_mode_chip()
         self._start_refresh()
         if self.refresh_interval > 0:
             self.set_interval(self.refresh_interval, self._start_refresh)
@@ -2974,16 +2978,27 @@ class QlabTui(App[None]):
         # Label and tone are read from one source. A snapshot taken before the
         # owner knew the desk mode would otherwise paint a real book in the
         # demo's tone, which is the single misread this chip exists to prevent.
-        data = str(mode.get("data") or (fallback.data if fallback else "synthetic"))
-        book = str(mode.get("book") or (fallback.book if fallback else "simulated"))
         label = str(mode.get("label")
-                    or (fallback.label if fallback else "SYNTHETIC"))
+                    or (fallback.label if fallback else "")).strip()
         chip = self.query_one("#mode-chip", Static)
-        # Alert tone for a real book, warning for live prices on a simulated
-        # one, muted for synthetic; the tones themselves live in the theme.
-        chip.set_class(book == "alpaca", "live-book")
-        chip.set_class(book != "alpaca" and data == "live", "live-data")
-        chip.update(label)
+        if not label:
+            # Nobody has said which desk this is yet — the chooser is still up.
+            # "SYNTHETIC" here would be a positive and possibly wrong answer to
+            # "whose money is this", so the chip claims nothing instead.
+            chip.set_class(False, "live-book", "live-data")
+            chip.update("CONNECTING")
+        else:
+            # Normalised because this comparison decides whether a real book
+            # reads as the demo; casing drift must not downgrade it silently.
+            data = str(mode.get("data")
+                       or (fallback.data if fallback else "")).strip().lower()
+            book = str(mode.get("book")
+                       or (fallback.book if fallback else "")).strip().lower()
+            # Alert tone for a real book, warning for live prices on a
+            # simulated one, muted for synthetic; the tones live in the theme.
+            chip.set_class(book == "alpaca", "live-book")
+            chip.set_class(book != "alpaca" and data == "live", "live-data")
+            chip.update(label)
         self.query_one("#chat-exit", Button).label = (
             "■ stop" if self.claude.running else "exit")
         self._sync_chat_input()

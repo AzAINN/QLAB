@@ -63,12 +63,24 @@ def _load_yaml_mapping(path: Path) -> dict:
     may reach ``.get`` on a hand-edited file that parses to a list or a scalar:
     a broken source is an ``AlpacaAuthError``, never a raw ``AttributeError``.
     An empty file is an empty mapping.
+
+    Reading is guarded as tightly as parsing. ``UnicodeDecodeError`` carries the
+    entire decoded buffer in its ``args``, so one stray byte in a profile puts
+    the ``access_token`` into any repr of it — and both callers of this module
+    render an unexpected exception (a 500 body on ``/api/tui``, a startup
+    traceback in the terminal). The read error is therefore re-rendered from the
+    path alone, and ``OSError`` joins it so an unreadable profile is the same
+    loud refusal instead of a raw ``PermissionError``.
     """
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         # `from None`: the chained PyYAML error carries the source snippet.
         raise _yaml_parse_error(path, exc) from None
+    except (OSError, UnicodeDecodeError):
+        # Neither the exception nor its args may be interpolated or chained:
+        # both routes to the operator would print the buffer they hold.
+        raise AlpacaAuthError(f"{path} could not be read") from None
     if loaded is None:
         return {}
     if not isinstance(loaded, dict):

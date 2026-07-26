@@ -1417,6 +1417,38 @@ def test_setting_the_desk_mode_switches_the_book(session, monkeypatch):
     assert session.current_book(offline=False) == "simulated_paper"
 
 
+def _write_unreadable_profile(tmp_path, secret: str) -> None:
+    """An Alpaca CLI config dir whose active profile cannot be decoded."""
+    (tmp_path / "profiles").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config.yaml").write_text(
+        "default_profile: paper\n", encoding="utf-8")
+    (tmp_path / "profiles" / "paper.yaml").write_bytes(
+        f"access_token: {secret}\n".encode("utf-8") + b"\xff\xfe\n")
+
+
+def test_a_broken_profile_never_reaches_a_response_body(
+    session, tmp_path, monkeypatch,
+):
+    """The always-running escape route for a credential read failure.
+
+    ``desk_mode_payload`` catches only ``AlpacaAuthError``; anything else
+    propagates into the handler's ``{"error": repr(exc)}`` and is served on
+    every two-second poll of ``/api/tui``.
+    """
+    secret = "tok-abcdefghijklmnopqrstuvwxyz012345"
+    _write_unreadable_profile(tmp_path, secret)
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+
+    status, payload = handle_api(session, "GET", "/api/desk_mode", {}, {})
+    assert status == 200
+    assert payload["credentials_ok"] is False
+    assert secret not in repr(payload)
+
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert secret not in repr(snap)
+
+
 def test_an_impossible_desk_mode_is_refused(session):
     status, payload = handle_api(
         session, "POST", "/api/desk_mode", {},

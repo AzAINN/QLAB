@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from qlab.trader.alpaca_auth import (
@@ -113,6 +115,56 @@ def test_a_malformed_profile_error_never_echoes_the_token(tmp_path, monkeypatch)
     assert secret not in str(caught.value)
     assert secret.removeprefix("tok-") not in str(caught.value)
     # A chained PyYAML error would print the same snippet in any traceback.
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
+def test_a_non_utf8_profile_never_echoes_the_token(tmp_path, monkeypatch):
+    # UnicodeDecodeError carries the whole decoded buffer in ``args``, so its
+    # repr — and therefore any 500 body or startup traceback built from it —
+    # contains the token. The read must be re-rendered, not propagated.
+    secret = "tok-abcdefghijklmnopqrstuvwxyz012345"
+    (tmp_path / "profiles").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config.yaml").write_text(
+        "default_profile: paper\n", encoding="utf-8")
+    (tmp_path / "profiles" / "paper.yaml").write_bytes(
+        f"access_token: {secret}\nlive: false\n".encode("utf-8") + b"\xff\xfe\n")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    with pytest.raises(AlpacaAuthError) as caught:
+        resolve_alpaca_credentials()
+    message = str(caught.value)
+    assert "paper.yaml" in message
+    assert secret not in message
+    assert secret.removeprefix("tok-") not in message
+    assert "UnicodeDecodeError" not in message and "utf-8" not in message
+    # A chained decode error would carry the same buffer into any traceback.
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
+def test_an_unreadable_profile_is_refused_without_leaking(tmp_path, monkeypatch):
+    # A PermissionError propagating raw out of the resolver 500s the whole
+    # owner snapshot route; it has to arrive as the same loud AlpacaAuthError.
+    secret = "tok-abcdefghijklmnopqrstuvwxyz012345"
+    _write_profile(tmp_path, body=f"access_token: {secret}\n")
+    profile = tmp_path / "profiles" / "paper.yaml"
+    profile.chmod(0o000)
+    if os.access(profile, os.R_OK):  # running as root: chmod cannot deny us
+        pytest.skip("cannot make a file unreadable as this user")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    try:
+        with pytest.raises(AlpacaAuthError) as caught:
+            resolve_alpaca_credentials()
+    finally:
+        profile.chmod(0o600)
+    message = str(caught.value)
+    assert "paper.yaml" in message
+    assert secret not in message
+    assert "PermissionError" not in message and "Errno" not in message
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
 

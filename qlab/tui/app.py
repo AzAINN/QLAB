@@ -29,6 +29,7 @@ from textual.widgets import (
 )
 
 from qlab.core.atlas import arm_display_name
+from qlab.core.desk_mode import DeskMode
 from qlab.paths import workspace_root
 from qlab.research.prediction import (
     IC_ADMISSION_THRESHOLD,
@@ -37,6 +38,7 @@ from qlab.research.prediction import (
 from qlab.tui.atlas_view import AtlasView
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
+from qlab.tui.desk_mode_screen import DeskModeScreen
 from qlab.tui.formatting import (
     braille_chart, bulletin, connection_chip, fence_state_after,
     is_numbered_item, key_number_lines, money, pct, phase_elapsed,
@@ -849,11 +851,18 @@ class QlabTui(App[None]):
         refresh_interval: float = 2.0,
         owned_server: subprocess.Popen | None = None,
         claude_start: str = "offer",
+        desk_mode: DeskMode | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.client = client
-        self.offline = offline
+        # None means "nobody has said yet" — the operator is asked on mount. A
+        # mode from a flag is authoritative and skips the question entirely; it
+        # also owns the data lane, so ``offline`` can never contradict the mode
+        # the status strip is about to report.
+        self.desk_mode = desk_mode
+        self.offline = offline if desk_mode is None else desk_mode.offline
+        self._desk_mode_prompted = False
         self.refresh_interval = refresh_interval
         self.owned_server = owned_server
         self.claude_start = claude_start
@@ -907,7 +916,7 @@ class QlabTui(App[None]):
             self._receive_claude_event,
             cwd=_WORKSPACE_ROOT,
             runtime_url=getattr(client, "base_url", "http://127.0.0.1:8765"),
-            offline=offline,
+            offline=self.offline,
         )
 
     def compose(self) -> ComposeResult:
@@ -1108,6 +1117,9 @@ class QlabTui(App[None]):
             self.set_interval(self.refresh_interval, self._start_refresh)
             self.set_interval(0.25, self._tick_pulse)
         self._start_live_stream()
+        if self.desk_mode is None and not self._desk_mode_prompted:
+            self._desk_mode_prompted = True
+            self._start_desk_mode_prompt()
 
     def on_unmount(self) -> None:
         self._live_stream_stop = True
@@ -1168,6 +1180,58 @@ class QlabTui(App[None]):
         text, level = connection_chip(age, self._refresh_failures)
         tone = {"ok": UP, "warn": AMBER, "down": DOWN}[level]
         self.query_one("#conn-chip", Static).update(f"[{tone}]{text}[/]")
+
+    # -- desk mode --------------------------------------------------------
+    def _start_desk_mode_prompt(self) -> None:
+        """Fetch credential status off-thread, then ask.
+
+        The probe reaches the owner, which resolves a credential; that must never
+        block the UI, so it follows the same worker shape as the atlas fetch. A
+        probe that cannot answer is reported as "no usable credential", never as
+        a working one.
+        """
+
+        def run() -> None:
+            try:
+                payload = self.client.get("/api/desk_mode")
+            except Exception as exc:
+                payload = {"credentials": f"owner unreachable: {exc!r}",
+                           "credentials_ok": False}
+            self.call_from_thread(self._ask_desk_mode, payload)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _ask_desk_mode(self, payload: dict) -> None:
+        def chosen(mode: DeskMode | None) -> None:
+            if mode is None:
+                return
+            self.desk_mode = mode
+            self.offline = mode.offline
+            self._post_desk_mode(mode)
+            self._render_status()
+            self._start_refresh()
+
+        self.push_screen(
+            DeskModeScreen(
+                credentials=str(payload.get("credentials", "")),
+                credentials_ok=bool(payload.get("credentials_ok")),
+            ),
+            chosen,
+        )
+
+    def _post_desk_mode(self, mode: DeskMode) -> None:
+        """Tell the owner which desk it is serving; it holds the book lane."""
+
+        def run() -> None:
+            try:
+                self.client.post("/api/desk_mode",
+                                 {"data": mode.data, "book": mode.book})
+            except Exception as exc:
+                self.call_from_thread(
+                    self._write_local_event, "desk_mode.error",
+                    {"error": repr(exc)})
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _start_bootstrap(self) -> None:
         """Fetch immutable owner configuration once, when Settings is first shown."""

@@ -636,3 +636,51 @@ WORKFORCE_MODAL_CSS_TEMPLATE = Template("""
     """)
 
 WORKFORCE_MODAL_CSS = WORKFORCE_MODAL_CSS_TEMPLATE.substitute(TOKENS)
+
+
+DESK_MODAL_CSS_TEMPLATE = Template("""
+    DeskModeScreen {
+        align: center middle;
+        background: $overlay;
+    }
+    #desk-dialog {
+        width: 62;
+        height: auto;
+        padding: 1 2;
+        background: $bg_raised;
+        border: round $border_hi;
+    }
+    #desk-dialog-title {
+        color: $amber;
+        text-style: bold;
+    }
+    #desk-data-row, #desk-book-buttons {
+        height: auto;
+        padding: 1 0;
+    }
+    #desk-data-row Button, #desk-book-buttons Button {
+        margin-right: 1;
+    }
+    #desk-credentials {
+        color: $muted;
+    }
+    #desk-book-row {
+        height: auto;
+    }
+    #desk-book-title {
+        color: $amber;
+        text-style: bold;
+        padding-top: 1;
+    }
+    #desk-book-copy {
+        color: $muted;
+        padding-top: 1;
+    }
+    #desk-actions {
+        height: auto;
+        padding-top: 1;
+        align-horizontal: right;
+    }
+    """)
+
+DESK_MODAL_CSS = DESK_MODAL_CSS_TEMPLATE.substitute(TOKENS)

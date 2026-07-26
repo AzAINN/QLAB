@@ -108,18 +108,30 @@ def _active_profile_name(config_dir: Path) -> str:
     return "paper"
 
 
-def resolve_alpaca_credentials() -> AlpacaCredentials | None:
-    """Env credentials, else the active CLI profile, else None."""
+def refuse_partial_env_credentials() -> None:
+    """Refuse a half-set ``ALPACA_API_KEY``/``ALPACA_API_SECRET`` pair.
+
+    Partial credentials signal intent with a broken setup: refuse rather than
+    fall through to a profile — or a book — the operator did not ask for.
+    Exposed on its own because a caller that needs no credential at all (the
+    explicitly simulated book) must still make the misconfiguration loud
+    instead of stepping over it.
+    """
     key = os.environ.get("ALPACA_API_KEY", "").strip()
     secret = os.environ.get("ALPACA_API_SECRET", "").strip()
     if bool(key) != bool(secret):
-        # Partial credentials signal intent with a broken setup: refuse rather
-        # than fall through to a profile the operator did not ask for.
         missing = "ALPACA_API_SECRET" if key else "ALPACA_API_KEY"
         raise AlpacaAuthError(
             f"{missing} is not set; set both ALPACA_API_KEY and "
             "ALPACA_API_SECRET, or neither to use your `alpaca profile login` "
             "session instead")
+
+
+def resolve_alpaca_credentials() -> AlpacaCredentials | None:
+    """Env credentials, else the active CLI profile, else None."""
+    refuse_partial_env_credentials()
+    key = os.environ.get("ALPACA_API_KEY", "").strip()
+    secret = os.environ.get("ALPACA_API_SECRET", "").strip()
     if key and secret:
         return AlpacaCredentials("api_key", key, secret, None, None, "env")
 

@@ -808,6 +808,23 @@ def test_the_alpaca_book_still_reaches_a_disk_profile(tmp_path, monkeypatch):
     assert (seen["kind"], seen["profile"]) == ("oauth", "paper")
 
 
+@pytest.mark.parametrize("book", [None, "simulated"])
+def test_a_partial_env_credential_pair_is_refused_for_every_book(monkeypatch, book):
+    """The loud guard predates the explicit book and must still fire.
+
+    Before ``book`` existed this refusal was unconditional. The simulated book
+    needs no credential — but half a pair is a broken setup the operator has to
+    see, not something the simulated lane steps over on the way past.
+    """
+    from qlab.trader import broker as broker_mod
+    from qlab.trader.alpaca_auth import AlpacaAuthError
+
+    monkeypatch.setenv("ALPACA_API_KEY", "PKONLY")
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    with pytest.raises(AlpacaAuthError, match="ALPACA_API_SECRET"):
+        broker_mod.get_broker(Registry(":memory:"), offline=True, book=book)
+
+
 def test_an_unknown_book_is_refused():
     """Garbage must not resolve to a venue by accident, in either direction."""
     from qlab.trader import broker as broker_mod

@@ -17,7 +17,8 @@ from typing import Callable
 from qlab.core import data as market
 from qlab.state.registry import Registry
 from qlab.trader.alpaca_auth import (
-    AlpacaAuthError, AlpacaCredentials, resolve_alpaca_credentials)
+    AlpacaAuthError, AlpacaCredentials, refuse_partial_env_credentials,
+    resolve_alpaca_credentials)
 
 PriceProvider = Callable[[list[str]], dict[str, float]]
 
@@ -348,6 +349,11 @@ def get_broker(registry: Registry, *, offline: bool = False,
     if book not in (None, "simulated", "alpaca"):
         raise ValueError(f"unknown book {book!r}; choose 'simulated' or 'alpaca'")
     if book == "simulated" or (book is None and not _env_credential_signal()):
+        # This refusal predates the explicit book and was unconditional then.
+        # The simulated book needs no credential, but half a pair is a broken
+        # setup the operator has to see rather than one this lane steps over.
+        # (``book is None`` here means neither half is set, so it is a no-op.)
+        refuse_partial_env_credentials()
         return SimulatedPaperBroker(
             registry, default_price_provider(offline=offline, seed=seed),
             starting_cash, universe=universe)

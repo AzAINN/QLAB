@@ -130,6 +130,19 @@ def _write_claude(agent: AgentDef, out_dir: Path) -> Path:
 
 
 def _write_bob(agent: AgentDef, out_dir: Path) -> Path:
+    """Project a role into ``.bob/personas/`` — qlab's own neutral YAML.
+
+    These keys (``persona``, ``allowed_tools``, ``system_prompt``) are qlab's,
+    not IBM Bob's: the file proves the one-source org chart targets a second
+    orchestrator, but Bob does not load it. Bob's loadable equivalent is
+    ``.bob/custom_modes.yaml`` (role definition + instructions + a deterministic
+    tool set, where the ``MCP`` group alone yields the no-filesystem/no-shell
+    boundary every role here asserts). That generator attaches at this function;
+    confirm the schema against a live Bob install before writing one — see
+    planning-docs/2026-07-26-ibm-bob-integration-options.md. Bob's *runtime*
+    connection is not this file at all: it is ``.bob/mcp.json`` -> the
+    propose-only owner proxy, which needs no adapter.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     persona = {
         "persona": agent.name,

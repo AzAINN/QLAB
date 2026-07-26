@@ -1,0 +1,42 @@
+{
+  "mcpServers": {
+    "qlab-operator": {
+      "command": "python",
+      "args": ["-m", "qlab.mcp.tui_proxy"],
+      "env": {
+        "QLAB_RUNTIME_URL": "http://127.0.0.1:8765",
+        "QLAB_OFFLINE": "1"
+      },
+      "alwaysAllow": [
+        "portfolio_state",
+        "market_snapshot",
+        "policy_current",
+        "audit_events",
+        "research_runs",
+        "research_decisions",
+        "data_snapshot_summary",
+        "qa_data_integrity",
+        "regime_turbulence",
+        "regime_absorption",
+        "regime_volatility_term_structure",
+        "regime_drawdown",
+        "regime_tail_risk",
+        "research_window_evidence",
+        "algorithms_list",
+        "algorithms_describe",
+        "registry_list_runs",
+        "registry_report",
+        "registry_recent_decisions"
+      ],
+      "disabled": false
+    },
+    "qlab": {
+      "command": "python",
+      "args": ["-m", "qlab.mcp.server"],
+      "env": {
+        "QLAB_OFFLINE": "1"
+      },
+      "disabled": true
+    }
+  }
+}

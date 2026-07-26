@@ -74,10 +74,19 @@ def test_oauth_profile_builds_a_paper_broker():
     when the operator has no browser-login session.
     """
     from qlab.state.registry import Registry
-    from qlab.trader.alpaca_auth import resolve_alpaca_credentials
+    from qlab.trader.alpaca_auth import AlpacaAuthError, resolve_alpaca_credentials
     from qlab.trader.broker import AlpacaPaperBroker
 
-    creds = resolve_alpaca_credentials()
+    try:
+        creds = resolve_alpaca_credentials()
+    except AlpacaAuthError as exc:
+        # An unusable credential source — a half-set env pair, a live profile,
+        # unparseable YAML — is not a browser-login session, so for this case it
+        # is absence: skip, as the `broker` fixture above does for absent env
+        # keys. Those refusals are each asserted offline in test_alpaca_auth.py,
+        # which always runs; swallowing them here costs no coverage. The message
+        # is safe to print: alpaca_auth never puts a secret in one.
+        pytest.skip(f"no usable OAuth profile ({exc})")
     if creds is None or creds.kind != "oauth":
         pytest.skip("no OAuth profile; run `alpaca profile login`")
     registry = Registry(":memory:")

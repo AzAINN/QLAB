@@ -69,6 +69,30 @@ For a core-only install:
 A normal wheel includes the default mandate, universe, experiment spec, and
 agent definitions. Runtime state is never written into site-packages.
 
+### Real market data and whose book
+
+The desk opens on offline synthetic data with a simulated book, so it runs with
+no account at all. For real prices, authorize a paper account in your browser:
+
+    alpaca profile login      # browser OAuth; paper-only by construction
+    qlab tui --live           # real Alpaca prices, qlab's own simulated book
+    qlab tui --alpaca-book    # real prices and your Alpaca paper book
+
+`--alpaca-book` implies `--live`: reaching the real paper account is never a
+side effect of asking for real prices. The same three modes are offered by the
+startup modal on first launch — the flags only skip the question — and the
+choice persists, so later launches reopen the desk in the mode you left it in.
+The desk-mode chip in the command row names the mode currently in force.
+
+Every mode is paper-only; there is no live-trading path to select, and the
+browser login cannot grant one (the Alpaca CLI puts live behind its separate
+`--api-key --live` flow). That login is preferred over `ALPACA_API_KEY` /
+`ALPACA_API_SECRET` because it leaves no secret to paste or store. If you use
+keys anyway, export them into the environment that starts qlab — nothing here
+reads `.env`, so filling in `.env.example` alone changes nothing — and note
+that qlab's `ALPACA_API_SECRET` is spelled `ALPACA_SECRET_KEY` by the Alpaca
+CLI.
+
 ## What is implemented
 
 ### Research substrate
@@ -289,9 +313,11 @@ The current operator surface is research and paper-first:
 - Offline mode uses cache or deterministic synthetic fixtures.
 - Market provenance records the producing provider (`yfinance`, `alpaca`, or
   `synthetic`), and the as-of date and bar age are shown to the operator.
-- Alpaca support requires the trader extra plus local `ALPACA_API_KEY` and
-  `ALPACA_API_SECRET` values. It remains paper-only and daily-bar-only: there is
-  no streaming quote tape or complete order-lifecycle integration.
+- Alpaca support requires the trader extra plus one credential source: an
+  `alpaca profile login` session, or exported `ALPACA_API_KEY` and
+  `ALPACA_API_SECRET` values (qlab reads no `.env` file). It remains paper-only
+  and daily-bar-only: there is no streaming quote tape or complete
+  order-lifecycle integration.
 - Selecting Alpaca without its package or credentials fails loudly; qlab does
   not silently switch the request back to yfinance.
 - The simulated broker remains the zero-account default.

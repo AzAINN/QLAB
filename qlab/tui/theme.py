@@ -477,12 +477,6 @@ APP_CSS_TEMPLATE = Template("""
         color: $muted;
         scrollbar-size: 1 1;
     }
-    #event-strip {
-        height: 1;
-        padding: 0 1;
-        background: $bg_raised;
-        color: $muted;
-    }
     #command-row {
         height: 2;
         padding: 0 1;
@@ -506,12 +500,22 @@ APP_CSS_TEMPLATE = Template("""
         text-align: right;
         color: $muted;
     }
-    #system-status {
+    /* The only always-visible answer to "whose money is this". Synthetic is
+       muted; live prices on a simulated book warn; a real Alpaca book takes
+       the alert tone so it can never be mistaken for the demo. */
+    #mode-chip {
         width: auto;
-        min-width: 28;
+        padding: 0 1;
         height: 1;
         text-align: right;
         color: $muted;
+    }
+    #mode-chip.live-data {
+        color: $amber;
+    }
+    #mode-chip.live-book {
+        color: $down;
+        text-style: bold;
     }
 
     Screen.compact #spine {

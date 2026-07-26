@@ -608,7 +608,7 @@ def test_headless_shell_has_no_header_and_switches_context():
             assert len(app.query("Header")) == 0
             assert app.query_one("#spine") is not None
             assert app.query_one("#agent-rail") is not None
-            assert app.query_one("#system-status").content.startswith("PAPER")
+            assert app.query_one("#settings-system").content.startswith("PAPER")
             assert app.active_view == "dashboard"
 
             await pilot.press("2")
@@ -652,7 +652,7 @@ def test_owner_system_status_reads_latest_autopilot_event():
     assert status["autopilot"]["triggers_fired"] == 2
 
 
-def test_status_strip_shows_autopilot_last_run_and_trigger_count():
+def test_settings_system_card_shows_autopilot_last_run_and_trigger_count():
     from qlab.tui.app import QlabTui
 
     class AutopilotClient(StubClient):
@@ -669,7 +669,7 @@ def test_status_strip_shows_autopilot_last_run_and_trigger_count():
         app = QlabTui(AutopilotClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(160, 42)) as pilot:
             await pilot.pause(0.2)
-            status = str(app.query_one("#system-status").content)
+            status = str(app.query_one("#settings-system").content)
             assert "AUTO 07-24 16:30·2" in status
 
     asyncio.run(run())
@@ -690,6 +690,88 @@ def test_owner_failure_surfaces_in_conn_chip():
             app._note_refresh_failure()
             chip = str(app.query_one("#conn-chip").content)
             assert "OWNER DOWN" in chip
+
+    asyncio.run(run())
+
+
+def test_bottom_row_shows_only_connection_and_mode():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0,
+                      desk_mode=DeskMode("live", "alpaca"))
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            assert str(app.query_one("#mode-chip").content).strip() == (
+                "LIVE · ALPACA BOOK")
+            # the verbose banner and the full-width event line are gone
+            assert not app.query("#system-status")
+            assert not app.query("#event-strip")
+
+    asyncio.run(run())
+
+
+def test_mode_chip_tones_a_real_book_apart_from_a_simulated_one():
+    """Colour, not just wording, separates a real book from the demo.
+
+    "Live prices, simulated book" is the state an operator could misread as
+    real P&L, so the three modes must be three tones — this chip is the only
+    always-visible answer to whose money is at risk.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.theme import AMBER, DOWN, MUTED
+
+    async def chip(mode):
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=mode)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            widget = app.query_one("#mode-chip")
+            return str(widget.content).strip(), widget.styles.color
+
+    async def run():
+        label, tone = await chip(DeskMode("live", "alpaca"))
+        assert label == "LIVE · ALPACA BOOK"
+        assert tone == Color.parse(DOWN)
+
+        label, tone = await chip(DeskMode("live", "simulated"))
+        assert label == "LIVE · SIM BOOK"
+        assert tone == Color.parse(AMBER)
+
+        label, tone = await chip(_SYNTH)
+        assert label == "SYNTHETIC"
+        assert tone == Color.parse(MUTED)
+
+    asyncio.run(run())
+
+
+def test_settings_keeps_every_fact_the_banner_used_to_show():
+    from qlab.tui.app import QlabTui
+
+    class FactsClient(StubClient):
+        def get(self, path, **params):
+            snap = super().get(path, **params)
+            if path == "/api/tui":
+                snap["system"]["autopilot"] = {
+                    "last_run_at": "2026-07-24T16:30:00+00:00",
+                    "triggers_fired": 2,
+                }
+                snap["system"]["data_source"] = "synthetic"
+                snap["system"]["data_age_days"] = 0
+            return snap
+
+    async def run():
+        app = QlabTui(FactsClient(), refresh_interval=0,
+                      desk_mode=DeskMode("synthetic", "simulated"))
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("8")            # Settings
+            await pilot.pause(0.3)
+            card = str(app.query_one("#settings-system").content)
+            assert "AUTO 07-24 16:30·2" in card
+            assert "CLAUDE READY" in card
+            assert "DATA synthetic·0d" in card
 
     asyncio.run(run())
 
@@ -1059,7 +1141,7 @@ def test_tui_offer_mode_never_pushes_a_startup_modal():
             assert app.snapshot
             assert len(app.screen_stack) == 1
             assert app.screen is app.screen_stack[0]
-            assert "CLAUDE READY" in app.query_one("#system-status").content
+            assert "CLAUDE READY" in app.query_one("#settings-system").content
 
     asyncio.run(run())
 
@@ -1413,6 +1495,8 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
         app = QlabTui(AuditClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(160, 44)) as pilot:
             await pilot.pause(0.2)
+            await pilot.press("~")   # reveal the timeline before it is written to
+            await pilot.pause(0.1)
             table = app.query_one("#audit-table")
             labels = [str(column.label) for column in table.columns.values()]
             assert "verdict" in labels
@@ -1427,8 +1511,9 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
                 app.query_one("#audit-summary").content)
 
             # selected-row detail expands challenger_view + verdict reasons
-            # into the work rail; the strip carries the verdict summary
+            # into the work rail; the timeline carries the verdict summary
             app._render_audit_detail("dec-pass-1")
+            await pilot.pause(0.1)
             rail = str(app.query_one("#selected-work").content)
             assert "turnover is acceptable" in rail
             assert "turnover within cap" in rail
@@ -1436,10 +1521,12 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
             assert "**" not in rail and "`" not in rail
             assert "decision_id: decision-hidden" in rail
             assert "objective_id: obj-hidden" in rail
-            assert "verdict PASS" in str(app.query_one("#event-strip").content)
+            timeline = "\n".join(
+                strip.text for strip in app.query_one("#timeline").lines)
+            assert "verdict PASS" in timeline
 
-            # status strip carries the one DATA provenance token
-            assert "DATA synthetic·0d" in app.query_one("#system-status").content
+            # the settings system card carries the one DATA provenance token
+            assert "DATA synthetic·0d" in app.query_one("#settings-system").content
 
     asyncio.run(run())
 
@@ -3393,7 +3480,7 @@ class _BobStubClient(StubClient):
         return super().get(path, **params)
 
 
-def test_status_line_shows_bob_mode_and_feed_identity():
+def test_settings_system_card_shows_bob_mode_and_feed_identity():
     from qlab.tui.app import QlabTui
 
     snap = _bob_snapshot(quotes={
@@ -3406,7 +3493,7 @@ def test_status_line_shows_bob_mode_and_feed_identity():
                       desk_mode=_SYNTH)
         async with app.run_test(size=(200, 48)) as pilot:
             await pilot.pause(0.2)
-            status = str(app.query_one("#system-status").content)
+            status = str(app.query_one("#settings-system").content)
             # IEX/SIP is never collapsed into the word "live".
             assert "ALPACA·SIP" in status
             assert "BOB OBSERVE/OBSERVING" in status
@@ -3414,7 +3501,7 @@ def test_status_line_shows_bob_mode_and_feed_identity():
     asyncio.run(run())
 
 
-def test_status_line_marks_a_stale_quote_feed():
+def test_settings_system_card_marks_a_stale_quote_feed():
     from qlab.tui.app import QlabTui
 
     snap = _bob_snapshot(quotes={
@@ -3426,7 +3513,7 @@ def test_status_line_marks_a_stale_quote_feed():
                       desk_mode=_SYNTH)
         async with app.run_test(size=(200, 48)) as pilot:
             await pilot.pause(0.2)
-            status = str(app.query_one("#system-status").content)
+            status = str(app.query_one("#settings-system").content)
             assert "ALPACA·IEX STALE" in status
 
     asyncio.run(run())

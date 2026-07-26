@@ -859,7 +859,7 @@ class QlabTui(App[None]):
         # None means "nobody has said yet" — the operator is asked on mount. A
         # mode from a flag is authoritative and skips the question entirely; it
         # also owns the data lane, so ``offline`` can never contradict the mode
-        # the status strip is about to report.
+        # the chip is about to report.
         self.desk_mode = desk_mode
         self.offline = offline if desk_mode is None else desk_mode.offline
         self._desk_mode_prompted = False
@@ -1051,6 +1051,11 @@ class QlabTui(App[None]):
                         markup=True,
                     )
                     yield Static(
+                        id="settings-system",
+                        classes="settings-card",
+                        markup=True,
+                    )
+                    yield Static(
                         id="settings-data",
                         classes="settings-card",
                         markup=True,
@@ -1087,11 +1092,10 @@ class QlabTui(App[None]):
                 )
 
         yield RichLog(id="timeline", wrap=True, markup=False, max_lines=500)
-        yield Static("waiting for runtime snapshot", id="event-strip")
         with Horizontal(id="command-row"):
             yield Input(placeholder=": command or Ctrl-P", id="command")
             yield Static("CONNECTING", id="conn-chip", markup=True)
-            yield Static("PAPER · CONNECTING", id="system-status")
+            yield Static("SYNTHETIC", id="mode-chip")
 
     def on_mount(self) -> None:
         self.query_one("#runs-table", DataTable).add_columns("run", "kind", "created")
@@ -1149,7 +1153,7 @@ class QlabTui(App[None]):
     # -- snapshot refresh -------------------------------------------------
     def _start_refresh(self) -> None:
         # A running owner action holds the owner's dispatch lock; polling
-        # /api/tui behind it would only pile up timeouts in the event strip.
+        # /api/tui behind it would only pile up timeouts in the timeline.
         if self._refreshing or self._action_running:
             return
         self._refreshing = True
@@ -1213,7 +1217,7 @@ class QlabTui(App[None]):
             # chip — the one contradiction this screen exists to prevent.
             self.claude.offline = mode.offline
             self._post_desk_mode(mode)
-            self._render_status()
+            self._render_mode_chip()
             self._start_refresh()
 
         self.push_screen(
@@ -1553,7 +1557,7 @@ class QlabTui(App[None]):
             }
         self._render_agents()
         self._render_bob_rail()
-        self._render_status()
+        self._render_mode_chip()
         self._ingest_events(snapshot.get("events", []))
         self._maybe_offer_workforce()
 
@@ -2734,6 +2738,14 @@ class QlabTui(App[None]):
             ])
         self.query_one("#settings-mandate", Static).update(mandate_copy)
 
+        # "PAPER" leads the card because the desk is a paper desk before it is
+        # anything else; the tokens below it are the ones the command row used
+        # to carry, now read here instead of glanced at.
+        system_lines = [f"PAPER [{LABEL_GOLD}]DESK · SYSTEM & SERVICES[/]"]
+        system_lines.extend(_key_number_markup(self._system_tokens()))
+        self.query_one("#settings-system", Static).update(
+            "\n".join(system_lines))
+
         market = self.snapshot.get("market", {}) if self.snapshot else {}
         system = self.snapshot.get("system", {}) if self.snapshot else {}
         market_age = market.get("bar_age_days")
@@ -2915,9 +2927,10 @@ class QlabTui(App[None]):
             ),
         ])
         self._set_selected_work("\n".join(card_lines), markup=True)
-        self.query_one("#event-strip", Static).update(
-            f"{escape(str(key)[:10])}  "
-            f"[{verdict_tone}]verdict {escape(verdict_text)}[/] · "
+        # The timeline keeps the trail of what was inspected and what it said,
+        # so a selection made minutes ago is still recoverable from `~`.
+        self.query_one("#timeline", RichLog).write(
+            f"{str(key)[:10]}  verdict {verdict_text} · "
             "challenger + rationale in the work rail →"
         )
 
@@ -2955,10 +2968,34 @@ class QlabTui(App[None]):
             )
         self.query_one("#agent-list", Static).update("\n".join(lines))
 
-    def _render_status(self) -> None:
-        system = self.snapshot.get("system", {})
-        market = self.snapshot.get("market", {})
-        source = str(market.get("source", "data")).upper()
+    def _render_mode_chip(self) -> None:
+        mode = (self.snapshot.get("desk_mode") or {}) if self.snapshot else {}
+        fallback = self.desk_mode
+        # Label and tone are read from one source. A snapshot taken before the
+        # owner knew the desk mode would otherwise paint a real book in the
+        # demo's tone, which is the single misread this chip exists to prevent.
+        data = str(mode.get("data") or (fallback.data if fallback else "synthetic"))
+        book = str(mode.get("book") or (fallback.book if fallback else "simulated"))
+        label = str(mode.get("label")
+                    or (fallback.label if fallback else "SYNTHETIC"))
+        chip = self.query_one("#mode-chip", Static)
+        # Alert tone for a real book, warning for live prices on a simulated
+        # one, muted for synthetic; the tones themselves live in the theme.
+        chip.set_class(book == "alpaca", "live-book")
+        chip.set_class(book != "alpaca" and data == "live", "live-data")
+        chip.update(label)
+        self.query_one("#chat-exit", Button).label = (
+            "■ stop" if self.claude.running else "exit")
+        self._sync_chat_input()
+
+    def _system_tokens(self) -> list[tuple[str, str]]:
+        """The service facts the bottom banner used to concatenate.
+
+        Kept as the banner's own token strings — ``DATA synthetic·0d``,
+        ``AUTO 07-24 16:30·2`` — because they are what the operator learned to
+        read; only their home moved from the command row into Settings.
+        """
+        system = (self.snapshot.get("system") or {}) if self.snapshot else {}
         if system.get("mcp_proxy_available"):
             mcp = "MCP WORKFORCE"
         elif system.get("mcp_configured"):
@@ -2993,7 +3030,7 @@ class QlabTui(App[None]):
             autopilot_token = "AUTO —·0"
         # Feed identity is never collapsed into the word "live": IEX is not SIP
         # coverage, and the operator must always see which one is priced.
-        quotes = self.snapshot.get("quotes") or {}
+        quotes = (self.snapshot.get("quotes") or {}) if self.snapshot else {}
         if quotes.get("live_stream"):
             feed = str(quotes.get("feed", "")).replace("_", " ").upper()
             health = quotes.get("health") or {}
@@ -3001,18 +3038,20 @@ class QlabTui(App[None]):
                 f"ALPACA·{feed}" if health.get("fresh") else f"ALPACA·{feed} STALE")
         else:
             feed_token = "FEED —"
-        bob = self.snapshot.get("bob") or {}
+        bob = (self.snapshot.get("bob") or {}) if self.snapshot else {}
         bob_token = (
             f"BOB {str(bob.get('mode', '—')).upper()}/"
             f"{str(bob.get('state', '—')).upper()}" if bob else "BOB —")
-        approvals = self.snapshot.get("approvals") or []
-        approval_token = f" · APPROVALS {len(approvals)}" if approvals else ""
-        self.query_one("#system-status", Static).update(
-            f"PAPER · {source}/DAILY · {feed_token} · {mcp} · {claude} · "
-            f"{data_token} · {autopilot_token} · {bob_token}{approval_token}")
-        self.query_one("#chat-exit", Button).label = (
-            "■ stop" if self.claude.running else "exit")
-        self._sync_chat_input()
+        approvals = (self.snapshot.get("approvals") or []) if self.snapshot else []
+        return [
+            ("quote feed", feed_token),
+            ("mcp proxy", mcp),
+            ("coordinator", claude),
+            ("provenance", data_token),
+            ("autopilot", autopilot_token),
+            ("desk manager", bob_token),
+            ("approvals waiting", str(len(approvals))),
+        ]
 
     # -- events -----------------------------------------------------------
     def _ingest_events(self, events_: list[dict]) -> None:
@@ -3036,7 +3075,6 @@ class QlabTui(App[None]):
             detail = detail[:177] + "…"
         line = f"{clock}  {kind}  {detail if detail != '{}' else ''}".rstrip()
         self.query_one("#timeline", RichLog).write(line)
-        self.query_one("#event-strip", Static).update(line)
 
     def _write_local_event(self, kind: str, payload: dict) -> None:
         self._append_event({"ts": datetime.now().isoformat(), "kind": kind, "payload": payload})
@@ -3525,7 +3563,7 @@ class QlabTui(App[None]):
             "claude.started",
             {"mode": "workforce" if governed else "read-only", "prompt": prompt[:120]},
         )
-        self._render_status()
+        self._render_mode_chip()
         return True
 
     def _receive_claude_event(self, event: ClaudeEvent) -> None:
@@ -3612,7 +3650,7 @@ class QlabTui(App[None]):
                 self._set_selected_work(
                     "CLAUDE · READ-ONLY\n\n" + (self._claude_buffer or event.text)[-6000:])
             self._start_refresh()
-        self._render_status()
+        self._render_mode_chip()
 
     def _print_workforce_results(self, text: str) -> None:
         """Print one friendly completion summary when the coordinator's turn ends.

@@ -24,8 +24,9 @@ Python 3.10 or newer is required.
     qlab tui
 
 The terminal opens as a quiet, no-top-header workstation. It starts or connects
-to one owner HTTP process; the TUI itself never opens DuckDB. The status bar
-shows when the Claude CLI is ready without interrupting the desk.
+to one owner HTTP process; the TUI itself never opens DuckDB. The command row
+carries two chips only — owner connection, and the desk mode that says whose
+book is live; the system and service detail sits in Settings (`8`).
 
 The complete screen map is available from either the digit or matching function
 key:

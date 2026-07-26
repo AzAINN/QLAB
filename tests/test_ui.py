@@ -1385,3 +1385,47 @@ def test_snapshot_poll_marks_are_throttled_to_one_an_hour(session):
     session.tui_snapshot(offline=True, event_limit=10)
     assert len([row for row in session.registry.equity_marks()
                 if row["source"] == "poll"]) == 1
+
+
+# -- the explicit desk mode ------------------------------------------------
+def test_desk_mode_defaults_to_synthetic_and_is_reported(session):
+    status, payload = handle_api(session, "GET", "/api/desk_mode", {}, {})
+    assert status == 200
+    assert (payload["data"], payload["book"]) == ("synthetic", "simulated")
+    assert payload["label"] == "SYNTHETIC"
+    assert "credentials" in payload          # description string, never a secret
+
+
+def test_setting_the_desk_mode_switches_the_book(session, monkeypatch):
+    from qlab.core import data as market
+    from qlab.trader import broker as broker_mod
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+    monkeypatch.setattr(
+        broker_mod, "resolve_alpaca_credentials",
+        lambda: AlpacaCredentials("oauth", None, None, "tok", "paper", "/x"))
+    # A live-data desk prices off the network, which this suite never touches:
+    # pin the provider and serve its one fetch seam from the synthetic feed.
+    monkeypatch.setenv("QLAB_DATA_PROVIDER", "yfinance")
+    monkeypatch.setattr(market, "_fetch_yfinance", market.synthetic_prices)
+
+    status, payload = handle_api(
+        session, "POST", "/api/desk_mode", {},
+        {"data": "live", "book": "simulated"})
+    assert status == 200 and payload["label"] == "LIVE · SIM BOOK"
+    # The simulated book is honoured even though a credential is discoverable.
+    assert session.portfolio(offline=False)["broker"] == "simulated_paper"
+    assert session.current_book(offline=False) == "simulated_paper"
+
+
+def test_an_impossible_desk_mode_is_refused(session):
+    status, payload = handle_api(
+        session, "POST", "/api/desk_mode", {},
+        {"data": "synthetic", "book": "alpaca"})
+    assert status == 400
+    assert "synthetic" in payload["error"]
+
+
+def test_tui_snapshot_carries_the_desk_mode(session):
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert snap["desk_mode"]["label"] == "SYNTHETIC"

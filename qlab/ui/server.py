@@ -12,6 +12,8 @@ GET  /api/portfolio            broker-truth positions + risk report
 GET  /api/portfolio/live       live mark-to-market: P&L, exposure, provenance
 GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
+GET  /api/desk_mode            the chosen data source and book + credential status
+POST /api/desk_mode            choose the data source and the book
 GET  /api/data/health          data-policy provenance, freshness, eligibility
 GET  /api/data/permit/current  the latest recorded data permit for a purpose
 GET  /api/quotes               latest cached quotes + live market-stream health
@@ -79,6 +81,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from qlab.core.desk_mode import (
+    DEFAULT_DESK_MODE, DeskMode, load_desk_mode, save_desk_mode)
 from qlab.core.types import _jsonable
 from qlab.paths import workspace_root
 
@@ -172,7 +176,8 @@ class _OwnerToolApp:
 class UISession:
     """Process-wide state: one registry (the paper book) + the mandate."""
 
-    def __init__(self, offline_default: bool = True, seed: int = 7, registry=None):
+    def __init__(self, offline_default: bool = True, seed: int = 7, registry=None,
+                 desk_mode: DeskMode | None = None):
         from qlab.trader.mandate import load_mandate
         from qlab.mcp.guardrails import LabState
         from qlab.mcp.quant_lab import register_lab_tools
@@ -181,6 +186,9 @@ class UISession:
         self.registry = registry or Registry()
         self.mandate = load_mandate()
         self.offline_default = offline_default
+        # The operator's explicit choice; the persisted value is authoritative
+        # when the caller passes none, and synthetic is the safe default.
+        self.desk_mode = desk_mode or load_desk_mode() or DEFAULT_DESK_MODE
         self.seed = seed
         self._market_events: deque[dict] = deque(maxlen=_MARKET_EVENT_LIMIT)
         self._market_lock = threading.Lock()
@@ -294,6 +302,7 @@ class UISession:
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,
             universe=self.mandate.universe_whitelist,
+            book=self.desk_mode.book,
         )
         rec = reconcile(
             self.registry, broker, self.mandate.universe_whitelist,
@@ -390,6 +399,7 @@ class UISession:
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,
             universe=self.mandate.universe_whitelist,
+            book=self.desk_mode.book,
         )
         try:
             result = execute_plan(self.registry, broker, plan)
@@ -403,7 +413,8 @@ class UISession:
 
         broker = get_broker(self.registry, offline=offline,
                             starting_cash=self.mandate.paper_capital,
-                            seed=self.seed, universe=self.mandate.universe_whitelist)
+                            seed=self.seed, universe=self.mandate.universe_whitelist,
+                            book=self.desk_mode.book)
         state = broker.portfolio_state(self.mandate.universe_whitelist)
         hwm = state.get("high_water_mark", state["equity"])
         dd = 1.0 - state["equity"] / hwm if hwm > 0 else 0.0
@@ -449,7 +460,7 @@ class UISession:
             broker = get_broker(
                 self.registry, offline=offline,
                 starting_cash=self.mandate.paper_capital,
-                seed=self.seed, universe=universe)
+                seed=self.seed, universe=universe, book=self.desk_mode.book)
             state = broker.portfolio_state(universe)
         except (market.DataUnavailable, RuntimeError) as exc:
             return {"blocked": True, "mode": policy.mode, "provider": policy.provider,
@@ -512,20 +523,45 @@ class UISession:
             },
         }
 
+    # -- desk mode ----------------------------------------------------------
+    def set_desk_mode(self, mode: DeskMode) -> DeskMode:
+        self.desk_mode = mode
+        save_desk_mode(mode)
+        return mode
+
+    def desk_mode_payload(self) -> dict:
+        from qlab.trader.alpaca_auth import (
+            AlpacaAuthError, describe_credentials, resolve_alpaca_credentials)
+
+        try:
+            creds = resolve_alpaca_credentials()
+            description, ok = describe_credentials(creds), creds is not None
+        except AlpacaAuthError as exc:
+            # A broken credential source is not the same as absence: say so.
+            description, ok = str(exc), False
+        return {
+            "data": self.desk_mode.data,
+            "book": self.desk_mode.book,
+            "label": self.desk_mode.label,
+            "offline": self.desk_mode.offline,
+            "credentials": description,
+            "credentials_ok": ok,
+        }
+
     # -- realized performance ----------------------------------------------
     def current_book(self, offline: bool) -> str:
         """Name of the book being traded now — the marks' partition key.
 
-        Constructing the broker is the only honest answer: the venue is chosen
-        by credentials, so the book can change between sessions without anything
-        in the registry changing.
+        Constructing the broker is the only honest answer: the chosen book can
+        change between sessions without anything in the registry changing.
         """
         from qlab.trader.broker import get_broker
 
         return get_broker(
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,
-            universe=self.mandate.universe_whitelist).name
+            universe=self.mandate.universe_whitelist,
+            book=self.desk_mode.book).name
 
     def record_equity_mark(self, source: str, offline: bool) -> None:
         state = self.portfolio(offline)
@@ -612,7 +648,7 @@ class UISession:
         broker = get_broker(
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,
-            universe=self.mandate.universe_whitelist)
+            universe=self.mandate.universe_whitelist, book=self.desk_mode.book)
         if not hasattr(broker, "portfolio_history"):
             raise RuntimeError(
                 f"broker {broker.name!r} exposes no portfolio history to backfill")
@@ -1192,7 +1228,8 @@ class UISession:
                          pre_trade=stored["pre_trade"], state=stored["state"])
         broker = get_broker(self.registry, offline=offline,
                             starting_cash=self.mandate.paper_capital, seed=self.seed,
-                            universe=self.mandate.universe_whitelist)
+                            universe=self.mandate.universe_whitelist,
+                            book=self.desk_mode.book)
         try:
             result = execute_plan(self.registry, broker, plan)
         except MandateViolation as exc:
@@ -1340,6 +1377,7 @@ class UISession:
             )
         self.registry.expire_due_approvals(self._now_iso())
         return {
+            "desk_mode": self.desk_mode_payload(),
             "portfolio": portfolio,
             "live_portfolio": self.live_portfolio(offline),
             "market": market_snapshot,
@@ -1615,6 +1653,17 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/system":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.system_status(offline)
+
+    if method == "GET" and path == "/api/desk_mode":
+        return 200, session.desk_mode_payload()
+
+    if method == "POST" and path == "/api/desk_mode":
+        try:
+            mode = DeskMode(str(body.get("data")), str(body.get("book")))
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        session.set_desk_mode(mode)
+        return 200, session.desk_mode_payload()
 
     if method == "GET" and path == "/api/data/health":
         offline = _qbool(query, "offline", session.offline_default)

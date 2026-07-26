@@ -32,6 +32,17 @@ def isolated_market_cache(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_state_root(tmp_path, monkeypatch):
+    """Keep the operator's runtime state out of the suite, in both directions.
+
+    ``UISession`` loads the persisted desk mode at construction and the desk-mode
+    route saves it, so without this a run would inherit the mode the operator
+    left their desk in — and then overwrite it.
+    """
+    monkeypatch.setenv("QLAB_STATE_DIR", str(tmp_path / "state"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_alpaca_credentials(request, tmp_path, monkeypatch):
     """No test may discover the operator's real Alpaca login.
 

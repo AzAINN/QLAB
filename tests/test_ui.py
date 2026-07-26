@@ -1598,6 +1598,42 @@ def test_run_once_and_daily_ops_still_honor_body_offline_on_the_simulated_book(
     assert calls["daily_ops"]["offline"] is False
     assert calls["daily_ops"]["book"] == "simulated"
 
+    # Both directions, so the clamp cannot degenerate into "always non-offline":
+    # the operator's own True must survive on a book that is not the real one.
+    status, _ = handle_api(
+        session, "POST", "/api/run_once", {}, {"offline": True, "execute": False})
+    assert status == 200
+    assert calls["run_once"]["offline"] is True
+
+    status, _ = handle_api(session, "POST", "/api/daily_ops", {}, {"offline": True})
+    assert status == 200
+    assert calls["daily_ops"]["offline"] is True
+
+
+def test_the_daily_ops_equity_mark_uses_the_clamped_data_lane(session, monkeypatch):
+    """One route must not hold two answers about its own data lane.
+
+    ``_mark_after_mutation`` was still handed the raw body flag while the loop
+    beside it got the clamped one. On the Alpaca book the persisted numbers come
+    from the account either way, so nothing wrong was written — but the hook
+    priced a live desk's portfolio off the synthetic feed to get there, and any
+    future mark that reads ``state["marks"]`` would inherit the contradiction.
+    """
+    from qlab.autopilot import loop
+    from qlab.core.desk_mode import DeskMode
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    monkeypatch.setattr(loop, "daily_ops", lambda **kwargs: {"kind": "daily_ops"})
+    marked: list[bool] = []
+    monkeypatch.setattr(
+        session, "record_equity_mark",
+        lambda source, offline: marked.append(offline))
+
+    status, _payload = handle_api(
+        session, "POST", "/api/daily_ops", {}, {"offline": True})
+    assert status == 200
+    assert marked == [False]
+
 
 def test_plan_execution_clamps_offline_to_desk_mode_on_the_alpaca_book(
     session, monkeypatch,

@@ -139,6 +139,11 @@ def test_a_non_utf8_profile_never_echoes_the_token(tmp_path, monkeypatch):
     assert secret not in message
     assert secret.removeprefix("tok-") not in message
     assert "UnicodeDecodeError" not in message and "utf-8" not in message
+    # Assert on the decoder's own leak markers too, not only on the codec name:
+    # the path in this message is a tmp dir, so "utf-8" is absent partly by
+    # luck. These two strings can only come from the exception itself.
+    assert "codec" not in message and "invalid start byte" not in message
+    assert "0xff" not in message and "position" not in message
     # A chained decode error would carry the same buffer into any traceback.
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
@@ -151,8 +156,12 @@ def test_an_unreadable_profile_is_refused_without_leaking(tmp_path, monkeypatch)
     _write_profile(tmp_path, body=f"access_token: {secret}\n")
     profile = tmp_path / "profiles" / "paper.yaml"
     profile.chmod(0o000)
-    if os.access(profile, os.R_OK):  # running as root: chmod cannot deny us
-        pytest.skip("cannot make a file unreadable as this user")
+    # Two platforms cannot honour this: root ignores the mode bits, and Windows
+    # `chmod` only toggles the read-only attribute — it has no read bit to clear
+    # (and its `os.access` ignores R_OK outright). Skip rather than fail there.
+    if os.access(profile, os.R_OK):
+        profile.chmod(0o600)
+        pytest.skip("this platform cannot make a file unreadable (root, or Windows)")
     monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_API_SECRET", raising=False)

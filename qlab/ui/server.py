@@ -1910,10 +1910,12 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "POST" and path == "/api/daily_ops":
         from qlab.autopilot.loop import daily_ops
 
+        clamped_off = _offline_for_book(session, off)
         summary = daily_ops(registry=session.registry, mandate=session.mandate,
-                            offline=_offline_for_book(session, off), seed=session.seed,
+                            offline=clamped_off, seed=session.seed,
                             book=session.desk_mode.book)
-        _mark_after_mutation(session, "daily", off)
+        # The same lane the heartbeat ran on: one route, one answer.
+        _mark_after_mutation(session, "daily", clamped_off)
         return 200, summary
 
     if method == "POST" and path == "/api/batch":

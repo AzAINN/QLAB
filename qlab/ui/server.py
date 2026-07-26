@@ -1873,11 +1873,12 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.rebalance_preview(body, off)
 
     if method == "POST" and path == "/api/plans/execute":
-        result = session.execute_checked_plan(body, off)
+        clamped_off = _offline_for_book(session, off)
+        result = session.execute_checked_plan(body, clamped_off)
         # A mark sourced "execution" asserts that legs filled; a refused or
         # mandate-violating plan must not forge that provenance.
         if result.get("executed") is True:
-            _mark_after_mutation(session, "execution", off)
+            _mark_after_mutation(session, "execution", clamped_off)
         return 200, result
 
     if method == "POST" and path == "/api/performance/backfill":

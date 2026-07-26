@@ -1599,6 +1599,56 @@ def test_run_once_and_daily_ops_still_honor_body_offline_on_the_simulated_book(
     assert calls["daily_ops"]["book"] == "simulated"
 
 
+def test_plan_execution_clamps_offline_to_desk_mode_on_the_alpaca_book(
+    session, monkeypatch,
+):
+    """Plan execution cannot contradict the book either.
+
+    A body of ``{"offline": true}`` must not reach ``execute_checked_plan``
+    as-is on a live/alpaca desk: honouring it would run
+    ``execute_checked_plan``'s P3 execution-time data-revalidation gate under
+    a demo policy (never execution-eligible) while ``get_broker`` still fills
+    against the real Alpaca account — exactly the contradiction ``DeskMode``
+    forbids.
+    """
+    from qlab.core.desk_mode import DeskMode
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    calls: dict[str, tuple] = {}
+
+    def fake_execute_checked_plan(body, offline):
+        calls["execute"] = (body, offline)
+        return {"executed": False}
+
+    monkeypatch.setattr(session, "execute_checked_plan", fake_execute_checked_plan)
+
+    status, _ = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": "whatever", "human_confirmed": True})
+    assert status == 200
+    assert calls["execute"][1] is False
+
+
+def test_plan_execution_still_honors_body_offline_on_the_simulated_book(
+    session, monkeypatch,
+):
+    """The clamp is narrow: a non-Alpaca desk keeps the operator's own flag."""
+    assert session.desk_mode.book == "simulated"  # default fixture desk mode
+    calls: dict[str, tuple] = {}
+
+    def fake_execute_checked_plan(body, offline):
+        calls["execute"] = (body, offline)
+        return {"executed": False}
+
+    monkeypatch.setattr(session, "execute_checked_plan", fake_execute_checked_plan)
+
+    status, _ = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": "whatever", "human_confirmed": True})
+    assert status == 200
+    assert calls["execute"][1] is True
+
+
 def test_tui_snapshot_carries_the_desk_mode(session):
     status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
     assert status == 200

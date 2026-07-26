@@ -1876,14 +1876,16 @@ def handle_api(session: UISession, method: str, path: str,
             execute=bool(body.get("execute", True)),
             skew_lambda=float(body.get("skew", 0.5)),
             kurt_lambda=float(body.get("kurt", 0.5)),
-            as_of=body.get("as_of") or None, seed=session.seed)
+            as_of=body.get("as_of") or None, seed=session.seed,
+            book=session.desk_mode.book)
         return 200, summary
 
     if method == "POST" and path == "/api/daily_ops":
         from qlab.autopilot.loop import daily_ops
 
         summary = daily_ops(registry=session.registry, mandate=session.mandate,
-                            offline=off, seed=session.seed)
+                            offline=off, seed=session.seed,
+                            book=session.desk_mode.book)
         _mark_after_mutation(session, "daily", off)
         return 200, summary
 

@@ -1457,6 +1457,41 @@ def test_an_impossible_desk_mode_is_refused(session):
     assert "synthetic" in payload["error"]
 
 
+@pytest.mark.parametrize(
+    "path, body",
+    [("/api/daily_ops", {"offline": True}),
+     ("/api/run_once", {"offline": True, "execute": False})],
+)
+def test_autopilot_routes_run_the_book_the_desk_mode_chose(
+    session, monkeypatch, path, body,
+):
+    """`: daily ops` and `: rebalance dry` must not silently use the simulator.
+
+    Both write the registry the Alpaca book is executed against: daily_ops
+    evaluates the drawdown kill switch and latches the halt, run_once builds the
+    checked plan ``execute_checked_plan`` later fills against Alpaca. A book that
+    disagrees with the desk mode makes both of those numbers the wrong book's.
+    """
+    from qlab.autopilot import loop
+    from qlab.core.desk_mode import DeskMode
+    from qlab.trader.broker import get_broker as real_get_broker
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    requested: list[str | None] = []
+
+    def recording_get_broker(registry, **kwargs):
+        # Assert on the requested book, never on a live call: the substitute is
+        # always the simulator so the suite stays offline and account-free.
+        requested.append(kwargs.get("book"))
+        return real_get_broker(registry, **{**kwargs, "book": "simulated"})
+
+    monkeypatch.setattr(loop, "get_broker", recording_get_broker)
+
+    status, _payload = handle_api(session, "POST", path, {}, body)
+    assert status == 200
+    assert requested == ["alpaca"]
+
+
 def test_tui_snapshot_carries_the_desk_mode(session):
     status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
     assert status == 200

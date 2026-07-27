@@ -357,3 +357,39 @@ def test_cmd_ui_persists_an_explicitly_flagged_mode(monkeypatch):
 
     assert cli.main(["ui", "--alpaca-book", "--no-browser"]) == 0
     assert load_desk_mode() == DeskMode("live", "alpaca")
+
+def test_workforce_cli_controls_require_an_id_and_call_the_owner(monkeypatch):
+    from types import SimpleNamespace
+
+    import qlab.desk_cli as desk_cli
+
+    class Client:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, path, body=None):
+            self.posts.append((path, body or {}))
+            return {
+                "workflow_id": "wf42",
+                "status": path.rsplit("/", 1)[-1] + "ed",
+                "request": {"goal": "review"},
+                "steps": [],
+                "result": {},
+            }
+
+    client = Client()
+    console = _recording_console()
+    monkeypatch.setattr(desk_cli, "_client", lambda args: client)
+    monkeypatch.setattr(desk_cli, "_console", lambda: console)
+
+    missing = SimpleNamespace(action="abandon", id=None)
+    assert desk_cli.cmd_workforce(missing) == 2
+    assert client.posts == []
+
+    interrupt = SimpleNamespace(action="interrupt", id="wf42")
+    assert desk_cli.cmd_workforce(interrupt) == 0
+    assert client.posts == [(
+        "/api/workflows/wf42/interrupt",
+        {"reason": "operator interrupted the workflow from the desk CLI"},
+    )]
+    assert "durable writes are fenced" in console.export_text()

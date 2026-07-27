@@ -33,6 +33,12 @@ from qlab.paths import state_path
 
 
 WORKFORCE_PHASES = ("analyst", "challenger", "optimizer", "referee", "reporter")
+WORKFLOW_RESUMABLE_STATUSES = frozenset({
+    "interrupted", "failed", "blocked",
+})
+WORKFLOW_TERMINAL_STATUSES = frozenset({
+    "complete", "abandoned",
+})
 # Dependency DAG for the standard pipeline. The bounded debate makes the
 # challenger a true upstream of the optimizer: an amendment recorded in the
 # challenger phase's artifacts must be able to replace the optimizer's inputs,
@@ -156,11 +162,11 @@ CREATE TABLE IF NOT EXISTS data_permits (
     permit_id VARCHAR PRIMARY KEY, snapshot_id VARCHAR, purpose VARCHAR,
     provider VARCHAR, feed VARCHAR, as_of VARCHAR, permit JSON,
     eligible_for_execution BOOLEAN, created_at VARCHAR);
-CREATE TABLE IF NOT EXISTS bob_state (
+CREATE TABLE IF NOT EXISTS atlas_state (
     manager_id VARCHAR PRIMARY KEY, mode VARCHAR, state VARCHAR,
     current_task_id VARCHAR, last_wake_reason VARCHAR, last_brief_at VARCHAR,
     blocked_reason VARCHAR, coordinator_session_id VARCHAR, updated_at VARCHAR);
-CREATE TABLE IF NOT EXISTS bob_tasks (
+CREATE TABLE IF NOT EXISTS atlas_tasks (
     task_id VARCHAR PRIMARY KEY, dedupe_key VARCHAR UNIQUE, trigger_kind VARCHAR,
     trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
     conclusion JSON, error VARCHAR, attempt_count INTEGER,
@@ -206,6 +212,18 @@ CREATE TABLE IF NOT EXISTS equity_marks (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _control_summary(current: str, label: str, reason: str) -> str:
+    """Append one bounded lifecycle note without erasing the phase evidence."""
+    note = f"{label}: {reason.strip()}"
+    existing = current.strip()
+    if not existing:
+        return note[:4000]
+    if note in existing:
+        return existing[:4000]
+    room = max(0, 4000 - len(note) - 2)
+    return f"{existing[:room].rstrip()}\n\n{note}"[:4000]
 
 
 def _j(obj: Any) -> str:
@@ -1088,6 +1106,195 @@ class Registry:
         })
         return self.get_workflow(workflow_id) or {}
 
+    def interrupt_workflow(
+        self,
+        workflow_id: str,
+        reason: str = "coordinator stopped before the workflow completed",
+    ) -> dict:
+        """Freeze a live workflow in a resumable, visibly non-running state.
+
+        Interruption is an owner control, not an agent phase update. Every
+        currently-working branch is frozen together so a panel cannot leave one
+        worker animated after its shared coordinator has gone away.
+        """
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("workflow interruption requires a reason")
+        if len(reason) > 1000:
+            raise ValueError("workflow interruption reason exceeds 1000 characters")
+        workflow = self.get_workflow(workflow_id)
+        if not workflow:
+            raise KeyError(f"unknown workflow_id {workflow_id!r}")
+        status = str(workflow.get("status") or "")
+        if status != "running":
+            # Stop is deliberately idempotent across process/result races. A
+            # completed, abandoned, or already-paused run must not be rewritten.
+            return workflow
+
+        steps = list(workflow.get("steps") or [])
+        active = [step for step in steps if step.get("status") == "working"]
+        if not active:
+            current = str(workflow.get("current_phase") or "")
+            active = [
+                step for step in steps
+                if step.get("phase") == current and step.get("status") != "done"
+            ]
+        if not active:
+            active = [step for step in steps if step.get("status") != "done"][:1]
+
+        now = _now()
+        changed: list[str] = []
+        with self.transaction():
+            for step in active:
+                summary = _control_summary(
+                    str(step.get("summary") or ""), "Interrupted", reason)
+                self.con.execute(
+                    "UPDATE workflow_steps SET status='interrupted', summary=?, "
+                    "completed_at=?, updated_at=? "
+                    "WHERE step_id=? AND status <> 'done'",
+                    [summary, now, now, step["step_id"]],
+                )
+                changed.append(str(step["phase"]))
+            current_phase = changed[0] if changed else str(
+                workflow.get("current_phase") or "")
+            self.con.execute(
+                "UPDATE workflows SET status='interrupted', current_phase=?, "
+                "updated_at=? WHERE workflow_id=? AND status='running'",
+                [current_phase, now, workflow_id],
+            )
+        self.record_event("workflow_interrupted", {
+            "workflow_id": workflow_id,
+            "phases": changed,
+            "reason": reason,
+        })
+        return self.get_workflow(workflow_id) or {}
+
+    def resume_workflow(self, workflow_id: str) -> dict:
+        """Explicitly reopen one interrupted/failed/blocked workflow.
+
+        Agents cannot call this transition. Requiring an owner-side resume
+        fences a surviving orphan process: phase writes alone cannot silently
+        turn an interrupted workflow back into a live one.
+        """
+        workflow = self.get_workflow(workflow_id)
+        if not workflow:
+            raise KeyError(f"unknown workflow_id {workflow_id!r}")
+        status = str(workflow.get("status") or "")
+        if status == "running":
+            raise RuntimeError(
+                f"workflow {workflow_id!r} is already running")
+        if status in WORKFLOW_TERMINAL_STATUSES:
+            raise RuntimeError(
+                f"{status} workflow {workflow_id!r} cannot be resumed")
+        if status not in WORKFLOW_RESUMABLE_STATUSES:
+            raise RuntimeError(
+                f"workflow {workflow_id!r} in state {status!r} cannot be resumed")
+
+        open_steps = [
+            step for step in workflow.get("steps", [])
+            if step.get("status") != "done"
+        ]
+        if not open_steps:
+            raise RuntimeError(
+                f"workflow {workflow_id!r} has no incomplete phase to resume")
+        now = _now()
+        current_phase = str(open_steps[0]["phase"])
+        self.con.execute(
+            "UPDATE workflows SET status='running', current_phase=?, result=?, "
+            "updated_at=? WHERE workflow_id=?",
+            [current_phase, _j({}), now, workflow_id],
+        )
+        self.record_event("workflow_resumed", {
+            "workflow_id": workflow_id,
+            "phase": current_phase,
+        })
+        return self.get_workflow(workflow_id) or {}
+
+    def abandon_workflow(
+        self,
+        workflow_id: str,
+        reason: str = "operator abandoned the incomplete workflow",
+    ) -> dict:
+        """Permanently close an incomplete workflow while retaining its audit."""
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("workflow abandonment requires a reason")
+        if len(reason) > 1000:
+            raise ValueError("workflow abandonment reason exceeds 1000 characters")
+        workflow = self.get_workflow(workflow_id)
+        if not workflow:
+            raise KeyError(f"unknown workflow_id {workflow_id!r}")
+        status = str(workflow.get("status") or "")
+        if status == "abandoned":
+            return workflow
+        if status == "complete":
+            raise RuntimeError(
+                f"completed workflow {workflow_id!r} cannot be abandoned")
+
+        now = _now()
+        changed: list[str] = []
+        with self.transaction():
+            for step in workflow.get("steps", []):
+                if step.get("status") == "done":
+                    continue
+                prefix = (
+                    "Not run; workflow abandoned"
+                    if step.get("status") == "queued"
+                    else "Abandoned"
+                )
+                summary = _control_summary(
+                    str(step.get("summary") or ""), prefix, reason)
+                self.con.execute(
+                    "UPDATE workflow_steps SET status='abandoned', summary=?, "
+                    "completed_at=?, updated_at=? "
+                    "WHERE step_id=? AND status <> 'done'",
+                    [summary, now, now, step["step_id"]],
+                )
+                changed.append(str(step["phase"]))
+            result = {
+                "final_summary": f"Workflow abandoned: {reason}",
+                "control": {
+                    "status": "abandoned",
+                    "reason": reason,
+                    "at": now,
+                },
+            }
+            self.con.execute(
+                "UPDATE workflows SET status='abandoned', result=?, updated_at=? "
+                "WHERE workflow_id=? AND status <> 'complete'",
+                [_j(result), now, workflow_id],
+            )
+        self.record_event("workflow_abandoned", {
+            "workflow_id": workflow_id,
+            "phases": changed,
+            "reason": reason,
+        })
+        return self.get_workflow(workflow_id) or {}
+
+    def interrupt_running_workflows(
+        self,
+        reason: str,
+        *,
+        updated_before: str | None = None,
+    ) -> list[dict]:
+        """Interrupt every matching orphan candidate and return changed rows."""
+        if updated_before is None:
+            rows = self._rows(
+                "SELECT workflow_id FROM workflows WHERE status='running' "
+                "ORDER BY created_at",
+                [],
+            )
+        else:
+            rows = self._rows(
+                "SELECT workflow_id FROM workflows WHERE status='running' "
+                "AND updated_at < ? ORDER BY created_at",
+                [updated_before],
+            )
+        return [
+            self.interrupt_workflow(str(row["workflow_id"]), reason)
+            for row in rows
+        ]
+
     def update_workflow_phase(
         self,
         workflow_id: str,
@@ -1117,6 +1324,12 @@ class Registry:
                 # persisted result.
                 return workflow
             raise RuntimeError(f"completed phase {phase!r} cannot be reopened")
+        workflow_status = str(workflow.get("status") or "")
+        if workflow_status != "running":
+            raise RuntimeError(
+                f"workflow {workflow_id!r} is {workflow_status!r}; "
+                "resume it explicitly before updating a phase"
+            )
         instance_deps = (workflow.get("request") or {}).get("_deps")
         # Honor a stored DAG only when it covers exactly this workflow's
         # phases; anything else falls back to the static map so a malformed
@@ -1172,12 +1385,18 @@ class Registry:
                 self._check_referee_binding(by_phase, artifacts)
 
         now = _now()
-        started_at = step.get("started_at") or now
+        restarting = (
+            status == "working"
+            and step.get("status") in {
+                "interrupted", "failed", "blocked",
+            }
+        )
+        started_at = now if restarting else step.get("started_at") or now
         completed_at = now if status in {"done", "failed", "blocked"} else None
         with self.transaction():
             self.con.execute(
                 "UPDATE workflow_steps SET status=?, summary=?, artifacts=?, "
-                "started_at=COALESCE(started_at, ?), completed_at=?, updated_at=? "
+                "started_at=?, completed_at=?, updated_at=? "
                 "WHERE step_id=?",
                 [status, summary, artifacts_json, started_at, completed_at, now,
                  step["step_id"]],
@@ -1376,22 +1595,22 @@ class Registry:
         )
         return rows[0] if rows else None
 
-    # -- BobTheQuant supervisor state ---------------------------------------
-    def get_bob_state(self, manager_id: str = "bob-the-quant") -> dict | None:
+    # -- Atlas supervisor state ---------------------------------------
+    def get_atlas_state(self, manager_id: str = "atlas") -> dict | None:
         rows = self._rows(
-            "SELECT * FROM bob_state WHERE manager_id = ?", [manager_id])
+            "SELECT * FROM atlas_state WHERE manager_id = ?", [manager_id])
         return rows[0] if rows else None
 
-    def save_bob_state(self, state: dict, manager_id: str = "bob-the-quant") -> None:
-        """Upsert Bob's single logical current-state record."""
+    def save_atlas_state(self, state: dict, manager_id: str = "atlas") -> None:
+        """Upsert Atlas's single logical current-state record."""
         self.con.execute(
-            "INSERT OR REPLACE INTO bob_state VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO atlas_state VALUES (?,?,?,?,?,?,?,?,?)",
             [manager_id, state.get("mode"), state.get("state"),
              state.get("current_task_id"), state.get("last_wake_reason"),
              state.get("last_brief_at"), state.get("blocked_reason"),
              state.get("coordinator_session_id"), _now()])
 
-    def create_bob_task(self, task_id: str, dedupe_key: str, trigger_kind: str,
+    def create_atlas_task(self, task_id: str, dedupe_key: str, trigger_kind: str,
                         trigger_payload: dict, template_id: str | None) -> bool:
         """Create a queued task, deduped by its UNIQUE key.
 
@@ -1400,11 +1619,11 @@ class Registry:
         must not re-run a deduplicated task.
         """
         existing = self._rows(
-            "SELECT task_id FROM bob_tasks WHERE dedupe_key = ?", [dedupe_key])
+            "SELECT task_id FROM atlas_tasks WHERE dedupe_key = ?", [dedupe_key])
         if existing:
             return False
         self.con.execute(
-            "INSERT INTO bob_tasks (task_id, dedupe_key, trigger_kind, "
+            "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
             "trigger_payload, template_id, status, workflow_id, conclusion, "
             "error, attempt_count, created_at, started_at, completed_at, "
             "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1412,7 +1631,7 @@ class Registry:
              "queued", None, None, None, 0, _now(), None, None, _now()])
         return True
 
-    def update_bob_task(self, task_id: str, *, status: str | None = None,
+    def update_atlas_task(self, task_id: str, *, status: str | None = None,
                         workflow_id: str | None = None,
                         conclusion: dict | None = None,
                         error: str | None = None,
@@ -1440,25 +1659,25 @@ class Registry:
             sets.append("attempt_count=attempt_count+1")
         params.append(task_id)
         self.con.execute(
-            f"UPDATE bob_tasks SET {', '.join(sets)} WHERE task_id=?", params)
+            f"UPDATE atlas_tasks SET {', '.join(sets)} WHERE task_id=?", params)
 
-    def get_bob_task(self, task_id: str) -> dict | None:
-        rows = self._rows("SELECT * FROM bob_tasks WHERE task_id = ?", [task_id])
+    def get_atlas_task(self, task_id: str) -> dict | None:
+        rows = self._rows("SELECT * FROM atlas_tasks WHERE task_id = ?", [task_id])
         return rows[0] if rows else None
 
-    def list_bob_tasks(self, limit: int = 50) -> list[dict]:
+    def list_atlas_tasks(self, limit: int = 50) -> list[dict]:
         return self._rows(
-            "SELECT * FROM bob_tasks ORDER BY created_at DESC LIMIT ?", [limit])
+            "SELECT * FROM atlas_tasks ORDER BY created_at DESC LIMIT ?", [limit])
 
-    def count_bob_tasks_on(self, day_iso: str, trigger_kind: str | None = None) -> int:
+    def count_atlas_tasks_on(self, day_iso: str, trigger_kind: str | None = None) -> int:
         """Autonomous tasks created on a UTC date (for the daily budget)."""
         if trigger_kind is not None:
             rows = self._rows(
-                "SELECT COUNT(*) AS n FROM bob_tasks WHERE substr(created_at,1,10)=? "
+                "SELECT COUNT(*) AS n FROM atlas_tasks WHERE substr(created_at,1,10)=? "
                 "AND trigger_kind=?", [day_iso[:10], trigger_kind])
         else:
             rows = self._rows(
-                "SELECT COUNT(*) AS n FROM bob_tasks WHERE substr(created_at,1,10)=?",
+                "SELECT COUNT(*) AS n FROM atlas_tasks WHERE substr(created_at,1,10)=?",
                 [day_iso[:10]])
         return int(rows[0]["n"]) if rows else 0
 

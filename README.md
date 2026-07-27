@@ -31,15 +31,38 @@ book is live; the system and service detail sits in Settings (`8`).
 The complete screen map is available from either the digit or matching function
 key:
 
-- `1` / `F1` — Dashboard: portfolio, regime, allocation, and alerts.
-- `2` / `F2` — Market: daily price context and provenance.
-- `3` / `F3` — Workforce: governed coordinator chat and phase progress.
-- `4` / `F4` — Research: experiment runs and algorithm evidence.
-- `5` / `F5` — Book: positions, checked plans, confirmation, and paper orders.
-- `6` / `F6` — Audit: decisions, challenges, verdicts, and reflections.
-- `7` / `F7` — Atlas: what every arm, metric, role, and rule is, with the live
+- `1` / `F1` — **Atlas**: the desk manager's read — what the signals, the news,
+  and the research add up to, and where they disagree. This is the default view.
+- `2` / `F2` — Dashboard: portfolio, regime, allocation, and alerts.
+- `3` / `F3` — Market: daily price context and provenance.
+- `4` / `F4` — Workforce: governed coordinator chat and phase progress.
+- `5` / `F5` — Research: experiment runs and algorithm evidence.
+- `6` / `F6` — Book: positions, checked plans, confirmation, and paper orders.
+- `7` / `F7` — Audit: decisions, challenges, verdicts, and reflections.
+- `8` / `F8` — Atlas: what every arm, metric, role, and rule is, with the live
   champion and its latest ablation numbers.
-- `8` / `F8` — Settings: read-only mandate, data, agent, and theme bulletins.
+- `9` / `F9` — Settings: read-only mandate, data, agent, and theme bulletins.
+
+### Atlas, the desk manager
+
+Atlas runs continuously inside the owner on a heartbeat (`QLAB_BOB_INTERVAL_S`,
+default 30s). Each tick it evaluates deterministic triggers against owner facts
+and recomposes its **read**: one view across the regime panel, the news record,
+and what the workforce concluded.
+
+The read leads with the part a number cannot express — the **tensions**, where
+the evidence disagrees with itself. "Prices are calm but the coverage is not"
+is the case Atlas exists to surface. Conviction describes how much the evidence
+agrees, never how likely a price move is.
+
+Atlas escalates a material disagreement into the same registry-enforced debate
+the workforce uses — allowlisted claim, two-round ceiling, adjudication the
+reporter waits on. It holds read-only tools and cannot trade, approve, or
+create a paper plan in any mode; `Ctrl-B` opens its detail drawer from any view.
+
+Modes: `observe` (monitor and brief), `research` (may start approved research
+workflows), `propose` (may request a checked plan for human approval), and
+`paused`. The mode is the authority statement and is shown wherever Atlas is.
 
     qlab tui --claude offer   # default: show readiness, never prompt
     qlab tui --claude auto    # start the workforce after the first snapshot
@@ -52,9 +75,17 @@ the console stays quiet, printing one short note per agent (what it settled,
 what runs next) and the run's results at the end. Full tool traffic remains on
 the timeline (`~`). Follow-up messages continue the same session, the `■ stop`
 button interrupts without losing durable phase state, and a run that stalls is
-stopped by a watchdog rather than hanging the desk. `: workforce GOAL`,
-`: workforce status`, and `: workforce resume ID` drive the same machinery from
-the command row.
+stopped by a watchdog rather than hanging the desk. Stop terminates the entire
+Claude/coordinator/Agent/MCP child-process tree, marks the active durable phase
+`interrupted`, and fences late child writes until an explicit resume. A
+successful Claude exit that leaves a phase open is treated the same way rather
+than leaving the desk painted `working`. Owner startup recovers orphaned
+`running` rows, and the owner also expires rows older than the coordinator
+lease. `: workforce GOAL`, `: workforce status`, `: workforce resume ID`,
+`: workforce stop`, and `: workforce abandon [ID]` drive the same machinery
+from the command row. Abandon permanently closes unfinished phases but retains
+completed evidence, events, and the audit record; it does not delete registry
+state.
 
 `: chat MESSAGE` switches the same chat box to a read-only desk assistant —
 ask about the portfolio, market, runs, or audit trail conversationally; it
@@ -98,10 +129,10 @@ Every mode is paper-only; there is no live-trading path to select, and the
 browser login cannot grant one (the Alpaca CLI puts live behind its separate
 `--api-key --live` flow). That login is preferred over `ALPACA_API_KEY` /
 `ALPACA_API_SECRET` because it leaves no secret to paste or store. If you use
-keys anyway, export them into the environment that starts qlab — nothing here
-reads `.env`, so filling in `.env.example` alone changes nothing — and note
-that qlab's `ALPACA_API_SECRET` is spelled `ALPACA_SECRET_KEY` by the Alpaca
-CLI.
+keys anyway, either export them or put them in `.env`, which the CLI loads at
+startup — an already-exported variable outranks the file, and a blank entry in
+the file is ignored rather than treated as empty credentials. Note that qlab's
+`ALPACA_API_SECRET` is spelled `ALPACA_SECRET_KEY` by the Alpaca CLI.
 
 ## What is implemented
 
@@ -274,6 +305,79 @@ Starting a retired standalone quant-lab or quant-trader module now delegates to
 the guarded combined server, so those module paths cannot recreate the old
 two-writer topology.
 
+## IBM Bob
+
+Bob is IBM's agentic SDLC environment — the Bob IDE, and Bob Shell for the
+terminal. In qlab it has one job, stated precisely because the whole project is
+an argument about authority: **Bob is a governed client of the desk, never an
+authority inside it.**
+
+That is not a limitation imposed on Bob. It is the same boundary every
+orchestrator here lives behind. qlab's rigor is enforced by deterministic code —
+the mandate, the referee gate, execution idempotency, one DuckDB writer — so
+that swapping the model or the IDE driving the desk cannot change what the desk
+is allowed to do. Bob inherits that guarantee by construction.
+
+### Why Bob is a good fit for this desk
+
+A quant desk is an SDLC problem wearing a trading hat. The repetitive work here
+is not placing orders — it is regenerating role adapters after a prompt edit,
+restarting the owner after changing code it serves, keeping the offline suite
+green, and adding a catalog entry at the right stage. Those are the invariants
+most easily broken by moving fast, and they are exactly what Bob's rules and
+skills exist to hold. Meanwhile the judgment work — which estimation window,
+which regime call, what the news actually supports — stays with the governed
+roles and their evidence trail.
+
+Bob also brings an approval model that composes with qlab's rather than
+competing with it. Bob asks before it acts; qlab refuses unless a human
+confirms. Two independent gates on the same action is the correct number for a
+desk that touches a book.
+
+### The connection: `.bob/mcp.json`
+
+Bob attaches to the running desk through the same propose-only MCP proxy the
+Claude workforce uses. Start an owner runtime, then open the project in Bob:
+
+    qlab tui          # or: qlab ui --no-browser
+
+`.bob/mcp.json` points Bob at `qlab.mcp.tui_proxy`, which never opens DuckDB and
+talks to the owner over HTTP only. Bob can read the portfolio, the regime panel,
+the audit trail, the research runs, and the algorithm catalog; it can request a
+*dry* rebalance preview. It cannot execute a paper trade, because no MCP tool
+here accepts a raw order and execution requires `human_confirmed=True` from the
+TUI.
+
+The `alwaysAllow` list in that file is the governance boundary made concrete:
+pure observation is auto-approved, and every tool that persists a decision,
+starts a workflow, runs a solver, fetches from the network, or previews a plan
+stops for an explicit human click. The second entry, the combined `qlab` server,
+ships `disabled: true` — it is the no-owner headless path, and enabling it while
+an owner is alive is refused by the port guard rather than quietly creating a
+second writer.
+
+### Roles from one source
+
+`agents/*.md` is the single source of truth for the org chart.
+`python -m qlab.agents.loader sync` projects it into `.claude/agents/*.md` for
+Claude Code and `.bob/personas/*.yaml` for Bob, so the two orchestrators cannot
+drift apart on what a role is or what it may touch.
+
+Bob's own mode system is a close match for this: a custom mode is a role
+definition plus instructions plus a deterministic set of permitted tools, and
+its tool groups (`Read`, `Edit`, `Execute`, `MCP`, `Skill`, …) make an
+**MCP-only** mode expressible directly — no filesystem, no editor, no shell,
+which is precisely what every qlab role already asserts about itself.
+
+Being straight about current state: `.bob/personas/*.yaml` is qlab's neutral
+projection of a role, not yet a file Bob loads. Emitting real
+`.bob/custom_modes.yaml` from the same source is the next step, and it is
+tracked with the open schema questions in
+[planning-docs/2026-07-26-ibm-bob-integration-options.md](planning-docs/2026-07-26-ibm-bob-integration-options.md)
+alongside the seams a Bob Shell coordinator backend would attach to. The model
+invocation record already carries a `backend` column, so a Bob-served phase is
+auditable the day it exists.
+
 ## Commands
 
     qlab run-once --offline --dry-run
@@ -286,6 +390,8 @@ two-writer topology.
     qlab desk
     qlab workforce run "Review the desk and challenge the estimation window"
     qlab workforce status
+    qlab workforce interrupt --id WORKFLOW_ID
+    qlab workforce abandon --id WORKFLOW_ID
     qlab events --kind workflow_phase
 
 run-once performs analysis, solves the configured operational policy, logs the decision,
@@ -306,7 +412,10 @@ triggers. It cannot trade.
 The desk verbs are the research-CLI face of the owner runtime: `qlab desk`
 prints one status card, `qlab workforce run` drives a governed run headless
 and streams the coordinator plus the owner's live audit bus, and `qlab
-events` tails that bus (`GET /api/stream`, server-sent events). The TUI
+events` tails that bus (`GET /api/stream`, server-sent events). Ctrl-C during a
+headless run interrupts its durable workflow and terminates the full reasoning
+process tree. `workforce interrupt` fences an orphan for later resumption;
+`workforce abandon` closes it while retaining its audit. The TUI
 subscribes to the same stream, so phase changes and verdicts land on every
 surface the moment they are recorded. None of these verbs can execute a
 paper trade.
@@ -324,8 +433,9 @@ The current operator surface is research and paper-first:
 - Market provenance records the producing provider (`yfinance`, `alpaca`, or
   `synthetic`), and the as-of date and bar age are shown to the operator.
 - Alpaca support requires the trader extra plus one credential source: an
-  `alpaca profile login` session, or exported `ALPACA_API_KEY` and
-  `ALPACA_API_SECRET` values (qlab reads no `.env` file). The browser login
+  `alpaca profile login` session, or `ALPACA_API_KEY` and `ALPACA_API_SECRET`
+  either exported or set in `.env`, which the CLI loads at startup. The browser
+  login
   currently reaches the **broker** only — the `alpaca` daily-bar provider reads
   the two environment variables directly, so Alpaca market data still needs
   exported keys. It remains paper-only and daily-bar-only: there is no

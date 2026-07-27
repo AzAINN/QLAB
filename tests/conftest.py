@@ -63,6 +63,13 @@ def isolated_alpaca_credentials(request, tmp_path, monkeypatch):
     monkeypatch.delenv("ALPACA_PROFILE", raising=False)
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    # Clearing the variables is not enough once ``qlab.env`` exists: tests that
+    # drive ``cli.main`` call ``load_once()``, and the loader only declines to
+    # set a variable that is already *truthy* — so a deleted one is exactly the
+    # case it fills from the operator's ``.env``. Setting them to "" would not
+    # help for the same reason. Neutralise the loader instead: no test reads the
+    # operator's file.
+    monkeypatch.setattr("qlab.env.load_once", lambda *a, **k: [])
 
 
 @pytest.fixture

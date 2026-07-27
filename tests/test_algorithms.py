@@ -59,6 +59,32 @@ def test_mvsk_is_research_not_the_operational_policy() -> None:
     assert get_operational_policy("hrp").algorithm_id == "hrp"
 
 
+def test_operational_objective_forms_are_exactly_the_solvable_ones(moment_set) -> None:
+    """Every form the helper reports must have an operational solver, and every
+    excluded portfolio form (mvsk) must not — this is the boundary objective.build
+    enforces so a research-only objective never reaches the optimizer.
+    """
+    from qlab.algorithms.catalog import operational_objective_forms
+
+    forms = operational_objective_forms()
+    assert forms == {"min_variance", "max_utility"}
+
+    operational = list_algorithms(stage="operational")
+    for form in forms:
+        # At least one operational, prepared-objective algorithm can consume it.
+        assert any(
+            spec["prepared_objective"] and form in spec["objective_forms"]
+            for spec in operational
+        )
+
+    # mvsk is deliberately absent: no operational algorithm declares it, so a
+    # built mvsk objective is unsolvable on the staged surface.
+    assert "mvsk" not in forms
+    mvsk = build_objective("mvsk", moment_set, skew_lambda=0.5, kurt_lambda=0.5)
+    with pytest.raises(ValueError, match="supports"):
+        solve_prepared_objective("min_variance", mvsk, Constraints())
+
+
 def test_target_semivariance_is_research_and_refused_by_staged_solve(
     moment_set,
 ) -> None:

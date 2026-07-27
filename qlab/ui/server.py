@@ -23,24 +23,26 @@ GET  /api/decisions/<id>/outcome   the immutable resolved outcome
 GET  /api/decisions/<id>/lesson    advisory lesson over that outcome (if any)
 GET  /api/workflows/<id>/debate    debates, turns, and adjudication
 GET  /api/models/invocations   model tier/route audit records
-GET  /api/bob/status           BobTheQuant desk-manager mode and lifecycle state
-GET  /api/bob/tasks            Bob's deduplicated autonomous task history
-GET  /api/bob/templates        the registered workflow templates Bob may start
-GET  /api/bob/startable        queued tasks Bob may start now, with refusals
-GET  /api/bob/shadow           shadow-rollout scorecard (evidence, not a grant)
-POST /api/bob/tasks/<id>/start start one queued task's registered template
-POST /api/bob/observe          run one deterministic Bob observe tick
-POST /api/bob/mode             set Bob mode (observe|research|propose|paused)
-POST /api/bob/pause            pause Bob's autonomous work
-POST /api/bob/resume           resume Bob into a mode
-POST /api/bob/message          ask Bob a question (never grants authority)
+GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
+GET  /api/atlas/read             Atlas's composed read: signals + news + research
+POST /api/atlas/escalate         open a bounded debate on a material disagreement
+GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
+GET  /api/atlas/templates        the registered workflow templates Atlas may start
+GET  /api/atlas/startable        queued tasks Atlas may start now, with refusals
+GET  /api/atlas/shadow           shadow-rollout scorecard (evidence, not a grant)
+POST /api/atlas/tasks/<id>/start start one queued task's registered template
+POST /api/atlas/observe          run one deterministic Atlas observe tick
+POST /api/atlas/mode             set Atlas mode (observe|research|propose|paused)
+POST /api/atlas/pause            pause Atlas's autonomous work
+POST /api/atlas/resume           resume Atlas into a mode
+POST /api/atlas/message          ask Atlas a question (never grants authority)
 GET  /api/events               event stream with cursor and limit
 GET  /api/plans                recent order plans
 GET  /api/orders               recent orders
 GET  /api/agents               deployed agent definitions
 GET  /api/algorithms           categorized algorithm deployment catalog
 GET  /api/policy               configured operational allocation policy
-GET  /api/atlas                curated component catalog + live champion/stage overlay
+GET  /api/reference                curated component catalog + live champion/stage overlay
 GET  /api/performance          realized equity curve + metrics from the equity marks
 GET  /api/workflows            durable Claude-workforce runs and phase state
 GET  /api/workflows/<id>       one durable workflow and its ordered steps
@@ -49,6 +51,9 @@ GET  /api/tui                  one consistent terminal snapshot
 POST /api/lab/<tool>           bounded research tool executed by this owner
 POST /api/workflows/start      begin a standard or panel workforce run
 POST /api/workflows/<phase>    update one role-bound workflow phase
+POST /api/workflows/<id>/interrupt  pause a run for explicit resumption
+POST /api/workflows/<id>/resume     reopen an interrupted/failed/blocked run
+POST /api/workflows/<id>/abandon    permanently close an incomplete run
 POST /api/rebalance_preview    build an exact, referee-bound checked plan
 POST /api/plans/execute        human-confirm one existing checked paper plan
 POST /api/approvals            create a plan-bound, expiring approval request
@@ -70,6 +75,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import threading
 import time
@@ -104,6 +110,10 @@ _MARKET_THREAD_NAME = "qlab-market-topics"
 _MARKET_THREAD_JOIN_TIMEOUT_SECONDS = 5.0
 _MARKET_THREAD_LOCK = threading.Lock()
 _ACTIVE_MARKET_THREAD: threading.Thread | None = None
+# Claude's hard session ceiling is 30 minutes. A running registry row with no
+# update beyond this grace cannot belong to a healthy qlab coordinator.
+_WORKFLOW_STALE_AFTER_SECONDS = 35 * 60
+_WORKFLOW_REAP_INTERVAL_SECONDS = 60.0
 
 # Realized-performance window. `_MARK_WINDOW` is the newest-N read cap; when the
 # book has more marks than that, the payload says so rather than letting a
@@ -184,6 +194,11 @@ class UISession:
         from qlab.state.registry import Registry
 
         self.registry = registry or Registry()
+        # A coordinator is process-local. If a new owner acquired this registry,
+        # no old coordinator lease survived with it; leave completed evidence
+        # intact and turn only live-looking rows into resumable interruptions.
+        self.registry.interrupt_running_workflows(
+            "owner runtime restarted before the coordinator completed")
         self.mandate = load_mandate()
         # The operator's explicit choice; the persisted value is authoritative
         # when the caller passes none, and ``offline_default`` only seeds the
@@ -204,6 +219,13 @@ class UISession:
         # (a real Alpaca feed); it stays None for demo/offline runtimes.
         self.market_stream = None
         self._last_poll_mark = 0.0
+        self._last_workflow_reap = 0.0
+        # Atlas's composed qualitative read, refreshed by the heartbeat.
+        self._desk_read: dict | None = None
+        self.heartbeat = None
+        # Autonomy is a runtime switch the operator owns from the UI.
+        # The env var only seeds its initial value.
+        self.autonomous = os.environ.get("QLAB_ATLAS_AUTONOMOUS") == "1"
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -212,12 +234,12 @@ class UISession:
         owner_tools = _OwnerToolApp()
         register_lab_tools(owner_tools, self.lab_state, owner_only=True)
         self._lab_tools = owner_tools.tools
-        # BobTheQuant: the deterministic desk supervisor. It degrades (not fails)
+        # Atlas: the deterministic desk supervisor. It degrades (not fails)
         # when the coordinator (Claude) is absent and holds no execution or
         # proposal authority in Observe mode.
-        from qlab.operator.bob import BobSupervisor
+        from qlab.operator.atlas import AtlasSupervisor
 
-        self.bob = BobSupervisor(
+        self.atlas = AtlasSupervisor(
             self.registry,
             coordinator_available=lambda: bool(shutil.which("claude")))
 
@@ -273,6 +295,46 @@ class UISession:
             str(body.get("status") or "working"),
             str(body.get("summary") or ""),
             body.get("artifacts") if isinstance(body.get("artifacts"), dict) else {},
+        )
+
+    def control_workflow(
+        self,
+        workflow_id: str,
+        action: str,
+        body: dict,
+    ) -> dict:
+        """Apply a human/operator lifecycle transition through the sole writer."""
+        reason = str(body.get("reason") or "").strip()
+        if action == "interrupt":
+            return self.registry.interrupt_workflow(
+                workflow_id,
+                reason or "operator stopped the coordinator before completion",
+            )
+        if action == "resume":
+            return self.registry.resume_workflow(workflow_id)
+        if action == "abandon":
+            return self.registry.abandon_workflow(
+                workflow_id,
+                reason or "operator abandoned the incomplete workflow",
+            )
+        raise ValueError(f"unknown workflow control action {action!r}")
+
+    def reap_stale_workflows(self, *, force: bool = False) -> list[dict]:
+        """Turn expired live-looking rows into resumable interruptions."""
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_workflow_reap < _WORKFLOW_REAP_INTERVAL_SECONDS
+        ):
+            return []
+        self._last_workflow_reap = now
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=_WORKFLOW_STALE_AFTER_SECONDS)
+        ).isoformat()
+        return self.registry.interrupt_running_workflows(
+            "coordinator lease expired after the workforce time limit",
+            updated_before=cutoff,
         )
 
     def rebalance_preview(self, body: dict, offline: bool) -> dict:
@@ -848,6 +910,7 @@ class UISession:
         """Agent definitions shaped for the persistent work rail."""
         from qlab.agents.loader import load_agents
 
+        self.reap_stale_workflows()
         latest = self.registry.list_workflows(limit=1)
         step_states = {
             step["agent"]: step["status"]
@@ -1025,9 +1088,9 @@ class UISession:
             min_similarity=float(_one("min_similarity", 0.5)))
         return {"as_of": as_of, "fingerprint": fingerprint, "decisions": rows}
 
-    # -- BobTheQuant desk manager -------------------------------------------
-    def bob_facts(self, offline: bool) -> dict:
-        """Assemble the deterministic owner facts Bob observes (no LLM)."""
+    # -- Atlas desk manager -------------------------------------------
+    def atlas_facts(self, offline: bool) -> dict:
+        """Assemble the deterministic owner facts Atlas observes (no LLM)."""
         port = self.portfolio(offline)
         health = self.data_health(offline)
         weights = port.get("weights", {}) or {}
@@ -1061,17 +1124,146 @@ class UISession:
             "open_workflows": len(self.registry.list_workflows(50)),
             "pending_approvals": 0,
             "order_anomaly": anomaly,
+            # The grounded window the news-analyst would interpret. Present so
+            # template preconditions can refuse an empty record rather than
+            # letting the analyst narrate silence.
+            "news_window_items": len(
+                (self.desk_read(offline).get("grounding") or {})
+                .get("hashes", [])),
         }
 
-    def bob_observe(self, offline: bool) -> dict:
-        """Run one deterministic Bob observe tick against current owner facts."""
-        facts = self.bob_facts(offline)
-        return self.bob.observe(facts, trading_date=date.today().isoformat())
+    def atlas_observe(self, offline: bool) -> dict:
+        """Run one deterministic Atlas observe tick against current owner facts."""
+        facts = self.atlas_facts(offline)
+        return self.atlas.observe(facts, trading_date=date.today().isoformat())
 
-    def bob_workflow_runner(self, task: dict, template_id: str) -> dict:
-        """Start the durable workforce run a Bob task selected.
+    def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:
+        """Atlas's composed qualitative read across signals, news, and research.
 
-        This is the seam BobSupervisor.start_task calls once authority has
+        Cached between heartbeats: composing it fetches news and builds the
+        regime panel, which is too heavy to redo on every status poll.
+        """
+        if not refresh and self._desk_read is not None:
+            return self._desk_read
+        return self.refresh_desk_read(offline)
+
+    def refresh_desk_read(self, offline: bool) -> dict:
+        """Recompose the desk read from current evidence."""
+        from qlab.news.feed import fetch_news
+        from qlab.operator.synthesis import compose_read, read_news
+
+        universe = self.mandate.universe_whitelist
+        as_of = date.today().isoformat()
+        try:
+            panel = self.regime_panel(offline)
+        except Exception as exc:
+            panel = {"robust_state": "unknown",
+                     "uncertainty_reason": f"panel unavailable: {exc}"}
+        news_error = None
+        try:
+            items = fetch_news(as_of, universe, lookback_hours=48,
+                               offline=offline)
+        except Exception as exc:
+            # A news outage weakens the read but never breaks the desk. It must
+            # still be VISIBLE: a silently empty news window is indistinguishable
+            # from a genuinely quiet market, and those mean opposite things.
+            items = []
+            news_error = str(exc)
+        # Ground the window before interpreting it: enforce the point-in-time
+        # boundary, hash each record so an edited headline is a new record
+        # rather than a silent rewrite, and cluster so corroboration is visible.
+        from qlab.news.grounding import ground
+
+        provider_name = ("synthetic" if offline else
+                         os.environ.get("QLAB_NEWS_PROVIDER", "synthetic"))
+        grounded = ground(
+            items, as_of=datetime.now(timezone.utc).isoformat(),
+            provider=provider_name, universe=universe)
+        news = read_news(grounded.items)
+        portfolio = {"drawdown_tier": self.mandate.drawdown_tier(
+            float(self.portfolio(offline).get("drawdown", 0.0)))}
+        decisions = self.registry.recent_decisions(limit=10)
+        verdicts = self.registry.verdicts_for(
+            [d["decision_id"] for d in decisions])
+        read = compose_read(
+            as_of=as_of, panel=panel, news=news, portfolio=portfolio,
+            recent_verdicts=[v for v in verdicts.values() if v])
+        payload = read.to_dict()
+        payload["news_source"] = (
+            "synthetic (demo)" if offline else provider_name)
+        payload["grounding"] = grounded.to_dict()
+        # Claims a human should actually weigh: primary documents and
+        # multi-publisher stories. Single secondary takes stay visible in the
+        # full window but are not promoted as established.
+        payload["supported_claims"] = [
+            c.to_dict() for c in grounded.corroborated_claims[:6]]
+        if news_error:
+            payload["news_error"] = news_error[:400]
+            payload["observations"] = [
+                f"News feed is UNAVAILABLE ({news_error[:160]}); the "
+                "qualitative side of this read is missing, not quiet.",
+                *payload["observations"],
+            ]
+        self._desk_read = payload
+        return self._desk_read
+
+    def set_autonomy(self, enabled: bool) -> dict:
+        """Turn autonomous work on or off at runtime.
+
+        This does not widen authority: the mode still decides what may run, so
+        enabling autonomy in Observe mode still launches nothing. It only
+        removes the need for a human to press start on permitted work.
+        """
+        self.autonomous = bool(enabled)
+        mode = self.atlas.status().get("mode", "observe")
+        self.registry.record_event(
+            "atlas_autonomy", {"enabled": self.autonomous, "mode": mode})
+        return {
+            "autonomous": self.autonomous,
+            "mode": mode,
+            "effect": (
+                "Atlas will start work its mode permits on each heartbeat"
+                if self.autonomous and mode in ("research", "propose")
+                else f"enabled, but {mode!r} mode starts no workflows"
+                if self.autonomous
+                else "Atlas will queue work and wait for you to start it"),
+        }
+
+    def atlas_escalate_debate(self, offline: bool) -> dict:
+        """Open a bounded debate when Atlas's read finds material disagreement.
+
+        Atlas does not get a private argument channel: it opens the SAME
+        registry-enforced debate the workforce uses, with an allowlisted claim,
+        a two-round ceiling, and an adjudication the reporter waits on.
+        """
+        from qlab.governance.debate import DebateViolation, open_debate
+        from qlab.operator.synthesis import should_open_debate
+
+        read = self.desk_read(offline)
+        should, claim = should_open_debate(read)
+        if not should:
+            return {"opened": False,
+                    "reason": "no material disagreement in the current read"}
+        decisions = self.registry.recent_decisions(limit=1)
+        decision_id = decisions[0]["decision_id"] if decisions else "no-decision"
+        try:
+            debate_id = open_debate(
+                self.registry, workflow_id=f"atlas-{read.get('read_hash')}",
+                original_decision_id=decision_id, material_claims=[claim],
+                panel_snapshot_id=(read.get("evidence_refs") or [None])[0])
+        except DebateViolation as exc:
+            return {"opened": False, "reason": str(exc)}
+        self.registry.record_event(
+            "atlas_opened_debate",
+            {"debate_id": debate_id, "claim": claim,
+             "tension": (read.get("tensions") or [""])[0][:200]})
+        return {"opened": True, "debate_id": debate_id, "claim": claim,
+                "tensions": read.get("tensions")}
+
+    def atlas_workflow_runner(self, task: dict, template_id: str) -> dict:
+        """Start the durable workforce run a Atlas task selected.
+
+        This is the seam AtlasSupervisor.start_task calls once authority has
         already been checked. It only *starts* a governed workflow — the same
         one a human could start — and returns the handle. It grants nothing:
         the workflow's own phase gates, referee binding, and approval
@@ -1084,43 +1276,66 @@ class UISession:
             # Deterministic templates (desk_brief) need no workforce at all.
             return {"template_id": template_id, "workflow_id": None,
                     "action_taken": False,
-                    "brief": self.bob.desk_brief(self.bob_facts(True))}
+                    "brief": self.atlas.desk_brief(self.atlas_facts(True))}
         started = self.start_workflow({
             "kind": "portfolio_review",
             "goal": f"[{template_id}] {template.purpose} "
                     f"(trigger: {task.get('trigger_kind')})",
-            "started_by": "bob-the-quant",
+            "started_by": "atlas",
         })
         workflow_id = (started or {}).get("workflow_id")
         if workflow_id:
-            self.registry.update_bob_task(
+            self.registry.update_atlas_task(
                 str(task.get("task_id")), workflow_id=str(workflow_id))
         return {"template_id": template_id, "workflow_id": workflow_id,
                 "action_taken": True}
 
-    def bob_start_task(self, task_id: str, offline: bool) -> dict:
-        """Start one queued Bob task through the governed workflow runner."""
-        facts = self.bob_facts(offline)
-        return self.bob.start_task(task_id, facts,
-                                   runner=self.bob_workflow_runner)
+    def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
+        """Start the queued work Atlas's current mode already permits.
 
-    def bob_message(self, body: dict) -> dict:
+        Autonomy is a *convenience*, never an authority widening: every task
+        still goes through ``start_task``, so mode checks, the retry budget,
+        and the plan-creation boundary all apply unchanged. In Research mode
+        this launches research and still cannot create a paper plan.
+        """
+        facts = self.atlas_facts(offline)
+        started: list[dict] = []
+        for candidate in self.atlas.startable_tasks(facts):
+            if len(started) >= limit:
+                break
+            if not candidate.get("startable"):
+                continue
+            result = self.atlas.start_task(
+                candidate["task_id"], facts, runner=self.atlas_workflow_runner)
+            started.append({"task_id": candidate["task_id"],
+                            "template_id": candidate.get("template_id"),
+                            **{k: v for k, v in result.items()
+                               if k in ("started", "completed", "blocked_by")}})
+        return started
+
+    def atlas_start_task(self, task_id: str, offline: bool) -> dict:
+        """Start one queued Atlas task through the governed workflow runner."""
+        facts = self.atlas_facts(offline)
+        return self.atlas.start_task(task_id, facts,
+                                   runner=self.atlas_workflow_runner)
+
+    def atlas_message(self, body: dict) -> dict:
         """Accept a human question or explicit workflow request.
 
         This never grants authority. The message is recorded; a substantive
-        answer needs the coordinator, so when Claude is absent Bob acknowledges
+        answer needs the coordinator, so when Claude is absent Atlas acknowledges
         and reports itself degraded rather than fabricating an answer.
         """
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("message text is required")
-        self.registry.record_event("bob_message", {"text": text[:500]})
+        self.registry.record_event("atlas_message", {"text": text[:500]})
         available = bool(shutil.which("claude"))
         return {
             "received": True,
             "coordinator_available": available,
             "note": ("queued for the interpreting agent" if available
-                     else "coordinator unavailable; Bob is degraded and cannot "
+                     else "coordinator unavailable; Atlas is degraded and cannot "
                           "answer, but the owner, data, and book remain usable"),
         }
 
@@ -1301,18 +1516,18 @@ class UISession:
                 return {bt["arm_id"]: bt["metrics"] for bt in backtests}
         return {}
 
-    def atlas(self) -> dict:
+    def reference(self) -> dict:
         """The curated catalog with live facts overlaid, never stored in prose."""
         from dataclasses import asdict
 
         from qlab.algorithms import list_algorithms
-        from qlab.core.atlas import ATLAS_ENTRIES
+        from qlab.core.reference import REFERENCE_ENTRIES
 
         catalog = {row["id"]: row for row in list_algorithms()}
         champion = self.mandate.operational_policy
         ablation = self.latest_ablation_metrics()
         entries = []
-        for entry in ATLAS_ENTRIES:
+        for entry in REFERENCE_ENTRIES:
             row = asdict(entry)
             spec = catalog.get(entry.algorithm_key) if entry.algorithm_key else None
             row["stage"] = spec["stage"] if spec else None
@@ -1327,7 +1542,7 @@ class UISession:
     def leaderboard(self) -> list[dict]:
         """Newest ablation ranked by Sharpe, in operator-readable method names."""
         from qlab.algorithms import list_algorithms
-        from qlab.core.atlas import (
+        from qlab.core.reference import (
             OVERLAY_METRICS,
             arm_algorithm_key,
             arm_display_name,
@@ -1393,8 +1608,14 @@ class UISession:
             "live_portfolio": self.live_portfolio(offline),
             "market": market_snapshot,
             "stress": stress,
-            "bob": self.bob.status(),
-            "bob_tasks": self.registry.list_bob_tasks(10),
+            "atlas": self.atlas.status(),
+            "atlas_read": self.desk_read(offline),
+            "atlas_heartbeat": {
+                **(self.heartbeat.status() if self.heartbeat
+                   else {"running": False, "ticks": 0}),
+                "autonomous": self.autonomous,
+            },
+            "atlas_tasks": self.registry.list_atlas_tasks(10),
             "approvals": self.registry.list_approval_requests(10, "pending"),
             "quotes": self.quotes(),
             "agents": self.agents(),
@@ -1646,14 +1867,15 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/policy":
         return 200, session.allocation_policy()
 
-    if method == "GET" and path == "/api/atlas":
-        return 200, session.atlas()
+    if method == "GET" and path == "/api/reference":
+        return 200, session.reference()
 
     if method == "GET" and path == "/api/performance":
         return 200, session.performance(
             _qbool(query, "offline", session.offline_default))
 
     if method == "GET" and path == "/api/workflows":
+        session.reap_stale_workflows()
         limit = max(1, min(int(query.get("limit", ["10"])[0]), 50))
         return 200, {"workflows": session.registry.list_workflows(limit)}
 
@@ -1732,57 +1954,75 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/models/invocations":
         return 200, {"invocations": session.registry.list_model_invocations(50)}
 
-    if method == "GET" and path == "/api/bob/status":
-        return 200, session.bob.status()
+    if method == "GET" and path == "/api/atlas/status":
+        status = session.atlas.status()
+        status["heartbeat"] = (
+            session.heartbeat.status() if session.heartbeat else
+            {"running": False, "ticks": 0})
+        return 200, status
 
-    if method == "GET" and path == "/api/bob/tasks":
-        return 200, {"tasks": session.registry.list_bob_tasks(50)}
+    if method == "GET" and path == "/api/atlas/read":
+        offline = _qbool(query, "offline", session.offline_default)
+        refresh = _qbool(query, "refresh", False)
+        return 200, session.desk_read(offline, refresh=refresh)
 
-    if method == "GET" and path == "/api/bob/templates":
+    if method == "GET" and path == "/api/atlas/tasks":
+        return 200, {"tasks": session.registry.list_atlas_tasks(50)}
+
+    if method == "GET" and path == "/api/atlas/templates":
         from qlab.operator.templates import TEMPLATES
 
         return 200, {"templates": [t.to_dict() for t in TEMPLATES.values()]}
 
-    if method == "GET" and path == "/api/bob/shadow":
+    if method == "GET" and path == "/api/atlas/shadow":
         from qlab.operator.shadow import shadow_scorecard
 
         return 200, shadow_scorecard(
             session.registry, since=query.get("since", [None])[0])
 
-    if method == "GET" and path == "/api/bob/startable":
+    if method == "GET" and path == "/api/atlas/startable":
         offline = _qbool(query, "offline", session.offline_default)
-        facts = session.bob_facts(offline)
-        return 200, {"startable": session.bob.startable_tasks(facts)}
+        facts = session.atlas_facts(offline)
+        return 200, {"startable": session.atlas.startable_tasks(facts)}
 
-    if method == "POST" and path == "/api/bob/observe":
-        return 200, session.bob_observe(off)
+    if method == "POST" and path == "/api/atlas/observe":
+        return 200, session.atlas_observe(off)
 
-    if method == "POST" and path == "/api/bob/mode":
+    if method == "POST" and path == "/api/atlas/mode":
         mode = str(body.get("mode") or "")
         try:
-            return 200, session.bob.set_mode(mode)
+            return 200, session.atlas.set_mode(mode)
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
-    if method == "POST" and path == "/api/bob/pause":
-        return 200, session.bob.pause()
+    if method == "POST" and path == "/api/atlas/pause":
+        return 200, session.atlas.pause()
 
-    if method == "POST" and path == "/api/bob/resume":
-        return 200, session.bob.resume(str(body.get("mode") or "observe"))
+    if method == "POST" and path == "/api/atlas/resume":
+        return 200, session.atlas.resume(str(body.get("mode") or "observe"))
 
-    if (method == "POST" and path.startswith("/api/bob/tasks/")
+    if (method == "POST" and path.startswith("/api/atlas/tasks/")
             and path.endswith("/start")):
-        task_id = path.removeprefix("/api/bob/tasks/").removesuffix("/start")
+        task_id = path.removeprefix("/api/atlas/tasks/").removesuffix("/start")
         try:
-            return 200, session.bob_start_task(task_id, off)
+            return 200, session.atlas_start_task(task_id, off)
         except KeyError as exc:
             return 404, {"error": str(exc)}
         except PermissionError as exc:
             return 400, {"error": str(exc)}
 
-    if method == "POST" and path == "/api/bob/message":
+    if method == "POST" and path == "/api/atlas/autonomy":
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return 400, {"error": "enabled must be true or false"}
+        return 200, session.set_autonomy(enabled)
+
+    if method == "POST" and path == "/api/atlas/escalate":
+        return 200, session.atlas_escalate_debate(off)
+
+    if method == "POST" and path == "/api/atlas/message":
         try:
-            return 200, session.bob_message(body)
+            return 200, session.atlas_message(body)
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
@@ -1888,9 +2128,27 @@ def handle_api(session: UISession, method: str, path: str,
             return 400, {"error": str(exc)}
 
     if method == "POST" and path.startswith("/api/workflows/"):
+        rest = path.removeprefix("/api/workflows/")
+        workflow_id, separator, action = rest.rpartition("/")
+        if separator and action in {"interrupt", "resume", "abandon"}:
+            try:
+                return 200, session.control_workflow(
+                    workflow_id, action, body)
+            except KeyError as exc:
+                return 404, {"error": str(exc)}
+            except RuntimeError as exc:
+                return 409, {"error": str(exc)}
+            except ValueError as exc:
+                return 400, {"error": str(exc)}
+
+    if method == "POST" and path.startswith("/api/workflows/"):
         phase = path.removeprefix("/api/workflows/")
         try:
             return 200, session.update_workflow(phase, body)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
+        except RuntimeError as exc:
+            return 409, {"error": str(exc)}
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
@@ -2214,6 +2472,31 @@ def _startup_banner(mode: DeskMode, url: str) -> str:
             f"data={mode.data} book={mode.book}; paper capital only)")
 
 
+def _start_atlas_heartbeat(session: UISession, *, offline: bool,
+                         interval_s: float | None = None):
+    """Start the desk manager's heartbeat inside the owner process.
+
+    Ticks under the owner's dispatch lock, so Atlas observing never races a
+    request — the one-writer rule is preserved.
+    """
+    from qlab.operator.heartbeat import AtlasHeartbeat, build_owner_tick
+
+    seconds = float(os.environ.get("QLAB_ATLAS_INTERVAL_S", interval_s or 30.0))
+    # Autonomy is opt-in and does not widen authority: the mode still decides
+    # what may run, so QLAB_ATLAS_AUTONOMOUS=1 in Observe mode still launches
+    # nothing.
+    autonomous = os.environ.get("QLAB_ATLAS_AUTONOMOUS") == "1"
+    heartbeat = AtlasHeartbeat(
+        build_owner_tick(session, _LOCK, offline=offline,
+                         autonomous=autonomous),
+        interval_s=seconds,
+        on_error=lambda exc: print(f"[qlab] atlas heartbeat: {exc!r}", flush=True),
+    )
+    session.heartbeat = heartbeat
+    heartbeat.start()
+    return heartbeat
+
+
 def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
           desk_mode: DeskMode | None = None) -> None:
     """Start the UI server (blocking). Ctrl-C to stop.
@@ -2223,12 +2506,19 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
     ``offline`` only seeds a desk that has never been chosen. The mode the
     session settles on is what the banner reports.
     """
-    session = UISession(offline_default=offline, desk_mode=desk_mode)
-    market_stop, market_thread = _start_market_topics(session)
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     except Exception:
-        _stop_market_topics(market_stop, market_thread)
+        # Resolve ownership before opening DuckDB or recovering workflows. A
+        # second process that cannot bind this port must remain a pure refusal,
+        # never a transient second writer that interrupts the real owner's run.
+        raise
+    try:
+        session = UISession(offline_default=offline, desk_mode=desk_mode)
+        market_stop, market_thread = _start_market_topics(session)
+        _start_atlas_heartbeat(session, offline=offline)
+    except Exception:
+        httpd.server_close()
         raise
     httpd.daemon_threads = True
     _Handler.session = session
@@ -2243,6 +2533,10 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
         print("\n[qlab] UI stopped.")
     finally:
         try:
-            _stop_market_topics(market_stop, market_thread)
+            if session.heartbeat is not None:
+                session.heartbeat.stop()
         finally:
-            httpd.server_close()
+            try:
+                _stop_market_topics(market_stop, market_thread)
+            finally:
+                httpd.server_close()

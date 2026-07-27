@@ -1,7 +1,7 @@
 """Standing paper authority: an expiring, revocable, code-checked grant.
 
 **This is inert by default and must stay that way until reviewed.** No grant
-exists unless a human creates one, no code path creates one on its own, and Bob
+exists unless a human creates one, no code path creates one on its own, and Atlas
 can neither create, edit, nor read-around one. The plan requires a separate
 design review of the grant schema, revocation, anomaly pauses, and the operator
 experience before standing authority is actually used; this module implements

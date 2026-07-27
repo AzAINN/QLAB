@@ -598,9 +598,77 @@ def _validate_ticker_list(value: Any, label: str) -> None:
         raise ValueError(f"{label} must be a non-empty list of strings")
 
 
+def _fetch_alpaca(
+    as_of: datetime,
+    universe: tuple[str, ...],
+) -> list[NewsItem]:
+    """Fetch ticker-tagged news from Alpaca (Benzinga-backed).
+
+    Strictly better grounded than generic RSS for this purpose: the venue tags
+    each story with the symbols it concerns, so no keyword guessing is needed,
+    and the window is a real date range rather than "whatever is in the feed
+    right now" — which is what makes point-in-time replay possible.
+
+    Uses the same credentials as the broker and market data. Fails loud: a
+    news provider that silently returns nothing is indistinguishable from a
+    quiet market, and those mean opposite things.
+    """
+    key = os.environ.get("ALPACA_API_KEY", "").strip()
+    secret = os.environ.get("ALPACA_API_SECRET", "").strip()
+    if not (key and secret):
+        raise RuntimeError(
+            "alpaca news provider requires ALPACA_API_KEY and "
+            "ALPACA_API_SECRET")
+    try:
+        from alpaca.data.historical.news import NewsClient
+        from alpaca.data.requests import NewsRequest
+    except ImportError as exc:
+        raise RuntimeError(
+            "alpaca news provider requires the 'alpaca-py' package; "
+            "install qlab[trader]") from exc
+
+    client = NewsClient(key, secret)
+    request = NewsRequest(
+        symbols=",".join(universe),
+        start=as_of - timedelta(days=7),
+        end=as_of,
+        limit=50,
+        include_content=True,
+        exclude_contentless=True,
+    )
+    try:
+        response = client.get_news(request)
+    except Exception as exc:
+        raise RuntimeError(f"alpaca news request failed ({exc})") from exc
+
+    raw = getattr(response, "data", None)
+    records = raw.get("news", []) if isinstance(raw, dict) else (raw or [])
+    universe_set = set(universe)
+    items: list[NewsItem] = []
+    for record in records:
+        symbols = tuple(
+            s for s in (getattr(record, "symbols", None) or [])
+            if s in universe_set)
+        if not symbols:
+            continue
+        published = getattr(record, "created_at", None)
+        items.append(NewsItem(
+            source=str(getattr(record, "source", "") or "alpaca"),
+            published=_iso_timestamp(_as_datetime(published)) if published
+            else _iso_timestamp(as_of),
+            headline=str(getattr(record, "headline", "") or ""),
+            summary=str(getattr(record, "summary", "") or ""),
+            url=str(getattr(record, "url", "") or ""),
+            tickers=tuple(sorted(symbols)),
+            provider="alpaca",
+        ))
+    return items
+
+
 PROVIDERS.update(
     {
         "synthetic": _fetch_synthetic,
         "rss": _fetch_rss,
+        "alpaca": _fetch_alpaca,
     }
 )

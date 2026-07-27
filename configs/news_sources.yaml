@@ -1,5 +1,10 @@
 # Curated, read-only news sources for the bounded qualitative research lane.
 # A source either maps every item to fixed tickers or applies keyword rules.
+#
+# Every URL here was reachable when last verified (2026-07-25). The rss
+# provider fails loud if ANY feed is unreachable — that is deliberate, so a
+# silently shrinking news window can never masquerade as a quiet market. If a
+# feed dies, fix or remove it here rather than letting the lane degrade.
 feeds:
   - name: Federal Reserve
     url: https://www.federalreserve.gov/feeds/press_all.xml
@@ -9,29 +14,46 @@ feeds:
     url: https://www.ecb.europa.eu/rss/press.html
     tickers: [BNDW, EMB, IGF]
 
-  - name: U.S. Treasury
-    url: https://home.treasury.gov/news/press-releases/feed
-    tickers: [BNDW, EMB, IGF]
-
-  - name: Reuters Markets
-    url: https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best
-    keywords:
-      - terms: [global market, world stocks, equities, shares, stock market]
-        tickers: [ACWI]
-      - terms: [commodity, commodities, crude oil, energy market]
-        tickers: [GSG]
-      - terms: [gold, precious metal, bullion]
-        tickers: [GLD]
-      - terms: [real estate, property market, REIT]
-        tickers: [VNQ]
-
   - name: EIA Today in Energy
     url: https://www.eia.gov/rss/todayinenergy.xml
     tickers: [GSG]
 
   - name: Nareit News
-    url: https://www.reit.com/news/blog/market-commentary/rss.xml
+    url: https://www.reit.com/rss.xml
     tickers: [VNQ]
+
+  - name: CNBC Markets
+    url: https://www.cnbc.com/id/20910258/device/rss/rss.html
+    keywords:
+      - terms: [global market, world stocks, equities, shares, stock market,
+                s&p, nasdaq, dow]
+        tickers: [ACWI]
+      - terms: [commodity, commodities, crude oil, energy market, opec]
+        tickers: [GSG]
+      - terms: [gold, precious metal, bullion]
+        tickers: [GLD]
+      - terms: [real estate, property market, REIT, housing]
+        tickers: [VNQ]
+      - terms: [treasury, bond, yield, fed, inflation, rate cut, rate hike]
+        tickers: [BNDW]
+      - terms: [emerging market, china, india, brazil]
+        tickers: [EMB]
+      - terms: [infrastructure, utilities, pipeline]
+        tickers: [IGF]
+
+  - name: MarketWatch Top Stories
+    url: http://feeds.marketwatch.com/marketwatch/topstories/
+    keywords:
+      - terms: [stocks, equities, market, s&p, nasdaq, dow]
+        tickers: [ACWI]
+      - terms: [oil, commodity, commodities, energy]
+        tickers: [GSG]
+      - terms: [gold, silver, bullion]
+        tickers: [GLD]
+      - terms: [treasury, bond, yield, inflation, fed]
+        tickers: [BNDW]
+      - terms: [real estate, housing, REIT]
+        tickers: [VNQ]
 
 # These are deterministic fixtures, not cached or simulated live headlines.
 # The provider picks one template per requested ticker and timestamps it from a

@@ -28,14 +28,14 @@ from textual.widgets import (
     Static,
 )
 
-from qlab.core.atlas import arm_display_name
 from qlab.core.desk_mode import DeskMode
+from qlab.core.reference import arm_display_name
 from qlab.paths import workspace_root
 from qlab.research.prediction import (
     IC_ADMISSION_THRESHOLD,
     IC_STABILITY_THRESHOLD,
 )
-from qlab.tui.atlas_view import AtlasView
+from qlab.tui.reference_view import ReferenceView
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
 from qlab.tui.desk_mode_screen import DeskModeScreen
@@ -62,7 +62,7 @@ from qlab.tui.theme import (
     LABEL_GOLD,
     MUTED,
     PALETTE_NAME,
-    BOB_DRAWER_CSS,
+    ATLAS_DRAWER_CSS,
     PAPER_MODAL_CSS,
     SEL_BG,
     STATE_STYLE,
@@ -75,8 +75,8 @@ from qlab.tui.theme import (
 _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 _VIEWS = (
-    "dashboard", "market", "workforce", "research", "book", "audit", "atlas",
-    "settings",
+    "atlas", "dashboard", "market", "workforce", "research", "book", "audit",
+    "reference", "settings",
 )
 _DASHBOARD_TILE_KEYS = (
     "equity", "allocation", "regime", "market-pulse", "verdict", "run", "alerts",
@@ -85,15 +85,15 @@ _DASHBOARD_TILE_KEYS = (
 _AGENT_NAMES = (
     "moments-analyst", "challenger", "optimization-runner", "referee", "reporter",
 )
-# What each Bob mode may do. Stated plainly in the drawer because the mode IS
-# the authority: a reader must never have to infer what Bob is allowed to do.
-_BOB_STATE_TONES = {
+# What each Atlas mode may do. Stated plainly in the drawer because the mode IS
+# the authority: a reader must never have to infer what Atlas is allowed to do.
+_ATLAS_STATE_TONES = {
     "observing": UP,
     "blocked": DOWN,
     "degraded": AMBER,
     "paused": MUTED,
 }
-_BOB_MODE_AUTHORITY = {
+_ATLAS_MODE_AUTHORITY = {
     "observe": "Observe: monitors and briefs. Starts no workflows.",
     "research": "Research: may start approved research workflows. "
                 "May not create a paper plan.",
@@ -225,6 +225,7 @@ _PULSE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 # Bus events that mean durable state changed and a full refresh is worth it.
 _REFRESH_EVENT_KINDS = {
     "workflow_started", "workflow_phase", "referee_verdict",
+    "workflow_interrupted", "workflow_resumed", "workflow_abandoned",
     "plan_built", "order_filled", "decision_logged", "ablation_complete",
     "cost_gate_refusal", "autopilot_trigger", "daily_ops",
 }
@@ -237,6 +238,7 @@ COMMAND_TABLE = {
     ("view", "research"): "action_view",
     ("view", "book"): "action_view",
     ("view", "audit"): "action_view",
+    ("view", "reference"): "action_view",
     ("view", "atlas"): "action_view",
     ("view", "settings"): "action_view",
     ("view", "agents"): "action_agent_focus",
@@ -250,10 +252,13 @@ COMMAND_TABLE = {
     ("workforce", "status"): "action_workforce_status",
     ("workforce", "resume"): "action_workforce_resume",
     ("workforce", "stop"): "action_workforce_stop",
+    ("workforce", "abandon"): "action_workforce_abandon",
+    ("workforce", "clean"): "action_workforce_abandon",
     ("governed", None): "action_workforce_new",
     ("governed", "status"): "action_workforce_status",
     ("governed", "resume"): "action_workforce_resume",
     ("governed", "stop"): "action_workforce_stop",
+    ("governed", "abandon"): "action_workforce_abandon",
     ("rebalance", "dry"): "action_rebalance_dry",
     ("rebalance", "paper"): "action_rebalance_paper",
     ("daily", None): "action_daily_ops",
@@ -348,6 +353,18 @@ def workforce_note(phase: str, status: str, summary: str,
         return (f"{short} blocked — {detail or 'a governance gate was not met'}",
                 "A hard gate refused, so nothing downstream may proceed. Nothing "
                 "was traded; this is the gate working.")
+    if status == "interrupted":
+        return (
+            f"{short} interrupted — {detail or 'the coordinator stopped'}",
+            "The run is paused, not working. Resume it explicitly or abandon it "
+            "to close the incomplete review.",
+        )
+    if status == "abandoned":
+        return (
+            f"{short} abandoned — {detail or 'the operator closed the run'}",
+            "The incomplete review is closed and remains in the audit trail. "
+            "Start a new review for fresh reasoning.",
+        )
 
     # The worker's own summary is the specific account; the role clause is only
     # the fallback, so the note never repeats what the summary already says.
@@ -506,6 +523,8 @@ def _result_banner(status: str) -> tuple[str, str]:
         "complete": (UP, "WORKFORCE COMPLETE"),
         "blocked": (AMBER, "STOPPED AT A SAFETY GATE"),
         "failed": (DOWN, "STOPPED ON AN ERROR"),
+        "interrupted": (GOLD, "WORKFORCE INTERRUPTED"),
+        "abandoned": (MUTED, "WORKFORCE ABANDONED"),
     }.get(status, (GOLD, "ENDED EARLY"))
 
 
@@ -520,6 +539,10 @@ def _result_headline(status: str, verdict: str) -> str:
         return "A safety gate stopped the run before any trade. Nothing was traded."
     if status == "failed":
         return "The run hit an error before finishing. Its completed steps are saved."
+    if status == "interrupted":
+        return "The coordinator stopped. Completed steps are saved and resumable."
+    if status == "abandoned":
+        return "The incomplete run was closed by the operator. Nothing was traded."
     return "The run ended before completing. The steps it reached are below."
 
 
@@ -559,6 +582,10 @@ def _agent_brief(phase: str, step: dict | None,
         return "◌", DIM, name, "did not run"
     if state == "working":
         return glyph, colour, name, "was still running when the run stopped"
+    if state == "interrupted":
+        return glyph, colour, name, "paused safely before completing"
+    if state == "abandoned":
+        return glyph, colour, name, "did not complete before the run was abandoned"
     if state in ("failed", "blocked"):
         reason = " · ".join(
             bulletin(
@@ -608,6 +635,10 @@ def _result_meaning(status: str, verdict: str, has_targets: bool,
                 "proposing a trade. This is the guardrail working as intended.")
     if status == "failed":
         return "Nothing was traded. You can resume the run once the cause is fixed."
+    if status == "interrupted":
+        return "Nothing was traded. Resume explicitly when you are ready to continue."
+    if status == "abandoned":
+        return "Nothing was traded. Start a new review if you want fresh reasoning."
     return "Nothing was traded. You can resume the run to finish it."
 
 
@@ -781,8 +812,8 @@ class PaperConfirmScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm-paper")
 
 
-class BobDrawerScreen(ModalScreen[None]):
-    """Bob's full detail: state, triggers, task history, pending approvals.
+class AtlasDrawerScreen(ModalScreen[None]):
+    """Atlas's full detail: state, triggers, task history, pending approvals.
 
     Read-only by construction. Approving a plan is a deliberate act through the
     owner's approvals API, never a keystroke inside a status drawer.
@@ -792,17 +823,17 @@ class BobDrawerScreen(ModalScreen[None]):
         Binding("escape", "cancel", "Close", show=False),
         Binding("ctrl+b", "cancel", "Close", show=False),
     ]
-    CSS = BOB_DRAWER_CSS
+    CSS = ATLAS_DRAWER_CSS
 
     def __init__(self, body: str = ""):
         super().__init__()
         self.body = body
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="bob-drawer"):
-            yield Static("BOB · DESK MANAGER", id="bob-drawer-title")
-            yield Static(self.body, id="bob-drawer-body", markup=True)
-            yield Static("esc or ctrl+b to close", id="bob-drawer-hint")
+        with Vertical(id="atlas-drawer"):
+            yield Static("ATLAS · DESK MANAGER", id="atlas-drawer-title")
+            yield Static(self.body, id="atlas-drawer-body", markup=True)
+            yield Static("esc or ctrl+b to close", id="atlas-drawer-hint")
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -816,29 +847,31 @@ class QlabTui(App[None]):
     CSS = APP_CSS
 
     BINDINGS = [
-        Binding("1", "view('dashboard')", "Dashboard", show=False),
-        Binding("2", "view('market')", "Market", show=False),
-        Binding("3", "view('workforce')", "Workforce", show=False),
-        Binding("4", "view('research')", "Research", show=False),
-        Binding("5", "view('book')", "Book", show=False),
-        Binding("6", "view('audit')", "Audit", show=False),
-        Binding("7", "view('atlas')", "Atlas", show=False),
-        Binding("8", "view('settings')", "Settings", show=False),
-        Binding("f1", "view('dashboard')", "Dashboard", show=False),
-        Binding("f2", "view('market')", "Market", show=False),
-        Binding("f3", "view('workforce')", "Workforce", show=False),
-        Binding("f4", "view('research')", "Research", show=False),
-        Binding("f5", "view('book')", "Book", show=False),
-        Binding("f6", "view('audit')", "Audit", show=False),
-        Binding("f7", "view('atlas')", "Atlas", show=False),
-        Binding("f8", "view('settings')", "Settings", show=False),
+        Binding("1", "view('atlas')", "Atlas", show=False),
+        Binding("2", "view('dashboard')", "Dashboard", show=False),
+        Binding("3", "view('market')", "Market", show=False),
+        Binding("4", "view('workforce')", "Workforce", show=False),
+        Binding("5", "view('research')", "Research", show=False),
+        Binding("6", "view('book')", "Book", show=False),
+        Binding("7", "view('audit')", "Audit", show=False),
+        Binding("8", "view('reference')", "Reference", show=False),
+        Binding("9", "view('settings')", "Settings", show=False),
+        Binding("f1", "view('atlas')", "Atlas", show=False),
+        Binding("f2", "view('dashboard')", "Dashboard", show=False),
+        Binding("f3", "view('market')", "Market", show=False),
+        Binding("f4", "view('workforce')", "Workforce", show=False),
+        Binding("f5", "view('research')", "Research", show=False),
+        Binding("f6", "view('book')", "Book", show=False),
+        Binding("f7", "view('audit')", "Audit", show=False),
+        Binding("f8", "view('reference')", "Reference", show=False),
+        Binding("f9", "view('settings')", "Settings", show=False),
         Binding("a", "agent_focus", "Agents", show=False),
         Binding("j", "next_symbol", "Next symbol", show=False),
         Binding("k", "previous_symbol", "Previous symbol", show=False),
         Binding("colon", "command", "Command", show=False),
         Binding("ctrl+p", "command", "Command", show=False),
         Binding("tilde", "timeline", "Timeline", show=False),
-        Binding("ctrl+b", "bob_drawer", "Bob", show=False),
+        Binding("ctrl+b", "atlas_drawer", "Atlas", show=False),
         Binding("escape", "escape", "Back", show=False),
         Binding("ctrl+q", "quit", "Quit", show=False),
     ]
@@ -869,7 +902,8 @@ class QlabTui(App[None]):
         self.refresh_interval = refresh_interval
         self.owned_server = owned_server
         self.claude_start = claude_start
-        self.active_view = "dashboard"
+        # The desk opens on Atlas: the manager is the front door, not a tab.
+        self.active_view = "atlas"
         # Placeholder until the first snapshot; the owner's mandate universe
         # (market.assets) replaces it so a config change never desyncs the TUI.
         self.universe_tickers: list[str] = list(_DEFAULT_TICKERS)
@@ -901,6 +935,14 @@ class QlabTui(App[None]):
         # sets _pending_workflow, so the chart never keeps painting the previous
         # run's outcome in the seconds before the coordinator calls workflow.start.
         self._active_workflow_id = ""
+        # The workflow this TUI launched or explicitly resumed. Unlike
+        # _active_workflow_id, this never points at passive history and is safe
+        # to interrupt automatically when the owned coordinator exits.
+        self._launched_workflow_id = ""
+        # A stop can race workflow.start: the coordinator process is already
+        # ours, but the durable id has not reached the event stream yet. Keep
+        # the requested transition and apply it as soon as the id is observed.
+        self._pending_workflow_control: tuple[str, str] | None = None
         self._pending_workflow = False
         self._seen_workflow_ids: set[str] = set()
         self._phase_reported: dict[str, str] = {}
@@ -933,7 +975,46 @@ class QlabTui(App[None]):
                     id="universe",
                 )
 
-            with ContentSwitcher(initial="dashboard", id="canvas"):
+            with ContentSwitcher(initial="atlas", id="canvas"):
+                with Vertical(id="atlas", classes="canvas-view"):
+                    yield Static(
+                        f"[{AMBER}]▍[/] ATLAS · DESK MANAGER",
+                        classes="canvas-title",
+                        markup=True,
+                    )
+                    yield Static(id="atlas-read", markup=True)
+                    with Horizontal(id="atlas-actions"):
+                        yield Button(
+                            "REFRESH READ",
+                            id="btn-atlas-refresh",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "ESCALATE DEBATE",
+                            id="btn-atlas-escalate",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "OBSERVE NOW",
+                            id="btn-atlas-observe",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "MODE",
+                            id="btn-atlas-mode",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+                        yield Button(
+                            "AUTONOMY",
+                            id="btn-atlas-autonomy",
+                            classes="view-action-button",
+                            compact=True,
+                        )
+
                 with Vertical(id="dashboard", classes="canvas-view"):
                     yield Static(
                         f"[{AMBER}]\u258d[/] DASHBOARD",
@@ -995,6 +1076,13 @@ class QlabTui(App[None]):
                             disabled=True,
                             compact=True,
                         )
+                        yield Button(
+                            "ABANDON",
+                            id="btn-workforce-abandon",
+                            classes="view-action-button",
+                            disabled=True,
+                            compact=True,
+                        )
                         yield Button("exit", id="chat-exit")
                 with Vertical(id="research", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] RESEARCH", classes="canvas-title", markup=True)
@@ -1045,7 +1133,7 @@ class QlabTui(App[None]):
                     yield Static(f"[{AMBER}]\u258d[/] AUDIT", classes="canvas-title", markup=True)
                     yield Static(id="audit-summary", markup=True)
                     yield DataTable(id="audit-table", cursor_type="row")
-                yield AtlasView(id="atlas", classes="canvas-view")
+                yield ReferenceView(id="reference", classes="canvas-view")
                 with Vertical(id="settings", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] SETTINGS", classes="canvas-title", markup=True)
                     yield Static(
@@ -1075,13 +1163,13 @@ class QlabTui(App[None]):
                     )
 
             with Vertical(id="agent-rail"):
-                # Bob sits at the top of the rail because the desk manager is
+                # Atlas sits at the top of the rail because the desk manager is
                 # always present: its mode is the standing authority statement,
                 # visible in every view rather than only where work happens.
-                yield Static("BOB · DESK MANAGER", id="bob-label")
+                yield Static("ATLAS · DESK MANAGER", id="atlas-label")
                 yield Static(
                     "waiting for runtime snapshot",
-                    id="bob-rail",
+                    id="atlas-rail",
                     markup=True,
                 )
                 yield Static("AGENTS", id="agent-label")
@@ -1134,7 +1222,24 @@ class QlabTui(App[None]):
 
     def on_unmount(self) -> None:
         self._live_stream_stop = True
-        self.claude.stop()
+        owned_workflow = (
+            self._launched_workflow_id
+            if self.claude.mode == "workforce" and self.claude.running
+            else ""
+        )
+        self.claude.stop("TUI closed before the coordinator completed")
+        if owned_workflow:
+            try:
+                post_control = getattr(
+                    self.client, "post_control", self.client.post)
+                post_control(
+                    f"/api/workflows/{owned_workflow}/interrupt",
+                    {"reason": "TUI closed before the coordinator completed"},
+                )
+            except Exception:
+                # The owned server may already be exiting. Its next startup
+                # performs the same orphan recovery before serving snapshots.
+                pass
         if self.owned_server is not None and self.owned_server.poll() is None:
             self.owned_server.terminate()
 
@@ -1315,31 +1420,31 @@ class QlabTui(App[None]):
         self._bootstrap_error = error
         self._render_settings()
 
-    def _start_atlas_fetch(self) -> None:
-        """Fetch the curated catalog on every visit to Atlas.
+    def _start_reference_fetch(self) -> None:
+        """Fetch the curated catalog on every visit to Reference.
 
         The payload carries live ablation evidence, and ``: batch`` writes new
         ablation numbers mid-session. A once-per-session fetch would keep
         asserting "latest ablation" with superseded numbers while the leaderboard
-        on the same evidence refreshed on the next tick. ``AtlasView.set_entries``
+        on the same evidence refreshed on the next tick. ``ReferenceView.set_entries``
         ignores an unchanged payload, so re-entry costs one request and no
         rebuild flicker.
         """
 
         def run() -> None:
             try:
-                payload = self.client.get("/api/atlas")
-                self.call_from_thread(self._finish_atlas, payload, "")
+                payload = self.client.get("/api/reference")
+                self.call_from_thread(self._finish_reference, payload, "")
             except Exception as exc:
-                self.call_from_thread(self._finish_atlas, None, repr(exc))
+                self.call_from_thread(self._finish_reference, None, repr(exc))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _finish_atlas(self, payload: dict[str, Any] | None, error: str) -> None:
-        view = self.query_one("#atlas", AtlasView)
+    def _finish_reference(self, payload: dict[str, Any] | None, error: str) -> None:
+        view = self.query_one("#reference", ReferenceView)
         if payload is None:
-            self.query_one("#atlas-detail", Static).update(
-                f"[{DOWN}]atlas unavailable: {escape(error)}[/]")
+            self.query_one("#reference-detail", Static).update(
+                f"[{DOWN}]reference unavailable: {escape(error)}[/]")
             return
         view.set_entries(payload.get("entries") or [])
 
@@ -1483,6 +1588,19 @@ class QlabTui(App[None]):
         else:
             field.placeholder = "message the coordinator — Enter sends · : chat to switch"
 
+    def _note_workflow_started(self, payload: dict) -> None:
+        """Bind a pending launch before its first phase update can race a stop."""
+        workflow_id = str(payload.get("workflow_id") or "")
+        if (
+            self._pending_workflow
+            and workflow_id
+            and workflow_id not in self._seen_workflow_ids
+        ):
+            self._active_workflow_id = workflow_id
+            self._launched_workflow_id = workflow_id
+            self._pending_workflow = False
+            self._apply_pending_workflow_control(workflow_id)
+
     def _note_workflow_phase(self, payload: dict) -> None:
         """One short paragraph per completed agent: what happened, what's next.
 
@@ -1503,6 +1621,11 @@ class QlabTui(App[None]):
                 return
         elif not self._pending_workflow or workflow_id in self._seen_workflow_ids:
             return
+        else:
+            self._active_workflow_id = workflow_id
+            self._launched_workflow_id = workflow_id
+            self._pending_workflow = False
+            self._apply_pending_workflow_control(workflow_id)
         if self._phase_reported.get(phase) == status:
             return
         self._phase_reported[phase] = status
@@ -1511,7 +1634,9 @@ class QlabTui(App[None]):
                 f"[{CYAN}]▶ {escape(_phase_short(phase))}[/] "
                 f"[{LABEL_GOLD}]working[/]")
             return
-        if status not in ("done", "failed", "blocked"):
+        if status not in (
+            "done", "failed", "blocked", "interrupted", "abandoned",
+        ):
             return
         done = {name for name, state in self._flow_states.items() if state == "done"}
         if status == "done":
@@ -1527,6 +1652,8 @@ class QlabTui(App[None]):
             "done": ("✓", UP),
             "failed": ("×", DOWN),
             "blocked": ("!", AMBER),
+            "interrupted": ("Ⅱ", GOLD),
+            "abandoned": ("×", MUTED),
         }[status]
         for line in bulletin([head], max_len=260):
             self._console_write(f"[{tone}]{glyph} {escape(line)}[/]")
@@ -1603,7 +1730,8 @@ class QlabTui(App[None]):
                 for agent in snapshot.get("agents", [])
             }
         self._render_agents()
-        self._render_bob_rail()
+        self._render_atlas()
+        self._render_atlas_rail()
         self._reconcile_desk_mode(snapshot)
         self._render_mode_chip()
         self._ingest_events(snapshot.get("events", []))
@@ -1968,25 +2096,132 @@ class QlabTui(App[None]):
         }
         self._update_dashboard_tiles(contents)
 
-    def action_bob_drawer(self) -> None:
-        """Ctrl+B: open Bob's detail drawer over the current view."""
-        if isinstance(self.screen, BobDrawerScreen):
+    def _render_atlas(self) -> None:
+        """The desk-manager view: Atlas's read, in the order a human asks it.
+
+        Conclusion first (what does this add up to), then the tensions that
+        make it interesting, then the evidence under them.
+        """
+        read = _record(self.snapshot.get("atlas_read"))
+        atlas = _record(self.snapshot.get("atlas"))
+        beat = _record(self.snapshot.get("atlas_heartbeat"))
+        target = self.query_one("#atlas-read", Static)
+        if not read:
+            target.update(
+                f"[{MUTED}]Atlas has not composed a read yet. "
+                "The heartbeat writes one on its first tick.[/]")
+            return
+
+        agreement = str(read.get("agreement", "—"))
+        conviction = _finite_number(read.get("conviction"))
+        tone = str((read.get("news") or {}).get("tone", "—"))
+        quant = str(read.get("quantitative_state", "—"))
+        agreement_tone = {
+            "divergent": AMBER, "aligned": UP, "quiet": MUTED,
+        }.get(agreement, TEXT_HI)
+
+        lines = [f"[{LABEL_GOLD}]THE READ[/]"]
+        lines.extend(_key_number_markup(
+            [
+                ("SIGNALS", quant.upper()),
+                ("NEWS TONE", tone.replace("_", " ").upper()),
+                ("AGREEMENT", agreement.upper()),
+                ("CONVICTION", pct(conviction) if conviction is not None else "—"),
+            ],
+            value_tones=[TEXT_HI, TEXT_HI, agreement_tone,
+                         UP if (conviction or 0) >= 0.6
+                         else AMBER if (conviction or 0) >= 0.35 else MUTED],
+            bold_values={2, 3},
+        ))
+
+        if read.get("news_error"):
+            lines.append("")
+            lines.extend(_bulletin_markup(
+                [f"NEWS FEED UNAVAILABLE — {read['news_error']}",
+                 "The qualitative side of this read is missing, not quiet."],
+                tone=DOWN, max_len=200))
+
+        tensions = [str(t) for t in (read.get("tensions") or [])]
+        if tensions:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]TENSIONS[/]  "
+                         f"[{DIM}]where the evidence disagrees[/]")
+            lines.extend(_bulletin_markup(tensions, tone=AMBER, max_len=220))
+
+        observations = [str(o) for o in (read.get("observations") or [])]
+        if observations:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]OBSERVATIONS[/]")
+            lines.extend(_bulletin_markup(observations, tone=TEXT, max_len=200))
+
+        changers = [str(c) for c in (read.get("would_change_my_mind") or [])]
+        if changers:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]WOULD CHANGE THIS[/]")
+            lines.extend(_bulletin_markup(changers, tone=MUTED, max_len=200))
+
+        supported = read.get("supported_claims") or []
+        if supported:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]WELL-SUPPORTED CLAIMS[/]  "
+                         f"[{DIM}]primary documents or multi-publisher[/]")
+            for claim in supported[:5]:
+                tier_tone = UP if claim.get("tier") == "primary" else CYAN
+                lines.append(
+                    f"  [{tier_tone}]•[/] {str(claim.get('headline',''))[:88]} "
+                    f"[{DIM}]({claim.get('support','')})[/]")
+
+        grounding = read.get("grounding") or {}
+        for flag in (grounding.get("quality_flags") or [])[:3]:
+            lines.extend(_bulletin_markup([str(flag)], tone=AMBER, max_len=140))
+
+        headlines = (read.get("news") or {}).get("headlines") or []
+        if headlines:
+            lines.append("")
+            lines.append(f"[{LABEL_GOLD}]QUALITATIVE RECORD[/]  "
+                         f"[{DIM}]everything in the window[/]")
+            for item in headlines[:6]:
+                item_tone = {
+                    "risk_off": DOWN, "risk_on": UP, "mixed": AMBER,
+                }.get(str(item.get("tone")), DIM)
+                tickers = ",".join(item.get("tickers") or [])[:20]
+                lines.append(
+                    f"  [{item_tone}]•[/] {str(item.get('headline',''))[:96]} "
+                    f"[{DIM}]{item.get('source','')} {tickers}[/]")
+
+        lines.append("")
+        lines.append(
+            f"[{DIM}]mode {str(atlas.get('mode','—')).upper()} · "
+            f"state {str(atlas.get('state','—')).upper()} · "
+            f"heartbeat {'live' if beat.get('running') else 'stopped'} "
+            f"({int(beat.get('ticks', 0))} ticks) · "
+            f"autonomy {'ON' if beat.get('autonomous') else 'off'} · "
+            f"news {read.get('news_source','—')} · "
+            f"as of {read.get('as_of','—')}[/]")
+        lines.append(
+            f"[{DIM}]This is interpretation over persisted facts — advisory, "
+            f"never an instruction. Atlas cannot trade.[/]")
+        target.update("\n".join(lines))
+
+    def action_atlas_drawer(self) -> None:
+        """Ctrl+B: open Atlas's detail drawer over the current view."""
+        if isinstance(self.screen, AtlasDrawerScreen):
             self.pop_screen()
             return
-        self.push_screen(BobDrawerScreen(self._bob_drawer_content()))
+        self.push_screen(AtlasDrawerScreen(self._atlas_drawer_content()))
 
-    def _render_bob_rail(self) -> None:
+    def _render_atlas_rail(self) -> None:
         """The always-present rail summary: authority first, then state."""
-        bob = _record(self.snapshot.get("bob"))
-        rail = self.query_one("#bob-rail", Static)
-        if not bob:
+        atlas = _record(self.snapshot.get("atlas"))
+        rail = self.query_one("#atlas-rail", Static)
+        if not atlas:
             rail.update(f"[{MUTED}]desk manager unavailable[/]")
             return
-        mode = str(bob.get("mode", "—"))
-        state = str(bob.get("state", "—"))
-        state_tone = _BOB_STATE_TONES.get(state, TEXT_HI)
+        mode = str(atlas.get("mode", "—"))
+        state = str(atlas.get("state", "—"))
+        state_tone = _ATLAS_STATE_TONES.get(state, TEXT_HI)
         approvals = _records(self.snapshot.get("approvals"))
-        tasks = _records(self.snapshot.get("bob_tasks"))
+        tasks = _records(self.snapshot.get("atlas_tasks"))
         active = [t for t in tasks if t.get("status") in ("queued", "running")]
         lines = _key_number_markup(
             [
@@ -2003,30 +2238,30 @@ class QlabTui(App[None]):
             ],
             bold_values={0, 1},
         )
-        reason = str(bob.get("blocked_reason") or "").strip()
+        reason = str(atlas.get("blocked_reason") or "").strip()
         if reason:
             lines.extend(_bulletin_markup([reason], tone=DOWN, max_len=60))
-        elif not bob.get("coordinator_available"):
+        elif not atlas.get("coordinator_available"):
             lines.extend(_bulletin_markup(
                 ["coordinator unavailable"], tone=MUTED, max_len=60))
         lines.append(f"[{DIM}]ctrl+b for detail[/]")
         rail.update("\n".join(lines))
 
-    def _bob_drawer_content(self) -> str:
-        """Full Bob detail: authority, state, approvals, and task history."""
-        bob = _record(self.snapshot.get("bob"))
-        if not bob:
+    def _atlas_drawer_content(self) -> str:
+        """Full Atlas detail: authority, state, approvals, and task history."""
+        atlas = _record(self.snapshot.get("atlas"))
+        if not atlas:
             return f"[{MUTED}]desk manager unavailable[/]"
-        mode = str(bob.get("mode", "—"))
-        lines = [self._bob_panel_content(), ""]
+        mode = str(atlas.get("mode", "—"))
+        lines = [self._atlas_panel_content(), ""]
         lines.append(f"[{LABEL_GOLD}]AUTHORITY[/]")
         lines.extend(_bulletin_markup(
-            [_BOB_MODE_AUTHORITY.get(mode, "unknown mode"),
-             "Bob never executes: paper execution consumes a persisted human "
+            [_ATLAS_MODE_AUTHORITY.get(mode, "unknown mode"),
+             "Atlas never executes: paper execution consumes a persisted human "
              "approval bound to the exact plan."],
             tone=MUTED, max_len=110))
 
-        tasks = _records(self.snapshot.get("bob_tasks"))
+        tasks = _records(self.snapshot.get("atlas_tasks"))
         lines.append("")
         lines.append(f"[{LABEL_GOLD}]RECENT TASKS[/]")
         if not tasks:
@@ -2047,21 +2282,21 @@ class QlabTui(App[None]):
                 lines.extend(_bulletin_markup([error], tone=DOWN, max_len=100))
         return "\n".join(lines)
 
-    def _bob_panel_content(self) -> str:
-        """Bob's mode, lifecycle state, pending approvals, and recent tasks.
+    def _atlas_panel_content(self) -> str:
+        """Atlas's mode, lifecycle state, pending approvals, and recent tasks.
 
         Mode is the authority statement (observe never launches work; only
         propose can put a plan up for approval), so it is shown first and
         never abbreviated away.
         """
-        bob = _record(self.snapshot.get("bob"))
-        if not bob:
+        atlas = _record(self.snapshot.get("atlas"))
+        if not atlas:
             return f"[{MUTED}]desk manager unavailable[/]"
-        mode = str(bob.get("mode", "—"))
-        state = str(bob.get("state", "—"))
-        state_tone = _BOB_STATE_TONES.get(state, TEXT_HI)
+        mode = str(atlas.get("mode", "—"))
+        state = str(atlas.get("state", "—"))
+        state_tone = _ATLAS_STATE_TONES.get(state, TEXT_HI)
         approvals = _records(self.snapshot.get("approvals"))
-        tasks = _records(self.snapshot.get("bob_tasks"))
+        tasks = _records(self.snapshot.get("atlas_tasks"))
         active = [t for t in tasks if t.get("status") in ("queued", "running")]
         pairs = [
             ("MODE", mode.upper()),
@@ -2075,13 +2310,13 @@ class QlabTui(App[None]):
             AMBER if approvals else MUTED,
             TEXT_HI if active else MUTED,
         ]
-        lines = [f"[{LABEL_GOLD}]BOB · DESK MANAGER[/]"]
+        lines = [f"[{LABEL_GOLD}]ATLAS · DESK MANAGER[/]"]
         lines.extend(_key_number_markup(
             pairs, value_tones=tones, bold_values={0, 1}))
-        reason = str(bob.get("blocked_reason") or "").strip()
+        reason = str(atlas.get("blocked_reason") or "").strip()
         if reason:
             lines.extend(_bulletin_markup([reason], tone=DOWN, max_len=90))
-        elif not bob.get("coordinator_available"):
+        elif not atlas.get("coordinator_available"):
             lines.extend(_bulletin_markup(
                 ["coordinator unavailable — monitoring continues"],
                 tone=MUTED, max_len=90))
@@ -2234,7 +2469,10 @@ class QlabTui(App[None]):
             f"[bold]{escape(node.short)}[/]\n"
             f"[{color}]{glyph} {escape(state)}[/]"
         )
-        for token in ("working", "queued", "done", "failed", "blocked"):
+        for token in (
+            "working", "queued", "done", "failed", "blocked",
+            "interrupted", "abandoned",
+        ):
             node.set_class(token == state, f"-{token}")
         node.tooltip = self._flow_details.get(node.phase) or (
             f"{node.agent}\n\nnot yet started"
@@ -2282,6 +2520,7 @@ class QlabTui(App[None]):
                 workflow_id = str(row.get("workflow_id", ""))
                 if workflow_id and workflow_id not in self._seen_workflow_ids:
                     self._active_workflow_id = workflow_id
+                    self._launched_workflow_id = workflow_id
                     self._pending_workflow = False
                     return row
             return None
@@ -2290,12 +2529,20 @@ class QlabTui(App[None]):
     def _render_workforce(self) -> None:
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
         resumable_id = self._latest_resumable_workflow_id()
+        abandonable_id = self._latest_abandonable_workflow_id()
         resume_button = self.query_one("#btn-workforce-resume", Button)
+        abandon_button = self.query_one("#btn-workforce-abandon", Button)
         resume_button.disabled = not bool(resumable_id)
+        abandon_button.disabled = not bool(abandonable_id)
         resume_button.tooltip = (
             f"Resume {resumable_id}"
             if resumable_id else
             "No incomplete workforce review to resume"
+        )
+        abandon_button.tooltip = (
+            f"Permanently close {abandonable_id}; its audit record is retained"
+            if abandonable_id else
+            "No incomplete workforce review to abandon"
         )
         workflow = self._select_workflow(workflows)
         if workflow is None:
@@ -2411,10 +2658,15 @@ class QlabTui(App[None]):
                     f"{plan_id} → : rebalance paper to confirm",
                 ))
             lines.extend(_key_number_markup(result_pairs))
-        elif status in ("failed", "blocked"):
-            tone = DOWN if status == "failed" else AMBER
+        elif status in ("failed", "blocked", "interrupted", "abandoned"):
+            tone = {
+                "failed": DOWN,
+                "blocked": AMBER,
+                "interrupted": GOLD,
+                "abandoned": MUTED,
+            }[status]
             broken = next(
-                (s for s in steps if s.get("status") in ("failed", "blocked")),
+                (s for s in steps if s.get("status") == status),
                 None)
             why = str((broken or {}).get("summary") or "").strip()
             lines.extend([
@@ -2428,10 +2680,19 @@ class QlabTui(App[None]):
                 max_len=200,
                 strip_ids=False,
             ))
-            lines.append(
-                f"[{LABEL_GOLD}]Resume with : workforce resume "
-                f"{escape(str(workflow.get('workflow_id', '')))}[/]"
-            )
+            workflow_id = escape(str(workflow.get("workflow_id", "")))
+            if status != "abandoned":
+                lines.append(
+                    f"[{LABEL_GOLD}]Resume with : workforce resume "
+                    f"{workflow_id} · close permanently with "
+                    f": workforce abandon {workflow_id}[/]"
+                )
+            else:
+                lines.append(
+                    f"[{MUTED}]This run is closed. Its completed evidence and "
+                    "audit trail remain available; start a new workforce run "
+                    "to continue research.[/]"
+                )
 
         earlier = [row for row in workflows
                    if str(row.get("workflow_id", "")) != self._active_workflow_id
@@ -2448,12 +2709,95 @@ class QlabTui(App[None]):
     def _latest_resumable_workflow_id(self) -> str:
         workflows = self.snapshot.get("workflows", []) if self.snapshot else []
         for workflow in workflows:
-            if str(workflow.get("status", "")).lower() == "complete":
+            if str(workflow.get("status", "")).lower() not in {
+                "interrupted", "failed", "blocked",
+            }:
                 continue
             workflow_id = str(workflow.get("workflow_id", "")).strip()
             if workflow_id:
                 return workflow_id
         return ""
+
+    def _latest_abandonable_workflow_id(self) -> str:
+        workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        for workflow in workflows:
+            if str(workflow.get("status", "")).lower() in {
+                "complete", "abandoned",
+            }:
+                continue
+            workflow_id = str(workflow.get("workflow_id", "")).strip()
+            if workflow_id:
+                return workflow_id
+        return ""
+
+    def _workflow_row(self, workflow_id: str) -> dict | None:
+        workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+        return next((
+            row for row in workflows
+            if str(row.get("workflow_id", "")) == workflow_id
+        ), None)
+
+    def _merge_workflow(self, workflow: dict) -> None:
+        """Merge an owner control response into the view before the next poll."""
+        workflow_id = str(workflow.get("workflow_id") or "")
+        if not workflow_id:
+            return
+        workflows = list(
+            self.snapshot.get("workflows", []) if self.snapshot else [])
+        for index, row in enumerate(workflows):
+            if str(row.get("workflow_id", "")) == workflow_id:
+                workflows[index] = workflow
+                break
+        else:
+            workflows.insert(0, workflow)
+        self.snapshot["workflows"] = workflows
+        self._active_workflow_id = workflow_id
+        self._pending_workflow = False
+
+    def _control_workflow(
+        self,
+        workflow_id: str,
+        action: str,
+        reason: str,
+        *,
+        quiet: bool = False,
+    ) -> dict | None:
+        """Fence a workflow through the owner; never mutate DuckDB in the TUI."""
+        if not workflow_id:
+            return None
+        try:
+            post_control = getattr(
+                self.client, "post_control", self.client.post)
+            workflow = post_control(
+                f"/api/workflows/{workflow_id}/{action}",
+                {"reason": reason},
+            )
+        except Exception as exc:
+            if not quiet:
+                detail = str(exc) or repr(exc)
+                self._console_write(
+                    f"[{DOWN}]workflow {escape(action)} failed: "
+                    f"{escape(detail[-240:])}[/]")
+                self._set_selected_work(
+                    f"WORKFLOW {action.upper()} FAILED\n\n{detail[-2000:]}"
+                )
+            return None
+        self._merge_workflow(workflow)
+        self._write_local_event(
+            f"claude.workflow_{action}",
+            {"workflow_id": workflow_id, "reason": reason},
+        )
+        self._render_workforce()
+        self._start_refresh()
+        return workflow
+
+    def _apply_pending_workflow_control(self, workflow_id: str) -> None:
+        pending = self._pending_workflow_control
+        if pending is None or not workflow_id:
+            return
+        self._pending_workflow_control = None
+        action, reason = pending
+        self._control_workflow(workflow_id, action, reason)
 
     def _maybe_offer_workforce(self) -> None:
         if self._claude_offer_handled:
@@ -2861,7 +3205,7 @@ class QlabTui(App[None]):
         self.query_one("#audit-summary", Static).update(
             "Every judgment, challenge, verdict, and reflection remains inspectable.\n\n"
             f"{len(decisions)} decisions   ·   plans and orders are in Book\n\n"
-            f"{self._bob_panel_content()}"
+            f"{self._atlas_panel_content()}"
         )
         rows = []
         self._audit_decisions = {}
@@ -3000,14 +3344,7 @@ class QlabTui(App[None]):
         for agent in agents:
             name = agent["name"]
             state = self._agent_states.get(name, agent.get("state", "idle"))
-            glyph, color = {
-                "working": ("●", CYAN),
-                "queued": ("◐", GOLD),
-                "waiting": ("◐", GOLD),
-                "done": ("✓", UP),
-                "failed": ("×", DOWN),
-                "blocked": ("!", AMBER),
-            }.get(state, ("◌", DIM))
+            glyph, color = _STATE_STYLE.get(state, ("◌", DIM))
             if state == "working":
                 glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
             lines.append(
@@ -3104,10 +3441,10 @@ class QlabTui(App[None]):
                 f"ALPACA·{feed}" if health.get("fresh") else f"ALPACA·{feed} STALE")
         else:
             feed_token = "FEED —"
-        bob = (self.snapshot.get("bob") or {}) if self.snapshot else {}
-        bob_token = (
-            f"BOB {str(bob.get('mode', '—')).upper()}/"
-            f"{str(bob.get('state', '—')).upper()}" if bob else "BOB —")
+        atlas = (self.snapshot.get("atlas") or {}) if self.snapshot else {}
+        atlas_token = (
+            f"ATLAS {str(atlas.get('mode', '—')).upper()}/"
+            f"{str(atlas.get('state', '—')).upper()}" if atlas else "ATLAS —")
         approvals = (self.snapshot.get("approvals") or []) if self.snapshot else []
         return [
             ("quote feed", feed_token),
@@ -3115,7 +3452,7 @@ class QlabTui(App[None]):
             ("coordinator", claude),
             ("provenance", data_token),
             ("autopilot", autopilot_token),
-            ("desk manager", bob_token),
+            ("desk manager", atlas_token),
             ("approvals waiting", str(len(approvals))),
         ]
 
@@ -3128,7 +3465,10 @@ class QlabTui(App[None]):
             if event_id:
                 self._event_ids.add(event_id)
             self._append_event(event)
-            if str(event.get("kind", "")) == "workflow_phase":
+            kind = str(event.get("kind", ""))
+            if kind == "workflow_started":
+                self._note_workflow_started(event.get("payload") or {})
+            elif kind == "workflow_phase":
                 self._note_workflow_phase(event.get("payload") or {})
 
     def _append_event(self, event: dict) -> None:
@@ -3163,11 +3503,11 @@ class QlabTui(App[None]):
             field = self.query_one("#chat-input", Input)
             if not field.disabled:  # a running turn owns the box; don't grab it
                 field.focus()
-        elif view == "atlas":
+        elif view == "reference":
             # Master-detail only reads if the index is navigable on arrival; the
             # ListView claims no digit keys, so view switching keeps working.
-            self.query_one("#atlas-list", ListView).focus()
-            self._start_atlas_fetch()
+            self.query_one("#reference-list", ListView).focus()
+            self._start_reference_fetch()
         elif view == "settings":
             self._start_bootstrap()
 
@@ -3260,12 +3600,83 @@ class QlabTui(App[None]):
     def action_workforce_stop(self) -> None:
         self._chat_mode = "workforce"
         self._render_chat_mode()
-        self.claude.stop()
+        reason = "operator stopped the coordinator before completion"
+        workflow_id = self._launched_workflow_id
+        if not workflow_id and not self._pending_workflow:
+            workflows = self.snapshot.get("workflows", []) if self.snapshot else []
+            workflow_id = next((
+                str(row.get("workflow_id", ""))
+                for row in workflows
+                if str(row.get("status", "")).lower() == "running"
+            ), "")
+        if self.claude.mode == "workforce":
+            # Stop the local process tree first. The following owner call is
+            # short-bounded, but process cleanup must not depend on owner health.
+            self.claude.stop(reason)
+        if workflow_id:
+            self._control_workflow(workflow_id, "interrupt", reason)
+        elif self._pending_workflow:
+            # workflow.start may already be in flight. The process tree is
+            # stopped now; the first durable id is fenced when its event lands.
+            self._pending_workflow_control = ("interrupt", reason)
+        if workflow_id or self._pending_workflow_control:
+            self._set_selected_work(
+                "CLAUDE WORKFORCE INTERRUPTED\n\nThe full coordinator/agent "
+                "process tree was stopped. Completed evidence is retained and "
+                "the active phase is frozen; use : workforce resume ID to "
+                "continue or : workforce abandon ID to close it permanently."
+            )
+            self._console_write(
+                f"[{GOLD}]Ⅱ interrupted — child agents were stopped; durable "
+                "phase state is resumable[/]")
+        else:
+            self._set_selected_work(
+                "NO ACTIVE WORKFORCE\n\nThere is no running or incomplete "
+                "coordinator owned by this desk to stop."
+            )
+        self._write_local_event(
+            "claude.workforce_stopped", {"workflow_id": workflow_id})
+        self._render_mode_chip()
+
+    def action_workforce_abandon(self, workflow_id: str = "") -> None:
+        """Close an incomplete run without deleting its evidence or audit."""
+        self._chat_mode = "workforce"
+        self._render_chat_mode()
+        explicit_id = bool(workflow_id.strip())
+        workflow_id = workflow_id.strip() or self._latest_abandonable_workflow_id()
+        reason = "operator permanently closed the incomplete workflow"
+        if not workflow_id and self._pending_workflow:
+            self._pending_workflow_control = ("abandon", reason)
+        elif not workflow_id:
+            self._set_selected_work(
+                "NO REVIEW TO ABANDON\n\nThere is no incomplete workflow. "
+                "Completed and already-abandoned records are retained."
+            )
+            return
+        else:
+            row = self._workflow_row(workflow_id)
+            if row is None and not explicit_id:
+                self._set_selected_work(
+                    f"UNKNOWN WORKFLOW\n\nNo recent workflow has id {workflow_id}."
+                )
+                return
+        if self.claude.mode == "workforce" and self.claude.running:
+            owned = self._launched_workflow_id
+            if not owned or not workflow_id or owned == workflow_id:
+                self.claude.stop(reason)
+        if workflow_id and self._control_workflow(
+                workflow_id, "abandon", reason) is None:
+            return
         self._set_selected_work(
-            "CLAUDE WORKFORCE STOPPED\n\nThe owner kept its durable phase state. "
-            "Use : workforce resume ID to continue."
+            "WORKFLOW ABANDONED\n\nThe run is permanently closed, and every "
+            "unfinished phase is non-running. Completed results and the full "
+            "audit trail were retained; no market or execution records were "
+            "deleted."
         )
-        self._write_local_event("claude.workforce_stopped", {})
+        self._console_write(
+            f"[{MUTED}]× abandoned — audit retained; start a new run to "
+            "continue[/]")
+        self._render_mode_chip()
 
     def action_rebalance_dry(self) -> None:
         self._run_api_action(
@@ -3312,6 +3723,43 @@ class QlabTui(App[None]):
             active_agent="reporter",
         )
 
+    def action_atlas_refresh(self) -> None:
+        """Recompose Atlas's read now instead of waiting for the next heartbeat."""
+        self._run_api_action(
+            "atlas read", "/api/atlas/observe", {"offline": self.offline},
+            active_agent=None)
+
+    def action_atlas_observe(self) -> None:
+        """Force one supervisor tick — evaluate triggers against current facts."""
+        self._run_api_action(
+            "atlas observe", "/api/atlas/observe", {"offline": self.offline},
+            active_agent=None)
+
+    def action_atlas_cycle_mode(self) -> None:
+        """Step Atlas through its authority modes from the desk."""
+        order = ("observe", "research", "propose", "paused")
+        current = str(_record(self.snapshot.get("atlas")).get("mode", "observe"))
+        nxt = order[(order.index(current) + 1) % len(order)] if current in order \
+            else "observe"
+        self._run_api_action(
+            f"atlas mode {nxt}", "/api/atlas/mode",
+            {"mode": nxt, "offline": self.offline}, active_agent=None)
+
+    def action_atlas_toggle_autonomy(self) -> None:
+        """Turn autonomous work on or off. Never widens what a mode permits."""
+        beat = _record(self.snapshot.get("atlas_heartbeat"))
+        enabled = not bool(beat.get("autonomous"))
+        self._run_api_action(
+            f"atlas autonomy {'on' if enabled else 'off'}",
+            "/api/atlas/autonomy",
+            {"enabled": enabled, "offline": self.offline}, active_agent=None)
+
+    def action_atlas_escalate(self) -> None:
+        """Ask Atlas to open a bounded debate on the current disagreement."""
+        self._run_api_action(
+            "atlas escalate", "/api/atlas/escalate", {"offline": self.offline},
+            active_agent=None)
+
     def action_batch(self) -> None:
         self.action_view("research")
         self._run_api_action(
@@ -3323,14 +3771,15 @@ class QlabTui(App[None]):
     def action_help(self) -> None:
         self._set_selected_work(
             "COMMANDS\n\n"
-            "view dashboard|desk|market|workforce|research|book|audit|atlas|settings\n"
+            "view dashboard|desk|market|workforce|research|book|audit|reference|settings\n"
             "view agents\n"
             "symbol TICKER\n"
             "chat MESSAGE      (read-only desk assistant)\n"
             "workforce GOAL    (governed five-role pipeline)\n"
             "workforce status\n"
             "workforce resume ID\n"
-            "workforce stop\n"
+            "workforce stop      (interrupt + stop every child process)\n"
+            "workforce abandon [ID]  (close without deleting its audit)\n"
             "rebalance dry\n"
             "rebalance paper\n"
             "daily\n"
@@ -3376,9 +3825,44 @@ class QlabTui(App[None]):
             self._start_claude(message, governed=False, chat=True,
                                resume_session=resume)
         elif self._chat_sessions["workforce"]:
-            self._start_claude(
+            workflow_id = self._launched_workflow_id
+            row = self._workflow_row(workflow_id) if workflow_id else None
+            status = str((row or {}).get("status") or "").lower()
+            if status == "abandoned":
+                self._set_selected_work(
+                    "WORKFLOW CLOSED\n\nThis workforce run was abandoned and "
+                    "cannot be reopened. Start a new run for further research."
+                )
+                return
+            if status == "running":
+                # No local process is running, so this is a live-looking orphan
+                # from an earlier turn. Fence it before explicitly reopening.
+                if self._control_workflow(
+                    workflow_id,
+                    "interrupt",
+                    "previous coordinator turn ended before a follow-up",
+                ) is None:
+                    return
+                status = "interrupted"
+            if status in {"interrupted", "failed", "blocked"}:
+                if self._control_workflow(
+                    workflow_id, "resume",
+                    "operator continued the coordinator conversation",
+                ) is None:
+                    return
+                self._bind_run(workflow_id)
+            started = self._start_claude(
                 message, governed=True,
                 resume_session=self._chat_sessions["workforce"])
+            if not started and status in {
+                "running", "interrupted", "failed", "blocked",
+            }:
+                self._control_workflow(
+                    workflow_id,
+                    "interrupt",
+                    "Claude could not restart the resumed workflow",
+                    quiet=True,
+                )
         else:
             self._start_workforce(message)
 
@@ -3386,6 +3870,21 @@ class QlabTui(App[None]):
         button_id = event.button.id
         if button_id in self._book_plan_ids:
             self._confirm_plan_execution(self._book_plan_ids[button_id])
+            return
+        if button_id == "btn-atlas-refresh":
+            self.action_atlas_refresh()
+            return
+        if button_id == "btn-atlas-escalate":
+            self.action_atlas_escalate()
+            return
+        if button_id == "btn-atlas-observe":
+            self.action_atlas_observe()
+            return
+        if button_id == "btn-atlas-mode":
+            self.action_atlas_cycle_mode()
+            return
+        if button_id == "btn-atlas-autonomy":
+            self.action_atlas_toggle_autonomy()
             return
         if button_id == "btn-rebalance-dry":
             self.action_rebalance_dry()
@@ -3411,14 +3910,19 @@ class QlabTui(App[None]):
                     "workforce review."
                 )
             return
+        if button_id == "btn-workforce-abandon":
+            self.action_workforce_abandon(
+                self._latest_abandonable_workflow_id())
+            return
         if button_id != "chat-exit":
             return
         if self.claude.running:
-            self.claude.stop()
-            self._console_write(
-                f"[{GOLD}]■ stopped — durable phase state is kept; send a "
-                "message to continue or use : workforce resume ID[/]")
-            self._write_local_event("claude.workforce_stopped", {})
+            if self.claude.mode == "workforce":
+                self.action_workforce_stop()
+            else:
+                self.claude.stop("operator stopped the chat session")
+                self._console_write(f"[{GOLD}]■ chat stopped[/]")
+                self._render_mode_chip()
         else:
             self.action_view("dashboard")
 
@@ -3442,6 +3946,8 @@ class QlabTui(App[None]):
                 action_args = (argument,)
             else:
                 action_name = None
+        elif action_name == "action_workforce_abandon":
+            action_args = (argument,)
         elif action_name is not None and argument:
             action_name = None
 
@@ -3547,6 +4053,12 @@ class QlabTui(App[None]):
             if not workflow_id.replace("-", "").isalnum():
                 self._set_selected_work("Invalid workflow id.")
                 return
+            if self._control_workflow(
+                workflow_id,
+                "resume",
+                "operator explicitly resumed the workflow",
+            ) is None:
+                return
             prompt = (
                 f"RESUME_WORKFLOW_ID: {workflow_id}\n"
                 "Inspect workflow.status first. Continue at the first non-done phase; "
@@ -3562,6 +4074,13 @@ class QlabTui(App[None]):
             # rather than an empty chart waiting on a run that never starts.
             self._active_workflow_id = ""
             self._pending_workflow = False
+            if workflow_id:
+                self._control_workflow(
+                    workflow_id,
+                    "interrupt",
+                    "Claude could not start the resumed workflow",
+                    quiet=True,
+                )
             self._render_workforce()
 
     def _bind_run(self, workflow_id: str = "") -> None:
@@ -3576,6 +4095,8 @@ class QlabTui(App[None]):
         self._seen_workflow_ids = {
             str(row.get("workflow_id", "")) for row in workflows}
         self._active_workflow_id = workflow_id
+        self._launched_workflow_id = workflow_id
+        self._pending_workflow_control = None
         self._pending_workflow = not workflow_id
         self._phase_reported = {}
         self._results_printed = False
@@ -3692,6 +4213,13 @@ class QlabTui(App[None]):
         elif event.kind == "error":
             self._write_local_event("claude.failed", {"error": event.text[-400:]})
             if workforce:
+                workflow_id = self._launched_workflow_id
+                reason = f"coordinator exited before completion: {event.text[-600:]}"
+                if workflow_id:
+                    self._control_workflow(
+                        workflow_id, "interrupt", reason, quiet=True)
+                elif self._pending_workflow:
+                    self._pending_workflow_control = ("interrupt", reason)
                 self._console_write(f"[{DOWN}]✗ {escape(event.text[-240:])}[/]")
                 # A terminal error still owes the operator the run's state: the
                 # durable phases reached before it stopped.
@@ -3706,6 +4234,17 @@ class QlabTui(App[None]):
         elif event.kind == "result":
             self._write_local_event("claude.completed", {})
             if workforce:
+                # A successful CLI result is not proof that all durable phases
+                # finished. If the coordinator returned early, freeze the
+                # live-looking phase instead of leaving every agent "working".
+                workflow_id = self._launched_workflow_id
+                reason = (
+                    "coordinator returned before the durable workflow completed")
+                if workflow_id:
+                    self._control_workflow(
+                        workflow_id, "interrupt", reason, quiet=True)
+                elif self._pending_workflow:
+                    self._pending_workflow_control = ("interrupt", reason)
                 # Reporter is done and the run is complete: the one block that
                 # lands in the chat is the run's synthesized results.
                 self._print_workforce_results(event.text)

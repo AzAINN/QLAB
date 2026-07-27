@@ -68,6 +68,7 @@ def test_rendered_css_uses_shared_tokens():
 def test_state_style_covers_every_workflow_state():
     assert set(theme.STATE_STYLE) == {
         "working", "queued", "waiting", "done", "failed", "blocked", "idle",
+        "interrupted", "abandoned",
     }
 
 

@@ -9,6 +9,8 @@ compose with the TUI and web client instead of competing with them:
     qlab workforce run "GOAL"       headless governed run, streamed live
     qlab workforce status [ID]      durable phase state of a run
     qlab workforce watch [ID]       tail a run someone else is driving
+    qlab workforce interrupt --id ID freeze an orphan for explicit resumption
+    qlab workforce abandon --id ID permanently close it; retain its audit
     qlab events [--kind K]          tail the owner event bus
 
 Requires the ``operator`` extra (rich + httpx). Paper execution is not
@@ -27,11 +29,16 @@ _PHASE_GLYPHS = {
     "done": ("✓", "ok"),
     "failed": ("×", "bad"),
     "blocked": ("!", "gold"),
+    "interrupted": ("Ⅱ", "gold"),
+    "abandoned": ("×", "muted"),
 }
 
 _EVENT_STYLES = {
     "workflow_started": "accent",
     "workflow_phase": "accent",
+    "workflow_interrupted": "gold",
+    "workflow_resumed": "accent",
+    "workflow_abandoned": "muted",
     "referee_verdict": "ok",
     "tool_call": "info",
     "quote": "info",
@@ -81,6 +88,12 @@ def _client(args):
                       "`qlab ui --no-browser`, or pass --port[/muted]")
         raise SystemExit(1)
     return client
+
+
+def _post_control(client, path: str, body: dict) -> dict:
+    """Use the short lifecycle deadline when the HTTP client supports it."""
+    post = getattr(client, "post_control", client.post)
+    return post(path, body)
 
 
 def _banner(console, title: str, subtitle: str = "") -> None:
@@ -271,6 +284,34 @@ def cmd_workforce(args) -> int:
             console.print("[muted]detached[/muted]")
         return 0
 
+    if action in {"interrupt", "abandon"}:
+        if not args.id:
+            console.print(
+                f"[bad]✗[/bad] `qlab workforce {action}` requires --id")
+            return 2
+        reason = (
+            "operator interrupted the workflow from the desk CLI"
+            if action == "interrupt"
+            else "operator permanently closed the workflow from the desk CLI"
+        )
+        try:
+            workflow = _post_control(
+                client,
+                f"/api/workflows/{args.id}/{action}", {"reason": reason})
+        except Exception as exc:
+            console.print(f"[bad]✗ {exc}[/bad]")
+            return 1
+        render_workflow(console, workflow)
+        if action == "interrupt":
+            console.print(
+                "[muted]durable writes are fenced; resume explicitly with "
+                f"`qlab workforce run --resume {args.id}`[/muted]")
+        else:
+            console.print(
+                "[muted]closed permanently; completed evidence and audit "
+                "records were retained[/muted]")
+        return 0
+
     # action == "run"
     return _run_workforce(console, client, args)
 
@@ -304,6 +345,11 @@ def _run_workforce(console, client, args) -> int:
                   f"non-done phase; do not create a new workflow.\n{prompt}")
 
     feed: queue.Queue = queue.Queue()
+    known_workflows = {
+        str(row.get("workflow_id") or "")
+        for row in client.get("/api/workflows", limit=1000).get("workflows", [])
+    }
+    active_workflow_id = str(args.resume or "")
     session = ClaudeSession(
         lambda event: feed.put(("claude", event)),
         cwd=workspace_root(), runtime_url=client.base_url,
@@ -311,6 +357,49 @@ def _run_workforce(console, client, args) -> int:
     if not session.available:
         console.print("[bad]✗[/bad] the `claude` CLI is not on PATH")
         return 1
+
+    if args.resume:
+        try:
+            _post_control(
+                client,
+                f"/api/workflows/{args.resume}/resume",
+                {"reason": "operator explicitly resumed the workflow"},
+            )
+        except Exception as exc:
+            console.print(f"[bad]✗ could not resume {args.resume}: {exc}[/bad]")
+            return 1
+
+    def resolve_active_workflow() -> str:
+        nonlocal active_workflow_id
+        if not active_workflow_id:
+            try:
+                rows = client.get(
+                    "/api/workflows", limit=20).get("workflows", [])
+            except Exception:
+                rows = []
+            active_workflow_id = next((
+                str(row.get("workflow_id") or "")
+                for row in rows
+                if str(row.get("workflow_id") or "") not in known_workflows
+                and str(row.get("status") or "") == "running"
+            ), "")
+            if active_workflow_id:
+                known_workflows.add(active_workflow_id)
+        return active_workflow_id
+
+    def interrupt_active(reason: str) -> None:
+        resolve_active_workflow()
+        if not active_workflow_id:
+            return
+        try:
+            _post_control(
+                client,
+                f"/api/workflows/{active_workflow_id}/interrupt",
+                {"reason": reason},
+            )
+        except Exception as exc:
+            console.print(
+                f"[bad]✗ could not freeze {active_workflow_id}: {exc}[/bad]")
 
     def tail() -> None:
         try:
@@ -323,6 +412,8 @@ def _run_workforce(console, client, args) -> int:
     _banner(console, "workforce run",
             args.resume and f"resuming {args.resume}" or goal or "default review")
     if not session.start(prompt, governed=True):
+        if args.resume:
+            interrupt_active("Claude could not start the resumed workflow")
         console.print("[bad]✗[/bad] could not start the Claude session")
         return 1
 
@@ -332,6 +423,11 @@ def _run_workforce(console, client, args) -> int:
         while True:
             source, event = feed.get()
             if source == "bus":
+                if event.get("kind") == "workflow_started":
+                    # The SSE primer may contain an old workflow.start outside
+                    # the newest registry window. Resolve against current
+                    # owner state instead of trusting that historical payload.
+                    resolve_active_workflow()
                 if event.get("kind") not in _EVENT_STYLES:
                     continue
                 if mid_line:
@@ -359,16 +455,24 @@ def _run_workforce(console, client, args) -> int:
             elif event.kind == "error":
                 if mid_line:
                     console.print()
+                interrupt_active(
+                    f"coordinator exited before completion: {event.text[-600:]}")
                 console.print(f"[bad]✗ {event.text}[/bad]", markup=False)
                 exit_code = 1
                 break
             elif event.kind == "result":
                 if mid_line:
                     console.print()
+                # A CLI success result can still arrive before all durable
+                # phases close; interrupt is idempotent for a completed run.
+                interrupt_active(
+                    "coordinator returned before the durable workflow completed")
                 break
     except KeyboardInterrupt:
-        session.stop()
-        console.print("\n[muted]stopped — durable phase state is kept; "
+        interrupt_active("operator interrupted the headless workforce")
+        session.stop("operator interrupted the headless workforce")
+        console.print("\n[muted]interrupted — the full Claude/Agent/MCP "
+                      "process tree was stopped and durable phase state is kept; "
                       "resume with `qlab workforce run --resume ID`[/muted]")
         return 130
 
@@ -389,10 +493,17 @@ def register_subcommands(sub, add_common) -> None:
     wf = sub.add_parser(
         "workforce", help="run, inspect, or tail a governed workforce run")
     add_common(wf)
-    wf.add_argument("action", choices=["run", "status", "watch"])
+    wf.add_argument(
+        "action",
+        choices=["run", "status", "watch", "interrupt", "abandon"],
+    )
     wf.add_argument("goal", nargs="?", default="",
                     help="research goal for `run`")
-    wf.add_argument("--id", default=None, help="workflow id for status/watch")
+    wf.add_argument(
+        "--id",
+        default=None,
+        help="workflow id for status/watch/interrupt/abandon",
+    )
     wf.add_argument("--resume", default=None,
                     help="resume an interrupted run by workflow id")
     wf.add_argument("--port", type=int, default=8765)

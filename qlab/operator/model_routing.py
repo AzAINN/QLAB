@@ -98,6 +98,10 @@ def record_invocation(registry, decision: RouteDecision, *,
     """Persist one model invocation and emit its route event.
 
     The registry is the single writer; this only assembles the record.
+
+    ``backend`` names the process that served the role, not the model — a
+    second coordinator (``bob_shell``) would pass its own value here so a phase
+    cannot be read as clean without knowing what actually ran it.
     """
     invocation_id = invocation_id or uuid.uuid4().hex[:16]
     registry.record_model_invocation({

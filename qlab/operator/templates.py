@@ -1,6 +1,6 @@
-"""The registered workflow templates Bob may start, and nothing else.
+"""The registered workflow templates Atlas may start, and nothing else.
 
-Bob does not compose arbitrary work. In Research mode it may start one of these
+Atlas does not compose arbitrary work. In Research mode it may start one of these
 named templates, chosen deterministically by the trigger that woke it; the
 interpreting agent may argue for a different registered template but cannot
 invent one. Each template declares what it needs before it can start and what
@@ -64,6 +64,14 @@ TEMPLATES: dict[str, WorkflowTemplate] = {
         purpose="Analyze a drawdown-tier or kill-switch event and brief the human.",
         phases=("analyst", "challenger", "referee", "reporter"),
         requires=("data_eligible_for_research",)),
+    "news_read": WorkflowTemplate(
+        template_id="news_read",
+        purpose="Interpret the grounded news window: what the record supports, "
+                "what is merely circulating, and what it bears on.",
+        phases=("news-analyst",),
+        requires=("grounded_news_window",),
+        notes="Atlas's qualitative helper. Reads a window it is handed; it "
+              "cannot fetch, forecast, or propose."),
     "news_risk_review": WorkflowTemplate(
         template_id="news_risk_review",
         purpose="Turn operator-pasted excerpts into dry, corroborated risk views.",
@@ -101,12 +109,12 @@ def get_template(template_id: str) -> WorkflowTemplate:
         return TEMPLATES[template_id]
     except KeyError as exc:
         raise TemplateNotAllowed(
-            f"unknown workflow template {template_id!r}; Bob may start only "
+            f"unknown workflow template {template_id!r}; Atlas may start only "
             f"registered templates: {sorted(TEMPLATES)}") from exc
 
 
 def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplate:
-    """Return the template if Bob may start it now, else raise.
+    """Return the template if Atlas may start it now, else raise.
 
     Authority first, then preconditions — so a mode violation is never masked
     by a data problem.
@@ -116,7 +124,7 @@ def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplat
         raise TemplateNotAllowed(
             f"Observe mode may not start workflows; {template_id!r} refused")
     if mode == "paused":
-        raise TemplateNotAllowed("Bob is paused; no autonomous work starts")
+        raise TemplateNotAllowed("Atlas is paused; no autonomous work starts")
     if template.creates_plan and mode != "propose":
         raise TemplateNotAllowed(
             f"{template_id!r} creates a paper plan, which requires Propose "
@@ -134,8 +142,15 @@ def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplat
     if "operator_supplied_excerpts" in template.requires:
         if not facts.get("operator_excerpts"):
             raise TemplateNotAllowed(
-                f"{template_id!r} needs operator-pasted excerpts; Bob does not "
+                f"{template_id!r} needs operator-pasted excerpts; Atlas does not "
                 "fetch news on its own")
+    if "grounded_news_window" in template.requires:
+        # The analyst interprets a window it is handed. Refusing when there is
+        # nothing to read keeps it from narrating an empty record.
+        if not facts.get("news_window_items"):
+            raise TemplateNotAllowed(
+                f"{template_id!r} needs a non-empty grounded news window; "
+                "there is nothing to interpret right now")
     return template
 
 

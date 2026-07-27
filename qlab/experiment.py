@@ -45,7 +45,7 @@ from qlab.state.registry import Registry
 # Batch mode
 # ---------------------------------------------------------------------------
 # The run kind the staged ablation writes. Read surfaces (the owner's
-# leaderboard and atlas overlay) filter on it, so producer and consumer share
+# leaderboard and reference overlay) filter on it, so producer and consumer share
 # this name instead of two string literals that can drift apart silently.
 ABLATION_RUN_KIND = "ablation"
 

@@ -41,8 +41,8 @@ def test_algorithm_catalog_endpoint_marks_offline_methods_non_runnable(session):
     assert not any(row["agent_usable"] for row in offline)
 
 
-def test_atlas_marks_champion_and_reports_absent_ablation(session):
-    status, payload = handle_api(session, "GET", "/api/atlas", {}, {})
+def test_reference_marks_champion_and_reports_absent_ablation(session):
+    status, payload = handle_api(session, "GET", "/api/reference", {}, {})
     assert status == 200
     entries = payload["entries"]
     champions = [e for e in entries if e["champion"]]
@@ -67,8 +67,8 @@ def test_leaderboard_reports_method_names_not_codes(session):
     assert [row["name"] for row in rows] == ["HRP", "60/40"]
     assert rows[0]["champion"] and not rows[1]["champion"]
     assert rows[1]["benchmark"]
-    # The atlas overlays the same ablation numbers on the arm entries.
-    status, payload = handle_api(session, "GET", "/api/atlas", {}, {})
+    # The reference overlays the same ablation numbers on the arm entries.
+    status, payload = handle_api(session, "GET", "/api/reference", {}, {})
     assert status == 200
     by_id = {entry["entry_id"]: entry for entry in payload["entries"]}
     assert by_id["b2"]["ablation"]["sharpe"] == 0.91
@@ -87,7 +87,7 @@ def test_leaderboard_ignores_newer_non_ablation_backtest_runs(session):
     session.registry.log_backtest(views, "views_probe", {"sharpe": 3.0})
 
     assert [row["arm_id"] for row in session.leaderboard()] == ["B2"]
-    status, payload = handle_api(session, "GET", "/api/atlas", {}, {})
+    status, payload = handle_api(session, "GET", "/api/reference", {}, {})
     assert status == 200
     by_id = {entry["entry_id"]: entry for entry in payload["entries"]}
     assert by_id["b2"]["ablation"]["sharpe"] == 0.91
@@ -104,7 +104,7 @@ def test_leaderboard_reads_a_real_ablation_run(session):
 
     Every other leaderboard test writes ``log_run("ablation", …)`` by hand, so a
     rename inside ``run_ablation`` would leave the suite green and both the
-    leaderboard and the atlas overlay silently blank.
+    leaderboard and the reference overlay silently blank.
     """
     from qlab.experiment import ABLATION_RUN_KIND, run_ablation
 
@@ -124,7 +124,7 @@ def test_leaderboard_reads_a_real_ablation_run(session):
     assert {row["arm_id"] for row in rows} == {"B1", "B0"}
     assert {row["name"] for row in rows} == {"Equal weight", "60/40"}
     assert all(row["sharpe"] is not None for row in rows)
-    status, payload = handle_api(session, "GET", "/api/atlas", {}, {})
+    status, payload = handle_api(session, "GET", "/api/reference", {}, {})
     by_id = {entry["entry_id"]: entry for entry in payload["entries"]}
     assert by_id["b1"]["ablation"]["sharpe"] == rows[
         next(i for i, r in enumerate(rows) if r["arm_id"] == "B1")]["sharpe"]
@@ -291,6 +291,145 @@ def test_workflow_debate_route_does_not_shadow_the_workflow_route(session):
     assert status == 200 and workflow["workflow_id"] == wid
 
 
+def test_workflow_control_routes_interrupt_resume_and_abandon(session):
+    workflow = session.registry.start_workflow(
+        "portfolio_review", {"goal": "lifecycle"})
+    workflow_id = workflow["workflow_id"]
+    session.registry.update_workflow_phase(
+        workflow_id, "analyst", "working")
+
+    status, interrupted = handle_api(
+        session,
+        "POST",
+        f"/api/workflows/{workflow_id}/interrupt",
+        {},
+        {"reason": "operator stopped it"},
+    )
+    assert status == 200
+    assert interrupted["status"] == "interrupted"
+    assert interrupted["steps"][0]["status"] == "interrupted"
+
+    status, fenced = handle_api(
+        session,
+        "POST",
+        "/api/workflows/analyst",
+        {},
+        {"workflow_id": workflow_id, "status": "working"},
+    )
+    assert status == 409
+    assert "resume it explicitly" in fenced["error"]
+
+    status, resumed = handle_api(
+        session,
+        "POST",
+        f"/api/workflows/{workflow_id}/resume",
+        {},
+        {},
+    )
+    assert status == 200 and resumed["status"] == "running"
+
+    status, abandoned = handle_api(
+        session,
+        "POST",
+        f"/api/workflows/{workflow_id}/abandon",
+        {},
+        {"reason": "obsolete run"},
+    )
+    assert status == 200 and abandoned["status"] == "abandoned"
+    assert all(
+        step["status"] == "abandoned"
+        for step in abandoned["steps"]
+    )
+
+    status, conflict = handle_api(
+        session,
+        "POST",
+        f"/api/workflows/{workflow_id}/resume",
+        {},
+        {},
+    )
+    assert status == 409
+    assert "cannot be resumed" in conflict["error"]
+
+
+def test_owner_startup_recovers_live_looking_workflows_as_interrupted():
+    registry = Registry(":memory:")
+    workflow = registry.start_workflow(
+        "portfolio_review", {"goal": "survive owner restart"})
+    registry.update_workflow_phase(
+        workflow["workflow_id"], "analyst", "working")
+
+    recovered = UISession(offline_default=True, registry=registry)
+    row = recovered.registry.get_workflow(workflow["workflow_id"])
+    assert row["status"] == "interrupted"
+    assert row["steps"][0]["status"] == "interrupted"
+    assert "owner runtime restarted" in row["steps"][0]["summary"]
+    recovered.registry.close()
+
+
+def test_owner_reaps_a_workflow_older_than_the_coordinator_lease(session):
+    workflow = session.registry.start_workflow(
+        "portfolio_review", {"goal": "stale"})
+    session.registry.update_workflow_phase(
+        workflow["workflow_id"], "analyst", "working")
+    session.registry.con.execute(
+        "UPDATE workflows SET updated_at=? WHERE workflow_id=?",
+        ["2000-01-01T00:00:00+00:00", workflow["workflow_id"]],
+    )
+
+    reaped = session.reap_stale_workflows(force=True)
+    assert [row["workflow_id"] for row in reaped] == [workflow["workflow_id"]]
+    row = session.registry.get_workflow(workflow["workflow_id"])
+    assert row["status"] == "interrupted"
+    assert "lease expired" in row["steps"][0]["summary"]
+
+
+def test_serve_refuses_the_port_before_opening_or_recovering_registry(
+    monkeypatch,
+):
+    import qlab.ui.server as server_module
+
+    constructed = []
+
+    def refuse_port(*args, **kwargs):
+        raise OSError("address already in use")
+
+    monkeypatch.setattr(server_module, "ThreadingHTTPServer", refuse_port)
+    monkeypatch.setattr(
+        server_module,
+        "UISession",
+        lambda **kwargs: constructed.append(kwargs),
+    )
+    with pytest.raises(OSError, match="address already in use"):
+        server_module.serve(port=8765, offline=True, open_browser=False)
+    assert constructed == []
+
+
+def test_lifecycle_client_uses_a_short_deadline(monkeypatch):
+    import qlab.tui.client as client_module
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"workflow_id": "wf1", "status": "interrupted"}
+
+    def post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(client_module.httpx, "post", post)
+    result = client_module.ApiClient("http://owner").post_control(
+        "/api/workflows/wf1/interrupt", {"reason": "stop"})
+    assert result["status"] == "interrupted"
+    assert captured["timeout"].read == 5.0
+    assert captured["timeout"].connect == 2.0
+
+
 def test_model_invocations_route(session):
     from qlab.operator.model_routing import record_invocation, resolve_route
 
@@ -299,38 +438,38 @@ def test_model_invocations_route(session):
     assert status == 200 and out["invocations"][0]["role"] == "reporter"
 
 
-def test_bob_status_starts_in_observe(session):
-    status, out = handle_api(session, "GET", "/api/bob/status", {}, {})
+def test_atlas_status_starts_in_observe(session):
+    status, out = handle_api(session, "GET", "/api/atlas/status", {}, {})
     assert status == 200
     assert out["mode"] == "observe"
-    assert out["manager_id"] == "bob-the-quant"
+    assert out["manager_id"] == "atlas"
 
 
-def test_bob_observe_tick_returns_state_and_brief(session):
-    status, out = handle_api(session, "POST", "/api/bob/observe", {},
+def test_atlas_observe_tick_returns_state_and_brief(session):
+    status, out = handle_api(session, "POST", "/api/atlas/observe", {},
                              {"offline": True})
     assert status == 200
-    # Demo data is research-only, so Bob is not blocked on it; coordinator may be
+    # Demo data is research-only, so Atlas is not blocked on it; coordinator may be
     # absent in CI -> degraded, else observing. Either way a brief is produced.
     assert out["state"] in ("observing", "degraded")
     assert out["brief"]["book"]["equity"] is not None
 
 
-def test_bob_mode_and_pause_resume(session):
-    status, out = handle_api(session, "POST", "/api/bob/mode", {},
+def test_atlas_mode_and_pause_resume(session):
+    status, out = handle_api(session, "POST", "/api/atlas/mode", {},
                              {"mode": "research"})
     assert status == 200 and out["mode"] == "research"
-    status, bad = handle_api(session, "POST", "/api/bob/mode", {},
+    status, bad = handle_api(session, "POST", "/api/atlas/mode", {},
                              {"mode": "nonsense"})
     assert status == 400
-    status, paused = handle_api(session, "POST", "/api/bob/pause", {}, {})
+    status, paused = handle_api(session, "POST", "/api/atlas/pause", {}, {})
     assert paused["mode"] == "paused"
-    status, resumed = handle_api(session, "POST", "/api/bob/resume", {}, {})
+    status, resumed = handle_api(session, "POST", "/api/atlas/resume", {}, {})
     assert resumed["mode"] == "observe"
 
 
-def test_bob_message_never_grants_authority(session):
-    status, out = handle_api(session, "POST", "/api/bob/message", {},
+def test_atlas_message_never_grants_authority(session):
+    status, out = handle_api(session, "POST", "/api/atlas/message", {},
                              {"text": "what is our drawdown?"})
     assert status == 200 and out["received"] is True
     # No authority field, no execution — just an acknowledgement.
@@ -1081,38 +1220,38 @@ def test_quote_event_cli_format_shows_three_tickers_and_total():
     assert "count=4" in line
 
 
-def test_bob_task_start_respects_mode_authority(session):
-    """Starting a Bob task through the owner runs the governed workflow — and
+def test_atlas_task_start_respects_mode_authority(session):
+    """Starting a Atlas task through the owner runs the governed workflow — and
     only when the mode allows it. Observe mode must refuse."""
-    facts = session.bob_facts(True)
+    facts = session.atlas_facts(True)
     facts["regime"]["flip"] = True
-    out = session.bob.observe(facts, trading_date="2020-01-02")
+    out = session.atlas.observe(facts, trading_date="2020-01-02")
     task_id = out["created_tasks"][0]["task_id"]
 
     # Observe mode: refused before any workflow is created.
     status, refused = handle_api(
-        session, "POST", f"/api/bob/tasks/{task_id}/start", {},
+        session, "POST", f"/api/atlas/tasks/{task_id}/start", {},
         {"offline": True})
     assert status == 200
     assert refused["started"] is False and refused["blocked_by"] == "authority"
     assert session.registry.list_workflows(10) == []
 
     # Research mode: the template runs and a durable workflow is registered.
-    session.bob.set_mode("research")
-    session.registry.update_bob_task(task_id, status="queued")
+    session.atlas.set_mode("research")
+    session.registry.update_atlas_task(task_id, status="queued")
     status, started = handle_api(
-        session, "POST", f"/api/bob/tasks/{task_id}/start", {},
+        session, "POST", f"/api/atlas/tasks/{task_id}/start", {},
         {"offline": True})
     assert status == 200 and started["completed"] is True
     assert started["conclusion"]["workflow_id"]
-    stored = session.registry.get_bob_task(task_id)
+    stored = session.registry.get_atlas_task(task_id)
     assert stored["status"] == "completed"
     assert stored["workflow_id"] == started["conclusion"]["workflow_id"]
 
 
-def test_unknown_bob_task_start_is_404(session):
+def test_unknown_atlas_task_start_is_404(session):
     status, out = handle_api(
-        session, "POST", "/api/bob/tasks/nope/start", {}, {"offline": True})
+        session, "POST", "/api/atlas/tasks/nope/start", {}, {"offline": True})
     assert status == 404
 
 
@@ -1715,3 +1854,49 @@ def test_tui_snapshot_carries_the_desk_mode(session):
     status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
     assert status == 200
     assert snap["desk_mode"]["label"] == "SYNTHETIC"
+
+def test_autonomy_is_a_runtime_toggle_that_never_widens_authority(session):
+    """The UI switch removes the button press, not the boundary."""
+    session.atlas.set_mode("observe")
+    status, out = handle_api(session, "POST", "/api/atlas/autonomy", {},
+                             {"enabled": True})
+    assert status == 200 and out["autonomous"] is True
+    # Enabled, but Observe mode still starts nothing — said plainly.
+    assert "starts no workflows" in out["effect"]
+
+    session.atlas.set_mode("research")
+    _, out = handle_api(session, "POST", "/api/atlas/autonomy", {},
+                        {"enabled": True})
+    assert "on each heartbeat" in out["effect"]
+
+    _, out = handle_api(session, "POST", "/api/atlas/autonomy", {},
+                        {"enabled": False})
+    assert out["autonomous"] is False
+    assert "wait for you" in out["effect"]
+
+
+def test_autonomy_rejects_a_non_boolean(session):
+    status, out = handle_api(session, "POST", "/api/atlas/autonomy", {},
+                             {"enabled": "yes"})
+    assert status == 400 and "true or false" in out["error"]
+
+
+def test_autonomy_state_reaches_the_tui_snapshot(session):
+    handle_api(session, "POST", "/api/atlas/autonomy", {}, {"enabled": True})
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert snap["atlas_heartbeat"]["autonomous"] is True
+
+
+def test_news_read_template_refuses_an_empty_window(session):
+    """The analyst interprets a window it is handed; with nothing to read it
+    must refuse rather than narrate silence."""
+    from qlab.operator.templates import TemplateNotAllowed, check_startable
+
+    facts = session.atlas_facts(True)
+    facts["news_window_items"] = 0
+    with pytest.raises(TemplateNotAllowed, match="nothing to interpret"):
+        check_startable("news_read", "research", facts)
+
+    facts["news_window_items"] = 5
+    assert check_startable("news_read", "research", facts).template_id == "news_read"

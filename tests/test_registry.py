@@ -261,6 +261,103 @@ def test_workforce_is_durable_ordered_and_role_bound(reg):
     assert replay["result"]["final_summary"] == "reporter complete"
 
 
+def test_workforce_interrupt_requires_explicit_resume_and_preserves_evidence(reg):
+    import pytest
+
+    workflow = reg.start_workflow("portfolio_review", {"goal": "review"})
+    workflow_id = workflow["workflow_id"]
+    reg.update_workflow_phase(workflow_id, "analyst", "working")
+
+    interrupted = reg.interrupt_workflow(
+        workflow_id, "operator stopped a stuck analyst")
+    by_phase = {step["phase"]: step for step in interrupted["steps"]}
+    assert interrupted["status"] == "interrupted"
+    assert interrupted["current_phase"] == "analyst"
+    assert by_phase["analyst"]["status"] == "interrupted"
+    assert "stuck analyst" in by_phase["analyst"]["summary"]
+    assert by_phase["analyst"]["completed_at"] is not None
+    assert by_phase["challenger"]["status"] == "queued"
+
+    # A surviving child cannot make a late write and silently resurrect the run.
+    with pytest.raises(RuntimeError, match="resume it explicitly"):
+        reg.update_workflow_phase(workflow_id, "analyst", "working")
+    with pytest.raises(RuntimeError, match="already running"):
+        reg.resume_workflow(reg.start_workflow(
+            "portfolio_review", {"goal": "other"})["workflow_id"])
+
+    resumed = reg.resume_workflow(workflow_id)
+    assert resumed["status"] == "running"
+    assert resumed["current_phase"] == "analyst"
+    restarted = reg.update_workflow_phase(
+        workflow_id, "analyst", "working", summary="re-estimating")
+    analyst = restarted["steps"][0]
+    assert analyst["status"] == "working"
+    assert analyst["completed_at"] is None
+    assert analyst["summary"] == "re-estimating"
+
+    kinds = [event["kind"] for event in reg.read_events(limit=20)]
+    assert "workflow_interrupted" in kinds
+    assert "workflow_resumed" in kinds
+
+
+def test_workforce_abandon_closes_unfinished_phases_without_deleting_done_work(reg):
+    import pytest
+
+    workflow = reg.start_workflow("portfolio_review", {"goal": "review"})
+    workflow_id = workflow["workflow_id"]
+    reg.update_workflow_phase(
+        workflow_id,
+        "analyst",
+        "done",
+        summary="estimation persisted",
+        artifacts={
+            "moment_set_id": "m1",
+            "objective_id": "o1",
+            "decision_id": "d1",
+            "regime": "neutral",
+            "regime_summary": "mixed backdrop",
+        },
+    )
+    reg.update_workflow_phase(workflow_id, "challenger", "working")
+
+    abandoned = reg.abandon_workflow(
+        workflow_id, "operator closed obsolete research")
+    by_phase = {step["phase"]: step for step in abandoned["steps"]}
+    assert abandoned["status"] == "abandoned"
+    assert abandoned["result"]["control"]["status"] == "abandoned"
+    assert by_phase["analyst"]["status"] == "done"
+    assert by_phase["analyst"]["summary"] == "estimation persisted"
+    assert all(
+        by_phase[phase]["status"] == "abandoned"
+        for phase in ("challenger", "optimizer", "referee", "reporter")
+    )
+    assert "obsolete research" in by_phase["challenger"]["summary"]
+
+    with pytest.raises(RuntimeError, match="cannot be resumed"):
+        reg.resume_workflow(workflow_id)
+    with pytest.raises(RuntimeError, match="resume it explicitly"):
+        reg.update_workflow_phase(workflow_id, "challenger", "working")
+    assert reg.abandon_workflow(
+        workflow_id, "idempotent retry")["status"] == "abandoned"
+
+
+def test_bulk_interrupt_only_reaps_running_workflows_older_than_cutoff(reg):
+    old = reg.start_workflow("portfolio_review", {"goal": "old"})
+    fresh = reg.start_workflow("portfolio_review", {"goal": "fresh"})
+    reg.con.execute(
+        "UPDATE workflows SET updated_at=? WHERE workflow_id=?",
+        ["2000-01-01T00:00:00+00:00", old["workflow_id"]],
+    )
+
+    changed = reg.interrupt_running_workflows(
+        "coordinator lease expired",
+        updated_before="2001-01-01T00:00:00+00:00",
+    )
+    assert [row["workflow_id"] for row in changed] == [old["workflow_id"]]
+    assert reg.get_workflow(old["workflow_id"])["status"] == "interrupted"
+    assert reg.get_workflow(fresh["workflow_id"])["status"] == "running"
+
+
 def test_workforce_optimizer_waits_for_the_debate(reg):
     """The bounded debate makes the challenger a true upstream of the
     optimizer: an amendment recorded in the challenger phase must be able to

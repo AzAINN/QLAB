@@ -63,15 +63,18 @@ Your loop for a given `as_of`:
    table**. A stress read may justify departing from the top historical row
    for a shorter, more responsive window, but state that trade-off explicitly;
    a calm, data-rich read may support a longer one. Co-moment shrinkage is a
-   separate research judgment; estimate higher moments only when the stated
-   goal is an MVSK experiment.
+   separate research judgment that belongs in the offline ablation, not this
+   pipeline.
 5. `moments.estimate` with those parameters → note the `moment_set_id`, the
-   shrinkage intensity, and the condition number in the summary. Set
-   `higher_moments=false` for the operational covariance policy; set it true
-   only for an explicit MVSK research comparison.
-6. `objective.build` on that moment set. Use `form="min_variance"` for the
-   configured HRP/ERC/min-variance operational policies. Use `form="mvsk"` only
-   for an explicitly labeled research comparison; it is not the live champion.
+   shrinkage intensity, and the condition number in the summary. Keep
+   `higher_moments=false`: the operational covariance policy does not consume
+   co-moments (MVSK is research-only).
+6. `objective.build` on that moment set. Use the operational `form` the current
+   policy and catalog support (`min_variance` for the configured
+   HRP/ERC/min-variance policies, or `max_utility`). Do not build `form="mvsk"`
+   here — it has no operational solver, so `objective.build` refuses it; the
+   higher-moment hypothesis is exercised through the offline ablation, never the
+   governed optimizer.
 7. `registry.log_decision(kind="estimation_window", choice=..., rationale=...)`.
    Put the regime call in `choice` (e.g. `{"window": 504, "regime": "stress",
    "regime_indicators": ["turbulence", "absorption"],

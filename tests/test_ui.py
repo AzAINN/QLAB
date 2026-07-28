@@ -1164,6 +1164,17 @@ def test_api_client_resubscribe_uses_last_event_tuple(monkeypatch):
     ]
 
 
+def test_the_owner_proves_liveness_before_the_stream_reader_gives_up():
+    # These two numbers are a contract across two modules. A stream poll waits
+    # this long for the dispatch lock and then pings instead; if that wait ever
+    # reached the client's read deadline, every long owner action would cost a
+    # reconnect and strand a server thread blocked on the lock.
+    from qlab.tui.client import STREAM_READ_TIMEOUT_S
+    from qlab.ui.server import _STREAM_LOCK_WAIT_SECONDS
+
+    assert _STREAM_LOCK_WAIT_SECONDS * 2 < STREAM_READ_TIMEOUT_S
+
+
 def test_api_client_stream_stops_on_heartbeat_after_cancellation(monkeypatch):
     """A quiet SSE connection must release when the Textual app unmounts."""
     import threading

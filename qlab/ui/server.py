@@ -97,6 +97,10 @@ _INDEX = _HERE / "index.html"
 # Effectively one request computes at a time (fine for a local single user),
 # while the socket layer never stalls.
 _LOCK = threading.Lock()
+# How long a stream poll waits for the dispatch lock before proving the socket
+# is alive instead. Must stay comfortably under the client's stream read
+# deadline, or a long owner action expires the client before it hears anything.
+_STREAM_LOCK_WAIT_SECONDS = 2.0
 
 _MARKET_EVENT_LIMIT = 500
 _STREAM_PAGE_CEILING = 5000
@@ -2391,9 +2395,21 @@ class _Handler(BaseHTTPRequestHandler):
                     )
 
                 while True:
-                    with _LOCK:
+                    # Waiting indefinitely here is what turns one long owner
+                    # action into reconnect churn: no ping is emitted while the
+                    # lock is held, the client's read deadline expires, and the
+                    # replacement connection blocks on the same lock while this
+                    # thread survives to write to a dead socket. Bound the wait
+                    # and prove liveness instead.
+                    if not _LOCK.acquire(timeout=_STREAM_LOCK_WAIT_SECONDS):
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        continue
+                    try:
                         audit_events = self.session.read_audit_stream_events(
                             read_limit, read_after)
+                    finally:
+                        _LOCK.release()
                     market_events = self.session.read_market_events(
                         read_limit, read_after)
 

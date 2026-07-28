@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import threading
 
 import pytest
 
@@ -272,6 +273,37 @@ def test_owner_tick_keeps_external_news_fetch_outside_dispatch_lock():
 
     assert calls == ["fetch", "compose", "observe"]
     assert result["state"] == "observing"
+
+
+def test_a_failed_recompose_stops_the_stale_window_gating_a_news_template():
+    # The heartbeat swallows a read failure so the supervisor keeps observing.
+    # It used to leave the previous tick's window cached, and `atlas_facts`
+    # derives `news_window_items` from it -- so the news precondition passed on
+    # evidence that was no longer current.
+    from qlab.operator.heartbeat import build_owner_tick
+    from qlab.operator.templates import TemplateNotAllowed, check_startable
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    # A composed read with a real window, as a healthy tick would leave behind.
+    session._desk_read = {"grounding": {"hashes": ["h1", "h2"]},
+                          "observations": ["prior read"]}
+    assert session.atlas_facts(True)["news_window_items"] == 2
+
+    def explode(offline, *, prefetched_news):
+        raise RuntimeError("grounding rejected a malformed record")
+
+    session.compose_desk_read = explode
+    session.fetch_desk_news = lambda offline: {
+        "items": [], "provider_name": "synthetic", "error": None}
+
+    build_owner_tick(session, threading.Lock(), offline=True)()
+
+    facts = session.atlas_facts(True)
+    assert facts["news_window_items"] == 0
+    with pytest.raises(TemplateNotAllowed, match="non-empty grounded news"):
+        check_startable("news_read", "research", facts)
+    assert "STALE" in " ".join(session._desk_read["observations"])
 
 
 def test_autonomy_still_cannot_create_a_paper_plan(reg):

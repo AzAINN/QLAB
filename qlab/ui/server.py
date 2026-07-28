@@ -1227,6 +1227,26 @@ class UISession:
         self._desk_read = payload
         return self._desk_read
 
+    def mark_desk_read_stale(self, error: str) -> None:
+        """Record that the read could not be recomposed.
+
+        The cached payload is a previous tick's window. Leaving it intact makes
+        a failed refresh indistinguishable from a genuinely unchanged desk, and
+        `atlas_facts` derives `news_window_items` from it — so a template
+        precondition would admit a news read against evidence that is no longer
+        current. Zero the grounding and say so, the same way a fetch outage
+        does, so the refusal is the loud one rather than a stale number.
+        """
+        payload = dict(self._desk_read or {})
+        payload["grounding"] = {"hashes": []}
+        payload["news_error"] = str(error)[:400]
+        payload["observations"] = [
+            f"Desk read could not be recomposed ({str(error)[:160]}); the "
+            "qualitative side of this read is STALE, not quiet.",
+            *(payload.get("observations") or []),
+        ]
+        self._desk_read = payload
+
     def set_autonomy(self, enabled: bool) -> dict:
         """Turn autonomous work on or off at runtime.
 

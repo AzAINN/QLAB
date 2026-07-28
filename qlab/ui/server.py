@@ -1130,7 +1130,54 @@ class UISession:
 
     def refresh_desk_read(self, offline: bool) -> dict:
         """Recompose the desk read from current evidence."""
+        return self.compose_desk_read(
+            offline,
+            prefetched_news=self.fetch_desk_news(offline),
+        )
+
+    def fetch_desk_news(self, offline: bool) -> dict:
+        """Fetch external news without touching the registry.
+
+        The owner heartbeat calls this before taking its dispatch lock. Network
+        latency therefore cannot stall TUI requests, while the subsequent
+        grounding and registry reads remain serialized under the one-writer
+        boundary.
+        """
         from qlab.news.feed import fetch_news
+
+        universe = self.mandate.universe_whitelist
+        as_of = date.today().isoformat()
+        provider_name = (
+            "synthetic"
+            if offline
+            else os.environ.get("QLAB_NEWS_PROVIDER", "synthetic")
+        )
+        try:
+            items = fetch_news(
+                as_of,
+                universe,
+                lookback_hours=48,
+                offline=offline,
+            )
+        except Exception as exc:
+            return {
+                "items": [],
+                "provider_name": provider_name,
+                "error": str(exc),
+            }
+        return {
+            "items": items,
+            "provider_name": provider_name,
+            "error": None,
+        }
+
+    def compose_desk_read(
+        self,
+        offline: bool,
+        *,
+        prefetched_news: dict,
+    ) -> dict:
+        """Ground a fetched news window and compose it with owner state."""
         from qlab.operator.synthesis import compose_read, read_news
 
         universe = self.mandate.universe_whitelist
@@ -1140,23 +1187,15 @@ class UISession:
         except Exception as exc:
             panel = {"robust_state": "unknown",
                      "uncertainty_reason": f"panel unavailable: {exc}"}
-        news_error = None
-        try:
-            items = fetch_news(as_of, universe, lookback_hours=48,
-                               offline=offline)
-        except Exception as exc:
-            # A news outage weakens the read but never breaks the desk. It must
-            # still be VISIBLE: a silently empty news window is indistinguishable
-            # from a genuinely quiet market, and those mean opposite things.
-            items = []
-            news_error = str(exc)
+        items = list(prefetched_news.get("items") or [])
+        news_error = prefetched_news.get("error")
         # Ground the window before interpreting it: enforce the point-in-time
         # boundary, hash each record so an edited headline is a new record
         # rather than a silent rewrite, and cluster so corroboration is visible.
         from qlab.news.grounding import ground
 
-        provider_name = ("synthetic" if offline else
-                         os.environ.get("QLAB_NEWS_PROVIDER", "synthetic"))
+        provider_name = str(
+            prefetched_news.get("provider_name") or "synthetic")
         grounded = ground(
             items, as_of=datetime.now(timezone.utc).isoformat(),
             provider=provider_name, universe=universe)
@@ -2258,10 +2297,25 @@ class _Handler(BaseHTTPRequestHandler):
             self._stream(parse_qs(parsed.query))
             return
         if parsed.path.startswith("/api/"):
+            query = parse_qs(parsed.query)
             try:
-                with _LOCK:
-                    status, obj = handle_api(self.session, "GET", parsed.path,
-                                             parse_qs(parsed.query), {})
+                if (
+                    parsed.path == "/api/atlas/read"
+                    and _qbool(query, "refresh", False)
+                ):
+                    offline = _qbool(
+                        query, "offline", self.session.offline_default)
+                    prefetched_news = self.session.fetch_desk_news(offline)
+                    with _LOCK:
+                        obj = self.session.compose_desk_read(
+                            offline,
+                            prefetched_news=prefetched_news,
+                        )
+                    status = 200
+                else:
+                    with _LOCK:
+                        status, obj = handle_api(
+                            self.session, "GET", parsed.path, query, {})
             except Exception as exc:  # never crash the server on a bad call
                 status, obj = 500, {"error": repr(exc)}
             self._json(status, obj)

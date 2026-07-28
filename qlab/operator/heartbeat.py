@@ -109,7 +109,7 @@ class AtlasHeartbeat:
 
 def build_owner_tick(session, lock, *, offline: bool,
                      autonomous: bool = False) -> Callable[[], dict]:
-    """The owner's tick: observe under the dispatch lock, then let Atlas read.
+    """The owner's tick: fetch externally, then compose and observe under lock.
 
     Bound to ``session`` rather than importing it, so tests drive the same code
     with a stub. The lock is the owner's HTTP dispatch lock — holding it makes a
@@ -124,18 +124,29 @@ def build_owner_tick(session, lock, *, offline: bool,
     """
 
     def tick() -> dict:
+        # Network work is deliberately outside the owner dispatch lock. The
+        # returned payload contains no registry state; grounding and composition
+        # happen below while the one-writer boundary is held.
+        fetch_news = getattr(session, "fetch_desk_news", None)
+        prefetched_news = fetch_news(offline) if callable(fetch_news) else None
         with lock:
             # Read the switch each tick so the UI toggle takes effect
             # immediately rather than at the next owner restart.
             live_autonomous = getattr(session, "autonomous", autonomous)
-            result = session.atlas_observe(offline)
             # The qualitative read is what a human actually looks at; refresh it
             # on the same tick so the rail and the drawer never disagree.
             try:
-                session.refresh_desk_read(offline)
+                if prefetched_news is None:
+                    session.refresh_desk_read(offline)
+                else:
+                    session.compose_desk_read(
+                        offline,
+                        prefetched_news=prefetched_news,
+                    )
             except Exception:
                 # A read failure must not stop the supervisor from observing.
                 pass
+            result = session.atlas_observe(offline)
             result["autonomous_enabled"] = bool(live_autonomous)
             if live_autonomous:
                 try:

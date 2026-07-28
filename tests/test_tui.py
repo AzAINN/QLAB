@@ -3600,6 +3600,37 @@ class _AtlasStubClient(StubClient):
         return super().get(path, **params)
 
 
+def test_atlas_refresh_fetches_a_fresh_composed_read():
+    from qlab.tui.app import QlabTui
+
+    class RefreshClient(_AtlasStubClient):
+        def __init__(self, snapshot):
+            super().__init__(snapshot)
+            self.read_requests = []
+
+        def get(self, path, **params):
+            if path == "/api/atlas/read":
+                self.read_requests.append(params)
+                return {"read_hash": "fresh-read"}
+            return super().get(path, **params)
+
+    async def run():
+        client = RefreshClient(_atlas_snapshot())
+        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app.action_atlas_refresh()
+            for _ in range(50):
+                if not app._action_running:
+                    break
+                await pilot.pause(0.02)
+
+            assert client.read_requests == [
+                {"offline": True, "refresh": True}]
+
+    asyncio.run(run())
+
+
 def test_status_line_shows_atlas_mode_and_feed_identity():
     from qlab.tui.app import QlabTui
 

@@ -3620,8 +3620,12 @@ class QlabTui(App[None]):
     def action_atlas_refresh(self) -> None:
         """Recompose Atlas's read now instead of waiting for the next heartbeat."""
         self._run_api_action(
-            "atlas read", "/api/atlas/observe", {"offline": self.offline},
-            active_agent=None)
+            "atlas read",
+            "/api/atlas/read",
+            {"offline": self.offline, "refresh": True},
+            active_agent=None,
+            http_method="get",
+        )
 
     def action_atlas_observe(self) -> None:
         """Force one supervisor tick — evaluate triggers against current facts."""

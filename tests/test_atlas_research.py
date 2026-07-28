@@ -229,6 +229,51 @@ def test_autonomous_tick_runs_only_what_the_mode_permits(reg):
     assert session.started == ["regime_review"]
 
 
+def test_owner_tick_keeps_external_news_fetch_outside_dispatch_lock():
+    """Slow providers must not freeze every owner API request."""
+    from qlab.operator.heartbeat import build_owner_tick
+
+    class TrackingLock:
+        held = False
+
+        def __enter__(self):
+            assert not self.held
+            self.held = True
+
+        def __exit__(self, *exc):
+            self.held = False
+
+    lock = TrackingLock()
+    calls = []
+
+    class Session:
+        autonomous = False
+
+        def fetch_desk_news(self, offline):
+            assert lock.held is False
+            calls.append("fetch")
+            return {"items": [], "provider_name": "synthetic", "error": None}
+
+        def compose_desk_read(self, offline, *, prefetched_news):
+            assert lock.held is True
+            calls.append("compose")
+            return {}
+
+        def atlas_observe(self, offline):
+            assert lock.held is True
+            calls.append("observe")
+            return {"state": "observing"}
+
+    result = build_owner_tick(
+        Session(),
+        lock,
+        offline=True,
+    )()
+
+    assert calls == ["fetch", "compose", "observe"]
+    assert result["state"] == "observing"
+
+
 def test_autonomy_still_cannot_create_a_paper_plan(reg):
     """The plan-creation boundary survives autonomy in Research mode."""
     atlas = _atlas(reg)

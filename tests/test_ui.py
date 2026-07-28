@@ -560,6 +560,25 @@ def test_atlas_observe_tick_returns_state_and_brief(session):
     assert out["brief"]["book"]["equity"] is not None
 
 
+def test_post_offline_flag_is_parsed_not_cast(session, monkeypatch):
+    # bool("0") is True: a POST asking for LIVE data used to be served synthetic
+    # data and a 200, with nothing in the response saying so.
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        session, "atlas_observe", lambda offline: seen.append(offline) or {})
+
+    handle_api(session, "POST", "/api/atlas/observe", {"offline": ["0"]}, {})
+    handle_api(session, "POST", "/api/atlas/observe", {}, {"offline": "0"})
+    handle_api(session, "POST", "/api/atlas/observe", {}, {"offline": "false"})
+    assert seen == [False, False, False]
+
+    seen.clear()
+    handle_api(session, "POST", "/api/atlas/observe", {"offline": ["1"]}, {})
+    handle_api(session, "POST", "/api/atlas/observe", {}, {"offline": True})
+    handle_api(session, "POST", "/api/atlas/observe", {}, {})   # session default
+    assert seen == [True, True, True]
+
+
 def test_atlas_mode_and_pause_resume(session):
     status, out = handle_api(session, "POST", "/api/atlas/mode", {},
                              {"mode": "research"})

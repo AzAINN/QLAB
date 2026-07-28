@@ -51,6 +51,7 @@ _WORKFORCE_DEPS = {
     "optimizer": ("analyst", "challenger"),
     "referee": ("challenger", "optimizer"),
     "reporter": ("referee",),
+    "news-analyst": (),
 }
 _WORKFORCE_REQUIRED_ARTIFACTS = {
     # regime + regime_summary are required so the run always carries the analyst's
@@ -62,6 +63,10 @@ _WORKFORCE_REQUIRED_ARTIFACTS = {
     "judge": ("winner_phase", "winning_targets", "evidence"),
     "referee": ("verdict", "verdict_id", "targets"),
     "reporter": ("recommendation",),
+    # Atlas's qualitative helper. It reads a grounded window it is handed and
+    # produces a view; it has no dependencies and reaches no gate, because it
+    # never produces targets and so can never approach the approval path.
+    "news-analyst": ("news_view",),
 }
 _MAX_PANEL_VARIANTS = 5
 
@@ -72,6 +77,41 @@ def _phase_type(phase: str) -> str:
     if dash and suffix.isdigit():
         return base
     return phase
+
+
+def validate_phase_graph(
+    phases: tuple[str, ...],
+    deps: dict[str, tuple[str, ...]] | None = None,
+) -> None:
+    """Raise unless every phase in `phases` could actually run to completion.
+
+    Naming every phase correctly is not enough. A phase whose dependency is
+    absent from the set can never start, so the workflow sits ``running``
+    forever -- which is exactly how a reduced graph like
+    ``(analyst, challenger, referee, reporter)`` orphans its referee. Rejecting
+    that at creation turns a silent deadlock into a loud error.
+
+    `deps` is the dependency map to validate against; panels pass their instance
+    DAG, where branch optimizers depend on their own analysts.
+    """
+    if not phases or len(set(phases)) != len(phases):
+        raise ValueError("workflow phases must be non-empty and unique")
+    unknown = {
+        phase for phase in phases
+        if _phase_type(phase) not in _WORKFORCE_REQUIRED_ARTIFACTS
+    }
+    if unknown:
+        raise ValueError(f"unknown workforce phases: {sorted(unknown)}")
+
+    deps_map = deps if deps is not None else _WORKFORCE_DEPS
+    present = set(phases)
+    for phase in phases:
+        for dependency in deps_map.get(phase, ()):
+            if dependency not in present:
+                raise ValueError(
+                    f"phase {phase!r} depends on {dependency!r}, which the "
+                    f"declared graph omits; it could never start"
+                )
 
 
 def panel_phases(n_variants: int) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
@@ -1072,6 +1112,7 @@ class Registry:
         # "_deps" is a registry-owned key: only the panel builder writes it.
         # A caller-supplied value could reorder or orphan the gate phases.
         request.pop("_deps", None)
+        deps: dict[str, tuple[str, ...]] | None = None
         if kind == "panel":
             variants = request.get("variants")
             if not isinstance(variants, list) or not all(
@@ -1079,14 +1120,9 @@ class Registry:
                 raise ValueError("panel requires request['variants']: list[dict]")
             phases, deps = panel_phases(len(variants))
             request["_deps"] = {phase: list(d) for phase, d in deps.items()}
-        if not phases or len(set(phases)) != len(phases):
-            raise ValueError("workflow phases must be non-empty and unique")
-        unknown = {
-            phase for phase in phases
-            if _phase_type(phase) not in _WORKFORCE_REQUIRED_ARTIFACTS
-        }
-        if unknown:
-            raise ValueError(f"unknown workforce phases: {sorted(unknown)}")
+        # Dependency closure is checked here, not just phase names: a graph that
+        # omits a dependency would be created happily and then deadlock.
+        validate_phase_graph(phases, deps)
 
         workflow_id = uuid.uuid4().hex[:16]
         now = _now()
@@ -1945,4 +1981,5 @@ def _agent_for_phase(phase: str) -> str:
         "judge": "referee",
         "referee": "referee",
         "reporter": "reporter",
+        "news-analyst": "news-analyst",
     }[_phase_type(phase)]

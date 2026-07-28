@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from qlab.core.types import Decision, SolveResult, Weights
 from qlab.state.registry import Registry
 
@@ -734,3 +736,85 @@ def test_equity_marks_gains_the_book_column_on_an_existing_table(tmp_path):
         assert reg.count_equity_marks(book="alpaca_paper") == 1
     finally:
         reg.close()
+
+
+# --- phase graphs must be executable, not merely well-named ------------------
+
+def test_validate_phase_graph_rejects_an_unknown_phase_type():
+    from qlab.state.registry import validate_phase_graph
+
+    with pytest.raises(ValueError, match="unknown workforce phases"):
+        validate_phase_graph(("news-analyst-typo",))
+
+
+def test_validate_phase_graph_rejects_a_graph_whose_dependency_is_absent():
+    # This is the real defect: the set is individually well-named, every phase
+    # exists, and creation succeeds -- but referee depends on optimizer, so
+    # omitting optimizer orphans the referee and the run can never terminate.
+    from qlab.state.registry import validate_phase_graph
+
+    with pytest.raises(ValueError, match="referee.*optimizer"):
+        validate_phase_graph(("analyst", "challenger", "referee", "reporter"))
+
+
+def test_validate_phase_graph_accepts_the_standard_workforce_graph():
+    from qlab.state.registry import WORKFORCE_PHASES, validate_phase_graph
+
+    validate_phase_graph(WORKFORCE_PHASES)
+
+
+def test_start_workflow_refuses_a_graph_that_could_never_complete():
+    # Creation used to succeed and the deadlock only surfaced later, when the
+    # referee refused to start and the workflow sat running forever.
+    registry = Registry(":memory:")
+    try:
+        with pytest.raises(ValueError, match="referee"):
+            registry.start_workflow(
+                "portfolio_review", {"goal": "g"},
+                phases=("analyst", "challenger", "referee", "reporter"))
+    finally:
+        registry.close()
+
+
+def test_a_panel_graph_is_validated_against_its_own_dependencies():
+    # Panels carry an instance DAG where branch optimizers depend on their own
+    # analysts; validating them against the static map would wrongly reject them.
+    registry = Registry(":memory:")
+    try:
+        workflow = registry.start_workflow(
+            "panel", {"goal": "g", "variants": [{"window": 252}, {"window": 504}]})
+        assert workflow["workflow_id"]
+    finally:
+        registry.close()
+
+
+def test_a_news_analyst_phase_runs_as_a_single_phase_workflow():
+    # Atlas's qualitative helper reads a window it is handed. It produces a view
+    # and nothing else: no targets, so no referee and no approval path.
+    registry = Registry(":memory:")
+    try:
+        workflow = registry.start_workflow(
+            "portfolio_review", {"goal": "read the window"},
+            phases=("news-analyst",))
+        registry.update_workflow_phase(
+            workflow["workflow_id"], "news-analyst", "done",
+            summary="record supports a narrow reading",
+            artifacts={"news_view": "two primary filings, one single-source take"})
+
+        stored = registry.get_workflow(workflow["workflow_id"])
+        assert stored["status"] == "complete"
+    finally:
+        registry.close()
+
+
+def test_a_news_analyst_phase_cannot_complete_without_its_view():
+    registry = Registry(":memory:")
+    try:
+        workflow = registry.start_workflow(
+            "portfolio_review", {"goal": "g"}, phases=("news-analyst",))
+        with pytest.raises(ValueError, match="news_view"):
+            registry.update_workflow_phase(
+                workflow["workflow_id"], "news-analyst", "done",
+                summary="empty", artifacts={})
+    finally:
+        registry.close()

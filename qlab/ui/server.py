@@ -238,8 +238,17 @@ class UISession:
         args = {key: value for key, value in body.items() if key != "offline"}
         return self._lab_tools[name](**args)  # type: ignore[operator]
 
-    def start_workflow(self, body: dict) -> dict:
-        """Start a durable portfolio/research workforce run."""
+    def start_workflow(self, body: dict, *,
+                       phases: tuple[str, ...] | None = None) -> dict:
+        """Start a durable portfolio/research workforce run.
+
+        `phases` is an in-process argument only, never read from `body`: letting
+        a network caller shape the phase graph would let it drop a gate phase.
+        The registry validates whatever graph it is given for dependency
+        closure, so a graph that omits the referee cannot reach a reporter and
+        therefore cannot produce a plan either way -- but the narrower surface
+        is the point.
+        """
         from qlab.mcp.guardrails import CallBudget
 
         kind = str(body.get("kind") or "portfolio_review")
@@ -272,6 +281,10 @@ class UISession:
         }
         if kind == "panel":
             request["variants"] = [dict(variant) for variant in variants]
+            # Panels build their own instance DAG; a declared graph would fight it.
+            return self.registry.start_workflow(kind, request)
+        if phases:
+            return self.registry.start_workflow(kind, request, phases=phases)
         return self.registry.start_workflow(kind, request)
 
     def update_workflow(self, phase: str, body: dict) -> dict:

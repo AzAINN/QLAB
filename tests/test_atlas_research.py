@@ -243,3 +243,38 @@ def test_autonomy_still_cannot_create_a_paper_plan(reg):
 
     result = atlas.start_task(task_id, facts, runner=runner)
     assert result["started"] is False and result["blocked_by"] == "authority"
+
+
+# --- declared template graphs must be runnable (P1 contract mismatch) --------
+
+def test_every_template_declares_an_executable_phase_graph():
+    # A template whose graph omits a dependency would create a workflow that
+    # deadlocks and an Atlas task that waits on it forever. Declarations are
+    # contracts, so they are checked here rather than discovered in production.
+    from qlab.state.registry import validate_phase_graph
+
+    for template_id, template in TEMPLATES.items():
+        if not template.phases:
+            assert not template.needs_coordinator, (
+                f"{template_id} needs a coordinator but declares no phases")
+            continue
+        validate_phase_graph(template.phases)
+
+
+def test_the_news_read_template_is_executable():
+    # It previously named a phase the registry did not accept, so the one
+    # template Atlas uses for qualitative reads could never have run.
+    from qlab.state.registry import validate_phase_graph
+
+    template = get_template("news_read")
+    validate_phase_graph(template.phases)
+
+
+def test_a_coordinator_template_declares_the_graph_it_actually_runs():
+    # The four review templates previously declared a reduced graph while the
+    # runner always created the standard one; the declaration was decorative.
+    for template_id in ("regime_review", "research_review", "risk_event",
+                        "news_risk_review"):
+        template = get_template(template_id)
+        assert "optimizer" in template.phases, (
+            f"{template_id} declares a referee without the optimizer it depends on")

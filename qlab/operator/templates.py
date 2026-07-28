@@ -10,6 +10,14 @@ authority it carries — and none of them carry execution authority.
 would create a paper plan is refused. Propose mode (a later phase) is what
 admits ``desk_rebalance_review``, and even then the plan is a *proposal* that
 still requires a persisted human approval to execute.
+
+``phases`` is an executable contract, not a description. Every declared graph is
+validated against the registry's dependency DAG by the test suite, because a
+graph that omits a dependency creates a workflow that can never terminate and an
+Atlas task that waits on it forever. A research-only graph that stops before the
+optimizer is *not* expressible: the referee checks targets, so it structurally
+depends on the optimizer producing them. Templates that want a referee therefore
+declare the full chain, which is what actually runs.
 """
 
 from __future__ import annotations
@@ -46,7 +54,7 @@ TEMPLATES: dict[str, WorkflowTemplate] = {
     "regime_review": WorkflowTemplate(
         template_id="regime_review",
         purpose="Re-read the regime panel and challenge the current estimate.",
-        phases=("analyst", "challenger", "referee", "reporter"),
+        phases=("analyst", "challenger", "optimizer", "referee", "reporter"),
         requires=("data_eligible_for_research",)),
     "estimation_panel": WorkflowTemplate(
         template_id="estimation_panel",
@@ -57,12 +65,12 @@ TEMPLATES: dict[str, WorkflowTemplate] = {
     "research_review": WorkflowTemplate(
         template_id="research_review",
         purpose="Review a terminal research run against the champion policy.",
-        phases=("analyst", "challenger", "referee", "reporter"),
+        phases=("analyst", "challenger", "optimizer", "referee", "reporter"),
         requires=("data_eligible_for_research",)),
     "risk_event": WorkflowTemplate(
         template_id="risk_event",
         purpose="Analyze a drawdown-tier or kill-switch event and brief the human.",
-        phases=("analyst", "challenger", "referee", "reporter"),
+        phases=("analyst", "challenger", "optimizer", "referee", "reporter"),
         requires=("data_eligible_for_research",)),
     "news_read": WorkflowTemplate(
         template_id="news_read",
@@ -75,7 +83,7 @@ TEMPLATES: dict[str, WorkflowTemplate] = {
     "news_risk_review": WorkflowTemplate(
         template_id="news_risk_review",
         purpose="Turn operator-pasted excerpts into dry, corroborated risk views.",
-        phases=("analyst", "challenger", "referee", "reporter"),
+        phases=("analyst", "challenger", "optimizer", "referee", "reporter"),
         requires=("data_eligible_for_research", "operator_supplied_excerpts")),
     "desk_rebalance_review": WorkflowTemplate(
         template_id="desk_rebalance_review",

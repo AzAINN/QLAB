@@ -212,6 +212,10 @@ class UISession:
         self._last_workflow_reap = 0.0
         # Atlas's composed qualitative read, refreshed by the heartbeat.
         self._desk_read: dict | None = None
+        # The last news window, written only by fetch_desk_news — which runs
+        # outside the owner dispatch lock. desk_read composes from this and
+        # never fetches, so a cold cache cannot stall the lock on RSS timeouts.
+        self._desk_news: dict | None = None
         self.heartbeat = None
         # Autonomy is a runtime switch the operator owns from the UI.
         # The env var only seeds its initial value.
@@ -1125,15 +1129,44 @@ class UISession:
     def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:
         """Atlas's composed qualitative read across signals, news, and research.
 
-        Cached between heartbeats: composing it fetches news and builds the
-        regime panel, which is too heavy to redo on every status poll.
+        Never fetches. Every caller of this method — ``tui_snapshot``,
+        ``atlas_facts``, ``/api/atlas/read``, ``/api/atlas/startable`` — reaches
+        it while the owner holds its dispatch lock, and a cold cache used to
+        turn that into six RSS timeouts with the whole desk queued behind them.
+        News arrives only through ``fetch_desk_news``, which the heartbeat and
+        the explicit refresh route call outside the lock; ``refresh`` here means
+        recompose from the newest window already fetched, not go get one.
         """
         if not refresh and self._desk_read is not None:
             return self._desk_read
-        return self.refresh_desk_read(offline)
+        return self.compose_desk_read(
+            offline, prefetched_news=self.desk_news_window())
+
+    def desk_news_window(self) -> dict:
+        """The last window fetched outside the lock, or a loud stand-in.
+
+        Before the first heartbeat tick lands there is no window at all. Saying
+        so through the existing ``news_error`` channel keeps a not-yet-fetched
+        desk distinguishable from a genuinely quiet one; returning an empty
+        window silently would read as 'no news', which is a different claim.
+        """
+        if self._desk_news is not None:
+            return self._desk_news
+        return {
+            "items": [],
+            "provider_name": "synthetic",
+            "error": "news window not fetched yet (owner is still starting up)",
+        }
 
     def refresh_desk_read(self, offline: bool) -> dict:
-        """Recompose the desk read from current evidence."""
+        """Fetch a news window and recompose the read from it.
+
+        Does network I/O; callers holding the owner dispatch lock must not use
+        it. The owner's own paths (heartbeat, ``/api/atlas/read?refresh=1``)
+        call ``fetch_desk_news`` then ``compose_desk_read`` around the lock
+        instead. This stays as the single-shot entry point for surfaces that
+        have no heartbeat behind them.
+        """
         return self.compose_desk_read(
             offline,
             prefetched_news=self.fetch_desk_news(offline),
@@ -1145,7 +1178,8 @@ class UISession:
         The owner heartbeat calls this before taking its dispatch lock. Network
         latency therefore cannot stall TUI requests, while the subsequent
         grounding and registry reads remain serialized under the one-writer
-        boundary.
+        boundary. The window is cached so ``desk_read`` can compose under the
+        lock without ever reaching the network itself.
         """
         from qlab.news.feed import fetch_news
 
@@ -1164,16 +1198,19 @@ class UISession:
                 offline=offline,
             )
         except Exception as exc:
-            return {
+            window = {
                 "items": [],
                 "provider_name": provider_name,
                 "error": str(exc),
             }
-        return {
-            "items": items,
-            "provider_name": provider_name,
-            "error": None,
-        }
+        else:
+            window = {
+                "items": items,
+                "provider_name": provider_name,
+                "error": None,
+            }
+        self._desk_news = window
+        return window
 
     def compose_desk_read(
         self,
@@ -1996,6 +2033,9 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, status
 
     if method == "GET" and path == "/api/atlas/read":
+        # refresh=1 recomposes here; the HTTP handler intercepts that case
+        # first and does the news fetch outside the dispatch lock, because
+        # nothing reached from handle_api may block on the network.
         offline = _qbool(query, "offline", session.offline_default)
         refresh = _qbool(query, "refresh", False)
         return 200, session.desk_read(offline, refresh=refresh)

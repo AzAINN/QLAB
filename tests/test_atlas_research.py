@@ -306,6 +306,55 @@ def test_a_failed_recompose_stops_the_stale_window_gating_a_news_template():
     assert "STALE" in " ".join(session._desk_read["observations"])
 
 
+def test_a_cold_desk_read_never_fetches_under_the_dispatch_lock():
+    # tui_snapshot, /api/atlas/read, /api/atlas/startable and POST
+    # /api/atlas/observe all reach desk_read while the owner holds its dispatch
+    # lock. On a cold cache that used to run six RSS feeds at 5 s each, so a TUI
+    # attaching to a fresh --online owner froze the whole desk. Fetching belongs
+    # to fetch_desk_news, which the heartbeat calls outside the lock.
+    from qlab.ui.server import UISession, handle_api
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+
+    def forbidden(offline):
+        raise AssertionError("desk_read fetched news under the dispatch lock")
+
+    session.fetch_desk_news = forbidden
+
+    assert session._desk_read is None                       # cold cache
+    read = session.desk_read(True)
+    # Loud about the window it does not have: a desk that has not fetched yet
+    # must not read as a desk with nothing to report.
+    assert read["grounding"]["hashes"] == []
+    assert "not fetched yet" in read["news_error"]
+    assert any("UNAVAILABLE" in o for o in read["observations"])
+
+    for method, path, query, body in (
+        ("GET", "/api/atlas/read", {"offline": ["1"]}, {}),
+        ("GET", "/api/atlas/read", {"offline": ["1"], "refresh": ["1"]}, {}),
+        ("GET", "/api/atlas/startable", {"offline": ["1"]}, {}),
+        ("POST", "/api/atlas/observe", {}, {"offline": True}),
+    ):
+        session._desk_read = None                           # cold again
+        status, _ = handle_api(session, method, path, query, body)
+        assert status == 200
+    session._desk_read = None
+    session.tui_snapshot(True, event_limit=5)
+
+
+def test_a_window_fetched_outside_the_lock_is_what_desk_read_composes():
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    session.fetch_desk_news(True)                # what the heartbeat does first
+    assert session._desk_news is not None
+    fetched = len(session._desk_news["items"])
+
+    read = session.desk_read(True)               # composed under the lock
+    assert "news_error" not in read
+    assert read["grounding"]["item_count"] == fetched
+
+
 def test_autonomy_still_cannot_create_a_paper_plan(reg):
     """The plan-creation boundary survives autonomy in Research mode."""
     atlas = _atlas(reg)

@@ -639,7 +639,11 @@ def write_session_agents(root: Path, agents: dict[str, dict]) -> list[Path]:
     written: list[Path] = []
     for name, definition in agents.items():
         if name not in {
-            *_WORKFLOW_PHASE, *_ADVISORY_ROLES, _COORDINATOR_NAME, "qlab-desk"
+            *_WORKFLOW_PHASE,
+            *_ADVISORY_ROLES,
+            _QUARANTINED_ROLE,
+            _COORDINATOR_NAME,
+            "qlab-desk",
         }:
             raise ValueError(f"unexpected session agent name: {name!r}")
         prompt = str(definition["prompt"])

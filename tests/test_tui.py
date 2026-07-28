@@ -492,6 +492,27 @@ def test_session_agent_files_preserve_workforce_authority(tmp_path):
         assert "model" not in yaml.safe_load(front)
 
 
+def test_news_scoped_session_materializes_quarantined_extractor(tmp_path):
+    """A news goal may opt into the extractor without widening its authority."""
+    from qlab.tui.claude import build_workforce_agents, write_session_agents
+
+    written = write_session_agents(
+        tmp_path,
+        build_workforce_agents("review the grounded market news"),
+    )
+    assert "news-extractor" in {path.stem for path in written}
+
+    extractor = (
+        tmp_path / ".claude" / "agents" / "news-extractor.md"
+    ).read_text(encoding="utf-8")
+    _, front, body = extractor.split("---", 2)
+    metadata = yaml.safe_load(front)
+    assert metadata["tools"] == "mcp__qlab-operator__research_apply_views"
+    assert "workflow" not in metadata["tools"]
+    assert "execute" not in metadata["tools"]
+    assert "OWNER-WORKFORCE QUARANTINE MODE" in body
+
+
 def test_coordinator_dispatches_synchronously_with_bounded_debate_and_panel_fanout():
     """Prompt clauses that bound standard review and keep panels parallel.
 

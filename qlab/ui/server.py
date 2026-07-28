@@ -1879,8 +1879,9 @@ def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None
 # ---------------------------------------------------------------------------
 def handle_api(session: UISession, method: str, path: str,
                query: dict, body: dict) -> tuple[int, dict]:
-    off = bool(body.get("offline", query.get("offline", [session.offline_default])[0]
-                        if isinstance(query.get("offline"), list) else session.offline_default))
+    # bool("0") is True, so a flag arriving as text has to be parsed, never cast.
+    off = _flagbool(body.get("offline"),
+                    _qbool(query, "offline", session.offline_default))
 
     if method == "GET" and path == "/api/bootstrap":
         return 200, _bootstrap(session)
@@ -2279,11 +2280,22 @@ def _default_ui_spec() -> dict:
     }
 
 
+def _flagbool(value: object, default: bool) -> bool:
+    """Coerce one flag value; text is parsed, because bool("0") is True."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _qbool(query: dict, key: str, default: bool) -> bool:
     v = query.get(key)
     if not v:
         return default
-    return str(v[0]).lower() in ("1", "true", "yes", "on")
+    return _flagbool(v[0], default)
 
 
 # ---------------------------------------------------------------------------

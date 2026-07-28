@@ -393,13 +393,15 @@ def workforce_note(phase: str, status: str, summary: str,
         nxt = ("Next: the challenger opens the bounded debate on this "
                "estimation call; the optimizer runs after the debate settles "
                "on the final decision.")
-    elif base in ("challenger", "optimizer"):
-        other = "optimizer" if base == "challenger" else "challenger"
+    elif base == "challenger":
         nxt = (
-            "Next: the referee gate, now that both parallel phases are in."
-            if other in done_phases else
-            f"Next: waiting on the {other} (running in parallel), then the "
-            "referee gate."
+            "Next: the optimizer uses the debate's final persisted decision; "
+            "it cannot start from the analyst's superseded inputs."
+        )
+    elif base == "optimizer":
+        nxt = (
+            "Next: the referee independently checks the final decision and "
+            "the optimizer's exact targets."
         )
     elif base == "referee":
         nxt = ("Next: the reporter compiles the recommendation. A PASS is bound "
@@ -748,7 +750,7 @@ class FlowBoard(Horizontal):
 
 
 class NavMenu(Static):
-    """The eight-view switcher in the spine.
+    """The nine-view switcher in the spine.
 
     It renders one text line per view (in ``_VIEWS`` order), so a click selects
     the view on the clicked row — the click's y within the widget *is* the row

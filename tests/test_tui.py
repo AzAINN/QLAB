@@ -3262,11 +3262,11 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "decision-hidden" not in head
     assert "debate" in nxt and "optimizer" in nxt
 
-    # the first of the parallel pair waits for the other, not for the referee
-    _, nxt = workforce_note("optimizer", "done", "", {"analyst", "optimizer"})
-    assert "challenger" in nxt
     _, nxt = workforce_note(
-        "optimizer", "done", "", {"analyst", "challenger", "optimizer"})
+        "challenger", "done", "", {"analyst", "challenger"})
+    assert "optimizer" in nxt and "final persisted decision" in nxt
+
+    _, nxt = workforce_note("optimizer", "done", "", {"analyst", "optimizer"})
     assert "referee" in nxt
 
     head, nxt = workforce_note("referee", "blocked", "cap breach", {"analyst"})

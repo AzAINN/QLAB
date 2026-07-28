@@ -70,6 +70,10 @@ viz = ["matplotlib>=3.8"]
 
 dev = ["pytest>=8.0", "pytest-cov>=4.1"]
 
+# Rasterises the SVG that Textual emits, so `scripts/tui_shots.py` can produce
+# images a design review can actually look at. Pure wheel — no system cairo.
+shots = ["resvg-py>=0.1"]
+
 all = [
     "qlab[data,hmm,optimize,mcp,trader,viz,tui,dev]",
 ]

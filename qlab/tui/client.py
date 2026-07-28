@@ -23,6 +23,15 @@ class ApiClient:
         response.raise_for_status()
         return response.json()
 
+    def probe(self, path: str = "/readyz", *, timeout: float = 1.0) -> dict:
+        """Read a lightweight owner readiness route with a short deadline."""
+        response = httpx.get(
+            self.base_url + path,
+            timeout=httpx.Timeout(timeout, connect=timeout),
+        )
+        response.raise_for_status()
+        return response.json()
+
     def post(self, path: str, body: dict | None = None) -> dict:
         response = httpx.post(
             self.base_url + path,

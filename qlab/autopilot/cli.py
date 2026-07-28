@@ -186,7 +186,9 @@ def _cmd_tui(args) -> int:
     startup_budget_s = 45.0
 
     owner = None
-    if not port_open():
+    already_open = port_open()
+    client = ApiClient(f"http://127.0.0.1:{args.port}")
+    if not already_open:
         server_argv = [
             sys.executable, "-m", "qlab.autopilot.cli", "ui",
             "--port", str(args.port), "--no-browser",
@@ -220,9 +222,8 @@ def _cmd_tui(args) -> int:
             return (err or "").strip()
 
         deadline = time.monotonic() + startup_budget_s
+        last_probe_error = ""
         while time.monotonic() < deadline:
-            if port_open():
-                break
             if owner.poll() is not None:
                 detail = (owner.stderr.read().strip()
                           if owner.stderr else "")
@@ -230,19 +231,24 @@ def _cmd_tui(args) -> int:
                     "qlab UI runtime exited before the TUI connected"
                     + (f":\n{detail}" if detail else "")
                 )
+            try:
+                client.probe()
+            except Exception as exc:
+                last_probe_error = str(exc) or repr(exc)
+            else:
+                break
             time.sleep(0.2)
         else:
             detail = _owner_stderr(owner)
             raise SystemExit(
-                f"qlab UI runtime did not open port {args.port} within "
+                f"qlab UI runtime was not ready on port {args.port} within "
                 f"{int(startup_budget_s)}s"
                 + (f":\n{detail}" if detail else
-                   " and reported no error — the port may be held by another "
-                   "process, or startup is unusually slow. Try `qlab ui "
-                   "--no-browser` in a separate terminal to see its output.")
+                   f"; last readiness error: {last_probe_error or 'none'}. "
+                   "Startup may be unusually slow. Try `qlab ui --no-browser` "
+                   "in a separate terminal to see its output.")
             )
 
-    client = ApiClient(f"http://127.0.0.1:{args.port}")
     try:
         client.get("/api/system", offline=int(not args.online))
     except Exception as exc:

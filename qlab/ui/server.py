@@ -2251,6 +2251,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self._send(200, _INDEX.read_bytes(), "text/html; charset=utf-8")
             return
+        if parsed.path == "/readyz":
+            self._json(200, {"ready": True})
+            return
         if parsed.path == "/api/stream":
             self._stream(parse_qs(parsed.query))
             return

@@ -430,6 +430,111 @@ def test_lifecycle_client_uses_a_short_deadline(monkeypatch):
     assert captured["timeout"].connect == 2.0
 
 
+def test_readiness_probe_uses_a_short_deadline(monkeypatch):
+    import qlab.tui.client as client_module
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ready": True}
+
+    def get(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(client_module.httpx, "get", get)
+    result = client_module.ApiClient("http://owner").probe(timeout=0.75)
+
+    assert result == {"ready": True}
+    assert captured["url"] == "http://owner/readyz"
+    assert captured["timeout"].read == 0.75
+    assert captured["timeout"].connect == 0.75
+
+
+def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
+    """A bound port is not enough: the owner may still be opening its state."""
+    from types import SimpleNamespace
+
+    import qlab.autopilot.cli as cli_module
+    import qlab.tui.app as app_module
+    import qlab.tui.client as client_module
+
+    calls = {"probe": 0, "system": 0, "run": 0}
+
+    class ClosedPort:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect_ex(self, _address):
+            return 1
+
+    class Owner:
+        stderr = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            raise AssertionError("a healthy owner must not be terminated")
+
+    class Client:
+        def __init__(self, base_url):
+            assert base_url == "http://127.0.0.1:8877"
+
+        def probe(self):
+            calls["probe"] += 1
+            if calls["probe"] == 1:
+                raise ConnectionResetError("owner has bound but is not ready")
+            return {"ready": True}
+
+        def get(self, path, **params):
+            assert path == "/api/system"
+            assert params == {"offline": 1}
+            calls["system"] += 1
+            return {"mode": "offline"}
+
+    class Tui:
+        def __init__(self, client, **kwargs):
+            assert isinstance(client, Client)
+            assert kwargs["owned_server"].poll() is None
+            assert kwargs["offline"] is True
+            assert kwargs["claude_start"] == "off"
+
+        def run(self):
+            calls["run"] += 1
+
+    monkeypatch.setattr(cli_module.socket, "socket", ClosedPort)
+    monkeypatch.setattr(
+        cli_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: Owner(),
+    )
+    monkeypatch.setattr(cli_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(client_module, "ApiClient", Client)
+    monkeypatch.setattr(app_module, "QlabTui", Tui)
+
+    result = cli_module._cmd_tui(SimpleNamespace(
+        port=8877,
+        online=False,
+        refresh=0.0,
+        claude="off",
+    ))
+
+    assert result == 0
+    assert calls == {"probe": 2, "system": 1, "run": 1}
+
+
 def test_model_invocations_route(session):
     from qlab.operator.model_routing import record_invocation, resolve_route
 

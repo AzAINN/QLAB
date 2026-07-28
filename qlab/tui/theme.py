@@ -209,16 +209,19 @@ APP_CSS_TEMPLATE = Template("""
         border: round $border;
     }
     .tile-title {
-        height: 2;
+        height: 1;
         padding: 0 1;
         background: $bg_raised;
         color: $muted;
         text-style: bold;
     }
+    /* Vertical padding is spent per tile, so on an eight-tile grid it costs a
+       sixth of the viewport and pushes the last row below the fold. The row of
+       breathing space above the content comes from the title band instead. */
     .tile-content {
         height: auto;
         min-height: 3;
-        padding: 1;
+        padding: 0 1;
         color: $text;
     }
     #tile-allocation, #tile-market-pulse {

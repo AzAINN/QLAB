@@ -986,6 +986,7 @@ class QlabTui(App[None]):
         self._action_running = False
         self._last_snapshot_at: float | None = None
         self._refresh_failures = 0
+        self._event_shown = False
         self._event_ids: set[str] = set()
         self._event_id_order: deque[str] = deque()
         self._runs_signature: tuple = ()
@@ -1789,6 +1790,8 @@ class QlabTui(App[None]):
         self._render_atlas_rail()
         self._render_status()
         self._ingest_events(snapshot.get("events", []))
+        if snapshot:
+            self._settle_event_strip()
         self._maybe_offer_workforce()
 
     def _render_active_snapshot_view(self) -> None:
@@ -3487,8 +3490,21 @@ class QlabTui(App[None]):
         if len(detail) > 180:
             detail = detail[:177] + "…"
         line = f"{clock}  {kind}  {detail if detail != '{}' else ''}".rstrip()
+        self._event_shown = True
         self.query_one("#timeline", RichLog).write(line)
         self.query_one("#event-strip", Static).update(line)
+
+    def _settle_event_strip(self) -> None:
+        """Stop claiming to wait for a snapshot that has already arrived.
+
+        The strip only ever changes when an event arrives, so on a desk with no
+        audit history it kept reporting the startup state indefinitely — beside
+        a screen full of live figures. A quiet bus and an unreachable owner are
+        opposite conditions and must not read the same.
+        """
+        if self._event_shown:
+            return
+        self.query_one("#event-strip", Static).update("no desk events yet")
 
     def _write_local_event(self, kind: str, payload: dict) -> None:
         self._append_event({"ts": datetime.now().isoformat(), "kind": kind, "payload": payload})

@@ -143,9 +143,14 @@ def build_owner_tick(session, lock, *, offline: bool,
                         offline,
                         prefetched_news=prefetched_news,
                     )
-            except Exception:
-                # A read failure must not stop the supervisor from observing.
-                pass
+            except Exception as exc:
+                # A read failure must not stop the supervisor from observing —
+                # but the cached read must not keep passing as current either,
+                # or a news template runs its precondition against the previous
+                # tick's window and reports a finding for evidence it never saw.
+                mark_stale = getattr(session, "mark_desk_read_stale", None)
+                if callable(mark_stale):
+                    mark_stale(str(exc))
             result = session.atlas_observe(offline)
             result["autonomous_enabled"] = bool(live_autonomous)
             if live_autonomous:

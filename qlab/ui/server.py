@@ -97,6 +97,10 @@ _INDEX = _HERE / "index.html"
 # Effectively one request computes at a time (fine for a local single user),
 # while the socket layer never stalls.
 _LOCK = threading.Lock()
+# How long a stream poll waits for the dispatch lock before proving the socket
+# is alive instead. Must stay comfortably under the client's stream read
+# deadline, or a long owner action expires the client before it hears anything.
+_STREAM_LOCK_WAIT_SECONDS = 2.0
 
 _MARKET_EVENT_LIMIT = 500
 _STREAM_PAGE_CEILING = 5000
@@ -1226,6 +1230,26 @@ class UISession:
             ]
         self._desk_read = payload
         return self._desk_read
+
+    def mark_desk_read_stale(self, error: str) -> None:
+        """Record that the read could not be recomposed.
+
+        The cached payload is a previous tick's window. Leaving it intact makes
+        a failed refresh indistinguishable from a genuinely unchanged desk, and
+        `atlas_facts` derives `news_window_items` from it — so a template
+        precondition would admit a news read against evidence that is no longer
+        current. Zero the grounding and say so, the same way a fetch outage
+        does, so the refusal is the loud one rather than a stale number.
+        """
+        payload = dict(self._desk_read or {})
+        payload["grounding"] = {"hashes": []}
+        payload["news_error"] = str(error)[:400]
+        payload["observations"] = [
+            f"Desk read could not be recomposed ({str(error)[:160]}); the "
+            "qualitative side of this read is STALE, not quiet.",
+            *(payload.get("observations") or []),
+        ]
+        self._desk_read = payload
 
     def set_autonomy(self, enabled: bool) -> dict:
         """Turn autonomous work on or off at runtime.
@@ -2371,9 +2395,21 @@ class _Handler(BaseHTTPRequestHandler):
                     )
 
                 while True:
-                    with _LOCK:
+                    # Waiting indefinitely here is what turns one long owner
+                    # action into reconnect churn: no ping is emitted while the
+                    # lock is held, the client's read deadline expires, and the
+                    # replacement connection blocks on the same lock while this
+                    # thread survives to write to a dead socket. Bound the wait
+                    # and prove liveness instead.
+                    if not _LOCK.acquire(timeout=_STREAM_LOCK_WAIT_SECONDS):
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        continue
+                    try:
                         audit_events = self.session.read_audit_stream_events(
                             read_limit, read_after)
+                    finally:
+                        _LOCK.release()
                     market_events = self.session.read_market_events(
                         read_limit, read_after)
 
@@ -2463,12 +2499,28 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            # The declared length is unusable, so the body cannot be consumed
+            # and this connection can no longer be framed.
+            self.close_connection = True
+            self._json(400, {"error": "Content-Length must be an integer"})
+            return
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        # A body the owner failed to parse must never be replaced by {}. The
+        # route defaults are permissive on purpose -- /api/run_once reads
+        # execute=True out of an empty body -- so substituting {} turns a
+        # truncated request into an unrequested paper trade, and every other
+        # POST into a 200 computed from parameters the caller never sent.
         try:
             body = json.loads(raw or b"{}")
-        except Exception:
-            body = {}
+        except (ValueError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": f"request body is not valid JSON: {exc}"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"error": "request body must be a JSON object"})
+            return
         try:
             with _LOCK:
                 status, obj = handle_api(self.session, "POST", parsed.path,

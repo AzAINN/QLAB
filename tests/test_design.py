@@ -538,3 +538,20 @@ def test_primitives_render_in_every_theme():
         assert primitives.state_badge("failed", theme=theme_name).plain
         assert primitives.field("label", "value", theme=theme_name).plain
         assert primitives.absent("gated", theme=theme_name).plain
+
+
+def test_resolve_leaves_currency_in_body_text_alone():
+    # A money amount outside a tag is not a variable reference. Substituting
+    # across the whole line read "$100" as a token name and raised, so any
+    # console line quoting a dollar figure -- including the operator's own chat
+    # message -- crashed the write.
+    from qlab.tui.design.markup import MUTED, resolve
+
+    assert resolve("equity $100,000.00") == "equity $100,000.00"
+    assert resolve("a move of $0.02 per share") == "a move of $0.02 per share"
+    assert resolve(f"[{MUTED}]cash[/] $1,250").endswith("cash[/] $1,250")
+
+    # A mistyped token inside a tag must still fail loud; that is the whole
+    # reason substitution is strict.
+    with pytest.raises(KeyError):
+        resolve("[$nosuchtoken]x[/]")

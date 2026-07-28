@@ -7,6 +7,12 @@ from typing import Any
 
 import httpx
 
+# How long a stream read waits before giving up and resubscribing. The owner
+# must prove liveness inside this window even while a long action holds its
+# dispatch lock, or every such action costs a reconnect and a stranded server
+# thread — see `_STREAM_LOCK_WAIT_SECONDS` in qlab.ui.server.
+STREAM_READ_TIMEOUT_S = 15.0
+
 
 class ApiClient:
     """JSON client used from TUI worker threads.
@@ -78,7 +84,7 @@ class ApiClient:
         while stop_event is None or not stop_event.is_set():
             with httpx.stream(
                 "GET", self.base_url + path, params=request_params,
-                timeout=httpx.Timeout(15.0, connect=10.0),
+                timeout=httpx.Timeout(STREAM_READ_TIMEOUT_S, connect=10.0),
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():

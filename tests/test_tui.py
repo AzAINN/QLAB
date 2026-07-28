@@ -3321,6 +3321,28 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "Nothing was traded" in nxt
 
 
+def test_a_respec_after_a_theme_switch_keeps_the_new_nodes_on_that_theme():
+    # A workflow respec recomposes the flow board. Nodes built after the switch
+    # mounted on the default palette while the rest of the desk was light, so a
+    # single board showed two themes at once.
+    from qlab.tui.app import FlowNode, QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app.action_theme("qlab-light")
+            app._set_flow_spec((
+                ("analyst", "moments-analyst", "ANL"),
+                ("news-analyst", "news-analyst", "NEWS"),
+            ))
+            await pilot.pause(0.4)  # the recompose runs on a worker
+            themes = {node.theme_name for node in app.query(FlowNode)}
+            assert themes == {"qlab-light"}, themes
+
+    asyncio.run(run())
+
+
 def test_tui_event_dedupe_window_is_bounded():
     from qlab.tui.app import QlabTui, _EVENT_ID_LIMIT
 

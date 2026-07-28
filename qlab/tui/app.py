@@ -1286,10 +1286,13 @@ class QlabTui(App[None]):
     def _register_design_themes(self) -> None:
         """Make the design themes selectable and adopt the default.
 
-        Chrome is still styled by the pre-substituted CSS in `qlab.tui.theme`,
-        so a switch currently repaints only content rendered through
-        `qlab.tui.design.primitives`. Converting the stylesheet to theme
-        variables is a separate slice.
+        Registering here rather than in `on_mount` is required: the stylesheet
+        is parsed during startup and references these variables, so a later
+        registration raises UnresolvedVariableError on `$bg`.
+
+        A switch repaints chrome as well as content — `qlab.tui.theme`
+        substitutes token *references* rather than frozen literals, so the CSS
+        reaches Textual as `$bg` and follows the active theme.
         """
         for theme in tokens.THEMES.values():
             self.register_theme(theme)
@@ -1590,13 +1593,21 @@ class QlabTui(App[None]):
         )
 
     # -- workforce console -------------------------------------------------
+    def _active_theme(self) -> str:
+        """The design theme to render against.
+
+        Textual's own themes remain selectable, so `self.theme` is not
+        guaranteed to name one of ours; falling back keeps a renderer from
+        raising on a theme the design system does not publish.
+        """
+        return self.theme if self.theme in tokens.THEMES else tokens.DEFAULT_THEME
+
     def _console_write(self, line: str) -> None:
         # RichLog renders through rich.text.Text.from_markup, which knows
         # nothing about theme variables, so they are resolved here against the
         # active theme rather than reaching Rich as a literal `$name`.
-        theme = self.theme if self.theme in tokens.THEMES else tokens.DEFAULT_THEME
         self.query_one("#workforce-console", RichLog).write(
-            _resolve_markup(line, theme=theme))
+            _resolve_markup(line, theme=self._active_theme()))
 
     def _render_chat_mode(self) -> None:
         chip = self.query_one("#chat-mode", Static)
@@ -2516,6 +2527,11 @@ class QlabTui(App[None]):
         state = self._flow_states.get(node.phase, "idle")
         node.state = state
         node.pulse = self._pulse
+        # A workflow respec recomposes the board, and a node built after a theme
+        # switch would otherwise mount on the default palette -- `action_theme`
+        # only reaches the nodes that existed when it ran. Pushing it here makes
+        # mount-time correct, because on_mount paints through this method.
+        node.theme_name = self._active_theme()
         node.detail = self._flow_details.get(node.phase) or (
             f"{node.agent}\n\nnot yet started")
 

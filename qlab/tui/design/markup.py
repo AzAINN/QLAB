@@ -50,15 +50,24 @@ __all__ = [
     "LABEL_GOLD", "MUTED", "SEL_BG", "TEXT", "TEXT_HI", "UP",
 ]
 
-_VARIABLE = re.compile(r"\$([a-zA-Z0-9_\-]+)")
+# A variable reference only ever occurs inside a markup tag, because that is the
+# only place a colour can be applied. Substituting across the whole line instead
+# treats body text as markup: a console line reading "equity $100,000.00" parses
+# "$100" as a variable name and the write raises. On this desk that is most
+# lines, and the text can come from the operator's own chat message.
+_TAG = re.compile(r"\[[^\[\]]*\]")
+# A name must start with a letter or underscore. No theme variable is digit-led,
+# so this keeps a currency amount from ever looking like a reference.
+_VARIABLE = re.compile(r"\$([a-zA-Z_][a-zA-Z0-9_\-]*)")
 
 
 def resolve(markup: str, *, theme: str = tokens.DEFAULT_THEME) -> str:
-    """Replace ``$variable`` references with the theme's colours.
+    """Replace ``$variable`` references inside markup tags with real colours.
 
-    For the Rich-rendered console only. Raises `KeyError` on an unknown
-    variable rather than emitting a literal ``$name`` that Rich would either
-    reject or silently print.
+    For the Rich-rendered console only. Raises `KeyError` on an unknown variable
+    *inside a tag* rather than emitting a literal ``$name`` that Rich would
+    either reject or silently print — a mistyped token name must still fail
+    loud. Text outside a tag is returned untouched, dollar signs and all.
     """
     variables = tokens.THEMES[theme].variables
 
@@ -70,4 +79,4 @@ def resolve(markup: str, *, theme: str = tokens.DEFAULT_THEME) -> str:
             raise KeyError(
                 f"no theme variable ${name} in {theme}") from exc
 
-    return _VARIABLE.sub(substitute, markup)
+    return _TAG.sub(lambda tag: _VARIABLE.sub(substitute, tag.group(0)), markup)

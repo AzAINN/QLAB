@@ -55,6 +55,33 @@ class AtlasConfig:
 
 
 @dataclass(frozen=True)
+class Dispatched:
+    """A runner started durable work; the task is *not* finished.
+
+    Returning this instead of a conclusion is what keeps Atlas honest. A runner
+    that creates a workflow row has not performed the research, so the task
+    stays ``running`` and is bound to the workflow. Only
+    :meth:`AtlasSupervisor.reconcile_tasks`, reading the workflow's own terminal
+    state, may complete or fail it.
+
+    A runner returning a plain dict is asserting the work is genuinely done
+    inline -- which is true only for deterministic templates that need no
+    coordinator.
+    """
+
+    workflow_id: str
+    detail: dict | None = None
+
+
+# Workflow states from which an Atlas task may be resolved. Anything else means
+# the workflow is still in flight and the task must keep waiting.
+_WORKFLOW_SUCCESS = "complete"
+_WORKFLOW_UNSUCCESSFUL = frozenset({
+    "failed", "blocked", "interrupted", "abandoned",
+})
+
+
+@dataclass(frozen=True)
 class Trigger:
     kind: str
     action: str            # brief | alert | block | workflow | pause_proposals
@@ -251,11 +278,87 @@ class AtlasSupervisor:
                 "atlas_task_failed", {"task_id": task_id, "error": str(exc)[:300]})
             return {"started": True, "completed": False, "error": str(exc)}
 
+        if isinstance(conclusion, Dispatched):
+            # Durable work is now in flight elsewhere. The task stays running
+            # and Atlas stays coordinating; reconcile_tasks resolves it from the
+            # workflow's own terminal state, never from the fact of dispatch.
+            self.registry.update_atlas_task(
+                task_id, workflow_id=conclusion.workflow_id)
+            self.registry.record_event(
+                "atlas_task_dispatched",
+                {"task_id": task_id, "workflow_id": conclusion.workflow_id,
+                 "template_id": template_id})
+            return {"started": True, "completed": False, "dispatched": True,
+                    "workflow_id": conclusion.workflow_id,
+                    "template_id": template_id}
+
         self.registry.update_atlas_task(task_id, status="completed",
                                       conclusion=conclusion)
         self._patch_state(state=OBSERVING, current_task_id=None)
         self.registry.record_event("atlas_task_completed", {"task_id": task_id})
         return {"started": True, "completed": True, "conclusion": conclusion}
+
+    def reconcile_tasks(self) -> list[dict]:
+        """Resolve running tasks from the terminal state of their workflow.
+
+        This is the only path that may complete a dispatched task, and it runs
+        on the observe cycle and at owner startup -- so a workflow that finished
+        while the process was down is still picked up.
+
+        A task with no workflow binding is left alone: it belongs to a
+        deterministic template that completes inline. A task bound to a workflow
+        that does not exist is failed rather than left running forever.
+        """
+        moved: list[dict] = []
+        for task in self.registry.list_atlas_tasks(limit=200):
+            if task.get("status") != "running":
+                continue
+            workflow_id = str(task.get("workflow_id") or "")
+            if not workflow_id:
+                continue
+            task_id = str(task["task_id"])
+            workflow = self.registry.get_workflow(workflow_id)
+            if workflow is None:
+                error = (f"bound workflow {workflow_id} does not exist; "
+                         "the task cannot be resolved")
+                self.registry.update_atlas_task(
+                    task_id, status="failed", error=error)
+                self.registry.record_event(
+                    "atlas_task_failed",
+                    {"task_id": task_id, "error": error})
+                moved.append({"task_id": task_id, "status": "failed",
+                              "workflow_status": None})
+                continue
+
+            workflow_status = str(workflow.get("status") or "")
+            if workflow_status == _WORKFLOW_SUCCESS:
+                conclusion = {
+                    "workflow_id": workflow_id,
+                    "workflow_status": workflow_status,
+                    "result": workflow.get("result") or {},
+                }
+                self.registry.update_atlas_task(
+                    task_id, status="completed", conclusion=conclusion)
+                self.registry.record_event(
+                    "atlas_task_completed",
+                    {"task_id": task_id, "workflow_id": workflow_id})
+                moved.append({"task_id": task_id, "status": "completed",
+                              "workflow_status": workflow_status})
+            elif workflow_status in _WORKFLOW_UNSUCCESSFUL:
+                error = f"workflow {workflow_id} {workflow_status}"
+                self.registry.update_atlas_task(
+                    task_id, status="failed", error=error)
+                self.registry.record_event(
+                    "atlas_task_failed",
+                    {"task_id": task_id, "error": error})
+                moved.append({"task_id": task_id, "status": "failed",
+                              "workflow_status": workflow_status})
+            else:
+                continue
+
+        if moved:
+            self._patch_state(state=OBSERVING, current_task_id=None)
+        return moved
 
     # -- deterministic desk brief (no LLM) ----------------------------------
     def desk_brief(self, facts: dict) -> dict:

@@ -228,6 +228,12 @@ class UISession:
         self.atlas = AtlasSupervisor(
             self.registry,
             coordinator_available=lambda: bool(shutil.which("claude")))
+        # A dispatched workflow can reach a terminal state while no owner is
+        # running, and the restart above has just interrupted anything that was
+        # still live. Either way the bound task must be resolved now rather than
+        # waiting for the first observe tick -- a task that outlives its
+        # workflow is the state this whole path exists to prevent.
+        self.atlas.reconcile_tasks()
 
     # -- Claude workforce --------------------------------------------------
     def call_lab_tool(self, name: str, body: dict, offline: bool) -> object:
@@ -1099,9 +1105,18 @@ class UISession:
         }
 
     def atlas_observe(self, offline: bool) -> dict:
-        """Run one deterministic Atlas observe tick against current owner facts."""
+        """Run one deterministic Atlas observe tick against current owner facts.
+
+        Reconciliation runs first: a dispatched workflow may have reached a
+        terminal state since the last tick (or while this process was down), and
+        its task must be resolved from that state before new work is considered.
+        """
+        reconciled = self.atlas.reconcile_tasks()
         facts = self.atlas_facts(offline)
-        return self.atlas.observe(facts, trading_date=date.today().isoformat())
+        observed = self.atlas.observe(facts, trading_date=date.today().isoformat())
+        if reconciled:
+            observed = {**observed, "reconciled_tasks": reconciled}
+        return observed
 
     def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:
         """Atlas's composed qualitative read across signals, news, and research.
@@ -1235,26 +1250,42 @@ class UISession:
         the workflow's own phase gates, referee binding, and approval
         requirement are unchanged by having been started autonomously.
         """
+        from qlab.operator.atlas import Dispatched
         from qlab.operator.templates import get_template
 
         template = get_template(template_id)
         if not template.needs_coordinator:
-            # Deterministic templates (desk_brief) need no workforce at all.
+            # Deterministic templates (desk_brief) need no workforce at all, so
+            # this genuinely is the conclusion.
             return {"template_id": template_id, "workflow_id": None,
                     "action_taken": False,
                     "brief": self.atlas.desk_brief(self.atlas_facts(True))}
-        started = self.start_workflow({
-            "kind": "portfolio_review",
-            "goal": f"[{template_id}] {template.purpose} "
-                    f"(trigger: {task.get('trigger_kind')})",
-            "started_by": "atlas",
-        })
+        # The template's declared graph is what runs. Before this it was ignored
+        # and every template silently got the standard portfolio graph, so the
+        # declarations were decorative and four of them were unrunnable.
+        started = self.start_workflow(
+            {
+                "kind": "portfolio_review",
+                "goal": f"[{template_id}] {template.purpose} "
+                        f"(trigger: {task.get('trigger_kind')})",
+                "started_by": "atlas",
+            },
+            phases=template.phases or None,
+        )
         workflow_id = (started or {}).get("workflow_id")
-        if workflow_id:
-            self.registry.update_atlas_task(
-                str(task.get("task_id")), workflow_id=str(workflow_id))
-        return {"template_id": template_id, "workflow_id": workflow_id,
-                "action_taken": True}
+        if not workflow_id:
+            # Returning a handle with workflow_id=None is how a failed dispatch
+            # used to be recorded as a completed task. Refuse instead.
+            raise RuntimeError(
+                f"no workflow could be started for template {template_id!r}; "
+                "the task cannot be dispatched")
+        # A workflow row is not a finding. Report the dispatch and let
+        # AtlasSupervisor.reconcile_tasks resolve the task from the workflow's
+        # own terminal state.
+        return Dispatched(
+            workflow_id=str(workflow_id),
+            detail={"template_id": template_id, "action_taken": True},
+        )
 
     def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
         """Start the queued work Atlas's current mode already permits.

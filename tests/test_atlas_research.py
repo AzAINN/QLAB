@@ -245,6 +245,137 @@ def test_autonomy_still_cannot_create_a_paper_plan(reg):
     assert result["started"] is False and result["blocked_by"] == "authority"
 
 
+# --- a dispatched workflow is not a finished task (P1) -----------------------
+
+def _dispatch_task(reg, atlas):
+    """Queue one regime_review task and put Atlas in a mode that may start it."""
+    facts = _facts()
+    facts["regime"]["flip"] = True
+    out = atlas.observe(facts, trading_date="2026-07-24")
+    atlas.set_mode("research")
+    return out["created_tasks"][0]["task_id"], facts
+
+
+def test_a_dispatched_workflow_leaves_the_task_running(reg):
+    # The bug this pins: creating a durable workflow row was reported as the
+    # task having completed, so Atlas claimed research it had not done.
+    from qlab.operator.atlas import Dispatched
+
+    atlas = _atlas(reg)
+    task_id, facts = _dispatch_task(reg, atlas)
+    workflow = reg.start_workflow("portfolio_review", {"goal": "regime re-read"})
+
+    def runner(task, template_id):
+        return Dispatched(workflow_id=workflow["workflow_id"])
+
+    result = atlas.start_task(task_id, facts, runner=runner)
+
+    assert result["completed"] is False
+    assert result["dispatched"] is True
+    assert result["workflow_id"] == workflow["workflow_id"]
+    stored = reg.get_atlas_task(task_id)
+    assert stored["status"] == "running"
+    assert stored["workflow_id"] == workflow["workflow_id"]
+
+
+def test_a_deterministic_conclusion_still_completes_the_task(reg):
+    # Templates that need no coordinator (desk_brief) genuinely finish inline.
+    atlas = _atlas(reg)
+    task_id, facts = _dispatch_task(reg, atlas)
+
+    result = atlas.start_task(
+        task_id, facts, runner=lambda task, tid: {"summary": "read only"})
+
+    assert result["completed"] is True
+    assert reg.get_atlas_task(task_id)["status"] == "completed"
+
+
+def test_reconcile_completes_a_task_whose_workflow_finished(reg):
+    from qlab.operator.atlas import Dispatched
+
+    atlas = _atlas(reg)
+    task_id, facts = _dispatch_task(reg, atlas)
+    # A single-phase run reaches 'complete' without standing in for the referee
+    # gate: this test is about reconciliation, not about the approval chain,
+    # and driving a full portfolio_review here would mean persisting a bound
+    # PASS verdict that has nothing to do with what is under test.
+    workflow = reg.start_workflow(
+        "portfolio_review", {"goal": "regime re-read"}, phases=("analyst",))
+    atlas.start_task(task_id, facts,
+                     runner=lambda t, tid: Dispatched(workflow["workflow_id"]))
+
+    reg.update_workflow_phase(
+        workflow["workflow_id"], "analyst", "done", summary="ok",
+        artifacts={"moment_set_id": "m1", "objective_id": "o1",
+                   "decision_id": "d1", "regime": "calm",
+                   "regime_summary": "calm and quiet"})
+
+    moved = atlas.reconcile_tasks()
+
+    assert [m["task_id"] for m in moved] == [task_id]
+    stored = reg.get_atlas_task(task_id)
+    assert stored["status"] == "completed"
+    assert stored["conclusion"]["workflow_status"] == "complete"
+
+
+def test_reconcile_fails_a_task_whose_workflow_was_interrupted(reg):
+    from qlab.operator.atlas import Dispatched
+
+    atlas = _atlas(reg)
+    task_id, facts = _dispatch_task(reg, atlas)
+    workflow = reg.start_workflow("portfolio_review", {"goal": "regime re-read"})
+    atlas.start_task(task_id, facts,
+                     runner=lambda t, tid: Dispatched(workflow["workflow_id"]))
+
+    reg.interrupt_workflow(workflow["workflow_id"], reason="operator stopped it")
+    atlas.reconcile_tasks()
+
+    stored = reg.get_atlas_task(task_id)
+    assert stored["status"] == "failed"
+    assert "interrupted" in (stored["error"] or "")
+
+
+def test_reconcile_leaves_a_still_running_workflow_alone(reg):
+    from qlab.operator.atlas import Dispatched
+
+    atlas = _atlas(reg)
+    task_id, facts = _dispatch_task(reg, atlas)
+    workflow = reg.start_workflow("portfolio_review", {"goal": "regime re-read"})
+    atlas.start_task(task_id, facts,
+                     runner=lambda t, tid: Dispatched(workflow["workflow_id"]))
+
+    assert atlas.reconcile_tasks() == []
+    assert reg.get_atlas_task(task_id)["status"] == "running"
+
+
+def test_reconcile_fails_loud_when_the_bound_workflow_is_gone(reg):
+    # A task bound to a workflow that does not exist must not sit running
+    # forever, and must never be reported as complete.
+    from qlab.operator.atlas import Dispatched
+
+    atlas = _atlas(reg)
+    task_id, facts = _dispatch_task(reg, atlas)
+    atlas.start_task(task_id, facts,
+                     runner=lambda t, tid: Dispatched("wf-that-never-existed"))
+
+    atlas.reconcile_tasks()
+
+    stored = reg.get_atlas_task(task_id)
+    assert stored["status"] == "failed"
+    assert "wf-that-never-existed" in (stored["error"] or "")
+
+
+def test_reconcile_ignores_a_running_task_with_no_workflow_binding(reg):
+    # A deterministic template that is mid-flight has no workflow to read; it
+    # must not be swept into a failure by reconciliation.
+    atlas = _atlas(reg)
+    task_id, facts = _dispatch_task(reg, atlas)
+    reg.update_atlas_task(task_id, status="running")
+
+    assert atlas.reconcile_tasks() == []
+    assert reg.get_atlas_task(task_id)["status"] == "running"
+
+
 # --- declared template graphs must be runnable (P1 contract mismatch) --------
 
 def test_every_template_declares_an_executable_phase_graph():

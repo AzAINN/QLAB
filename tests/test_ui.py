@@ -1236,17 +1236,22 @@ def test_atlas_task_start_respects_mode_authority(session):
     assert refused["started"] is False and refused["blocked_by"] == "authority"
     assert session.registry.list_workflows(10) == []
 
-    # Research mode: the template runs and a durable workflow is registered.
+    # Research mode: the template dispatches and a durable workflow is
+    # registered. The task stays running -- a workflow row is not a finding, and
+    # only the workflow's own terminal state may complete the task.
     session.atlas.set_mode("research")
     session.registry.update_atlas_task(task_id, status="queued")
     status, started = handle_api(
         session, "POST", f"/api/atlas/tasks/{task_id}/start", {},
         {"offline": True})
-    assert status == 200 and started["completed"] is True
-    assert started["conclusion"]["workflow_id"]
+    assert status == 200
+    assert started["started"] is True
+    assert started["completed"] is False
+    assert started["dispatched"] is True
+    assert started["workflow_id"]
     stored = session.registry.get_atlas_task(task_id)
-    assert stored["status"] == "completed"
-    assert stored["workflow_id"] == started["conclusion"]["workflow_id"]
+    assert stored["status"] == "running"
+    assert stored["workflow_id"] == started["workflow_id"]
 
 
 def test_unknown_atlas_task_start_is_404(session):
@@ -1571,3 +1576,148 @@ def test_news_read_template_refuses_an_empty_window(session):
 
     facts["news_window_items"] = 5
     assert check_startable("news_read", "research", facts).template_id == "news_read"
+
+
+# --- Atlas dispatch honesty at the owner boundary (P1) -----------------------
+
+def test_atlas_workflow_runner_dispatches_instead_of_concluding():
+    # The runner starts a durable workflow. That is a dispatch, not a finding,
+    # and it must be reported as one or Atlas claims research it never did.
+    from qlab.operator.atlas import Dispatched
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    task = {"task_id": "t-1", "trigger_kind": "regime_flip"}
+
+    outcome = session.atlas_workflow_runner(task, "regime_review")
+
+    assert isinstance(outcome, Dispatched)
+    assert outcome.workflow_id
+    assert session.registry.get_workflow(outcome.workflow_id) is not None
+
+
+def test_a_deterministic_template_still_concludes_inline():
+    # desk_brief needs no coordinator; it genuinely finishes during the runner.
+    from qlab.operator.atlas import Dispatched
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    outcome = session.atlas_workflow_runner(
+        {"task_id": "t-1", "trigger_kind": "daily_open"}, "desk_brief")
+
+    assert not isinstance(outcome, Dispatched)
+    assert outcome["action_taken"] is False
+    assert "brief" in outcome
+
+
+def test_the_runner_fails_loud_when_no_workflow_could_be_started(monkeypatch):
+    # Silently returning a handle with workflow_id=None is how a dispatch
+    # failure previously became a completed task.
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    monkeypatch.setattr(session, "start_workflow",
+                        lambda request, **kwargs: {})
+
+    with pytest.raises(RuntimeError, match="workflow"):
+        session.atlas_workflow_runner(
+            {"task_id": "t-1", "trigger_kind": "regime_flip"}, "regime_review")
+
+
+def test_an_autonomous_start_is_never_reported_as_completed():
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    session.atlas.set_mode("research")
+    facts = session.atlas_facts(True)
+    facts["regime"]["flip"] = True
+    session.atlas.observe(facts, trading_date="2026-07-26")
+
+    started = session.atlas_run_startable(True, limit=1)
+
+    assert started, "expected one startable task"
+    for entry in started:
+        assert entry.get("completed") is not True
+    for task in session.registry.list_atlas_tasks(limit=10):
+        if task["status"] == "completed":
+            assert task["conclusion"].get("workflow_status") == "complete", (
+                "a task completed without its workflow reaching terminal state")
+
+
+def test_the_observe_tick_reconciles_dispatched_tasks():
+    # A workflow that finished while nothing was watching must still resolve its
+    # task; reconciliation on the observe cycle is what makes that true.
+    from qlab.operator.atlas import Dispatched
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    registry = session.registry
+    session.atlas.set_mode("research")
+    facts = session.atlas_facts(True)
+    facts["regime"]["flip"] = True
+    created = session.atlas.observe(facts, trading_date="2026-07-26")
+    task_id = created["created_tasks"][0]["task_id"]
+
+    workflow = registry.start_workflow(
+        "portfolio_review", {"goal": "g"}, phases=("analyst",))
+    session.atlas.start_task(
+        task_id, facts, runner=lambda t, tid: Dispatched(workflow["workflow_id"]))
+    assert registry.get_atlas_task(task_id)["status"] == "running"
+
+    registry.update_workflow_phase(
+        workflow["workflow_id"], "analyst", "done", summary="ok",
+        artifacts={"moment_set_id": "m", "objective_id": "o",
+                   "decision_id": "d", "regime": "calm",
+                   "regime_summary": "quiet"})
+
+    session.atlas_observe(True)
+
+    assert registry.get_atlas_task(task_id)["status"] == "completed"
+
+
+def test_owner_startup_reconciles_a_workflow_that_finished_while_it_was_down():
+    # A dispatched workflow can reach terminal state while no owner is running.
+    # Without startup reconciliation the task would sit running until the next
+    # observe tick -- and a task that outlives its workflow is exactly the state
+    # that used to be misreported.
+    from qlab.operator.atlas import Dispatched
+
+    registry = Registry(":memory:")
+    session = UISession(offline_default=True, registry=registry)
+    session.atlas.set_mode("research")
+    facts = session.atlas_facts(True)
+    facts["regime"]["flip"] = True
+    created = session.atlas.observe(facts, trading_date="2026-07-26")
+    task_id = created["created_tasks"][0]["task_id"]
+
+    workflow = registry.start_workflow(
+        "portfolio_review", {"goal": "g"}, phases=("news-analyst",))
+    session.atlas.start_task(
+        task_id, facts, runner=lambda t, tid: Dispatched(workflow["workflow_id"]))
+    registry.update_workflow_phase(
+        workflow["workflow_id"], "news-analyst", "done", summary="ok",
+        artifacts={"news_view": "the record supports a narrow reading"})
+    assert registry.get_atlas_task(task_id)["status"] == "running"
+
+    # A fresh owner over the same registry, as after a restart.
+    UISession(offline_default=True, registry=registry)
+
+    assert registry.get_atlas_task(task_id)["status"] == "completed"
+
+
+def test_a_dispatched_task_fails_when_the_restart_interrupts_its_workflow():
+    # The other half: a workflow still running at restart is interrupted (no
+    # coordinator lease survives), so its task must fail rather than hang.
+    from qlab.operator.atlas import Dispatched
+
+    registry = Registry(":memory:")
+    session = UISession(offline_default=True, registry=registry)
+    session.atlas.set_mode("research")
+    facts = session.atlas_facts(True)
+    facts["regime"]["flip"] = True
+    created = session.atlas.observe(facts, trading_date="2026-07-26")
+    task_id = created["created_tasks"][0]["task_id"]
+
+    workflow = registry.start_workflow(
+        "portfolio_review", {"goal": "g"}, phases=("news-analyst",))
+    session.atlas.start_task(
+        task_id, facts, runner=lambda t, tid: Dispatched(workflow["workflow_id"]))
+
+    UISession(offline_default=True, registry=registry)
+
+    stored = registry.get_atlas_task(task_id)
+    assert stored["status"] == "failed"
+    assert "interrupted" in (stored["error"] or "")

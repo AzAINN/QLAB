@@ -1164,6 +1164,43 @@ def test_api_client_resubscribe_uses_last_event_tuple(monkeypatch):
     ]
 
 
+def test_api_client_stream_stops_on_heartbeat_after_cancellation(monkeypatch):
+    """A quiet SSE connection must release when the Textual app unmounts."""
+    import threading
+
+    import qlab.tui.client as client_module
+
+    stop = threading.Event()
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            stop.set()
+            yield ": ping"
+            raise AssertionError("stream read continued after cancellation")
+
+    monkeypatch.setattr(
+        client_module.httpx,
+        "stream",
+        lambda method, url, *, params, timeout: FakeResponse(),
+    )
+    events = client_module.ApiClient("http://owner").stream(
+        "/api/stream",
+        stop_event=stop,
+    )
+
+    with pytest.raises(StopIteration):
+        next(events)
+
+
 def test_sse_stream_delivers_late_same_timestamp_audit_event_once(session):
     """A quote cursor cannot skip an audit row committed later at the same ts."""
     import json

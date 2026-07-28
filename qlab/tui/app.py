@@ -7,6 +7,7 @@ import math
 import subprocess
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from typing import Any
 
@@ -228,6 +229,7 @@ _REFRESH_EVENT_KINDS = {
     "cost_gate_refusal", "autopilot_trigger", "daily_ops",
 }
 _QUOTE_REPAINT_INTERVAL = 1.0
+_EVENT_ID_LIMIT = 2_048
 COMMAND_TABLE = {
     ("view", "dashboard"): "action_view",
     ("view", "desk"): "action_view",
@@ -899,11 +901,14 @@ class QlabTui(App[None]):
         self.universe_tickers: list[str] = list(_DEFAULT_TICKERS)
         self.active_ticker = self.universe_tickers[0]
         self.snapshot: dict[str, Any] = {}
+        self._snapshot_initialized = False
+        self._closing = False
         self._refreshing = False
         self._action_running = False
         self._last_snapshot_at: float | None = None
         self._refresh_failures = 0
         self._event_ids: set[str] = set()
+        self._event_id_order: deque[str] = deque()
         self._runs_signature: tuple = ()
         self._audit_signature: tuple = ()
         self._audit_decisions: dict[str, dict] = {}
@@ -938,7 +943,7 @@ class QlabTui(App[None]):
         self._phase_reported: dict[str, str] = {}
         self._results_printed = False
         self._pulse = 0
-        self._live_stream_stop = False
+        self._live_stream_stop = threading.Event()
         self._last_quote_repaint_at = 0.0
         self._quote_repaint_timer = None
         self._console_partial = ""
@@ -1200,7 +1205,8 @@ class QlabTui(App[None]):
         self._start_live_stream()
 
     def on_unmount(self) -> None:
-        self._live_stream_stop = True
+        self._closing = True
+        self._live_stream_stop.set()
         owned_workflow = (
             self._launched_workflow_id
             if self.claude.mode == "workforce" and self.claude.running
@@ -1242,6 +1248,17 @@ class QlabTui(App[None]):
                 self._render_dashboard()
 
     # -- snapshot refresh -------------------------------------------------
+    def _call_from_worker(self, callback, *args) -> None:
+        """Marshal a worker result only while Textual owns its message loop."""
+        if self._closing:
+            return
+        try:
+            self.call_from_thread(callback, *args)
+        except RuntimeError:
+            # A request may finish after unmount begins. Its result belongs in
+            # the next owner snapshot, not in this retired widget tree.
+            return
+
     def _start_refresh(self) -> None:
         # A running owner action holds the owner's dispatch lock; polling
         # /api/tui behind it would only pile up timeouts in the event strip.
@@ -1252,15 +1269,19 @@ class QlabTui(App[None]):
         def run() -> None:
             try:
                 snapshot = gather_snapshot(self.client, offline=self.offline)
-                self.call_from_thread(self._apply_snapshot, snapshot)
+                self._call_from_worker(self._apply_snapshot, snapshot)
             except Exception as exc:
-                self.call_from_thread(
+                self._call_from_worker(
                     self._write_local_event, "api.error", {"error": repr(exc)})
-                self.call_from_thread(self._note_refresh_failure)
+                self._call_from_worker(self._note_refresh_failure)
             finally:
-                self.call_from_thread(self._finish_refresh)
+                self._call_from_worker(self._finish_refresh)
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="qlab-tui-refresh",
+        ).start()
 
     def _finish_refresh(self) -> None:
         self._refreshing = False
@@ -1286,12 +1307,16 @@ class QlabTui(App[None]):
         def run() -> None:
             try:
                 bootstrap = self.client.get("/api/bootstrap")
-                self.call_from_thread(self._finish_bootstrap, bootstrap, "")
+                self._call_from_worker(self._finish_bootstrap, bootstrap, "")
             except Exception as exc:
-                self.call_from_thread(
+                self._call_from_worker(
                     self._finish_bootstrap, None, repr(exc))
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="qlab-tui-bootstrap",
+        ).start()
 
     def _finish_bootstrap(
         self,
@@ -1316,11 +1341,16 @@ class QlabTui(App[None]):
         def run() -> None:
             try:
                 payload = self.client.get("/api/reference")
-                self.call_from_thread(self._finish_reference, payload, "")
+                self._call_from_worker(self._finish_reference, payload, "")
             except Exception as exc:
-                self.call_from_thread(self._finish_reference, None, repr(exc))
+                self._call_from_worker(
+                    self._finish_reference, None, repr(exc))
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="qlab-tui-reference",
+        ).start()
 
     def _finish_reference(self, payload: dict[str, Any] | None, error: str) -> None:
         view = self.query_one("#reference", ReferenceView)
@@ -1340,17 +1370,24 @@ class QlabTui(App[None]):
             return
 
         def run() -> None:
-            while not self._live_stream_stop:
+            while not self._live_stream_stop.is_set():
                 try:
-                    for event in self.client.stream("/api/stream"):
-                        if self._live_stream_stop:
+                    for event in self.client.stream(
+                        "/api/stream",
+                        stop_event=self._live_stream_stop,
+                    ):
+                        if self._live_stream_stop.is_set():
                             return
-                        self.call_from_thread(self._apply_live_event, event)
+                        self._call_from_worker(self._apply_live_event, event)
                 except Exception:
                     pass  # owner restarting or unreachable; retry quietly
-                time.sleep(2.0)
+                self._live_stream_stop.wait(2.0)
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="qlab-tui-events",
+        ).start()
 
     def _apply_live_event(self, event: dict) -> None:
         kind = str(event.get("kind", ""))
@@ -1599,24 +1636,47 @@ class QlabTui(App[None]):
             self.active_ticker = assets[0]["ticker"]
         self._render_nav()
         self._render_universe(assets)
-        self._render_dashboard()
-        self._render_market()
-        self._render_workforce()
-        self._render_research()
-        self._render_book()
-        self._render_audit()
-        self._render_settings()
+        if self._snapshot_initialized and snapshot:
+            self._render_active_snapshot_view()
+        else:
+            # Prime every canvas once, and clear every canvas if the owner
+            # returns no state so a hidden view cannot retain stale figures.
+            # Ordinary later polls repaint only the visible canvas.
+            self._render_dashboard()
+            self._render_market()
+            self._render_workforce()
+            self._render_research()
+            self._render_book()
+            self._render_audit()
+            self._render_settings()
+            self._render_atlas()
+            self._snapshot_initialized = True
         if not self._action_running:
             self._agent_states = {
                 str(agent.get("name")): str(agent.get("state", "idle"))
                 for agent in snapshot.get("agents", [])
             }
         self._render_agents()
-        self._render_atlas()
         self._render_atlas_rail()
         self._render_status()
         self._ingest_events(snapshot.get("events", []))
         self._maybe_offer_workforce()
+
+    def _render_active_snapshot_view(self) -> None:
+        """Render the visible canvas from the latest owner snapshot."""
+        renderers = {
+            "atlas": self._render_atlas,
+            "dashboard": self._render_dashboard,
+            "market": self._render_market,
+            "workforce": self._render_workforce,
+            "research": self._render_research,
+            "book": self._render_book,
+            "audit": self._render_audit,
+            "settings": self._render_settings,
+        }
+        renderer = renderers.get(self.active_view)
+        if renderer is not None:
+            renderer()
 
     # -- renderers --------------------------------------------------------
     def _render_nav(self) -> None:
@@ -3292,6 +3352,9 @@ class QlabTui(App[None]):
                 continue
             if event_id:
                 self._event_ids.add(event_id)
+                self._event_id_order.append(event_id)
+                if len(self._event_id_order) > _EVENT_ID_LIMIT:
+                    self._event_ids.discard(self._event_id_order.popleft())
             self._append_event(event)
             kind = str(event.get("kind", ""))
             if kind == "workflow_started":
@@ -3326,6 +3389,8 @@ class QlabTui(App[None]):
         self.active_view = view
         self.query_one("#canvas", ContentSwitcher).current = view
         self._render_nav()
+        if self.snapshot:
+            self._render_active_snapshot_view()
         if view == "workforce":
             # Chat-first focus claims digits as text; F1-F8 still switch views,
             # and Escape blurs the input so digit navigation works again.
@@ -3816,35 +3881,77 @@ class QlabTui(App[None]):
             active_agent="reporter",
         )
 
-    def _run_api_action(self, label: str, path: str, body: dict, *, active_agent: str) -> None:
+    def _run_api_action(
+        self,
+        label: str,
+        path: str,
+        body: dict,
+        *,
+        active_agent: str | None,
+        http_method: str = "post",
+    ) -> None:
         if self._action_running:
             self._write_local_event("action.rejected", {"reason": "another action is running"})
             return
         self._action_running = True
-        self._agent_states = {name: "queued" for name in _AGENT_NAMES}
-        self._agent_states[active_agent] = "working"
-        self._render_agents()
+        if active_agent is not None:
+            self._agent_states = {name: "queued" for name in _AGENT_NAMES}
+            self._agent_states[active_agent] = "working"
+            self._render_agents()
         self._set_selected_work(f"{label.upper()}\n\nRunning through the owner API…")
         self._write_local_event("action.started", {"action": label})
 
         def run() -> None:
             try:
-                result = self.client.post(path, body)
-                self.call_from_thread(self._finish_api_action, label, result, None)
+                if http_method == "get":
+                    result = self.client.get(path, **body)
+                elif http_method == "post":
+                    result = self.client.post(path, body)
+                else:
+                    raise ValueError(
+                        f"unsupported owner API method {http_method!r}")
+                self._call_from_worker(
+                    self._finish_api_action,
+                    label,
+                    result,
+                    None,
+                    active_agent,
+                )
             except Exception as exc:
-                self.call_from_thread(self._finish_api_action, label, None, exc)
+                self._call_from_worker(
+                    self._finish_api_action,
+                    label,
+                    None,
+                    exc,
+                    active_agent,
+                )
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="qlab-tui-action",
+        ).start()
 
-    def _finish_api_action(self, label: str, result: dict | None, error: Exception | None) -> None:
+    def _finish_api_action(
+        self,
+        label: str,
+        result: dict | None,
+        error: Exception | None,
+        active_agent: str | None,
+    ) -> None:
         self._action_running = False
         if error is not None:
-            self._agent_states = {name: "failed" if state == "working" else "idle"
-                                  for name, state in self._agent_states.items()}
+            if active_agent is not None:
+                self._agent_states = {
+                    name: "failed" if state == "working" else "idle"
+                    for name, state in self._agent_states.items()
+                }
             self._set_selected_work(f"{label.upper()} FAILED\n\n{error!r}")
             self._write_local_event("action.failed", {"action": label, "error": repr(error)})
         else:
-            self._agent_states = {name: "done" for name in self._agent_states}
+            if active_agent is not None:
+                self._agent_states = {
+                    name: "done" for name in self._agent_states}
             assert result is not None
             lines = [f"{label.upper()} COMPLETE", ""]
             if "decision_id" in result:
@@ -3867,7 +3974,8 @@ class QlabTui(App[None]):
                 lines.append(f"triggers  {', '.join(result.get('triggers') or []) or 'none'}")
             self._set_selected_work("\n".join(lines))
             self._write_local_event("action.completed", {"action": label})
-        self._render_agents()
+        if active_agent is not None:
+            self._render_agents()
         self._start_refresh()
 
     # -- Claude stream ----------------------------------------------------
@@ -3983,10 +4091,7 @@ class QlabTui(App[None]):
         return True
 
     def _receive_claude_event(self, event: ClaudeEvent) -> None:
-        try:
-            self.call_from_thread(self._apply_claude_event, event)
-        except Exception:
-            pass  # app closed while the reader thread was finishing
+        self._call_from_worker(self._apply_claude_event, event)
 
     def _apply_claude_event(self, event: ClaudeEvent) -> None:
         workforce = self.claude.mode == "workforce"

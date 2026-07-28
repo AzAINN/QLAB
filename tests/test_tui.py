@@ -1105,6 +1105,30 @@ def test_dashboard_refresh_replaces_full_snapshot_with_unavailable_state():
     asyncio.run(run())
 
 
+def test_later_snapshots_repaint_only_the_visible_canvas():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app._apply_snapshot(_snapshot())
+            app.active_view = "market"
+            calls = {"market": 0, "dashboard": 0, "workforce": 0}
+            app._render_market = lambda: calls.__setitem__(
+                "market", calls["market"] + 1)
+            app._render_dashboard = lambda: calls.__setitem__(
+                "dashboard", calls["dashboard"] + 1)
+            app._render_workforce = lambda: calls.__setitem__(
+                "workforce", calls["workforce"] + 1)
+
+            app._apply_snapshot(_snapshot())
+
+            assert calls == {"market": 1, "dashboard": 0, "workforce": 0}
+
+    asyncio.run(run())
+
+
 class WorkforceReadyClient(StubClient):
     def get(self, path, **params):
         snap = _snapshot()
@@ -3295,6 +3319,25 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "Nothing was traded" in nxt
 
 
+def test_tui_event_dedupe_window_is_bounded():
+    from qlab.tui.app import QlabTui, _EVENT_ID_LIMIT
+
+    app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+    appended = []
+    app._append_event = appended.append
+    events = [
+        {"event_id": f"event-{index}", "kind": "audit", "payload": {}}
+        for index in range(_EVENT_ID_LIMIT + 5)
+    ]
+
+    app._ingest_events(events)
+
+    assert len(app._event_ids) == _EVENT_ID_LIMIT
+    assert "event-0" not in app._event_ids
+    assert f"event-{_EVENT_ID_LIMIT + 4}" in app._event_ids
+    assert len(appended) == len(events)
+
+
 def test_workforce_chat_sends_resumes_and_stops():
     from qlab.tui.app import QlabTui
     from qlab.tui.claude import ClaudeEvent
@@ -3455,6 +3498,32 @@ def test_claude_session_reports_process_creation_failure(tmp_path, monkeypatch):
     assert not session.start("inspect", governed=True)
     assert "WinError 206" in session.last_error
     assert "too long" in session.last_error
+
+
+def test_claude_session_reports_agent_configuration_failure(tmp_path, monkeypatch):
+    from qlab.tui import claude as claude_module
+
+    monkeypatch.setattr(
+        claude_module.shutil, "which", lambda command: "/usr/local/bin/claude"
+    )
+    monkeypatch.setattr(
+        claude_module,
+        "build_workforce_agents",
+        lambda prompt="": {
+            "untrusted-role": {
+                "description": "must be refused",
+                "prompt": "no",
+                "tools": [],
+            }
+        },
+    )
+    session = claude_module.ClaudeSession(lambda event: None, cwd=tmp_path)
+
+    assert not session.start("inspect", governed=True)
+    assert session.process is None
+    assert session._session_dir is None
+    assert "Could not configure Claude Code session" in session.last_error
+    assert "unexpected session agent name" in session.last_error
 
 
 def test_resolve_claude_executable_prefers_runnable_launcher_on_windows(monkeypatch):

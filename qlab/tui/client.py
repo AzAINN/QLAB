@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import httpx
@@ -57,24 +58,32 @@ class ApiClient:
         return response.json()
 
 
-    def stream(self, path: str, **params: Any):
+    def stream(
+        self,
+        path: str,
+        *,
+        stop_event: threading.Event | None = None,
+        **params: Any,
+    ):
         """Yield durable audit and transient topic events from the owner.
 
-        Blocks between events; callers exit by breaking (Ctrl-C closes the
-        socket via the context manager). Heartbeat comments are skipped, and
-        a closed connection resumes after the last exact event tuple.
+        The owner emits a heartbeat about every ten seconds, which bounds
+        cancellation even while the desk is quiet. A closed connection resumes
+        after the last exact event tuple.
         """
         import json
 
         request_params = dict(params)
         last_cursor: tuple[str, str] | None = None
-        while True:
+        while stop_event is None or not stop_event.is_set():
             with httpx.stream(
                 "GET", self.base_url + path, params=request_params,
-                timeout=httpx.Timeout(None, connect=10.0),
+                timeout=httpx.Timeout(15.0, connect=10.0),
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
+                    if stop_event is not None and stop_event.is_set():
+                        return
                     if not line or not line.startswith("data:"):
                         continue
                     payload = line[len("data:"):].strip()
@@ -90,6 +99,8 @@ class ApiClient:
                         if event_ts and event_id:
                             last_cursor = (event_ts, event_id)
                     yield event
+            if stop_event is not None and stop_event.is_set():
+                return
             if last_cursor is None:
                 return
             request_params["after"], request_params["after_id"] = last_cursor

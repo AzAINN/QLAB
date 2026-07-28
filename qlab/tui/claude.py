@@ -1003,14 +1003,22 @@ class ClaudeSession:
                 env=env,
                 **_process_group_options(),
             )
-        except OSError as exc:
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             self.process = None
             if self._session_dir is not None:
                 self._session_dir.cleanup()
                 self._session_dir = None
-            winerror = getattr(exc, "winerror", None)
-            detail = f"WinError {winerror}: " if winerror is not None else ""
-            self.last_error = f"Could not start Claude Code: {detail}{exc.strerror or exc}"
+            if isinstance(exc, OSError):
+                winerror = getattr(exc, "winerror", None)
+                detail = f"WinError {winerror}: " if winerror is not None else ""
+                self.last_error = (
+                    f"Could not start Claude Code: "
+                    f"{detail}{exc.strerror or exc}"
+                )
+            else:
+                self.last_error = (
+                    f"Could not configure Claude Code session: {exc}"
+                )
             return False
         self._timed_out = ""
         self._last_event_at = time.monotonic()

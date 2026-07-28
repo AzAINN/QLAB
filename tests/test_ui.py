@@ -1863,3 +1863,63 @@ def test_a_dispatched_task_fails_when_the_restart_interrupts_its_workflow():
     stored = registry.get_atlas_task(task_id)
     assert stored["status"] == "failed"
     assert "interrupted" in (stored["error"] or "")
+
+
+def test_an_unparseable_post_body_is_refused_rather_than_silently_emptied(
+    session, monkeypatch,
+):
+    """A truncated body must never become {}.
+
+    The route defaults are permissive: /api/run_once reads execute=True out of
+    an empty body. Substituting {} for a body the owner could not parse
+    therefore turned a dropped byte into an unrequested paper trade, answered
+    200 as if the caller had asked for it.
+    """
+    import http.client
+    import json
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    import qlab.autopilot.loop as loop_module
+    import qlab.ui.server as server_module
+
+    ran: list[dict] = []
+
+    def refuse_to_run(**kwargs):
+        ran.append(kwargs)
+        return {"executed": True}
+
+    monkeypatch.setattr(loop_module, "run_once", refuse_to_run)
+
+    handler = type("H", (server_module._Handler,), {"session": session})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        # The caller asked NOT to execute; the body is truncated in transit.
+        conn.request("POST", "/api/run_once", body=b'{"execute": fal')
+        response = conn.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 400
+        assert "not valid JSON" in payload["error"]
+        assert ran == [], "a body the owner could not parse must not trade"
+
+        # Valid JSON that is not an object is refused for the same reason.
+        conn.request("POST", "/api/run_once", body=b"[]")
+        response = conn.getresponse()
+        assert response.status == 400
+        assert "JSON object" in json.loads(response.read())["error"]
+        assert ran == []
+
+        # A genuinely absent body still means "the defaults", as before.
+        conn.request("POST", "/api/run_once")
+        response = conn.getresponse()
+        assert response.status == 200
+        assert len(ran) == 1
+        conn.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

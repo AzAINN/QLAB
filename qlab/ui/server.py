@@ -2463,12 +2463,28 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            # The declared length is unusable, so the body cannot be consumed
+            # and this connection can no longer be framed.
+            self.close_connection = True
+            self._json(400, {"error": "Content-Length must be an integer"})
+            return
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        # A body the owner failed to parse must never be replaced by {}. The
+        # route defaults are permissive on purpose -- /api/run_once reads
+        # execute=True out of an empty body -- so substituting {} turns a
+        # truncated request into an unrequested paper trade, and every other
+        # POST into a 200 computed from parameters the caller never sent.
         try:
             body = json.loads(raw or b"{}")
-        except Exception:
-            body = {}
+        except (ValueError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": f"request body is not valid JSON: {exc}"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"error": "request body must be a JSON object"})
+            return
         try:
             with _LOCK:
                 status, obj = handle_api(self.session, "POST", parsed.path,

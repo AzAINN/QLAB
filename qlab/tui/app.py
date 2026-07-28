@@ -12,10 +12,12 @@ from datetime import datetime
 from typing import Any
 
 from rich.markup import escape
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
+from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -43,11 +45,15 @@ from qlab.tui.formatting import (
     is_numbered_item, key_number_lines, money, pct, phase_elapsed,
     report_lines, sparkline, verdict_chip, weight_bar,
 )
-from qlab.tui.theme import (
+from qlab.tui.design import primitives, tokens
+# Colour names resolve against the active theme at render time. They are
+# variable references, not literals, so every inline markup site below follows a
+# theme switch. The Rich-rendered console is the one exception and resolves them
+# itself in `_console_write`.
+from qlab.tui.design.markup import (
     ALLOCATION_TRACK,
     AMBER,
     AMBER_HI,
-    APP_CSS,
     BG,
     BG_PANEL,
     BG_RAISED,
@@ -60,14 +66,18 @@ from qlab.tui.theme import (
     GOLD,
     LABEL_GOLD,
     MUTED,
-    PALETTE_NAME,
-    ATLAS_DRAWER_CSS,
-    PAPER_MODAL_CSS,
     SEL_BG,
-    STATE_STYLE,
     TEXT,
     TEXT_HI,
     UP,
+)
+from qlab.tui.design.markup import resolve as _resolve_markup
+from qlab.tui.theme import (
+    APP_CSS,
+    ATLAS_DRAWER_CSS,
+    PALETTE_NAME,
+    PAPER_MODAL_CSS,
+    STATE_STYLE,
 )
 
 
@@ -243,6 +253,7 @@ COMMAND_TABLE = {
     ("view", "settings"): "action_view",
     ("view", "agents"): "action_agent_focus",
     ("agents", None): "action_agent_focus",
+    ("theme", None): "action_theme",
     ("symbol", None): "action_symbol",
     ("timeline", None): "action_timeline",
     ("help", None): "action_help",
@@ -706,6 +717,14 @@ class FlowNode(Static):
     narrative — no block of coordinator text is ever dumped into the console.
     """
 
+    state: reactive[str] = reactive("idle")
+    detail: reactive[str] = reactive("", repaint=False)
+    pulse: reactive[int] = reactive(0)
+    # Pushed down by the app on a theme change. The widget never reaches up to
+    # read the active theme, so it renders identically inside and outside a
+    # running app -- which is what keeps these renderers unit-testable.
+    theme_name: reactive[str] = reactive(tokens.DEFAULT_THEME)
+
     def __init__(self, phase: str, agent: str, short: str):
         super().__init__(id=f"flow-{phase}", markup=True)
         self.phase = phase
@@ -718,10 +737,31 @@ class FlowNode(Static):
             paint(self)
 
     def on_enter(self, event: events.Enter) -> None:
-        app = self.app
-        detail = getattr(app, "_flow_details", {}).get(self.phase) or (
-            f"{self.agent}\n\nnot yet started")
-        app._set_selected_work(f"{self.short.upper()} · {self.agent}\n\n{detail}")
+        detail = self.detail or f"{self.agent}\n\nnot yet started"
+        self.app._set_selected_work(
+            f"{self.short.upper()} · {self.agent}\n\n{detail}")
+
+    def render(self) -> Text:
+        # State is encoded twice -- glyph colour and the state word -- so an
+        # unmapped owner status still reads correctly with the glyph degraded.
+        pulse = (_PULSE_FRAMES[self.pulse % len(_PULSE_FRAMES)]
+                 if self.state == "working" else None)
+        rendered = Text(self.short, style="bold")
+        rendered.append("\n")
+        rendered.append_text(primitives.state_badge(
+            self.state, glyph=pulse, fallback="idle", theme=self.theme_name))
+        rendered.append(f" {self.state}")
+        return rendered
+
+    def watch_state(self, state: str) -> None:
+        for token in (
+            "working", "queued", "done", "failed", "blocked",
+            "interrupted", "abandoned",
+        ):
+            self.set_class(token == state, f"-{token}")
+
+    def watch_detail(self, detail: str) -> None:
+        self.tooltip = detail or f"{self.agent}\n\nnot yet started"
 
 
 class FlowBoard(Horizontal):
@@ -760,10 +800,45 @@ class NavMenu(Static):
     lacks.
     """
 
+    active_view: reactive[str] = reactive("atlas")
+
+    def render(self) -> str:
+        return "\n".join(
+            (
+                f"[bold {TEXT_HI}]› {index}  {view.title()}[/]"
+                if view == self.active_view
+                else f"[{MUTED}]  {index}  {view.title()}[/]"
+            )
+            for index, view in enumerate(_VIEWS, start=1)
+        )
+
     def on_click(self, event: events.Click) -> None:
         index = int(event.y)
         if 0 <= index < len(_VIEWS):
             self.app.action_view(_VIEWS[index])
+
+
+class AgentRail(Static):
+    """Declarative rendering of the owner-reported workforce roster."""
+
+    rows: reactive[tuple[tuple[str, str, str], ...]] = reactive(tuple)
+    pulse: reactive[int] = reactive(0)
+    theme_name: reactive[str] = reactive(tokens.DEFAULT_THEME)
+
+    def render(self) -> Text:
+        rendered = Text()
+        faint = tokens.role(self.theme_name, "faint")
+        for index, (name, authority, state) in enumerate(self.rows):
+            if index:
+                rendered.append("\n")
+            pulse = (_PULSE_FRAMES[self.pulse % len(_PULSE_FRAMES)]
+                     if state == "working" else None)
+            rendered.append_text(primitives.state_badge(
+                state, glyph=pulse, fallback="idle", theme=self.theme_name))
+            rendered.append(" ")
+            rendered.append(name, style="bold")
+            rendered.append(f"\n   {state} · {authority}", style=faint)
+        return rendered
 
 
 class Tile(Vertical):
@@ -889,6 +964,10 @@ class QlabTui(App[None]):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        # Before anything else: the stylesheet is parsed during startup and
+        # references these variables, so registering in on_mount is too late and
+        # raises UnresolvedVariableError on `$bg`.
+        self._register_design_themes()
         self.client = client
         self.offline = offline
         self.refresh_interval = refresh_interval
@@ -1163,7 +1242,7 @@ class QlabTui(App[None]):
                     markup=True,
                 )
                 yield Static("AGENTS", id="agent-label")
-                yield Static(id="agent-list", markup=True)
+                yield AgentRail(id="agent-list", markup=True)
                 yield Static("SELECTED WORK", id="work-label")
                 yield Static(
                     "No active workforce.\n\nUse [bold]: workforce GOAL[/] to let "
@@ -1203,6 +1282,40 @@ class QlabTui(App[None]):
             self.set_interval(self.refresh_interval, self._start_refresh)
             self.set_interval(0.25, self._tick_pulse)
         self._start_live_stream()
+
+    def _register_design_themes(self) -> None:
+        """Make the design themes selectable and adopt the default.
+
+        Chrome is still styled by the pre-substituted CSS in `qlab.tui.theme`,
+        so a switch currently repaints only content rendered through
+        `qlab.tui.design.primitives`. Converting the stylesheet to theme
+        variables is a separate slice.
+        """
+        for theme in tokens.THEMES.values():
+            self.register_theme(theme)
+        self.theme = tokens.DEFAULT_THEME
+
+    def action_theme(self, name: str = "") -> None:
+        """Switch the active design theme, or list the choices when unnamed."""
+        wanted = name.strip()
+        if wanted not in tokens.THEMES:
+            self._write_local_event(
+                "theme.rejected", {"requested": wanted})
+            self._set_selected_work(
+                "THEME\n\n"
+                + ("Name a theme.\n\n" if not wanted
+                   else f"Unknown theme {wanted!r}.\n\n")
+                + "\n".join(f"  : theme {known}" for known in tokens.THEMES)
+            )
+            return
+        self.theme = wanted
+        # State down: the renderers are told the theme, they never read it.
+        for node in self.query(FlowNode):
+            node.theme_name = wanted
+        for rail in self.query(AgentRail):
+            rail.theme_name = wanted
+        self._write_local_event("theme.changed", {"theme": wanted})
+        self._set_selected_work(f"THEME\n\n{wanted} is active.")
 
     def on_unmount(self) -> None:
         self._closing = True
@@ -1478,7 +1591,12 @@ class QlabTui(App[None]):
 
     # -- workforce console -------------------------------------------------
     def _console_write(self, line: str) -> None:
-        self.query_one("#workforce-console", RichLog).write(line)
+        # RichLog renders through rich.text.Text.from_markup, which knows
+        # nothing about theme variables, so they are resolved here against the
+        # active theme rather than reaching Rich as a literal `$name`.
+        theme = self.theme if self.theme in tokens.THEMES else tokens.DEFAULT_THEME
+        self.query_one("#workforce-console", RichLog).write(
+            _resolve_markup(line, theme=theme))
 
     def _render_chat_mode(self) -> None:
         chip = self.query_one("#chat-mode", Static)
@@ -1680,14 +1798,7 @@ class QlabTui(App[None]):
 
     # -- renderers --------------------------------------------------------
     def _render_nav(self) -> None:
-        lines = []
-        for index, view in enumerate(_VIEWS, start=1):
-            if view == self.active_view:
-                lines.append(
-                    f"[bold {TEXT_HI}]› {index}  {view.title()}[/]")
-            else:
-                lines.append(f"[{MUTED}]  {index}  {view.title()}[/]")
-        self.query_one("#nav", Static).update("\n".join(lines))
+        self.query_one("#nav", NavMenu).active_view = self.active_view
 
     def _sync_universe(self, tickers: list[str]) -> None:
         """Adopt the owner's universe so the spine follows the mandate config."""
@@ -2403,21 +2514,10 @@ class QlabTui(App[None]):
 
     def _paint_flow_node(self, node: FlowNode) -> None:
         state = self._flow_states.get(node.phase, "idle")
-        glyph, color = _STATE_STYLE.get(state, ("◌", DIM))
-        if state == "working":
-            glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
-        node.update(
-            f"[bold]{escape(node.short)}[/]\n"
-            f"[{color}]{glyph} {escape(state)}[/]"
-        )
-        for token in (
-            "working", "queued", "done", "failed", "blocked",
-            "interrupted", "abandoned",
-        ):
-            node.set_class(token == state, f"-{token}")
-        node.tooltip = self._flow_details.get(node.phase) or (
-            f"{node.agent}\n\nnot yet started"
-        )
+        node.state = state
+        node.pulse = self._pulse
+        node.detail = self._flow_details.get(node.phase) or (
+            f"{node.agent}\n\nnot yet started")
 
     def _render_flow(self) -> None:
         """Paint the dynamic workflow-step board from durable phase state."""
@@ -3272,18 +3372,18 @@ class QlabTui(App[None]):
                 {"name": name, "authority": "—", "state": "idle"}
                 for name in _AGENT_NAMES
             ]
-        lines = []
+        rows = []
         for agent in agents:
-            name = agent["name"]
+            name = str(agent["name"])
             state = self._agent_states.get(name, agent.get("state", "idle"))
-            glyph, color = _STATE_STYLE.get(state, ("◌", DIM))
-            if state == "working":
-                glyph = _PULSE_FRAMES[self._pulse % len(_PULSE_FRAMES)]
-            lines.append(
-                f"[{color}]{glyph}[/] [bold]{escape(name)}[/]\n"
-                f"   [{DIM}]{escape(state)} · {escape(str(agent.get('authority', '—')))}[/]"
-            )
-        self.query_one("#agent-list", Static).update("\n".join(lines))
+            rows.append((
+                name,
+                str(agent.get("authority", "—")),
+                str(state),
+            ))
+        rail = self.query_one("#agent-list", AgentRail)
+        rail.rows = tuple(rows)
+        rail.pulse = self._pulse
 
     def _render_status(self) -> None:
         system = self.snapshot.get("system", {})
@@ -3862,7 +3962,8 @@ class QlabTui(App[None]):
                     action_args = (rest,)
                 else:
                     action_name = None
-            elif action_name in {"action_chat_mode", "action_workforce_new"}:
+            elif action_name in {"action_chat_mode", "action_workforce_new",
+                                 "action_theme"}:
                 action_args = (rest,)
 
         if action_name is not None:

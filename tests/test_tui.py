@@ -1726,7 +1726,9 @@ def test_operator_mcp_proxy_is_propose_only_and_never_executes():
 
 def test_research_view_renders_latest_prediction_admission_with_tone():
     from qlab.tui.app import QlabTui
-    from qlab.tui.theme import DOWN, UP
+    # Same vocabulary the view renders with: colour names are theme-variable
+    # references now, so the tone assertion still checks the tone was applied.
+    from qlab.tui.design.markup import DOWN, UP
 
     async def run():
         app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
@@ -2911,7 +2913,7 @@ def test_console_keeps_fenced_code_verbatim_across_streamed_chunks():
     across many calls. Fence state must survive between them: unindented code
     stays verbatim, and a chunk that closes the fence must not reopen it."""
     from qlab.tui.app import QlabTui
-    from qlab.tui.theme import DIM, TEXT
+    from qlab.tui.design.markup import DIM, TEXT
 
     async def run():
         app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
@@ -3873,5 +3875,173 @@ def test_atlas_view_actions_route_through_the_owner():
                     break
                 await pilot.pause(0.05)
             assert client.posts and client.posts[0][0] == "/api/atlas/escalate"
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# design-system wiring: the workforce state renderers and theme registration
+# ---------------------------------------------------------------------------
+
+def _style_strings(text) -> str:
+    """Every style on a Text, flattened, so a role colour can be searched for."""
+    return " ".join([str(text.style)] + [str(span.style) for span in text.spans])
+
+
+def test_flow_node_renders_its_state_glyph_from_the_design_system():
+    from rich.text import Text
+
+    from qlab.tui.app import FlowNode
+    from qlab.tui.design import glyphs
+
+    node = FlowNode("analyst", "moments-analyst", "analyst")
+    rendered = node.render()
+
+    assert isinstance(rendered, Text)
+    assert glyphs.STATES["idle"].unicode in rendered.plain
+    assert "analyst" in rendered.plain
+
+
+def test_flow_node_pulse_changes_the_glyph_but_not_the_role_colour():
+    from qlab.tui.app import FlowNode, _PULSE_FRAMES
+    from qlab.tui.design import tokens
+
+    node = FlowNode("analyst", "moments-analyst", "analyst")
+    node.set_reactive(FlowNode.state, "working")
+
+    node.set_reactive(FlowNode.pulse, 0)
+    first = node.render()
+    node.set_reactive(FlowNode.pulse, 1)
+    second = node.render()
+
+    assert _PULSE_FRAMES[0] in first.plain
+    assert _PULSE_FRAMES[1] in second.plain
+    accent = tokens.role(tokens.DEFAULT_THEME, "accent")
+    assert accent in _style_strings(first)
+    assert accent in _style_strings(second)
+
+
+def test_flow_node_colours_a_failed_phase_with_the_down_role():
+    from qlab.tui.app import FlowNode
+    from qlab.tui.design import tokens
+
+    node = FlowNode("referee", "referee", "referee")
+    node.set_reactive(FlowNode.state, "failed")
+
+    assert tokens.role(tokens.DEFAULT_THEME, "down") in _style_strings(node.render())
+
+
+def test_flow_node_degrades_on_a_state_the_design_system_does_not_know():
+    # An owner status the glyph table has not seen must not take down the view;
+    # the state name still renders as text so the operator sees the truth.
+    from qlab.tui.app import FlowNode
+
+    node = FlowNode("analyst", "moments-analyst", "analyst")
+    node.set_reactive(FlowNode.state, "some-future-owner-status")
+
+    rendered = node.render()
+
+    assert "some-future-owner-status" in rendered.plain
+
+
+def test_agent_rail_renders_states_from_the_design_system():
+    from rich.text import Text
+
+    from qlab.tui.app import AgentRail
+    from qlab.tui.design import glyphs
+
+    rail = AgentRail()
+    rail.set_reactive(AgentRail.rows, (
+        ("moments-analyst", "judgment", "done"),
+        ("referee", "approval", "queued"),
+    ))
+    rendered = rail.render()
+
+    assert isinstance(rendered, Text)
+    assert glyphs.STATES["done"].unicode in rendered.plain
+    assert glyphs.STATES["queued"].unicode in rendered.plain
+    assert "moments-analyst" in rendered.plain
+    assert "approval" in rendered.plain
+
+
+def test_agent_rail_degrades_on_an_unmapped_owner_state():
+    from qlab.tui.app import AgentRail
+
+    rail = AgentRail()
+    rail.set_reactive(AgentRail.rows, (("reporter", "reporting", "brand-new"),))
+
+    assert "brand-new" in rail.render().plain
+
+
+def test_app_registers_every_design_theme_and_defaults_to_dark():
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.1)
+            assert app.theme == tokens.DEFAULT_THEME
+            for name in tokens.THEMES:
+                assert name in app.available_themes
+
+    asyncio.run(run())
+
+
+def test_theme_command_switches_the_active_theme():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.1)
+            app._handle_command("theme qlab-light")
+            await pilot.pause(0.05)
+            assert app.theme == "qlab-light"
+
+    asyncio.run(run())
+
+
+def test_theme_command_refuses_an_unknown_theme_without_changing_it():
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.1)
+            app._handle_command("theme solarized-banana")
+            await pilot.pause(0.05)
+            assert app.theme == tokens.DEFAULT_THEME
+
+    asyncio.run(run())
+
+
+def test_switching_theme_repaints_chrome_not_just_content():
+    # The point of the whole token migration: the stylesheet resolves colours
+    # from the active theme, so a switch moves chrome too. Baked literals made
+    # chrome permanently dark no matter what the theme said.
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.1)
+            spine = app.query_one("#spine")
+            screen = app.screen
+
+            dark_spine = spine.styles.background.rich_color.triplet
+            dark_screen = screen.styles.background.rich_color.triplet
+
+            app._handle_command("theme qlab-light")
+            await pilot.pause(0.1)
+
+            light_spine = spine.styles.background.rich_color.triplet
+            light_screen = screen.styles.background.rich_color.triplet
+
+            assert light_spine != dark_spine, "spine chrome did not follow the theme"
+            assert light_screen != dark_screen, "canvas did not follow the theme"
+            # The light canvas must actually be lighter, not merely different.
+            assert sum(light_screen) > sum(dark_screen)
 
     asyncio.run(run())

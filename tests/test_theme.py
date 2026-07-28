@@ -54,15 +54,23 @@ assert "textual" not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
-def test_rendered_css_uses_shared_tokens():
-    assert theme.BG in theme.APP_CSS
-    assert theme.AMBER in theme.APP_CSS
-    assert "$" not in theme.APP_CSS
-    assert all((
-        theme.APP_CSS,
-        theme.PAPER_MODAL_CSS,
-        theme.WORKFORCE_MODAL_CSS,
-    ))
+def test_rendered_css_references_shared_tokens_instead_of_baking_them():
+    # The stylesheets deliberately keep `$token` references so a theme switch
+    # repaints chrome; baking literals is what previously made the palette
+    # fixed at import time. qlab.tui.design.tokens publishes every name as a
+    # theme variable, and an unpublished one is a startup stylesheet error.
+    import re
+
+    assert "$bg" in theme.APP_CSS
+    assert "$amber" in theme.APP_CSS
+    assert theme.BG not in theme.APP_CSS
+
+    for css in (theme.APP_CSS, theme.PAPER_MODAL_CSS, theme.ATLAS_DRAWER_CSS,
+                theme.WORKFORCE_MODAL_CSS):
+        assert css
+        assert not re.search(r"#[0-9a-fA-F]{6}\b", css)
+        for name in set(re.findall(r"\$([a-zA-Z0-9_]+)", css)):
+            assert name in theme.TOKENS, f"CSS references unknown token ${name}"
 
 
 def test_state_style_covers_every_workflow_state():

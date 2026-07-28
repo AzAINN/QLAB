@@ -101,6 +101,13 @@ TOKENS = {
     "cyan_pale": CYAN_PALE,
 }
 
+# The stylesheets substitute each token with a reference to itself, so the CSS
+# reaches Textual as `$bg` rather than a frozen literal and a theme switch
+# repaints chrome. Substitution is retained rather than dropped because it still
+# fails loud when a stylesheet names a token that does not exist.
+# qlab.tui.design.tokens publishes every one of these names as a theme variable.
+TOKEN_REFS = {name: f"${name}" for name in TOKENS}
+
 # One state → (glyph, colour) table shared by the flowchart and the agent rail.
 STATE_STYLE = {
     "working": ("●", CYAN),
@@ -546,7 +553,7 @@ APP_CSS_TEMPLATE = Template("""
     }
     """)
 
-APP_CSS = APP_CSS_TEMPLATE.substitute(TOKENS)
+APP_CSS = APP_CSS_TEMPLATE.substitute(TOKEN_REFS)
 
 
 PAPER_MODAL_CSS_TEMPLATE = Template("""
@@ -579,7 +586,7 @@ PAPER_MODAL_CSS_TEMPLATE = Template("""
     }
     """)
 
-PAPER_MODAL_CSS = PAPER_MODAL_CSS_TEMPLATE.substitute(TOKENS)
+PAPER_MODAL_CSS = PAPER_MODAL_CSS_TEMPLATE.substitute(TOKEN_REFS)
 
 
 ATLAS_DRAWER_CSS_TEMPLATE = Template("""
@@ -609,7 +616,7 @@ ATLAS_DRAWER_CSS_TEMPLATE = Template("""
     }
     """)
 
-ATLAS_DRAWER_CSS = ATLAS_DRAWER_CSS_TEMPLATE.substitute(TOKENS)
+ATLAS_DRAWER_CSS = ATLAS_DRAWER_CSS_TEMPLATE.substitute(TOKEN_REFS)
 
 
 WORKFORCE_MODAL_CSS_TEMPLATE = Template("""
@@ -642,4 +649,4 @@ WORKFORCE_MODAL_CSS_TEMPLATE = Template("""
     }
     """)
 
-WORKFORCE_MODAL_CSS = WORKFORCE_MODAL_CSS_TEMPLATE.substitute(TOKENS)
+WORKFORCE_MODAL_CSS = WORKFORCE_MODAL_CSS_TEMPLATE.substitute(TOKEN_REFS)

@@ -41,8 +41,10 @@ def check_news(universe: list[str], *, provider: str | None = None,
         return report
     if name == "alpaca" and not creds["alpaca_credentials"]:
         report["error"] = (
-            "provider is 'alpaca' but ALPACA_API_KEY / ALPACA_API_SECRET are "
-            "not set. Put both in .env at the workspace root.")
+            "provider is 'alpaca' but no credential resolves. Run "
+            "`alpaca profile login` for a paper-only browser session, or put "
+            "ALPACA_API_KEY and ALPACA_API_SECRET in .env at the workspace "
+            "root.")
         return report
 
     try:

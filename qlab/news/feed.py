@@ -613,11 +613,23 @@ def _fetch_alpaca(
     news provider that silently returns nothing is indistinguishable from a
     quiet market, and those mean opposite things.
     """
-    key = os.environ.get("ALPACA_API_KEY", "").strip()
-    secret = os.environ.get("ALPACA_API_SECRET", "").strip()
-    if not (key and secret):
+    # Resolved the same way the broker and data lanes resolve, so a browser
+    # login reaches news too. This read env vars directly, which meant an
+    # operator who ran `alpaca profile login` — the flow the desk now
+    # recommends, and the only paper-only one — was told to go and paste API
+    # keys for news alone.
+    from qlab.trader.alpaca_auth import (
+        AlpacaAuthError, resolve_alpaca_credentials)
+
+    try:
+        creds = resolve_alpaca_credentials()
+    except AlpacaAuthError as exc:
+        # A malformed credential source is not absence; say which it was.
+        raise RuntimeError(f"alpaca news credentials unusable: {exc}") from exc
+    if creds is None:
         raise RuntimeError(
-            "alpaca news provider requires ALPACA_API_KEY and "
+            "alpaca news provider needs a credential: run "
+            "`alpaca profile login`, or set ALPACA_API_KEY and "
             "ALPACA_API_SECRET")
     try:
         from alpaca.data.historical.news import NewsClient
@@ -627,7 +639,11 @@ def _fetch_alpaca(
             "alpaca news provider requires the 'alpaca-py' package; "
             "install qlab[trader]") from exc
 
-    client = NewsClient(key, secret)
+    client = (
+        NewsClient(oauth_token=creds.oauth_token)
+        if creds.kind == "oauth"
+        else NewsClient(creds.api_key, creds.secret_key)
+    )
     request = NewsRequest(
         symbols=",".join(universe),
         start=as_of - timedelta(days=7),

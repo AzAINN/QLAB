@@ -105,6 +105,12 @@ _LOCK = threading.Lock()
 # is alive instead. Must stay comfortably under the client's stream read
 # deadline, or a long owner action expires the client before it hears anything.
 _STREAM_LOCK_WAIT_SECONDS = 2.0
+# How long a broker valuation may be reused on a real venue. The TUI polls
+# every two seconds and carries the valuation in that payload, so without this
+# an idle Alpaca desk makes one or two API calls a second for a book that only
+# changes when this desk trades. Any mutation drops the cache, so a fill shows
+# up at once rather than up to this long later.
+_VALUATION_TTL_SECONDS = 15.0
 
 _MARKET_EVENT_LIMIT = 500
 _STREAM_PAGE_CEILING = 5000
@@ -238,6 +244,8 @@ class UISession:
         # restart there is no prior observation, and claiming a flip without
         # one would launch a workflow off a cold start.
         self._last_robust_state: str | None = None
+        # (key, monotonic stamp, payload) for the display valuation.
+        self._valuation_cache: tuple[tuple[bool, str], float, dict] | None = None
         self.heartbeat = None
         # Autonomy is a runtime switch the operator owns from the UI.
         # The env var only seeds its initial value.
@@ -488,6 +496,38 @@ class UISession:
     def live_portfolio(self, offline: bool) -> dict:
         """Mark the paper book to live prices and evaluate it, with provenance.
 
+        Cached briefly on a real venue. The TUI polls `/api/tui` every two
+        seconds and that payload carries this valuation, so on the Alpaca book
+        an idle desk was making one or two broker calls a second — positions
+        and account, forever, for a book that only changes when this desk
+        trades. The cache is invalidated on every mutation, so a fill is still
+        reflected immediately; quote-level freshness arrives on the market
+        stream and does not come through here.
+
+        `portfolio()` is deliberately NOT cached: execution and equity marks
+        read it, and those must see the venue's current truth.
+        """
+        cached = self._valuation_cache
+        if cached is not None:
+            key, stamped, payload = cached
+            if key == (bool(offline), self.desk_mode.book) and (
+                    time.monotonic() - stamped) < _VALUATION_TTL_SECONDS:
+                return payload
+        payload = self._compute_live_portfolio(offline)
+        # Only a real venue needs this; the simulator is local and free, and
+        # caching it would only add a way for the demo to look stale.
+        if self.desk_mode.book == "alpaca":
+            self._valuation_cache = (
+                (bool(offline), self.desk_mode.book), time.monotonic(), payload)
+        return payload
+
+    def invalidate_valuation(self) -> None:
+        """Drop the cached valuation — call after anything that moves the book."""
+        self._valuation_cache = None
+
+    def _compute_live_portfolio(self, offline: bool) -> dict:
+        """Uncached mark-to-market. See :meth:`live_portfolio`.
+
         Unlike :meth:`portfolio` this reports a full mark-to-market: per-position
         unrealized P&L against the booked average price, gross/net exposure, and
         the provenance of the marks (live Alpaca trades vs demo synthetic). In an
@@ -585,6 +625,10 @@ class UISession:
         # synthetic quotes and pricing a real book off the synthetic feed.
         self.offline_default = mode.offline
         self.lab_state.offline = mode.offline
+        # A different book is a different set of positions; the cache key
+        # covers that, but dropping it here means the switch is visible on the
+        # very next poll rather than after the TTL.
+        self.invalidate_valuation()
         save_desk_mode(mode)
         return mode
 
@@ -1974,6 +2018,10 @@ def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None
     the audit bus instead. Only the post-mutation hooks are guarded — the backfill
     route still surfaces its RuntimeError to the client as a 400.
     """
+    # This hook runs after every book-moving route, so it is also the one place
+    # that has to drop a cached valuation — otherwise a fill could take up to
+    # the TTL to appear, which is exactly the wrong thing to be slow about.
+    session.invalidate_valuation()
     try:
         session.record_equity_mark(source, offline)
     except Exception as exc:  # the mutation's own result must still reach the client
@@ -2370,6 +2418,7 @@ def handle_api(session: UISession, method: str, path: str,
         state = session.portfolio(off)
         session.registry.reset_book(session.mandate.paper_capital,
                                     book=state["broker"])
+        session.invalidate_valuation()
         return 200, {"reset": True, "cash": session.mandate.paper_capital,
                      "book": state["broker"]}
 

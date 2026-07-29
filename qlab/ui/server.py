@@ -12,6 +12,8 @@ GET  /api/portfolio            broker-truth positions + risk report
 GET  /api/portfolio/live       live mark-to-market: P&L, exposure, provenance
 GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
+GET  /api/desk_mode            the chosen data source and book + credential status
+POST /api/desk_mode            choose the data source and the book
 GET  /api/data/health          data-policy provenance, freshness, eligibility
 GET  /api/data/permit/current  the latest recorded data permit for a purpose
 GET  /api/quotes               latest cached quotes + live market-stream health
@@ -85,6 +87,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from qlab.core.desk_mode import (
+    DEFAULT_DESK_MODE, DeskMode, load_desk_mode, save_desk_mode)
 from qlab.core.types import _jsonable
 from qlab.paths import workspace_root
 
@@ -186,7 +190,8 @@ class _OwnerToolApp:
 class UISession:
     """Process-wide state: one registry (the paper book) + the mandate."""
 
-    def __init__(self, offline_default: bool = True, seed: int = 7, registry=None):
+    def __init__(self, offline_default: bool = True, seed: int = 7, registry=None,
+                 desk_mode: DeskMode | None = None):
         from qlab.trader.mandate import load_mandate
         from qlab.mcp.guardrails import LabState
         from qlab.mcp.quant_lab import register_lab_tools
@@ -199,7 +204,16 @@ class UISession:
         self.registry.interrupt_running_workflows(
             "owner runtime restarted before the coordinator completed")
         self.mandate = load_mandate()
-        self.offline_default = offline_default
+        # The operator's explicit choice; the persisted value is authoritative
+        # when the caller passes none, and ``offline_default`` only seeds the
+        # mode nobody has chosen yet — never a second opinion about it.
+        self.desk_mode = desk_mode or load_desk_mode() or (
+            DEFAULT_DESK_MODE if offline_default else DeskMode("live", "simulated"))
+        # Derived, never carried alongside: a launcher flag and a persisted (or
+        # POSTed) mode used to disagree, and the disagreement reconstructed
+        # `synthetic` + `alpaca` — synthetic quotes on the SSE bus and a
+        # synthetic portfolio for a real Alpaca book.
+        self.offline_default = self.desk_mode.offline
         self.seed = seed
         self._market_events: deque[dict] = deque(maxlen=_MARKET_EVENT_LIMIT)
         self._market_lock = threading.Lock()
@@ -223,7 +237,7 @@ class UISession:
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
-            offline=offline_default, seed=seed,
+            offline=self.offline_default, seed=seed,
         )
         owner_tools = _OwnerToolApp()
         register_lab_tools(owner_tools, self.lab_state, owner_only=True)
@@ -383,6 +397,7 @@ class UISession:
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,
             universe=self.mandate.universe_whitelist,
+            book=self.desk_mode.book,
         )
         rec = reconcile(
             self.registry, broker, self.mandate.universe_whitelist,
@@ -479,6 +494,7 @@ class UISession:
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,
             universe=self.mandate.universe_whitelist,
+            book=self.desk_mode.book,
         )
         try:
             result = execute_plan(self.registry, broker, plan)
@@ -492,7 +508,8 @@ class UISession:
 
         broker = get_broker(self.registry, offline=offline,
                             starting_cash=self.mandate.paper_capital,
-                            seed=self.seed, universe=self.mandate.universe_whitelist)
+                            seed=self.seed, universe=self.mandate.universe_whitelist,
+                            book=self.desk_mode.book)
         state = broker.portfolio_state(self.mandate.universe_whitelist)
         hwm = state.get("high_water_mark", state["equity"])
         dd = 1.0 - state["equity"] / hwm if hwm > 0 else 0.0
@@ -538,7 +555,7 @@ class UISession:
             broker = get_broker(
                 self.registry, offline=offline,
                 starting_cash=self.mandate.paper_capital,
-                seed=self.seed, universe=universe)
+                seed=self.seed, universe=universe, book=self.desk_mode.book)
             state = broker.portfolio_state(universe)
         except (market.DataUnavailable, RuntimeError) as exc:
             return {"blocked": True, "mode": policy.mode, "provider": policy.provider,
@@ -601,20 +618,50 @@ class UISession:
             },
         }
 
+    # -- desk mode ----------------------------------------------------------
+    def set_desk_mode(self, mode: DeskMode) -> DeskMode:
+        self.desk_mode = mode
+        # The mode owns the data lane too: the TUI retunes an owner that was
+        # spawned with no flags, so leaving these behind would keep publishing
+        # synthetic quotes and pricing a real book off the synthetic feed.
+        self.offline_default = mode.offline
+        self.lab_state.offline = mode.offline
+        save_desk_mode(mode)
+        return mode
+
+    def desk_mode_payload(self) -> dict:
+        from qlab.trader.alpaca_auth import (
+            AlpacaAuthError, describe_credentials, resolve_alpaca_credentials)
+
+        try:
+            creds = resolve_alpaca_credentials()
+            description, ok = describe_credentials(creds), creds is not None
+        except AlpacaAuthError as exc:
+            # A broken credential source is not the same as absence: say so.
+            description, ok = str(exc), False
+        return {
+            "data": self.desk_mode.data,
+            "book": self.desk_mode.book,
+            "label": self.desk_mode.label,
+            "offline": self.desk_mode.offline,
+            "credentials": description,
+            "credentials_ok": ok,
+        }
+
     # -- realized performance ----------------------------------------------
     def current_book(self, offline: bool) -> str:
         """Name of the book being traded now — the marks' partition key.
 
-        Constructing the broker is the only honest answer: the venue is chosen
-        by credentials, so the book can change between sessions without anything
-        in the registry changing.
+        Constructing the broker is the only honest answer: the chosen book can
+        change between sessions without anything in the registry changing.
         """
         from qlab.trader.broker import get_broker
 
         return get_broker(
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,
-            universe=self.mandate.universe_whitelist).name
+            universe=self.mandate.universe_whitelist,
+            book=self.desk_mode.book).name
 
     def record_equity_mark(self, source: str, offline: bool) -> None:
         state = self.portfolio(offline)
@@ -701,7 +748,7 @@ class UISession:
         broker = get_broker(
             self.registry, offline=offline,
             starting_cash=self.mandate.paper_capital, seed=self.seed,
-            universe=self.mandate.universe_whitelist)
+            universe=self.mandate.universe_whitelist, book=self.desk_mode.book)
         if not hasattr(broker, "portfolio_history"):
             raise RuntimeError(
                 f"broker {broker.name!r} exposes no portfolio history to backfill")
@@ -1551,7 +1598,8 @@ class UISession:
                          pre_trade=stored["pre_trade"], state=stored["state"])
         broker = get_broker(self.registry, offline=offline,
                             starting_cash=self.mandate.paper_capital, seed=self.seed,
-                            universe=self.mandate.universe_whitelist)
+                            universe=self.mandate.universe_whitelist,
+                            book=self.desk_mode.book)
         try:
             result = execute_plan(self.registry, broker, plan)
         except MandateViolation as exc:
@@ -1699,6 +1747,7 @@ class UISession:
             )
         self.registry.expire_due_approvals(self._now_iso())
         return {
+            "desk_mode": self.desk_mode_payload(),
             "portfolio": portfolio,
             "live_portfolio": self.live_portfolio(offline),
             "market": market_snapshot,
@@ -1895,6 +1944,20 @@ def _observed_cadence(daily) -> dict | None:
     }
 
 
+def _offline_for_book(session: UISession, off: bool) -> bool:
+    """The data lane can never contradict the book.
+
+    ``off`` is the request body's operator-supplied flag, and the bundled web
+    dashboard's checkbox re-defaults it to True on every page load — honouring
+    it verbatim on an Alpaca-book desk could reconstruct the synthetic+alpaca
+    pairing ``DeskMode.__post_init__`` forbids. The real book always runs on
+    the desk mode's own data lane instead.
+    """
+    if session.desk_mode.book == "alpaca":
+        return session.desk_mode.offline
+    return off
+
+
 def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None:
     """Mark the book after a mutation; a failed mark must never hide the result.
 
@@ -1982,6 +2045,17 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/system":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.system_status(offline)
+
+    if method == "GET" and path == "/api/desk_mode":
+        return 200, session.desk_mode_payload()
+
+    if method == "POST" and path == "/api/desk_mode":
+        try:
+            mode = DeskMode(str(body.get("data")), str(body.get("book")))
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        session.set_desk_mode(mode)
+        return 200, session.desk_mode_payload()
 
     if method == "GET" and path == "/api/data/health":
         offline = _qbool(query, "offline", session.offline_default)
@@ -2187,11 +2261,12 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.rebalance_preview(body, off)
 
     if method == "POST" and path == "/api/plans/execute":
-        result = session.execute_checked_plan(body, off)
+        clamped_off = _offline_for_book(session, off)
+        result = session.execute_checked_plan(body, clamped_off)
         # A mark sourced "execution" asserts that legs filled; a refused or
         # mandate-violating plan must not forge that provenance.
         if result.get("executed") is True:
-            _mark_after_mutation(session, "execution", off)
+            _mark_after_mutation(session, "execution", clamped_off)
         return 200, result
 
     if method == "POST" and path == "/api/performance/backfill":
@@ -2229,19 +2304,24 @@ def handle_api(session: UISession, method: str, path: str,
         from qlab.autopilot.loop import run_once
 
         summary = run_once(
-            registry=session.registry, mandate=session.mandate, offline=off,
+            registry=session.registry, mandate=session.mandate,
+            offline=_offline_for_book(session, off),
             execute=bool(body.get("execute", True)),
             skew_lambda=float(body.get("skew", 0.5)),
             kurt_lambda=float(body.get("kurt", 0.5)),
-            as_of=body.get("as_of") or None, seed=session.seed)
+            as_of=body.get("as_of") or None, seed=session.seed,
+            book=session.desk_mode.book)
         return 200, summary
 
     if method == "POST" and path == "/api/daily_ops":
         from qlab.autopilot.loop import daily_ops
 
+        clamped_off = _offline_for_book(session, off)
         summary = daily_ops(registry=session.registry, mandate=session.mandate,
-                            offline=off, seed=session.seed)
-        _mark_after_mutation(session, "daily", off)
+                            offline=clamped_off, seed=session.seed,
+                            book=session.desk_mode.book)
+        # The same lane the heartbeat ran on: one route, one answer.
+        _mark_after_mutation(session, "daily", clamped_off)
         return 200, summary
 
     if method == "POST" and path == "/api/batch":
@@ -2582,6 +2662,21 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(status, obj)
 
 
+def _startup_banner(mode: DeskMode, url: str) -> str:
+    """The owner's one startup line — deliberately pure ASCII.
+
+    ``qlab tui`` spawns this process with ``stdout=DEVNULL``, so CPython encodes
+    here with the locale ANSI codepage under ``errors='strict'``, not UTF-8. The
+    chip's ``label`` carries U+00B7, which cp932 and cp874 cannot encode — and
+    this line runs after the port bind and before ``serve_forever()``, so an
+    encode error would take the owner down on every launch in those locales.
+    The mode's own words are ASCII and say more than the decorated label anyway.
+    """
+    return (f"[qlab] UI at {url}  "
+            f"(offline={'on' if mode.offline else 'off'}; "
+            f"data={mode.data} book={mode.book}; paper capital only)")
+
+
 def _start_atlas_heartbeat(session: UISession, *, offline: bool,
                          interval_s: float | None = None):
     """Start the desk manager's heartbeat inside the owner process.
@@ -2607,8 +2702,15 @@ def _start_atlas_heartbeat(session: UISession, *, offline: bool,
     return heartbeat
 
 
-def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) -> None:
-    """Start the UI server (blocking). Ctrl-C to stop."""
+def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
+          desk_mode: DeskMode | None = None) -> None:
+    """Start the UI server (blocking). Ctrl-C to stop.
+
+    ``desk_mode=None`` means no launcher flag chose one, so the session loads
+    the operator's persisted choice rather than being handed a guess — and
+    ``offline`` only seeds a desk that has never been chosen. The mode the
+    session settles on is what the banner reports.
+    """
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     except Exception:
@@ -2617,7 +2719,7 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) 
         # never a transient second writer that interrupts the real owner's run.
         raise
     try:
-        session = UISession(offline_default=offline)
+        session = UISession(offline_default=offline, desk_mode=desk_mode)
         market_stop, market_thread = _start_market_topics(session)
         _start_atlas_heartbeat(session, offline=offline)
     except Exception:
@@ -2626,7 +2728,7 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True) 
     httpd.daemon_threads = True
     _Handler.session = session
     url = f"http://127.0.0.1:{port}/"
-    print(f"[qlab] UI at {url}  (offline={'on' if offline else 'off'}; paper capital only)")
+    print(_startup_banner(session.desk_mode, url))
     print("[qlab] press Ctrl-C to stop.")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()

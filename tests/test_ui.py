@@ -1361,7 +1361,7 @@ def test_refused_second_serve_preserves_first_handler_session(
     monkeypatch.setattr(
         server_module,
         "UISession",
-        lambda offline_default=True: second_session,
+        lambda offline_default=True, desk_mode=None: second_session,
     )
 
     stop_event, producer = server_module._start_market_topics(session)
@@ -1702,6 +1702,335 @@ def test_snapshot_poll_marks_are_throttled_to_one_an_hour(session):
     assert len([row for row in session.registry.equity_marks()
                 if row["source"] == "poll"]) == 1
 
+
+# -- the explicit desk mode ------------------------------------------------
+def test_desk_mode_defaults_to_synthetic_and_is_reported(session):
+    status, payload = handle_api(session, "GET", "/api/desk_mode", {}, {})
+    assert status == 200
+    assert (payload["data"], payload["book"]) == ("synthetic", "simulated")
+    assert payload["label"] == "SYNTHETIC"
+    assert "credentials" in payload          # description string, never a secret
+
+
+def test_setting_the_desk_mode_switches_the_book(session, monkeypatch):
+    from qlab.core import data as market
+    from qlab.trader import broker as broker_mod
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+    monkeypatch.setattr(
+        broker_mod, "resolve_alpaca_credentials",
+        lambda: AlpacaCredentials("oauth", None, None, "tok", "paper", "/x"))
+    # A live-data desk prices off the network, which this suite never touches:
+    # pin the provider and serve its one fetch seam from the synthetic feed.
+    monkeypatch.setenv("QLAB_DATA_PROVIDER", "yfinance")
+    monkeypatch.setattr(market, "_fetch_yfinance", market.synthetic_prices)
+
+    status, payload = handle_api(
+        session, "POST", "/api/desk_mode", {},
+        {"data": "live", "book": "simulated"})
+    assert status == 200 and payload["label"] == "LIVE · SIM BOOK"
+    # The simulated book is honoured even though a credential is discoverable.
+    assert session.portfolio(offline=False)["broker"] == "simulated_paper"
+    assert session.current_book(offline=False) == "simulated_paper"
+
+
+def test_a_persisted_live_desk_owns_the_default_data_lane():
+    """``offline_default`` must not be a second, contradictable answer.
+
+    Bare ``qlab ui`` computes ``offline=True`` from its flags while the session
+    loads a persisted live mode from disk. Serving synthetic data under a real
+    book is ``synthetic`` + ``alpaca`` — the state ``DeskMode`` forbids —
+    rebuilt at runtime out of two independent fields.
+    """
+    from qlab.core.desk_mode import DeskMode, save_desk_mode
+
+    save_desk_mode(DeskMode("live", "alpaca"))
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    assert session.desk_mode == DeskMode("live", "alpaca")
+    assert session.offline_default is False
+    assert session.lab_state.offline is False
+
+
+def test_retuning_the_desk_mode_moves_the_default_data_lane(session):
+    """The TUI's only path: an owner spawned with no flags, then POSTed into."""
+    from qlab.core.desk_mode import DeskMode
+
+    assert session.offline_default is True
+    status, _payload = handle_api(
+        session, "POST", "/api/desk_mode", {},
+        {"data": "live", "book": "simulated"})
+    assert status == 200
+    assert session.offline_default is False
+    assert session.lab_state.offline is False
+
+    session.set_desk_mode(DeskMode("synthetic", "simulated"))
+    assert session.offline_default is True
+    assert session.lab_state.offline is True
+
+
+def _write_unreadable_profile(tmp_path, secret: str) -> None:
+    """An Alpaca CLI config dir whose active profile cannot be decoded."""
+    (tmp_path / "profiles").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config.yaml").write_text(
+        "default_profile: paper\n", encoding="utf-8")
+    (tmp_path / "profiles" / "paper.yaml").write_bytes(
+        f"access_token: {secret}\n".encode("utf-8") + b"\xff\xfe\n")
+
+
+def test_a_broken_profile_never_reaches_a_response_body(
+    session, tmp_path, monkeypatch,
+):
+    """The always-running escape route for a credential read failure.
+
+    ``desk_mode_payload`` catches only ``AlpacaAuthError``; anything else
+    propagates into the handler's ``{"error": repr(exc)}`` and is served on
+    every two-second poll of ``/api/tui``.
+    """
+    secret = "tok-abcdefghijklmnopqrstuvwxyz012345"
+    _write_unreadable_profile(tmp_path, secret)
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))
+
+    status, payload = handle_api(session, "GET", "/api/desk_mode", {}, {})
+    assert status == 200
+    assert payload["credentials_ok"] is False
+    assert secret not in repr(payload)
+
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert secret not in repr(snap)
+
+
+def test_an_impossible_desk_mode_is_refused(session):
+    status, payload = handle_api(
+        session, "POST", "/api/desk_mode", {},
+        {"data": "synthetic", "book": "alpaca"})
+    assert status == 400
+    assert "synthetic" in payload["error"]
+
+
+@pytest.mark.parametrize(
+    "path, body",
+    [("/api/daily_ops", {"offline": True}),
+     ("/api/run_once", {"offline": True, "execute": False})],
+)
+def test_autopilot_routes_run_the_book_the_desk_mode_chose(
+    session, monkeypatch, path, body,
+):
+    """`: daily ops` and `: rebalance dry` must not silently use the simulator.
+
+    Both write the registry the Alpaca book is executed against: daily_ops
+    evaluates the drawdown kill switch and latches the halt, run_once builds the
+    checked plan ``execute_checked_plan`` later fills against Alpaca. A book that
+    disagrees with the desk mode makes both of those numbers the wrong book's.
+    """
+    from qlab.autopilot import loop
+    from qlab.core.desk_mode import DeskMode
+    from qlab.trader.broker import get_broker as real_get_broker
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    requested: list[str | None] = []
+
+    def recording_get_broker(registry, **kwargs):
+        # Assert on the requested book, never on a live call: the substitute is
+        # always the simulator so the suite stays offline and account-free.
+        requested.append(kwargs.get("book"))
+        return real_get_broker(registry, **{**kwargs, "book": "simulated"})
+
+    monkeypatch.setattr(loop, "get_broker", recording_get_broker)
+
+    status, _payload = handle_api(session, "POST", path, {}, body)
+    assert status == 200
+    assert requested == ["alpaca"]
+
+
+def test_run_once_and_daily_ops_clamp_offline_to_desk_mode_on_the_alpaca_book(
+    session, monkeypatch,
+):
+    """The data lane can never contradict the book.
+
+    The bundled web dashboard's offline checkbox re-defaults to True on every
+    page load, so on a live/alpaca desk a body of ``{"offline": true}`` must
+    not reach either route as-is: honouring it would run synthetic moments
+    into a referee verdict and a cost-gated plan (``run_once``), or evaluate
+    the drawdown kill switch on synthetic data while latching it against the
+    real book (``daily_ops``) — exactly the pairing ``DeskMode`` forbids.
+    """
+    from qlab.autopilot import loop
+    from qlab.core.desk_mode import DeskMode
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    calls: dict[str, dict] = {}
+
+    def fake_run_once(**kwargs):
+        calls["run_once"] = kwargs
+        return {"rebalance_recommended": False}
+
+    def fake_daily_ops(**kwargs):
+        calls["daily_ops"] = kwargs
+        return {"rebalance_recommended": False}
+
+    monkeypatch.setattr(loop, "run_once", fake_run_once)
+    monkeypatch.setattr(loop, "daily_ops", fake_daily_ops)
+
+    status, _ = handle_api(
+        session, "POST", "/api/run_once", {}, {"offline": True, "execute": False})
+    assert status == 200
+    assert calls["run_once"]["offline"] is False
+    assert calls["run_once"]["book"] == "alpaca"
+
+    status, _ = handle_api(session, "POST", "/api/daily_ops", {}, {"offline": True})
+    assert status == 200
+    assert calls["daily_ops"]["offline"] is False
+    assert calls["daily_ops"]["book"] == "alpaca"
+
+
+def test_run_once_and_daily_ops_still_honor_body_offline_on_the_simulated_book(
+    session, monkeypatch,
+):
+    """The clamp is narrow: a non-Alpaca desk keeps the operator's own flag."""
+    from qlab.autopilot import loop
+
+    assert session.desk_mode.book == "simulated"  # default fixture desk mode
+    calls: dict[str, dict] = {}
+
+    def fake_run_once(**kwargs):
+        calls["run_once"] = kwargs
+        return {"rebalance_recommended": False}
+
+    def fake_daily_ops(**kwargs):
+        calls["daily_ops"] = kwargs
+        return {"rebalance_recommended": False}
+
+    monkeypatch.setattr(loop, "run_once", fake_run_once)
+    monkeypatch.setattr(loop, "daily_ops", fake_daily_ops)
+
+    status, _ = handle_api(
+        session, "POST", "/api/run_once", {}, {"offline": False, "execute": False})
+    assert status == 200
+    assert calls["run_once"]["offline"] is False
+    assert calls["run_once"]["book"] == "simulated"
+
+    status, _ = handle_api(session, "POST", "/api/daily_ops", {}, {"offline": False})
+    assert status == 200
+    assert calls["daily_ops"]["offline"] is False
+    assert calls["daily_ops"]["book"] == "simulated"
+
+    # Both directions, so the clamp cannot degenerate into "always non-offline":
+    # the operator's own True must survive on a book that is not the real one.
+    status, _ = handle_api(
+        session, "POST", "/api/run_once", {}, {"offline": True, "execute": False})
+    assert status == 200
+    assert calls["run_once"]["offline"] is True
+
+    status, _ = handle_api(session, "POST", "/api/daily_ops", {}, {"offline": True})
+    assert status == 200
+    assert calls["daily_ops"]["offline"] is True
+
+
+def test_the_daily_ops_equity_mark_uses_the_clamped_data_lane(session, monkeypatch):
+    """One route must not hold two answers about its own data lane.
+
+    ``_mark_after_mutation`` was still handed the raw body flag while the loop
+    beside it got the clamped one. On the Alpaca book the persisted numbers come
+    from the account either way, so nothing wrong was written — but the hook
+    priced a live desk's portfolio off the synthetic feed to get there, and any
+    future mark that reads ``state["marks"]`` would inherit the contradiction.
+    """
+    from qlab.autopilot import loop
+    from qlab.core.desk_mode import DeskMode
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    monkeypatch.setattr(loop, "daily_ops", lambda **kwargs: {"kind": "daily_ops"})
+    marked: list[bool] = []
+    monkeypatch.setattr(
+        session, "record_equity_mark",
+        lambda source, offline: marked.append(offline))
+
+    status, _payload = handle_api(
+        session, "POST", "/api/daily_ops", {}, {"offline": True})
+    assert status == 200
+    assert marked == [False]
+
+
+def test_plan_execution_clamps_offline_to_desk_mode_on_the_alpaca_book(
+    session, monkeypatch,
+):
+    """Plan execution cannot contradict the book either.
+
+    A body of ``{"offline": true}`` must not reach ``execute_checked_plan``
+    as-is on a live/alpaca desk: honouring it would run
+    ``execute_checked_plan``'s P3 execution-time data-revalidation gate under
+    a demo policy (never execution-eligible) while ``get_broker`` still fills
+    against the real Alpaca account — exactly the contradiction ``DeskMode``
+    forbids.
+    """
+    from qlab.core.desk_mode import DeskMode
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    calls: dict[str, tuple] = {}
+
+    def fake_execute_checked_plan(body, offline):
+        calls["execute"] = (body, offline)
+        return {"executed": False}
+
+    monkeypatch.setattr(session, "execute_checked_plan", fake_execute_checked_plan)
+
+    status, _ = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": "whatever", "human_confirmed": True})
+    assert status == 200
+    assert calls["execute"][1] is False
+
+
+def test_plan_execution_still_honors_body_offline_on_the_simulated_book(
+    session, monkeypatch,
+):
+    """The clamp is narrow: a non-Alpaca desk keeps the operator's own flag."""
+    assert session.desk_mode.book == "simulated"  # default fixture desk mode
+    calls: dict[str, tuple] = {}
+
+    def fake_execute_checked_plan(body, offline):
+        calls["execute"] = (body, offline)
+        return {"executed": False}
+
+    monkeypatch.setattr(session, "execute_checked_plan", fake_execute_checked_plan)
+
+    status, _ = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": "whatever", "human_confirmed": True})
+    assert status == 200
+    assert calls["execute"][1] is True
+
+
+@pytest.mark.parametrize(
+    "data, book",
+    [("synthetic", "simulated"), ("live", "simulated"), ("live", "alpaca")])
+def test_the_startup_banner_survives_a_non_utf8_console(data, book):
+    """The owner's startup line must encode in any locale codepage.
+
+    ``qlab tui`` spawns the owner with ``stdout=subprocess.DEVNULL``, so CPython
+    encodes this line with the locale ANSI codepage under ``errors='strict'``
+    rather than UTF-8. U+00B7 — carried by the live mode labels — has no mapping
+    in cp932 (Japanese) or cp874 (Thai). The print sits after the port bind and
+    before ``serve_forever()``, so an encode error there takes the owner down on
+    every launch for those locales, which is exactly the desk mode this branch
+    exists to serve. ASCII is the tightest pin: it encodes in every codepage.
+    """
+    from qlab.core.desk_mode import DeskMode
+    from qlab.ui.server import _startup_banner
+
+    banner = _startup_banner(DeskMode(data, book), "http://127.0.0.1:8765/")
+    banner.encode("ascii")
+    for codepage in ("cp932", "cp874", "cp1252"):
+        banner.encode(codepage)
+    # It still has to say the two things the operator reads it for.
+    assert "127.0.0.1:8765" in banner
+    assert data in banner and book in banner
+
+
+def test_tui_snapshot_carries_the_desk_mode(session):
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert snap["desk_mode"]["label"] == "SYNTHETIC"
 
 def test_autonomy_is_a_runtime_toggle_that_never_widens_authority(session):
     """The UI switch removes the button press, not the boundary."""

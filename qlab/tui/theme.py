@@ -494,12 +494,6 @@ APP_CSS_TEMPLATE = Template("""
         color: $muted;
         scrollbar-size: 1 1;
     }
-    #event-strip {
-        height: 1;
-        padding: 0 1;
-        background: $bg_raised;
-        color: $muted;
-    }
     #command-row {
         height: 2;
         padding: 0 1;
@@ -523,12 +517,22 @@ APP_CSS_TEMPLATE = Template("""
         text-align: right;
         color: $muted;
     }
-    #system-status {
+    /* The only always-visible answer to "whose money is this". Synthetic is
+       muted; live prices on a simulated book warn; a real Alpaca book takes
+       the alert tone so it can never be mistaken for the demo. */
+    #mode-chip {
         width: auto;
-        min-width: 28;
+        padding: 0 1;
         height: 1;
         text-align: right;
         color: $muted;
+    }
+    #mode-chip.live-data {
+        color: $amber;
+    }
+    #mode-chip.live-book {
+        color: $down;
+        text-style: bold;
     }
 
     Screen.compact #spine {
@@ -653,3 +657,51 @@ WORKFORCE_MODAL_CSS_TEMPLATE = Template("""
     """)
 
 WORKFORCE_MODAL_CSS = WORKFORCE_MODAL_CSS_TEMPLATE.substitute(TOKEN_REFS)
+
+
+DESK_MODAL_CSS_TEMPLATE = Template("""
+    DeskModeScreen {
+        align: center middle;
+        background: $overlay;
+    }
+    #desk-dialog {
+        width: 62;
+        height: auto;
+        padding: 1 2;
+        background: $bg_raised;
+        border: round $border_hi;
+    }
+    #desk-dialog-title {
+        color: $amber;
+        text-style: bold;
+    }
+    #desk-data-row, #desk-book-buttons {
+        height: auto;
+        padding: 1 0;
+    }
+    #desk-data-row Button, #desk-book-buttons Button {
+        margin-right: 1;
+    }
+    #desk-credentials {
+        color: $muted;
+    }
+    #desk-book-row {
+        height: auto;
+    }
+    #desk-book-title {
+        color: $amber;
+        text-style: bold;
+        padding-top: 1;
+    }
+    #desk-book-copy {
+        color: $muted;
+        padding-top: 1;
+    }
+    #desk-actions {
+        height: auto;
+        padding-top: 1;
+        align-horizontal: right;
+    }
+    """)
+
+DESK_MODAL_CSS = DESK_MODAL_CSS_TEMPLATE.substitute(TOKEN_REFS)

@@ -2546,6 +2546,25 @@ def test_nav_menu_rows_are_clickable():
     asyncio.run(run())
 
 
+def test_a_downsampled_chart_cannot_drop_the_high_or_the_low():
+    # The market view plots history from 2008 — roughly 4,500 bars into ~200
+    # dot-columns. Point-sampling visited under 5% of them, so any extreme
+    # falling in the other 95% vanished from the line AND from the axis
+    # labels derived from it. On a price chart the high and the low are the
+    # two facts most worth having.
+    from qlab.tui.formatting import braille_chart
+
+    n = 4000
+    series = [100.0] * n
+    series[1500] = 400.0            # an index no sampler lands on
+    rows = braille_chart(series, width=60, height=8)
+
+    assert any(row.strip("⠀") for row in rows[:4]), (
+        "a 4x spike is missing from the top half of the chart")
+    # And the shape contract the caller relies on is unchanged.
+    assert len(rows) == 8 and {len(r) for r in rows} == {60}
+
+
 def test_braille_chart_is_fixed_size_and_plots_the_trend():
     from qlab.tui.formatting import braille_chart
 

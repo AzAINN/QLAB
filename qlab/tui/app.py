@@ -2821,9 +2821,19 @@ class QlabTui(App[None]):
         # Y-axis gutter: right-aligned price labels.
         gutter = max(len(money(hi)), len(money(mid)), len(money(lo))) if history else 0
         chart_w = max(24, avail_w - gutter - 2)
-        # Change 2: chart is now nearly full-height — reserve 6 lines for the
-        # header row, x-axis baseline, time span, and legend line.
-        chart_h = max(8, avail_h - 6)
+        # Height is bounded by the chart's own aspect, not just by the space
+        # available. A braille cell is 2 dots wide and 4 tall, so a plot given
+        # the full canvas height stretches each move into a near-vertical
+        # stroke and the line reads as scattered dots — the same series at a
+        # third of that height reads as a price curve. Roughly 3:1 width to
+        # height is the shape a trend is legible at.
+        # A braille cell is 2 dots wide and 4 tall, so a plot that is w cells
+        # by h cells is 2w by 4h dots — a chart given the full canvas height
+        # ends up taller than it is wide in dot space, which stretches every
+        # move into a near-vertical stroke and reads as scattered dots. A
+        # sixth of the width keeps it near 3:1 in dots, where a trend is
+        # legible.
+        chart_h = max(10, min(avail_h - 6, chart_w // 6))
         rows = braille_chart(history, chart_w, chart_h)
         last_row = len(rows) - 1
         mid_row = last_row // 2

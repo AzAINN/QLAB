@@ -86,33 +86,36 @@ async def _shoot(views, theme, size, out_dir):
     return written
 
 
-# KNOWN LIMITATION — braille renders as tofu boxes.
-#
 # Textual draws charts (`braille_chart`) and the market-pulse sparkline with
 # braille, U+28xx. resvg picks one family per run and does not fall back per
-# glyph, so it needs a single font that is both monospace and covers that
-# block. On a stock macOS install no such font exists: a scan of
-# /System/Library/Fonts, /Library/Fonts and ~/Library/Fonts finds braille only
-# in Apple Braille*, Apple Symbols and LastResort, all proportional — and a
-# proportional face destroys a terminal grid.
+# glyph, so rendering those needs a single font that is BOTH monospace and
+# covers that block — otherwise every braille visual rasterises as a row of
+# notdef boxes and the market view is unreviewable.
 #
-# So braille visuals here are NOT reviewable, and the Market view in particular
-# is meaningless in these captures. Judge those in a real terminal. Installing
-# a monospace font with braille coverage (DejaVu Sans Mono, Iosevka) and naming
-# it below fixes it; that is a change to the machine, so it is not done here.
-_FONT_DIRS = ["/System/Library/Fonts", "/Library/Fonts",
-              str(Path.home() / "Library/Fonts")]
-# Set to a monospace family covering U+28xx if one is installed.
-_MONO_FAMILY: str | None = None
+# Nothing on a stock macOS install qualifies. Braille appears only in
+# Apple Braille*, Apple Symbols, LastResort and the DejaVu *proportional*
+# faces; DejaVu Sans **Mono** does not carry it. Iosevka does, and is
+# monospace: `brew install --cask font-iosevka`.
+#
+# Without it the harness still runs — braille just renders as boxes, and the
+# Market view should then be judged in a real terminal instead.
+_BRAILLE_MONO_FAMILY = "Iosevka"
+_BRAILLE_MONO_FILE = Path.home() / "Library/Fonts/Iosevka.ttc"
 
 
 def _rasterise(svg: str, target: Path) -> None:
     import resvg_py
 
-    options: dict = {"font_dirs": [d for d in _FONT_DIRS if Path(d).is_dir()]}
-    if _MONO_FAMILY:
+    options: dict = {}
+    if _BRAILLE_MONO_FILE.is_file():
+        # Name the file rather than a directory: pointing resvg at a whole
+        # font directory makes it parse every face on every render, which took
+        # this from instant to minutes.
+        options["font_files"] = [str(_BRAILLE_MONO_FILE)]
         options["style_sheet"] = (
-            f"text, tspan {{ font-family: '{_MONO_FAMILY}', monospace; }}")
+            f"text, tspan {{ font-family: '{_BRAILLE_MONO_FAMILY}', "
+            "monospace; }"
+        )
     png = resvg_py.svg_to_bytes(svg_string=svg, **options)
     target.write_bytes(bytes(png))
 

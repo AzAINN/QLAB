@@ -1175,9 +1175,7 @@ class QlabTui(App[None]):
                     )
                     # Change 4: pinned status strip — mode/state/conviction chips
                     yield Static(id="atlas-status-strip", markup=True)
-                    # Change 4: scrollable area holds the full read content
-                    with Vertical(id="atlas-read-scroll"):
-                        yield Static(id="atlas-read", markup=True)
+                    # Buttons before the scroll region so they are never cut off
                     with Horizontal(id="atlas-actions"):
                         yield Button(
                             "REFRESH READ",
@@ -1209,6 +1207,9 @@ class QlabTui(App[None]):
                             classes="view-action-button",
                             compact=True,
                         )
+                    # Scrollable read content below the always-visible buttons
+                    with Vertical(id="atlas-read-scroll"):
+                        yield Static(id="atlas-read", markup=True)
 
                 with Vertical(id="dashboard", classes="canvas-view"):
                     yield Static(
@@ -2463,7 +2464,14 @@ class QlabTui(App[None]):
             state = str(atlas.get("state", "—")).upper()
             state_tone = _ATLAS_STATE_TONES.get(state.lower(), TEXT_HI)
             mode_tone = AMBER if atlas.get("mode") == "propose" else TEXT_HI
-            beat_icon = f"[{UP}]◉ LIVE[/]" if beat.get("running") else f"[{MUTED}]◎ STOPPED[/]"
+            # Incorporate the merge's beat_errors so the strip reflects health
+            _beat_errors = int(beat.get("errors", 0) or 0)
+            if not beat.get("running"):
+                beat_icon = f"[{MUTED}]◎ STOPPED[/]"
+            elif _beat_errors:
+                beat_icon = f"[{DOWN}]⚠ FAILING[/]"
+            else:
+                beat_icon = f"[{UP}]◉ LIVE[/]"
             auto_icon = (f"[{AMBER}]AUTO ON[/]" if beat.get("autonomous")
                          else f"[{MUTED}]AUTO OFF[/]")
             conviction = _finite_number(read.get("conviction")) if read else None
@@ -2575,33 +2583,19 @@ class QlabTui(App[None]):
                     f"[{DIM}]{item.get('source','')} {tickers}[/]")
 
         lines.append("")
-        # A thread that is alive but whose every tick raises is not a working
-        # supervisor, and "live (0 ticks)" beside a quiet desk is exactly how a
-        # total outage used to render. The error count is part of the health.
+        # Supervisor error alert: shown in the scrollable body (not just the
+        # strip) so the operator can read the full message without truncation.
         beat_errors = int(beat.get("errors", 0) or 0)
-        if not beat.get("running"):
-            beat_health = "stopped"
-        elif beat_errors:
-            beat_health = f"FAILING ({beat_errors} errors)"
-        else:
-            beat_health = "live"
-        lines.append(
-            f"[{DIM}]mode {str(atlas.get('mode','—')).upper()} · "
-            f"state {str(atlas.get('state','—')).upper()} · "
-            f"heartbeat {beat_health} "
-            f"({int(beat.get('ticks', 0))} ticks) · "
-            f"autonomy {'ON' if beat.get('autonomous') else 'off'} · "
-            f"news {read.get('news_source','—')} · "
-            f"as of {read.get('as_of','—')}[/]")
         if beat_errors and beat.get("last_error"):
-            # Naming the reason is the difference between a desk the operator
-            # can fix and one that has silently stopped supervising.
             lines.append(
-                f"[{DOWN}]supervisor error: "
+                f"[{DOWN}]⚠ supervisor error: "
                 f"{escape(str(beat.get('last_error'))[:160])}[/]")
+        # Mode/state/heartbeat live in the pinned strip above; only the
+        # advisory disclaimer and news source belong in the scrollable body.
         lines.append(
-            f"[{DIM}]This is interpretation over persisted facts — advisory, "
-            f"never an instruction. Atlas cannot trade.[/]")
+            f"[{DIM}]news {read.get('news_source','—')} · "
+            f"heartbeat {int(beat.get('ticks', 0))} ticks · "
+            f"advisory only — Atlas cannot trade[/]")
         target.update("\n".join(lines))
 
     def action_atlas_drawer(self) -> None:

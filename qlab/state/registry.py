@@ -70,6 +70,23 @@ _WORKFORCE_REQUIRED_ARTIFACTS = {
 }
 _MAX_PANEL_VARIANTS = 5
 
+# Which statuses an approval may hold *before* it is moved to each status. The
+# terminal ones — rejected, expired, consumed, invalidated — appear in no
+# right-hand side, which is what makes them terminal: a spent or refused
+# approval can never be revived to authorise a fill.
+_APPROVAL_TRANSITIONS: dict[str, frozenset[str]] = {
+    # A challenge re-opens a decision that has not been acted on yet.
+    "pending": frozenset({"pending"}),
+    "approved": frozenset({"pending"}),
+    "rejected": frozenset({"pending"}),
+    "expired": frozenset({"pending"}),
+    "consumed": frozenset({"approved"}),
+    # Invalidation says the plan this covered has drifted, which can happen
+    # while the decision is still outstanding — a pending approval whose book
+    # moved must not remain approvable.
+    "invalidated": frozenset({"pending", "approved"}),
+}
+
 
 def _phase_type(phase: str) -> str:
     """'analyst-3' → 'analyst'; panel branches share their base type's rules."""
@@ -1894,6 +1911,26 @@ class Registry:
                             decided_at: str | None = None,
                             consumed_at: str | None = None,
                             invalidated_reason: str | None = None) -> None:
+        """Advance one approval along a legal edge, or refuse.
+
+        This used to be an unguarded UPDATE, which gave the approval lifecycle
+        writes but no edges: a consumed, rejected, or expired approval could be
+        driven back to ``pending`` by the challenge route and then approved
+        again, so neither a rejection nor an expiry was durable and a spent
+        approval could authorise a second fill. An unknown id updated nothing
+        and reported success.
+        """
+        legal = _APPROVAL_TRANSITIONS.get(status)
+        if legal is None:
+            raise ValueError(f"unknown approval status {status!r}")
+        current = self.get_approval_request(approval_id)
+        if current is None:
+            raise KeyError(f"unknown approval_id {approval_id!r}")
+        was = str(current.get("status") or "")
+        if was not in legal:
+            raise PermissionError(
+                f"approval {approval_id!r} cannot move {was!r} -> {status!r}; "
+                f"only {sorted(legal)} may become {status!r}")
         sets, params = ["status=?"], [status]
         if challenge_digest is not None:
             sets.append("challenge_digest=?")

@@ -1773,6 +1773,69 @@ def _execute_body(session, plan_id: str) -> dict:
             "approval_id": _approve(session, plan_id)}
 
 
+def test_a_consumed_approval_cannot_be_revived_and_spent_again(session):
+    # The challenge route wrote "pending" over whatever status it found, so a
+    # spent approval could be re-opened, re-approved, and used to authorise a
+    # second fill against the same human decision.
+    plan_id = _checked_plan(session)
+    approval_id = _approve(session, plan_id)
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": plan_id, "human_confirmed": True,
+         "approval_id": approval_id})
+    assert (status, result["executed"]) == (200, True)
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "consumed")
+
+    status, _ = handle_api(
+        session, "POST", f"/api/approvals/{approval_id}/challenge", {},
+        {"challenge": "let me have another go"})
+    assert status == 400
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "consumed")
+
+
+def test_a_rejection_and_an_expiry_are_both_durable(session):
+    from qlab.state.registry import Registry  # noqa: F401  (documents the writer)
+
+    rejected_plan = _checked_plan(session)
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": rejected_plan, "offline": True})
+    rejected = created["approval_id"]
+    handle_api(session, "POST", f"/api/approvals/{rejected}/reject", {}, {})
+
+    # A rejected decision must not be re-openable into an approvable state.
+    status, _ = handle_api(
+        session, "POST", f"/api/approvals/{rejected}/challenge", {},
+        {"challenge": "reconsider"})
+    assert status == 400
+    assert session.registry.get_approval_request(rejected)["status"] == "rejected"
+
+    # And an expiry is equally terminal.
+    expired_plan = _checked_plan(session, tilt=0.03)
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": expired_plan, "offline": True})
+    expired = created["approval_id"]
+    session.registry.expire_due_approvals("2999-01-01T00:00:00+00:00")
+    assert session.registry.get_approval_request(expired)["status"] == "expired"
+    with pytest.raises(PermissionError):
+        session.registry.transition_approval(expired, "approved")
+
+
+def test_transitioning_an_unknown_approval_is_refused_not_ignored(session):
+    # An unguarded UPDATE matched zero rows and reported success, so the
+    # challenge route answered 200 with a digest for an approval that does not
+    # exist.
+    with pytest.raises(KeyError):
+        session.registry.transition_approval("no-such-approval", "approved")
+    status, _ = handle_api(
+        session, "POST", "/api/approvals/no-such-approval/challenge", {},
+        {"challenge": "ghost"})
+    assert status == 404
+
+
 def test_a_bare_human_confirmed_flag_cannot_book_a_trade(session):
     # human_confirmed is a boolean in a request body — self-attestation any
     # local process can send. It used to be the whole gate on this route, so

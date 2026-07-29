@@ -45,7 +45,7 @@ from qlab.tui.desk_mode_screen import DeskModeScreen
 from qlab.tui.formatting import (
     braille_chart, bulletin, connection_chip, fence_state_after,
     is_numbered_item, key_number_lines, money, pct, phase_elapsed,
-    report_lines, sparkline, verdict_chip, weight_bar,
+    report_lines, spark, sparkline, verdict_chip, weight_bar,
 )
 from qlab.tui.design import primitives, tokens
 # Colour names resolve against the active theme at render time. They are
@@ -306,7 +306,10 @@ _REPORT_TONES = {
     "h1": f"[bold {AMBER}]▌ {{}}[/]",
     "h2": f"[{AMBER_HI}]› [/][bold {TEXT_HI}]{{}}[/]",
     "bullet": f"[{CYAN}]  › [/][{TEXT}]{{}}[/]",
-    "code": f"[{DIM}]  {{}}[/]",
+    # No indent: a fenced block is reproduced exactly as written. Padding it
+    # for looks changes the text an operator copies out, and for Python that
+    # is a syntax change rather than a cosmetic one.
+    "code": f"[{DIM}]{{}}[/]",
     "table": f"[{DIM}]{{}}[/]",
     "text": f"[{TEXT}]{{}}[/]",
     "blank": "{}",
@@ -2149,7 +2152,8 @@ class QlabTui(App[None]):
                     number = _finite_number(value)
                     if number is not None:
                         history.append(number)
-            pulse = sparkline(history[-12:]) or "—"
+            # Two samples per cell, so twice the history in the same width.
+            pulse = spark(history[-24:], width=12) or "—"
             pulse_lines.append(
                 f"[{TEXT}]{safe_ticker:<5}[/] "
                 f"[{TEXT_HI}]{price_text:>8}[/]  "
@@ -2243,7 +2247,23 @@ class QlabTui(App[None]):
             )
         if len(allocation_lines) == 1:
             allocation_lines.append(f"[{MUTED}]—[/]")
-        allocation_content = "\n".join(allocation_lines)
+        # A flat book renders as a full tile of em-dashes: maximum space for
+        # one fact, and it reads as missing data. Say it instead — but only
+        # when the weights are actually KNOWN to be zero. An absent weight is
+        # not a zero one, and a sparse payload must keep reading as unknown.
+        weights_known = [_finite_number(current.get(t))
+                         for t in self.universe_tickers]
+        if (weights_known and all(w == 0.0 for w in weights_known)
+                and not held_outside):
+            allocation_content = (
+                f"[{MUTED}]No positions held.[/]\n\n"
+                f"[{DIM}]The book is flat across all "
+                f"{len(self.universe_tickers)} mandate assets. A dry rebalance "
+                f"proposes targets; nothing is booked without your "
+                f"confirmation.[/]"
+            )
+        else:
+            allocation_content = "\n".join(allocation_lines)
 
         regime_name = str(
             regime.get("robust_state") or regime.get("regime") or "—"
@@ -2801,9 +2821,19 @@ class QlabTui(App[None]):
         # Y-axis gutter: right-aligned price labels.
         gutter = max(len(money(hi)), len(money(mid)), len(money(lo))) if history else 0
         chart_w = max(24, avail_w - gutter - 2)
-        # Change 2: chart is now nearly full-height — reserve 6 lines for the
-        # header row, x-axis baseline, time span, and legend line.
-        chart_h = max(8, avail_h - 6)
+        # Height is bounded by the chart's own aspect, not just by the space
+        # available. A braille cell is 2 dots wide and 4 tall, so a plot given
+        # the full canvas height stretches each move into a near-vertical
+        # stroke and the line reads as scattered dots — the same series at a
+        # third of that height reads as a price curve. Roughly 3:1 width to
+        # height is the shape a trend is legible at.
+        # A braille cell is 2 dots wide and 4 tall, so a plot that is w cells
+        # by h cells is 2w by 4h dots — a chart given the full canvas height
+        # ends up taller than it is wide in dot space, which stretches every
+        # move into a near-vertical stroke and reads as scattered dots. A
+        # sixth of the width keeps it near 3:1 in dots, where a trend is
+        # legible.
+        chart_h = max(10, min(avail_h - 6, chart_w // 6))
         rows = braille_chart(history, chart_w, chart_h)
         last_row = len(rows) - 1
         mid_row = last_row // 2

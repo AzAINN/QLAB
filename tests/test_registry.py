@@ -711,6 +711,99 @@ def test_resetting_one_book_leaves_another_books_history_intact():
     assert reg.equity_marks(book="simulated_paper") == []
 
 
+def test_a_flat_judge_graph_still_binds_the_verdict_to_its_own_decision():
+    # A panel winner is "optimizer-<branch>"; a flat graph's is bare
+    # "optimizer". rpartition on that returned "optimizer" itself, so the
+    # lookup asked for "analyst-optimizer", found nothing, and dropped the
+    # expected decision — skipping the check that a PASS reviewed THIS run.
+    registry = Registry(":memory:")
+    try:
+        targets = {"ACWI": 0.6, "BNDW": 0.4}
+        workflow = registry.start_workflow(
+            "portfolio_review", {"goal": "g"},
+            phases=("analyst", "challenger", "optimizer", "judge",
+                    "referee", "reporter"))
+        wid = workflow["workflow_id"]
+
+        foreign = registry.log_decision(Decision(
+            as_of=date.today(), kind="rebalance_gate",
+            choice={"targets": targets}, rationale="a different run entirely"))
+        verdict_id = registry.log_verdict(
+            foreign, "PASS", ["looked fine over there"],
+            source="referee-agent", targets=targets)
+
+        registry.update_workflow_phase(
+            wid, "analyst", "done", summary="s",
+            artifacts={"decision_id": "this-runs-own-decision",
+                       "regime": "calm", "regime_summary": "calm",
+                       "moment_set_id": "m", "objective_id": "o"})
+        registry.update_workflow_phase(
+            wid, "challenger", "done", summary="s",
+            artifacts={"challenger_view": "the window is too short"})
+        registry.update_workflow_phase(
+            wid, "optimizer", "done", summary="s",
+            artifacts={"targets": targets, "algorithm_id": "hrp"})
+        registry.update_workflow_phase(
+            wid, "judge", "done", summary="s",
+            artifacts={"winner_phase": "optimizer", "winning_targets": targets,
+                       "evidence": "e"})
+
+        # The PASS belongs to a foreign decision, so the referee must refuse.
+        with pytest.raises(ValueError):
+            registry.update_workflow_phase(
+                wid, "referee", "done", summary="s",
+                artifacts={"verdict": "PASS", "verdict_id": verdict_id,
+                           "targets": targets})
+    finally:
+        registry.close()
+
+
+def test_two_books_can_mark_the_same_timestamp_and_source():
+    # The primary key predated the book column, so a second book's backfill
+    # collided row-for-row and was silently dropped: the route answered
+    # {"backfilled": 0}, indistinguishable from "already up to date", while
+    # that book's series stayed empty.
+    reg = Registry(":memory:")
+    ts, source = "2026-06-01T21:00:00+00:00", "daily"
+    assert reg.log_equity_mark(ts, 10_500.0, cash=500.0, source=source,
+                               book="simulated_paper") is True
+    assert reg.log_equity_mark(ts, 98_000.0, cash=1_000.0, source=source,
+                               book="alpaca_paper") is True
+
+    assert [m["equity"] for m in reg.equity_marks(book="simulated_paper")] == [
+        10_500.0]
+    assert [m["equity"] for m in reg.equity_marks(book="alpaca_paper")] == [
+        98_000.0]
+    # The same book at the same instant is still one fact, not two.
+    assert reg.log_equity_mark(ts, 10_600.0, cash=400.0, source=source,
+                               book="simulated_paper") is False
+
+
+def test_an_existing_database_is_rekeyed_without_losing_marks(tmp_path):
+    # An ALTER cannot widen a primary key, so a database created before the
+    # book column keeps the old (ts, source) key until it is rebuilt.
+    import duckdb
+
+    path = tmp_path / "legacy.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(
+        "CREATE TABLE equity_marks (ts VARCHAR, source VARCHAR, "
+        "equity DOUBLE, cash DOUBLE, PRIMARY KEY (ts, source))")
+    con.execute("INSERT INTO equity_marks VALUES "
+                "('2026-06-01T21:00:00+00:00', 'daily', 10_500.0, 500.0)")
+    con.close()
+
+    reg = Registry(str(path))
+    try:
+        assert [m["equity"] for m in reg.equity_marks()] == [10_500.0]
+        # And the widened key now admits the second book.
+        assert reg.log_equity_mark(
+            "2026-06-01T21:00:00+00:00", 98_000.0, cash=1_000.0,
+            source="daily", book="alpaca_paper") is True
+    finally:
+        reg.close()
+
+
 def test_reset_book_refuses_an_unnamed_book():
     # The book is required precisely because the default used to be "all".
     reg = Registry(":memory:")

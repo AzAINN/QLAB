@@ -261,9 +261,11 @@ CREATE TABLE IF NOT EXISTS approval_requests (
 -- `book` is the broker the equity belongs to. Two books' equity levels can
 -- never compose one return series, so every mark carries its own; the
 -- idempotency key stays (ts, source).
+-- The book is part of the identity: two books legitimately hold an equity at
+-- the same timestamp from the same source, and they are different facts.
 CREATE TABLE IF NOT EXISTS equity_marks (
     ts VARCHAR, source VARCHAR, book VARCHAR, equity DOUBLE, cash DOUBLE,
-    PRIMARY KEY (ts, source));
+    PRIMARY KEY (ts, source, book));
 """
 
 
@@ -314,6 +316,43 @@ class Registry:
         self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS avg_fill_price DOUBLE")
         self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS fee DOUBLE")
         self.con.execute("ALTER TABLE equity_marks ADD COLUMN IF NOT EXISTS book VARCHAR")
+        self._widen_equity_mark_identity()
+
+    def _widen_equity_mark_identity(self) -> None:
+        """Bring a pre-book equity_marks primary key up to (ts, source, book).
+
+        The `book` column was added by ALTER, which cannot widen the key, so an
+        existing database still keys marks on (ts, source). Two books hold an
+        equity at the same timestamp from the same source as a matter of
+        course — a daily mark, a backfill — and `INSERT OR IGNORE` silently
+        discarded the second one, reporting `{"backfilled": 0}`: identical to
+        "already up to date", for a book whose series was in fact empty.
+
+        DuckDB cannot alter a primary key in place, so the table is rebuilt.
+        This is a no-op on a database created from the current schema.
+        """
+        pk = self.con.execute(
+            "SELECT constraint_column_names FROM duckdb_constraints() "
+            "WHERE table_name='equity_marks' AND constraint_type='PRIMARY KEY'"
+        ).fetchall()
+        if not pk or "book" in list(pk[0][0]):
+            return
+        with self.transaction():
+            self.con.execute("""
+                CREATE TABLE equity_marks_rekeyed (
+                    ts VARCHAR, source VARCHAR, book VARCHAR,
+                    equity DOUBLE, cash DOUBLE,
+                    PRIMARY KEY (ts, source, book));
+            """)
+            # DISTINCT because the old key permitted only one row per
+            # (ts, source) anyway; this is a widening, never a merge.
+            self.con.execute(
+                "INSERT INTO equity_marks_rekeyed "
+                "SELECT DISTINCT ts, source, COALESCE(book, ''), equity, cash "
+                "FROM equity_marks")
+            self.con.execute("DROP TABLE equity_marks")
+            self.con.execute(
+                "ALTER TABLE equity_marks_rekeyed RENAME TO equity_marks")
 
     def close(self) -> None:
         self.con.close()
@@ -1522,10 +1561,21 @@ class Registry:
                 raise ValueError(
                     "referee 'targets' do not match the judge's winning targets"
                 )
-            # The reviewed decision is the winning branch's own analyst decision.
+            # The reviewed decision is the winning branch's own analyst
+            # decision. A panel winner is "optimizer-<branch>"; a flat graph's
+            # is bare "optimizer", and rpartition on that yields "optimizer"
+            # itself — so this used to look up "analyst-optimizer", find
+            # nothing, and drop the expected decision entirely, skipping the
+            # check that a PASS must review THIS run's decision.
             winner = str((judge_step.get("artifacts") or {}).get("winner_phase", ""))
-            branch = winner.rpartition("-")[2]
-            expected_decision = self._phase_decision_id(by_phase, f"analyst-{branch}")
+            _, dash, branch = winner.rpartition("-")
+            analyst_phase = f"analyst-{branch}" if dash else "analyst"
+            if analyst_phase not in by_phase:
+                raise ValueError(
+                    f"judge crowned {winner!r}, whose analyst phase "
+                    f"{analyst_phase!r} is not in this workflow; the verdict "
+                    "cannot be bound to a decision")
+            expected_decision = self._phase_decision_id(by_phase, analyst_phase)
             return self._require_pass_verdict(
                 artifacts, reviewed_hash, expected_decision)
         optimizer_step = by_phase.get("optimizer")

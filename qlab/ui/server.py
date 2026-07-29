@@ -2281,7 +2281,9 @@ def handle_api(session: UISession, method: str, path: str,
         summary = run_once(
             registry=session.registry, mandate=session.mandate,
             offline=_offline_for_book(session, off),
-            execute=bool(body.get("execute", True)),
+            # Parsed, never cast: bool("false") is True, so a client that
+            # stringifies booleans would ask for a dry run and get a live one.
+            execute=_flagbool(body.get("execute"), True),
             skew_lambda=float(body.get("skew", 0.5)),
             kurt_lambda=float(body.get("kurt", 0.5)),
             as_of=body.get("as_of") or None, seed=session.seed,

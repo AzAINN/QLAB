@@ -3651,6 +3651,36 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "Nothing was traded" in nxt
 
 
+def test_a_theme_switch_repaints_the_console_history():
+    # Colours were resolved at write time, so the run narrative stayed in the
+    # old palette after a switch — dark-theme hex on the light canvas is about
+    # 1:1 contrast, i.e. the entire workforce output became invisible while
+    # the rest of the desk repainted correctly.
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH,
+                      claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app._console_write("[$text-strong]recommended targets[/]")
+            dark = tokens.THEMES["qlab-dark"].variables["text-strong"]
+            light = tokens.THEMES["qlab-light"].variables["text-strong"]
+            assert dark != light
+
+            app.action_theme("qlab-light")
+            await pilot.pause(0.1)
+            # The kept history is unresolved, and re-rendering uses the new
+            # theme — so the frozen dark colour is gone from the widget.
+            assert app._console_lines[-1] == "[$text-strong]recommended targets[/]"
+            from qlab.tui.design.markup import resolve
+            assert resolve(app._console_lines[-1], theme=app.theme) == (
+                f"[{light}]recommended targets[/]")
+
+    asyncio.run(run())
+
+
 def test_unreadable_target_weights_are_named_not_raised():
     # The registry validates `targets` as a dict and never checks value types,
     # so an agent-authored artifact can carry a string or a null weight. That

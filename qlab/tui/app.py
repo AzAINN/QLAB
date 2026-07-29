@@ -1052,6 +1052,9 @@ class QlabTui(App[None]):
         self._pending_workflow = False
         self._seen_workflow_ids: set[str] = set()
         self._phase_reported: dict[str, str] = {}
+        # Unresolved console markup, bounded to the RichLog's own capacity so
+        # the two retain the same history. Kept for theme re-rendering.
+        self._console_lines: deque[str] = deque(maxlen=400)
         self._results_printed = False
         self._pulse = 0
         self._live_stream_stop = threading.Event()
@@ -1360,6 +1363,7 @@ class QlabTui(App[None]):
             node.theme_name = wanted
         for rail in self.query(AgentRail):
             rail.theme_name = wanted
+        self._repaint_console()
         self._write_local_event("theme.changed", {"theme": wanted})
         self._set_selected_work(f"THEME\n\n{wanted} is active.")
 
@@ -1775,8 +1779,24 @@ class QlabTui(App[None]):
         # RichLog renders through rich.text.Text.from_markup, which knows
         # nothing about theme variables, so they are resolved here against the
         # active theme rather than reaching Rich as a literal `$name`.
+        # The unresolved line is kept so a theme switch can re-render it: a
+        # colour resolved at write time is frozen, and the run narrative would
+        # otherwise stay in the old palette — dark-theme hex on a light canvas
+        # is about 1:1 contrast, i.e. the whole run output goes invisible.
+        self._console_lines.append(line)
         self.query_one("#workforce-console", RichLog).write(
             _resolve_markup(line, theme=self._active_theme()))
+
+    def _repaint_console(self) -> None:
+        """Re-render the kept console history against the active theme."""
+        try:
+            console = self.query_one("#workforce-console", RichLog)
+        except Exception:
+            return
+        console.clear()
+        theme = self._active_theme()
+        for line in self._console_lines:
+            console.write(_resolve_markup(line, theme=theme))
 
     def _render_chat_mode(self) -> None:
         chip = self.query_one("#chat-mode", Static)
@@ -4087,6 +4107,14 @@ class QlabTui(App[None]):
                 ) is None:
                     return
                 self._bind_run(workflow_id)
+            else:
+                # A completed run — or one the registry never recorded — cannot
+                # be resumed, so this turn is a new run. Without rebinding, the
+                # view stayed pinned to the finished one: the results block was
+                # already printed, every phase already reported, and the new
+                # workflow's id did not match, so a turn that ran to completion
+                # printed nothing at all.
+                self._bind_run("")
             started = self._start_claude(
                 message, governed=True,
                 resume_session=self._chat_sessions["workforce"])

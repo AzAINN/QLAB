@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from qlab.state.registry import Registry
+from qlab.ui import server as ui_server
 from qlab.ui.server import UISession, _INDEX, handle_api
 
 
@@ -1771,6 +1772,51 @@ def _approve(session, plan_id: str) -> str:
 def _execute_body(session, plan_id: str) -> dict:
     return {"offline": True, "plan_id": plan_id, "human_confirmed": True,
             "approval_id": _approve(session, plan_id)}
+
+
+def test_a_get_with_a_body_cannot_smuggle_a_second_request(session):
+    # Under HTTP/1.1 keep-alive an unconsumed GET body stayed in rfile and the
+    # next request on that connection was parsed out of it — so a client could
+    # append a reset to a harmless read and have the owner run it.
+    import io
+
+    class _Handler(ui_server._Handler):
+        def __init__(self, raw: bytes):
+            self.rfile = io.BytesIO(raw)
+            self.wfile = io.BytesIO()
+            self.headers = {"Content-Length": str(len(raw))}
+            self.close_connection = False
+            self.responses: list[tuple[int, dict]] = []
+
+        def _json(self, status, obj):
+            self.responses.append((status, obj))
+
+    smuggled = b"POST /api/reset HTTP/1.1\r\n\r\n"
+    handler = _Handler(smuggled)
+    assert handler._drain_request_body() is True
+    # The body was consumed, so nothing is left to be read as a new request.
+    assert handler.rfile.read() == b""
+
+    negative = _Handler(b"")
+    negative.headers = {"Content-Length": "-1"}
+    assert negative._drain_request_body() is False
+    assert negative.responses[0][0] == 400
+    assert negative.close_connection is True
+
+
+def test_a_malformed_mcp_config_is_not_reported_as_absent(session, tmp_path,
+                                                          monkeypatch):
+    # A file that exists but does not parse is a different fact from no file.
+    # Reporting both as "not configured" sent the operator to re-add a server
+    # entry that was already there, with the parse error surfaced nowhere.
+    monkeypatch.setattr(ui_server, "workspace_root", lambda: tmp_path)
+    (tmp_path / ".mcp.json").write_text('{"mcpServers": {"qlab": {},}}')
+
+    status = session.system_status(offline=True)
+    assert status["mcp_configured"] is False
+    # It names the fault rather than merely flagging one.
+    assert "JSONDecodeError" in status["mcp_config_error"]
+    assert "trailing comma" in status["mcp_config_error"]
 
 
 def test_reset_refuses_the_alpaca_book_and_spares_its_history(session):

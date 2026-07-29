@@ -275,6 +275,25 @@ def test_owner_tick_keeps_external_news_fetch_outside_dispatch_lock():
     assert result["state"] == "observing"
 
 
+def test_a_failing_heartbeat_reports_why_instead_of_looking_healthy():
+    # The only channel for a tick failure was a print to a stdout that
+    # `qlab tui` points at DEVNULL, and the status error count was rendered
+    # nowhere — so a supervisor whose every tick raised rendered exactly like
+    # a healthy desk with nothing to report.
+    from qlab.operator.heartbeat import AtlasHeartbeat
+
+    def always_fails():
+        raise RuntimeError("desk read is unreachable")
+
+    beat = AtlasHeartbeat(always_fails, interval_s=0.01)
+    assert beat.tick_once() is None
+
+    status = beat.status()
+    assert status["errors"] == 1
+    assert "unreachable" in status["last_error"]
+    assert status["last_error_at"]
+
+
 def test_a_failed_recompose_stops_the_stale_window_gating_a_news_template():
     # The heartbeat swallows a read failure so the supervisor keeps observing.
     # It used to leave the previous tick's window cached, and `atlas_facts`

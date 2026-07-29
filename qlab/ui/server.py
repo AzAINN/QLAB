@@ -230,6 +230,10 @@ class UISession:
         # outside the owner dispatch lock. desk_read composes from this and
         # never fetches, so a cold cache cannot stall the lock on RSS timeouts.
         self._desk_news: dict | None = None
+        # Guards publication of the window above. Two fetchers legitimately run
+        # concurrently — a heartbeat tick and an operator refresh — and both
+        # write here from outside the dispatch lock.
+        self._news_lock = threading.Lock()
         self.heartbeat = None
         # Autonomy is a runtime switch the operator owns from the UI.
         # The env var only seeds its initial value.
@@ -920,12 +924,17 @@ class UISession:
 
         config_path = workspace_root() / ".mcp.json"
         servers: list[str] = []
+        mcp_error = ""
         if config_path.exists():
             try:
                 config = json.loads(config_path.read_text(encoding="utf-8"))
                 servers = sorted(config.get("mcpServers", {}))
-            except Exception:
-                servers = []
+            except Exception as exc:
+                # A file that exists but does not parse is not the same fact as
+                # no file: reporting both as "not configured" sent the operator
+                # to re-add a server entry that was already there, while the
+                # parse error was surfaced nowhere.
+                mcp_error = f"{type(exc).__name__}: {exc}"[:200]
         proxy_available = importlib.util.find_spec("fastmcp") is not None
         # Cache-only provenance: never a network fetch from a status poll.
         provenance = data.cached_provenance(self.mandate.universe_whitelist)
@@ -953,6 +962,7 @@ class UISession:
             "claude_available": bool(shutil.which("claude")),
             "mcp_configured": bool(servers),
             "mcp_servers": servers,
+            "mcp_config_error": mcp_error,
             "mcp_proxy_available": proxy_available,
             "governed_available": proxy_available and bool(shutil.which("claude")),
             "governed_authority": "propose_only",
@@ -1148,8 +1158,9 @@ class UISession:
         desk distinguishable from a genuinely quiet one; returning an empty
         window silently would read as 'no news', which is a different claim.
         """
-        if self._desk_news is not None:
-            return self._desk_news
+        with self._news_lock:
+            if self._desk_news is not None:
+                return self._desk_news
         return {
             "items": [],
             "provider_name": "synthetic",
@@ -1207,7 +1218,12 @@ class UISession:
                 "provider_name": provider_name,
                 "error": None,
             }
-        self._desk_news = window
+        # Publishing under the same lock the heartbeat composes under keeps a
+        # manual refresh and a heartbeat tick from interleaving fetch and
+        # publish, which could leave the drawer showing a window older than the
+        # one just asked for — with no marker that it was stale.
+        with self._news_lock:
+            self._desk_news = window
         return window
 
     def compose_desk_read(
@@ -2430,7 +2446,34 @@ class _Handler(BaseHTTPRequestHandler):
         payload = json.dumps(_jsonable(obj), default=str).encode("utf-8")
         self._send(status, payload, "application/json")
 
+    def _drain_request_body(self) -> bool:
+        """Consume any body sent with a bodyless method. False = unframable.
+
+        A GET carrying a body left those bytes in `rfile` under HTTP/1.1
+        keep-alive, and the next request on that connection was parsed out of
+        them — so a client could append a second, unrelated request (a reset,
+        say) to a harmless read and have the owner run it.
+        """
+        header = self.headers.get("Content-Length")
+        if header is None:
+            return True
+        try:
+            length = int(header)
+        except ValueError:
+            self.close_connection = True
+            self._json(400, {"error": "Content-Length must be an integer"})
+            return False
+        if length < 0:
+            self.close_connection = True
+            self._json(400, {"error": "Content-Length must not be negative"})
+            return False
+        if length:
+            self.rfile.read(length)
+        return True
+
     def do_GET(self):
+        if not self._drain_request_body():
+            return
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
             self._send(200, _INDEX.read_bytes(), "text/html; charset=utf-8")
@@ -2627,6 +2670,13 @@ class _Handler(BaseHTTPRequestHandler):
             # and this connection can no longer be framed.
             self.close_connection = True
             self._json(400, {"error": "Content-Length must be an integer"})
+            return
+        if length < 0:
+            # A negative length parses as an integer but describes no body:
+            # `length > 0` was False, so the bytes were neither consumed nor
+            # refused and keep-alive framed the next request against them.
+            self.close_connection = True
+            self._json(400, {"error": "Content-Length must not be negative"})
             return
         raw = self.rfile.read(length) if length > 0 else b"{}"
         # A body the owner failed to parse must never be replaced by {}. The

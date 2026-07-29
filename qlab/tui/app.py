@@ -2443,14 +2443,30 @@ class QlabTui(App[None]):
                     f"[{DIM}]{item.get('source','')} {tickers}[/]")
 
         lines.append("")
+        # A thread that is alive but whose every tick raises is not a working
+        # supervisor, and "live (0 ticks)" beside a quiet desk is exactly how a
+        # total outage used to render. The error count is part of the health.
+        beat_errors = int(beat.get("errors", 0) or 0)
+        if not beat.get("running"):
+            beat_health = "stopped"
+        elif beat_errors:
+            beat_health = f"FAILING ({beat_errors} errors)"
+        else:
+            beat_health = "live"
         lines.append(
             f"[{DIM}]mode {str(atlas.get('mode','—')).upper()} · "
             f"state {str(atlas.get('state','—')).upper()} · "
-            f"heartbeat {'live' if beat.get('running') else 'stopped'} "
+            f"heartbeat {beat_health} "
             f"({int(beat.get('ticks', 0))} ticks) · "
             f"autonomy {'ON' if beat.get('autonomous') else 'off'} · "
             f"news {read.get('news_source','—')} · "
             f"as of {read.get('as_of','—')}[/]")
+        if beat_errors and beat.get("last_error"):
+            # Naming the reason is the difference between a desk the operator
+            # can fix and one that has silently stopped supervising.
+            lines.append(
+                f"[{DOWN}]supervisor error: "
+                f"{escape(str(beat.get('last_error'))[:160])}[/]")
         lines.append(
             f"[{DIM}]This is interpretation over persisted facts — advisory, "
             f"never an instruction. Atlas cannot trade.[/]")

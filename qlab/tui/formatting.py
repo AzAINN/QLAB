@@ -259,7 +259,8 @@ _BRAILLE_DOTS = (
 )
 
 
-def braille_chart(values: list[float], width: int, height: int) -> list[str]:
+def braille_chart(values: list[float], width: int, height: int, *,
+                  fill: bool = False) -> list[str]:
     """Render ``values`` as a multi-row braille line chart.
 
     ``width``/``height`` are terminal cells; the dot grid is therefore
@@ -267,6 +268,12 @@ def braille_chart(values: list[float], width: int, height: int) -> list[str]:
     ``width`` characters (blank braille where there is no line), so the caller
     can drop it straight into a fixed region without reflow. A flat or too-short
     series yields blank rows rather than raising.
+
+    ``fill`` shades from the line down to the baseline. A bare line is one dot
+    thick, so across a tall plot it is mostly empty space and reads as scatter
+    even though it is continuous; filling under it gives the eye a shape to
+    follow, which is why price charts are drawn that way. Use it whenever the
+    plot is given real height.
     """
     width = max(1, int(width))
     height = max(1, int(height))
@@ -324,6 +331,9 @@ def braille_chart(values: list[float], width: int, height: int) -> list[str]:
         # the line stays continuous across a gap.
         low_dot = min(bottom, top, prev_top)
         high_dot = max(bottom, top, prev_top)
+        if fill:
+            # Down to the baseline rather than just the column's own run.
+            low_dot = 0
         for dy in range(low_dot, high_dot + 1):
             ry = (rows - 1) - dy  # dot rows are top-down
             grid[ry // 4][cx // 2] |= _BRAILLE_DOTS[ry % 4][cx % 2]

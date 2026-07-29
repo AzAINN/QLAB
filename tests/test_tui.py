@@ -2580,15 +2580,19 @@ def test_market_view_scales_the_chart_to_the_terminal():
             await pilot.pause(0.2)
             await pilot.press("3")
             await pilot.pause(0.1)
-            content = str(app.query_one("#market-content").content)
-            # the braille chart is present and spans many rows (a real plot,
-            # not a one-line sparkline)
-            chart_rows = [ln for ln in content.split("\n")
+            # The view is a split now: the plot owns its own column and the
+            # readouts moved to a sidebar. `#market-content` survives as a
+            # hidden widget nothing writes to, so asserting against it passed
+            # vacuously — it is empty by construction.
+            chart = str(app.query_one("#market-chart").content)
+            chart_rows = [ln for ln in chart.split("\n")
                           if any(c not in " ⠀" and ord(c) >= 0x2800 and ord(c) <= 0x28ff
                                  for c in ln)]
-            assert len(chart_rows) >= 10
-            # the readouts still render below it
-            assert "portfolio weight" in content and "regime" in content
+            assert len(chart_rows) >= 10, "the plot is not a one-line sparkline"
+            # And the readouts still render, grouped, beside it.
+            stats = str(app.query_one("#market-stats-body").content).lower()
+            assert "weight" in stats and "target" in stats
+            assert "regime" in stats and "bar age" in stats
 
     asyncio.run(run())
 
@@ -3220,7 +3224,7 @@ def test_console_renders_markdown_report_styled():
             # plain prose still reads as prose: whole, unbulleted, untruncated
             assert ("News is a quarantined research input, not a trading signal."
                     in flat)
-            assert "• referee passed" in flat
+            assert "› referee passed" in flat
             assert "1. bind the targets" in flat
             assert "• 1. bind the targets" not in flat   # numbering is the marker
             assert "| source | quality |" in rendered    # table alignment kept
@@ -3287,7 +3291,8 @@ def test_console_bullet_glyph_survives_a_count_leading_bullet():
                 strip.text for strip in app.query_one(
                     "#workforce-console", RichLog).lines).split())
 
-            assert "• 3 of 7 arms admitted" in flat
+            # The bullet glyph is a cyan chevron now, not a dot.
+            assert "› 3 of 7 arms admitted" in flat
             assert "1. bind the targets" in flat
             assert "• 1. bind the targets" not in flat
 
@@ -4497,7 +4502,12 @@ def test_flow_node_renders_its_state_glyph_from_the_design_system():
 
     assert isinstance(rendered, Text)
     assert glyphs.STATES["idle"].unicode in rendered.plain
-    assert "analyst" in rendered.plain
+    # The node is a three-line card now: phase label, glyph + state, then the
+    # agent role truncated to the cell width (the hover card carries it whole).
+    lines = rendered.plain.split("\n")
+    assert lines[0] == "ANALYST"
+    assert "idle" in lines[1]
+    assert lines[2].startswith("moments")
 
 
 def test_flow_node_pulse_changes_the_glyph_but_not_the_role_colour():

@@ -134,41 +134,48 @@ APP_CSS_TEMPLATE = Template("""
         height: 1fr;
     }
 
+    /* ── CHANGE #2 ── spine / nav visual hierarchy ─────────────────────── */
     #spine {
         width: 24;
         min-width: 18;
-        padding: 1 1 0 1;
+        padding: 0 0 0 0;
         background: $bg_panel;
-        border-right: solid $border;
+        border-right: solid $border_hi;
     }
     #wordmark {
-        height: 3;
-        color: $text_hi;
+        height: 4;
+        padding: 1 0 0 1;
+        color: $amber_hi;
         text-style: bold;
     }
     #nav {
         height: 9;
         color: $muted;
+        margin-top: 0;
     }
     #universe-label {
-        height: 2;
-        margin-top: 1;
-        color: $label_gold;
+        height: 1;
+        margin-top: 0;
+        padding: 0 1;
+        background: $bg_raised;
+        color: $amber;
+        text-style: bold;
     }
     #universe {
         height: 1fr;
         background: transparent;
         border: none;
+        border-top: solid $border;
         scrollbar-size: 0 0;
     }
     #universe ListItem {
         height: 1;
-        padding: 0;
+        padding: 0 1;
         color: $muted;
     }
     #universe ListItem.-highlight {
         background: $sel_bg;
-        color: $text_hi;
+        color: $amber_hi;
         text-style: bold;
     }
 
@@ -188,9 +195,47 @@ APP_CSS_TEMPLATE = Template("""
         height: 2;
         color: $amber_hi;
         text-style: bold;
+        border-bottom: solid $border;
+        padding-bottom: 0;
     }
-    #market-content {
+    /* ── MARKET TAB ── split layout: braille chart left, stat sidebar right */
+    #market-split {
+        width: 1fr;
         height: 1fr;
+    }
+    #market-chart-col {
+        width: 1fr;
+        height: 1fr;
+        padding: 0;
+    }
+    #market-chart {
+        width: 1fr;
+        height: 1fr;
+        overflow-y: auto;
+        scrollbar-size: 0 0;
+    }
+    #market-stats-col {
+        width: 28;
+        min-width: 22;
+        height: 1fr;
+        background: $bg_panel;
+        border-left: solid $border_hi;
+    }
+    #market-stats-header {
+        height: 4;
+        padding: 1 1 0 1;
+        border-bottom: solid $border;
+    }
+    #market-stats-body {
+        height: 1fr;
+        padding: 1 1 0 1;
+        overflow-y: auto;
+        scrollbar-size: 0 0;
+    }
+    /* legacy id — zero height so it never occupies space or renders a grey box */
+    #market-content {
+        height: 0;
+        display: none;
     }
     #dashboard-grid {
         width: 1fr;
@@ -201,19 +246,22 @@ APP_CSS_TEMPLATE = Template("""
         grid-rows: auto;
         grid-gutter: 1 2;
     }
+    /* ── CHANGE #3 ── dashboard tile header polish ───────────────────────── */
     .dashboard-tile {
         width: 1fr;
         height: auto;
         min-height: 6;
         background: $bg_panel;
-        border: round $border;
+        border: solid $border;
+        border-left: solid $amber;
     }
     .tile-title {
         height: 1;
         padding: 0 1;
         background: $bg_raised;
-        color: $muted;
+        color: $amber;
         text-style: bold;
+        border-bottom: solid $border_hi;
     }
     /* Vertical padding is spent per tile, so on an eight-tile grid it costs a
        sixth of the viewport and pushes the last row below the fold. The row of
@@ -257,55 +305,117 @@ APP_CSS_TEMPLATE = Template("""
         border: round $disabled_border;
         text-style: none;
     }
+    /* ── CHANGE 3 ── Workforce status block: reactive accent border by run state */
     #workforce-content {
         height: auto;
-        max-height: 30%;
+        max-height: 28%;
         padding: 1 2;
         background: $bg_panel;
-        border: round $border;
+        border: solid $border;
+        border-left: solid $border_hi;
+    }
+    #workforce-content.-running {
+        border-left: solid $cyan;
+    }
+    #workforce-content.-complete {
+        border-left: solid $up;
+    }
+    #workforce-content.-failed {
+        border-left: solid $down;
+    }
+    #workforce-content.-blocked {
+        border-left: solid $amber;
+    }
+    #workforce-content.-interrupted {
+        border-left: solid $gold;
+    }
+
+    /* ── CHANGE 1 ── Flowchart: section header strip + legend row */
+    #flow-section {
+        height: auto;
+        margin-top: 1;
+    }
+    #flow-header {
+        height: 1;
+        padding: 0 2;
+        color: $amber;
+        text-style: bold;
     }
     #flow-row {
-        height: 6;
-        margin-top: 1;
+        height: 7;
+        margin-top: 0;
+        padding: 0 2;
         align: left middle;
         overflow-x: auto;
         overflow-y: hidden;
         scrollbar-size: 1 0;
+        border-top: solid $border;
+        border-bottom: solid $border;
     }
+    #flow-legend {
+        height: 1;
+        padding: 0 2;
+        color: $dim;
+    }
+
+    /* ── CHANGE 1 ── FlowNode: taller card with role subtitle line */
     FlowNode {
-        width: 12;
-        height: 4;
+        width: 14;
+        height: 5;
         padding: 0;
-        border: round $border;
+        border: solid $border;
+        border-left: solid $border_hi;
         color: $muted;
         content-align: center middle;
         text-align: center;
     }
     FlowNode.-working {
-        border: round $cyan;
+        border: solid $cyan;
+        border-left: solid $cyan;
         background: $flow_working_bg;
         color: $text_hi;
         text-style: bold;
     }
-    FlowNode.-queued { border: round $flow_queued_border; color: $flow_queued_text; }
-    FlowNode.-done { border: round $flow_done_border; color: $flow_done_text; }
-    FlowNode.-failed { border: round $flow_failed_border; color: $flow_failed_text; }
-    FlowNode.-blocked { border: round $flow_blocked_border; color: $flow_blocked_text; }
-    FlowNode.-interrupted {
-        border: round $flow_queued_border;
+    FlowNode.-queued {
+        border: solid $flow_queued_border;
+        border-left: solid $gold;
         color: $flow_queued_text;
     }
-    FlowNode.-abandoned { border: round $border; color: $dim; }
+    FlowNode.-done {
+        border: solid $flow_done_border;
+        border-left: solid $up;
+        color: $flow_done_text;
+    }
+    FlowNode.-failed {
+        border: solid $flow_failed_border;
+        border-left: solid $down;
+        color: $flow_failed_text;
+    }
+    FlowNode.-blocked {
+        border: solid $flow_blocked_border;
+        border-left: solid $amber;
+        color: $flow_blocked_text;
+    }
+    FlowNode.-interrupted {
+        border: solid $flow_queued_border;
+        border-left: solid $gold;
+        color: $flow_queued_text;
+    }
+    FlowNode.-abandoned {
+        border: solid $border;
+        border-left: solid $dim;
+        color: $dim;
+    }
     .flow-arrow {
-        width: 3;
-        height: 4;
+        width: 4;
+        height: 5;
         content-align: center middle;
         text-align: center;
-        color: $dim;
+        color: $border_hi;
     }
     #workforce-console {
         height: 1fr;
-        margin-top: 1;
+        margin-top: 0;
         padding: 0 1;
         background: transparent;
         border: none;
@@ -361,21 +471,33 @@ APP_CSS_TEMPLATE = Template("""
         border: none;
         scrollbar-size: 1 1;
     }
+    /* Bloomberg table: amber column headers, accent cursor row */
     DataTable > .datatable--header {
         background: $bg_raised;
-        color: $muted;
-        text-style: none;
+        color: $amber;
+        text-style: bold;
     }
     DataTable > .datatable--cursor {
         background: $sel_bg;
-        color: $text_hi;
+        color: $amber_hi;
+        text-style: bold;
+    }
+    DataTable > .datatable--odd-row {
+        background: $bg;
+    }
+    DataTable > .datatable--even-row {
+        background: $bg_panel;
     }
 
+    /* CHANGE #2: book section titles as Bloomberg field-group labels */
     .book-section-title {
-        height: 2;
+        height: 1;
         margin-top: 1;
-        color: $label_gold;
+        padding: 0 1;
+        background: $bg_raised;
+        color: $amber;
         text-style: bold;
+        border-bottom: solid $border;
     }
     .book-section {
         width: 1fr;
@@ -453,36 +575,49 @@ APP_CSS_TEMPLATE = Template("""
         margin-bottom: 1;
         padding: 1 2;
         background: $bg_panel;
-        border: round $border;
+        border: solid $border;
+        border-left: solid $border_hi;
         color: $text;
     }
 
+    /* ── CHANGE #2 ── agent rail: Bloomberg field-group headers ─────────── */
     #agent-rail {
         width: 38;
         min-width: 31;
-        padding: 1 1 0 2;
+        padding: 0 0 0 0;
         background: $bg_panel;
-        border-left: solid $border;
+        border-left: solid $border_hi;
     }
     #agent-label, #work-label, #atlas-label {
-        height: 2;
-        color: $label_gold;
+        height: 1;
+        padding: 0 1;
+        background: $bg_raised;
+        color: $amber;
+        text-style: bold;
+        border-bottom: solid $border;
+    }
+    #atlas-label {
+        border-top: solid $border_hi;
     }
     #atlas-rail {
         height: auto;
-        margin-bottom: 1;
+        margin-bottom: 0;
+        padding: 1 1 1 2;
+        border-bottom: solid $border;
     }
     #agent-list {
         height: 16;
+        padding: 1 1 1 2;
     }
     #work-label {
-        margin-top: 1;
+        margin-top: 0;
     }
     #selected-work {
         height: 1fr;
         color: $text;
         overflow-y: auto;
         scrollbar-size: 1 1;
+        padding: 1 1 0 2;
     }
 
     #timeline {
@@ -494,38 +629,43 @@ APP_CSS_TEMPLATE = Template("""
         color: $muted;
         scrollbar-size: 1 1;
     }
+    /* ── CHANGE #1 ── Bloomberg-style status bar ─────────────────────────── */
     #command-row {
-        height: 2;
-        padding: 0 1;
-        background: $bg_panel;
+        height: 3;
+        padding: 0 0;
+        background: $bg_raised;
+        border-top: solid $border_hi;
     }
     #command {
         width: 1fr;
         height: 1;
         border: none;
-        padding: 0;
+        padding: 0 2;
         background: transparent;
         color: $text_hi;
+        margin-top: 1;
     }
     #command:focus {
         border: none;
     }
     #conn-chip {
         width: auto;
-        padding: 0 1;
-        height: 1;
+        padding: 1 1 0 1;
+        height: 3;
         text-align: right;
         color: $muted;
+        border-left: solid $border;
     }
     /* The only always-visible answer to "whose money is this". Synthetic is
        muted; live prices on a simulated book warn; a real Alpaca book takes
        the alert tone so it can never be mistaken for the demo. */
     #mode-chip {
         width: auto;
-        padding: 0 1;
-        height: 1;
+        padding: 1 2 0 1;
+        height: 3;
         text-align: right;
         color: $muted;
+        border-left: solid $border;
     }
     #mode-chip.live-data {
         color: $amber;
@@ -536,7 +676,7 @@ APP_CSS_TEMPLATE = Template("""
     }
 
     Screen.compact #spine {
-        width: 19;
+        width: 20;
     }
     Screen.compact #agent-rail {
         width: 31;
@@ -557,6 +697,31 @@ APP_CSS_TEMPLATE = Template("""
         width: 1fr;
         border-left: none;
         padding-left: 2;
+    }
+
+    /* ── CHANGE 4 ── Atlas view: pinned status strip + scrollable read body */
+    #atlas-status-strip {
+        height: 3;
+        padding: 1 2 0 2;
+        background: $bg_raised;
+        border-bottom: solid $border_hi;
+        color: $text;
+    }
+    #atlas-read-scroll {
+        height: 1fr;
+        overflow-y: auto;
+        scrollbar-size: 1 1;
+        padding: 1 2 1 2;
+    }
+    #atlas-read {
+        height: auto;
+        color: $text;
+    }
+    #atlas-actions {
+        height: 3;
+        padding: 0 2;
+        align-vertical: middle;
+        border-top: solid $border;
     }
     """)
 
@@ -597,29 +762,38 @@ PAPER_MODAL_CSS = PAPER_MODAL_CSS_TEMPLATE.substitute(TOKEN_REFS)
 
 
 ATLAS_DRAWER_CSS_TEMPLATE = Template("""
+    /* ── CHANGE 5 ── Atlas drawer: visual section cards + approval blocks */
     AtlasDrawerScreen {
         align: right middle;
         background: $overlay;
     }
     #atlas-drawer {
-        width: 76;
+        width: 80;
         height: 100%;
-        padding: 2 3;
+        padding: 0;
         background: $bg_raised;
-        border-left: solid $gold;
+        border-left: solid $amber;
     }
     #atlas-drawer-title {
-        color: $text_hi;
+        height: 3;
+        padding: 1 3;
+        color: $amber_hi;
         text-style: bold;
-        margin-bottom: 1;
+        background: $bg_panel;
+        border-bottom: solid $border_hi;
     }
     #atlas-drawer-body {
         height: 1fr;
         color: $text;
+        padding: 1 3;
+        overflow-y: auto;
+        scrollbar-size: 1 1;
     }
     #atlas-drawer-hint {
         height: 2;
-        color: $muted;
+        padding: 0 3;
+        color: $dim;
+        border-top: solid $border;
     }
     """)
 

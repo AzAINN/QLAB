@@ -295,12 +295,20 @@ def _bulletin_markup(
     ]
 
 
-# Theme skin for the kinds report_lines() emits. The renderer stays tone-free;
-# only this table knows the palette.
+# CHANGE #5: Report tones with richer visual hierarchy.
+# h1: full amber left-bar accent (Bloomberg section header style)
+# h2: bold bright text, muted marker distinguishes from h1
+# bullet: cyan marker for better scan-readability vs muted
+# code: dim text (verbatim; unchanged semantics)
+# table: dim (verbatim alignment blocks)
+# text: normal body colour
 _REPORT_TONES = {
-    "h1": f"[bold {AMBER}]▍{{}}[/]",
-    "h2": f"[bold {TEXT_HI}]{{}}[/]",
-    "bullet": f"[{MUTED}]  • [/][{TEXT}]{{}}[/]",
+    "h1": f"[bold {AMBER}]▌ {{}}[/]",
+    "h2": f"[{AMBER_HI}]› [/][bold {TEXT_HI}]{{}}[/]",
+    "bullet": f"[{CYAN}]  › [/][{TEXT}]{{}}[/]",
+    # No indent: a fenced block is reproduced exactly as written. Padding it
+    # for looks changes the text an operator copies out, and for Python that
+    # is a syntax change rather than a cosmetic one.
     "code": f"[{DIM}]{{}}[/]",
     "table": f"[{DIM}]{{}}[/]",
     "text": f"[{TEXT}]{{}}[/]",
@@ -766,13 +774,23 @@ class FlowNode(Static):
     def render(self) -> Text:
         # State is encoded twice -- glyph colour and the state word -- so an
         # unmapped owner status still reads correctly with the glyph degraded.
+        # Change 1: three-line card — phase short label / glyph + state / agent role
         pulse = (_PULSE_FRAMES[self.pulse % len(_PULSE_FRAMES)]
                  if self.state == "working" else None)
-        rendered = Text(self.short, style="bold")
+        faint = tokens.role(self.theme_name, "faint")
+        # Line 1: phase label (bold)
+        rendered = Text(self.short.upper(), style="bold")
         rendered.append("\n")
+        # Line 2: state glyph + state word
         rendered.append_text(primitives.state_badge(
             self.state, glyph=pulse, fallback="idle", theme=self.theme_name))
         rendered.append(f" {self.state}")
+        rendered.append("\n")
+        # Line 3: agent role name, dim/faint — truncated to fit the cell width
+        role_label = self.agent.replace("-", " ")
+        if len(role_label) > 11:
+            role_label = role_label[:10] + "…"
+        rendered.append(role_label, style=faint)
         return rendered
 
     def watch_state(self, state: str) -> None:
@@ -786,8 +804,8 @@ class FlowNode(Static):
         self.tooltip = detail or f"{self.agent}\n\nnot yet started"
 
 
-class FlowBoard(Horizontal):
-    """A recomposable workflow-step board; panel branches are real nodes."""
+class FlowRow(Horizontal):
+    """The scrollable node row inside the flow section."""
 
     def __init__(self, flow: tuple[tuple[str, str, str], ...]):
         super().__init__(id="flow-row")
@@ -796,16 +814,66 @@ class FlowBoard(Horizontal):
     def compose(self) -> ComposeResult:
         for index, (phase, agent, short) in enumerate(self.flow):
             if index:
-                yield Static("→", classes="flow-arrow")
+                # data-flow style connector
+                yield Static("──►", classes="flow-arrow")
             yield FlowNode(phase, agent, short)
+
+
+class FlowBoard(Vertical):
+    """A recomposable workflow-step board: header + node row + legend.
+
+    Change 2: wraps the scrollable node row in a named section with a
+    PIPELINE header and a compact state-legend row beneath the nodes so
+    the operator always has a colour key visible.
+    """
+
+    # The legend text is static — state colours are already on the nodes.
+    _LEGEND = (
+        f"[{_STATE_STYLE['working'][1]}]● working[/]  "
+        f"[{_STATE_STYLE['done'][1]}]✓ done[/]  "
+        f"[{_STATE_STYLE['failed'][1]}]× failed[/]  "
+        f"[{_STATE_STYLE['blocked'][1]}]! blocked[/]  "
+        f"[{_STATE_STYLE['queued'][1]}]· queued[/]  "
+        f"[{DIM}]hover a node for detail[/]"
+    )
+
+    def __init__(self, flow: tuple[tuple[str, str, str], ...]):
+        super().__init__(id="flow-section")
+        self.flow = flow
+        self._flow_row: FlowRow | None = None
+
+    def compose(self) -> ComposeResult:
+        # Change 2: header row above the nodes
+        yield Static(
+            f"[bold {AMBER}]PIPELINE[/]  [{DIM}]{len(self.flow)} phases[/]",
+            id="flow-header",
+            markup=True,
+        )
+        self._flow_row = FlowRow(self.flow)
+        yield self._flow_row
+        # Change 2: legend row below the nodes
+        yield Static(self._LEGEND, id="flow-legend", markup=True)
 
     def set_flow(self, flow: tuple[tuple[str, str, str], ...]) -> None:
         if flow == self.flow:
             return
         self.flow = flow
-        if self.is_attached:
-            self.run_worker(
-                self.recompose(),
+        # Update the phase count in the header
+        try:
+            self.query_one("#flow-header", Static).update(
+                f"[bold {AMBER}]PIPELINE[/]  [{DIM}]{len(flow)} phases[/]"
+            )
+        except Exception:
+            pass
+        row = self._flow_row
+        if row is None:
+            return
+        if row.flow == flow:
+            return
+        row.flow = flow
+        if row.is_attached:
+            row.run_worker(
+                row.recompose(),
                 name="recompose-workflow-flow",
                 group="workflow-flow",
                 exclusive=True,
@@ -825,11 +893,13 @@ class NavMenu(Static):
     active_view: reactive[str] = reactive("atlas")
 
     def render(self) -> str:
+        # CHANGE #2: amber accent bar on active item, muted dim on inactive,
+        # uppercase labels for Bloomberg-style scan-readability.
         return "\n".join(
             (
-                f"[bold {TEXT_HI}]› {index}  {view.title()}[/]"
+                f"[bold {AMBER}]▐[/][bold {TEXT_HI}] {index}  {view.upper()}[/]"
                 if view == self.active_view
-                else f"[{MUTED}]  {index}  {view.title()}[/]"
+                else f"[{MUTED}]   {index}  {view.title()}[/]"
             )
             for index, view in enumerate(_VIEWS, start=1)
         )
@@ -929,10 +999,19 @@ class AtlasDrawerScreen(ModalScreen[None]):
         self.body = body
 
     def compose(self) -> ComposeResult:
+        # Change 5: title bar + scrollable body + pinned hint footer
         with Vertical(id="atlas-drawer"):
-            yield Static("ATLAS · DESK MANAGER", id="atlas-drawer-title")
+            yield Static(
+                f"[bold]ATLAS[/]  [{AMBER}]◈[/]  DESK MANAGER",
+                id="atlas-drawer-title",
+                markup=True,
+            )
             yield Static(self.body, id="atlas-drawer-body", markup=True)
-            yield Static("esc or ctrl+b to close", id="atlas-drawer-hint")
+            yield Static(
+                f"[{DIM}]esc[/] or [bold {AMBER}]ctrl+b[/] [{DIM}]to close[/]",
+                id="atlas-drawer-hint",
+                markup=True,
+            )
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1076,7 +1155,12 @@ class QlabTui(App[None]):
     def compose(self) -> ComposeResult:
         with Horizontal(id="workspace"):
             with Vertical(id="spine"):
-                yield Static("qlab\n[dim]operator console[/]", id="wordmark", markup=True)
+                # CHANGE #2: Bloomberg-style wordmark — amber ticker name + muted descriptor
+                yield Static(
+                    f"[bold {AMBER_HI}]QLAB[/]  [bold {AMBER}]◈[/]\n"
+                    f"[{MUTED}]OPERATOR CONSOLE[/]",
+                    id="wordmark", markup=True,
+                )
                 yield NavMenu(id="nav", markup=True)
                 yield Static("UNIVERSE", id="universe-label")
                 yield ListView(
@@ -1086,12 +1170,17 @@ class QlabTui(App[None]):
 
             with ContentSwitcher(initial="atlas", id="canvas"):
                 with Vertical(id="atlas", classes="canvas-view"):
+                    # Change 4: canvas-title stays as the tab label
                     yield Static(
                         f"[{AMBER}]▍[/] ATLAS · DESK MANAGER",
                         classes="canvas-title",
                         markup=True,
                     )
-                    yield Static(id="atlas-read", markup=True)
+                    # Change 4: pinned status strip — mode/state/conviction chips
+                    yield Static(id="atlas-status-strip", markup=True)
+                    # Change 4: scrollable area holds the full read content
+                    with Vertical(id="atlas-read-scroll"):
+                        yield Static(id="atlas-read", markup=True)
                     with Horizontal(id="atlas-actions"):
                         yield Button(
                             "REFRESH READ",
@@ -1160,6 +1249,14 @@ class QlabTui(App[None]):
                         )
                 with Vertical(id="market", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] MARKET", classes="canvas-title", markup=True)
+                    # Change 1: split layout — braille chart column + stat sidebar
+                    with Horizontal(id="market-split"):
+                        with Vertical(id="market-chart-col"):
+                            yield Static(id="market-chart", markup=True)
+                        with Vertical(id="market-stats-col"):
+                            yield Static(id="market-stats-header", markup=True)
+                            yield Static(id="market-stats-body", markup=True)
+                    # kept for any code path that resolves it; display:none in CSS
                     yield Static(id="market-content", markup=True)
                 with Vertical(id="workforce", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] WORKFORCE", classes="canvas-title", markup=True)
@@ -1292,8 +1389,9 @@ class QlabTui(App[None]):
                 )
 
         yield RichLog(id="timeline", wrap=True, markup=False, max_lines=500)
+        # CHANGE #1: Bloomberg-style status bar — command prompt + chip strip
         with Horizontal(id="command-row"):
-            yield Input(placeholder=": command or Ctrl-P", id="command")
+            yield Input(placeholder="  : command  ·  ctrl+p  ·  1-9 views  ·  j/k symbol", id="command")
             yield Static("CONNECTING", id="conn-chip", markup=True)
             yield Static("CONNECTING", id="mode-chip")
 
@@ -2376,6 +2474,34 @@ class QlabTui(App[None]):
         atlas = _record(self.snapshot.get("atlas"))
         beat = _record(self.snapshot.get("atlas_heartbeat"))
         target = self.query_one("#atlas-read", Static)
+        strip = self.query_one("#atlas-status-strip", Static)
+
+        # Change 4: always populate the status strip from atlas + beat, even if
+        # there is no read yet — the operator always knows Atlas's live state.
+        if atlas:
+            mode = str(atlas.get("mode", "—")).upper()
+            state = str(atlas.get("state", "—")).upper()
+            state_tone = _ATLAS_STATE_TONES.get(state.lower(), TEXT_HI)
+            mode_tone = AMBER if atlas.get("mode") == "propose" else TEXT_HI
+            beat_icon = f"[{UP}]◉ LIVE[/]" if beat.get("running") else f"[{MUTED}]◎ STOPPED[/]"
+            auto_icon = (f"[{AMBER}]AUTO ON[/]" if beat.get("autonomous")
+                         else f"[{MUTED}]AUTO OFF[/]")
+            conviction = _finite_number(read.get("conviction")) if read else None
+            conv_tone = (UP if (conviction or 0) >= 0.6
+                         else AMBER if (conviction or 0) >= 0.35 else MUTED)
+            conv_text = pct(conviction) if conviction is not None else "—"
+            strip.update(
+                f"[bold {mode_tone}]MODE [{mode}][/]"
+                f"  [{DIM}]│[/]  "
+                f"[bold {state_tone}]{state}[/]"
+                f"  [{DIM}]│[/]  "
+                f"[{LABEL_GOLD}]conviction [/][bold {conv_tone}]{conv_text}[/]"
+                f"  [{DIM}]│[/]  "
+                f"{beat_icon}  {auto_icon}"
+            )
+        else:
+            strip.update(f"[{MUTED}]waiting for atlas snapshot…[/]")
+
         if not read:
             target.update(
                 f"[{MUTED}]Atlas has not composed a read yet. "
@@ -2390,7 +2516,12 @@ class QlabTui(App[None]):
             "divergent": AMBER, "aligned": UP, "quiet": MUTED,
         }.get(agreement, TEXT_HI)
 
-        lines = [f"[{LABEL_GOLD}]THE READ[/]"]
+        # Change 4: "THE READ" section header uses the richer h1-style format
+        rule = f"[{BORDER_HI}]{'─' * 48}[/]"
+        lines = [
+            f"[bold {AMBER}]▌ THE READ[/]  [{DIM}]as of {read.get('as_of','—')}[/]",
+            rule,
+        ]
         lines.extend(_key_number_markup(
             [
                 ("SIGNALS", quant.upper()),
@@ -2414,31 +2545,34 @@ class QlabTui(App[None]):
         tensions = [str(t) for t in (read.get("tensions") or [])]
         if tensions:
             lines.append("")
-            lines.append(f"[{LABEL_GOLD}]TENSIONS[/]  "
-                         f"[{DIM}]where the evidence disagrees[/]")
+            lines.append(f"[bold {AMBER}]▌ TENSIONS[/]  [{DIM}]where the evidence disagrees[/]")
+            lines.append(rule)
             lines.extend(_bulletin_markup(tensions, tone=AMBER, max_len=220))
 
         observations = [str(o) for o in (read.get("observations") or [])]
         if observations:
             lines.append("")
-            lines.append(f"[{LABEL_GOLD}]OBSERVATIONS[/]")
+            lines.append(f"[bold {AMBER}]▌ OBSERVATIONS[/]")
+            lines.append(rule)
             lines.extend(_bulletin_markup(observations, tone=TEXT, max_len=200))
 
         changers = [str(c) for c in (read.get("would_change_my_mind") or [])]
         if changers:
             lines.append("")
-            lines.append(f"[{LABEL_GOLD}]WOULD CHANGE THIS[/]")
+            lines.append(f"[bold {AMBER}]▌ WOULD CHANGE THIS[/]")
+            lines.append(rule)
             lines.extend(_bulletin_markup(changers, tone=MUTED, max_len=200))
 
         supported = read.get("supported_claims") or []
         if supported:
             lines.append("")
-            lines.append(f"[{LABEL_GOLD}]WELL-SUPPORTED CLAIMS[/]  "
+            lines.append(f"[bold {AMBER}]▌ WELL-SUPPORTED CLAIMS[/]  "
                          f"[{DIM}]primary documents or multi-publisher[/]")
+            lines.append(rule)
             for claim in supported[:5]:
                 tier_tone = UP if claim.get("tier") == "primary" else CYAN
                 lines.append(
-                    f"  [{tier_tone}]•[/] {str(claim.get('headline',''))[:88]} "
+                    f"  [{tier_tone}]›[/] {str(claim.get('headline',''))[:88]} "
                     f"[{DIM}]({claim.get('support','')})[/]")
 
         grounding = read.get("grounding") or {}
@@ -2448,15 +2582,16 @@ class QlabTui(App[None]):
         headlines = (read.get("news") or {}).get("headlines") or []
         if headlines:
             lines.append("")
-            lines.append(f"[{LABEL_GOLD}]QUALITATIVE RECORD[/]  "
+            lines.append(f"[bold {AMBER}]▌ QUALITATIVE RECORD[/]  "
                          f"[{DIM}]everything in the window[/]")
+            lines.append(rule)
             for item in headlines[:6]:
                 item_tone = {
                     "risk_off": DOWN, "risk_on": UP, "mixed": AMBER,
                 }.get(str(item.get("tone")), DIM)
                 tickers = ",".join(item.get("tickers") or [])[:20]
                 lines.append(
-                    f"  [{item_tone}]•[/] {str(item.get('headline',''))[:96]} "
+                    f"  [{item_tone}]›[/] {str(item.get('headline',''))[:96]} "
                     f"[{DIM}]{item.get('source','')} {tickers}[/]")
 
         lines.append("")
@@ -2535,34 +2670,46 @@ class QlabTui(App[None]):
 
     def _atlas_drawer_content(self) -> str:
         """Full Atlas detail: authority, state, approvals, and task history."""
+        # Change 5: section divider rule shared across all sections in the drawer
         atlas = _record(self.snapshot.get("atlas"))
         if not atlas:
             return f"[{MUTED}]desk manager unavailable[/]"
         mode = str(atlas.get("mode", "—"))
-        lines = [self._atlas_panel_content(), ""]
-        lines.append(f"[{LABEL_GOLD}]AUTHORITY[/]")
+        rule = f"[{BORDER_HI}]{'─' * 52}[/]"
+
+        lines = [self._atlas_panel_content(), rule, ""]
+
+        # Authority section — what this mode is allowed to do
+        lines.append(f"[bold {AMBER}]▌ AUTHORITY[/]")
+        lines.append(rule)
         lines.extend(_bulletin_markup(
             [_ATLAS_MODE_AUTHORITY.get(mode, "unknown mode"),
              "Atlas never executes: paper execution consumes a persisted human "
              "approval bound to the exact plan."],
             tone=MUTED, max_len=110))
 
+        # Task history section — structured columns with status icon prefix
         tasks = _records(self.snapshot.get("atlas_tasks"))
         lines.append("")
-        lines.append(f"[{LABEL_GOLD}]RECENT TASKS[/]")
+        lines.append(f"[bold {AMBER}]▌ RECENT TASKS[/]")
+        lines.append(rule)
         if not tasks:
             lines.extend(_bulletin_markup(
                 ["no autonomous tasks recorded"], tone=MUTED, max_len=100))
         for task in tasks[:8]:
             status = str(task.get("status", "—"))
-            tone = {
-                "completed": UP, "failed": DOWN, "blocked": DOWN,
-                "running": AMBER,
-            }.get(status, MUTED)
+            task_tone, task_glyph = {
+                "completed": (UP, "✓"),
+                "failed":    (DOWN, "×"),
+                "blocked":   (DOWN, "!"),
+                "running":   (AMBER, "●"),
+            }.get(status, (MUTED, "◌"))
             created = str(task.get("created_at", ""))[5:16].replace("T", " ")
+            trigger = str(task.get("trigger_kind", "—"))
             lines.append(
-                f"  [{tone}]{status:<10}[/] {str(task.get('trigger_kind','')):<18} "
-                f"[{DIM}]{created}[/]")
+                f"  [{task_tone}]{task_glyph} {status:<10}[/]"
+                f"  [{TEXT_HI}]{trigger:<20}[/]"
+                f"  [{DIM}]{created}[/]")
             error = str(task.get("error") or "").strip()
             if error:
                 lines.extend(_bulletin_markup([error], tone=DOWN, max_len=100))
@@ -2596,7 +2743,8 @@ class QlabTui(App[None]):
             AMBER if approvals else MUTED,
             TEXT_HI if active else MUTED,
         ]
-        lines = [f"[{LABEL_GOLD}]ATLAS · DESK MANAGER[/]"]
+        rule = f"[{BORDER_HI}]{'─' * 52}[/]"
+        lines = [f"[bold {AMBER}]▌ ATLAS · DESK MANAGER[/]", rule]
         lines.extend(_key_number_markup(
             pairs, value_tones=tones, bold_values={0, 1}))
         reason = str(atlas.get("blocked_reason") or "").strip()
@@ -2612,13 +2760,17 @@ class QlabTui(App[None]):
         # act through the owner API, never a side effect of viewing.
         if approvals:
             lines.append("")
-            lines.append(f"[{LABEL_GOLD}]PENDING APPROVALS[/]")
+            # Change 5: approval cards with amber ID badges and expiry chips
+            lines.append(f"[bold {AMBER}]▌ PENDING APPROVALS[/]")
+            lines.append(rule)
             for approval in approvals[:5]:
-                plan_id = str(approval.get("plan_id", ""))[:12]
+                plan_id = str(approval.get("plan_id", ""))[:14]
                 expires = str(approval.get("expires_at", ""))[11:19]
+                approval_id = str(approval.get('approval_id', ''))[:10]
                 lines.append(
-                    f"  [{AMBER}]{str(approval.get('approval_id',''))[:8]}[/] "
-                    f"plan {plan_id} · expires {expires}")
+                    f"  [{AMBER}]❯ {approval_id}[/]"
+                    f"  [{TEXT_HI}]plan {plan_id}[/]"
+                    f"  [{DIM}]expires {expires}[/]")
             lines.extend(_bulletin_markup(
                 ["approve or reject through the owner approvals API; "
                  "execution consumes the approval"],
@@ -2634,9 +2786,10 @@ class QlabTui(App[None]):
         except Exception:
             avail_w = avail_h = 0
         if avail_w <= 0:
-            # Terminal minus the two side rails and padding; a floor keeps the
-            # very first pre-layout paint sane.
-            avail_w = max(40, self.size.width - 34)
+            # For the market chart column subtract the sidebar (≈30) and rails;
+            # for all other widgets keep the original two-rail estimate.
+            sidebar = 30 if widget_id == "#market-chart" else 0
+            avail_w = max(40, self.size.width - 34 - sidebar)
         if avail_h <= 0:
             avail_h = max(16, self.size.height - 8)
         return avail_w, avail_h
@@ -2656,33 +2809,35 @@ class QlabTui(App[None]):
         up = float(row.get("change_1d", 0.0)) >= 0
         dir_col = UP if up else DOWN
 
-        # The chart takes the whole width and most of the height; the readouts
-        # underneath get what's left. Both track the terminal size, so a wider
-        # or taller window is spent on the plot. The left price gutter and the
-        # two-line time axis are reserved out of the plot's cells first, so the
-        # braille curve and its labels always align.
-        avail_w, avail_h = self._plot_region("#market-content")
+        # ── Change 1: chart column gets its own size probe ─────────────────
+        # The stats sidebar is ~28 cols wide; subtract that + the gutter from
+        # what the chart column can use. The height is now the full canvas
+        # height minus the header row only (no stats rows below the chart).
+        avail_w, avail_h = self._plot_region("#market-chart")
         hi = max(history) if history else 0.0
         lo = min(history) if history else 0.0
         mid = (hi + lo) / 2.0
-        # Y axis (price): a right-aligned gutter carrying the high, midpoint, and
-        # low ticks. Its width is the widest of the three labels so every row's
-        # plot area starts at the same column.
+
+        # Y-axis gutter: right-aligned price labels.
         gutter = max(len(money(hi)), len(money(mid)), len(money(lo))) if history else 0
         chart_w = max(24, avail_w - gutter - 2)
-        chart_h = max(6, min(30, avail_h - 14))
+        # Change 2: chart is now nearly full-height — reserve 6 lines for the
+        # header row, x-axis baseline, time span, and legend line.
+        chart_h = max(8, avail_h - 6)
         rows = braille_chart(history, chart_w, chart_h)
         last_row = len(rows) - 1
         mid_row = last_row // 2
         as_of = str(market.get("as_of", "—"))
 
+        # ── Assemble chart lines ────────────────────────────────────────────
+        # Header: ticker + price + change + hi/lo range
         lines = [
             f"[bold {TEXT_HI}]{escape(self.active_ticker)}[/]  "
             f"[bold {TEXT_HI}]{money(row.get('price'))}[/]  "
             f"[{dir_col}]{'▲' if up else '▼'} {pct(row.get('change_1d'))} today[/]"
-            f"    [{LABEL_GOLD}]HIGH[/] [{TEXT}]{money(hi)}[/]  "
-            f"[{LABEL_GOLD}]LOW[/] [{TEXT}]{money(lo)}[/]  "
-            f"[{LABEL_GOLD}]{len(history)} DAILY BARS[/]",
+            f"  [{LABEL_GOLD}]H[/] [{TEXT}]{money(hi)}[/]"
+            f"  [{LABEL_GOLD}]L[/] [{TEXT}]{money(lo)}[/]"
+            f"  [{DIM}]{len(history)}d[/]",
             "",
         ]
         for i, bar in enumerate(rows):
@@ -2698,42 +2853,72 @@ class QlabTui(App[None]):
                 tick = ""
             lines.append(
                 f"[{LABEL_GOLD}]{tick:>{gutter}}[/] [{CHART_AXIS}]│[/]"
-                f"[{dir_col}]{escape(bar)}[/]")
-        # X axis (time): a baseline under the plot, then the oldest→latest span,
-        # then a one-line legend naming both axes so the plot is self-defining.
+                f"[{dir_col}]{escape(bar)}[/]"
+            )
+        # X axis
         pad = " " * (gutter + 2)
         lines.append(f"[{CHART_AXIS}]{' ' * gutter} └{'─' * chart_w}[/]")
-        left_lbl = f"{len(history)} bars ago"
+        left_lbl = f"{len(history)}d ago"
         right_lbl = f"as of {as_of}"
         gap = chart_w - len(left_lbl) - len(right_lbl)
         span = (left_lbl + " " * gap + right_lbl if gap >= 1
-                else f"{len(history)} bars → {as_of}"[:chart_w])
+                else f"{len(history)}d → {as_of}"[:chart_w])
         lines.append(f"[{LABEL_GOLD}]{pad}{escape(span)}[/]")
         lines.append(
-            f"[{DIM}]{pad}X · time (daily bars, oldest → latest)"
-            "   Y · price (USD)[/]")
-        lines.append("")
+            f"[{DIM}]{pad}daily adjusted-close · not a streaming quote[/]")
 
-        stats = [
-            ("20-day change", pct(row.get("change_20d"))),
-            ("63-day vol", pct(row.get("realized_vol"))),
-            ("portfolio weight", pct(current)),
-            ("target weight", pct(target)),
-            ("regime", str(market.get("regime", {}).get("regime", "—")).upper()),
-            ("source", str(market.get("source", "—")).upper()),
-            ("as of", str(market.get("as_of", "—"))),
-            ("bar age", f"{market.get('bar_age_days', '—')} days"),
+        self.query_one("#market-chart", Static).update("\n".join(lines))
+
+        # ── Change 3: sidebar — sparkline header + grouped stat cards ──────
+        # Header card: large sparkline of full history for the selected ticker
+        spark_w = 20  # cells available in the 28-wide sidebar
+        spark_lines = braille_chart(history, spark_w, 3) if len(history) >= 2 else []
+        header_lines: list[str] = []
+        for spark_row in spark_lines:
+            header_lines.append(f"[{dir_col}]{escape(spark_row)}[/]")
+        if not header_lines:
+            header_lines.append(f"[{MUTED}]no history[/]")
+        self.query_one("#market-stats-header", Static).update(
+            "\n".join(header_lines)
+        )
+
+        # Stat cards: three groups — PRICE, POSITION, CONTEXT
+        change_20d = _finite_number(row.get("change_20d"))
+        change_20d_tone = (MUTED if change_20d is None
+                           else UP if change_20d >= 0 else DOWN)
+        realized_vol = _finite_number(row.get("realized_vol"))
+        regime_name = str(
+            market.get("regime", {}).get("regime", "—")
+        ).upper()
+        regime_tone = _HMM_STATE_TONE.get(regime_name.lower(), TEXT_HI)
+
+        def _stat(label: str, value: str, tone: str = TEXT_HI) -> str:
+            lbl = escape(label[:12])
+            val = escape(str(value)[:10])
+            return f"[{MUTED}]{lbl:<12}[/] [{tone}]{val}[/]"
+
+        rule = f"[{BORDER_HI}]{'─' * 22}[/]"
+        body_lines = [
+            f"[bold {AMBER}]▌ PRICE[/]",
+            rule,
+            _stat("20d change", pct(change_20d), change_20d_tone),
+            _stat("63d vol", pct(realized_vol)),
+            "",
+            f"[bold {AMBER}]▌ POSITION[/]",
+            rule,
+            _stat("weight", pct(float(current))),
+            _stat("target", pct(target) if target is not None else "—"),
+            "",
+            f"[bold {AMBER}]▌ CONTEXT[/]",
+            rule,
+            _stat("regime", regime_name, regime_tone),
+            _stat("source", str(market.get("source", "—")).upper()),
+            _stat("as of", str(market.get("as_of", "—"))[:10]),
+            _stat("bar age", f"{market.get('bar_age_days', '—')}d"),
         ]
-        per_row = 2 if avail_w >= 78 else 1
-        for i in range(0, len(stats), per_row):
-            cells = [
-                f"[{LABEL_GOLD}]{escape(label):<18}[/][{TEXT_HI}]{escape(str(value)):<16}[/]"
-                for label, value in stats[i:i + per_row]
-            ]
-            lines.append("  ".join(cells))
-        lines.append(
-            f"[{LABEL_GOLD}]Daily adjusted-close context; this is not a streaming quote.[/]")
-        self.query_one("#market-content", Static).update("\n".join(lines))
+        self.query_one("#market-stats-body", Static).update(
+            "\n".join(body_lines)
+        )
 
     def _set_flow_spec(
         self,
@@ -2742,7 +2927,7 @@ class QlabTui(App[None]):
         """Switch the board to the selected workflow's actual step instances."""
         self._flow_spec = flow or _FLOW
         try:
-            self.query_one("#flow-row", FlowBoard).set_flow(self._flow_spec)
+            self.query_one("#flow-section", FlowBoard).set_flow(self._flow_spec)
         except Exception:
             pass
 
@@ -2865,6 +3050,19 @@ class QlabTui(App[None]):
         )
         self._set_flow_spec(flow)
 
+        # Change 3: set a CSS class on #workforce-content that reflects the run
+        # state so the accent border colour updates without touching text content.
+        content_widget = self.query_one("#workforce-content", Static)
+        for cls in ("running", "complete", "failed", "blocked", "interrupted"):
+            content_widget.remove_class(f"-{cls}")
+        _status_cls = {
+            "running": "-running", "complete": "-complete",
+            "failed": "-failed", "blocked": "-blocked",
+            "interrupted": "-interrupted",
+        }.get(status)
+        if _status_cls:
+            content_widget.add_class(_status_cls)
+
         # Rebuild flow state/detail from durable steps; where a phase has no
         # step yet, keep a live 'working' the tool stream set, else queue it.
         prior_states = self._flow_states
@@ -2892,11 +3090,20 @@ class QlabTui(App[None]):
         self._flow_details = flow_details
         self._render_flow()
 
+        # Change 3: structured two-line header: ID + status chip / kind · date · universe
+        status_tone = {
+            "running": CYAN, "complete": UP, "failed": DOWN,
+            "blocked": AMBER, "interrupted": GOLD,
+        }.get(status, MUTED)
+        status_glyph = {
+            "running": "●", "complete": "✓", "failed": "×",
+            "blocked": "!", "interrupted": "‖",
+        }.get(status, "◌")
         lines = [
-            f"[bold {TEXT_HI}]{escape(str(workflow.get('workflow_id', '—')))}[/]   "
-            f"{escape(status.upper())}",
-            f"[{LABEL_GOLD}]{escape(str(workflow.get('kind', 'portfolio_review')))} · "
-            f"as of {escape(str(request.get('as_of', '—')))} · "
+            f"[bold {TEXT_HI}]{escape(str(workflow.get('workflow_id', '—')))}[/]"
+            f"   [{status_tone}]{status_glyph} {escape(status.upper())}[/]",
+            f"[{AMBER}]{escape(str(workflow.get('kind', 'portfolio_review')))}[/]"
+            f"[{MUTED}] · as of {escape(str(request.get('as_of', '—')))} · "
             f"{escape(str(request.get('universe', 'core')))}[/]",
             f"[{MUTED}]{escape(str(request.get('goal', 'Governed portfolio review'))[:160])}[/]",
         ]

@@ -456,6 +456,27 @@ def test_readiness_probe_uses_a_short_deadline(monkeypatch):
     assert captured["timeout"].connect == 0.75
 
 
+def test_owner_stderr_drain_survives_a_chatty_child():
+    # A PIPE nobody reads deadlocks the child once the OS buffer (~64 KB)
+    # fills, so the drain must run for the child's whole life. This drives a
+    # multiple of that through the pipe and asserts the child still exits and
+    # the tail keeps the end — where a traceback would be.
+    import subprocess
+    import sys as _sys
+
+    from qlab.autopilot.cli import _OwnerStderrTail
+
+    child = subprocess.Popen(
+        [_sys.executable, "-c",
+         "import sys\n"
+         "for i in range(20000):\n"
+         "    print(f'line {i}', file=sys.stderr)\n"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    tail = _OwnerStderrTail(child)
+    assert child.wait(timeout=30) == 0  # deadlocks here without the drain
+    assert tail.tail().splitlines()[-1] == "line 19999"
+
+
 def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
     """A bound port is not enough: the owner may still be opening its state."""
     from types import SimpleNamespace

@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -46,8 +48,31 @@ def _client():
     return InProcessClient()
 
 
+def _isolate_runtime_state() -> None:
+    """Point runtime state at a scratch directory before anything reads it.
+
+    `UISession` loads the persisted desk mode at construction, so without this
+    the harness inherits whichever desk the operator left running — the chip
+    rendered LIVE · ALPACA BOOK on a synthetic capture. Screenshots must never
+    depend on, or disclose, the real book.
+    """
+    scratch = tempfile.mkdtemp(prefix="qlab-shots-state-")
+    os.environ["QLAB_STATE_DIR"] = scratch
+    # Same reasoning for credentials: a capture must not be able to reach the
+    # operator's Alpaca profile even if some path tries.
+    os.environ["ALPACA_CONFIG_DIR"] = str(Path(scratch) / "no-alpaca-config")
+    for name in ("ALPACA_PROFILE", "ALPACA_API_KEY", "ALPACA_API_SECRET"):
+        os.environ.pop(name, None)
+
+
 async def _shoot(views, theme, size, out_dir):
-    app = QlabTui(_client(), refresh_interval=0, claude_start="off")
+    # An explicit desk mode: without one the app asks on mount and the modal
+    # sits over every view. Synthetic is also the only honest choice here —
+    # these images must never be produced against a real book.
+    from qlab.core.desk_mode import DeskMode
+
+    app = QlabTui(_client(), refresh_interval=0, claude_start="off",
+                  desk_mode=DeskMode("synthetic", "simulated"))
     written = []
     async with app.run_test(size=size) as pilot:
         if theme != tokens.DEFAULT_THEME:
@@ -61,14 +86,42 @@ async def _shoot(views, theme, size, out_dir):
     return written
 
 
+# Textual draws charts (`braille_chart`) and the market-pulse sparkline with
+# braille, U+28xx. resvg picks one family per run and does not fall back per
+# glyph, so rendering those needs a single font that is BOTH monospace and
+# covers that block — otherwise every braille visual rasterises as a row of
+# notdef boxes and the market view is unreviewable.
+#
+# Nothing on a stock macOS install qualifies. Braille appears only in
+# Apple Braille*, Apple Symbols, LastResort and the DejaVu *proportional*
+# faces; DejaVu Sans **Mono** does not carry it. Iosevka does, and is
+# monospace: `brew install --cask font-iosevka`.
+#
+# Without it the harness still runs — braille just renders as boxes, and the
+# Market view should then be judged in a real terminal instead.
+_BRAILLE_MONO_FAMILY = "Iosevka"
+_BRAILLE_MONO_FILE = Path.home() / "Library/Fonts/Iosevka.ttc"
+
+
 def _rasterise(svg: str, target: Path) -> None:
     import resvg_py
 
-    png = resvg_py.svg_to_bytes(svg_string=svg)
+    options: dict = {}
+    if _BRAILLE_MONO_FILE.is_file():
+        # Name the file rather than a directory: pointing resvg at a whole
+        # font directory makes it parse every face on every render, which took
+        # this from instant to minutes.
+        options["font_files"] = [str(_BRAILLE_MONO_FILE)]
+        options["style_sheet"] = (
+            f"text, tspan {{ font-family: '{_BRAILLE_MONO_FAMILY}', "
+            "monospace; }"
+        )
+    png = resvg_py.svg_to_bytes(svg_string=svg, **options)
     target.write_bytes(bytes(png))
 
 
 def main() -> int:
+    _isolate_runtime_state()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--views", nargs="*", default=None,
                         help=f"subset of: {' '.join(_VIEWS)}")

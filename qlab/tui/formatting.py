@@ -224,6 +224,23 @@ def sparkline(values: list[float]) -> str:
     )
 
 
+def spark(values: list[float], width: int = 12) -> str:
+    """A one-row trend line, or "" when there is nothing to draw.
+
+    Block glyphs fill from the baseline, so at sparkline size a noisy series
+    renders as a solid filled mass and the shape is unreadable. A braille row
+    marks only the value, so it reads as a line, and it carries two samples per
+    cell — twice the history in the same width.
+
+    Returns "" rather than a row of blanks for an unplottable series: a blank
+    row is indistinguishable from a flat one, and those mean different things.
+    """
+    finite = [float(v) for v in values if math.isfinite(float(v))]
+    if len(finite) < 2:
+        return ""
+    return braille_chart(finite, width=width, height=1)[0]
+
+
 def weight_bar(value: float, width: int = 16) -> str:
     value = min(1.0, max(0.0, float(value)))
     filled = min(width, max(0, round(value * width)))
@@ -261,31 +278,56 @@ def braille_chart(values: list[float], width: int, height: int) -> list[str]:
     cols = width * 2
     rows = height * 4
     n = len(finite)
-    # Resample to one point per dot-column with linear interpolation, so a short
-    # series (e.g. 40 daily bars) upsampled onto a wide terminal reads as a
-    # smooth curve rather than a staircase of repeated samples.
-    sampled = []
-    for i in range(cols):
-        pos = i * (n - 1) / (cols - 1)
-        lo_i = int(pos)
-        hi_i = min(n - 1, lo_i + 1)
-        frac = pos - lo_i
-        sampled.append(finite[lo_i] * (1.0 - frac) + finite[hi_i] * frac)
-    lo, hi = min(sampled), max(sampled)
+
+    # Two regimes, because point-sampling is only safe in one of them.
+    #
+    # Upsampling (fewer points than columns): interpolate, so 40 daily bars on
+    # a wide terminal read as a curve rather than a staircase.
+    #
+    # Downsampling (more points than columns): aggregate each column's whole
+    # bucket to its low and high. Point-sampling here silently drops whatever
+    # falls between the sampled indices — plotting ~4500 daily bars into ~200
+    # columns visits under 5% of them, and a spike landing in the other 95%
+    # disappears from the chart AND from its axis labels. On a price chart the
+    # high and the low are the two facts most worth having; a line that can
+    # omit them is not a smaller picture, it is a wrong one.
+    if n <= cols:
+        spans: list[tuple[float, float]] = []
+        for i in range(cols):
+            pos = i * (n - 1) / (cols - 1) if cols > 1 else 0.0
+            lo_i = int(pos)
+            hi_i = min(n - 1, lo_i + 1)
+            frac = pos - lo_i
+            value = finite[lo_i] * (1.0 - frac) + finite[hi_i] * frac
+            spans.append((value, value))
+    else:
+        spans = []
+        for i in range(cols):
+            start = (i * n) // cols
+            stop = max(start + 1, ((i + 1) * n) // cols)
+            bucket = finite[start:stop]
+            spans.append((min(bucket), max(bucket)))
+
+    lo = min(low for low, _ in spans)
+    hi = max(high for _, high in spans)
     span = (hi - lo) or 1.0
-    # Dot-space y, 0 at the bottom of the grid.
-    ys = [int(round((value - lo) / span * (rows - 1))) for value in sampled]
+
+    def _dot_y(value: float) -> int:
+        return int(round((value - lo) / span * (rows - 1)))
 
     grid = [[0] * width for _ in range(height)]
-    prev = ys[0]
+    prev_top = _dot_y(spans[0][1])
     for cx in range(cols):
-        cur = ys[cx]
-        # Fill the vertical run between adjacent samples so the line is
-        # continuous instead of a scatter of dots.
-        for dy in range(min(prev, cur), max(prev, cur) + 1):
+        col_lo, col_hi = spans[cx]
+        bottom, top = _dot_y(col_lo), _dot_y(col_hi)
+        # The column's own range, plus the run back to the previous column, so
+        # the line stays continuous across a gap.
+        low_dot = min(bottom, top, prev_top)
+        high_dot = max(bottom, top, prev_top)
+        for dy in range(low_dot, high_dot + 1):
             ry = (rows - 1) - dy  # dot rows are top-down
             grid[ry // 4][cx // 2] |= _BRAILLE_DOTS[ry % 4][cx % 2]
-        prev = cur
+        prev_top = top
     return [
         "".join(chr(0x2800 + cell) for cell in row)
         for row in grid

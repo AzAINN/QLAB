@@ -43,6 +43,25 @@ def isolated_state_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_ambient_owner_runtime(request, monkeypatch):
+    """Tests never consult a desk that happens to be running on this machine.
+
+    The direct-registry commands refuse to start while an owner owns the book,
+    and that guard probes a real port — so with `qlab tui` up, `cli.main` in a
+    test exits instead of running. A test's result must not depend on whether
+    the operator's desk is open. Tests that exercise the guard patch it
+    themselves, which takes precedence over this.
+
+    ``tests/test_mcp_server.py`` owns the probe's own behaviour, so it is
+    exempt: stubbing the function there would test the stub.
+    """
+    if request.path.name == "test_mcp_server.py":
+        return
+    monkeypatch.setattr(
+        "qlab.mcp.server.owner_runtime_alive", lambda port: False)
+
+
+@pytest.fixture(autouse=True)
 def isolated_alpaca_credentials(request, tmp_path, monkeypatch):
     """No test may discover the operator's real Alpaca login.
 

@@ -54,6 +54,31 @@ assert "textual" not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
+def test_no_single_row_band_spends_its_only_row_on_a_border():
+    # A one-row band has exactly one row for its text. Adding a border to it
+    # consumes that row, and the band renders as an unlabelled strip — which
+    # is what happened to every dashboard tile title and the whole agent rail
+    # at once: EQUITY, ALLOCATION, MARKET PULSE, AGENTS and SELECTED WORK all
+    # went blank while every test still passed, because no assertion reads a
+    # heading.
+    import re
+
+    from qlab.tui.theme import APP_CSS
+
+    # Each `selector { ... }` block, with its declarations.
+    blocks = re.findall(r"([^{}]+)\{([^{}]*)\}", APP_CSS)
+    offenders = []
+    for selector, body in blocks:
+        declarations = [d.strip() for d in body.split(";") if d.strip()]
+        heights = [d for d in declarations if d.startswith("height:")]
+        if heights and heights[-1].replace(" ", "") == "height:1":
+            if any(d.startswith("border") and "none" not in d
+                   for d in declarations):
+                offenders.append(selector.strip().splitlines()[-1].strip())
+    assert not offenders, (
+        f"one-row bands whose border eats their text: {offenders}")
+
+
 def test_rendered_css_references_shared_tokens_instead_of_baking_them():
     # The stylesheets deliberately keep `$token` references so a theme switch
     # repaints chrome; baking literals is what previously made the palette

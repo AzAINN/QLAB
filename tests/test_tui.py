@@ -2546,6 +2546,25 @@ def test_nav_menu_rows_are_clickable():
     asyncio.run(run())
 
 
+def test_a_downsampled_chart_cannot_drop_the_high_or_the_low():
+    # The market view plots history from 2008 — roughly 4,500 bars into ~200
+    # dot-columns. Point-sampling visited under 5% of them, so any extreme
+    # falling in the other 95% vanished from the line AND from the axis
+    # labels derived from it. On a price chart the high and the low are the
+    # two facts most worth having.
+    from qlab.tui.formatting import braille_chart
+
+    n = 4000
+    series = [100.0] * n
+    series[1500] = 400.0            # an index no sampler lands on
+    rows = braille_chart(series, width=60, height=8)
+
+    assert any(row.strip("⠀") for row in rows[:4]), (
+        "a 4x spike is missing from the top half of the chart")
+    # And the shape contract the caller relies on is unchanged.
+    assert len(rows) == 8 and {len(r) for r in rows} == {60}
+
+
 def test_braille_chart_is_fixed_size_and_plots_the_trend():
     from qlab.tui.formatting import braille_chart
 
@@ -2580,15 +2599,19 @@ def test_market_view_scales_the_chart_to_the_terminal():
             await pilot.pause(0.2)
             await pilot.press("3")
             await pilot.pause(0.1)
-            content = str(app.query_one("#market-content").content)
-            # the braille chart is present and spans many rows (a real plot,
-            # not a one-line sparkline)
-            chart_rows = [ln for ln in content.split("\n")
+            # The view is a split now: the plot owns its own column and the
+            # readouts moved to a sidebar. `#market-content` survives as a
+            # hidden widget nothing writes to, so asserting against it passed
+            # vacuously — it is empty by construction.
+            chart = str(app.query_one("#market-chart").content)
+            chart_rows = [ln for ln in chart.split("\n")
                           if any(c not in " ⠀" and ord(c) >= 0x2800 and ord(c) <= 0x28ff
                                  for c in ln)]
-            assert len(chart_rows) >= 10
-            # the readouts still render below it
-            assert "portfolio weight" in content and "regime" in content
+            assert len(chart_rows) >= 10, "the plot is not a one-line sparkline"
+            # And the readouts still render, grouped, beside it.
+            stats = str(app.query_one("#market-stats-body").content).lower()
+            assert "weight" in stats and "target" in stats
+            assert "regime" in stats and "bar age" in stats
 
     asyncio.run(run())
 
@@ -3220,7 +3243,7 @@ def test_console_renders_markdown_report_styled():
             # plain prose still reads as prose: whole, unbulleted, untruncated
             assert ("News is a quarantined research input, not a trading signal."
                     in flat)
-            assert "• referee passed" in flat
+            assert "› referee passed" in flat
             assert "1. bind the targets" in flat
             assert "• 1. bind the targets" not in flat   # numbering is the marker
             assert "| source | quality |" in rendered    # table alignment kept
@@ -3287,7 +3310,8 @@ def test_console_bullet_glyph_survives_a_count_leading_bullet():
                 strip.text for strip in app.query_one(
                     "#workforce-console", RichLog).lines).split())
 
-            assert "• 3 of 7 arms admitted" in flat
+            # The bullet glyph is a cyan chevron now, not a dot.
+            assert "› 3 of 7 arms admitted" in flat
             assert "1. bind the targets" in flat
             assert "• 1. bind the targets" not in flat
 
@@ -3649,6 +3673,40 @@ def test_workforce_note_follows_the_dependency_graph():
     head, nxt = workforce_note("referee", "blocked", "cap breach", {"analyst"})
     assert "blocked" in head and "cap breach" in head
     assert "Nothing was traded" in nxt
+
+
+def test_a_flat_book_reads_differently_from_an_unknown_one():
+    # A flat book spent a whole tile on em-dashes, which reads as missing
+    # data. Saying so plainly is better — but ONLY when the weights are known
+    # to be zero: an absent weight is not a zero one, and collapsing the two
+    # is exactly the confusion this desk exists to prevent.
+    from qlab.tui.app import QlabTui
+
+    flat = _snapshot()
+    from qlab.tui.app import _DEFAULT_TICKERS
+    flat["portfolio"]["weights"] = {t: 0.0 for t in _DEFAULT_TICKERS}
+    unknown = _snapshot()
+    unknown["portfolio"]["weights"] = {}
+
+    async def run(snapshot):
+        class C(StubClient):
+            def get(self, path, **params):
+                if path == "/api/tui":
+                    return snapshot
+                return super().get(path, **params)
+
+        app = QlabTui(C(), refresh_interval=0, desk_mode=_SYNTH,
+                      claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.25)
+            return str(app.query_one("#tile-allocation-content").content)
+
+    flat_text = asyncio.run(run(flat))
+    unknown_text = asyncio.run(run(unknown))
+
+    assert "No positions held" in flat_text
+    assert "No positions held" not in unknown_text
+    assert "—" in unknown_text
 
 
 def test_a_theme_switch_repaints_the_console_history():
@@ -4463,7 +4521,12 @@ def test_flow_node_renders_its_state_glyph_from_the_design_system():
 
     assert isinstance(rendered, Text)
     assert glyphs.STATES["idle"].unicode in rendered.plain
-    assert "analyst" in rendered.plain
+    # The node is a three-line card now: phase label, glyph + state, then the
+    # agent role truncated to the cell width (the hover card carries it whole).
+    lines = rendered.plain.split("\n")
+    assert lines[0] == "ANALYST"
+    assert "idle" in lines[1]
+    assert lines[2].startswith("moments")
 
 
 def test_flow_node_pulse_changes_the_glyph_but_not_the_role_colour():

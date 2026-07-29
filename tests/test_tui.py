@@ -3662,15 +3662,22 @@ def test_one_malformed_live_event_does_not_kill_the_subscription():
         app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
+            # The timeline drawer defers writes while hidden, so it must be
+            # open for the surfacing to be observable.
+            app.action_timeline()
+            await pilot.pause(0.1)
             app._apply_live_event({
                 "event_id": "bad-1",
                 "ts": "2026-07-24T12:00:00+00:00",
                 "kind": "quote",
                 "payload": {"rows": [{"ticker": "ACWI"}]},  # no price/change
             })
-            # No exception escaped; the strip names the bad frame.
-            strip = str(app.query_one("#event-strip").render())
-            assert "event.malformed" in strip
+            await pilot.pause(0.1)
+            # No exception escaped; the timeline names the bad frame.
+            from textual.widgets import RichLog
+            timeline = app.query_one("#timeline", RichLog)
+            written = "".join(s.text for s in timeline.lines)
+            assert "event.malformed" in written
             # And a well-formed event afterwards still lands.
             app._apply_live_event({
                 "event_id": "good-1",

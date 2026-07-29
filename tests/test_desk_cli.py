@@ -261,6 +261,11 @@ def _drive_cmd_tui(monkeypatch, argv, *, owner_running):
         def __init__(self, base_url):
             record["base_url"] = base_url
 
+        def probe(self, *args, **kwargs):
+            # Readiness is probe-based since the launcher stopped trusting an
+            # open port; a fake owner is ready the moment it exists.
+            return {}
+
         def get(self, path, **params):
             record["gets"].append((path, params))
             return {}

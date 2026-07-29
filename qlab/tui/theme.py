@@ -464,8 +464,14 @@ APP_CSS_TEMPLATE = Template("""
         background: $border;
         color: $text_hi;
     }
+    /* Auto, not a fixed seven rows: these carry the Atlas panel as well as
+       their own copy, which is taller than that — so the block clipped
+       mid-sentence and the table below started over the remains of it. The
+       cap keeps a long panel from pushing the table off the view. */
     #research-summary, #audit-summary {
-        height: 7;
+        height: auto;
+        max-height: 60%;
+        overflow-y: auto;
         color: $text;
     }
     #runs-table, #audit-table {

@@ -1329,6 +1329,14 @@ class QlabTui(App[None]):
                                     disabled=True,
                                     compact=True,
                                 )
+                    # Every plan card is hidden when there are none, which left
+                    # this heading standing over nothing while ORDERS below it
+                    # said so plainly. An empty section reads as a broken one.
+                    yield Static(
+                        id="book-plans-empty",
+                        classes="book-section",
+                        markup=True,
+                    )
                     yield Static("ORDERS · NEWEST 10", classes="book-section-title")
                     yield Static(
                         id="book-orders",
@@ -3509,6 +3517,11 @@ class QlabTui(App[None]):
             reverse=True,
         )[:5]
         self._book_plan_ids = {}
+        empty = self.query_one("#book-plans-empty", Static)
+        empty.styles.display = "none" if plans else "block"
+        if not plans:
+            empty.update(
+                f"[{MUTED}]No plans yet — a dry rebalance proposes one.[/]")
         for slot in range(5):
             card = self.query_one(f"#book-plan-{slot}", Horizontal)
             button = self.query_one(f"#execute-plan-{slot}", Button)

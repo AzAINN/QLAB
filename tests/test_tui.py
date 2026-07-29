@@ -3651,6 +3651,40 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "Nothing was traded" in nxt
 
 
+def test_a_flat_book_reads_differently_from_an_unknown_one():
+    # A flat book spent a whole tile on em-dashes, which reads as missing
+    # data. Saying so plainly is better — but ONLY when the weights are known
+    # to be zero: an absent weight is not a zero one, and collapsing the two
+    # is exactly the confusion this desk exists to prevent.
+    from qlab.tui.app import QlabTui
+
+    flat = _snapshot()
+    from qlab.tui.app import _DEFAULT_TICKERS
+    flat["portfolio"]["weights"] = {t: 0.0 for t in _DEFAULT_TICKERS}
+    unknown = _snapshot()
+    unknown["portfolio"]["weights"] = {}
+
+    async def run(snapshot):
+        class C(StubClient):
+            def get(self, path, **params):
+                if path == "/api/tui":
+                    return snapshot
+                return super().get(path, **params)
+
+        app = QlabTui(C(), refresh_interval=0, desk_mode=_SYNTH,
+                      claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.25)
+            return str(app.query_one("#tile-allocation-content").content)
+
+    flat_text = asyncio.run(run(flat))
+    unknown_text = asyncio.run(run(unknown))
+
+    assert "No positions held" in flat_text
+    assert "No positions held" not in unknown_text
+    assert "—" in unknown_text
+
+
 def test_a_theme_switch_repaints_the_console_history():
     # Colours were resolved at write time, so the run narrative stayed in the
     # old palette after a switch — dark-theme hex on the light canvas is about

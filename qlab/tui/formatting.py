@@ -224,6 +224,23 @@ def sparkline(values: list[float]) -> str:
     )
 
 
+def spark(values: list[float], width: int = 12) -> str:
+    """A one-row trend line, or "" when there is nothing to draw.
+
+    Block glyphs fill from the baseline, so at sparkline size a noisy series
+    renders as a solid filled mass and the shape is unreadable. A braille row
+    marks only the value, so it reads as a line, and it carries two samples per
+    cell — twice the history in the same width.
+
+    Returns "" rather than a row of blanks for an unplottable series: a blank
+    row is indistinguishable from a flat one, and those mean different things.
+    """
+    finite = [float(v) for v in values if math.isfinite(float(v))]
+    if len(finite) < 2:
+        return ""
+    return braille_chart(finite, width=width, height=1)[0]
+
+
 def weight_bar(value: float, width: int = 16) -> str:
     value = min(1.0, max(0.0, float(value)))
     filled = min(width, max(0, round(value * width)))

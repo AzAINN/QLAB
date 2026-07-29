@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -46,8 +48,31 @@ def _client():
     return InProcessClient()
 
 
+def _isolate_runtime_state() -> None:
+    """Point runtime state at a scratch directory before anything reads it.
+
+    `UISession` loads the persisted desk mode at construction, so without this
+    the harness inherits whichever desk the operator left running — the chip
+    rendered LIVE · ALPACA BOOK on a synthetic capture. Screenshots must never
+    depend on, or disclose, the real book.
+    """
+    scratch = tempfile.mkdtemp(prefix="qlab-shots-state-")
+    os.environ["QLAB_STATE_DIR"] = scratch
+    # Same reasoning for credentials: a capture must not be able to reach the
+    # operator's Alpaca profile even if some path tries.
+    os.environ["ALPACA_CONFIG_DIR"] = str(Path(scratch) / "no-alpaca-config")
+    for name in ("ALPACA_PROFILE", "ALPACA_API_KEY", "ALPACA_API_SECRET"):
+        os.environ.pop(name, None)
+
+
 async def _shoot(views, theme, size, out_dir):
-    app = QlabTui(_client(), refresh_interval=0, claude_start="off")
+    # An explicit desk mode: without one the app asks on mount and the modal
+    # sits over every view. Synthetic is also the only honest choice here —
+    # these images must never be produced against a real book.
+    from qlab.core.desk_mode import DeskMode
+
+    app = QlabTui(_client(), refresh_interval=0, claude_start="off",
+                  desk_mode=DeskMode("synthetic", "simulated"))
     written = []
     async with app.run_test(size=size) as pilot:
         if theme != tokens.DEFAULT_THEME:
@@ -61,14 +86,39 @@ async def _shoot(views, theme, size, out_dir):
     return written
 
 
+# KNOWN LIMITATION — braille renders as tofu boxes.
+#
+# Textual draws charts (`braille_chart`) and the market-pulse sparkline with
+# braille, U+28xx. resvg picks one family per run and does not fall back per
+# glyph, so it needs a single font that is both monospace and covers that
+# block. On a stock macOS install no such font exists: a scan of
+# /System/Library/Fonts, /Library/Fonts and ~/Library/Fonts finds braille only
+# in Apple Braille*, Apple Symbols and LastResort, all proportional — and a
+# proportional face destroys a terminal grid.
+#
+# So braille visuals here are NOT reviewable, and the Market view in particular
+# is meaningless in these captures. Judge those in a real terminal. Installing
+# a monospace font with braille coverage (DejaVu Sans Mono, Iosevka) and naming
+# it below fixes it; that is a change to the machine, so it is not done here.
+_FONT_DIRS = ["/System/Library/Fonts", "/Library/Fonts",
+              str(Path.home() / "Library/Fonts")]
+# Set to a monospace family covering U+28xx if one is installed.
+_MONO_FAMILY: str | None = None
+
+
 def _rasterise(svg: str, target: Path) -> None:
     import resvg_py
 
-    png = resvg_py.svg_to_bytes(svg_string=svg)
+    options: dict = {"font_dirs": [d for d in _FONT_DIRS if Path(d).is_dir()]}
+    if _MONO_FAMILY:
+        options["style_sheet"] = (
+            f"text, tspan {{ font-family: '{_MONO_FAMILY}', monospace; }}")
+    png = resvg_py.svg_to_bytes(svg_string=svg, **options)
     target.write_bytes(bytes(png))
 
 
 def main() -> int:
+    _isolate_runtime_state()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--views", nargs="*", default=None,
                         help=f"subset of: {' '.join(_VIEWS)}")

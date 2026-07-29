@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -51,12 +52,14 @@ def _parse_interval(s: str) -> int:
 
 
 def _cmd_run_once(args) -> int:
+    _refuse_second_writer("run-once")
     summary = run_once(offline=args.offline, execute=not args.dry_run)
     print(render_summary(summary))
     return 0
 
 
 def _cmd_watch(args) -> int:
+    _refuse_second_writer("watch")
     interval = _parse_interval(args.interval)
     print(f"[qlab] watch: running every {interval}s (Ctrl-C to stop). "
           f"Paper capital only.")
@@ -71,6 +74,7 @@ def _cmd_watch(args) -> int:
 
 
 def _cmd_daily_ops(args) -> int:
+    _refuse_second_writer("daily-ops")
     result = daily_ops(offline=args.offline)
     print(render_summary(result))
     return 0
@@ -97,6 +101,7 @@ def _print_autopilot_triggers(result: dict) -> None:
 
 def _cmd_autopilot(args) -> int:
     """Run proposal-only daily ops once or each supported trading morning."""
+    _refuse_second_writer("autopilot")
     eastern = ZoneInfo("America/New_York")
     if args.once:
         today = datetime.now(eastern).date()
@@ -136,6 +141,8 @@ def _cmd_autopilot(args) -> int:
 
 
 def _cmd_batch(args) -> int:
+    _refuse_second_writer("batch")
+
     from qlab.experiment import run_ablation
 
     report = run_ablation(args.spec, offline=args.offline)
@@ -149,6 +156,8 @@ def _cmd_batch(args) -> int:
 
 
 def _cmd_recommend(args) -> int:
+    _refuse_second_writer("recommend")
+
     from qlab.experiment import recommend
     from qlab.trader.mandate import load_mandate
 
@@ -223,6 +232,7 @@ def startup_desk_mode(flagged: DeskMode | None) -> DeskMode | None:
 def _cmd_ui(args) -> int:
     from qlab.ui.server import serve
 
+    _publish_owner_port(args.port)
     # No modal on this surface, so an unflagged run is handed no guess: the
     # session loads the persisted mode itself (and defaults to synthetic).
     mode = desk_mode_from_args(args)
@@ -235,6 +245,41 @@ def _cmd_ui(args) -> int:
           offline=not args.online if mode is None else mode.offline,
           open_browser=not args.no_browser, desk_mode=mode)
     return 0
+
+
+def _refuse_second_writer(command: str, port: int = 0) -> None:
+    """Refuse a direct-registry command while an owner runtime owns the book.
+
+    These commands construct their own `Registry`, which opens
+    `.lab/registry.duckdb`. DuckDB permits exactly one writer, so running one
+    while `qlab tui` is up died on a raw lock error naming a pid — for the
+    documented invocation, in a second shell, which is precisely how the
+    README tells an operator to use them. Refuse in the project's own terms
+    instead, and name the way through.
+    """
+    from qlab.mcp.server import owner_runtime_alive
+
+    resolved = int(port or os.environ.get("QLAB_UI_PORT", "8765"))
+    if not owner_runtime_alive(resolved):
+        return
+    raise SystemExit(
+        f"qlab {command} cannot run right now: an owner runtime on port "
+        f"{resolved} already owns the paper book, and DuckDB allows one "
+        "writer. Stop the desk (or use `qlab desk`, `qlab workforce` and "
+        "`qlab events`, which speak to the owner over HTTP)."
+    )
+
+
+def _publish_owner_port(port: int) -> None:
+    """Tell descendants which port the owner is on.
+
+    The combined MCP server refuses to start while an owner is alive, but it
+    reads the port from `QLAB_UI_PORT` and nothing set it — so on any
+    non-default port the guard probed 8765, found nothing, and opened the
+    registry as a second writer. A Claude session launched from the desk
+    inherits this environment, and `.mcp.json` starts that server.
+    """
+    os.environ["QLAB_UI_PORT"] = str(int(port))
 
 
 class _OwnerStderrTail:
@@ -288,6 +333,7 @@ def _cmd_tui(args) -> int:
     # Only a flag may retune an owner that is already running, so what the flags
     # said is kept apart from what startup resolved. A resolved mode of None
     # means the TUI asks on mount.
+    _publish_owner_port(args.port)
     flagged = desk_mode_from_args(args)
     mode = startup_desk_mode(flagged)
     offline = not args.online if mode is None else mode.offline

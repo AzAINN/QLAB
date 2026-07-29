@@ -230,6 +230,14 @@ class UISession:
         # outside the owner dispatch lock. desk_read composes from this and
         # never fetches, so a cold cache cannot stall the lock on RSS timeouts.
         self._desk_news: dict | None = None
+        # Guards publication of the window above. Two fetchers legitimately run
+        # concurrently — a heartbeat tick and an operator refresh — and both
+        # write here from outside the dispatch lock.
+        self._news_lock = threading.Lock()
+        # Previous robust regime, for flip detection. In memory only: after a
+        # restart there is no prior observation, and claiming a flip without
+        # one would launch a workflow off a cold start.
+        self._last_robust_state: str | None = None
         self.heartbeat = None
         # Autonomy is a runtime switch the operator owns from the UI.
         # The env var only seeds its initial value.
@@ -452,55 +460,6 @@ class UISession:
             "decision_id": decision_id, "targets_hash": targets_hash(targets),
             "note": "checked dry preview only; Claude cannot execute it",
         }
-
-    def execute_checked_plan(self, body: dict, offline: bool) -> dict:
-        """Execute one persisted checked plan after an explicit TUI confirmation."""
-        from qlab.trader.broker import get_broker
-        from qlab.trader.mandate import MandateViolation
-        from qlab.trader.plan import OrderLeg, OrderPlan, execute_plan
-
-        if body.get("human_confirmed") is not True:
-            raise PermissionError("human_confirmed=true is required")
-        plan_id = str(body.get("plan_id") or "")
-        stored = self.registry.get_plan(plan_id)
-        if stored is None:
-            raise KeyError(f"unknown plan_id {plan_id!r}")
-        legs = [OrderLeg(**leg) for leg in (stored.get("legs") or [])]
-        expected_legs = int((stored.get("pre_trade") or {}).get("n_legs", 0))
-        if len(legs) != expected_legs:
-            raise RuntimeError(
-                f"plan {plan_id!r} has incomplete persisted legs; re-propose"
-            )
-        plan = OrderPlan(
-            plan_id=stored["plan_id"], decision_id=stored["decision_id"],
-            targets=stored["targets"], legs=legs,
-            pre_trade=stored["pre_trade"], state=stored["state"],
-        )
-        # Execution-time data revalidation (P3): under an operational policy the
-        # data backing this plan must STILL be execution-grade at submission —
-        # fresh daily bar and, if a live stream is attached, fresh quotes. Demo
-        # /offline runtimes are never execution-grade, so this gate applies only
-        # to the real operational path and never blocks the simulated demo.
-        from qlab.core import data as market
-
-        policy = market.policy_for(offline, seed=self.seed)
-        if policy.execution_eligible:
-            health = self.data_health(offline, purpose="execution")
-            if health.get("blocked") or not health.get("eligible_for_execution"):
-                return {"executed": False, "blocked_by": "data_revalidation",
-                        "data_health": health}
-
-        broker = get_broker(
-            self.registry, offline=offline,
-            starting_cash=self.mandate.paper_capital, seed=self.seed,
-            universe=self.mandate.universe_whitelist,
-            book=self.desk_mode.book,
-        )
-        try:
-            result = execute_plan(self.registry, broker, plan)
-        except MandateViolation as exc:
-            return {"executed": False, "mandate_violation": str(exc)}
-        return {"executed": True, **result}
 
     # -- portfolio view -----------------------------------------------------
     def portfolio(self, offline: bool) -> dict:
@@ -969,12 +928,17 @@ class UISession:
 
         config_path = workspace_root() / ".mcp.json"
         servers: list[str] = []
+        mcp_error = ""
         if config_path.exists():
             try:
                 config = json.loads(config_path.read_text(encoding="utf-8"))
                 servers = sorted(config.get("mcpServers", {}))
-            except Exception:
-                servers = []
+            except Exception as exc:
+                # A file that exists but does not parse is not the same fact as
+                # no file: reporting both as "not configured" sent the operator
+                # to re-add a server entry that was already there, while the
+                # parse error was surfaced nowhere.
+                mcp_error = f"{type(exc).__name__}: {exc}"[:200]
         proxy_available = importlib.util.find_spec("fastmcp") is not None
         # Cache-only provenance: never a network fetch from a status poll.
         provenance = data.cached_provenance(self.mandate.universe_whitelist)
@@ -1002,6 +966,7 @@ class UISession:
             "claude_available": bool(shutil.which("claude")),
             "mcp_configured": bool(servers),
             "mcp_servers": servers,
+            "mcp_config_error": mcp_error,
             "mcp_proxy_available": proxy_available,
             "governed_available": proxy_available and bool(shutil.which("claude")),
             "governed_authority": "propose_only",
@@ -1147,9 +1112,15 @@ class UISession:
                     sum(abs(float(w)) for w in weights.values()), 6),
                 "drift": round(drift, 4),
             },
-            "regime": {"robust_state": None, "flip": False},
+            # Both of these were hardcoded, which made `regime_review`
+            # unreachable autonomously (the flip branch could never fire) and
+            # had the desk brief report zero pending approvals with approvals
+            # sitting in the table — a confident wrong number rather than a
+            # missing one.
+            "regime": self._atlas_regime_facts(),
             "open_workflows": len(self.registry.list_workflows(50)),
-            "pending_approvals": 0,
+            "pending_approvals": len(
+                self.registry.list_approval_requests(50, "pending")),
             "order_anomaly": anomaly,
             # The grounded window the news-analyst would interpret. Present so
             # template preconditions can refuse an empty record rather than
@@ -1158,6 +1129,29 @@ class UISession:
                 (self.desk_read(offline).get("grounding") or {})
                 .get("hashes", [])),
         }
+
+    def _atlas_regime_facts(self) -> dict:
+        """The robust regime and whether it just changed.
+
+        Read from the panel the heartbeat already composed rather than
+        recomputed here: `atlas_facts` runs on every observe tick and holds the
+        dispatch lock, so this must not do data work.
+
+        `flip` compares against the previous observation only. A restart
+        therefore reports no flip rather than inventing one from a cold start,
+        which is the safe direction: a spurious flip launches a workflow.
+        """
+        cached = self._desk_read or {}
+        panel = cached.get("panel") if isinstance(cached.get("panel"), dict) else {}
+        robust = panel.get("robust_state") or cached.get("robust_state")
+        state = str(robust) if robust else None
+        flip = bool(
+            state and self._last_robust_state
+            and state != self._last_robust_state
+            and state != "unknown" and self._last_robust_state != "unknown")
+        if state:
+            self._last_robust_state = state
+        return {"robust_state": state, "flip": flip}
 
     def atlas_observe(self, offline: bool) -> dict:
         """Run one deterministic Atlas observe tick against current owner facts.
@@ -1197,8 +1191,9 @@ class UISession:
         desk distinguishable from a genuinely quiet one; returning an empty
         window silently would read as 'no news', which is a different claim.
         """
-        if self._desk_news is not None:
-            return self._desk_news
+        with self._news_lock:
+            if self._desk_news is not None:
+                return self._desk_news
         return {
             "items": [],
             "provider_name": "synthetic",
@@ -1256,7 +1251,12 @@ class UISession:
                 "provider_name": provider_name,
                 "error": None,
             }
-        self._desk_news = window
+        # Publishing under the same lock the heartbeat composes under keeps a
+        # manual refresh and a heartbeat tick from interleaving fetch and
+        # publish, which could leave the drawer showing a window older than the
+        # one just asked for — with no marker that it was stale.
+        with self._news_lock:
+            self._desk_news = window
         return window
 
     def compose_desk_read(
@@ -1593,6 +1593,13 @@ class UISession:
                         "data_health": health}
 
         legs = [OrderLeg(**leg) for leg in (stored.get("legs") or [])]
+        # A legacy or truncated row must be re-proposed, never executed with
+        # whatever legs happen to have survived — a partial plan that fills is
+        # indistinguishable from the plan the human actually approved.
+        expected_legs = int((stored.get("pre_trade") or {}).get("n_legs", 0))
+        if len(legs) != expected_legs:
+            raise RuntimeError(
+                f"plan {plan_id!r} has incomplete persisted legs; re-propose")
         plan = OrderPlan(plan_id=stored["plan_id"], decision_id=stored["decision_id"],
                          targets=stored["targets"], legs=legs,
                          pre_trade=stored["pre_trade"], state=stored["state"])
@@ -2261,8 +2268,25 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.rebalance_preview(body, off)
 
     if method == "POST" and path == "/api/plans/execute":
+        # Retained as the TUI's entry point, but it is now the same governed
+        # path as /api/plans/<id>/execute: a bare human_confirmed flag is
+        # self-attestation any local process can send, so the approval record
+        # — not the boolean — is what authorises a fill.
         clamped_off = _offline_for_book(session, off)
-        result = session.execute_checked_plan(body, clamped_off)
+        if body.get("human_confirmed") is not True:
+            return 400, {"error": "human_confirmed=true is required"}
+        if not str(body.get("approval_id") or ""):
+            # Distinct from an approval that fails to cover the plan (200 with
+            # reasons): presenting no approval at all is a malformed request,
+            # and saying so plainly keeps a caller from reading the refusal as
+            # "the desk declined this trade".
+            return 400, {"error": "execution requires an approval_id: a bare "
+                                  "human_confirmed flag cannot book a trade"}
+        try:
+            result = session.execute_plan_with_approval(
+                str(body.get("plan_id") or ""), body, clamped_off)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
         # A mark sourced "execution" asserts that legs filled; a refused or
         # mandate-violating plan must not forge that provenance.
         if result.get("executed") is True:
@@ -2306,7 +2330,9 @@ def handle_api(session: UISession, method: str, path: str,
         summary = run_once(
             registry=session.registry, mandate=session.mandate,
             offline=_offline_for_book(session, off),
-            execute=bool(body.get("execute", True)),
+            # Parsed, never cast: bool("false") is True, so a client that
+            # stringifies booleans would ask for a dry run and get a live one.
+            execute=_flagbool(body.get("execute"), True),
             skew_lambda=float(body.get("skew", 0.5)),
             kurt_lambda=float(body.get("kurt", 0.5)),
             as_of=body.get("as_of") or None, seed=session.seed,
@@ -2332,8 +2358,20 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, report
 
     if method == "POST" and path == "/api/reset":
-        session.registry.reset_book(session.mandate.paper_capital)
-        return 200, {"reset": True, "cash": session.mandate.paper_capital}
+        # A reset discards qlab's own book. It cannot discard an Alpaca
+        # account, so on that desk it would only delete the local marks and
+        # leave the recorded history disagreeing with the real account —
+        # refuse rather than manufacture that gap.
+        if session.desk_mode.book == "alpaca":
+            return 400, {
+                "error": "the Alpaca book cannot be reset from here: this "
+                         "would erase the local history of an account it "
+                         "cannot touch. Switch to the simulated book first."}
+        state = session.portfolio(off)
+        session.registry.reset_book(session.mandate.paper_capital,
+                                    book=state["broker"])
+        return 200, {"reset": True, "cash": session.mandate.paper_capital,
+                     "book": state["broker"]}
 
     return 404, {"error": f"no route for {method} {path}"}
 
@@ -2441,7 +2479,34 @@ class _Handler(BaseHTTPRequestHandler):
         payload = json.dumps(_jsonable(obj), default=str).encode("utf-8")
         self._send(status, payload, "application/json")
 
+    def _drain_request_body(self) -> bool:
+        """Consume any body sent with a bodyless method. False = unframable.
+
+        A GET carrying a body left those bytes in `rfile` under HTTP/1.1
+        keep-alive, and the next request on that connection was parsed out of
+        them — so a client could append a second, unrelated request (a reset,
+        say) to a harmless read and have the owner run it.
+        """
+        header = self.headers.get("Content-Length")
+        if header is None:
+            return True
+        try:
+            length = int(header)
+        except ValueError:
+            self.close_connection = True
+            self._json(400, {"error": "Content-Length must be an integer"})
+            return False
+        if length < 0:
+            self.close_connection = True
+            self._json(400, {"error": "Content-Length must not be negative"})
+            return False
+        if length:
+            self.rfile.read(length)
+        return True
+
     def do_GET(self):
+        if not self._drain_request_body():
+            return
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
             self._send(200, _INDEX.read_bytes(), "text/html; charset=utf-8")
@@ -2638,6 +2703,13 @@ class _Handler(BaseHTTPRequestHandler):
             # and this connection can no longer be framed.
             self.close_connection = True
             self._json(400, {"error": "Content-Length must be an integer"})
+            return
+        if length < 0:
+            # A negative length parses as an integer but describes no body:
+            # `length > 0` was False, so the bytes were neither consumed nor
+            # refused and keep-alive framed the next request against them.
+            self.close_connection = True
+            self._json(400, {"error": "Content-Length must not be negative"})
             return
         raw = self.rfile.read(length) if length > 0 else b"{}"
         # A body the owner failed to parse must never be replaced by {}. The

@@ -43,6 +43,8 @@ class AtlasHeartbeat:
         self._thread: threading.Thread | None = None
         self._ticks = 0
         self._errors = 0
+        self._last_error = ""
+        self._last_error_at = ""
         self._last_tick_at: float | None = None
         self._last_result: dict | None = None
         self._lock = threading.RLock()
@@ -83,6 +85,11 @@ class AtlasHeartbeat:
         except Exception as exc:
             with self._lock:
                 self._errors += 1
+                # The count alone cannot be acted on, and the only other
+                # channel was a print to a stdout the launcher sends to
+                # DEVNULL. Keep the reason where the snapshot can carry it.
+                self._last_error = repr(exc)[:300]
+                self._last_error_at = self._clock()
             if self._on_error is not None:
                 try:
                     self._on_error(exc)
@@ -103,6 +110,8 @@ class AtlasHeartbeat:
                 "ticks": self._ticks,
                 "errors": self._errors,
                 "last_tick_at": self._last_tick_at,
+                "last_error": self._last_error,
+                "last_error_at": self._last_error_at,
                 "last_state": (self._last_result or {}).get("state"),
             }
 

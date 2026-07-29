@@ -173,7 +173,72 @@ def test_plan_creating_template_is_refused_in_research_at_dispatch(reg):
     result = atlas.start_task(task_id, facts, runner=runner)
     assert result["started"] is False and result["blocked_by"] == "authority"
     assert "Propose mode" in result["reason"]
-    assert reg.get_atlas_task(task_id)["status"] == "blocked"
+    # The task stays queued and carries the reason. It used to be written
+    # "blocked" — the status an exhausted retry budget earns — which nothing
+    # moves back to queued, so the refusal was permanent: raising the mode to
+    # Propose could not recover it, and the day's trigger could not be
+    # recreated because its dedupe key was unchanged.
+    row = reg.get_atlas_task(task_id)
+    assert row["status"] == "queued"
+    assert "Propose mode" in (row["error"] or "")
+
+
+def test_a_drifting_drift_does_not_re_key_its_own_trigger(reg):
+    # The payload carried the live drift value and the dedupe key hashed the
+    # payload, so ordinary price movement minted a fresh key every tick: three
+    # tasks for one breach, the daily workflow budget gone, and a genuine
+    # drawdown trigger refused for the rest of the day.
+    atlas = _atlas(reg)
+    created = []
+    for drift in (0.0512, 0.0517, 0.0523, 0.0641):
+        facts = _facts()
+        facts["portfolio"]["drift"] = drift
+        out = atlas.observe(facts, trading_date="2026-07-24")
+        created += [t for t in out["created_tasks"]
+                    if t["trigger"] == "drift_breach"]
+
+    assert len(created) == 1, created
+    # The exact drift is still reported to the operator, just not identifying.
+    task = reg.get_atlas_task(created[0]["task_id"])
+    assert task["trigger_payload"]["drift"] == 0.0512
+
+
+def test_a_running_task_keeps_the_desk_reported_as_coordinating(reg):
+    # start_task wrote COORDINATING and the next observe tick overwrote it with
+    # OBSERVING, so the desk reported itself idle while a workforce run it had
+    # launched was still executing.
+    atlas = _atlas(reg)
+    facts = _facts()
+    facts["portfolio"]["drift"] = 0.5
+    out = atlas.observe(facts, trading_date="2026-07-24")
+    task_id = out["created_tasks"][0]["task_id"]
+    atlas.set_mode("propose")
+    assert atlas.start_task(task_id, facts)["started"] is True
+
+    observed = atlas.observe(facts, trading_date="2026-07-24")
+    assert observed["state"] == "coordinating"
+
+    # And once the task resolves, the desk goes back to observing.
+    reg.update_atlas_task(task_id, status="completed", conclusion={"ok": True})
+    assert atlas.observe(
+        facts, trading_date="2026-07-24")["state"] == "observing"
+
+
+def test_raising_the_mode_recovers_a_task_refused_on_authority(reg):
+    atlas = _atlas(reg)
+    facts = _facts()
+    facts["portfolio"]["drift"] = 0.5
+    out = atlas.observe(facts, trading_date="2026-07-24")
+    task_id = out["created_tasks"][0]["task_id"]
+
+    atlas.set_mode("research")
+    assert atlas.start_task(task_id, facts)["blocked_by"] == "authority"
+
+    # The refusal was about the mode, so the mode is what changes it.
+    atlas.set_mode("propose")
+    assert any(entry["task_id"] == task_id
+               for entry in atlas.startable_tasks(facts))
+    assert atlas.start_task(task_id, facts)["started"] is True
 
 
 # --- autonomy (opt-in, never an authority widening) --------------------------
@@ -273,6 +338,25 @@ def test_owner_tick_keeps_external_news_fetch_outside_dispatch_lock():
 
     assert calls == ["fetch", "compose", "observe"]
     assert result["state"] == "observing"
+
+
+def test_a_failing_heartbeat_reports_why_instead_of_looking_healthy():
+    # The only channel for a tick failure was a print to a stdout that
+    # `qlab tui` points at DEVNULL, and the status error count was rendered
+    # nowhere — so a supervisor whose every tick raised rendered exactly like
+    # a healthy desk with nothing to report.
+    from qlab.operator.heartbeat import AtlasHeartbeat
+
+    def always_fails():
+        raise RuntimeError("desk read is unreachable")
+
+    beat = AtlasHeartbeat(always_fails, interval_s=0.01)
+    assert beat.tick_once() is None
+
+    status = beat.status()
+    assert status["errors"] == 1
+    assert "unreachable" in status["last_error"]
+    assert status["last_error_at"]
 
 
 def test_a_failed_recompose_stops_the_stale_window_gating_a_news_template():

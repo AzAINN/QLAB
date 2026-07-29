@@ -70,6 +70,23 @@ _WORKFORCE_REQUIRED_ARTIFACTS = {
 }
 _MAX_PANEL_VARIANTS = 5
 
+# Which statuses an approval may hold *before* it is moved to each status. The
+# terminal ones — rejected, expired, consumed, invalidated — appear in no
+# right-hand side, which is what makes them terminal: a spent or refused
+# approval can never be revived to authorise a fill.
+_APPROVAL_TRANSITIONS: dict[str, frozenset[str]] = {
+    # A challenge re-opens a decision that has not been acted on yet.
+    "pending": frozenset({"pending"}),
+    "approved": frozenset({"pending"}),
+    "rejected": frozenset({"pending"}),
+    "expired": frozenset({"pending"}),
+    "consumed": frozenset({"approved"}),
+    # Invalidation says the plan this covered has drifted, which can happen
+    # while the decision is still outstanding — a pending approval whose book
+    # moved must not remain approvable.
+    "invalidated": frozenset({"pending", "approved"}),
+}
+
 
 def _phase_type(phase: str) -> str:
     """'analyst-3' → 'analyst'; panel branches share their base type's rules."""
@@ -244,9 +261,11 @@ CREATE TABLE IF NOT EXISTS approval_requests (
 -- `book` is the broker the equity belongs to. Two books' equity levels can
 -- never compose one return series, so every mark carries its own; the
 -- idempotency key stays (ts, source).
+-- The book is part of the identity: two books legitimately hold an equity at
+-- the same timestamp from the same source, and they are different facts.
 CREATE TABLE IF NOT EXISTS equity_marks (
     ts VARCHAR, source VARCHAR, book VARCHAR, equity DOUBLE, cash DOUBLE,
-    PRIMARY KEY (ts, source));
+    PRIMARY KEY (ts, source, book));
 """
 
 
@@ -297,6 +316,43 @@ class Registry:
         self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS avg_fill_price DOUBLE")
         self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS fee DOUBLE")
         self.con.execute("ALTER TABLE equity_marks ADD COLUMN IF NOT EXISTS book VARCHAR")
+        self._widen_equity_mark_identity()
+
+    def _widen_equity_mark_identity(self) -> None:
+        """Bring a pre-book equity_marks primary key up to (ts, source, book).
+
+        The `book` column was added by ALTER, which cannot widen the key, so an
+        existing database still keys marks on (ts, source). Two books hold an
+        equity at the same timestamp from the same source as a matter of
+        course — a daily mark, a backfill — and `INSERT OR IGNORE` silently
+        discarded the second one, reporting `{"backfilled": 0}`: identical to
+        "already up to date", for a book whose series was in fact empty.
+
+        DuckDB cannot alter a primary key in place, so the table is rebuilt.
+        This is a no-op on a database created from the current schema.
+        """
+        pk = self.con.execute(
+            "SELECT constraint_column_names FROM duckdb_constraints() "
+            "WHERE table_name='equity_marks' AND constraint_type='PRIMARY KEY'"
+        ).fetchall()
+        if not pk or "book" in list(pk[0][0]):
+            return
+        with self.transaction():
+            self.con.execute("""
+                CREATE TABLE equity_marks_rekeyed (
+                    ts VARCHAR, source VARCHAR, book VARCHAR,
+                    equity DOUBLE, cash DOUBLE,
+                    PRIMARY KEY (ts, source, book));
+            """)
+            # DISTINCT because the old key permitted only one row per
+            # (ts, source) anyway; this is a widening, never a merge.
+            self.con.execute(
+                "INSERT INTO equity_marks_rekeyed "
+                "SELECT DISTINCT ts, source, COALESCE(book, ''), equity, cash "
+                "FROM equity_marks")
+            self.con.execute("DROP TABLE equity_marks")
+            self.con.execute(
+                "ALTER TABLE equity_marks_rekeyed RENAME TO equity_marks")
 
     def close(self) -> None:
         self.con.close()
@@ -908,18 +964,30 @@ class Registry:
         self.con.execute("UPDATE account SET halted=?, updated_at=? WHERE id=1",
                          [halted, _now()])
 
-    def reset_book(self, cash: float) -> None:
-        """Discard the book: positions, orders, marks, and the account state.
+    def reset_book(self, cash: float, book: str) -> None:
+        """Discard one book: positions, orders, its marks, and the account state.
 
-        The equity marks go with it. Keeping them would splice the discarded
-        book's equity level onto the fresh one, and the first mark after a reset
-        would read as a market loss the size of the discarded gains — a
-        fabricated return that then propagates into max_drawdown, ann_vol and
-        cvar_95. A reset is already a destructive wipe; the history goes too.
+        That book's equity marks go with it. Keeping them would splice the
+        discarded book's equity level onto the fresh one, and the first mark
+        after a reset would read as a market loss the size of the discarded
+        gains — a fabricated return that then propagates into max_drawdown,
+        ann_vol and cvar_95. A reset is already a destructive wipe; that
+        history goes too.
+
+        Only *that book's* marks, though. The delete used to be unqualified,
+        so resetting the simulated paper book also destroyed the realized
+        equity curve of every other book — including an Alpaca account's
+        backfilled history, which no reset here can rebuild. `positions` and
+        `orders` are not book-partitioned because they only ever hold the
+        simulated book: the Alpaca adapter reads its positions from Alpaca.
         """
+        if not str(book).strip():
+            raise ValueError(
+                "reset_book requires the book being reset; an unqualified "
+                "wipe would take every book's history with it")
         self.con.execute("DELETE FROM positions")
         self.con.execute("DELETE FROM orders")
-        self.con.execute("DELETE FROM equity_marks")
+        self.con.execute("DELETE FROM equity_marks WHERE book=?", [str(book)])
         self.con.execute(
             "UPDATE account SET cash=?, high_water_mark=?, halted=FALSE, updated_at=? "
             "WHERE id=1", [cash, cash, _now()])
@@ -1493,10 +1561,21 @@ class Registry:
                 raise ValueError(
                     "referee 'targets' do not match the judge's winning targets"
                 )
-            # The reviewed decision is the winning branch's own analyst decision.
+            # The reviewed decision is the winning branch's own analyst
+            # decision. A panel winner is "optimizer-<branch>"; a flat graph's
+            # is bare "optimizer", and rpartition on that yields "optimizer"
+            # itself — so this used to look up "analyst-optimizer", find
+            # nothing, and drop the expected decision entirely, skipping the
+            # check that a PASS must review THIS run's decision.
             winner = str((judge_step.get("artifacts") or {}).get("winner_phase", ""))
-            branch = winner.rpartition("-")[2]
-            expected_decision = self._phase_decision_id(by_phase, f"analyst-{branch}")
+            _, dash, branch = winner.rpartition("-")
+            analyst_phase = f"analyst-{branch}" if dash else "analyst"
+            if analyst_phase not in by_phase:
+                raise ValueError(
+                    f"judge crowned {winner!r}, whose analyst phase "
+                    f"{analyst_phase!r} is not in this workflow; the verdict "
+                    "cannot be bound to a decision")
+            expected_decision = self._phase_decision_id(by_phase, analyst_phase)
             return self._require_pass_verdict(
                 artifacts, reviewed_hash, expected_decision)
         optimizer_step = by_phase.get("optimizer")
@@ -1894,6 +1973,26 @@ class Registry:
                             decided_at: str | None = None,
                             consumed_at: str | None = None,
                             invalidated_reason: str | None = None) -> None:
+        """Advance one approval along a legal edge, or refuse.
+
+        This used to be an unguarded UPDATE, which gave the approval lifecycle
+        writes but no edges: a consumed, rejected, or expired approval could be
+        driven back to ``pending`` by the challenge route and then approved
+        again, so neither a rejection nor an expiry was durable and a spent
+        approval could authorise a second fill. An unknown id updated nothing
+        and reported success.
+        """
+        legal = _APPROVAL_TRANSITIONS.get(status)
+        if legal is None:
+            raise ValueError(f"unknown approval status {status!r}")
+        current = self.get_approval_request(approval_id)
+        if current is None:
+            raise KeyError(f"unknown approval_id {approval_id!r}")
+        was = str(current.get("status") or "")
+        if was not in legal:
+            raise PermissionError(
+                f"approval {approval_id!r} cannot move {was!r} -> {status!r}; "
+                f"only {sorted(legal)} may become {status!r}")
         sets, params = ["status=?"], [status]
         if challenge_digest is not None:
             sets.append("challenge_digest=?")

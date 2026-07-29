@@ -454,11 +454,38 @@ def test_owner_runtime_alive_true_when_api_responds(monkeypatch):
             return b"{}"
 
     def fake_urlopen(url, timeout=None):
-        assert "/api/system" in url
+        # The probe must use the lock-free readiness route: /api/system is
+        # served under the owner's dispatch lock, so a long action made the
+        # probe time out and the guard concluded "no owner".
+        assert "/readyz" in url
         return FakeResp()
 
     monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
     assert server.owner_runtime_alive(8765) is True
+
+
+def test_a_slow_owner_is_alive_not_absent(monkeypatch):
+    # Guessing "no owner" from silence is the dangerous direction: it lets a
+    # second DuckDB writer start against a book someone already owns.
+    import qlab.mcp.server as server
+
+    def timeout_urlopen(url, timeout=None):
+        raise TimeoutError("owner busy under its dispatch lock")
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", timeout_urlopen)
+    assert server.owner_runtime_alive(8765) is True
+
+
+def test_a_refused_connection_is_a_real_absence(monkeypatch):
+    import urllib.error
+
+    import qlab.mcp.server as server
+
+    def refused(url, timeout=None):
+        raise urllib.error.URLError(ConnectionRefusedError("nothing listening"))
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", refused)
+    assert server.owner_runtime_alive(8765) is False
 
 
 def test_owner_runtime_alive_false_when_refused(monkeypatch):

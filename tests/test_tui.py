@@ -2546,6 +2546,33 @@ def test_nav_menu_rows_are_clickable():
     asyncio.run(run())
 
 
+def test_a_filled_chart_shades_from_the_line_to_the_baseline():
+    # A one-dot line spread over a tall plot is mostly empty space and reads
+    # as scatter even though it is continuous. Filling under it is what makes
+    # a price series legible at the height the market view actually gives it.
+    from qlab.tui.formatting import braille_chart
+
+    rising = [100.0 + i for i in range(40)]
+    line = braille_chart(rising, 40, 10)
+    filled = braille_chart(rising, 40, 10, fill=True)
+
+    # Every column reaches the baseline when filled, and the bare line's
+    # bottom row is not solid.
+    assert all(ch != "⠀" for ch in filled[-1])
+    assert filled[-1] != line[-1]
+
+    # Filling only ADDS dots: every dot on the line is still set, so the
+    # plotted path is unchanged rather than redrawn.
+    for filled_row, line_row in zip(filled, line):
+        for filled_cell, line_cell in zip(filled_row, line_row):
+            line_dots = ord(line_cell) - 0x2800
+            filled_dots = ord(filled_cell) - 0x2800
+            assert filled_dots & line_dots == line_dots
+
+    ink = sum(1 for r in filled for ch in r if ch != "⠀")
+    assert ink > 2 * sum(1 for r in line for ch in r if ch != "⠀")
+
+
 def test_a_downsampled_chart_cannot_drop_the_high_or_the_low():
     # The market view plots history from 2008 — roughly 4,500 bars into ~200
     # dot-columns. Point-sampling visited under 5% of them, so any extreme

@@ -1330,6 +1330,14 @@ class QlabTui(App[None]):
                                     disabled=True,
                                     compact=True,
                                 )
+                    # Every plan card is hidden when there are none, which left
+                    # this heading standing over nothing while ORDERS below it
+                    # said so plainly. An empty section reads as a broken one.
+                    yield Static(
+                        id="book-plans-empty",
+                        classes="book-section",
+                        markup=True,
+                    )
                     yield Static("ORDERS · NEWEST 10", classes="book-section-title")
                     yield Static(
                         id="book-orders",
@@ -2821,14 +2829,15 @@ class QlabTui(App[None]):
         # stroke and the line reads as scattered dots — the same series at a
         # third of that height reads as a price curve. Roughly 3:1 width to
         # height is the shape a trend is legible at.
-        # A braille cell is 2 dots wide and 4 tall, so a plot that is w cells
-        # by h cells is 2w by 4h dots — a chart given the full canvas height
-        # ends up taller than it is wide in dot space, which stretches every
-        # move into a near-vertical stroke and reads as scattered dots. A
-        # sixth of the width keeps it near 3:1 in dots, where a trend is
-        # legible.
-        chart_h = max(10, min(avail_h - 6, chart_w // 6))
-        rows = braille_chart(history, chart_w, chart_h)
+        # The chart takes the height it is given: this is the view's subject,
+        # and a plot occupying a third of its own pane looks like a rendering
+        # fault. Six lines go to the header, the x-axis baseline, the span and
+        # the legend.
+        chart_h = max(8, avail_h - 6)
+        # Filled, because a one-dot line spread over that much height reads as
+        # scatter even though it is continuous — the shape is what carries a
+        # price series.
+        rows = braille_chart(history, chart_w, chart_h, fill=True)
         last_row = len(rows) - 1
         mid_row = last_row // 2
         as_of = str(market.get("as_of", "—"))
@@ -3502,6 +3511,11 @@ class QlabTui(App[None]):
             reverse=True,
         )[:5]
         self._book_plan_ids = {}
+        empty = self.query_one("#book-plans-empty", Static)
+        empty.styles.display = "none" if plans else "block"
+        if not plans:
+            empty.update(
+                f"[{MUTED}]No plans yet — a dry rebalance proposes one.[/]")
         for slot in range(5):
             card = self.query_one(f"#book-plan-{slot}", Horizontal)
             button = self.query_one(f"#execute-plan-{slot}", Button)

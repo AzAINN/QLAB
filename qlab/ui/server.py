@@ -234,6 +234,10 @@ class UISession:
         # concurrently — a heartbeat tick and an operator refresh — and both
         # write here from outside the dispatch lock.
         self._news_lock = threading.Lock()
+        # Previous robust regime, for flip detection. In memory only: after a
+        # restart there is no prior observation, and claiming a flip without
+        # one would launch a workflow off a cold start.
+        self._last_robust_state: str | None = None
         self.heartbeat = None
         # Autonomy is a runtime switch the operator owns from the UI.
         # The env var only seeds its initial value.
@@ -1108,9 +1112,15 @@ class UISession:
                     sum(abs(float(w)) for w in weights.values()), 6),
                 "drift": round(drift, 4),
             },
-            "regime": {"robust_state": None, "flip": False},
+            # Both of these were hardcoded, which made `regime_review`
+            # unreachable autonomously (the flip branch could never fire) and
+            # had the desk brief report zero pending approvals with approvals
+            # sitting in the table — a confident wrong number rather than a
+            # missing one.
+            "regime": self._atlas_regime_facts(),
             "open_workflows": len(self.registry.list_workflows(50)),
-            "pending_approvals": 0,
+            "pending_approvals": len(
+                self.registry.list_approval_requests(50, "pending")),
             "order_anomaly": anomaly,
             # The grounded window the news-analyst would interpret. Present so
             # template preconditions can refuse an empty record rather than
@@ -1119,6 +1129,29 @@ class UISession:
                 (self.desk_read(offline).get("grounding") or {})
                 .get("hashes", [])),
         }
+
+    def _atlas_regime_facts(self) -> dict:
+        """The robust regime and whether it just changed.
+
+        Read from the panel the heartbeat already composed rather than
+        recomputed here: `atlas_facts` runs on every observe tick and holds the
+        dispatch lock, so this must not do data work.
+
+        `flip` compares against the previous observation only. A restart
+        therefore reports no flip rather than inventing one from a cold start,
+        which is the safe direction: a spurious flip launches a workflow.
+        """
+        cached = self._desk_read or {}
+        panel = cached.get("panel") if isinstance(cached.get("panel"), dict) else {}
+        robust = panel.get("robust_state") or cached.get("robust_state")
+        state = str(robust) if robust else None
+        flip = bool(
+            state and self._last_robust_state
+            and state != self._last_robust_state
+            and state != "unknown" and self._last_robust_state != "unknown")
+        if state:
+            self._last_robust_state = state
+        return {"robust_state": state, "flip": flip}
 
     def atlas_observe(self, offline: bool) -> dict:
         """Run one deterministic Atlas observe tick against current owner facts.

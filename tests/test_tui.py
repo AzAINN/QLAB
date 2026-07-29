@@ -10,11 +10,17 @@ import subprocess
 import pytest
 import yaml
 
+from qlab.core.desk_mode import DeskMode
 from qlab.state.registry import Registry
 from qlab.ui.server import UISession, handle_api
 
 
 pytest.importorskip("textual")
+
+# Every pilot below states its desk mode. An unset mode is the app's signal to
+# ask on mount, and that modal would take focus from assertions written before
+# it existed; the tests that exercise the modal leave the mode unset on purpose.
+_SYNTH = DeskMode("synthetic", "simulated")
 
 
 class InProcessClient:
@@ -673,13 +679,13 @@ def test_headless_shell_has_no_header_and_switches_context():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0)
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             assert len(app.query("Header")) == 0
             assert app.query_one("#spine") is not None
             assert app.query_one("#agent-rail") is not None
-            assert app.query_one("#system-status").content.startswith("PAPER")
+            assert app.query_one("#settings-system").content.startswith("PAPER")
             assert app.active_view == "atlas"
 
             await pilot.press("3")
@@ -723,7 +729,7 @@ def test_owner_system_status_reads_latest_autopilot_event():
     assert status["autopilot"]["triggers_fired"] == 2
 
 
-def test_status_strip_shows_autopilot_last_run_and_trigger_count():
+def test_settings_system_card_shows_autopilot_last_run_and_trigger_count():
     from qlab.tui.app import QlabTui
 
     class AutopilotClient(StubClient):
@@ -737,10 +743,10 @@ def test_status_strip_shows_autopilot_last_run_and_trigger_count():
             return snapshot
 
     async def run():
-        app = QlabTui(AutopilotClient(), refresh_interval=0)
+        app = QlabTui(AutopilotClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(160, 42)) as pilot:
             await pilot.pause(0.2)
-            status = str(app.query_one("#system-status").content)
+            status = str(app.query_one("#settings-system").content)
             assert "AUTO 07-24 16:30·2" in status
 
     asyncio.run(run())
@@ -750,7 +756,7 @@ def test_owner_failure_surfaces_in_conn_chip():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0)
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(160, 42)) as pilot:
             await pilot.pause(0.2)
             # Drive the failure path directly rather than through real
@@ -765,12 +771,299 @@ def test_owner_failure_surfaces_in_conn_chip():
     asyncio.run(run())
 
 
+def test_bottom_row_shows_only_connection_and_mode():
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0,
+                      desk_mode=DeskMode("live", "alpaca"))
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            assert str(app.query_one("#mode-chip").content).strip() == (
+                "LIVE · ALPACA BOOK")
+            # the verbose banner and the full-width event line are gone
+            assert not app.query("#system-status")
+            assert not app.query("#event-strip")
+
+    asyncio.run(run())
+
+
+def test_mode_chip_tones_a_real_book_apart_from_a_simulated_one():
+    """Colour, not just wording, separates a real book from the demo.
+
+    "Live prices, simulated book" is the state an operator could misread as
+    real P&L, so the three modes must be three tones — this chip is the only
+    always-visible answer to whose money is at risk.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens as _tokens
+    _v = _tokens.THEMES[_tokens.DEFAULT_THEME].variables
+    AMBER, DOWN, MUTED = _v["amber"], _v["down"], _v["muted"]
+
+    async def chip(mode):
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=mode)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            widget = app.query_one("#mode-chip")
+            return str(widget.content).strip(), widget.styles.color
+
+    async def run():
+        label, tone = await chip(DeskMode("live", "alpaca"))
+        assert label == "LIVE · ALPACA BOOK"
+        assert tone == Color.parse(DOWN)
+
+        label, tone = await chip(DeskMode("live", "simulated"))
+        assert label == "LIVE · SIM BOOK"
+        assert tone == Color.parse(AMBER)
+
+        label, tone = await chip(_SYNTH)
+        assert label == "SYNTHETIC"
+        assert tone == Color.parse(MUTED)
+
+    asyncio.run(run())
+
+
+def test_mode_chip_reads_the_owner_payload_over_the_launcher_flag():
+    """The owner holds the book lane, so its ``desk_mode`` payload wins.
+
+    Production ``/api/tui`` always carries the key, so this — not the launcher
+    fallback the other chip tests exercise — is the live path. The casing case
+    is deliberate: a real book must never be downgraded to the muted tone by
+    something as cosmetic as capitalisation.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens as _tokens
+    DOWN = _tokens.THEMES[_tokens.DEFAULT_THEME].variables["down"]
+
+    class OwnerDeskModeClient(StubClient):
+        def __init__(self, payload):
+            super().__init__()
+            self.payload = payload
+
+        def get(self, path, **params):
+            snap = super().get(path, **params)
+            if path == "/api/tui":
+                snap["desk_mode"] = self.payload
+            return snap
+
+    async def chip(payload):
+        # Launcher says synthetic; the owner says a real book. The owner wins.
+        app = QlabTui(OwnerDeskModeClient(payload), refresh_interval=0,
+                      desk_mode=_SYNTH)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            widget = app.query_one("#mode-chip")
+            return str(widget.content).strip(), widget.styles.color
+
+    async def run():
+        label, tone = await chip({"data": "live", "book": "alpaca",
+                                  "label": "LIVE · ALPACA BOOK"})
+        assert label == "LIVE · ALPACA BOOK"
+        assert tone == Color.parse(DOWN)
+
+        label, tone = await chip({"data": " Live ", "book": "Alpaca",
+                                  "label": "LIVE · ALPACA BOOK"})
+        assert label == "LIVE · ALPACA BOOK"
+        assert tone == Color.parse(DOWN)
+
+    asyncio.run(run())
+
+
+def test_mode_chip_never_claims_synthetic_before_it_knows():
+    """A dead or slow owner must not turn a real book into the demo.
+
+    ``--live --alpaca-book`` is authoritative and skips the chooser, so nothing
+    but mount itself paints the chip; if the owner never answers, whatever
+    mount left there is what the operator reads for as long as the desk is up.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens as _tokens
+    _v = _tokens.THEMES[_tokens.DEFAULT_THEME].variables
+    DOWN, MUTED = _v["down"], _v["muted"]
+
+    class DeadOwnerClient(StubClient):
+        def get(self, path, **params):
+            if path == "/api/tui":
+                raise RuntimeError("owner has not finished booting")
+            return super().get(path, **params)
+
+    async def run():
+        app = QlabTui(DeadOwnerClient(), refresh_interval=0,
+                      desk_mode=DeskMode("live", "alpaca"))
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            assert not app.snapshot          # no snapshot ever arrived
+            widget = app.query_one("#mode-chip")
+            label = str(widget.content).strip()
+            assert label != "SYNTHETIC"
+            assert label == "LIVE · ALPACA BOOK"
+            assert widget.styles.color != Color.parse(MUTED)
+            assert widget.styles.color == Color.parse(DOWN)
+
+    asyncio.run(run())
+
+
+def test_mode_chip_does_not_read_the_pre_choice_snapshot():
+    """Choosing a real book must not leave a muted SYNTHETIC chip behind.
+
+    ``chosen()`` repaints the chip while ``self.snapshot`` still holds the
+    payload the owner sent *before* it was told, and the renderer prefers the
+    snapshot. Snapshot-first is right; the stale entry has to go.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens as _tokens
+    DOWN = _tokens.THEMES[_tokens.DEFAULT_THEME].variables["down"]
+
+    class StaleSnapshotClient(StubClient):
+        """One pre-choice snapshot, then silence — the window being tested.
+
+        The next poll is at least a refresh interval away and further still if
+        the owner is busy; whatever the chip says meanwhile is what is read.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.served = 0
+
+        def get(self, path, **params):
+            if path == "/api/tui":
+                self.served += 1
+                if self.served > 1:
+                    raise RuntimeError("the owner has not answered again yet")
+                snap = super().get(path, **params)
+                snap["desk_mode"] = {"data": "synthetic", "book": "simulated",
+                                     "label": "SYNTHETIC"}
+                return snap
+            return super().get(path, **params)
+
+    async def run():
+        app = QlabTui(StaleSnapshotClient(), refresh_interval=0, desk_mode=_SYNTH)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            assert str(app.query_one("#mode-chip").content).strip() == "SYNTHETIC"
+            app._ask_desk_mode({"credentials": "Alpaca browser login",
+                                "credentials_ok": True})
+            await pilot.pause(0.1)
+            app.screen.dismiss(DeskMode("live", "alpaca"))
+            await pilot.pause(0.2)
+            widget = app.query_one("#mode-chip")
+            assert str(widget.content).strip() == "LIVE · ALPACA BOOK"
+            assert widget.styles.color == Color.parse(DOWN)
+
+    asyncio.run(run())
+
+
+def test_a_refused_desk_mode_post_is_rendered_not_just_logged():
+    """A desk mode the owner never accepted must not read as in force.
+
+    ``chosen()`` has already committed the mode to the TUI, which then sends
+    ``offline=0`` and stamps ``QLAB_OFFLINE=0`` on every workforce call while
+    the owner is still on the old mode and the old book. The CLI's
+    attached-owner path raises SystemExit on exactly this failure; the modal
+    path only wrote a timeline line that scrolls away.
+    """
+    from textual.color import Color
+
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens as _tokens
+    DOWN = _tokens.THEMES[_tokens.DEFAULT_THEME].variables["down"]
+
+    class RefusingClient(StubClient):
+        def post(self, path, body=None):
+            if path == "/api/desk_mode":
+                raise RuntimeError("owner refused the desk mode")
+            return super().post(path, body)
+
+    async def run():
+        app = QlabTui(RefusingClient(), refresh_interval=0, desk_mode=_SYNTH)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            logged = []
+            timeline = app._write_local_event
+
+            def spy(kind, payload):
+                logged.append(kind)
+                timeline(kind, payload)
+
+            app._write_local_event = spy
+            app._ask_desk_mode({"credentials": "Alpaca browser login",
+                                "credentials_ok": True})
+            await pilot.pause(0.1)
+            app.screen.dismiss(DeskMode("live", "alpaca"))
+            await pilot.pause(0.4)
+            widget = app.query_one("#mode-chip")
+            label = str(widget.content).strip()
+            # Not the mode it failed to apply, and not the muted demo either.
+            assert "LIVE · ALPACA BOOK" not in label
+            assert "NOT APPLIED" in label
+            assert widget.styles.color == Color.parse(DOWN)
+            # The detail still reaches the audit timeline.
+            assert "desk_mode.error" in logged
+            assert "owner refused the desk mode" in (app._desk_mode_error or "")
+
+    asyncio.run(run())
+
+
+def test_mode_chip_claims_no_mode_while_the_chooser_is_still_up():
+    """No desk mode chosen yet is not the same as "synthetic"."""
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        # desk_mode=None is the app's signal to ask; the modal owns the screen
+        # while the chip must stand behind it saying nothing about the book.
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=None)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            assert str(app.query_one("#mode-chip").content).strip() == (
+                "CONNECTING")
+
+    asyncio.run(run())
+
+
+def test_settings_keeps_every_fact_the_banner_used_to_show():
+    from qlab.tui.app import QlabTui
+
+    class FactsClient(StubClient):
+        def get(self, path, **params):
+            snap = super().get(path, **params)
+            if path == "/api/tui":
+                snap["system"]["autopilot"] = {
+                    "last_run_at": "2026-07-24T16:30:00+00:00",
+                    "triggers_fired": 2,
+                }
+                snap["system"]["data_source"] = "synthetic"
+                snap["system"]["data_age_days"] = 0
+            return snap
+
+    async def run():
+        app = QlabTui(FactsClient(), refresh_interval=0,
+                      desk_mode=DeskMode("synthetic", "simulated"))
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("8")            # Settings
+            await pilot.pause(0.3)
+            card = str(app.query_one("#settings-system").content)
+            assert "AUTO 07-24 16:30·2" in card
+            assert "CLAUDE READY" in card
+            assert "DATA synthetic·0d" in card
+
+    asyncio.run(run())
+
+
 def test_view_switches_release_workforce_focus():
     from qlab.tui.app import QlabTui
 
     async def run():
         client = StubClient()
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
 
@@ -799,7 +1092,8 @@ def test_dashboard_renders_all_tiles_and_latest_verdict():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             tile_ids = {
@@ -864,7 +1158,8 @@ def test_dashboard_stress_alerts_tile_renders_all_drawdown_tiers():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             for tier_name in ("warning", "control", "breaker"):
@@ -915,7 +1210,7 @@ def test_dashboard_regime_tile_renders_hmm_posterior_and_uncertain_state():
     async def run():
         app = QlabTui(
             PosteriorClient(),
-            refresh_interval=0,
+            refresh_interval=0, desk_mode=_SYNTH,
             claude_start="off",
         )
         async with app.run_test(size=(160, 48)) as pilot:
@@ -935,7 +1230,7 @@ def test_quote_event_repaints_only_market_pulse_and_universe():
 
     async def run():
         client = StubClient()
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             other_tiles = {
@@ -1016,7 +1311,8 @@ def test_dashboard_sparse_payload_updates_every_tile():
     }
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             for tile_key in tile_keys:
@@ -1076,7 +1372,8 @@ def test_dashboard_refresh_replaces_full_snapshot_with_unavailable_state():
     }
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             app._apply_snapshot(_snapshot())
@@ -1109,7 +1406,7 @@ def test_later_snapshots_repaint_only_the_visible_canvas():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             app._apply_snapshot(_snapshot())
@@ -1142,14 +1439,15 @@ def test_tui_offer_mode_never_pushes_a_startup_modal():
 
     async def run():
         app = QlabTui(
-            WorkforceReadyClient(), refresh_interval=0, claude_start="offer"
+            WorkforceReadyClient(), refresh_interval=0, claude_start="offer",
+            desk_mode=_SYNTH
         )
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             assert app.snapshot
             assert len(app.screen_stack) == 1
             assert app.screen is app.screen_stack[0]
-            assert "CLAUDE READY" in app.query_one("#system-status").content
+            assert "CLAUDE READY" in app.query_one("#settings-system").content
 
     asyncio.run(run())
 
@@ -1175,7 +1473,8 @@ def test_workforce_view_renders_durable_phase_progress():
             return snap
 
     async def run():
-        app = QlabTui(WorkflowClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(WorkflowClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -1238,6 +1537,7 @@ def test_workforce_view_renders_panel_branches_and_judge_from_steps():
     async def run():
         app = QlabTui(
             PanelWorkflowClient(), refresh_interval=0, claude_start="off",
+            desk_mode=_SYNTH,
         )
         async with app.run_test(size=(160, 42)) as pilot:
             await pilot.pause(0.4)
@@ -1300,7 +1600,8 @@ def test_book_view_renders_positions_plan_cards_and_specific_execute_flow():
     from qlab.tui.app import PaperConfirmScreen, QlabTui
 
     async def run():
-        app = QlabTui(BookClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(BookClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 54)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("f6")
@@ -1336,7 +1637,8 @@ def test_book_renders_equity_curve_metrics_and_position_pnl():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("6")
@@ -1375,7 +1677,8 @@ def test_book_equity_discloses_a_capped_history_and_a_foreign_book():
             return snapshot
 
     async def run():
-        app = QlabTui(CappedClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(CappedClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("6")
@@ -1400,7 +1703,8 @@ def test_book_is_honest_when_no_equity_history():
             return snapshot
 
     async def run():
-        app = QlabTui(NoHistoryClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(NoHistoryClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("6")
@@ -1431,7 +1735,8 @@ def test_book_equity_reports_note_when_metrics_are_unavailable():
             return snapshot
 
     async def run():
-        app = QlabTui(ThinHistoryClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(ThinHistoryClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("6")
@@ -1493,9 +1798,11 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(AuditClient(), refresh_interval=0)
+        app = QlabTui(AuditClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(160, 44)) as pilot:
             await pilot.pause(0.2)
+            await pilot.press("~")   # reveal the timeline before it is written to
+            await pilot.pause(0.1)
             table = app.query_one("#audit-table")
             labels = [str(column.label) for column in table.columns.values()]
             assert "verdict" in labels
@@ -1510,8 +1817,9 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
                 app.query_one("#audit-summary").content)
 
             # selected-row detail expands challenger_view + verdict reasons
-            # into the work rail; the strip carries the verdict summary
+            # into the work rail; the timeline carries the verdict summary
             app._render_audit_detail("dec-pass-1")
+            await pilot.pause(0.1)
             rail = str(app.query_one("#selected-work").content)
             assert "turnover is acceptable" in rail
             assert "turnover within cap" in rail
@@ -1519,10 +1827,12 @@ def test_audit_view_surfaces_verdict_reflection_and_data_token():
             assert "**" not in rail and "`" not in rail
             assert "decision_id: decision-hidden" in rail
             assert "objective_id: obj-hidden" in rail
-            assert "verdict PASS" in str(app.query_one("#event-strip").content)
+            timeline = "\n".join(
+                strip.text for strip in app.query_one("#timeline").lines)
+            assert "verdict PASS" in timeline
 
-            # status strip carries the one DATA provenance token
-            assert "DATA synthetic·0d" in app.query_one("#system-status").content
+            # the settings system card carries the one DATA provenance token
+            assert "DATA synthetic·0d" in app.query_one("#settings-system").content
 
     asyncio.run(run())
 
@@ -1532,7 +1842,7 @@ def test_dry_rebalance_button_routes_through_owner_api():
 
     async def run():
         client = StubClient()
-        app = QlabTui(client, refresh_interval=0)
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(140, 60)) as pilot:
             await pilot.pause(0.1)
             # The desk opens on Atlas now; the dashboard action lives one view over.
@@ -1556,7 +1866,7 @@ def test_command_table_covers_help_and_preserves_owner_action_routes():
 
     async def run():
         client = StubClient()
-        app = QlabTui(client, refresh_interval=0)
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(120, 36)) as pilot:
             await pilot.pause(0.1)
             app.action_help()
@@ -1731,7 +2041,8 @@ def test_research_view_renders_latest_prediction_admission_with_tone():
     from qlab.tui.design.markup import DOWN, UP
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.2)
             app.snapshot["runs"] = [
@@ -1782,7 +2093,7 @@ def test_research_leaderboard_shows_method_names_not_codes():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0)
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("5")
@@ -1812,7 +2123,7 @@ def test_research_leaderboard_columns_align_on_visible_width():
     }
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0)
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("5")
@@ -1846,7 +2157,7 @@ def test_research_leaderboard_renders_absent_metrics_as_em_dash():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0)
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("5")
@@ -1917,7 +2228,7 @@ def test_settings_view_fetches_bootstrap_once_and_renders_read_only_bulletins():
 
     async def run():
         client = SettingsClient()
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("9")
@@ -1965,7 +2276,7 @@ def test_settings_bootstrap_error_is_capped_with_an_explicit_ellipsis():
     async def run():
         app = QlabTui(
             FailingSettingsClient(),
-            refresh_interval=0,
+            refresh_interval=0, desk_mode=_SYNTH,
             claude_start="off",
         )
         async with app.run_test(size=(160, 48)) as pilot:
@@ -1996,7 +2307,8 @@ def test_reference_view_leads_with_method_names_and_marks_champion():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("8")
@@ -2021,7 +2333,8 @@ def test_reference_detail_states_absent_ablation_and_shows_champion_numbers():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("8")
@@ -2091,7 +2404,8 @@ def test_reference_ablation_without_curated_numbers_reads_as_absent():
 
     async def run():
         app = QlabTui(
-            ShortWindowClient(), refresh_interval=0, claude_start="off")
+            ShortWindowClient(), refresh_interval=0, claude_start="off",
+            desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("8")
@@ -2127,7 +2441,7 @@ def test_reference_fetch_failure_is_visible_and_retried_on_the_next_visit():
 
     async def run():
         client = FailingReferenceClient()
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("8")
@@ -2177,7 +2491,7 @@ def test_reference_refetches_on_every_visit_so_a_new_ablation_is_never_stale():
 
     async def run():
         client = ChangingReferenceClient()
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("8")
@@ -2215,7 +2529,8 @@ def test_nav_menu_rows_are_clickable():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 44)) as pilot:
             await pilot.pause(0.2)
             for row, view in enumerate(
@@ -2259,7 +2574,8 @@ def test_market_view_scales_the_chart_to_the_terminal():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(200, 52)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("3")
@@ -2281,7 +2597,8 @@ def test_resize_sets_one_layout_tier():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(210, 50)) as pilot:
             await pilot.pause(0.2)
             assert "wide" in app.screen.classes
@@ -2550,7 +2867,7 @@ def test_workforce_view_shows_result_card_and_timings():
             return snap
 
     async def run():
-        app = QlabTui(CompleteWorkflowClient(), refresh_interval=0,
+        app = QlabTui(CompleteWorkflowClient(), refresh_interval=0, desk_mode=_SYNTH,
                       claude_start="off")
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
@@ -2597,7 +2914,8 @@ def test_workforce_view_shows_the_selected_regime_and_reasoning():
             return snap
 
     async def run():
-        app = QlabTui(RegimeClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(RegimeClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -2674,7 +2992,7 @@ def test_new_run_clears_the_previous_run_from_the_flowchart_immediately():
 
     async def run():
         client = RollingClient()
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -2725,7 +3043,7 @@ def test_workforce_view_shows_failure_card_with_resume_hint():
             return snap
 
     async def run():
-        app = QlabTui(FailedWorkflowClient(), refresh_interval=0,
+        app = QlabTui(FailedWorkflowClient(), refresh_interval=0, desk_mode=_SYNTH,
                       claude_start="off")
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
@@ -2767,7 +3085,7 @@ def test_workforce_failure_card_preserves_id_bearing_reason():
     async def run():
         app = QlabTui(
             FailedWorkflowClient(),
-            refresh_interval=0,
+            refresh_interval=0, desk_mode=_SYNTH,
             claude_start="off",
         )
         async with app.run_test(size=(140, 42)) as pilot:
@@ -2786,7 +3104,8 @@ def test_workforce_mode_advances_flowchart_without_dumping_narrative():
     from textual.widgets import RichLog
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")  # console renders once the view is visible
@@ -2848,7 +3167,8 @@ def test_results_fallback_cleans_markdown_mojibake_and_ids():
 
     async def run():
         # StubClient's default snapshot carries no workflow → fallback path.
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -2875,7 +3195,8 @@ def test_console_renders_markdown_report_styled():
     from textual.widgets import RichLog
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -2916,7 +3237,8 @@ def test_console_keeps_fenced_code_verbatim_across_streamed_chunks():
     from qlab.tui.design.markup import DIM, TEXT
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             written: list[str] = []
@@ -2951,7 +3273,8 @@ def test_console_bullet_glyph_survives_a_count_leading_bullet():
     from textual.widgets import RichLog
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -2977,7 +3300,8 @@ def test_console_flush_writes_the_partial_line_and_never_leaks_fence_state():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             written: list[str] = []
@@ -3034,7 +3358,8 @@ def test_completed_run_prints_friendly_structured_summary():
             return snap
 
     async def run():
-        app = QlabTui(CompleteClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(CompleteClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(150, 46)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -3100,7 +3425,8 @@ def test_blocked_run_summary_names_the_gate_and_what_it_means():
             return snap
 
     async def run():
-        app = QlabTui(BlockedClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(BlockedClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(150, 46)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -3126,7 +3452,8 @@ def test_completed_agent_prints_one_note_with_what_is_next():
     from textual.widgets import RichLog
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -3179,7 +3506,8 @@ def test_a_stopped_session_still_reports_where_the_run_reached():
             return snap
 
     async def run():
-        app = QlabTui(PartialRunClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(PartialRunClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("4")
@@ -3211,7 +3539,8 @@ def test_tui_stop_resume_and_abandon_use_owner_lifecycle_controls():
         client.session.registry.update_workflow_phase(
             workflow_id, "analyst", "working")
 
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             for _ in range(100):
                 if app.snapshot and not app._refreshing:
@@ -3268,7 +3597,8 @@ def test_successful_coordinator_exit_interrupts_an_unfinished_durable_run():
         client.session.registry.update_workflow_phase(
             workflow_id, "analyst", "working")
 
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             for _ in range(100):
                 if app.snapshot and not app._refreshing:
@@ -3332,15 +3662,22 @@ def test_one_malformed_live_event_does_not_kill_the_subscription():
         app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
+            # The timeline drawer defers writes while hidden, so it must be
+            # open for the surfacing to be observable.
+            app.action_timeline()
+            await pilot.pause(0.1)
             app._apply_live_event({
                 "event_id": "bad-1",
                 "ts": "2026-07-24T12:00:00+00:00",
                 "kind": "quote",
                 "payload": {"rows": [{"ticker": "ACWI"}]},  # no price/change
             })
-            # No exception escaped; the strip names the bad frame.
-            strip = str(app.query_one("#event-strip").render())
-            assert "event.malformed" in strip
+            await pilot.pause(0.1)
+            # No exception escaped; the timeline names the bad frame.
+            from textual.widgets import RichLog
+            timeline = app.query_one("#timeline", RichLog)
+            written = "".join(s.text for s in timeline.lines)
+            assert "event.malformed" in written
             # And a well-formed event afterwards still lands.
             app._apply_live_event({
                 "event_id": "good-1",
@@ -3361,7 +3698,7 @@ def test_a_respec_after_a_theme_switch_keeps_the_new_nodes_on_that_theme():
     from qlab.tui.app import FlowNode, QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             app.action_theme("qlab-light")
@@ -3379,7 +3716,7 @@ def test_a_respec_after_a_theme_switch_keeps_the_new_nodes_on_that_theme():
 def test_tui_event_dedupe_window_is_bounded():
     from qlab.tui.app import QlabTui, _EVENT_ID_LIMIT
 
-    app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+    app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
     appended = []
     app._append_event = appended.append
     events = [
@@ -3418,7 +3755,8 @@ def test_workforce_chat_sends_resumes_and_stops():
             self.stopped += 1
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             app.claude = ClaudeStub()
@@ -3607,7 +3945,8 @@ def test_audit_row_select_expands_decision_into_work_rail():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.2)
             app._audit_decisions["d1"] = {
@@ -3673,7 +4012,7 @@ def test_atlas_refresh_fetches_a_fresh_composed_read():
 
     async def run():
         client = RefreshClient(_atlas_snapshot())
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             app.action_atlas_refresh()
@@ -3688,7 +4027,7 @@ def test_atlas_refresh_fetches_a_fresh_composed_read():
     asyncio.run(run())
 
 
-def test_status_line_shows_atlas_mode_and_feed_identity():
+def test_settings_system_card_shows_atlas_mode_and_feed_identity():
     from qlab.tui.app import QlabTui
 
     snap = _atlas_snapshot(quotes={
@@ -3697,10 +4036,10 @@ def test_status_line_shows_atlas_mode_and_feed_identity():
         "health": {"fresh": True, "state": "live"}})
 
     async def run():
-        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(200, 48)) as pilot:
             await pilot.pause(0.2)
-            status = str(app.query_one("#system-status").content)
+            status = str(app.query_one("#settings-system").content)
             # IEX/SIP is never collapsed into the word "live".
             assert "ALPACA·SIP" in status
             assert "ATLAS OBSERVE/OBSERVING" in status
@@ -3708,7 +4047,7 @@ def test_status_line_shows_atlas_mode_and_feed_identity():
     asyncio.run(run())
 
 
-def test_status_line_marks_a_stale_quote_feed():
+def test_settings_system_card_marks_a_stale_quote_feed():
     from qlab.tui.app import QlabTui
 
     snap = _atlas_snapshot(quotes={
@@ -3716,10 +4055,10 @@ def test_status_line_marks_a_stale_quote_feed():
         "health": {"fresh": False, "state": "stale"}})
 
     async def run():
-        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(200, 48)) as pilot:
             await pilot.pause(0.2)
-            status = str(app.query_one("#system-status").content)
+            status = str(app.query_one("#settings-system").content)
             assert "ALPACA·IEX STALE" in status
 
     asyncio.run(run())
@@ -3737,7 +4076,7 @@ def test_audit_view_shows_atlas_panel_and_pending_approvals():
                     "status": "pending"}])
 
     async def run():
-        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             app.action_view("audit")
@@ -3762,7 +4101,7 @@ def test_atlas_panel_reports_degraded_coordinator_without_failing():
         "blocked_reason": None, "coordinator_available": False})
 
     async def run():
-        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             app.action_view("audit")
@@ -3786,7 +4125,7 @@ def test_atlas_rail_is_present_in_every_view():
                     "expires_at": "2026-07-24T18:45:00+00:00"}])
 
     async def run():
-        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(180, 48)) as pilot:
             await pilot.pause(0.2)
             for view in ("dashboard", "market", "book", "audit"):
@@ -3814,7 +4153,7 @@ def test_ctrl_b_opens_and_closes_the_atlas_drawer():
                     "created_at": "2026-07-24T11:00:00+00:00"}])
 
     async def run():
-        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(180, 48)) as pilot:
             await pilot.pause(0.2)
             app.action_atlas_drawer()
@@ -3848,7 +4187,7 @@ def test_atlas_drawer_states_authority_for_each_mode():
                 "manager_id": "atlas", "mode": mode,
                 "state": "observing", "blocked_reason": None,
                 "coordinator_available": True})
-            app = QlabTui(_AtlasStubClient(snap), refresh_interval=0,
+            app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH,
                           claude_start="off")
             async with app.run_test(size=(180, 48)) as pilot:
                 await pilot.pause(0.2)
@@ -3879,7 +4218,7 @@ def test_desk_opens_on_atlas_and_renders_the_read():
         atlas_heartbeat={"running": True, "ticks": 12})
 
     async def run():
-        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(180, 50)) as pilot:
             await pilot.pause(0.2)
             assert app.active_view == "atlas"
@@ -3900,6 +4239,34 @@ def test_desk_opens_on_atlas_and_renders_the_read():
     asyncio.run(run())
 
 
+def test_tui_refuses_a_live_desk_when_the_owner_reports_no_credentials():
+    from qlab.core.desk_mode import DeskMode
+    from qlab.tui.app import QlabTui
+    from qlab.tui.desk_mode_screen import DeskModeScreen
+
+    class BrokenCredentialClient(StubClient):
+        def get(self, path, **params):
+            if path == "/api/desk_mode":
+                return {"credentials": "no Alpaca credentials found — run "
+                                       "`alpaca profile login`",
+                        "credentials_ok": False}
+            return super().get(path, **params)
+
+    async def run():
+        client = BrokenCredentialClient()
+        # Again unset: this is the modal's own contract under test.
+        app = QlabTui(client, refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, DeskModeScreen)
+            await pilot.click("#desk-data-live")
+            await pilot.click("#desk-confirm")
+            await pilot.pause(0.3)
+            assert app.desk_mode == DeskMode("synthetic", "simulated")
+            assert app.offline is True
+
+
 def test_atlas_view_says_so_when_no_read_exists_yet():
     from qlab.tui.app import QlabTui
 
@@ -3907,7 +4274,7 @@ def test_atlas_view_says_so_when_no_read_exists_yet():
     snap.pop("atlas_read", None)
 
     async def run():
-        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, claude_start="off")
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(160, 44)) as pilot:
             await pilot.pause(0.2)
             read = str(app.query_one("#atlas-read").content)
@@ -3921,7 +4288,8 @@ def test_atlas_view_actions_route_through_the_owner():
 
     async def run():
         client = _AtlasStubClient(_atlas_snapshot())
-        app = QlabTui(client, refresh_interval=0, claude_start="off")
+        app = QlabTui(client, refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
         async with app.run_test(size=(180, 50)) as pilot:
             await pilot.pause(0.1)
             await pilot.click("#btn-atlas-escalate")
@@ -4033,7 +4401,7 @@ def test_app_registers_every_design_theme_and_defaults_to_dark():
     from qlab.tui.design import tokens
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.1)
             assert app.theme == tokens.DEFAULT_THEME
@@ -4047,7 +4415,7 @@ def test_theme_command_switches_the_active_theme():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.1)
             app._handle_command("theme qlab-light")
@@ -4062,7 +4430,7 @@ def test_theme_command_refuses_an_unknown_theme_without_changing_it():
     from qlab.tui.design import tokens
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.1)
             app._handle_command("theme solarized-banana")
@@ -4079,7 +4447,7 @@ def test_switching_theme_repaints_chrome_not_just_content():
     from qlab.tui.app import QlabTui
 
     async def run():
-        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH, claude_start="off")
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause(0.1)
             spine = app.query_one("#spine")

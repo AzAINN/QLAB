@@ -24,8 +24,9 @@ Python 3.10 or newer is required.
     qlab tui
 
 The terminal opens as a quiet, no-top-header workstation. It starts or connects
-to one owner HTTP process; the TUI itself never opens DuckDB. The status bar
-shows when the Claude CLI is ready without interrupting the desk.
+to one owner HTTP process; the TUI itself never opens DuckDB. The command row
+carries two chips only — owner connection, and the desk mode that says whose
+book is live; the system and service detail sits in Settings (`8`).
 
 The complete screen map is available from either the digit or matching function
 key:
@@ -98,6 +99,40 @@ For a core-only install:
 
 A normal wheel includes the default mandate, universe, experiment spec, and
 agent definitions. Runtime state is never written into site-packages.
+
+### Real market data and whose book
+
+The desk opens on offline synthetic data with a simulated book, so it runs with
+no account at all. Two independent things can be switched on: the data lane and
+the book.
+
+    alpaca profile login      # browser OAuth; paper-only by construction
+    qlab tui --live           # online market data, qlab's own simulated book
+    qlab tui --alpaca-book    # online market data and your Alpaca paper book
+
+`--live` (equivalently `--online`) only takes the data lane online; which
+provider serves it is `QLAB_DATA_PROVIDER`, and that defaults to `yfinance`.
+Alpaca market data is a separate, additional choice: it needs
+`QLAB_DATA_PROVIDER=alpaca` **and** exported `ALPACA_API_KEY` /
+`ALPACA_API_SECRET`, because the daily-bar provider reads those environment
+variables directly. The `alpaca profile login` session reaches the **book**
+lane only — with an OAuth-only login, `--alpaca-book` trades your real Alpaca
+paper account while prices still come from yfinance.
+
+`--alpaca-book` implies `--live`: reaching the real paper account is never a
+side effect of asking for real prices. The same three modes are offered by the
+startup modal on first launch — the flags only skip the question — and the
+choice persists, so later launches reopen the desk in the mode you left it in.
+The desk-mode chip in the command row names the mode currently in force.
+
+Every mode is paper-only; there is no live-trading path to select, and the
+browser login cannot grant one (the Alpaca CLI puts live behind its separate
+`--api-key --live` flow). That login is preferred over `ALPACA_API_KEY` /
+`ALPACA_API_SECRET` because it leaves no secret to paste or store. If you use
+keys anyway, either export them or put them in `.env`, which the CLI loads at
+startup — an already-exported variable outranks the file, and a blank entry in
+the file is ignored rather than treated as empty credentials. Note that qlab's
+`ALPACA_API_SECRET` is spelled `ALPACA_SECRET_KEY` by the Alpaca CLI.
 
 ## What is implemented
 
@@ -397,9 +432,14 @@ The current operator surface is research and paper-first:
 - Offline mode uses cache or deterministic synthetic fixtures.
 - Market provenance records the producing provider (`yfinance`, `alpaca`, or
   `synthetic`), and the as-of date and bar age are shown to the operator.
-- Alpaca support requires the trader extra plus local `ALPACA_API_KEY` and
-  `ALPACA_API_SECRET` values. It remains paper-only and daily-bar-only: there is
-  no streaming quote tape or complete order-lifecycle integration.
+- Alpaca support requires the trader extra plus one credential source: an
+  `alpaca profile login` session, or `ALPACA_API_KEY` and `ALPACA_API_SECRET`
+  either exported or set in `.env`, which the CLI loads at startup. The browser
+  login
+  currently reaches the **broker** only — the `alpaca` daily-bar provider reads
+  the two environment variables directly, so Alpaca market data still needs
+  exported keys. It remains paper-only and daily-bar-only: there is no
+  streaming quote tape or complete order-lifecycle integration.
 - Selecting Alpaca without its package or credentials fails loudly; qlab does
   not silently switch the request back to yfinance.
 - The simulated broker remains the zero-account default.

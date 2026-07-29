@@ -86,13 +86,20 @@ def run_once(
     lookback_days: int = 756,
     seed: int = 7,
     as_of: str | None = None,
+    book: str | None = None,
 ) -> dict:
-    """Run one full pipeline iteration and (optionally) paper-trade the result."""
+    """Run one full pipeline iteration and (optionally) paper-trade the result.
+
+    ``book`` is the caller's desk mode. ``None`` keeps ``get_broker``'s env-only
+    inference for callers that have no desk mode; a caller that has one must
+    pass it, or the plan this builds is priced and sized against a different
+    book from the one ``execute_checked_plan`` will fill.
+    """
     reg = registry or Registry()
     mandate = mandate or load_mandate()
     tickers = mandate.universe_whitelist
     broker = get_broker(reg, offline=offline, starting_cash=mandate.paper_capital,
-                        seed=seed, universe=tickers)
+                        seed=seed, universe=tickers, book=book)
     constraints = constraints_from_mandate(mandate)
     as_of = as_of or date.today().isoformat()
 
@@ -269,13 +276,19 @@ def daily_ops(
     mandate: Mandate | None = None,
     offline: bool = False,
     seed: int = 7,
+    book: str | None = None,
 ) -> dict:
-    """Reconcile + risk report + drift/regime trigger check. Never trades."""
+    """Reconcile + risk report + drift/regime trigger check. Never trades.
+
+    ``book`` carries the caller's desk mode for the same reason ``run_once``
+    takes one, and here it also decides which book the trailing-drawdown kill
+    switch is evaluated against before it latches the halt.
+    """
     reg = registry or Registry()
     mandate = mandate or load_mandate()
     tickers = mandate.universe_whitelist
     broker = get_broker(reg, offline=offline, starting_cash=mandate.paper_capital,
-                        seed=seed, universe=tickers)
+                        seed=seed, universe=tickers, book=book)
 
     state = broker.portfolio_state(tickers)
     rec = reconcile(reg, broker, tickers)

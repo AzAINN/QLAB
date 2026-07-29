@@ -31,6 +31,7 @@ from textual.widgets import (
     Static,
 )
 
+from qlab.core.desk_mode import DeskMode
 from qlab.core.reference import arm_display_name
 from qlab.paths import workspace_root
 from qlab.research.prediction import (
@@ -40,6 +41,7 @@ from qlab.research.prediction import (
 from qlab.tui.reference_view import ReferenceView
 from qlab.tui.claude import ClaudeEvent, ClaudeSession
 from qlab.tui.client import gather_snapshot
+from qlab.tui.desk_mode_screen import DeskModeScreen
 from qlab.tui.formatting import (
     braille_chart, bulletin, connection_chip, fence_state_after,
     is_numbered_item, key_number_lines, money, pct, phase_elapsed,
@@ -961,6 +963,7 @@ class QlabTui(App[None]):
         refresh_interval: float = 2.0,
         owned_server: subprocess.Popen | None = None,
         claude_start: str = "offer",
+        desk_mode: DeskMode | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -969,7 +972,16 @@ class QlabTui(App[None]):
         # raises UnresolvedVariableError on `$bg`.
         self._register_design_themes()
         self.client = client
-        self.offline = offline
+        # None means "nobody has said yet" — the operator is asked on mount. A
+        # mode from a flag is authoritative and skips the question entirely; it
+        # also owns the data lane, so ``offline`` can never contradict the mode
+        # the chip is about to report.
+        self.desk_mode = desk_mode
+        self.offline = offline if desk_mode is None else desk_mode.offline
+        self._desk_mode_prompted = False
+        # Set when the owner would not accept a chosen mode: the two are then
+        # trading different desks and the chip has to say so.
+        self._desk_mode_error: str | None = None
         self.refresh_interval = refresh_interval
         self.owned_server = owned_server
         self.claude_start = claude_start
@@ -986,7 +998,6 @@ class QlabTui(App[None]):
         self._action_running = False
         self._last_snapshot_at: float | None = None
         self._refresh_failures = 0
-        self._event_shown = False
         self._event_ids: set[str] = set()
         self._event_id_order: deque[str] = deque()
         self._runs_signature: tuple = ()
@@ -1036,7 +1047,7 @@ class QlabTui(App[None]):
             self._receive_claude_event,
             cwd=_WORKSPACE_ROOT,
             runtime_url=getattr(client, "base_url", "http://127.0.0.1:8765"),
-            offline=offline,
+            offline=self.offline,
         )
 
     def compose(self) -> ComposeResult:
@@ -1217,6 +1228,11 @@ class QlabTui(App[None]):
                         markup=True,
                     )
                     yield Static(
+                        id="settings-system",
+                        classes="settings-card",
+                        markup=True,
+                    )
+                    yield Static(
                         id="settings-data",
                         classes="settings-card",
                         markup=True,
@@ -1253,11 +1269,10 @@ class QlabTui(App[None]):
                 )
 
         yield RichLog(id="timeline", wrap=True, markup=False, max_lines=500)
-        yield Static("waiting for runtime snapshot", id="event-strip")
         with Horizontal(id="command-row"):
             yield Input(placeholder=": command or Ctrl-P", id="command")
             yield Static("CONNECTING", id="conn-chip", markup=True)
-            yield Static("PAPER · CONNECTING", id="system-status")
+            yield Static("CONNECTING", id="mode-chip")
 
     def on_mount(self) -> None:
         self.query_one("#runs-table", DataTable).add_columns("run", "kind", "created")
@@ -1278,11 +1293,18 @@ class QlabTui(App[None]):
         self._render_book()
         self._render_settings()
         self._render_agents()
+        # A launcher flag is authoritative and skips the chooser, so mount is
+        # the only chance to paint the chip before the first snapshot — and if
+        # the owner never answers, it is the only chance at all.
+        self._render_mode_chip()
         self._start_refresh()
         if self.refresh_interval > 0:
             self.set_interval(self.refresh_interval, self._start_refresh)
             self.set_interval(0.25, self._tick_pulse)
         self._start_live_stream()
+        if self.desk_mode is None and not self._desk_mode_prompted:
+            self._desk_mode_prompted = True
+            self._start_desk_mode_prompt()
 
     def _register_design_themes(self) -> None:
         """Make the design themes selectable and adopt the default.
@@ -1378,7 +1400,7 @@ class QlabTui(App[None]):
 
     def _start_refresh(self) -> None:
         # A running owner action holds the owner's dispatch lock; polling
-        # /api/tui behind it would only pile up timeouts in the event strip.
+        # /api/tui behind it would only pile up timeouts in the timeline.
         if self._refreshing or self._action_running:
             return
         self._refreshing = True
@@ -1413,6 +1435,103 @@ class QlabTui(App[None]):
         text, level = connection_chip(age, self._refresh_failures)
         tone = {"ok": UP, "warn": AMBER, "down": DOWN}[level]
         self.query_one("#conn-chip", Static).update(f"[{tone}]{text}[/]")
+
+    # -- desk mode --------------------------------------------------------
+    def _start_desk_mode_prompt(self) -> None:
+        """Fetch credential status off-thread, then ask.
+
+        The probe reaches the owner, which resolves a credential; that must never
+        block the UI, so it follows the same worker shape as the atlas fetch. A
+        probe that cannot answer is reported as "no usable credential", never as
+        a working one.
+        """
+
+        def run() -> None:
+            try:
+                payload = self.client.get("/api/desk_mode")
+            except Exception as exc:
+                payload = {"credentials": f"owner unreachable: {exc!r}",
+                           "credentials_ok": False}
+            self.call_from_thread(self._ask_desk_mode, payload)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _ask_desk_mode(self, payload: dict) -> None:
+        def chosen(mode: DeskMode | None) -> None:
+            if mode is None:
+                return
+            self.desk_mode = mode
+            self.offline = mode.offline
+            # The workforce reads its own flag when a coordinator spawns, and it
+            # is stamped onto every owner call the MCP proxy makes. Leaving it
+            # behind would run governed reviews on synthetic data under a LIVE
+            # chip — the one contradiction this screen exists to prevent.
+            self.claude.offline = mode.offline
+            # The snapshot in hand predates this choice and the chip prefers it,
+            # so a real book would read as the muted demo until the next poll.
+            if self.snapshot:
+                self.snapshot.pop("desk_mode", None)
+            self._post_desk_mode(mode)
+            self._render_mode_chip()
+            self._start_refresh()
+
+        self.push_screen(
+            DeskModeScreen(
+                credentials=str(payload.get("credentials", "")),
+                credentials_ok=bool(payload.get("credentials_ok")),
+            ),
+            chosen,
+        )
+
+    def _post_desk_mode(self, mode: DeskMode) -> None:
+        """Tell the owner which desk it is serving; it holds the book lane."""
+
+        def run() -> None:
+            try:
+                self.client.post("/api/desk_mode",
+                                 {"data": mode.data, "book": mode.book})
+            except Exception as exc:
+                self.call_from_thread(self._note_desk_mode_failure, repr(exc))
+            else:
+                self.call_from_thread(self._clear_desk_mode_failure)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _note_desk_mode_failure(self, error: str) -> None:
+        """Make a rejected mode visible, without taking the desk down.
+
+        ``chosen()`` has already committed the mode here, so the TUI is now
+        sending ``offline`` and running the workforce against a desk the owner
+        never accepted. The CLI's attached-owner path exits loudly on the same
+        failure; this path cannot, so the always-visible chip carries the error
+        instead of a timeline line that scrolls away.
+        """
+        self._desk_mode_error = error
+        self._write_local_event("desk_mode.error", {"error": error})
+        self._render_mode_chip()
+
+    def _clear_desk_mode_failure(self) -> None:
+        if self._desk_mode_error is None:
+            return
+        self._desk_mode_error = None
+        self._render_mode_chip()
+
+    def _reconcile_desk_mode(self, snapshot: dict) -> None:
+        """Retire a rejected-mode error once the owner is demonstrably in sync.
+
+        A refused POST may still have applied, or the operator may have retuned
+        the owner another way. The snapshot is the owner's own answer about
+        which desk it is serving, so a match ends the disagreement — leaving the
+        error up after that would be its own misread.
+        """
+        if self._desk_mode_error is None or self.desk_mode is None:
+            return
+        mode = snapshot.get("desk_mode") or {}
+        agrees = (
+            str(mode.get("data", "")).strip().lower() == self.desk_mode.data
+            and str(mode.get("book", "")).strip().lower() == self.desk_mode.book)
+        if agrees:
+            self._desk_mode_error = None
 
     def _start_bootstrap(self) -> None:
         """Fetch immutable owner configuration once, when Settings is first shown."""
@@ -1806,10 +1925,9 @@ class QlabTui(App[None]):
             }
         self._render_agents()
         self._render_atlas_rail()
-        self._render_status()
+        self._reconcile_desk_mode(snapshot)
+        self._render_mode_chip()
         self._ingest_events(snapshot.get("events", []))
-        if snapshot:
-            self._settle_event_strip()
         self._maybe_offer_workforce()
 
     def _render_active_snapshot_view(self) -> None:
@@ -3208,6 +3326,14 @@ class QlabTui(App[None]):
             ])
         self.query_one("#settings-mandate", Static).update(mandate_copy)
 
+        # "PAPER" leads the card because the desk is a paper desk before it is
+        # anything else; the tokens below it are the ones the command row used
+        # to carry, now read here instead of glanced at.
+        system_lines = [f"PAPER [{LABEL_GOLD}]DESK · SYSTEM & SERVICES[/]"]
+        system_lines.extend(_key_number_markup(self._system_tokens()))
+        self.query_one("#settings-system", Static).update(
+            "\n".join(system_lines))
+
         market = self.snapshot.get("market", {}) if self.snapshot else {}
         system = self.snapshot.get("system", {}) if self.snapshot else {}
         market_age = market.get("bar_age_days")
@@ -3389,9 +3515,10 @@ class QlabTui(App[None]):
             ),
         ])
         self._set_selected_work("\n".join(card_lines), markup=True)
-        self.query_one("#event-strip", Static).update(
-            f"{escape(str(key)[:10])}  "
-            f"[{verdict_tone}]verdict {escape(verdict_text)}[/] · "
+        # The timeline keeps the trail of what was inspected and what it said,
+        # so a selection made minutes ago is still recoverable from `~`.
+        self.query_one("#timeline", RichLog).write(
+            f"{str(key)[:10]}  verdict {verdict_text} · "
             "challenger + rationale in the work rail →"
         )
 
@@ -3422,10 +3549,52 @@ class QlabTui(App[None]):
         rail.rows = tuple(rows)
         rail.pulse = self._pulse
 
-    def _render_status(self) -> None:
-        system = self.snapshot.get("system", {})
-        market = self.snapshot.get("market", {})
-        source = str(market.get("source", "data")).upper()
+    def _render_mode_chip(self) -> None:
+        mode = (self.snapshot.get("desk_mode") or {}) if self.snapshot else {}
+        fallback = self.desk_mode
+        # Label and tone are read from one source. A snapshot taken before the
+        # owner knew the desk mode would otherwise paint a real book in the
+        # demo's tone, which is the single misread this chip exists to prevent.
+        label = str(mode.get("label")
+                    or (fallback.label if fallback else "")).strip()
+        chip = self.query_one("#mode-chip", Static)
+        if self._desk_mode_error is not None:
+            # The owner rejected the mode this client already committed to, so
+            # neither label is true: naming either desk would be a claim about
+            # whose money is at risk that nothing currently supports.
+            chip.set_class(True, "live-book")
+            chip.set_class(False, "live-data")
+            chip.update("MODE NOT APPLIED")
+        elif not label:
+            # Nobody has said which desk this is yet — the chooser is still up.
+            # "SYNTHETIC" here would be a positive and possibly wrong answer to
+            # "whose money is this", so the chip claims nothing instead.
+            chip.set_class(False, "live-book", "live-data")
+            chip.update("CONNECTING")
+        else:
+            # Normalised because this comparison decides whether a real book
+            # reads as the demo; casing drift must not downgrade it silently.
+            data = str(mode.get("data")
+                       or (fallback.data if fallback else "")).strip().lower()
+            book = str(mode.get("book")
+                       or (fallback.book if fallback else "")).strip().lower()
+            # Alert tone for a real book, warning for live prices on a
+            # simulated one, muted for synthetic; the tones live in the theme.
+            chip.set_class(book == "alpaca", "live-book")
+            chip.set_class(book != "alpaca" and data == "live", "live-data")
+            chip.update(label)
+        self.query_one("#chat-exit", Button).label = (
+            "■ stop" if self.claude.running else "exit")
+        self._sync_chat_input()
+
+    def _system_tokens(self) -> list[tuple[str, str]]:
+        """The service facts the bottom banner used to concatenate.
+
+        Kept as the banner's own token strings — ``DATA synthetic·0d``,
+        ``AUTO 07-24 16:30·2`` — because they are what the operator learned to
+        read; only their home moved from the command row into Settings.
+        """
+        system = (self.snapshot.get("system") or {}) if self.snapshot else {}
         if system.get("mcp_proxy_available"):
             mcp = "MCP WORKFORCE"
         elif system.get("mcp_configured"):
@@ -3460,7 +3629,7 @@ class QlabTui(App[None]):
             autopilot_token = "AUTO —·0"
         # Feed identity is never collapsed into the word "live": IEX is not SIP
         # coverage, and the operator must always see which one is priced.
-        quotes = self.snapshot.get("quotes") or {}
+        quotes = (self.snapshot.get("quotes") or {}) if self.snapshot else {}
         if quotes.get("live_stream"):
             feed = str(quotes.get("feed", "")).replace("_", " ").upper()
             health = quotes.get("health") or {}
@@ -3468,18 +3637,20 @@ class QlabTui(App[None]):
                 f"ALPACA·{feed}" if health.get("fresh") else f"ALPACA·{feed} STALE")
         else:
             feed_token = "FEED —"
-        atlas = self.snapshot.get("atlas") or {}
-        bob_token = (
+        atlas = (self.snapshot.get("atlas") or {}) if self.snapshot else {}
+        atlas_token = (
             f"ATLAS {str(atlas.get('mode', '—')).upper()}/"
             f"{str(atlas.get('state', '—')).upper()}" if atlas else "ATLAS —")
-        approvals = self.snapshot.get("approvals") or []
-        approval_token = f" · APPROVALS {len(approvals)}" if approvals else ""
-        self.query_one("#system-status", Static).update(
-            f"PAPER · {source}/DAILY · {feed_token} · {mcp} · {claude} · "
-            f"{data_token} · {autopilot_token} · {bob_token}{approval_token}")
-        self.query_one("#chat-exit", Button).label = (
-            "■ stop" if self.claude.running else "exit")
-        self._sync_chat_input()
+        approvals = (self.snapshot.get("approvals") or []) if self.snapshot else []
+        return [
+            ("quote feed", feed_token),
+            ("mcp proxy", mcp),
+            ("coordinator", claude),
+            ("provenance", data_token),
+            ("autopilot", autopilot_token),
+            ("desk manager", atlas_token),
+            ("approvals waiting", str(len(approvals))),
+        ]
 
     # -- events -----------------------------------------------------------
     def _ingest_events(self, events_: list[dict]) -> None:
@@ -3508,21 +3679,7 @@ class QlabTui(App[None]):
         if len(detail) > 180:
             detail = detail[:177] + "…"
         line = f"{clock}  {kind}  {detail if detail != '{}' else ''}".rstrip()
-        self._event_shown = True
         self.query_one("#timeline", RichLog).write(line)
-        self.query_one("#event-strip", Static).update(line)
-
-    def _settle_event_strip(self) -> None:
-        """Stop claiming to wait for a snapshot that has already arrived.
-
-        The strip only ever changes when an event arrives, so on a desk with no
-        audit history it kept reporting the startup state indefinitely — beside
-        a screen full of live figures. A quiet bus and an unreachable owner are
-        opposite conditions and must not read the same.
-        """
-        if self._event_shown:
-            return
-        self.query_one("#event-strip", Static).update("no desk events yet")
 
     def _write_local_event(self, kind: str, payload: dict) -> None:
         self._append_event({"ts": datetime.now().isoformat(), "kind": kind, "payload": payload})
@@ -3680,7 +3837,7 @@ class QlabTui(App[None]):
             )
         self._write_local_event(
             "claude.workforce_stopped", {"workflow_id": workflow_id})
-        self._render_status()
+        self._render_mode_chip()
 
     def action_workforce_abandon(self, workflow_id: str = "") -> None:
         """Close an incomplete run without deleting its evidence or audit."""
@@ -3720,7 +3877,7 @@ class QlabTui(App[None]):
         self._console_write(
             f"[{MUTED}]× abandoned — audit retained; start a new run to "
             "continue[/]")
-        self._render_status()
+        self._render_mode_chip()
 
     def action_rebalance_dry(self) -> None:
         self._run_api_action(
@@ -3970,7 +4127,7 @@ class QlabTui(App[None]):
             else:
                 self.claude.stop("operator stopped the chat session")
                 self._console_write(f"[{GOLD}]■ chat stopped[/]")
-                self._render_status()
+                self._render_mode_chip()
         else:
             self.action_view("dashboard")
 
@@ -4242,7 +4399,7 @@ class QlabTui(App[None]):
             "claude.started",
             {"mode": "workforce" if governed else "read-only", "prompt": prompt[:120]},
         )
-        self._render_status()
+        self._render_mode_chip()
         return True
 
     def _receive_claude_event(self, event: ClaudeEvent) -> None:
@@ -4344,7 +4501,7 @@ class QlabTui(App[None]):
                 self._set_selected_work(
                     "CLAUDE · READ-ONLY\n\n" + (self._claude_buffer or event.text)[-6000:])
             self._start_refresh()
-        self._render_status()
+        self._render_mode_chip()
 
     def _print_workforce_results(self, text: str) -> None:
         """Print one friendly completion summary when the coordinator's turn ends.

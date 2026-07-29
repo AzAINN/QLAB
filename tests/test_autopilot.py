@@ -588,7 +588,7 @@ def test_get_broker_fails_loud_when_alpaca_creds_present_but_broken(monkeypatch)
     monkeypatch.setenv("ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALPACA_API_SECRET", "s")
 
-    def boom(_registry):
+    def boom(_registry, credentials=None):
         raise RuntimeError("alpaca sdk missing")
 
     monkeypatch.setattr(broker_mod, "AlpacaPaperBroker", boom)

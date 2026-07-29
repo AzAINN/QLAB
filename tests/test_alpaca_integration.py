@@ -4,8 +4,12 @@ These are the only tests in the suite that touch the network, and they are off
 by default so `python -m pytest` stays offline and deterministic. Enable with:
 
     export QLAB_ALPACA_INTEGRATION=1
-    export ALPACA_API_KEY=... ALPACA_API_SECRET=...
+    export ALPACA_API_KEY=... ALPACA_API_SECRET=...   # or: alpaca profile login
     python -m pytest tests/test_alpaca_integration.py -v
+
+Most cases take the ``broker`` fixture and so need the env keys;
+``test_oauth_profile_builds_a_paper_broker`` covers the browser-login path
+instead and skips when no such profile exists.
 
 They run against the Alpaca **paper** account only — ``AlpacaPaperBroker``
 hard-codes ``paper=True`` and there is no live path to select. They still place
@@ -51,10 +55,53 @@ def test_account_is_a_paper_account(broker):
     paper-api host. Assert the endpoint actually in use rather than trusting
     the constructor argument.
     """
-    base_url = str(getattr(broker.trading, "_base_url", "")).lower()
+    # alpaca-py holds a BaseURL enum here, whose str() is the member name
+    # ("BaseURL.TRADING_PAPER"), not the host. Read .value so the assertion
+    # sees the endpoint; the getattr chain keeps it safe if either the
+    # attribute or the enum shape changes.
+    raw = getattr(broker.trading, "_base_url", "")
+    base_url = str(getattr(raw, "value", raw)).lower()
     assert "paper-api" in base_url, (
         f"AlpacaPaperBroker reached a non-paper endpoint: {base_url!r}")
     assert float(broker.trading.get_account().equity) >= 0
+
+
+def test_oauth_profile_builds_a_paper_broker():
+    """The `alpaca profile login` path, end to end. Opt-in like its neighbours.
+
+    Takes no ``broker`` fixture: that one wants env API keys, and this case is
+    exactly the credential source that replaces them. Skips — never fails —
+    when the operator has no browser-login session.
+    """
+    from qlab.state.registry import Registry
+    from qlab.trader.alpaca_auth import AlpacaAuthError, resolve_alpaca_credentials
+    from qlab.trader.broker import AlpacaPaperBroker
+
+    try:
+        creds = resolve_alpaca_credentials()
+    except AlpacaAuthError as exc:
+        # An unusable credential source — a half-set env pair, a live profile,
+        # unparseable YAML — is not a browser-login session, so for this case it
+        # is absence: skip, as the `broker` fixture above does for absent env
+        # keys. Those refusals are each asserted offline in test_alpaca_auth.py,
+        # which always runs; swallowing them here costs no coverage. The message
+        # is safe to print: alpaca_auth never puts a secret in one.
+        pytest.skip(f"no usable OAuth profile ({exc})")
+    if creds is None or creds.kind != "oauth":
+        pytest.skip("no OAuth profile; run `alpaca profile login`")
+    registry = Registry(":memory:")
+    try:
+        broker = AlpacaPaperBroker(registry, credentials=creds)
+        # The OAuth branch builds its clients separately from the API-key
+        # branch, so the paper-only invariant is re-checked on this path too.
+        raw = getattr(broker.trading, "_base_url", "")
+        base_url = str(getattr(raw, "value", raw)).lower()
+        assert "paper-api" in base_url, (
+            f"OAuth credentials reached a non-paper endpoint: {base_url!r}")
+        state = broker.portfolio_state([_PROBE_SYMBOL])
+        assert state["equity"] > 0
+    finally:
+        registry.close()
 
 
 def test_portfolio_state_reports_broker_truth(broker):

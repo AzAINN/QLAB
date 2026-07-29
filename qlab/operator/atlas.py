@@ -253,8 +253,15 @@ class AtlasSupervisor:
         try:
             template = check_startable(template_id, mode, facts)
         except TemplateNotAllowed as exc:
-            self.registry.update_atlas_task(task_id, status="blocked",
-                                          error=str(exc))
+            # An authority refusal is a fact about the CURRENT mode, not about
+            # the task: the same task is legitimately startable once the
+            # operator moves to Research or Propose. Writing "blocked" — the
+            # status an exhausted retry budget earns — made it terminal, since
+            # nothing moves a task back to queued and `startable_tasks` lists
+            # only queued ones. The day's trigger was then gone for good,
+            # because its dedupe key was unchanged and no new task could be
+            # created for the same condition.
+            self.registry.update_atlas_task(task_id, error=str(exc))
             return {"started": False, "blocked_by": "authority",
                     "reason": str(exc)}
 
@@ -417,7 +424,11 @@ class AtlasSupervisor:
         if isinstance(drift, (int, float)) and drift > self.config.drift_threshold:
             triggers.append(self._t(
                 "drift_breach", "workflow", "regime_review",
-                {"reason": "drift threshold exceeded", "drift": round(float(drift), 4)}))
+                {"reason": "drift threshold exceeded",
+                 "drift": round(float(drift), 4)},
+                # The breach is the condition; the exact drift is detail for
+                # the operator and must not re-key the trigger as it moves.
+                identity={"reason": "drift threshold exceeded"}))
 
         if facts.get("regime", {}).get("flip"):
             triggers.append(self._t(
@@ -431,14 +442,22 @@ class AtlasSupervisor:
         return triggers
 
     def _t(self, kind: str, action: str, template: str | None,
-           payload: dict) -> Trigger:
+           payload: dict, identity: dict | None = None) -> Trigger:
         # The trigger->template map is the single source of truth; a trigger
         # that maps to no template starts no workflow.
+        #
+        # `identity` is what makes two firings the SAME condition, and defaults
+        # to the whole payload. A payload carrying a live measurement needs it:
+        # the drift breach hashed its own drift value, so a 1bp move minted a
+        # fresh dedupe key, and three ticks of ordinary price movement created
+        # three tasks and exhausted the daily workflow budget — after which a
+        # genuine drawdown trigger was refused for the rest of the day.
         from qlab.operator.templates import template_for_trigger
 
         return Trigger(kind=kind, action=action,
                        template_id=template_for_trigger(kind) or template,
-                       payload=payload, state_hash=_hash(payload))
+                       payload=payload,
+                       state_hash=_hash(payload if identity is None else identity))
 
     def _dedupe_key(self, trig: Trigger, trading_date: str, facts: dict) -> str:
         universe = ",".join(sorted(facts.get("universe", [])))
@@ -467,7 +486,17 @@ class AtlasSupervisor:
         if not coordinator:
             # Owner/data/book remain usable; only the interpreting agent is out.
             return DEGRADED
+        if self._has_running_task():
+            # A dispatched task is still in flight. Reporting OBSERVING here
+            # told the operator the desk was idle while a workforce run it had
+            # launched was executing — the observe tick overwrote the
+            # COORDINATING that start_task had just written.
+            return COORDINATING
         return OBSERVING
+
+    def _has_running_task(self) -> bool:
+        return any(task.get("status") == "running"
+                   for task in self.registry.list_atlas_tasks(limit=50))
 
     def _patch_state(self, **fields) -> None:
         current = self.registry.get_atlas_state(MANAGER_ID) or {}

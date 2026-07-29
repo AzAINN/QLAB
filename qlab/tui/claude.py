@@ -935,6 +935,9 @@ class ClaudeSession:
         self._last_event_at = 0.0
         self._timed_out = ""
         self._termination_reasons: dict[int, str] = {}
+        # Renderer faults raised back through on_event. Kept so a run that
+        # looked healthy but dropped events can still say so afterwards.
+        self._render_failures: list[str] = []
         self._stop_lock = threading.Lock()
 
     @property
@@ -1076,6 +1079,22 @@ class ClaudeSession:
                 return
             time.sleep(1.0)
 
+    def _emit(self, event: ClaudeEvent) -> None:
+        """Hand one event to the app without letting a render fault escape.
+
+        `on_event` marshals into the Textual app, which re-raises app-side
+        exceptions on this thread. Letting one escape killed the reader before
+        `process.wait()`, the session-dir cleanup and the `process = None`
+        reset — leaking the materialised agent files and, because nothing
+        drained stdout after that, blocking the whole Claude/Agent/MCP tree on
+        a full pipe until the silence watchdog fired, with nothing surfaced.
+        A renderer fault must cost one event, not the session.
+        """
+        try:
+            self.on_event(event)
+        except Exception as exc:
+            self._render_failures.append(f"{event.kind}: {exc!r}"[:200])
+
     def _read(
         self,
         process: subprocess.Popen[str],
@@ -1102,13 +1121,15 @@ class ClaudeSession:
             for event in parse_stream_line(line):
                 if event.kind in {"result", "error"}:
                     saw_terminal_event = True
-                self.on_event(event)
+                self._emit(event)
         returncode = process.wait()
         stderr_thread.join(timeout=5.0)
         reason = self._termination_reasons.pop(id(process), "")
         stderr = "".join(stderr_tail).strip()
+        # These closing events are guarded for the same reason as the stream
+        # ones: teardown below must run even when the app cannot render.
         if reason and not saw_terminal_event:
-            self.on_event(ClaudeEvent(
+            self._emit(ClaudeEvent(
                 "error",
                 f"session stopped: {reason}. The active workflow is interrupted "
                 "and can be explicitly resumed from the workforce view.",
@@ -1116,9 +1137,9 @@ class ClaudeSession:
         elif returncode and not saw_terminal_event:
             detail = stderr[-2000:] if stderr else (
                 f"Claude exited with status {returncode} without a result")
-            self.on_event(ClaudeEvent("error", detail))
+            self._emit(ClaudeEvent("error", detail))
         elif not saw_terminal_event:
-            self.on_event(ClaudeEvent(
+            self._emit(ClaudeEvent(
                 "error", "Claude exited without a terminal result"))
         try:
             if session_dir is not None:

@@ -528,9 +528,29 @@ def _extract_targets(steps_by_phase: dict) -> dict:
 
 
 def _format_targets(targets: dict, limit: int = 8) -> str:
-    """Target weights as a compact, largest-first line: 'AAPL 30.0% · GLD 20.0%'."""
-    ordered = sorted(targets.items(), key=lambda kv: -float(kv[1]))[:limit]
-    return " · ".join(f"{ticker} {float(weight):.1%}" for ticker, weight in ordered)
+    """Target weights as a compact, largest-first line: 'AAPL 30.0% · GLD 20.0%'.
+
+    Weights come from an agent-authored artifact that the registry validates
+    only as a dict — the value types are never checked — so a string weight or
+    a null reaches here on the failed-run path. Coercing per entry keeps one
+    bad weight from raising out of a render and, through `call_from_thread`,
+    into the Claude reader thread.
+    """
+    numeric: list[tuple[str, float]] = []
+    unreadable: list[str] = []
+    for ticker, weight in targets.items():
+        try:
+            numeric.append((str(ticker), float(weight)))
+        except (TypeError, ValueError):
+            unreadable.append(str(ticker))
+    ordered = sorted(numeric, key=lambda kv: -kv[1])[:limit]
+    line = " · ".join(f"{ticker} {weight:.1%}" for ticker, weight in ordered)
+    if unreadable:
+        # Naming them beats dropping them: a weight the desk could not read is
+        # a fact about the run, not noise to hide.
+        line += (" · " if line else "") + (
+            f"[unreadable: {', '.join(sorted(unreadable)[:4])}]")
+    return line
 
 
 # The completion summary is written for an operator, not a quant: a coloured
@@ -1108,6 +1128,9 @@ class QlabTui(App[None]):
         self._pending_workflow = False
         self._seen_workflow_ids: set[str] = set()
         self._phase_reported: dict[str, str] = {}
+        # Unresolved console markup, bounded to the RichLog's own capacity so
+        # the two retain the same history. Kept for theme re-rendering.
+        self._console_lines: deque[str] = deque(maxlen=400)
         self._results_printed = False
         self._pulse = 0
         self._live_stream_stop = threading.Event()
@@ -1435,6 +1458,7 @@ class QlabTui(App[None]):
             node.theme_name = wanted
         for rail in self.query(AgentRail):
             rail.theme_name = wanted
+        self._repaint_console()
         self._write_local_event("theme.changed", {"theme": wanted})
         self._set_selected_work(f"THEME\n\n{wanted} is active.")
 
@@ -1501,13 +1525,24 @@ class QlabTui(App[None]):
         self._refreshing = True
 
         def run() -> None:
+            # The fetch and the repaint are separated because they fail for
+            # different reasons and only one of them is the owner's fault.
+            # `call_from_thread` re-raises renderer exceptions here, so a
+            # repaint bug used to count toward `_refresh_failures` and, after
+            # three ticks, tell the operator OWNER DOWN about a healthy owner.
             try:
                 snapshot = gather_snapshot(self.client, offline=self.offline)
-                self._call_from_worker(self._apply_snapshot, snapshot)
             except Exception as exc:
                 self._call_from_worker(
                     self._write_local_event, "api.error", {"error": repr(exc)})
                 self._call_from_worker(self._note_refresh_failure)
+                self._call_from_worker(self._finish_refresh)
+                return
+            try:
+                self._call_from_worker(self._apply_snapshot, snapshot)
+            except Exception as exc:
+                self._call_from_worker(
+                    self._write_local_event, "render.error", {"error": repr(exc)})
             finally:
                 self._call_from_worker(self._finish_refresh)
 
@@ -1839,8 +1874,24 @@ class QlabTui(App[None]):
         # RichLog renders through rich.text.Text.from_markup, which knows
         # nothing about theme variables, so they are resolved here against the
         # active theme rather than reaching Rich as a literal `$name`.
+        # The unresolved line is kept so a theme switch can re-render it: a
+        # colour resolved at write time is frozen, and the run narrative would
+        # otherwise stay in the old palette — dark-theme hex on a light canvas
+        # is about 1:1 contrast, i.e. the whole run output goes invisible.
+        self._console_lines.append(line)
         self.query_one("#workforce-console", RichLog).write(
             _resolve_markup(line, theme=self._active_theme()))
+
+    def _repaint_console(self) -> None:
+        """Re-render the kept console history against the active theme."""
+        try:
+            console = self.query_one("#workforce-console", RichLog)
+        except Exception:
+            return
+        console.clear()
+        theme = self._active_theme()
+        for line in self._console_lines:
+            console.write(_resolve_markup(line, theme=theme))
 
     def _render_chat_mode(self) -> None:
         chip = self.query_one("#chat-mode", Static)
@@ -2524,10 +2575,33 @@ class QlabTui(App[None]):
                     f"[{DIM}]{item.get('source','')} {tickers}[/]")
 
         lines.append("")
+        # A thread that is alive but whose every tick raises is not a working
+        # supervisor, and "live (0 ticks)" beside a quiet desk is exactly how a
+        # total outage used to render. The error count is part of the health.
+        beat_errors = int(beat.get("errors", 0) or 0)
+        if not beat.get("running"):
+            beat_health = "stopped"
+        elif beat_errors:
+            beat_health = f"FAILING ({beat_errors} errors)"
+        else:
+            beat_health = "live"
         lines.append(
-            f"[{DIM}]news {read.get('news_source','—')} · "
-            f"heartbeat {int(beat.get('ticks', 0))} ticks · "
-            f"advisory only — Atlas cannot trade[/]")
+            f"[{DIM}]mode {str(atlas.get('mode','—')).upper()} · "
+            f"state {str(atlas.get('state','—')).upper()} · "
+            f"heartbeat {beat_health} "
+            f"({int(beat.get('ticks', 0))} ticks) · "
+            f"autonomy {'ON' if beat.get('autonomous') else 'off'} · "
+            f"news {read.get('news_source','—')} · "
+            f"as of {read.get('as_of','—')}[/]")
+        if beat_errors and beat.get("last_error"):
+            # Naming the reason is the difference between a desk the operator
+            # can fix and one that has silently stopped supervising.
+            lines.append(
+                f"[{DOWN}]supervisor error: "
+                f"{escape(str(beat.get('last_error'))[:160])}[/]")
+        lines.append(
+            f"[{DIM}]This is interpretation over persisted facts — advisory, "
+            f"never an instruction. Atlas cannot trade.[/]")
         target.update("\n".join(lines))
 
     def action_atlas_drawer(self) -> None:
@@ -4253,6 +4327,14 @@ class QlabTui(App[None]):
                 ) is None:
                     return
                 self._bind_run(workflow_id)
+            else:
+                # A completed run — or one the registry never recorded — cannot
+                # be resumed, so this turn is a new run. Without rebinding, the
+                # view stayed pinned to the finished one: the results block was
+                # already printed, every phase already reported, and the new
+                # workflow's id did not match, so a turn that ran to completion
+                # printed nothing at all.
+                self._bind_run("")
             started = self._start_claude(
                 message, governed=True,
                 resume_session=self._chat_sessions["workforce"])
@@ -4337,6 +4419,12 @@ class QlabTui(App[None]):
         argument = argument.strip()
 
         action_name = COMMAND_TABLE.get((command, subword)) if subword else None
+        # A recognised subcommand that fails its own argument check is a
+        # malformed subcommand, not a bare command with a long argument.
+        # Falling through turned ": workforce stop now" into
+        # action_workforce_new("stop now") — an attempt to halt a coordinator
+        # launched a second one.
+        named_subcommand = action_name is not None
         action_args: tuple[Any, ...] = ()
         if action_name == "action_view":
             if argument:
@@ -4352,6 +4440,14 @@ class QlabTui(App[None]):
             action_args = (argument,)
         elif action_name is not None and argument:
             action_name = None
+
+        if action_name is None and named_subcommand:
+            self._write_local_event(
+                "command.malformed", {"command": raw, "subcommand": subword})
+            self._set_selected_work(
+                f"{command.upper()} {subword.upper()} does not take those "
+                "arguments.\n\nUse : help for the command surface.")
+            return
 
         if action_name is None:
             action_name = COMMAND_TABLE.get((command, None))
@@ -4384,11 +4480,32 @@ class QlabTui(App[None]):
             return
         plan_id = self._pending_plan_id
         self._pending_plan_id = ""
+        # The dialog the operator just answered IS the approval decision, so it
+        # is recorded as one. A boolean in a request body is self-attestation
+        # any local process can send; the persisted approval binds this plan's
+        # digest, its targets, and the book revision as of this moment, so a
+        # book that moved between preview and confirm refuses instead of
+        # filling against figures the operator never saw.
         self._run_api_action(
             "paper plan execution", "/api/plans/execute",
             {"offline": self.offline, "plan_id": plan_id, "human_confirmed": True},
             active_agent="reporter",
+            prepare=lambda: self._record_paper_approval(plan_id),
         )
+
+    def _record_paper_approval(self, plan_id: str) -> dict:
+        """Create and approve the record the execution will consume.
+
+        Runs on the action worker, not the app thread, because it is two owner
+        round-trips. Returns the body fragment the execution call merges in.
+        """
+        created = self.client.post(
+            "/api/approvals", {"plan_id": plan_id, "offline": self.offline})
+        approval_id = str(created.get("approval_id") or "")
+        if not approval_id:
+            raise RuntimeError("the owner created no approval for this plan")
+        self.client.post(f"/api/approvals/{approval_id}/approve", {})
+        return {"approval_id": approval_id}
 
     def _run_api_action(
         self,
@@ -4398,7 +4515,14 @@ class QlabTui(App[None]):
         *,
         active_agent: str | None,
         http_method: str = "post",
+        prepare=None,
     ) -> None:
+        """Run one owner call on a worker thread.
+
+        `prepare` runs first, on the same worker, and its returned mapping is
+        merged into the request body — for a call that must be preceded by
+        other owner round-trips whose result it depends on.
+        """
         if self._action_running:
             self._write_local_event("action.rejected", {"reason": "another action is running"})
             return
@@ -4412,10 +4536,13 @@ class QlabTui(App[None]):
 
         def run() -> None:
             try:
+                call_body = dict(body)
+                if prepare is not None:
+                    call_body.update(prepare() or {})
                 if http_method == "get":
-                    result = self.client.get(path, **body)
+                    result = self.client.get(path, **call_body)
                 elif http_method == "post":
-                    result = self.client.post(path, body)
+                    result = self.client.post(path, call_body)
                 else:
                     raise ValueError(
                         f"unsupported owner API method {http_method!r}")

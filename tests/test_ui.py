@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from qlab.state.registry import Registry
+from qlab.ui import server as ui_server
 from qlab.ui.server import UISession, _INDEX, handle_api
 
 
@@ -902,7 +903,7 @@ def test_owner_preview_uses_exact_referee_reviewed_targets(session):
 
     status, executed = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": preview["plan_id"], "human_confirmed": True},
+        _execute_body(session, preview["plan_id"]),
     )
     assert status == 200 and executed["executed"] is True
     assert executed["plan_id"] == preview["plan_id"]
@@ -1726,14 +1727,23 @@ def test_backfill_merges_alpaca_history_idempotently(session, monkeypatch):
     assert payload["backfilled"] == 0
 
 
-def _checked_plan(session) -> str:
-    """A referee-PASSed persisted checked plan — the only executable shape."""
+def _checked_plan(session, tilt: float = 0.0) -> str:
+    """A referee-PASSed persisted checked plan — the only executable shape.
+
+    Plans are content-addressed, so identical targets yield the same plan_id;
+    `tilt` perturbs them when a test needs a genuinely different plan.
+    """
     from datetime import date
 
     from qlab.core.types import Decision
 
     tickers = session.mandate.universe_whitelist
-    targets = {ticker: 1.0 / len(tickers) for ticker in tickers}
+    even = 1.0 / len(tickers)
+    targets = {ticker: even for ticker in tickers}
+    if tilt:
+        first, last = tickers[0], tickers[-1]
+        targets[first] = even + tilt
+        targets[last] = even - tilt
     decision_id = session.registry.log_decision(Decision(
         as_of=date.today(), kind="rebalance_gate",
         choice={"targets": targets}, rationale="configured HRP policy",
@@ -1748,13 +1758,197 @@ def _checked_plan(session) -> str:
     return preview["plan_id"]
 
 
-def test_rejected_execution_writes_no_execution_mark(session):
-    """An "execution" mark asserts a fill happened; a refused plan forges none."""
+def _approve(session, plan_id: str) -> str:
+    """The human decision, recorded — execution consumes this, not a boolean."""
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": plan_id, "offline": True})
+    approval_id = created["approval_id"]
+    handle_api(
+        session, "POST", f"/api/approvals/{approval_id}/approve", {}, {})
+    return approval_id
+
+
+def _execute_body(session, plan_id: str) -> dict:
+    return {"offline": True, "plan_id": plan_id, "human_confirmed": True,
+            "approval_id": _approve(session, plan_id)}
+
+
+def test_a_get_with_a_body_cannot_smuggle_a_second_request(session):
+    # Under HTTP/1.1 keep-alive an unconsumed GET body stayed in rfile and the
+    # next request on that connection was parsed out of it — so a client could
+    # append a reset to a harmless read and have the owner run it.
+    import io
+
+    class _Handler(ui_server._Handler):
+        def __init__(self, raw: bytes):
+            self.rfile = io.BytesIO(raw)
+            self.wfile = io.BytesIO()
+            self.headers = {"Content-Length": str(len(raw))}
+            self.close_connection = False
+            self.responses: list[tuple[int, dict]] = []
+
+        def _json(self, status, obj):
+            self.responses.append((status, obj))
+
+    smuggled = b"POST /api/reset HTTP/1.1\r\n\r\n"
+    handler = _Handler(smuggled)
+    assert handler._drain_request_body() is True
+    # The body was consumed, so nothing is left to be read as a new request.
+    assert handler.rfile.read() == b""
+
+    negative = _Handler(b"")
+    negative.headers = {"Content-Length": "-1"}
+    assert negative._drain_request_body() is False
+    assert negative.responses[0][0] == 400
+    assert negative.close_connection is True
+
+
+def test_a_malformed_mcp_config_is_not_reported_as_absent(session, tmp_path,
+                                                          monkeypatch):
+    # A file that exists but does not parse is a different fact from no file.
+    # Reporting both as "not configured" sent the operator to re-add a server
+    # entry that was already there, with the parse error surfaced nowhere.
+    monkeypatch.setattr(ui_server, "workspace_root", lambda: tmp_path)
+    (tmp_path / ".mcp.json").write_text('{"mcpServers": {"qlab": {},}}')
+
+    status = session.system_status(offline=True)
+    assert status["mcp_configured"] is False
+    # It names the fault rather than merely flagging one.
+    assert "JSONDecodeError" in status["mcp_config_error"]
+    assert "trailing comma" in status["mcp_config_error"]
+
+
+def test_reset_refuses_the_alpaca_book_and_spares_its_history(session):
+    # A reset discards qlab's own book; it cannot discard an Alpaca account.
+    # Wiping only the local marks would leave the recorded history disagreeing
+    # with the untouched real account.
+    from qlab.core.desk_mode import DeskMode
+
+    session.registry.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 98_000.0, cash=1_000.0,
+        source="alpaca_backfill", book="alpaca_paper")
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+
+    status, result = handle_api(session, "POST", "/api/reset", {}, {})
+    assert status == 400 and "cannot be reset" in result["error"]
+    assert session.registry.equity_marks(book="alpaca_paper") != []
+
+
+def test_resetting_the_simulated_book_spares_the_alpaca_history(session):
+    session.registry.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 98_000.0, cash=1_000.0,
+        source="alpaca_backfill", book="alpaca_paper")
+    assert session.desk_mode.book == "simulated"
+
+    status, result = handle_api(session, "POST", "/api/reset", {}, {})
+    assert (status, result["reset"]) == (200, True)
+    assert [m["equity"] for m in
+            session.registry.equity_marks(book="alpaca_paper")] == [98_000.0]
+
+
+def test_a_consumed_approval_cannot_be_revived_and_spent_again(session):
+    # The challenge route wrote "pending" over whatever status it found, so a
+    # spent approval could be re-opened, re-approved, and used to authorise a
+    # second fill against the same human decision.
     plan_id = _checked_plan(session)
-    session.registry.set_plan_state(plan_id, "refused")
+    approval_id = _approve(session, plan_id)
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": plan_id, "human_confirmed": True,
+         "approval_id": approval_id})
+    assert (status, result["executed"]) == (200, True)
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "consumed")
+
+    status, _ = handle_api(
+        session, "POST", f"/api/approvals/{approval_id}/challenge", {},
+        {"challenge": "let me have another go"})
+    assert status == 400
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "consumed")
+
+
+def test_a_rejection_and_an_expiry_are_both_durable(session):
+    from qlab.state.registry import Registry  # noqa: F401  (documents the writer)
+
+    rejected_plan = _checked_plan(session)
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": rejected_plan, "offline": True})
+    rejected = created["approval_id"]
+    handle_api(session, "POST", f"/api/approvals/{rejected}/reject", {}, {})
+
+    # A rejected decision must not be re-openable into an approvable state.
+    status, _ = handle_api(
+        session, "POST", f"/api/approvals/{rejected}/challenge", {},
+        {"challenge": "reconsider"})
+    assert status == 400
+    assert session.registry.get_approval_request(rejected)["status"] == "rejected"
+
+    # And an expiry is equally terminal.
+    expired_plan = _checked_plan(session, tilt=0.03)
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": expired_plan, "offline": True})
+    expired = created["approval_id"]
+    session.registry.expire_due_approvals("2999-01-01T00:00:00+00:00")
+    assert session.registry.get_approval_request(expired)["status"] == "expired"
+    with pytest.raises(PermissionError):
+        session.registry.transition_approval(expired, "approved")
+
+
+def test_transitioning_an_unknown_approval_is_refused_not_ignored(session):
+    # An unguarded UPDATE matched zero rows and reported success, so the
+    # challenge route answered 200 with a digest for an approval that does not
+    # exist.
+    with pytest.raises(KeyError):
+        session.registry.transition_approval("no-such-approval", "approved")
+    status, _ = handle_api(
+        session, "POST", "/api/approvals/no-such-approval/challenge", {},
+        {"challenge": "ghost"})
+    assert status == 404
+
+
+def test_a_bare_human_confirmed_flag_cannot_book_a_trade(session):
+    # human_confirmed is a boolean in a request body — self-attestation any
+    # local process can send. It used to be the whole gate on this route, so
+    # one unauthenticated POST filled legs and the audit trail recorded it as
+    # a human decision. The approval record is what authorises now.
+    plan_id = _checked_plan(session)
     status, result = handle_api(
         session, "POST", "/api/plans/execute", {},
         {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+    assert status == 400
+    assert "approval" in result["error"]
+    assert [row for row in session.registry.equity_marks()
+            if row["source"] == "execution"] == []
+    assert session.registry.get_plan(plan_id)["state"] == "checked"
+
+
+def test_an_approval_for_a_different_plan_cannot_execute_this_one(session):
+    # The approval binds a specific plan digest and targets hash, so holding
+    # *an* approval is not holding one for this plan.
+    mine = _checked_plan(session)
+    other_approval = _approve(session, _checked_plan(session, tilt=0.02))
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": mine, "human_confirmed": True,
+         "approval_id": other_approval})
+    assert (status, result["executed"]) == (200, False)
+    assert result["blocked_by"] == "approval"
+
+
+def test_rejected_execution_writes_no_execution_mark(session):
+    """An "execution" mark asserts a fill happened; a refused plan forges none."""
+    plan_id = _checked_plan(session)
+    # Approve while the plan is still checked, then refuse it: the point is
+    # that a refused plan forges no mark even with a valid human decision
+    # behind it, not that an approval cannot be created for a refused plan.
+    body = _execute_body(session, plan_id)
+    session.registry.set_plan_state(plan_id, "refused")
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {}, body)
     assert (status, result["executed"]) == (200, False)
     assert "mandate_violation" in result
     assert [row for row in session.registry.equity_marks()
@@ -1771,7 +1965,7 @@ def test_failed_mark_never_masks_a_completed_execution(session, monkeypatch):
     monkeypatch.setattr(session, "portfolio", unavailable)
     status, result = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+        _execute_body(session, plan_id))
     assert (status, result["executed"]) == (200, True)
     failures = [event for event in session.registry.read_events(100)
                 if event["kind"] == "equity_mark_failed"]
@@ -1797,7 +1991,7 @@ def test_successful_execution_records_an_execution_mark(session):
     plan_id = _checked_plan(session)
     status, result = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+        _execute_body(session, plan_id))
     assert (status, result["executed"]) == (200, True)
     marks = [row for row in session.registry.equity_marks()
              if row["source"] == "execution"]
@@ -2071,27 +2265,27 @@ def test_plan_execution_clamps_offline_to_desk_mode_on_the_alpaca_book(
 ):
     """Plan execution cannot contradict the book either.
 
-    A body of ``{"offline": true}`` must not reach ``execute_checked_plan``
-    as-is on a live/alpaca desk: honouring it would run
-    ``execute_checked_plan``'s P3 execution-time data-revalidation gate under
-    a demo policy (never execution-eligible) while ``get_broker`` still fills
-    against the real Alpaca account — exactly the contradiction ``DeskMode``
-    forbids.
+    A body of ``{"offline": true}`` must not reach the execution path as-is on
+    a live/alpaca desk: honouring it would run the P3 execution-time
+    data-revalidation gate under a demo policy (never execution-eligible)
+    while ``get_broker`` still fills against the real Alpaca account — exactly
+    the contradiction ``DeskMode`` forbids.
     """
     from qlab.core.desk_mode import DeskMode
 
     session.set_desk_mode(DeskMode("live", "alpaca"))
     calls: dict[str, tuple] = {}
 
-    def fake_execute_checked_plan(body, offline):
+    def fake_execute(plan_id, body, offline):
         calls["execute"] = (body, offline)
         return {"executed": False}
 
-    monkeypatch.setattr(session, "execute_checked_plan", fake_execute_checked_plan)
+    monkeypatch.setattr(session, "execute_plan_with_approval", fake_execute)
 
     status, _ = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": "whatever", "human_confirmed": True})
+        {"offline": True, "plan_id": "whatever", "human_confirmed": True,
+         "approval_id": "whatever"})
     assert status == 200
     assert calls["execute"][1] is False
 
@@ -2103,15 +2297,16 @@ def test_plan_execution_still_honors_body_offline_on_the_simulated_book(
     assert session.desk_mode.book == "simulated"  # default fixture desk mode
     calls: dict[str, tuple] = {}
 
-    def fake_execute_checked_plan(body, offline):
+    def fake_execute(plan_id, body, offline):
         calls["execute"] = (body, offline)
         return {"executed": False}
 
-    monkeypatch.setattr(session, "execute_checked_plan", fake_execute_checked_plan)
+    monkeypatch.setattr(session, "execute_plan_with_approval", fake_execute)
 
     status, _ = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": "whatever", "human_confirmed": True})
+        {"offline": True, "plan_id": "whatever", "human_confirmed": True,
+         "approval_id": "whatever"})
     assert status == 200
     assert calls["execute"][1] is True
 

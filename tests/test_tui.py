@@ -3651,6 +3651,106 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "Nothing was traded" in nxt
 
 
+def test_a_theme_switch_repaints_the_console_history():
+    # Colours were resolved at write time, so the run narrative stayed in the
+    # old palette after a switch — dark-theme hex on the light canvas is about
+    # 1:1 contrast, i.e. the entire workforce output became invisible while
+    # the rest of the desk repainted correctly.
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design import tokens
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH,
+                      claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app._console_write("[$text-strong]recommended targets[/]")
+            dark = tokens.THEMES["qlab-dark"].variables["text-strong"]
+            light = tokens.THEMES["qlab-light"].variables["text-strong"]
+            assert dark != light
+
+            app.action_theme("qlab-light")
+            await pilot.pause(0.1)
+            # The kept history is unresolved, and re-rendering uses the new
+            # theme — so the frozen dark colour is gone from the widget.
+            assert app._console_lines[-1] == "[$text-strong]recommended targets[/]"
+            from qlab.tui.design.markup import resolve
+            assert resolve(app._console_lines[-1], theme=app.theme) == (
+                f"[{light}]recommended targets[/]")
+
+    asyncio.run(run())
+
+
+def test_unreadable_target_weights_are_named_not_raised():
+    # The registry validates `targets` as a dict and never checks value types,
+    # so an agent-authored artifact can carry a string or a null weight. That
+    # used to raise out of the results render and, through call_from_thread,
+    # kill the Claude reader thread mid-stream.
+    from qlab.tui.app import _format_targets
+
+    line = _format_targets({"ACWI": 0.35, "GLD": "35%", "EMB": None,
+                            "BNDW": 0.15})
+    assert "ACWI 35.0%" in line and "BNDW 15.0%" in line
+    assert "unreadable" in line and "GLD" in line and "EMB" in line
+
+
+def test_a_renderer_fault_is_not_reported_as_an_owner_outage():
+    # call_from_thread re-raises app-side exceptions in the worker, so a
+    # repaint bug counted as a failed poll and after three ticks the chip
+    # accused a perfectly healthy owner.
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH,
+                      claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app._refresh_failures = 0
+
+            def explode(_snapshot):
+                raise RuntimeError("a renderer bug, not an owner outage")
+
+            app._apply_snapshot = explode
+            for _ in range(4):
+                app._start_refresh()
+                for _ in range(50):
+                    if not app._refreshing:
+                        break
+                    await pilot.pause(0.01)
+
+            assert app._refresh_failures == 0
+
+    asyncio.run(run())
+
+
+def test_a_malformed_subcommand_never_launches_a_governed_run():
+    # A recognised subcommand failing its argument check fell through to the
+    # bare command, so ": workforce stop now" resolved to
+    # action_workforce_new("stop now") — trying to halt a coordinator started
+    # a second one. Same shape for a resume with the id forgotten.
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH,
+                      claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            launched: list[str] = []
+            app.action_workforce_new = lambda goal="": launched.append(goal)
+
+            for malformed in ("workforce stop now", "workforce resume",
+                              "workforce status extra"):
+                app._handle_command(malformed)
+            assert launched == []
+
+            # A goal that merely starts with an unrecognised word is still a
+            # goal, and must still start a run.
+            app._handle_command("workforce find alpha in gold")
+            assert launched == ["find alpha in gold"]
+
+    asyncio.run(run())
+
+
 def test_one_malformed_live_event_does_not_kill_the_subscription():
     # _apply_quote_event raises on a bad payload, and that exception used to
     # propagate through call_from_thread into the reader thread's catch-all —
@@ -3873,6 +3973,47 @@ def test_claude_session_uses_resolved_launcher_and_isolated_agents(
     process_cwd = launched["cwd"]
     assert process_cwd != tmp_path
     assert (process_cwd / ".claude" / "agents" / "qlab-coordinator.md").is_file()
+
+
+def test_a_render_fault_costs_one_event_not_the_claude_session():
+    # on_event marshals into the app, which re-raises app-side exceptions in
+    # the reader thread. Letting one escape killed the reader before
+    # process.wait(), the session-dir cleanup and the process reset — leaking
+    # the materialised agent files and blocking the whole Claude/Agent/MCP
+    # tree on an undrained stdout until the silence watchdog fired.
+    import subprocess
+    import sys as _sys
+
+    from qlab.tui.claude import ClaudeSession
+
+    seen: list[str] = []
+
+    def hostile(event):
+        seen.append(event.kind)
+        raise RuntimeError("a renderer bug on every single event")
+
+    session = ClaudeSession(hostile)
+    child = subprocess.Popen(
+        [_sys.executable, "-c",
+         "import json, sys\n"
+         "for i in range(5):\n"
+         "    print(json.dumps({'type': 'assistant', 'message': "
+         "{'content': [{'type': 'text', 'text': f'line {i}'}]}}))\n"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # The reader must consume the whole stream and reap the child despite
+    # every single event raising.
+    import tempfile
+    from pathlib import Path
+
+    session_dir = tempfile.TemporaryDirectory(prefix="qlab-claude-test-")
+    session._read(child, session_dir)
+
+    assert child.poll() == 0
+    assert len(seen) >= 5
+    assert session._render_failures  # and it can say what it dropped
+    # The session dir was cleaned up rather than leaked.
+    assert not Path(session_dir.name).exists()
 
 
 def test_claude_session_reports_process_creation_failure(tmp_path, monkeypatch):

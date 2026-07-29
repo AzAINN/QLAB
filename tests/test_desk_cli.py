@@ -289,6 +289,43 @@ def _drive_cmd_tui(monkeypatch, argv, *, owner_running):
     return record
 
 
+@pytest.mark.parametrize("argv", [
+    ["run-once", "--offline"],
+    ["daily-ops", "--offline"],
+    ["batch", "configs/specs/ablation_v1.yaml", "--offline"],
+    ["recommend", "--offline"],
+])
+def test_direct_registry_commands_refuse_while_an_owner_owns_the_book(
+    monkeypatch, argv,
+):
+    # These construct their own Registry, and DuckDB allows one writer. Running
+    # the documented invocation in a second shell while `qlab tui` is up used
+    # to die on a raw lock error naming a pid, with no mention of the owner.
+    from qlab.autopilot import cli
+
+    monkeypatch.setattr(
+        "qlab.mcp.server.owner_runtime_alive", lambda port: True)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(argv)
+    message = str(excinfo.value)
+    assert "already owns the paper book" in message
+    assert "qlab desk" in message  # and it names the way through
+
+
+def test_the_owner_port_reaches_the_guard_in_child_processes(monkeypatch):
+    # The combined MCP server reads QLAB_UI_PORT and nothing set it, so on a
+    # non-default port its guard probed 8765, found nothing, and opened the
+    # registry as a second writer.
+    import os
+
+    from qlab.autopilot import cli
+
+    monkeypatch.delenv("QLAB_UI_PORT", raising=False)
+    cli._publish_owner_port(9123)
+    assert os.environ["QLAB_UI_PORT"] == "9123"
+
+
 def test_cmd_tui_spawns_its_owner_with_the_same_mode(monkeypatch):
     pytest.importorskip("textual")
     from qlab.core.desk_mode import DeskMode, load_desk_mode

@@ -1204,6 +1204,100 @@ def test_api_client_resubscribe_uses_last_event_tuple(monkeypatch):
     ]
 
 
+def test_a_transport_failure_reconnects_with_the_cursor_intact(monkeypatch):
+    # The retry used to live in the caller, which rebuilt the stream from
+    # scratch — no `after`, a 25-event primer, and everything past it from the
+    # outage silently gone. The stream now heals itself with the exact tuple.
+    import json
+
+    import httpx
+
+    import qlab.tui.client as client_module
+
+    first = {"event_id": "event-a", "ts": "2026-07-24T12:34:56+00:00",
+             "kind": "audit"}
+    second = {"event_id": "event-b", "ts": "2026-07-24T12:35:00+00:00",
+              "kind": "audit"}
+
+    class DyingResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield f"data: {json.dumps(first)}"
+            raise httpx.ReadTimeout("owner went away mid-stream")
+
+    class HealthyResponse(DyingResponse):
+        def iter_lines(self):
+            yield f"data: {json.dumps(second)}"
+
+    responses = iter([DyingResponse(), HealthyResponse()])
+    calls = []
+
+    def fake_stream(method, url, *, params, timeout):
+        calls.append(dict(params))
+        return next(responses)
+
+    monkeypatch.setattr(client_module.httpx, "stream", fake_stream)
+    monkeypatch.setattr(client_module, "STREAM_RETRY_WAIT_S", 0.01)
+    events = client_module.ApiClient("http://owner").stream("/api/stream")
+    try:
+        assert next(events) == first
+        assert next(events) == second
+    finally:
+        events.close()
+
+    assert calls[1]["after"] == first["ts"]
+    assert calls[1]["after_id"] == first["event_id"]
+
+
+def test_a_malformed_frame_is_surfaced_not_fatal_and_not_silent(monkeypatch):
+    # A frame that fails to parse used to be either silently discarded (bad
+    # JSON) or yielded raw to crash the consumer (valid JSON, wrong shape).
+    # Both now surface as one loud stream.malformed event, and the events on
+    # either side of the bad frame still arrive.
+    import json
+
+    import qlab.tui.client as client_module
+
+    good = {"event_id": "event-a", "ts": "2026-07-24T12:34:56+00:00",
+            "kind": "audit"}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield "data: {not json"
+            yield "data: [1, 2, 3]"
+            yield f"data: {json.dumps(good)}"
+
+    monkeypatch.setattr(
+        client_module.httpx, "stream",
+        lambda method, url, *, params, timeout: Response())
+    events = client_module.ApiClient("http://owner").stream("/api/stream")
+    try:
+        received = [next(events) for _ in range(3)]
+    finally:
+        events.close()
+
+    assert [e.get("kind") for e in received] == [
+        "stream.malformed", "stream.malformed", "audit"]
+    assert received[2] == good
+
+
 def test_the_owner_proves_liveness_before_the_stream_reader_gives_up():
     # These two numbers are a contract across two modules. A stream poll waits
     # this long for the dispatch lock and then pings instead; if that wait ever

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 import httpx
@@ -12,6 +13,8 @@ import httpx
 # dispatch lock, or every such action costs a reconnect and a stranded server
 # thread — see `_STREAM_LOCK_WAIT_SECONDS` in qlab.ui.server.
 STREAM_READ_TIMEOUT_S = 15.0
+# Pause between reconnect attempts while the owner is unreachable.
+STREAM_RETRY_WAIT_S = 2.0
 
 
 class ApiClient:
@@ -74,42 +77,61 @@ class ApiClient:
         """Yield durable audit and transient topic events from the owner.
 
         The owner emits a heartbeat about every ten seconds, which bounds
-        cancellation even while the desk is quiet. A closed connection resumes
-        after the last exact event tuple.
+        cancellation even while the desk is quiet.
+
+        The subscription heals itself: transport failures and owner restarts
+        reconnect after the last exact event tuple, so an outage never resets
+        the cursor — a caller-level retry would resubscribe from the primer and
+        silently drop everything past it. A frame that does not parse to an
+        object is surfaced as a ``stream.malformed`` event rather than either
+        tearing the stream down or being silently discarded; the desk gets to
+        say a frame was bad while the subscription lives on.
         """
         import json
 
         request_params = dict(params)
         last_cursor: tuple[str, str] | None = None
-        while stop_event is None or not stop_event.is_set():
-            with httpx.stream(
-                "GET", self.base_url + path, params=request_params,
-                timeout=httpx.Timeout(STREAM_READ_TIMEOUT_S, connect=10.0),
-            ) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    if stop_event is not None and stop_event.is_set():
-                        return
-                    if not line or not line.startswith("data:"):
-                        continue
-                    payload = line[len("data:"):].strip()
-                    if not payload:
-                        continue
-                    try:
-                        event = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(event, dict):
+
+        def stopped() -> bool:
+            return stop_event is not None and stop_event.is_set()
+
+        while not stopped():
+            if last_cursor is not None:
+                request_params["after"], request_params["after_id"] = last_cursor
+            try:
+                with httpx.stream(
+                    "GET", self.base_url + path, params=request_params,
+                    timeout=httpx.Timeout(STREAM_READ_TIMEOUT_S, connect=10.0),
+                ) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if stopped():
+                            return
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[len("data:"):].strip()
+                        if not payload:
+                            continue
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError:
+                            event = None
+                        if not isinstance(event, dict):
+                            yield {"kind": "stream.malformed",
+                                   "payload": {"raw": payload[:120]}}
+                            continue
                         event_ts = str(event.get("ts") or "")
                         event_id = str(event.get("event_id") or "")
                         if event_ts and event_id:
                             last_cursor = (event_ts, event_id)
-                    yield event
-            if stop_event is not None and stop_event.is_set():
-                return
-            if last_cursor is None:
-                return
-            request_params["after"], request_params["after_id"] = last_cursor
+                        yield event
+            except httpx.HTTPError:
+                # Owner restarting or unreachable. Wait out the gap with the
+                # cursor intact; a resumable outage must not become data loss.
+                if stop_event is not None:
+                    stop_event.wait(STREAM_RETRY_WAIT_S)
+                else:
+                    time.sleep(STREAM_RETRY_WAIT_S)
 
 
 def gather_snapshot(client, *, offline: bool = True) -> dict:

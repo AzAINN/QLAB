@@ -1626,7 +1626,25 @@ class QlabTui(App[None]):
         ).start()
 
     def _apply_live_event(self, event: dict) -> None:
+        # One bad event must not kill the subscription: an exception raised
+        # here propagates back through call_from_thread into the reader
+        # thread, and before this guard a single malformed frame dropped the
+        # desk into a silent reconnect loop forever. Loud-but-alive: the strip
+        # names the bad frame and the stream keeps delivering.
+        try:
+            self._dispatch_live_event(event)
+        except Exception as exc:
+            self._write_local_event(
+                "event.malformed",
+                {"kind": str(event.get("kind", "")),
+                 "error": repr(exc)[:120]})
+
+    def _dispatch_live_event(self, event: dict) -> None:
         kind = str(event.get("kind", ""))
+        if kind == "stream.malformed":
+            # The client already decoded what it could; surface, don't parse.
+            self._write_local_event("event.malformed", event.get("payload") or {})
+            return
         if kind == "quote":
             self._apply_quote_event(event)
             return

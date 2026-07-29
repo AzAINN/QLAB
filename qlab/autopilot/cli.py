@@ -25,7 +25,9 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -235,6 +237,42 @@ def _cmd_ui(args) -> int:
     return 0
 
 
+class _OwnerStderrTail:
+    """Continuously drain a child's stderr, keeping the last lines.
+
+    A PIPE nobody reads deadlocks the child once the OS buffer (64 KB) fills,
+    so the drain must run for the child's whole life, not just at failure
+    time. A bounded deque keeps the part worth showing — the end, where the
+    traceback is — without growing with a chatty child.
+    """
+
+    def __init__(self, process: subprocess.Popen):
+        self._lines: deque[str] = deque(maxlen=200)
+        self._thread = threading.Thread(
+            target=self._drain,
+            args=(process.stderr,),
+            daemon=True,
+            name="qlab-owner-stderr",
+        )
+        self._thread.start()
+
+    def _drain(self, pipe) -> None:
+        if pipe is None:
+            return
+        try:
+            for line in pipe:
+                self._lines.append(line.rstrip("\n"))
+        except (OSError, ValueError):
+            # The pipe object was closed under the read during teardown; the
+            # tail keeps whatever was drained before that.
+            return
+
+    def tail(self, join_timeout: float = 1.0) -> str:
+        """The last stderr lines; call after the child has been stopped."""
+        self._thread.join(join_timeout)
+        return "\n".join(self._lines).strip()
+
+
 def _cmd_tui(args) -> int:
     """Launch the Textual client and, when needed, its owner API process."""
     try:
@@ -282,6 +320,11 @@ def _cmd_tui(args) -> int:
             stderr=subprocess.PIPE,
             text=True,
         )
+        # The pipe is kept (rather than DEVNULL) because failures are diagnosed
+        # from it — but a pipe nobody reads is a 64 KB fuse: once the owner has
+        # written that much it blocks on the next write and the whole desk
+        # wedges with no diagnostic. Drain continuously into a bounded tail.
+        stderr_tail = _OwnerStderrTail(owner)
         print(
             f"Starting the qlab runtime on port {args.port} "
             "(first launch compiles imports; this can take up to a minute)…",
@@ -289,24 +332,22 @@ def _cmd_tui(args) -> int:
         )
 
         def _owner_stderr(process: subprocess.Popen) -> str:
-            # Best-effort drain so a real failure is diagnosable instead of
-            # hidden behind a generic timeout. terminate() first so the read
-            # cannot block on a still-running child holding the pipe open.
+            # Stop the child first so the drain thread sees EOF and the tail
+            # is complete when read.
             if process.poll() is None:
                 process.terminate()
             try:
-                _out, err = process.communicate(timeout=5.0)
+                process.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 process.kill()
-                _out, err = process.communicate()
-            return (err or "").strip()
+                process.wait()
+            return stderr_tail.tail()
 
         deadline = time.monotonic() + startup_budget_s
         last_probe_error = ""
         while time.monotonic() < deadline:
             if owner.poll() is not None:
-                detail = (owner.stderr.read().strip()
-                          if owner.stderr else "")
+                detail = stderr_tail.tail()
                 raise SystemExit(
                     "qlab UI runtime exited before the TUI connected"
                     + (f":\n{detail}" if detail else "")

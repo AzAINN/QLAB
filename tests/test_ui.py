@@ -1910,6 +1910,47 @@ def test_transitioning_an_unknown_approval_is_refused_not_ignored(session):
     assert status == 404
 
 
+def test_a_real_venue_valuation_is_reused_between_polls(session, monkeypatch):
+    # The TUI polls /api/tui every two seconds and that payload carries the
+    # valuation, so on the Alpaca book an idle desk was making one or two
+    # broker calls a second for a book that only changes when this desk trades.
+    from qlab.core.desk_mode import DeskMode
+
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+    calls = {"n": 0}
+
+    def counted(offline):
+        calls["n"] += 1
+        return {"equity": 1.0, "positions": [], "blocked": False}
+
+    monkeypatch.setattr(session, "_compute_live_portfolio", counted)
+
+    for _ in range(5):
+        session.live_portfolio(True)
+    assert calls["n"] == 1, "each poll re-queried the venue"
+
+    # A fill must not wait out the TTL.
+    session.invalidate_valuation()
+    session.live_portfolio(True)
+    assert calls["n"] == 2
+
+
+def test_the_simulated_book_is_never_served_from_cache(session, monkeypatch):
+    # The simulator is local and free; caching it would only add a way for the
+    # demo to show a stale book.
+    assert session.desk_mode.book == "simulated"
+    calls = {"n": 0}
+
+    def counted(offline):
+        calls["n"] += 1
+        return {"equity": 1.0, "positions": [], "blocked": False}
+
+    monkeypatch.setattr(session, "_compute_live_portfolio", counted)
+    for _ in range(3):
+        session.live_portfolio(True)
+    assert calls["n"] == 3
+
+
 def test_a_bare_human_confirmed_flag_cannot_book_a_trade(session):
     # human_confirmed is a boolean in a request body — self-attestation any
     # local process can send. It used to be the whole gate on this route, so

@@ -86,7 +86,19 @@ def credential_status() -> dict:
     def present(*names: str) -> bool:
         return all(os.environ.get(n, "").strip() for n in names)
 
+    # An OAuth profile counts. Checking only the env pair reported "absent" for
+    # an operator who had signed in with `alpaca profile login` — the flow the
+    # desk recommends — and sent them to paste API keys they do not need.
     alpaca = present("ALPACA_API_KEY", "ALPACA_API_SECRET")
+    if not alpaca:
+        try:
+            from qlab.trader.alpaca_auth import resolve_alpaca_credentials
+
+            alpaca = resolve_alpaca_credentials() is not None
+        except Exception:
+            # A broken or absent profile is simply "no credential" here; the
+            # resolver reports the detail where it is actionable.
+            alpaca = False
     return {
         "alpaca_credentials": alpaca,
         "market_data_provider": os.environ.get("QLAB_DATA_PROVIDER") or "yfinance",

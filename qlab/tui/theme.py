@@ -576,6 +576,23 @@ APP_CSS_TEMPLATE = Template("""
         color: $text;
     }
 
+    /* The one interactive card on the page: its buttons need a row of their
+       own, and the copy above them must size to its content. */
+    #settings-desk {
+        width: 1fr;
+        height: auto;
+    }
+    #settings-desk-copy {
+        height: auto;
+    }
+    #settings-desk-actions {
+        height: auto;
+        min-height: 3;
+        padding-top: 1;
+    }
+    #settings-desk-actions Button {
+        margin-right: 1;
+    }
     .settings-card {
         width: 1fr;
         height: auto;

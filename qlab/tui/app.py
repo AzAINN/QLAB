@@ -1351,6 +1351,27 @@ class QlabTui(App[None]):
                 yield ReferenceView(id="reference", classes="canvas-view")
                 with Vertical(id="settings", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] SETTINGS", classes="canvas-title", markup=True)
+                    # The desk mode is the only setting an operator changes at
+                    # runtime, and it was reachable solely from a modal shown
+                    # once at startup \u2014 so a session that answered it, or was
+                    # started with a flag, had no way back to it. This card is
+                    # that way back, and it is first because "whose book is
+                    # this" outranks everything else on the page.
+                    with Vertical(id="settings-desk", classes="settings-card"):
+                        yield Static(id="settings-desk-copy", markup=True)
+                        with Horizontal(id="settings-desk-actions"):
+                            yield Button(
+                                "change desk mode",
+                                id="settings-change-desk",
+                                classes="view-action-button",
+                                compact=True,
+                            )
+                            yield Button(
+                                "re-check alpaca",
+                                id="settings-recheck-alpaca",
+                                classes="view-action-button",
+                                compact=True,
+                            )
                     yield Static(
                         id="settings-mandate",
                         classes="settings-card",
@@ -2780,21 +2801,24 @@ class QlabTui(App[None]):
         return "\n".join(lines)
 
     def _plot_region(self, widget_id: str) -> tuple[int, int]:
-        """Cells available to a chart in ``widget_id`` — its live size, or a
-        size derived from the terminal when layout has not settled yet."""
+        """Cells available to a chart in ``widget_id``, or ``(0, 0)`` if unknown.
+
+        A view inside the canvas switcher has no size until it is shown, so the
+        first paint after switching to it used to fall back to a width guessed
+        from the terminal. The guess does not match the real column, so the
+        chart was drawn at the wrong dimensions and then snapped to the right
+        ones on the next repaint — which is exactly the "distorted graph, then
+        the actual chart" an operator sees on first open.
+
+        Returning zero lets the caller wait for layout instead of inventing a
+        size. A chart drawn to the wrong scale is worse than one drawn a frame
+        later.
+        """
         try:
             region = self.query_one(widget_id).size
-            avail_w, avail_h = int(region.width), int(region.height)
         except Exception:
-            avail_w = avail_h = 0
-        if avail_w <= 0:
-            # For the market chart column subtract the sidebar (≈30) and rails;
-            # for all other widgets keep the original two-rail estimate.
-            sidebar = 30 if widget_id == "#market-chart" else 0
-            avail_w = max(40, self.size.width - 34 - sidebar)
-        if avail_h <= 0:
-            avail_h = max(16, self.size.height - 8)
-        return avail_w, avail_h
+            return 0, 0
+        return max(0, int(region.width)), max(0, int(region.height))
 
     def _render_market(self) -> None:
         if not self.snapshot:
@@ -2816,6 +2840,11 @@ class QlabTui(App[None]):
         # what the chart column can use. The height is now the full canvas
         # height minus the header row only (no stats rows below the chart).
         avail_w, avail_h = self._plot_region("#market-chart")
+        if avail_w <= 0 or avail_h <= 0:
+            # Layout has not sized the chart column yet. Repaint once it has,
+            # rather than drawing to a guessed scale and correcting visibly.
+            self.call_after_refresh(self._render_market)
+            return
         hi = max(history) if history else 0.0
         lo = min(history) if history else 0.0
         mid = (hi + lo) / 2.0
@@ -3571,7 +3600,54 @@ class QlabTui(App[None]):
             order_lines.append(f"[{MUTED}]No paper orders yet.[/]")
         self.query_one("#book-orders", Static).update("\n".join(order_lines))
 
+    def _render_desk_settings(self) -> None:
+        """The desk-mode card: which desk this is, and how to change it.
+
+        Credential state comes from the owner's own snapshot, which resolves
+        env-or-profile locally and never calls Alpaca — so opening Settings
+        cannot hang on a network round trip.
+        """
+        mode = (self.snapshot.get("desk_mode") or {}) if self.snapshot else {}
+        label = str(mode.get("label")
+                    or (self.desk_mode.label if self.desk_mode else "—"))
+        creds_ok = bool(mode.get("credentials_ok"))
+        creds = str(mode.get("credentials") or "").strip()
+
+        # The owner's view wins, but fall back to the mode this client committed
+        # to: a snapshot that predates the choice must not blank out fields the
+        # app already knows.
+        data = str(mode.get("data")
+                   or (self.desk_mode.data if self.desk_mode else "—"))
+        book = str(mode.get("book")
+                   or (self.desk_mode.book if self.desk_mode else "—"))
+        lines = [f"[{LABEL_GOLD}]DESK MODE · WHOSE BOOK THIS IS[/]"]
+        lines.extend(_key_number_markup([
+            ("current desk", label),
+            ("data", data.upper()),
+            ("book", book.upper()),
+        ]))
+        lines.append("")
+        # The owner's own description already names the remedy when there is
+        # none, so it is shown as-is rather than restated underneath it.
+        if creds_ok:
+            lines.append(f"[{UP}]✓ signed in[/]  [{DIM}]{escape(creds)}[/]")
+            lines.append(
+                f"[{DIM}]The Alpaca book is selectable. Paper only — this "
+                f"adapter has no live path.[/]")
+        else:
+            # Not an error: most sessions are synthetic on purpose. It is a
+            # precondition for one choice.
+            lines.append(f"[{AMBER}]! not signed in[/]  [{DIM}]"
+                         f"{escape(creds or 'no credential found')}[/]")
+            lines.append(
+                f"[{DIM}]Then press re-check — nothing here calls Alpaca.[/]")
+        self.query_one("#settings-desk-copy", Static).update("\n".join(lines))
+        # Reaching a real book without a credential is not a choice we offer.
+        self.query_one("#settings-change-desk", Button).tooltip = (
+            "Choose the data lane and which book is traded")
+
     def _render_settings(self) -> None:
+        self._render_desk_settings()
         if self.bootstrap is not None:
             mandate = self.bootstrap.get("mandate") or {}
             policy_id = str(mandate.get("operational_policy", "—"))
@@ -4392,6 +4468,18 @@ class QlabTui(App[None]):
         button_id = event.button.id
         if button_id in self._book_plan_ids:
             self._confirm_plan_execution(self._book_plan_ids[button_id])
+            return
+        if button_id == "settings-change-desk":
+            # The same chooser startup uses, so there is one place that decides
+            # which desk is being traded and one place that shows the
+            # credential behind it.
+            self._start_desk_mode_prompt()
+            return
+        if button_id == "settings-recheck-alpaca":
+            # Credential state rides on the owner's snapshot, so re-resolving
+            # is a refresh. Nothing here calls Alpaca.
+            self._write_local_event("alpaca.recheck", {})
+            self._start_refresh()
             return
         if button_id == "btn-atlas-refresh":
             self.action_atlas_refresh()

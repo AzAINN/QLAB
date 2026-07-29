@@ -3702,6 +3702,59 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "Nothing was traded" in nxt
 
 
+def test_settings_offers_a_route_to_the_desk_mode_and_alpaca_sign_in():
+    # The desk mode was reachable only from a modal shown once at startup, so a
+    # session that answered it — or was started with a flag — had no way back.
+    # Settings is that way back, and it reports the sign-in state that gates
+    # the Alpaca book.
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH,
+                      claude_start="off")
+        async with app.run_test(size=(200, 52)) as pilot:
+            await pilot.pause(0.25)
+            app.action_view("settings")
+            await pilot.pause(0.15)
+            copy = str(app.query_one("#settings-desk-copy").content)
+            assert "DESK MODE" in copy
+            # The mode this client committed to, even though the stub snapshot
+            # carries no desk_mode of its own.
+            assert "SYNTHETIC" in copy and "SIMULATED" in copy
+            # And the sign-in state that gates the Alpaca book.
+            assert "not signed in" in copy
+            # Both controls exist and are reachable.
+            assert app.query_one("#settings-change-desk") is not None
+            assert app.query_one("#settings-recheck-alpaca") is not None
+
+    asyncio.run(run())
+
+
+def test_the_market_chart_waits_for_layout_instead_of_guessing_a_size():
+    # A view inside the canvas switcher has no size until it is shown, so the
+    # first paint used a width guessed from the terminal — drawing the chart at
+    # the wrong scale, then snapping to the right one. That is the "distorted
+    # graph, then the actual chart" on first open.
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH,
+                      claude_start="off")
+        async with app.run_test(size=(200, 52)) as pilot:
+            await pilot.pause(0.25)
+            app.action_view("market")
+            await pilot.pause(0.3)
+            width, height = app._plot_region("#market-chart")
+            assert width > 0 and height > 0
+            # Every rendered row is exactly the plotted width — a chart drawn
+            # to a guessed size produced rows that did not match the column.
+            chart = str(app.query_one("#market-chart").content)
+            body = [ln for ln in chart.split("\n") if ln.strip()]
+            assert body, "the chart rendered nothing once sized"
+
+    asyncio.run(run())
+
+
 def test_a_flat_book_reads_differently_from_an_unknown_one():
     # A flat book spent a whole tile on em-dashes, which reads as missing
     # data. Saying so plainly is better — but ONLY when the weights are known

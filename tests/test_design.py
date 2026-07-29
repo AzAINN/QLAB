@@ -438,11 +438,16 @@ def test_rich_markup_resolution_produces_real_colours_for_a_log_line():
     assert tokens.role("qlab-light", "up") in resolved
 
 
-def test_rich_markup_resolution_refuses_an_unknown_variable():
+def test_rich_markup_resolution_leaves_an_unknown_variable_alone():
+    # This used to raise. It cannot: `resolve` sees operator prose as well as
+    # our markup and the two are not distinguishable by shape, so raising here
+    # meant a chat message containing "[$SPY]" killed the TUI. The guarantee
+    # that our own names are real now lives in
+    # test_every_exported_markup_name_resolves, which fails the build instead.
     from qlab.tui.design import markup
 
-    with pytest.raises(KeyError):
-        markup.resolve("[$not-a-token]x[/]", theme="qlab-dark")
+    assert markup.resolve("[$not-a-token]x[/]", theme="qlab-dark") == (
+        "[$not-a-token]x[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +545,37 @@ def test_primitives_render_in_every_theme():
         assert primitives.absent("gated", theme=theme_name).plain
 
 
+def test_every_exported_markup_name_resolves():
+    # `resolve` is permissive at runtime so operator prose cannot crash the
+    # desk, so the guarantee that OUR names are real lives here instead. A
+    # mistyped constant fails the build rather than rendering a literal
+    # "$mutd" into the console.
+    from qlab.tui.design import markup as markup_module
+
+    for theme_name in tokens.THEMES:
+        variables = tokens.THEMES[theme_name].variables
+        for name in markup_module.__all__:
+            token = getattr(markup_module, name)
+            assert token.startswith("$"), (name, token)
+            assert token[1:] in variables, (theme_name, name, token)
+
+
+def test_chat_prose_with_brackets_never_kills_the_console():
+    # rich.markup.escape does NOT escape "[$SPY]" — Rich does not read that as
+    # a tag — while this module's tag pattern necessarily does. Raising on the
+    # unknown name took the whole TUI down on a normal chat message.
+    from rich.markup import escape
+
+    from qlab.tui.design.markup import MUTED, resolve
+
+    assert resolve(escape("buy [$SPY] now")) == "buy [$SPY] now"
+    assert resolve("watch [$AAPL] and [$MSFT]") == "watch [$AAPL] and [$MSFT]"
+    # Text the caller escaped stays escaped rather than being reinterpreted.
+    assert resolve(escape("literal [bold] tag")) == "literal \\[bold] tag"
+    # And our own markup still resolves in the same line.
+    assert resolve(f"[{MUTED}]cash[/] [$SPY]").startswith("[#")
+
+
 def test_resolve_leaves_currency_in_body_text_alone():
     # A money amount outside a tag is not a variable reference. Substituting
     # across the whole line read "$100" as a token name and raised, so any
@@ -551,7 +587,7 @@ def test_resolve_leaves_currency_in_body_text_alone():
     assert resolve("a move of $0.02 per share") == "a move of $0.02 per share"
     assert resolve(f"[{MUTED}]cash[/] $1,250").endswith("cash[/] $1,250")
 
-    # A mistyped token inside a tag must still fail loud; that is the whole
-    # reason substitution is strict.
-    with pytest.raises(KeyError):
-        resolve("[$nosuchtoken]x[/]")
+    # A mistyped token is left as written rather than raising — see
+    # test_rich_markup_resolution_leaves_an_unknown_variable_alone for why the
+    # loud failure moved to build time.
+    assert resolve("[$nosuchtoken]x[/]") == "[$nosuchtoken]x[/]"

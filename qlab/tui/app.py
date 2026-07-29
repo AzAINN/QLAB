@@ -523,9 +523,29 @@ def _extract_targets(steps_by_phase: dict) -> dict:
 
 
 def _format_targets(targets: dict, limit: int = 8) -> str:
-    """Target weights as a compact, largest-first line: 'AAPL 30.0% · GLD 20.0%'."""
-    ordered = sorted(targets.items(), key=lambda kv: -float(kv[1]))[:limit]
-    return " · ".join(f"{ticker} {float(weight):.1%}" for ticker, weight in ordered)
+    """Target weights as a compact, largest-first line: 'AAPL 30.0% · GLD 20.0%'.
+
+    Weights come from an agent-authored artifact that the registry validates
+    only as a dict — the value types are never checked — so a string weight or
+    a null reaches here on the failed-run path. Coercing per entry keeps one
+    bad weight from raising out of a render and, through `call_from_thread`,
+    into the Claude reader thread.
+    """
+    numeric: list[tuple[str, float]] = []
+    unreadable: list[str] = []
+    for ticker, weight in targets.items():
+        try:
+            numeric.append((str(ticker), float(weight)))
+        except (TypeError, ValueError):
+            unreadable.append(str(ticker))
+    ordered = sorted(numeric, key=lambda kv: -kv[1])[:limit]
+    line = " · ".join(f"{ticker} {weight:.1%}" for ticker, weight in ordered)
+    if unreadable:
+        # Naming them beats dropping them: a weight the desk could not read is
+        # a fact about the run, not noise to hide.
+        line += (" · " if line else "") + (
+            f"[unreadable: {', '.join(sorted(unreadable)[:4])}]")
+    return line
 
 
 # The completion summary is written for an operator, not a quant: a coloured
@@ -1406,13 +1426,24 @@ class QlabTui(App[None]):
         self._refreshing = True
 
         def run() -> None:
+            # The fetch and the repaint are separated because they fail for
+            # different reasons and only one of them is the owner's fault.
+            # `call_from_thread` re-raises renderer exceptions here, so a
+            # repaint bug used to count toward `_refresh_failures` and, after
+            # three ticks, tell the operator OWNER DOWN about a healthy owner.
             try:
                 snapshot = gather_snapshot(self.client, offline=self.offline)
-                self._call_from_worker(self._apply_snapshot, snapshot)
             except Exception as exc:
                 self._call_from_worker(
                     self._write_local_event, "api.error", {"error": repr(exc)})
                 self._call_from_worker(self._note_refresh_failure)
+                self._call_from_worker(self._finish_refresh)
+                return
+            try:
+                self._call_from_worker(self._apply_snapshot, snapshot)
+            except Exception as exc:
+                self._call_from_worker(
+                    self._write_local_event, "render.error", {"error": repr(exc)})
             finally:
                 self._call_from_worker(self._finish_refresh)
 
@@ -4140,6 +4171,12 @@ class QlabTui(App[None]):
         argument = argument.strip()
 
         action_name = COMMAND_TABLE.get((command, subword)) if subword else None
+        # A recognised subcommand that fails its own argument check is a
+        # malformed subcommand, not a bare command with a long argument.
+        # Falling through turned ": workforce stop now" into
+        # action_workforce_new("stop now") — an attempt to halt a coordinator
+        # launched a second one.
+        named_subcommand = action_name is not None
         action_args: tuple[Any, ...] = ()
         if action_name == "action_view":
             if argument:
@@ -4155,6 +4192,14 @@ class QlabTui(App[None]):
             action_args = (argument,)
         elif action_name is not None and argument:
             action_name = None
+
+        if action_name is None and named_subcommand:
+            self._write_local_event(
+                "command.malformed", {"command": raw, "subcommand": subword})
+            self._set_selected_work(
+                f"{command.upper()} {subword.upper()} does not take those "
+                "arguments.\n\nUse : help for the command surface.")
+            return
 
         if action_name is None:
             action_name = COMMAND_TABLE.get((command, None))

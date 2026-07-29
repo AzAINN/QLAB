@@ -1773,6 +1773,34 @@ def _execute_body(session, plan_id: str) -> dict:
             "approval_id": _approve(session, plan_id)}
 
 
+def test_reset_refuses_the_alpaca_book_and_spares_its_history(session):
+    # A reset discards qlab's own book; it cannot discard an Alpaca account.
+    # Wiping only the local marks would leave the recorded history disagreeing
+    # with the untouched real account.
+    from qlab.core.desk_mode import DeskMode
+
+    session.registry.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 98_000.0, cash=1_000.0,
+        source="alpaca_backfill", book="alpaca_paper")
+    session.set_desk_mode(DeskMode("live", "alpaca"))
+
+    status, result = handle_api(session, "POST", "/api/reset", {}, {})
+    assert status == 400 and "cannot be reset" in result["error"]
+    assert session.registry.equity_marks(book="alpaca_paper") != []
+
+
+def test_resetting_the_simulated_book_spares_the_alpaca_history(session):
+    session.registry.log_equity_mark(
+        "2026-06-01T21:00:00+00:00", 98_000.0, cash=1_000.0,
+        source="alpaca_backfill", book="alpaca_paper")
+    assert session.desk_mode.book == "simulated"
+
+    status, result = handle_api(session, "POST", "/api/reset", {}, {})
+    assert (status, result["reset"]) == (200, True)
+    assert [m["equity"] for m in
+            session.registry.equity_marks(book="alpaca_paper")] == [98_000.0]
+
+
 def test_a_consumed_approval_cannot_be_revived_and_spent_again(session):
     # The challenge route wrote "pending" over whatever status it found, so a
     # spent approval could be re-opened, re-approved, and used to authorise a

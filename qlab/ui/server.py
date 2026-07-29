@@ -2307,8 +2307,20 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, report
 
     if method == "POST" and path == "/api/reset":
-        session.registry.reset_book(session.mandate.paper_capital)
-        return 200, {"reset": True, "cash": session.mandate.paper_capital}
+        # A reset discards qlab's own book. It cannot discard an Alpaca
+        # account, so on that desk it would only delete the local marks and
+        # leave the recorded history disagreeing with the real account —
+        # refuse rather than manufacture that gap.
+        if session.desk_mode.book == "alpaca":
+            return 400, {
+                "error": "the Alpaca book cannot be reset from here: this "
+                         "would erase the local history of an account it "
+                         "cannot touch. Switch to the simulated book first."}
+        state = session.portfolio(off)
+        session.registry.reset_book(session.mandate.paper_capital,
+                                    book=state["broker"])
+        return 200, {"reset": True, "cash": session.mandate.paper_capital,
+                     "book": state["broker"]}
 
     return 404, {"error": f"no route for {method} {path}"}
 

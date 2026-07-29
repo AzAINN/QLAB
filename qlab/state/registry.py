@@ -925,18 +925,30 @@ class Registry:
         self.con.execute("UPDATE account SET halted=?, updated_at=? WHERE id=1",
                          [halted, _now()])
 
-    def reset_book(self, cash: float) -> None:
-        """Discard the book: positions, orders, marks, and the account state.
+    def reset_book(self, cash: float, book: str) -> None:
+        """Discard one book: positions, orders, its marks, and the account state.
 
-        The equity marks go with it. Keeping them would splice the discarded
-        book's equity level onto the fresh one, and the first mark after a reset
-        would read as a market loss the size of the discarded gains — a
-        fabricated return that then propagates into max_drawdown, ann_vol and
-        cvar_95. A reset is already a destructive wipe; the history goes too.
+        That book's equity marks go with it. Keeping them would splice the
+        discarded book's equity level onto the fresh one, and the first mark
+        after a reset would read as a market loss the size of the discarded
+        gains — a fabricated return that then propagates into max_drawdown,
+        ann_vol and cvar_95. A reset is already a destructive wipe; that
+        history goes too.
+
+        Only *that book's* marks, though. The delete used to be unqualified,
+        so resetting the simulated paper book also destroyed the realized
+        equity curve of every other book — including an Alpaca account's
+        backfilled history, which no reset here can rebuild. `positions` and
+        `orders` are not book-partitioned because they only ever hold the
+        simulated book: the Alpaca adapter reads its positions from Alpaca.
         """
+        if not str(book).strip():
+            raise ValueError(
+                "reset_book requires the book being reset; an unqualified "
+                "wipe would take every book's history with it")
         self.con.execute("DELETE FROM positions")
         self.con.execute("DELETE FROM orders")
-        self.con.execute("DELETE FROM equity_marks")
+        self.con.execute("DELETE FROM equity_marks WHERE book=?", [str(book)])
         self.con.execute(
             "UPDATE account SET cash=?, high_water_mark=?, halted=FALSE, updated_at=? "
             "WHERE id=1", [cash, cash, _now()])

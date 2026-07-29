@@ -685,12 +685,38 @@ def test_reset_book_discards_the_equity_marks_of_the_discarded_book():
     reg.log_equity_mark("2026-06-01T21:00:00+00:00", 10_500.0, cash=500.0,
                         source="daily", book="simulated_paper")
 
-    reg.reset_book(10_000.0)
+    reg.reset_book(10_000.0, book="simulated_paper")
 
     assert reg.get_positions() == {}
     assert reg.list_orders() == []
     assert reg.equity_marks() == []
     assert reg.count_equity_marks() == 0
+
+
+def test_resetting_one_book_leaves_another_books_history_intact():
+    # The delete was unqualified, so discarding the simulated paper book also
+    # destroyed the Alpaca account's backfilled equity curve — history no
+    # reset here can rebuild, since that account lives at the broker.
+    reg = Registry(":memory:")
+    reg.init_account(10_000.0)
+    reg.log_equity_mark("2026-06-01T21:00:00+00:00", 10_500.0, cash=500.0,
+                        source="daily", book="simulated_paper")
+    reg.log_equity_mark("2026-06-01T21:00:00+00:00", 98_000.0, cash=1_000.0,
+                        source="alpaca_backfill", book="alpaca_paper")
+
+    reg.reset_book(10_000.0, book="simulated_paper")
+
+    surviving = reg.equity_marks(book="alpaca_paper")
+    assert [m["equity"] for m in surviving] == [98_000.0]
+    assert reg.equity_marks(book="simulated_paper") == []
+
+
+def test_reset_book_refuses_an_unnamed_book():
+    # The book is required precisely because the default used to be "all".
+    reg = Registry(":memory:")
+    reg.init_account(10_000.0)
+    with pytest.raises(ValueError, match="requires the book"):
+        reg.reset_book(10_000.0, book="")
 
 
 def test_equity_marks_are_partitioned_by_book():

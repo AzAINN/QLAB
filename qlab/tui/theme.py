@@ -255,13 +255,16 @@ APP_CSS_TEMPLATE = Template("""
         border: solid $border;
         border-left: solid $amber;
     }
+    /* A one-row band has exactly one row for its text, so a border-bottom
+       consumes it and the tile renders as an unlabelled grey strip. The raised
+       background already separates the band from the body; the rule does not
+       need to, and cannot afford to. */
     .tile-title {
         height: 1;
         padding: 0 1;
         background: $bg_raised;
         color: $amber;
         text-style: bold;
-        border-bottom: solid $border_hi;
     }
     /* Vertical padding is spent per tile, so on an eight-tile grid it costs a
        sixth of the viewport and pushes the last row below the fold. The row of
@@ -497,7 +500,6 @@ APP_CSS_TEMPLATE = Template("""
         background: $bg_raised;
         color: $amber;
         text-style: bold;
-        border-bottom: solid $border;
     }
     .book-section {
         width: 1fr;
@@ -588,17 +590,17 @@ APP_CSS_TEMPLATE = Template("""
         background: $bg_panel;
         border-left: solid $border_hi;
     }
+    /* Same one-row constraint as .tile-title: the border would eat the only
+       row the label has, leaving three blank strips down the rail. */
     #agent-label, #work-label, #atlas-label {
         height: 1;
         padding: 0 1;
         background: $bg_raised;
         color: $amber;
         text-style: bold;
-        border-bottom: solid $border;
     }
-    #atlas-label {
-        border-top: solid $border_hi;
-    }
+    /* No border here either — it is the same single row as the labels above,
+       and the rail's own left border already separates it from the canvas. */
     #atlas-rail {
         height: auto;
         margin-bottom: 0;

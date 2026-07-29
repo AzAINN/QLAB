@@ -4187,11 +4187,32 @@ class QlabTui(App[None]):
             return
         plan_id = self._pending_plan_id
         self._pending_plan_id = ""
+        # The dialog the operator just answered IS the approval decision, so it
+        # is recorded as one. A boolean in a request body is self-attestation
+        # any local process can send; the persisted approval binds this plan's
+        # digest, its targets, and the book revision as of this moment, so a
+        # book that moved between preview and confirm refuses instead of
+        # filling against figures the operator never saw.
         self._run_api_action(
             "paper plan execution", "/api/plans/execute",
             {"offline": self.offline, "plan_id": plan_id, "human_confirmed": True},
             active_agent="reporter",
+            prepare=lambda: self._record_paper_approval(plan_id),
         )
+
+    def _record_paper_approval(self, plan_id: str) -> dict:
+        """Create and approve the record the execution will consume.
+
+        Runs on the action worker, not the app thread, because it is two owner
+        round-trips. Returns the body fragment the execution call merges in.
+        """
+        created = self.client.post(
+            "/api/approvals", {"plan_id": plan_id, "offline": self.offline})
+        approval_id = str(created.get("approval_id") or "")
+        if not approval_id:
+            raise RuntimeError("the owner created no approval for this plan")
+        self.client.post(f"/api/approvals/{approval_id}/approve", {})
+        return {"approval_id": approval_id}
 
     def _run_api_action(
         self,
@@ -4201,7 +4222,14 @@ class QlabTui(App[None]):
         *,
         active_agent: str | None,
         http_method: str = "post",
+        prepare=None,
     ) -> None:
+        """Run one owner call on a worker thread.
+
+        `prepare` runs first, on the same worker, and its returned mapping is
+        merged into the request body — for a call that must be preceded by
+        other owner round-trips whose result it depends on.
+        """
         if self._action_running:
             self._write_local_event("action.rejected", {"reason": "another action is running"})
             return
@@ -4215,10 +4243,13 @@ class QlabTui(App[None]):
 
         def run() -> None:
             try:
+                call_body = dict(body)
+                if prepare is not None:
+                    call_body.update(prepare() or {})
                 if http_method == "get":
-                    result = self.client.get(path, **body)
+                    result = self.client.get(path, **call_body)
                 elif http_method == "post":
-                    result = self.client.post(path, body)
+                    result = self.client.post(path, call_body)
                 else:
                     raise ValueError(
                         f"unsupported owner API method {http_method!r}")

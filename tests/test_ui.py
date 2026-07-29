@@ -902,7 +902,7 @@ def test_owner_preview_uses_exact_referee_reviewed_targets(session):
 
     status, executed = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": preview["plan_id"], "human_confirmed": True},
+        _execute_body(session, preview["plan_id"]),
     )
     assert status == 200 and executed["executed"] is True
     assert executed["plan_id"] == preview["plan_id"]
@@ -1726,14 +1726,23 @@ def test_backfill_merges_alpaca_history_idempotently(session, monkeypatch):
     assert payload["backfilled"] == 0
 
 
-def _checked_plan(session) -> str:
-    """A referee-PASSed persisted checked plan — the only executable shape."""
+def _checked_plan(session, tilt: float = 0.0) -> str:
+    """A referee-PASSed persisted checked plan — the only executable shape.
+
+    Plans are content-addressed, so identical targets yield the same plan_id;
+    `tilt` perturbs them when a test needs a genuinely different plan.
+    """
     from datetime import date
 
     from qlab.core.types import Decision
 
     tickers = session.mandate.universe_whitelist
-    targets = {ticker: 1.0 / len(tickers) for ticker in tickers}
+    even = 1.0 / len(tickers)
+    targets = {ticker: even for ticker in tickers}
+    if tilt:
+        first, last = tickers[0], tickers[-1]
+        targets[first] = even + tilt
+        targets[last] = even - tilt
     decision_id = session.registry.log_decision(Decision(
         as_of=date.today(), kind="rebalance_gate",
         choice={"targets": targets}, rationale="configured HRP policy",
@@ -1748,13 +1757,61 @@ def _checked_plan(session) -> str:
     return preview["plan_id"]
 
 
-def test_rejected_execution_writes_no_execution_mark(session):
-    """An "execution" mark asserts a fill happened; a refused plan forges none."""
+def _approve(session, plan_id: str) -> str:
+    """The human decision, recorded — execution consumes this, not a boolean."""
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": plan_id, "offline": True})
+    approval_id = created["approval_id"]
+    handle_api(
+        session, "POST", f"/api/approvals/{approval_id}/approve", {}, {})
+    return approval_id
+
+
+def _execute_body(session, plan_id: str) -> dict:
+    return {"offline": True, "plan_id": plan_id, "human_confirmed": True,
+            "approval_id": _approve(session, plan_id)}
+
+
+def test_a_bare_human_confirmed_flag_cannot_book_a_trade(session):
+    # human_confirmed is a boolean in a request body — self-attestation any
+    # local process can send. It used to be the whole gate on this route, so
+    # one unauthenticated POST filled legs and the audit trail recorded it as
+    # a human decision. The approval record is what authorises now.
     plan_id = _checked_plan(session)
-    session.registry.set_plan_state(plan_id, "refused")
     status, result = handle_api(
         session, "POST", "/api/plans/execute", {},
         {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+    assert status == 400
+    assert "approval" in result["error"]
+    assert [row for row in session.registry.equity_marks()
+            if row["source"] == "execution"] == []
+    assert session.registry.get_plan(plan_id)["state"] == "checked"
+
+
+def test_an_approval_for_a_different_plan_cannot_execute_this_one(session):
+    # The approval binds a specific plan digest and targets hash, so holding
+    # *an* approval is not holding one for this plan.
+    mine = _checked_plan(session)
+    other_approval = _approve(session, _checked_plan(session, tilt=0.02))
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": mine, "human_confirmed": True,
+         "approval_id": other_approval})
+    assert (status, result["executed"]) == (200, False)
+    assert result["blocked_by"] == "approval"
+
+
+def test_rejected_execution_writes_no_execution_mark(session):
+    """An "execution" mark asserts a fill happened; a refused plan forges none."""
+    plan_id = _checked_plan(session)
+    # Approve while the plan is still checked, then refuse it: the point is
+    # that a refused plan forges no mark even with a valid human decision
+    # behind it, not that an approval cannot be created for a refused plan.
+    body = _execute_body(session, plan_id)
+    session.registry.set_plan_state(plan_id, "refused")
+    status, result = handle_api(
+        session, "POST", "/api/plans/execute", {}, body)
     assert (status, result["executed"]) == (200, False)
     assert "mandate_violation" in result
     assert [row for row in session.registry.equity_marks()
@@ -1771,7 +1828,7 @@ def test_failed_mark_never_masks_a_completed_execution(session, monkeypatch):
     monkeypatch.setattr(session, "portfolio", unavailable)
     status, result = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+        _execute_body(session, plan_id))
     assert (status, result["executed"]) == (200, True)
     failures = [event for event in session.registry.read_events(100)
                 if event["kind"] == "equity_mark_failed"]
@@ -1797,7 +1854,7 @@ def test_successful_execution_records_an_execution_mark(session):
     plan_id = _checked_plan(session)
     status, result = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": plan_id, "human_confirmed": True})
+        _execute_body(session, plan_id))
     assert (status, result["executed"]) == (200, True)
     marks = [row for row in session.registry.equity_marks()
              if row["source"] == "execution"]
@@ -2071,27 +2128,27 @@ def test_plan_execution_clamps_offline_to_desk_mode_on_the_alpaca_book(
 ):
     """Plan execution cannot contradict the book either.
 
-    A body of ``{"offline": true}`` must not reach ``execute_checked_plan``
-    as-is on a live/alpaca desk: honouring it would run
-    ``execute_checked_plan``'s P3 execution-time data-revalidation gate under
-    a demo policy (never execution-eligible) while ``get_broker`` still fills
-    against the real Alpaca account — exactly the contradiction ``DeskMode``
-    forbids.
+    A body of ``{"offline": true}`` must not reach the execution path as-is on
+    a live/alpaca desk: honouring it would run the P3 execution-time
+    data-revalidation gate under a demo policy (never execution-eligible)
+    while ``get_broker`` still fills against the real Alpaca account — exactly
+    the contradiction ``DeskMode`` forbids.
     """
     from qlab.core.desk_mode import DeskMode
 
     session.set_desk_mode(DeskMode("live", "alpaca"))
     calls: dict[str, tuple] = {}
 
-    def fake_execute_checked_plan(body, offline):
+    def fake_execute(plan_id, body, offline):
         calls["execute"] = (body, offline)
         return {"executed": False}
 
-    monkeypatch.setattr(session, "execute_checked_plan", fake_execute_checked_plan)
+    monkeypatch.setattr(session, "execute_plan_with_approval", fake_execute)
 
     status, _ = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": "whatever", "human_confirmed": True})
+        {"offline": True, "plan_id": "whatever", "human_confirmed": True,
+         "approval_id": "whatever"})
     assert status == 200
     assert calls["execute"][1] is False
 
@@ -2103,15 +2160,16 @@ def test_plan_execution_still_honors_body_offline_on_the_simulated_book(
     assert session.desk_mode.book == "simulated"  # default fixture desk mode
     calls: dict[str, tuple] = {}
 
-    def fake_execute_checked_plan(body, offline):
+    def fake_execute(plan_id, body, offline):
         calls["execute"] = (body, offline)
         return {"executed": False}
 
-    monkeypatch.setattr(session, "execute_checked_plan", fake_execute_checked_plan)
+    monkeypatch.setattr(session, "execute_plan_with_approval", fake_execute)
 
     status, _ = handle_api(
         session, "POST", "/api/plans/execute", {},
-        {"offline": True, "plan_id": "whatever", "human_confirmed": True})
+        {"offline": True, "plan_id": "whatever", "human_confirmed": True,
+         "approval_id": "whatever"})
     assert status == 200
     assert calls["execute"][1] is True
 

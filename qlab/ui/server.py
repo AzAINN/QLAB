@@ -453,55 +453,6 @@ class UISession:
             "note": "checked dry preview only; Claude cannot execute it",
         }
 
-    def execute_checked_plan(self, body: dict, offline: bool) -> dict:
-        """Execute one persisted checked plan after an explicit TUI confirmation."""
-        from qlab.trader.broker import get_broker
-        from qlab.trader.mandate import MandateViolation
-        from qlab.trader.plan import OrderLeg, OrderPlan, execute_plan
-
-        if body.get("human_confirmed") is not True:
-            raise PermissionError("human_confirmed=true is required")
-        plan_id = str(body.get("plan_id") or "")
-        stored = self.registry.get_plan(plan_id)
-        if stored is None:
-            raise KeyError(f"unknown plan_id {plan_id!r}")
-        legs = [OrderLeg(**leg) for leg in (stored.get("legs") or [])]
-        expected_legs = int((stored.get("pre_trade") or {}).get("n_legs", 0))
-        if len(legs) != expected_legs:
-            raise RuntimeError(
-                f"plan {plan_id!r} has incomplete persisted legs; re-propose"
-            )
-        plan = OrderPlan(
-            plan_id=stored["plan_id"], decision_id=stored["decision_id"],
-            targets=stored["targets"], legs=legs,
-            pre_trade=stored["pre_trade"], state=stored["state"],
-        )
-        # Execution-time data revalidation (P3): under an operational policy the
-        # data backing this plan must STILL be execution-grade at submission —
-        # fresh daily bar and, if a live stream is attached, fresh quotes. Demo
-        # /offline runtimes are never execution-grade, so this gate applies only
-        # to the real operational path and never blocks the simulated demo.
-        from qlab.core import data as market
-
-        policy = market.policy_for(offline, seed=self.seed)
-        if policy.execution_eligible:
-            health = self.data_health(offline, purpose="execution")
-            if health.get("blocked") or not health.get("eligible_for_execution"):
-                return {"executed": False, "blocked_by": "data_revalidation",
-                        "data_health": health}
-
-        broker = get_broker(
-            self.registry, offline=offline,
-            starting_cash=self.mandate.paper_capital, seed=self.seed,
-            universe=self.mandate.universe_whitelist,
-            book=self.desk_mode.book,
-        )
-        try:
-            result = execute_plan(self.registry, broker, plan)
-        except MandateViolation as exc:
-            return {"executed": False, "mandate_violation": str(exc)}
-        return {"executed": True, **result}
-
     # -- portfolio view -----------------------------------------------------
     def portfolio(self, offline: bool) -> dict:
         from qlab.trader.broker import get_broker
@@ -1593,6 +1544,13 @@ class UISession:
                         "data_health": health}
 
         legs = [OrderLeg(**leg) for leg in (stored.get("legs") or [])]
+        # A legacy or truncated row must be re-proposed, never executed with
+        # whatever legs happen to have survived — a partial plan that fills is
+        # indistinguishable from the plan the human actually approved.
+        expected_legs = int((stored.get("pre_trade") or {}).get("n_legs", 0))
+        if len(legs) != expected_legs:
+            raise RuntimeError(
+                f"plan {plan_id!r} has incomplete persisted legs; re-propose")
         plan = OrderPlan(plan_id=stored["plan_id"], decision_id=stored["decision_id"],
                          targets=stored["targets"], legs=legs,
                          pre_trade=stored["pre_trade"], state=stored["state"])
@@ -2261,8 +2219,25 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.rebalance_preview(body, off)
 
     if method == "POST" and path == "/api/plans/execute":
+        # Retained as the TUI's entry point, but it is now the same governed
+        # path as /api/plans/<id>/execute: a bare human_confirmed flag is
+        # self-attestation any local process can send, so the approval record
+        # — not the boolean — is what authorises a fill.
         clamped_off = _offline_for_book(session, off)
-        result = session.execute_checked_plan(body, clamped_off)
+        if body.get("human_confirmed") is not True:
+            return 400, {"error": "human_confirmed=true is required"}
+        if not str(body.get("approval_id") or ""):
+            # Distinct from an approval that fails to cover the plan (200 with
+            # reasons): presenting no approval at all is a malformed request,
+            # and saying so plainly keeps a caller from reading the refusal as
+            # "the desk declined this trade".
+            return 400, {"error": "execution requires an approval_id: a bare "
+                                  "human_confirmed flag cannot book a trade"}
+        try:
+            result = session.execute_plan_with_approval(
+                str(body.get("plan_id") or ""), body, clamped_off)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
         # A mark sourced "execution" asserts that legs filled; a refused or
         # mandate-violating plan must not forge that provenance.
         if result.get("executed") is True:

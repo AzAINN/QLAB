@@ -3321,6 +3321,39 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "Nothing was traded" in nxt
 
 
+def test_one_malformed_live_event_does_not_kill_the_subscription():
+    # _apply_quote_event raises on a bad payload, and that exception used to
+    # propagate through call_from_thread into the reader thread's catch-all —
+    # one bad frame dropped the desk into a silent reconnect loop forever. It
+    # must surface in the strip and leave the stream delivering.
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off")
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            app._apply_live_event({
+                "event_id": "bad-1",
+                "ts": "2026-07-24T12:00:00+00:00",
+                "kind": "quote",
+                "payload": {"rows": [{"ticker": "ACWI"}]},  # no price/change
+            })
+            # No exception escaped; the strip names the bad frame.
+            strip = str(app.query_one("#event-strip").render())
+            assert "event.malformed" in strip
+            # And a well-formed event afterwards still lands.
+            app._apply_live_event({
+                "event_id": "good-1",
+                "ts": "2026-07-24T12:00:01+00:00",
+                "kind": "quote",
+                "payload": {"rows": [{
+                    "ticker": "ACWI", "price": 111.0, "change_1d": 0.01,
+                }]},
+            })
+
+    asyncio.run(run())
+
+
 def test_a_respec_after_a_theme_switch_keeps_the_new_nodes_on_that_theme():
     # A workflow respec recomposes the flow board. Nodes built after the switch
     # mounted on the default palette while the rest of the desk was light, so a

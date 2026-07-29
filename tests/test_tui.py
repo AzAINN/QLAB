@@ -798,7 +798,9 @@ def test_mode_chip_tones_a_real_book_apart_from_a_simulated_one():
     from textual.color import Color
 
     from qlab.tui.app import QlabTui
-    from qlab.tui.theme import AMBER, DOWN, MUTED
+    from qlab.tui.design import tokens as _tokens
+    _v = _tokens.THEMES[_tokens.DEFAULT_THEME].variables
+    AMBER, DOWN, MUTED = _v["amber"], _v["down"], _v["muted"]
 
     async def chip(mode):
         app = QlabTui(StubClient(), refresh_interval=0, desk_mode=mode)
@@ -834,7 +836,8 @@ def test_mode_chip_reads_the_owner_payload_over_the_launcher_flag():
     from textual.color import Color
 
     from qlab.tui.app import QlabTui
-    from qlab.tui.theme import DOWN
+    from qlab.tui.design import tokens as _tokens
+    DOWN = _tokens.THEMES[_tokens.DEFAULT_THEME].variables["down"]
 
     class OwnerDeskModeClient(StubClient):
         def __init__(self, payload):
@@ -880,7 +883,9 @@ def test_mode_chip_never_claims_synthetic_before_it_knows():
     from textual.color import Color
 
     from qlab.tui.app import QlabTui
-    from qlab.tui.theme import DOWN, MUTED
+    from qlab.tui.design import tokens as _tokens
+    _v = _tokens.THEMES[_tokens.DEFAULT_THEME].variables
+    DOWN, MUTED = _v["down"], _v["muted"]
 
     class DeadOwnerClient(StubClient):
         def get(self, path, **params):
@@ -914,7 +919,8 @@ def test_mode_chip_does_not_read_the_pre_choice_snapshot():
     from textual.color import Color
 
     from qlab.tui.app import QlabTui
-    from qlab.tui.theme import DOWN
+    from qlab.tui.design import tokens as _tokens
+    DOWN = _tokens.THEMES[_tokens.DEFAULT_THEME].variables["down"]
 
     class StaleSnapshotClient(StubClient):
         """One pre-choice snapshot, then silence — the window being tested.
@@ -967,7 +973,8 @@ def test_a_refused_desk_mode_post_is_rendered_not_just_logged():
     from textual.color import Color
 
     from qlab.tui.app import QlabTui
-    from qlab.tui.theme import DOWN
+    from qlab.tui.design import tokens as _tokens
+    DOWN = _tokens.THEMES[_tokens.DEFAULT_THEME].variables["down"]
 
     class RefusingClient(StubClient):
         def post(self, path, body=None):
@@ -1012,7 +1019,7 @@ def test_mode_chip_claims_no_mode_while_the_chooser_is_still_up():
     async def run():
         # desk_mode=None is the app's signal to ask; the modal owns the screen
         # while the chip must stand behind it saying nothing about the book.
-        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=_SYNTH)
+        app = QlabTui(StubClient(), refresh_interval=0, desk_mode=None)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.pause(0.2)
             assert str(app.query_one("#mode-chip").content).strip() == (

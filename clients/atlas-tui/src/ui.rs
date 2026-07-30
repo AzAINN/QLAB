@@ -6,6 +6,12 @@
 //! meant to be fronted by a personal quant, not to be a view switcher that
 //! happens to include one.
 
+// The workstation's own UI tree grows in `src/ui/` beside this file; Task 5
+// absorbs the layout below into `shell` and deletes this module.
+pub mod shell;
+pub mod views;
+pub mod widgets;
+
 use crate::app::App;
 use crate::glyph;
 use ratatui::{

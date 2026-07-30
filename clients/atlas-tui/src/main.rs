@@ -10,8 +10,17 @@
 //! desk has two disagreeing faces.
 
 mod app;
+mod bus;
 mod client;
+mod cmd;
+mod format;
+mod fx;
 mod glyph;
+mod input;
+mod model;
+mod net;
+mod store;
+mod theme;
 mod ui;
 
 use anyhow::Result;
@@ -58,7 +67,12 @@ fn main() -> Result<()> {
 fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut app::App,
-) -> Result<()> {
+) -> Result<()>
+where
+    // ratatui 0.30 made the backend error an associated type; `anyhow` can only
+    // absorb it once it is a real, thread-safe error.
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let mut last_refresh = Instant::now();
     loop {
         terminal.draw(|f| ui::draw(f, app))?;

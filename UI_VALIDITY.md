@@ -1,11 +1,14 @@
 # UI validity and deployment boundary
 
-> Updated 2026-07-19. This document describes the current owner-backed TUI and
-> web UI. The former staged Quantum panel and QAOA comparison were removed.
+> Updated 2026-07-30. Describes the owner-backed Textual TUI, the web client,
+> and the read-only `atlas-tui` Ratatui client. The former staged Quantum panel
+> and QAOA comparison were removed.
 
-Use `qlab tui` for the primary quiet-workstation interface or `qlab ui` for the
-secondary browser client. Both talk to one owner process that exclusively holds
-the DuckDB research registry and paper book.
+Use `qlab tui` for the primary quiet-workstation interface, `qlab ui` for the
+browser client, or `clients/atlas-tui` for the Atlas-first terminal client. All
+three talk to one owner process that exclusively holds the DuckDB research
+registry and paper book. Only the Textual TUI can confirm a paper trade;
+`atlas-tui` has no order path at all.
 
 ## Interpret every number in context
 
@@ -30,7 +33,12 @@ do not, by themselves, establish economic usefulness or future performance.
 |---|---|---|
 | Offline with cache | Previously cached daily bars | Historical only, with the displayed as-of and staleness metadata |
 | Offline without cache | Deterministic synthetic fixture | Pipeline behavior and reproducibility only |
-| Online | Daily yfinance history refreshed into cache | Historical research only; this is not a streaming quote feed |
+| Online | Daily yfinance or Alpaca history refreshed into cache | Historical research only; this is not a streaming quote feed |
+
+A synthetic fixture is identified by its seed as well as its universe and dates:
+two seeds are two different samples and no longer share a cache entry. That
+matters for validity, not just tidiness — a robustness sweep that silently
+re-served one sample would report perfect stability for a spurious result.
 
 The default broker is simulated paper accounting. Alpaca support is paper-only
 and partial: it does not yet provide a complete streaming market-data and order-
@@ -60,6 +68,24 @@ produces a methodological fixture. Historical input produces a historical
 result with the usual estimation and sample-size uncertainty.
 
 There is no staged QAOA comparison on this surface.
+
+### Atlas and autonomous runs
+
+Atlas starts governed research by itself and the owner drives a coordinator
+through its phases, so runs now appear without a human having pressed start.
+This changes who *initiates* work and nothing about what work may do:
+
+- Atlas's own tools are read-only in every mode. It holds no tool that builds a
+  plan, approves one, or books a fill.
+- `research` mode — the default — cannot start a plan-creating template at all.
+  Reaching a paper plan needs `propose` mode, and reaching a fill additionally
+  needs explicit human confirmation from the TUI.
+- An autonomously started run produces exactly the artifacts a human-started run
+  produces, under the same referee gate and the same `targets_hash` binding.
+
+Read an autonomous run's conclusions the way you would read any other run's:
+the coordinator's reasoning is judgment, the referee verdict is a deterministic
+check, and neither is evidence about future returns.
 
 ### Autopilot
 
@@ -120,6 +146,8 @@ not prompt-only.
 | Offline QAOA is a deployed trading capability | No |
 | A constructed Ising dimension proves quantum hardware applicability | No |
 | MVSK beats the benchmarks | No; the current tested result is the opposite |
+| Quantum-inspired feature augmentation improves the vol forecast | No; measured to hurt across twelve samples |
+| An autonomous Atlas run can reach a fill without a human | No; confirmation is required and unchanged |
 | Historical or synthetic performance predicts live returns | No |
 
 The short version: trust the UI as an auditable paper-research workstation, read

@@ -6,10 +6,12 @@
 //! — *what is the market doing* and *what is Atlas doing* — must never be a
 //! view switch away.
 //!
-//! `draw` is a pure function of the `Store`. Nothing here reads a clock, opens
-//! a socket, or holds a client, which is what lets one golden frame pin the
-//! whole layout and what keeps the read-only posture a property of the
-//! composition root rather than a rule each view has to remember.
+//! `draw` is a pure function of the `Store` and the instant it is told it is
+//! drawing at. Nothing here reads a clock, opens a socket, or holds a client,
+//! which is what lets one golden frame pin the whole layout — including how a
+//! frame looks forty seconds after the last snapshot — and what keeps the
+//! read-only posture a property of the composition root rather than a rule
+//! each view has to remember.
 
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
@@ -28,6 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 /// Exactly wide enough for `▌6 AUDIT` — the active marker, the digit, a space,
@@ -38,11 +41,19 @@ const NAV_W: u16 = 8;
 const PULSE_W: u16 = 34;
 /// The label column inside the rails.
 const LABEL_W: usize = 11;
+/// When the numbers on screen stop counting as current.
+///
+/// Three poll intervals plus slack — the poller runs every 3 s
+/// (`main::REFRESH`) — so one missed poll is not staleness but a stopped feed
+/// is. A desk that keeps drawing old marks unmarked is the one failure a
+/// trading surface may not have.
+const STALE_AFTER: Duration = Duration::from_secs(10);
 
-pub fn draw(f: &mut Frame, store: &Store) {
+pub fn draw(f: &mut Frame, store: &Store, now: Instant) {
     let t = theme();
     let area = f.area();
     fill(f, area, t.bg_base);
+    let stale = stale_for(store, now);
 
     let rows = Layout::vertical([
         Constraint::Length(1), // ticker
@@ -57,7 +68,7 @@ pub fn draw(f: &mut Frame, store: &Store) {
     ])
     .split(rows[1]);
 
-    draw_ticker(f, rows[0], store, t);
+    draw_ticker(f, rows[0], store, t, stale.is_some());
     draw_nav(f, cols[0], store, t);
 
     // The rules belong to the shell, not to the panes: a view that drew its own
@@ -73,7 +84,14 @@ pub fn draw(f: &mut Frame, store: &Store) {
     fill(f, pulse, t.bg_surface);
     draw_pulse(f, pulse, store, t);
 
-    draw_status(f, rows[2], store, t);
+    draw_status(f, rows[2], store, t, stale);
+}
+
+/// How long the numbers on screen have been unrefreshed, once that is long
+/// enough to matter. `None` while they are current, or while there are none.
+fn stale_for(store: &Store, now: Instant) -> Option<Duration> {
+    let age = now.saturating_duration_since(store.last_snapshot_at?);
+    (age > STALE_AFTER).then_some(age)
 }
 
 /// Global keys, then the active view's.
@@ -136,7 +154,7 @@ fn left_rule(f: &mut Frame, area: Rect, t: &Theme) -> Rect {
 /// Static for now. Task 8 replaces this with the scrolling widget — rotation by
 /// display cell, quote-overlay prices, and the flash decay — which is why the
 /// row is assembled from `format` helpers rather than growing a private one.
-fn draw_ticker(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
+fn draw_ticker(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: bool) {
     fill(f, area, t.bg_raised);
     let assets = store
         .snapshot
@@ -152,18 +170,34 @@ fn draw_ticker(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
         };
         let price = asset.price.map(format::price);
         let change = asset.change_1d.map(format::signed_pct);
-        let tone = asset.change_1d.map(|c| t.change(c));
+        // Stale prices lose their colour along with their claim to be current.
+        // A green tick that is four minutes old is a statement about the tape
+        // that nobody made.
+        let tone = if stale {
+            t.text_tertiary
+        } else {
+            asset
+                .change_1d
+                .map(|c| t.change(c))
+                .unwrap_or(t.text_secondary)
+        };
+        let value = if stale {
+            t.text_tertiary
+        } else {
+            t.text_primary
+        };
+        let symbol = if stale { t.text_tertiary } else { t.cyan };
         spans.push(Span::styled(
             format!("{ticker} "),
-            Style::default().fg(t.cyan).add_modifier(Modifier::BOLD),
+            Style::default().fg(symbol).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             price.unwrap_or_else(|| MISSING.into()),
-            Style::default().fg(t.text_primary),
+            Style::default().fg(value),
         ));
         spans.push(Span::styled(
             format!(" {}   ", change.unwrap_or_else(|| MISSING.into())),
-            Style::default().fg(tone.unwrap_or(t.text_secondary)),
+            Style::default().fg(tone),
         ));
     }
     if spans.len() == 1 {
@@ -216,7 +250,33 @@ fn draw_nav(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
 /// is "I cannot see it". Ported from `ui.rs::draw_unreachable`, split in two
 /// because "not there" and "not yet" have different remedies.
 fn draw_no_data(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
-    let lines = if store.conn.owner {
+    // A broken payload outranks both: the owner answered, so "no owner" is
+    // wrong and "waiting" is worse — it says the desk is coming when it is not.
+    let lines = if let Some(bad) = &store.malformed {
+        vec![
+            Line::from(Span::styled(
+                "OWNER PAYLOAD MALFORMED",
+                Style::default().fg(t.negative).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                bad.error.clone(),
+                Style::default().fg(t.text_primary),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("from {}", bad.url),
+                Style::default().fg(t.text_secondary),
+            )),
+            // One logical line, wrapped by the Paragraph: hand-split lines
+            // re-wrap into orphans at rail widths this panel does not choose.
+            Line::from(Span::styled(
+                "The owner is answering and this client cannot read what it serves, \
+                 so nothing below is current. Check the owner's version.",
+                Style::default().fg(t.text_secondary),
+            )),
+        ]
+    } else if store.conn.owner {
         vec![
             Line::from(Span::styled(
                 "WAITING FOR THE FIRST SNAPSHOT",
@@ -337,7 +397,7 @@ fn draw_glyph(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
+fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Option<Duration>) {
     fill(f, area, t.bg_raised);
     let snapshot = store.snapshot.as_ref();
     let atlas = snapshot.and_then(|s| s.atlas.as_ref());
@@ -364,8 +424,25 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
         dot(store.conn.stream, t),
         Span::styled("SSE  ", Style::default().fg(t.text_secondary)),
         dot(store.conn.owner, t),
+        Span::styled("OWNER  ", Style::default().fg(t.text_secondary)),
+    ];
+    // Beside the chip, not instead of it: a reachable owner and current numbers
+    // are two claims, and the red dot only ever spoke to the first.
+    if let Some(age) = stale {
+        right.push(Span::styled(
+            format!("STALE {}s  ", age.as_secs()),
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if store.malformed.is_some() {
+        right.push(Span::styled(
+            "MALFORMED  ",
+            Style::default().fg(t.negative).add_modifier(Modifier::BOLD),
+        ));
+    }
+    right.extend([
         Span::styled(
-            format!("OWNER  {posture}  "),
+            format!("{posture}  "),
             Style::default().fg(t.text_secondary),
         ),
         // The posture, on every frame. An operator must never have to wonder
@@ -375,7 +452,7 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
             "GLASS ",
             Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
         ),
-    ];
+    ]);
 
     let used: usize = left
         .iter()

@@ -69,11 +69,14 @@ async fn main() -> Result<()> {
     if !readiness.is_ready() {
         tracing::warn!(reason = readiness.reason(), "owner is not reachable");
     }
-    store.apply(if readiness.is_ready() {
-        AppEvent::ConnUp(Channel::Owner)
-    } else {
-        AppEvent::ConnDown(Channel::Owner)
-    });
+    store.apply(
+        if readiness.is_ready() {
+            AppEvent::ConnUp(Channel::Owner)
+        } else {
+            AppEvent::ConnDown(Channel::Owner)
+        },
+        Instant::now(),
+    );
 
     spawn_owner_poll(tx.clone(), nudge_rx, offline);
     spawn_ticker(tx.clone());
@@ -97,8 +100,8 @@ async fn run(
 ) -> Result<()> {
     // One frame before the first event, or the operator stares at the shell's
     // leftovers until the ticker fires.
-    terminal.draw(|f| ui::shell::draw(f, store))?;
     let mut last_frame = Instant::now();
+    terminal.draw(|f| ui::shell::draw(f, store, last_frame))?;
 
     loop {
         // Block until something happens. The 120 ms tick is what guarantees the
@@ -110,16 +113,16 @@ async fn run(
         // decides against the instant the caller measured, not against whatever
         // the clock says several statements later.
         let now = Instant::now();
-        let mut quit = ingest(first, store, nudge);
+        let mut quit = ingest(first, store, nudge, now);
         // Drain-then-render: fifty quote events coalesce into one repaint.
         while let Ok(ev) = rx.try_recv() {
-            quit |= ingest(ev, store, nudge);
+            quit |= ingest(ev, store, nudge, now);
         }
 
         // Task 15 replaces this literal with the effect manager's running flag.
         let fx_active = false;
         if should_render(store.take_dirty(), fx_active, last_frame, now) {
-            terminal.draw(|f| ui::shell::draw(f, store))?;
+            terminal.draw(|f| ui::shell::draw(f, store, now))?;
             last_frame = now;
         }
         if quit {
@@ -133,7 +136,7 @@ async fn run(
 /// The runtime is the only thing that acts: the shell decides what a keystroke
 /// *means* and hands back a `Command`, and nothing in `ui/` can reach the
 /// network or the process lifetime on its own.
-fn ingest(ev: AppEvent, store: &mut Store, nudge: &Sender<()>) -> bool {
+fn ingest(ev: AppEvent, store: &mut Store, nudge: &Sender<()>, now: Instant) -> bool {
     let mut quit = false;
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
@@ -149,7 +152,7 @@ fn ingest(ev: AppEvent, store: &mut Store, nudge: &Sender<()>) -> bool {
             }
         }
     }
-    for trigger in store.apply(ev) {
+    for trigger in store.apply(ev, now) {
         // Task 15 turns these into effects. Logging them now means the diff has
         // a consumer today and its behaviour is observable during QA.
         tracing::debug!(?trigger, "desk transition");
@@ -171,26 +174,35 @@ fn spawn_owner_poll(tx: Tx, nudge: std::sync::mpsc::Receiver<()>, offline: bool)
         let mut up: Option<bool> = None;
         loop {
             match client.snapshot(offline) {
-                Ok(value) => {
-                    let event = match Snapshot::deserialize(&value) {
-                        Ok(snapshot) => AppEvent::Snapshot(Box::new(snapshot)),
-                        // Fail loud. A payload the model cannot read is a broken
-                        // contract with the owner, never a frame to skip.
-                        Err(err) => AppEvent::Http(HttpResult::Malformed {
+                // An answer is not a snapshot. `ConnUp` is only sent once one
+                // decodes: reporting the channel up on any HTTP 200 is what let
+                // an owner serving a payload this client cannot read render as
+                // "waiting for the first snapshot" for as long as it stayed
+                // broken, with the reason visible only in the log.
+                Ok(value) => match Snapshot::deserialize(&value) {
+                    Ok(snapshot) => {
+                        if tx.send(AppEvent::Snapshot(Box::new(snapshot))).is_err() {
+                            return;
+                        }
+                        if up != Some(true) {
+                            up = Some(true);
+                            if tx.send(AppEvent::ConnUp(Channel::Owner)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    // Fail loud, and on screen. A payload the model cannot read
+                    // is a broken contract with the owner, never a frame to skip.
+                    Err(err) => {
+                        let event = AppEvent::Http(HttpResult::Malformed {
                             url: url.clone(),
                             error: err.to_string(),
-                        }),
-                    };
-                    if tx.send(event).is_err() {
-                        return;
-                    }
-                    if up != Some(true) {
-                        up = Some(true);
-                        if tx.send(AppEvent::ConnUp(Channel::Owner)).is_err() {
+                        });
+                        if tx.send(event).is_err() {
                             return;
                         }
                     }
-                }
+                },
                 Err(err) => {
                     // The reason goes to the log rather than to the screen:
                     // the status chip says the owner is down and the content

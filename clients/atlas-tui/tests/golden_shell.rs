@@ -6,11 +6,12 @@
 
 mod harness;
 
-use atlas::bus::{AppEvent, Channel};
+use atlas::bus::{AppEvent, Channel, HttpResult};
 use atlas::model::Snapshot;
 use atlas::store::{Store, ViewId};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use harness::{fixture_store, frame_to_string, line_with};
+use harness::{fixture_store, frame_to_string, frame_to_string_at, line_with};
+use std::time::{Duration, Instant};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -18,10 +19,31 @@ fn key(code: KeyCode) -> KeyEvent {
 
 fn store_from(json: &str) -> Store {
     let mut store = Store::default();
-    store.apply(AppEvent::ConnUp(Channel::Owner));
-    store.apply(AppEvent::Snapshot(Box::new(
-        serde_json::from_str::<Snapshot>(json).unwrap(),
-    )));
+    let now = Instant::now();
+    store.apply(AppEvent::ConnUp(Channel::Owner), now);
+    store.apply(
+        AppEvent::Snapshot(Box::new(serde_json::from_str::<Snapshot>(json).unwrap())),
+        now,
+    );
+    store
+}
+
+/// A store that has seen the owner answer with something it cannot read.
+fn malformed_store(with_snapshot: bool) -> Store {
+    let mut store = if with_snapshot {
+        fixture_store()
+    } else {
+        Store::default()
+    };
+    let now = store.last_snapshot_at.unwrap_or_else(Instant::now);
+    store.apply(AppEvent::ConnUp(Channel::Owner), now);
+    store.apply(
+        AppEvent::Http(HttpResult::Malformed {
+            url: "http://127.0.0.1:8765/api/tui".into(),
+            error: "invalid type: string \"1e4\", expected f64".into(),
+        }),
+        now,
+    );
     store
 }
 
@@ -173,11 +195,80 @@ fn an_unreachable_owner_says_so_instead_of_rendering_an_empty_desk() {
 }
 
 #[test]
+fn numbers_that_stopped_refreshing_say_so_rather_than_passing_as_current() {
+    // A red connection chip says the owner is unreachable. It does not say the
+    // prices, the drawdown and the read on screen are four minutes old, and an
+    // operator reads the numbers, not the chip.
+    let store = fixture_store();
+    let arrived = store.last_snapshot_at.unwrap();
+
+    let fresh = frame_to_string_at(&store, 120, 36, arrived + Duration::from_secs(9));
+    assert!(
+        !fresh.contains("STALE"),
+        "one missed poll is not staleness:\n{fresh}"
+    );
+
+    let stale = frame_to_string_at(&store, 120, 36, arrived + Duration::from_secs(47));
+    let status = line_with(&stale, "GLASS");
+    assert!(
+        status.contains("STALE 47s"),
+        "the age itself, not just a flag: {status}"
+    );
+    // Beside the chip, not instead of it: reachable and current are two claims.
+    assert!(status.contains("OWNER"), "{status}");
+}
+
+#[test]
+fn a_desk_that_has_never_had_a_snapshot_is_not_stale() {
+    // Nothing to be stale: the no-data panel is what speaks here, and a client
+    // that opened a second ago must not accuse the owner of going quiet.
+    let frame = frame_to_string_at(&Store::default(), 100, 24, Instant::now());
+    assert!(!frame.contains("STALE"), "{frame}");
+}
+
+#[test]
+fn a_payload_the_model_cannot_read_reaches_the_frame() {
+    // The owner answers, so every connection chip is green and the old code
+    // rendered "waiting for the first snapshot" for as long as it stayed
+    // broken — an affirmative falsehood, with the reason only in the log.
+    let frame = frame_to_string(&malformed_store(false), 100, 24);
+    assert!(frame.contains("OWNER PAYLOAD MALFORMED"), "{frame}");
+    assert!(
+        frame.contains("expected f64"),
+        "the reason has to reach the screen:\n{frame}"
+    );
+    assert!(!frame.contains("WAITING FOR THE FIRST SNAPSHOT"), "{frame}");
+    assert!(line_with(&frame, "GLASS").contains("MALFORMED"), "{frame}");
+
+    // With a desk already on screen the panel is not shown, so the status line
+    // is the only thing that can say the newest payload was rejected.
+    let frame = frame_to_string(&malformed_store(true), 120, 36);
+    assert!(line_with(&frame, "GLASS").contains("MALFORMED"), "{frame}");
+}
+
+#[test]
+fn a_payload_that_decodes_clears_the_accusation_from_the_frame() {
+    let mut store = malformed_store(false);
+    let now = Instant::now();
+    store.apply(
+        AppEvent::Snapshot(Box::new(
+            serde_json::from_str::<Snapshot>(r#"{"atlas": {"mode": "research"}}"#).unwrap(),
+        )),
+        now,
+    );
+    let frame = frame_to_string(&store, 120, 36);
+    assert!(
+        !frame.contains("MALFORMED"),
+        "a recovered owner stays accused:\n{frame}"
+    );
+}
+
+#[test]
 fn a_reachable_owner_with_no_snapshot_yet_says_pending_not_missing() {
     // "Not there" and "not yet" are different facts about the desk, and the
     // remedy for one is not the remedy for the other.
     let mut store = Store::default();
-    store.apply(AppEvent::ConnUp(Channel::Owner));
+    store.apply(AppEvent::ConnUp(Channel::Owner), Instant::now());
     let frame = frame_to_string(&store, 100, 24);
     assert!(!frame.contains("NO OWNER RUNTIME"), "{frame}");
 }

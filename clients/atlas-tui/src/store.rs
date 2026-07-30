@@ -133,12 +133,37 @@ pub struct Conn {
     pub stream: bool,
 }
 
+/// A payload the owner served and the model could not read.
+///
+/// Held rather than only logged: an owner serving garbage is reachable, so the
+/// connection chips say everything is fine while nothing on the desk is. The
+/// frame has to be able to say which of the two it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Malformed {
+    pub url: String,
+    pub error: String,
+}
+
+/// Serde's message carries the whole path and can run long; the panel has a
+/// line or two for it. Truncating at the point of record also keeps a broken
+/// owner from growing the store by a decode message every three seconds.
+const MALFORMED_ERROR_MAX: usize = 200;
+
 #[derive(Debug, Default)]
 pub struct Store {
     pub snapshot: Option<Snapshot>,
     pub regime_panel: Option<RegimePanel>,
     pub nav: Nav,
     pub conn: Conn,
+    /// When the snapshot on screen arrived. Absent means none ever has.
+    ///
+    /// Time as data: `apply` is told the instant, and the shell is told the
+    /// instant it is drawing at, so "these numbers are 40 seconds old" is a
+    /// subtraction the golden frames can pin rather than a clock read buried
+    /// in a renderer.
+    pub last_snapshot_at: Option<Instant>,
+    /// The last payload that did not decode, cleared by the next that does.
+    pub malformed: Option<Malformed>,
     /// The animation beat, counted rather than read from a clock. Every frame
     /// the shell draws is a pure function of the store, so the phase an
     /// automaton is at has to be state — a renderer that called `Instant::now`
@@ -151,9 +176,13 @@ pub struct Store {
 
 impl Store {
     /// Fold one event in and report what changed on the desk.
-    pub fn apply(&mut self, ev: AppEvent) -> Vec<Trigger> {
+    ///
+    /// `now` is the caller's instant, never a clock read here: the loop stamps
+    /// arrival with the same instant it paces the frame against, so an age on
+    /// screen and the pacing decision behind it cannot disagree.
+    pub fn apply(&mut self, ev: AppEvent, now: Instant) -> Vec<Trigger> {
         match ev {
-            AppEvent::Snapshot(snap) => return self.apply_snapshot(*snap),
+            AppEvent::Snapshot(snap) => return self.apply_snapshot(*snap, now),
             AppEvent::RegimePanel(panel) => {
                 self.regime_panel = Some(panel);
                 self.dirty = true;
@@ -171,9 +200,19 @@ impl Store {
             // dirtying on one would repaint an unchanged frame.
             AppEvent::Sse(_) => {}
             AppEvent::Http(HttpResult::Malformed { url, error }) => {
-                // Fail loud. Task 16 raises this to a toast; until then the log
-                // is the channel, and silence is not an option.
+                // Fail loud, on screen. The log alone was not enough: an owner
+                // that answers with a payload the model cannot read is up, so
+                // every chip stays green and the frame says "waiting for the
+                // first snapshot" for as long as the owner stays broken.
                 tracing::error!(%url, %error, "owner payload did not decode");
+                let next = Malformed {
+                    error: error_head(&error),
+                    url,
+                };
+                if self.malformed.as_ref() != Some(&next) {
+                    self.malformed = Some(next);
+                    self.dirty = true;
+                }
             }
         }
         Vec::new()
@@ -216,7 +255,7 @@ impl Store {
     /// absent — so the first payload announces the state it arrives in. That is
     /// the point: an operator who opens this client onto a halted desk has to
     /// see the halt, not a quiet red number.
-    fn apply_snapshot(&mut self, next: Snapshot) -> Vec<Trigger> {
+    fn apply_snapshot(&mut self, next: Snapshot, now: Instant) -> Vec<Trigger> {
         let mut out = Vec::new();
         let prev = self.snapshot.as_ref();
 
@@ -241,6 +280,10 @@ impl Store {
         // sake, and would ship untestable.
 
         self.snapshot = Some(next);
+        self.last_snapshot_at = Some(now);
+        // A payload that decodes retires the last one that did not. Leaving it
+        // set would leave a recovered owner accused on every later frame.
+        self.malformed = None;
         self.dirty = true;
         out
     }
@@ -261,6 +304,19 @@ impl Store {
 /// value is the owner declining to say, which is not a transition.
 fn changed(prev: Option<&str>, next: Option<&str>) -> bool {
     next.is_some() && prev != next
+}
+
+/// The first line of a decode error, short enough to render.
+///
+/// Serde reports the failure and then the path it walked; the first line is the
+/// part that says what is wrong, and the rest is why the panel would otherwise
+/// scroll off the frame.
+fn error_head(error: &str) -> String {
+    let line = error.lines().next().unwrap_or_default().trim();
+    match line.char_indices().nth(MALFORMED_ERROR_MAX) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line.to_string(),
+    }
 }
 
 /// The live book decides the halt: it is the one marked to the tape, and the
@@ -289,6 +345,12 @@ mod tests {
     use crate::model::Snapshot;
     use serde_json::json;
 
+    /// `apply` with an instant the test does not care about. The arrival-stamp
+    /// and staleness tests pass their own; everything else only needs the fold.
+    fn apply(store: &mut Store, ev: AppEvent) -> Vec<Trigger> {
+        store.apply(ev, Instant::now())
+    }
+
     fn snap(value: serde_json::Value) -> AppEvent {
         // Through the real decoder, not a hand-built struct: a diff that reads a
         // field the owner never fills is a bug the fixture path would hide.
@@ -299,20 +361,20 @@ mod tests {
     fn a_halt_announces_itself_and_a_resume_is_a_separate_trigger() {
         let mut store = Store::default();
         assert_eq!(
-            store.apply(snap(json!({"portfolio": {"halted": false}}))),
+            apply(&mut store, snap(json!({"portfolio": {"halted": false}}))),
             vec![]
         );
         assert_eq!(
-            store.apply(snap(json!({"portfolio": {"halted": true}}))),
+            apply(&mut store, snap(json!({"portfolio": {"halted": true}}))),
             vec![Trigger::Halted]
         );
         // Still halted is not a new halt — the effect is already running.
         assert_eq!(
-            store.apply(snap(json!({"portfolio": {"halted": true}}))),
+            apply(&mut store, snap(json!({"portfolio": {"halted": true}}))),
             vec![]
         );
         assert_eq!(
-            store.apply(snap(json!({"portfolio": {"halted": false}}))),
+            apply(&mut store, snap(json!({"portfolio": {"halted": false}}))),
             vec![Trigger::Resumed]
         );
     }
@@ -323,7 +385,10 @@ mod tests {
         // that will never be sent again would render a halted desk quietly.
         let mut store = Store::default();
         assert_eq!(
-            store.apply(snap(json!({"live_portfolio": {"halted": true}}))),
+            apply(
+                &mut store,
+                snap(json!({"live_portfolio": {"halted": true}}))
+            ),
             vec![Trigger::Halted]
         );
     }
@@ -332,15 +397,16 @@ mod tests {
     fn the_live_book_decides_the_halt_and_a_vanished_flag_is_not_a_resume() {
         let mut store = Store::default();
         assert_eq!(
-            store.apply(snap(
-                json!({"live_portfolio": {"halted": true}, "portfolio": {"halted": false}})
-            )),
+            apply(
+                &mut store,
+                snap(json!({"live_portfolio": {"halted": true}, "portfolio": {"halted": false}}))
+            ),
             vec![Trigger::Halted]
         );
         // The owner stopped reporting the flag. That is missing information,
         // not a resume, and clearing the HALT effect on it would be a lie.
         assert_eq!(
-            store.apply(snap(json!({"portfolio": {"equity": 1.0}}))),
+            apply(&mut store, snap(json!({"portfolio": {"equity": 1.0}}))),
             vec![]
         );
     }
@@ -350,14 +416,15 @@ mod tests {
         let mut store = Store::default();
         let calm = json!({"market": {"regime": {"robust_state": "calm"}}});
         assert_eq!(
-            store.apply(snap(calm.clone())),
+            apply(&mut store, snap(calm.clone())),
             vec![Trigger::RegimeChanged]
         );
-        assert_eq!(store.apply(snap(calm)), vec![]);
+        assert_eq!(apply(&mut store, snap(calm)), vec![]);
         assert_eq!(
-            store.apply(snap(
-                json!({"market": {"regime": {"robust_state": "stress"}}})
-            )),
+            apply(
+                &mut store,
+                snap(json!({"market": {"regime": {"robust_state": "stress"}}}))
+            ),
             vec![Trigger::RegimeChanged]
         );
     }
@@ -368,17 +435,24 @@ mod tests {
         // would fire a regime flip on every sparse payload.
         let mut store = Store::default();
         assert_eq!(
-            store.apply(snap(json!({"market": {"regime": {"robust_state": ""}}}))),
+            apply(
+                &mut store,
+                snap(json!({"market": {"regime": {"robust_state": ""}}}))
+            ),
             vec![]
         );
         assert_eq!(
-            store.apply(snap(
-                json!({"market": {"regime": {"robust_state": "calm"}}})
-            )),
+            apply(
+                &mut store,
+                snap(json!({"market": {"regime": {"robust_state": "calm"}}}))
+            ),
             vec![Trigger::RegimeChanged]
         );
         assert_eq!(
-            store.apply(snap(json!({"market": {"regime": {"robust_state": ""}}}))),
+            apply(
+                &mut store,
+                snap(json!({"market": {"regime": {"robust_state": ""}}}))
+            ),
             vec![]
         );
     }
@@ -387,16 +461,20 @@ mod tests {
     fn a_new_read_retriggers_the_reveal() {
         let mut store = Store::default();
         let first = json!({"atlas_read": {"as_of": "2026-07-30T12:00:00Z"}});
-        assert_eq!(store.apply(snap(first.clone())), vec![Trigger::ReadChanged]);
         assert_eq!(
-            store.apply(snap(first)),
+            apply(&mut store, snap(first.clone())),
+            vec![Trigger::ReadChanged]
+        );
+        assert_eq!(
+            apply(&mut store, snap(first)),
             vec![],
             "the same read is not a new one"
         );
         assert_eq!(
-            store.apply(snap(
-                json!({"atlas_read": {"as_of": "2026-07-30T12:30:00Z"}})
-            )),
+            apply(
+                &mut store,
+                snap(json!({"atlas_read": {"as_of": "2026-07-30T12:30:00Z"}}))
+            ),
             vec![Trigger::ReadChanged]
         );
     }
@@ -404,16 +482,22 @@ mod tests {
     #[test]
     fn one_snapshot_can_carry_several_transitions() {
         let mut store = Store::default();
-        store.apply(snap(json!({
-            "portfolio": {"halted": false},
-            "market": {"regime": {"robust_state": "calm"}},
-            "atlas_read": {"as_of": "t0"}
-        })));
-        let triggers = store.apply(snap(json!({
-            "portfolio": {"halted": true},
-            "market": {"regime": {"robust_state": "stress"}},
-            "atlas_read": {"as_of": "t1"}
-        })));
+        apply(
+            &mut store,
+            snap(json!({
+                "portfolio": {"halted": false},
+                "market": {"regime": {"robust_state": "calm"}},
+                "atlas_read": {"as_of": "t0"}
+            })),
+        );
+        let triggers = apply(
+            &mut store,
+            snap(json!({
+                "portfolio": {"halted": true},
+                "market": {"regime": {"robust_state": "stress"}},
+                "atlas_read": {"as_of": "t1"}
+            })),
+        );
         assert!(triggers.contains(&Trigger::Halted));
         assert!(triggers.contains(&Trigger::RegimeChanged));
         assert!(triggers.contains(&Trigger::ReadChanged));
@@ -424,11 +508,11 @@ mod tests {
         // Numbers move without any of the motion triggers firing; the frame
         // still owes the operator the new ones.
         let mut store = Store::default();
-        store.apply(snap(json!({"portfolio": {"equity": 1.0}})));
+        apply(&mut store, snap(json!({"portfolio": {"equity": 1.0}})));
         assert!(store.take_dirty());
         assert!(!store.take_dirty(), "taking the flag clears it");
         assert_eq!(
-            store.apply(snap(json!({"portfolio": {"equity": 2.0}}))),
+            apply(&mut store, snap(json!({"portfolio": {"equity": 2.0}}))),
             vec![]
         );
         assert!(store.take_dirty());
@@ -439,7 +523,7 @@ mod tests {
         // The tick drives the glyph, not the desk. If it dirtied the store the
         // pacing rule would be decorative — every beat would force a frame.
         let mut store = Store::default();
-        assert_eq!(store.apply(AppEvent::Tick), vec![]);
+        assert_eq!(apply(&mut store, AppEvent::Tick), vec![]);
         assert_eq!(
             store.tick, 1,
             "the beat has to advance or the glyph freezes"
@@ -454,20 +538,116 @@ mod tests {
         // though it were watching a desk.
         assert_eq!(store.mood(), Mood::Dormant);
 
-        store.apply(snap(json!({"atlas": {"mode": "research"}})));
+        apply(&mut store, snap(json!({"atlas": {"mode": "research"}})));
         assert_eq!(store.mood(), Mood::Idle);
-        store.apply(snap(json!({
-            "atlas": {"mode": "research"},
-            "atlas_heartbeat": {"coordinator": {"driving": true}}
-        })));
+        apply(
+            &mut store,
+            snap(json!({
+                "atlas": {"mode": "research"},
+                "atlas_heartbeat": {"coordinator": {"driving": true}}
+            })),
+        );
         assert_eq!(store.mood(), Mood::Working);
         // The live book decides, and a halt overrides a running coordinator.
-        store.apply(snap(json!({
-            "atlas": {"mode": "research"},
-            "atlas_heartbeat": {"coordinator": {"driving": true}},
-            "live_portfolio": {"halted": true}
-        })));
+        apply(
+            &mut store,
+            snap(json!({
+                "atlas": {"mode": "research"},
+                "atlas_heartbeat": {"coordinator": {"driving": true}},
+                "live_portfolio": {"halted": true}
+            })),
+        );
         assert_eq!(store.mood(), Mood::Alarmed);
+    }
+
+    #[test]
+    fn a_snapshot_stamps_when_it_arrived() {
+        // Without a stamp nothing downstream can say how old the numbers on
+        // screen are, and a desk that draws four-minute-old marks unmarked is
+        // the one failure a trading surface may not have.
+        let mut store = Store::default();
+        assert_eq!(store.last_snapshot_at, None, "nothing has arrived yet");
+
+        let t0 = Instant::now();
+        store.apply(snap(json!({"portfolio": {"equity": 1.0}})), t0);
+        assert_eq!(store.last_snapshot_at, Some(t0));
+
+        let t1 = t0 + Duration::from_secs(30);
+        store.apply(snap(json!({"portfolio": {"equity": 2.0}})), t1);
+        assert_eq!(
+            store.last_snapshot_at,
+            Some(t1),
+            "the stamp is the newest arrival"
+        );
+
+        // Only a snapshot refreshes it: a tick or a keystroke is not news from
+        // the owner, and letting either reset the clock would hide a dead feed.
+        store.apply(AppEvent::Tick, t1 + Duration::from_secs(60));
+        assert_eq!(store.last_snapshot_at, Some(t1));
+    }
+
+    #[test]
+    fn a_malformed_payload_is_held_until_one_decodes() {
+        // An owner serving garbage is reachable, so every connection chip stays
+        // green. The log alone left the frame claiming it was waiting for a
+        // first snapshot that was never going to arrive.
+        let mut store = Store::default();
+        let now = Instant::now();
+        store.apply(
+            AppEvent::Http(HttpResult::Malformed {
+                url: "http://127.0.0.1:8765/api/tui".into(),
+                error: "invalid type: string \"x\", expected f64\n  at line 4".into(),
+            }),
+            now,
+        );
+        let bad = store
+            .malformed
+            .clone()
+            .expect("the failure must be held, not only logged");
+        assert_eq!(bad.url, "http://127.0.0.1:8765/api/tui");
+        assert_eq!(
+            bad.error, "invalid type: string \"x\", expected f64",
+            "first line only"
+        );
+        assert!(
+            store.take_dirty(),
+            "a new failure owes the operator a frame"
+        );
+
+        // The same failure every three seconds is not new news.
+        store.apply(
+            AppEvent::Http(HttpResult::Malformed {
+                url: "http://127.0.0.1:8765/api/tui".into(),
+                error: "invalid type: string \"x\", expected f64\n  at line 4".into(),
+            }),
+            now,
+        );
+        assert!(!store.take_dirty());
+
+        store.apply(snap(json!({"portfolio": {"equity": 1.0}})), now);
+        assert_eq!(
+            store.malformed, None,
+            "a payload that decodes retires the one that did not"
+        );
+    }
+
+    #[test]
+    fn a_long_decode_error_is_cut_rather_than_held_whole() {
+        let mut store = Store::default();
+        store.apply(
+            AppEvent::Http(HttpResult::Malformed {
+                url: "u".into(),
+                error: "e".repeat(5_000),
+            }),
+            Instant::now(),
+        );
+        let held = store.malformed.unwrap().error;
+        assert!(
+            held.chars().count() <= MALFORMED_ERROR_MAX + 1,
+            "{}",
+            held.len()
+        );
+        assert!(held.ends_with('…'), "a cut error has to say it was cut");
     }
 
     #[test]
@@ -495,15 +675,15 @@ mod tests {
     fn a_connection_transition_is_dirty_once_not_every_poll() {
         let mut store = Store::default();
         assert!(!store.conn.owner);
-        store.apply(AppEvent::ConnUp(Channel::Owner));
+        apply(&mut store, AppEvent::ConnUp(Channel::Owner));
         assert!(store.conn.owner);
         assert!(store.take_dirty());
-        store.apply(AppEvent::ConnUp(Channel::Owner));
+        apply(&mut store, AppEvent::ConnUp(Channel::Owner));
         assert!(
             !store.take_dirty(),
             "a repeat of the same state repaints nothing"
         );
-        store.apply(AppEvent::ConnDown(Channel::Owner));
+        apply(&mut store, AppEvent::ConnDown(Channel::Owner));
         assert!(store.take_dirty());
         assert!(!store.conn.owner && !store.conn.stream);
     }

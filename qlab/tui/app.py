@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -256,6 +258,11 @@ COMMAND_TABLE = {
     ("view", "agents"): "action_agent_focus",
     ("agents", None): "action_agent_focus",
     ("theme", None): "action_theme",
+    # Hand the terminal to the real Claude CLI. The governed workforce prints
+    # one short note per agent by design, which is deliberate but opaque if you
+    # want to see what the model is actually doing — this is the way to see it.
+    ("claude", None): "action_claude_cli",
+    ("cli", None): "action_claude_cli",
     ("symbol", None): "action_symbol",
     ("timeline", None): "action_timeline",
     ("help", None): "action_help",
@@ -1472,6 +1479,42 @@ class QlabTui(App[None]):
             self.register_theme(theme)
         self.theme = tokens.DEFAULT_THEME
 
+    def action_claude_cli(self, args: str = "") -> None:
+        """Drop out of the TUI and run the real Claude CLI, then come back.
+
+        The governed workforce is deliberately terse — one short note per agent,
+        no raw model output — which keeps the console readable but means there is
+        no way to watch Claude think. This is that way: Textual releases the
+        terminal, `claude` owns it exactly as it would in a shell, and the desk
+        resumes when you exit.
+
+        The owner keeps running throughout, so a session started here reaches
+        the same desk over HTTP and the same governance applies to it. It is not
+        a back door: it is the ordinary CLI, with no qlab authority of its own
+        beyond what the MCP config already grants.
+        """
+        binary = shutil.which("claude")
+        if binary is None:
+            self._write_local_event("claude.cli_missing", {})
+            self._set_selected_work(
+                "CLAUDE CLI\n\nNot found on PATH. Install Claude Code, or use "
+                ": workforce GOAL for the governed pipeline.")
+            return
+        argv = [binary, *shlex.split(args)] if args.strip() else [binary]
+        self._write_local_event("claude.cli_opened", {"args": args.strip()})
+        try:
+            with self.suspend():
+                subprocess.call(argv, cwd=str(_WORKSPACE_ROOT))
+        except Exception as exc:
+            self._write_local_event("claude.cli_failed", {"error": repr(exc)})
+            self._set_selected_work(f"CLAUDE CLI FAILED\n\n{exc!r}")
+            return
+        # The desk may have moved while the terminal was elsewhere.
+        self._set_selected_work(
+            "CLAUDE CLI\n\nSession ended; the desk is back. Anything that "
+            "session persisted is in the next snapshot.")
+        self._start_refresh()
+
     def action_theme(self, name: str = "") -> None:
         """Switch the active design theme, or list the choices when unnamed."""
         wanted = name.strip()
@@ -2528,7 +2571,10 @@ class QlabTui(App[None]):
                          else AMBER if (conviction or 0) >= 0.35 else MUTED)
             conv_text = pct(conviction) if conviction is not None else "—"
             strip.update(
-                f"[bold {mode_tone}]MODE [{mode}][/]"
+                # No brackets around the value: Rich reads `[OBSERVE]` as a
+                # style tag and drops it, so the strip said "MODE" and then the
+                # state — the authority statement, silently missing.
+                f"[bold {mode_tone}]MODE {mode}[/]"
                 f"  [{DIM}]│[/]  "
                 f"[bold {state_tone}]{state}[/]"
                 f"  [{DIM}]│[/]  "
@@ -2540,9 +2586,15 @@ class QlabTui(App[None]):
             strip.update(f"[{MUTED}]waiting for atlas snapshot…[/]")
 
         if not read:
-            target.update(
+            # No read is the case that most needs the explanation, not least:
+            # a fresh desk showed one muted sentence and nothing about what
+            # Atlas may do or why it is quiet.
+            target.update("\n".join([
                 f"[{MUTED}]Atlas has not composed a read yet. "
-                "The heartbeat writes one on its first tick.[/]")
+                "The heartbeat writes one on its first tick.[/]",
+                "",
+                *self._atlas_why_lines(beat),
+            ]))
             return
 
         agreement = str(read.get("agreement", "—"))
@@ -2643,6 +2695,10 @@ class QlabTui(App[None]):
         # thread that is alive but failing every tick, and one that is doing its
         # job, both just count. The health word is the answer, so it stays here
         # in the body next to the read it produced, not only in the rail.
+        lines.append("")
+        lines.extend(self._atlas_why_lines(beat))
+        lines.append("")
+
         if not beat.get("running"):
             beat_health = "stopped"
         elif beat_errors:
@@ -2654,6 +2710,50 @@ class QlabTui(App[None]):
             f"heartbeat {beat_health} ({int(beat.get('ticks', 0))} ticks) · "
             f"advisory, never an instruction — Atlas cannot trade[/]")
         target.update("\n".join(lines))
+
+    def _atlas_why_lines(self, beat: dict) -> list[str]:
+        """Why the supervisor is not doing anything, stated rather than implied.
+
+        A desk that is deliberately idle and one that is broken look identical
+        from outside, and "OBSERVING" answers neither — it is a state, not a
+        reason. Atlas is deterministic code, so this IS its reasoning: the
+        authority it holds, and what has fired under it.
+        """
+        atlas = _record(self.snapshot.get("atlas")) if self.snapshot else {}
+        mode_now = str(atlas.get("mode") or "—").lower()
+        autonomous = bool(beat.get("autonomous"))
+        open_tasks = int(atlas.get("open_tasks") or 0)
+
+        why: list[str] = []
+        if mode_now == "observe":
+            why.append("Mode is OBSERVE: Atlas may start no workflow at all. "
+                       "Raise it with the MODE control to let it act.")
+        elif mode_now == "paused":
+            why.append("Mode is PAUSED: monitoring continues, no new work is "
+                       "created.")
+        elif not autonomous:
+            why.append(f"Mode is {mode_now.upper()}, which permits work, but "
+                       "autonomy is OFF — Atlas queues tasks and waits for you "
+                       "to start them.")
+        else:
+            why.append(f"Mode is {mode_now.upper()} and autonomy is ON: Atlas "
+                       "starts the work its mode permits on each heartbeat.")
+        if open_tasks:
+            why.append(f"{open_tasks} task(s) queued — ctrl+b opens the drawer "
+                       "with each one and whether it is startable.")
+        else:
+            why.append("No trigger has fired: no drawdown tier, no drift "
+                       "breach, no regime flip, no data outage. Nothing to act "
+                       "on is not the same as idle by accident.")
+        why.append("Atlas is deterministic code, not a model — it has no prose "
+                   "reasoning to stream. Use `: workforce GOAL` for the "
+                   "governed Claude pipeline, or `: claude` to open the real "
+                   "Claude CLI in this terminal.")
+        return [
+            f"[bold {AMBER}]▌ WHY NOTHING IS RUNNING[/]",
+            f"[{BORDER_HI}]{'─' * 48}[/]",
+            *_bulletin_markup(why, tone=TEXT, max_len=240),
+        ]
 
     def action_atlas_drawer(self) -> None:
         """Ctrl+B: open Atlas's detail drawer over the current view."""
@@ -4597,7 +4697,7 @@ class QlabTui(App[None]):
                 else:
                     action_name = None
             elif action_name in {"action_chat_mode", "action_workforce_new",
-                                 "action_theme"}:
+                                 "action_theme", "action_claude_cli"}:
                 action_args = (rest,)
 
         if action_name is not None:

@@ -14,7 +14,21 @@ The design boundary is simple:
 
 The honest current result is that simple benchmarks still beat the MVSK arms
 out of sample on the tested 2018–2026 window. qlab records that result instead
-of turning an experiment into a marketing claim.
+of turning an experiment into a marketing claim. Two more negative results are
+written up the same way, because they cost real work to establish:
+
+- **Quantum-inspired feature augmentation does not help.** The angle and
+  Pauli-ZZ encodings hurt the volatility forecast across twelve samples — one of
+  them lost 12 out of 12. It stays at research stage, off by default
+  ([write-up](planning-docs/2026-07-30-ml-lane.md)).
+- **A promising first measurement of it was an artifact** of a cache that
+  ignored its seed, so a robustness sweep silently returned one repeated sample.
+  Fixed, guarded by a test, and recorded — a seed sweep that shows zero variance
+  is a broken sweep, not a strong result.
+
+One result did land: multistart's winning basin appears at restart 2–4 against a
+budget of 100–160, so early stopping made an n=40 MVSK solve **71s → 6.5s with
+bit-identical answers** ([write-up](planning-docs/2026-07-30-optimizer-audit.md)).
 
 ## Start the desk
 
@@ -26,7 +40,7 @@ Python 3.10 or newer is required.
 The terminal opens as a quiet, no-top-header workstation. It starts or connects
 to one owner HTTP process; the TUI itself never opens DuckDB. The command row
 carries two chips only — owner connection, and the desk mode that says whose
-book is live; the system and service detail sits in Settings (`8`).
+book is live; the system and service detail sits in Settings (`9`).
 
 The complete screen map is available from either the digit or matching function
 key:
@@ -39,13 +53,15 @@ key:
 - `5` / `F5` — Research: experiment runs and algorithm evidence.
 - `6` / `F6` — Book: positions, checked plans, confirmation, and paper orders.
 - `7` / `F7` — Audit: decisions, challenges, verdicts, and reflections.
-- `8` / `F8` — Atlas: what every arm, metric, role, and rule is, with the live
-  champion and its latest ablation numbers.
-- `9` / `F9` — Settings: read-only mandate, data, agent, and theme bulletins.
+- `8` / `F8` — Reference: what every arm, metric, role, and rule is, with the
+  live champion and its latest ablation numbers.
+- `9` / `F9` — Settings: whose book this is, how the workforce runs, and the
+  mandate, data, agent, and theme bulletins. The desk mode and the model tier
+  are changed from here; the rest is read-only.
 
 ### Atlas, the desk manager
 
-Atlas runs continuously inside the owner on a heartbeat (`QLAB_BOB_INTERVAL_S`,
+Atlas runs continuously inside the owner on a heartbeat (`QLAB_ATLAS_INTERVAL_S`,
 default 30s). Each tick it evaluates deterministic triggers against owner facts
 and recomposes its **read**: one view across the regime panel, the news record,
 and what the workforce concluded.
@@ -57,12 +73,42 @@ agrees, never how likely a price move is.
 
 Atlas escalates a material disagreement into the same registry-enforced debate
 the workforce uses — allowlisted claim, two-round ceiling, adjudication the
-reporter waits on. It holds read-only tools and cannot trade, approve, or
-create a paper plan in any mode; `Ctrl-B` opens its detail drawer from any view.
+reporter waits on. Its own tools are read-only in every mode: Atlas cannot
+trade, cannot approve, and holds no tool that builds a plan. What Propose mode
+permits is *starting a workflow whose reporter may prepare one* — and that plan
+is still checked, referee-bound, and inert until you confirm it. `Ctrl-B` opens
+its detail drawer from any view.
 
 Modes: `observe` (monitor and brief), `research` (may start approved research
 workflows), `propose` (may request a checked plan for human approval), and
 `paused`. The mode is the authority statement and is shown wherever Atlas is.
+
+**A fresh desk starts in `research` with autonomy on**, and that is the whole
+point: Observe permits no workflow at all, so a desk that opened there sat
+inert. Research is the highest mode that still cannot create a paper plan — the
+template gate refuses every plan-creating template below Propose — so Atlas
+researches unattended without the execution boundary moving an inch. Reaching a
+fill still needs Propose *and* your explicit confirmation.
+
+Dispatching work is not the same as running it. A workflow's phases only advance
+while a coordinator walks them, so the owner starts one itself for the run Atlas
+just registered — the same governed session a human would start, pointed at the
+owner over HTTP. One at a time; a second dispatch is refused with a reason
+rather than queued, because N Claude trees on one desk is a cost incident, not
+autonomy. Its stream is republished onto the audit bus, so an unattended run is
+something you can watch rather than a black box.
+
+    QLAB_ATLAS_AUTONOMOUS=0   # queue work, wait for you to press start
+    QLAB_ATLAS_DRIVE=0        # dispatch only; drive runs by hand
+    QLAB_LLM_FAST=1           # judgment roles on the quick model
+
+Fast mode trades depth for latency on the judgment roles and is also a toggle in
+Settings. It is bounded in the one place that matters: the referee keeps its
+tier, because a PASS must never mean *passed on the fast model*.
+
+If no `claude` is on PATH, a dispatch still registers its workflow and says so —
+you can resume it by hand with `: workforce`. Absence is reported, never
+absorbed.
 
     qlab tui --claude offer   # default: show readiness, never prompt
     qlab tui --claude auto    # start the workforce after the first snapshot
@@ -99,6 +145,28 @@ For a core-only install:
 
 A normal wheel includes the default mandate, universe, experiment spec, and
 agent definitions. Runtime state is never written into site-packages.
+
+### atlas-tui — the second client
+
+`clients/atlas-tui` is a Ratatui client for the same owner runtime, built
+alongside the Textual TUI rather than to replace it. Both read the same
+`/api/tui` snapshot, so there is no cutover cliff and no window in which the
+desk has two faces that disagree about it.
+
+    cd clients/atlas-tui && cargo run
+
+It inverts the layout: Atlas and its reasoning own the frame and the book
+supports them, rather than Atlas being one rail beside eight peer views. Atlas
+has a face — a braille automaton in four moods, each with its own tempo, derived
+from desk facts so it can never say *working* while the desk is halted.
+
+Read-only by construction: no order path, no registry handle, and no way to
+acquire either, so invariant 3 holds by absence rather than by a check someone
+could remove. It is a first slice — the market chart, book detail, workforce
+flowchart, audit trail, and command palette are not ported, and the Textual
+client remains the complete surface. Its README is straight about the ceiling:
+Rust bought no better animation ceiling than Textual, because a terminal cell
+grid at ~10fps is the same medium either way.
 
 ### Real market data and whose book
 
@@ -444,6 +512,12 @@ The current operator surface is research and paper-first:
   not silently switch the request back to yfinance.
 - The simulated broker remains the zero-account default.
 
+News follows the data lane: on a live desk with a resolvable Alpaca credential
+it uses Alpaca automatically, with nothing to configure.
+[docs/news-setup.md](docs/news-setup.md) covers the three providers, the
+`ALPACA_SECRET_KEY` / `ALPACA_API_SECRET` naming trap, and how to tell a news
+outage from a genuinely quiet market — the desk never conflates them.
+
 ## Configuration and state
 
 Editable checkout configuration:
@@ -463,6 +537,10 @@ Optional path overrides:
 | QLAB_UI_PORT | Owner-runtime guard port |
 | QLAB_OFFLINE | Default MCP data mode |
 | QLAB_DATA_PROVIDER | Online daily-bar provider (`yfinance` or `alpaca`) |
+| QLAB_NEWS_PROVIDER | Force a news provider (`alpaca`, `rss`, `synthetic`) |
+| QLAB_ATLAS_AUTONOMOUS | `0` makes Atlas queue work instead of starting it |
+| QLAB_ATLAS_DRIVE | `0` dispatches workflows without driving a coordinator |
+| QLAB_LLM_FAST | `1` runs judgment roles on the quick model (referee exempt) |
 
 An installed wheel defaults its writable state to .lab under the current
 workspace, not the Python environment.
@@ -479,9 +557,13 @@ workspace, not the Python environment.
       solvers/      uniform implementation adapters
       state/        DuckDB registry and content-addressed artifacts
       trader/       mandate, broker adapters, plans, reconcile
+      operator/     Atlas supervisor, heartbeat, model routing, coordinator driver
+      research/     purged walk-forward prediction and quantum-inspired features
       tui/          Textual operator workstation
       ui/           owner HTTP runtime and local web client
     agents/         source-of-truth role definitions
+    clients/        atlas-tui, the Ratatui client for the same owner runtime
+    docs/           operator setup guides
     configs/        universe and staged experiment specs
     planning-docs/  current status, delivery map, and archived plans
     tests/          offline-first regression suite
@@ -498,8 +580,26 @@ runtime-path tests cover the same boundary in the suite.
 
 The next research work should explain why MVSK loses before adding more solver
 complexity: lambda sweeps, estimator sensitivity, and bounded,
-provenance-carrying news views. The next operations work is real Alpaca paper
-integration, market-calendar scheduling, and exercising the Bob adapters.
+provenance-carrying news views. The optimizer audit narrowed where to look — the
+`n⁴` cokurt tensor is 104 MB at 60 assets, so MVSK is comfortable to ~25 names
+and should not be attempted past ~50 without a factor-structured approximation.
+That is a memory wall, not a governance preference, and it is the honest reason
+the arm is research-stage.
+
+Two smaller measured findings worth acting on: minimum variance pins to the
+per-asset cap with an effective 3.7 of 25 positions, so its in-sample volatility
+advantage is out-of-sample concentration risk; and the scenario-CVaR LP
+overtakes SLSQP past roughly 50 assets while diversifying better, which makes it
+the cheaper *and* better choice on a wide universe.
+
+If the ML lane is revived, the diagnosed failure is variance inflation under a
+single global ridge alpha — so group-wise penalties or a kernel formulation are
+the next things to try, and more data is not.
+
+The next operations work is real Alpaca paper integration, market-calendar
+scheduling, exercising the Bob adapters, and porting more of the surface into
+`clients/atlas-tui`. The live-on-Alpaca-book path has still never been
+exercised end to end.
 
 Offline algorithm experiments can continue independently, but promotion into
 the desk requires evidence, a catalog stage change, tool review, and new

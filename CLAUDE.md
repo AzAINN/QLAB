@@ -24,7 +24,14 @@ qlab desk                           # one-card desk status (owner must be up)
 qlab workforce run "GOAL"           # headless governed run, streamed live
 qlab events                         # tail the owner's SSE audit bus
 python -m qlab.agents.loader sync   # regenerate .claude/agents + .bob/personas
+
+cd clients/atlas-tui && cargo test  # the Ratatui client (needs no owner)
+cd clients/atlas-tui && cargo run   # run it against the owner on QLAB_UI_PORT
 ```
+
+`clients/atlas-tui` is a second client for the same owner runtime, not a
+replacement. Both read `/api/tui`. It is read-only by construction — no order
+path, no registry handle — so invariant 3 holds there by absence.
 
 Quantum research is an isolated offline lane: `pip install -e
 ".[offline-quantum]"` then `python -m pytest tests/test_quantum.py`. It is
@@ -44,6 +51,15 @@ excluded from `[all]`, the staged runtime, and the default ablation.
   (moments-analyst → challenger → optimization-runner → referee → reporter).
   Phase state persists in the registry (`workflows`/`workflow_steps`) and is
   resumable. No Claude role has filesystem, shell, or execution tools.
+- **The owner drives its own coordinator** (`qlab/operator/coordinator.py`).
+  Registering a workflow is not running it — phases advance only while a
+  coordinator walks them — so an Atlas dispatch spawns the same governed
+  session a human would, pointed at the owner over HTTP. One at a time, and
+  the driver's teardown is terminal so no tree outlives the runtime.
+- **Atlas defaults to `research` mode with autonomy on.** Research is the
+  highest mode that cannot create a paper plan; `check_startable` refuses every
+  plan-creating template below `propose`. Widening what Atlas *researches* must
+  never widen what it can *execute*.
 - **Algorithm catalog** (`qlab/algorithms/catalog.py`): every method is
   `operational`, `research`, or `offline`. `algorithms.solve` enforces the
   stage in code — research/offline entries are visible but not agent-runnable.
@@ -71,6 +87,19 @@ excluded from `[all]`, the staged runtime, and the default ablation.
    evidence, a catalog stage change, tool-authority review, and tests.
 8. **Restart the owner process after changing code it serves** — a long-lived
    owner keeps serving pre-change imports and will invalidate results.
+9. **The owner is threaded.** `ThreadingHTTPServer` plus a heartbeat thread, so
+   any shared mutable state on `UISession` needs a lock — a lazy build without
+   one silently hands out N objects, which is how "one coordinator at a time"
+   was lost once already.
+10. **Anything reachable must have a caller.** Three real bugs shipped as code
+    that existed but nothing invoked: `adjudicate()` (permanent reporter
+    deadlock), fast-mode routing nothing passed `True` to, and `list_debates()`
+    whose first bug proved it had never run. A new seam needs a call site and a
+    test that exercises it, not just a definition.
+11. **A negative result is a deliverable.** Record what did not work and why, in
+    `planning-docs/`, including claims that did not survive reproduction. A
+    measurement that looks too good is evidence of a bug until shown otherwise —
+    and a robustness sweep with zero variance is a broken sweep.
 
 ## Conventions
 

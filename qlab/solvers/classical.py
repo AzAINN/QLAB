@@ -25,6 +25,17 @@ from qlab.core.objective import compile_scipy, compile_target_semivariance
 from qlab.core.types import Objective, SolveResult, Weights
 from qlab.solvers.base import Constraints, Solver, finalize_weights, register_solver
 
+# Multistart early stopping. The default restart budget is 4n — 100 restarts at
+# n=25, 160 at n=40 — and measurement (planning-docs/2026-07-30-optimizer-audit)
+# put the winning basin at restart 2-4 across landscapes from effectively convex
+# to strongly non-convex (5-factor, lambda 10). Every restart after that was
+# 20ms of nothing. Patience is a 3-4x margin over the worst observed case, not a
+# tight fit: the cost of one extra restart is 20ms, the cost of stopping one too
+# early is a 26-56% worse objective.
+_PATIENCE = 12
+# Relative, because MVSK magnitudes span orders of magnitude with lambda.
+_IMPROVE_TOL = 1e-9
+
 
 def _budget_constraint(budget: float) -> dict:
     return {"type": "eq", "fun": lambda w: float(np.sum(w) - budget)}
@@ -129,9 +140,11 @@ class MultistartMVSKSolver(Solver):
     restarts to escape shallow basins.
     """
 
-    def __init__(self, n_starts: int | None = None, seed: int = 7):
+    def __init__(self, n_starts: int | None = None, seed: int = 7,
+                 patience: int | None = _PATIENCE):
         self.n_starts = n_starts
         self.seed = seed
+        self.patience = patience
 
     def solve(self, objective: Objective, constraints: Constraints, **_ctx) -> SolveResult:
         t0 = time.perf_counter()
@@ -142,14 +155,29 @@ class MultistartMVSKSolver(Solver):
         n_starts = self.n_starts or max(8, 4 * n)
 
         best_w, best_val = None, np.inf
+        since_improved = 0
+        run = 0
+        # The schedule is still computed over the full budget, so an early stop
+        # takes a prefix of the same starts rather than a different, hotter set:
+        # stopping must not change which points are explored, only how many.
         temps = np.linspace(1.0, 0.2, n_starts)     # parallel-tempering-style cooling
         for temp in temps:
             x0 = rng.dirichlet(np.ones(n) / temp) * constraints.budget
             w, val, ok = _slsqp(f, g, x0, bounds, constraints.budget)
             w = finalize_weights(w, constraints)
             v = f(w)
-            if v < best_val:
-                best_w, best_val = w, v
+            run += 1
+            # Relative, because MVSK objective magnitudes span orders of
+            # magnitude with lambda; an absolute epsilon would mean "never stop"
+            # on one scale and "stop instantly" on another.
+            if v < best_val - _IMPROVE_TOL * max(abs(best_val), 1e-12):
+                best_w, best_val, since_improved = w, v, 0
+            else:
+                if v < best_val:
+                    best_w, best_val = w, v
+                since_improved += 1
+            if self.patience and since_improved >= self.patience:
+                break
 
         constraints.validate(best_w)
         return SolveResult(
@@ -158,7 +186,12 @@ class MultistartMVSKSolver(Solver):
             solver=self.name,
             status="optimal",
             wall_clock_s=time.perf_counter() - t0,
-            diagnostics={"n_starts": n_starts},
+            # Both numbers, always: an audit has to be able to see that a run
+            # stopped at 13 of a budgeted 160 and decide whether that was
+            # acceptable, rather than reading 160 and believing it.
+            diagnostics={"n_starts": n_starts, "n_starts_run": run,
+                         "stopped_early": run < n_starts,
+                         "patience": self.patience},
         )
 
 

@@ -550,9 +550,18 @@ def _format_targets(targets: dict, limit: int = 8) -> str:
     unreadable: list[str] = []
     for ticker, weight in targets.items():
         try:
-            numeric.append((str(ticker), float(weight)))
+            value = float(weight)
         except (TypeError, ValueError):
             unreadable.append(str(ticker))
+            continue
+        # NaN and inf survive float() and rendered as "SPY nan%" — a number-
+        # shaped non-number on a trading surface, which reads as a real weight.
+        # Python's json emits and parses NaN by default, so an agent artifact
+        # carries one all the way here. Report it as unreadable, like a string.
+        if not math.isfinite(value):
+            unreadable.append(str(ticker))
+            continue
+        numeric.append((str(ticker), value))
     ordered = sorted(numeric, key=lambda kv: -kv[1])[:limit]
     line = " · ".join(f"{ticker} {weight:.1%}" for ticker, weight in ordered)
     if unreadable:
@@ -1376,6 +1385,20 @@ class QlabTui(App[None]):
                             yield Button(
                                 "re-check alpaca",
                                 id="settings-recheck-alpaca",
+                                classes="view-action-button",
+                                compact=True,
+                            )
+                    # How the workforce runs, next to whose book it runs on.
+                    # Autonomy has a control in the Atlas panel; fast mode and
+                    # owner-driven coordination had none at all, so the only way
+                    # to reach either was an env var set before launch.
+                    with Vertical(id="settings-workforce",
+                                  classes="settings-card"):
+                        yield Static(id="settings-workforce-copy", markup=True)
+                        with Horizontal(id="settings-workforce-actions"):
+                            yield Button(
+                                "toggle fast mode",
+                                id="settings-toggle-fast",
                                 classes="view-action-button",
                                 compact=True,
                             )
@@ -2745,10 +2768,23 @@ class QlabTui(App[None]):
             why.append("No trigger has fired: no drawdown tier, no drift "
                        "breach, no regime flip, no data outage. Nothing to act "
                        "on is not the same as idle by accident.")
-        why.append("Atlas is deterministic code, not a model — it has no prose "
-                   "reasoning to stream. Use `: workforce GOAL` for the "
-                   "governed Claude pipeline, or `: claude` to open the real "
-                   "Claude CLI in this terminal.")
+        # A dispatched workflow only advances while a coordinator walks its
+        # phases. Reporting that separately is what distinguishes "Claude is
+        # reasoning right now" from "a workflow row exists and is parked".
+        coordinator = _record(beat.get("coordinator"))
+        if coordinator.get("driving"):
+            why.append(
+                f"A Claude coordinator is driving workflow "
+                f"{coordinator.get('workflow_id', '—')} right now — its "
+                "reasoning streams into the console as it runs.")
+        elif not coordinator.get("can_drive") and coordinator.get("reason"):
+            why.append(f"Atlas cannot drive a run itself: "
+                       f"{coordinator['reason']}. Dispatched work waits for you "
+                       "to resume it with `: workforce`.")
+        why.append("Atlas itself is deterministic code, not a model — its own "
+                   "decisions have no prose to stream. The judgment runs in the "
+                   "coordinator it dispatches; `: workforce GOAL` starts one by "
+                   "hand, and `: claude` opens the real Claude CLI here.")
         return [
             f"[bold {AMBER}]▌ WHY NOTHING IS RUNNING[/]",
             f"[{BORDER_HI}]{'─' * 48}[/]",
@@ -3754,8 +3790,68 @@ class QlabTui(App[None]):
         self.query_one("#settings-change-desk", Button).tooltip = (
             "Choose the data lane and which book is traded")
 
+    def _render_workforce_settings(self) -> None:
+        """How the workforce runs: autonomy, speed, and who drives.
+
+        Each line states its trade-off rather than just its state. "FAST ON" is
+        not actionable on its own — what matters is which roles it cheapens and
+        which it deliberately does not.
+        """
+        beat = _record(self.snapshot.get("atlas_heartbeat")) if self.snapshot else {}
+        coordinator = _record(beat.get("coordinator"))
+        atlas = _record(self.snapshot.get("atlas")) if self.snapshot else {}
+        mode_now = str(atlas.get("mode") or "—").upper()
+        fast = bool(beat.get("fast"))
+        autonomous = bool(beat.get("autonomous"))
+
+        lines = [f"[{LABEL_GOLD}]WORKFORCE · HOW THE DESK RUNS[/]"]
+        lines.extend(_key_number_markup(
+            [
+                ("atlas mode", mode_now),
+                ("autonomy", "ON" if autonomous else "OFF"),
+                ("model tier", "FAST" if fast else "FULL"),
+                ("driving", "YES" if coordinator.get("driving") else "NO"),
+            ],
+            value_tones=[
+                TEXT_HI,
+                UP if autonomous else MUTED,
+                AMBER if fast else TEXT_HI,
+                UP if coordinator.get("driving") else MUTED,
+            ],
+        ))
+        lines.append("")
+        if fast:
+            lines.append(
+                f"[{AMBER}]Fast mode is on[/]  [{DIM}]judgment roles run on the "
+                f"quick model. The referee keeps its tier — a PASS must never "
+                f"mean 'passed on the fast model'.[/]")
+        else:
+            lines.append(
+                f"[{DIM}]Every role runs on its configured tier. Fast mode "
+                f"trades depth for latency on judgment roles only.[/]")
+        # Whether Atlas can run work by itself is the difference between a desk
+        # that researches overnight and one that queues and waits.
+        if coordinator.get("driving"):
+            lines.append(
+                f"[{UP}]Driving workflow {escape(str(coordinator.get('workflow_id') or '—'))}[/]"
+                f"  [{DIM}]its reasoning streams into the console.[/]")
+        elif coordinator.get("can_drive"):
+            lines.append(
+                f"[{DIM}]Idle. Atlas will start a coordinator itself when a "
+                f"trigger fires and its mode permits the template.[/]")
+        else:
+            lines.append(
+                f"[{AMBER}]! cannot drive[/]  [{DIM}]"
+                f"{escape(str(coordinator.get('reason') or 'unavailable'))} — "
+                f"dispatched work waits for `: workforce`.[/]")
+        self.query_one("#settings-workforce-copy", Static).update("\n".join(lines))
+        self.query_one("#settings-toggle-fast", Button).tooltip = (
+            "Turn fast mode off — every role back on its tier" if fast
+            else "Run judgment roles on the quick model (the referee is exempt)")
+
     def _render_settings(self) -> None:
         self._render_desk_settings()
+        self._render_workforce_settings()
         if self.bootstrap is not None:
             mandate = self.bootstrap.get("mandate") or {}
             policy_id = str(mandate.get("operational_policy", "—"))
@@ -4452,6 +4548,15 @@ class QlabTui(App[None]):
             "/api/atlas/autonomy",
             {"enabled": enabled, "offline": self.offline}, active_agent=None)
 
+    def action_toggle_fast_mode(self) -> None:
+        """Trade depth for latency on judgment roles. The referee is exempt."""
+        beat = _record(self.snapshot.get("atlas_heartbeat"))
+        enabled = not bool(beat.get("fast"))
+        self._run_api_action(
+            f"fast mode {'on' if enabled else 'off'}",
+            "/api/workforce/fast",
+            {"enabled": enabled, "offline": self.offline}, active_agent=None)
+
     def action_atlas_escalate(self) -> None:
         """Ask Atlas to open a bounded debate on the current disagreement."""
         self._run_api_action(
@@ -4588,6 +4693,9 @@ class QlabTui(App[None]):
             # is a refresh. Nothing here calls Alpaca.
             self._write_local_event("alpaca.recheck", {})
             self._start_refresh()
+            return
+        if button_id == "settings-toggle-fast":
+            self.action_toggle_fast_mode()
             return
         if button_id == "btn-atlas-refresh":
             self.action_atlas_refresh()

@@ -26,6 +26,11 @@ MANAGER_ID = "atlas"
 
 # Modes (authority) and states (lifecycle).
 MODES = ("observe", "research", "propose", "paused")
+# What a desk with no persisted state starts as. Research is the highest mode
+# that cannot create a paper plan: `check_startable` refuses every
+# plan-creating template below Propose, so this widens what Atlas *researches*
+# without moving the execution boundary an inch.
+DEFAULT_MODE = "research"
 STARTING = "starting"
 OBSERVING = "observing"
 INVESTIGATING = "investigating"
@@ -106,8 +111,14 @@ class AtlasSupervisor:
         self.config = config or AtlasConfig()
         self._id_gen = id_gen or (lambda: uuid.uuid4().hex[:16])
         if self.registry.get_atlas_state() is None:
+            # A fresh desk starts in Research, not Observe. Observe permits no
+            # workflow at all, so the desk shipped inert: it observed, queued
+            # nothing it could act on, and looked broken. Research lets Atlas do
+            # the research work by itself while `check_startable` still refuses
+            # every plan-creating template — reaching a paper trade needs Propose
+            # mode AND a human approval, both untouched by this default.
             self.registry.save_atlas_state(
-                {"mode": "observe", "state": STARTING}, MANAGER_ID)
+                {"mode": DEFAULT_MODE, "state": STARTING}, MANAGER_ID)
 
     # -- mode / lifecycle controls ------------------------------------------
     def status(self) -> dict:

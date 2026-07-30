@@ -44,11 +44,15 @@ def _healthy_facts():
     }
 
 
-def test_starts_in_observe_mode():
+def test_starts_in_research_mode():
+    # A fresh desk starts in Research, not Observe. Observe permits no workflow
+    # at all, so the desk shipped inert. Research is the highest mode that still
+    # cannot create a paper plan, so this widens what Atlas researches without
+    # moving the execution boundary.
     reg = Registry(":memory:")
     try:
         atlas = _atlas(reg)
-        assert atlas.status()["mode"] == "observe"
+        assert atlas.status()["mode"] == "research"
     finally:
         reg.close()
 

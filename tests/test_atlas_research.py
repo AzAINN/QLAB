@@ -107,6 +107,7 @@ def test_trigger_template_map_covers_the_workflow_triggers():
 
 def test_startable_tasks_explains_refusals_in_observe(reg):
     atlas = _atlas(reg)
+    atlas.set_mode("observe")   # no longer the default; this test is about it
     facts = _facts()
     facts["regime"]["flip"] = True
     atlas.observe(facts, trading_date="2026-07-24")
@@ -281,6 +282,7 @@ def test_autonomous_tick_runs_only_what_the_mode_permits(reg):
     import threading
 
     atlas = _atlas(reg)
+    atlas.set_mode("observe")   # no longer the default; the first leg needs it
     session = _Session(atlas)
     tick = build_owner_tick(session, threading.Lock(), offline=True,
                             autonomous=True)

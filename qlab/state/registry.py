@@ -70,6 +70,11 @@ _WORKFORCE_REQUIRED_ARTIFACTS = {
 }
 _MAX_PANEL_VARIANTS = 5
 
+# The book an unqualified account call means. Callers that know their venue pass
+# it; this keeps the simulator — which is what every offline test and the demo
+# run against — working without threading a book through every call site.
+DEFAULT_BOOK = "simulated_paper"
+
 # Which statuses an approval may hold *before* it is moved to each status. The
 # terminal ones — rejected, expired, consumed, invalidated — appear in no
 # right-hand side, which is what makes them terminal: a spent or refused
@@ -188,8 +193,10 @@ CREATE TABLE IF NOT EXISTS decisions (
     decision_id VARCHAR PRIMARY KEY, as_of VARCHAR, kind VARCHAR, choice JSON,
     rationale VARCHAR, challenger_view VARCHAR, realized_outcome JSON,
     reflection VARCHAR, created_at VARCHAR);
+-- Keyed by book: the high-water mark is per-venue, and one shared row turns a
+-- venue switch into a fabricated drawdown that trips the kill switch.
 CREATE TABLE IF NOT EXISTS account (
-    id INTEGER PRIMARY KEY, cash DOUBLE, high_water_mark DOUBLE,
+    book VARCHAR PRIMARY KEY, cash DOUBLE, high_water_mark DOUBLE,
     halted BOOLEAN, updated_at VARCHAR);
 CREATE TABLE IF NOT EXISTS positions (
     ticker VARCHAR PRIMARY KEY, qty DOUBLE, avg_price DOUBLE, updated_at VARCHAR);
@@ -317,6 +324,45 @@ class Registry:
         self.con.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS fee DOUBLE")
         self.con.execute("ALTER TABLE equity_marks ADD COLUMN IF NOT EXISTS book VARCHAR")
         self._widen_equity_mark_identity()
+        self._partition_account_by_book()
+
+    def _partition_account_by_book(self) -> None:
+        """Move a pre-book `account` row onto the book key.
+
+        The old table held one row (`id=1`) shared by every venue, so both
+        brokers ratcheted one high-water mark. An Alpaca paper account near
+        $32.6k set that mark, and the next read of the $10k simulated book
+        computed a 69% drawdown, tripped the kill switch, halted the desk and
+        blocked the reporter — with nothing having lost money.
+
+        The carried row keeps its cash but its high-water mark is reset to that
+        cash, and any halt is cleared. A mark inherited from another venue is
+        not a peak this book reached, so carrying it forward would carry the
+        false drawdown across the migration — the one thing this must not do.
+        """
+        columns = {
+            row[0] for row in self.con.execute(
+                "SELECT column_name FROM duckdb_columns() "
+                "WHERE table_name='account'").fetchall()
+        }
+        if "book" in columns:
+            return
+        legacy = self.con.execute(
+            "SELECT cash, high_water_mark, halted FROM account").fetchall()
+        with self.transaction():
+            self.con.execute("""
+                CREATE TABLE account_rekeyed (
+                    book VARCHAR PRIMARY KEY, cash DOUBLE,
+                    high_water_mark DOUBLE, halted BOOLEAN,
+                    updated_at VARCHAR);
+            """)
+            if legacy:
+                cash = float(legacy[0][0] or 0.0)
+                self.con.execute(
+                    "INSERT INTO account_rekeyed VALUES (?,?,?,?,?)",
+                    [DEFAULT_BOOK, cash, cash, False, _now()])
+            self.con.execute("DROP TABLE account")
+            self.con.execute("ALTER TABLE account_rekeyed RENAME TO account")
 
     def _widen_equity_mark_identity(self) -> None:
         """Bring a pre-book equity_marks primary key up to (ts, source, book).
@@ -929,21 +975,30 @@ class Registry:
         }
 
     # -- account / positions ------------------------------------------------
-    def init_account(self, cash: float) -> None:
+    #
+    # The account is partitioned by book for the same reason equity marks are:
+    # the high-water mark is per-venue, and sharing one row across books turns a
+    # venue switch into a fabricated loss. An Alpaca paper account near $32.6k
+    # ratcheted the shared mark, and the next read of the $10k simulated book
+    # computed a 69% drawdown — which tripped the kill switch, halted the desk,
+    # and blocked the reporter. Nothing had lost money.
+    def init_account(self, cash: float, book: str = DEFAULT_BOOK) -> None:
         self.con.execute(
-            "INSERT INTO account VALUES (1,?,?,?,?) ON CONFLICT DO NOTHING",
-            [cash, cash, False, _now()],
+            "INSERT INTO account (book, cash, high_water_mark, halted, updated_at) "
+            "VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING",
+            [str(book), cash, cash, False, _now()],
         )
 
-    def get_account(self) -> dict:
-        r = self._rows("SELECT * FROM account WHERE id=1", [])
+    def get_account(self, book: str = DEFAULT_BOOK) -> dict:
+        r = self._rows("SELECT * FROM account WHERE book=?", [str(book)])
         return r[0] if r else {}
 
     def get_positions(self) -> dict[str, dict]:
         rows = self._rows("SELECT * FROM positions", [])
         return {r["ticker"]: r for r in rows}
 
-    def apply_fill(self, ticker: str, dqty: float, price: float, cash_delta: float) -> None:
+    def apply_fill(self, ticker: str, dqty: float, price: float,
+                   cash_delta: float, book: str = DEFAULT_BOOK) -> None:
         pos = self.get_positions().get(ticker)
         if pos:
             new_qty = pos["qty"] + dqty
@@ -957,12 +1012,13 @@ class Registry:
             self.con.execute("INSERT INTO positions VALUES (?,?,?,?)",
                              [ticker, dqty, price, _now()])
         self.con.execute(
-            "UPDATE account SET cash = cash + ?, updated_at=? WHERE id=1",
-            [cash_delta, _now()])
+            "UPDATE account SET cash = cash + ?, updated_at=? WHERE book=?",
+            [cash_delta, _now(), str(book)])
 
-    def set_halt(self, halted: bool) -> None:
-        self.con.execute("UPDATE account SET halted=?, updated_at=? WHERE id=1",
-                         [halted, _now()])
+    def set_halt(self, halted: bool, book: str = DEFAULT_BOOK) -> None:
+        """Halt or release one book. A halt on one venue is not a halt on all."""
+        self.con.execute("UPDATE account SET halted=?, updated_at=? WHERE book=?",
+                         [halted, _now(), str(book)])
 
     def reset_book(self, cash: float, book: str) -> None:
         """Discard one book: positions, orders, its marks, and the account state.
@@ -988,14 +1044,23 @@ class Registry:
         self.con.execute("DELETE FROM positions")
         self.con.execute("DELETE FROM orders")
         self.con.execute("DELETE FROM equity_marks WHERE book=?", [str(book)])
+        # Resetting one book must not clear another book's halt or reset its
+        # peak — that is the same cross-book leak the partitioning exists for.
         self.con.execute(
             "UPDATE account SET cash=?, high_water_mark=?, halted=FALSE, updated_at=? "
-            "WHERE id=1", [cash, cash, _now()])
+            "WHERE book=?", [cash, cash, _now(), str(book)])
 
-    def update_high_water_mark(self, equity: float) -> None:
+    def update_high_water_mark(self, equity: float,
+                               book: str = DEFAULT_BOOK) -> None:
+        """Ratchet one book's high-water mark. GREATEST never lowers it.
+
+        Scoped to the book because the mark is what drawdown is measured
+        against: a mark set by a different venue is not a peak this book ever
+        reached, and the difference reads as a loss it never took.
+        """
         self.con.execute(
             "UPDATE account SET high_water_mark = GREATEST(high_water_mark, ?), "
-            "updated_at=? WHERE id=1", [equity, _now()])
+            "updated_at=? WHERE book=?", [equity, _now(), str(book)])
 
     # -- order plans (state machine) ---------------------------------------
     def create_plan(self, plan_id: str, decision_id: str, targets: dict,
@@ -1851,7 +1916,9 @@ class Registry:
             return self._rows(
                 "SELECT * FROM debates WHERE workflow_id = ? "
                 "ORDER BY created_at DESC", [workflow_id])
-        return self._rows("SELECT * FROM debates ORDER BY created_at DESC")
+        # `_rows` takes params positionally; omitting them raised a TypeError,
+        # so the unfiltered listing had never once run.
+        return self._rows("SELECT * FROM debates ORDER BY created_at DESC", [])
 
     def add_debate_turn(self, turn: dict) -> str:
         tid = str(turn["turn_id"])

@@ -62,6 +62,23 @@ def no_ambient_owner_runtime(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_owner_driven_coordinator(request, monkeypatch):
+    """No test may spawn a real Claude coordinator.
+
+    An Atlas dispatch now drives the workflow it registers, and the driver's
+    only precondition is a `claude` on PATH — which a developer machine has. So
+    without this, any test touching ``atlas_workflow_runner`` forks a real
+    billed Claude tree against a runtime URL no test is serving.
+
+    ``tests/test_atlas_coordinator.py`` owns the driver's own behaviour and
+    injects a fake session, so it is exempt.
+    """
+    if request.path.name == "test_atlas_coordinator.py":
+        return
+    monkeypatch.setenv("QLAB_ATLAS_DRIVE", "0")
+
+
+@pytest.fixture(autouse=True)
 def isolated_alpaca_credentials(request, tmp_path, monkeypatch):
     """No test may discover the operator's real Alpaca login.
 

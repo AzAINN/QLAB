@@ -47,6 +47,22 @@ TIER_MODEL: dict[str, str] = {
 # role could not run on its tier, the phase is degraded, not PASS.
 REQUIRED_DEEP_ROLES = frozenset({"referee"})
 
+# Fast mode: run the judgment roles on the quick model too, so a whole review
+# finishes in the time the deep tier alone would take. It is a speed/quality
+# trade the operator makes explicitly, and it is bounded — REQUIRED_DEEP_ROLES
+# keeps its tier, because the approval gate is the one place where a cheaper
+# answer is worth nothing. A PASS must never mean "passed on the fast model".
+FAST_TIER_MODEL: dict[str, str] = {
+    DEEP: "sonnet",
+    QUICK: "sonnet",
+    NONE: "inherit",
+}
+
+
+def tier_model_for(*, fast: bool = False) -> dict[str, str]:
+    """The tier→model map in force. `fast` trades depth for latency."""
+    return dict(FAST_TIER_MODEL if fast else TIER_MODEL)
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -70,17 +86,30 @@ def tier_for(role: str) -> str:
 
 
 def resolve_route(role: str, *, source_model: str | None = None,
-                  tier_model: dict[str, str] | None = None) -> RouteDecision:
+                  tier_model: dict[str, str] | None = None,
+                  fast: bool = False) -> RouteDecision:
     """Resolve which model serves ``role``.
 
     A concrete ``model:`` in the agent source always wins (an explicit operator
     override); otherwise the role's tier is resolved through ``tier_model``.
+
+    ``fast`` drops the judgment roles onto the quick model — except the roles in
+    REQUIRED_DEEP_ROLES, which keep their tier no matter what. Speed is the
+    operator's call everywhere except the gate that decides whether a trade may
+    be proposed at all.
     """
-    models = tier_model or TIER_MODEL
+    models = tier_model or tier_model_for(fast=fast)
     if source_model and source_model != "inherit":
         return RouteDecision(role=role, requested_tier=tier_for(role),
                              resolved_model=source_model, source="agent_override")
     tier = tier_for(role)
+    if fast and role in REQUIRED_DEEP_ROLES:
+        # Recorded as a deliberate exemption, so an audit shows fast mode was on
+        # and shows which role refused it.
+        return RouteDecision(
+            role=role, requested_tier=tier,
+            resolved_model=TIER_MODEL[tier], source="tier",
+            fallback_reason="fast mode does not apply to a required-deep role")
     if role not in ROLE_TIER:
         return RouteDecision(role=role, requested_tier=NONE,
                              resolved_model=models.get(NONE, "inherit"),

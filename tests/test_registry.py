@@ -758,6 +758,56 @@ def test_a_flat_judge_graph_still_binds_the_verdict_to_its_own_decision():
         registry.close()
 
 
+def test_a_book_switch_cannot_fabricate_a_drawdown():
+    # This is the bug that halted a real desk. The account was ONE row shared by
+    # every venue, and both brokers ratcheted its high-water mark. An Alpaca
+    # paper account near $32.6k set the mark; the next read of the $10k
+    # simulated book computed a 69% drawdown, tripped the kill switch, halted
+    # trading and blocked the reporter — with nothing having lost money.
+    reg = Registry(":memory:")
+    try:
+        reg.init_account(10_000.0, book="simulated_paper")
+        reg.init_account(32_626.0, book="alpaca_paper")
+        reg.update_high_water_mark(32_626.0, book="alpaca_paper")
+
+        sim = reg.get_account("simulated_paper")
+        assert sim["high_water_mark"] == 10_000.0, (
+            "the other venue's peak leaked into this book")
+        drawdown = 1.0 - sim["cash"] / sim["high_water_mark"]
+        assert drawdown == 0.0
+
+        # And a halt is per-venue: one book breaching must not stop the other.
+        reg.set_halt(True, book="alpaca_paper")
+        assert reg.get_account("alpaca_paper")["halted"] is True
+        assert reg.get_account("simulated_paper")["halted"] is False
+    finally:
+        reg.close()
+
+
+def test_a_legacy_shared_account_row_is_migrated_without_its_false_peak(tmp_path):
+    # A database written before the partitioning carries the corrupted mark. It
+    # must not survive the migration, or the false drawdown crosses with it.
+    import duckdb
+
+    path = tmp_path / "legacy.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(
+        "CREATE TABLE account (id INTEGER PRIMARY KEY, cash DOUBLE, "
+        "high_water_mark DOUBLE, halted BOOLEAN, updated_at VARCHAR)")
+    # $10k cash against a $32.6k peak, halted — exactly the observed state.
+    con.execute("INSERT INTO account VALUES (1, 10000.0, 32626.0, TRUE, 'x')")
+    con.close()
+
+    reg = Registry(str(path))
+    try:
+        acct = reg.get_account("simulated_paper")
+        assert acct["cash"] == 10_000.0          # the cash is real, keep it
+        assert acct["high_water_mark"] == 10_000.0  # the peak was not this book's
+        assert acct["halted"] is False            # so the halt was not either
+    finally:
+        reg.close()
+
+
 def test_two_books_can_mark_the_same_timestamp_and_source():
     # The primary key predated the book column, so a second book's backfill
     # collided row-for-row and was silently dropped: the route answered

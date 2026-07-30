@@ -22,6 +22,8 @@ GET  /api/decisions/similar    point-in-time recall of analogous decisions
 GET  /api/decisions/<id>/outcome   the immutable resolved outcome
 GET  /api/decisions/<id>/lesson    advisory lesson over that outcome (if any)
 GET  /api/workflows/<id>/debate    debates, turns, and adjudication
+GET  /api/debates                  open debates across every workflow
+POST /api/debates/<id>/adjudicate  close a debate (human act; no agent may)
 GET  /api/models/invocations   model tier/route audit records
 GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
@@ -249,7 +251,25 @@ class UISession:
         self.heartbeat = None
         # Autonomy is a runtime switch the operator owns from the UI.
         # The env var only seeds its initial value.
-        self.autonomous = os.environ.get("QLAB_ATLAS_AUTONOMOUS") == "1"
+        # On by default, and switchable off. Autonomy off meant Atlas queued
+        # tasks and waited for a human to press start, so the desk did nothing
+        # unattended — which is not what a personal quant is for. It stays
+        # bounded by the mode (Research creates no plans), the daily workflow
+        # budget, and the approval requirement on every execution.
+        self.autonomous = os.environ.get("QLAB_ATLAS_AUTONOMOUS", "1") != "0"
+        # The port serve() actually bound. A driven coordinator talks back to
+        # this owner over HTTP, so a wrong port means it opens the registry as a
+        # second writer instead — the one thing the architecture forbids.
+        self.port = int(os.environ.get("QLAB_UI_PORT", "8765") or 8765)
+        # Seeded from the same env var ClaudeSession reads, so one switch
+        # governs both an owner-driven coordinator and a hand-started one.
+        self.fast_mode = os.environ.get("QLAB_LLM_FAST", "0") == "1"
+        self._driver = None
+        # The owner is a ThreadingHTTPServer and the heartbeat is another
+        # thread. Without this, a lazy build races and hands out one driver per
+        # caller — each with its own lock and its own session slot, which is
+        # exactly the "one coordinator at a time" guarantee gone.
+        self._driver_lock = threading.Lock()
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -1271,17 +1291,17 @@ class UISession:
 
         universe = self.mandate.universe_whitelist
         as_of = date.today().isoformat()
-        provider_name = (
-            "synthetic"
-            if offline
-            else os.environ.get("QLAB_NEWS_PROVIDER", "synthetic")
-        )
+        provider_name = self.news_provider_for(offline)
         try:
+            # Passed explicitly rather than letting the feed re-resolve from the
+            # environment: the label and the fetch must be the same decision, or
+            # the desk can report a provenance it did not use.
             items = fetch_news(
                 as_of,
                 universe,
                 lookback_hours=48,
                 offline=offline,
+                provider=provider_name,
             )
         except Exception as exc:
             window = {
@@ -1359,6 +1379,36 @@ class UISession:
         self._desk_read = payload
         return self._desk_read
 
+    def news_provider_for(self, offline: bool) -> str:
+        """Which news provider this desk should read, and why.
+
+        News follows the data lane the operator already chose. A desk running on
+        live prices while its qualitative side is deterministic fixtures is the
+        provenance confusion this codebase refuses everywhere else — the read
+        would carry a real market and an invented narrative under one heading.
+
+        Precedence: offline is always synthetic (it is the demo, and it must
+        never reach the network); then an explicit `QLAB_NEWS_PROVIDER`, because
+        naming a provider is an operator instruction; then Alpaca when a
+        credential actually resolves; then synthetic, which `compose_desk_read`
+        already labels as fixtures.
+        """
+        if offline:
+            return "synthetic"
+        explicit = os.environ.get("QLAB_NEWS_PROVIDER", "").strip().lower()
+        if explicit:
+            return explicit
+        try:
+            from qlab.trader.alpaca_auth import resolve_alpaca_credentials
+
+            if resolve_alpaca_credentials() is not None:
+                return "alpaca"
+        except Exception:
+            # A broken credential source is not a provider; the resolver reports
+            # the detail where the operator can act on it.
+            pass
+        return "synthetic"
+
     def mark_desk_read_stale(self, error: str) -> None:
         """Record that the read could not be recomposed.
 
@@ -1401,6 +1451,28 @@ class UISession:
                 else "Atlas will queue work and wait for you to start it"),
         }
 
+    def set_fast_mode(self, enabled: bool) -> dict:
+        """Trade depth for latency on the judgment roles, at runtime.
+
+        Bounded in one place that matters: REQUIRED_DEEP_ROLES keep their tier,
+        so the referee is never cheapened. A PASS must mean the same thing on a
+        fast desk as on a slow one, or the gate is decorative.
+        """
+        from qlab.operator.model_routing import REQUIRED_DEEP_ROLES
+
+        self.fast_mode = bool(enabled)
+        self.registry.record_event("workforce_fast_mode",
+                                   {"enabled": self.fast_mode})
+        return {
+            "fast": self.fast_mode,
+            "exempt_roles": sorted(REQUIRED_DEEP_ROLES),
+            "effect": (
+                "judgment roles run on the quick model; "
+                f"{', '.join(sorted(REQUIRED_DEEP_ROLES))} keeps its tier"
+                if self.fast_mode
+                else "every role runs on its configured tier"),
+        }
+
     def atlas_escalate_debate(self, offline: bool) -> dict:
         """Open a bounded debate when Atlas's read finds material disagreement.
 
@@ -1431,6 +1503,40 @@ class UISession:
              "tension": (read.get("tensions") or [""])[0][:200]})
         return {"opened": True, "debate_id": debate_id, "claim": claim,
                 "tensions": read.get("tensions")}
+
+    def adjudicate_debate(self, debate_id: str, body: dict) -> dict:
+        """Close a debate with a human adjudication.
+
+        Until this existed, `adjudicate()` had no caller anywhere: a debate
+        could be opened but never closed, and `update_workflow_phase` refuses to
+        start the reporter while any debate on its workflow is open. An opened
+        debate was therefore a permanent deadlock with no exit — the run could
+        neither finish nor be finished.
+
+        Adjudication is a human act, exposed here and not to any agent. A role
+        that could close its own debate would make the bounded-debate gate
+        decorative.
+        """
+        from qlab.governance.debate import DebateViolation, adjudicate
+
+        resolution = str(body.get("resolution") or "").strip()
+        if not resolution:
+            raise ValueError("adjudication requires a resolution")
+        positions = body.get("winning_claim_positions")
+        if not isinstance(positions, dict) or not positions:
+            raise ValueError(
+                "adjudication requires winning_claim_positions: "
+                "{claim: position} for every material claim")
+        try:
+            return adjudicate(
+                self.registry, debate_id,
+                decided_by=str(body.get("decided_by") or "operator"),
+                resolution=resolution,
+                winning_claim_positions=positions,
+                evidence_refs=list(body.get("evidence_refs") or []),
+                amended_decision_id=body.get("amended_decision_id"))
+        except DebateViolation as exc:
+            raise ValueError(str(exc)) from exc
 
     def atlas_workflow_runner(self, task: dict, template_id: str) -> dict:
         """Start the durable workforce run a Atlas task selected.
@@ -1470,13 +1576,69 @@ class UISession:
             raise RuntimeError(
                 f"no workflow could be started for template {template_id!r}; "
                 "the task cannot be dispatched")
+        # Registering the workflow is not running it. Its phases advance only
+        # when a coordinator walks them, so dispatch alone left the run parked at
+        # phase one forever. Drive it here.
+        driven = self.drive_workflow(
+            str(workflow_id),
+            f"[{template_id}] {template.purpose}")
         # A workflow row is not a finding. Report the dispatch and let
         # AtlasSupervisor.reconcile_tasks resolve the task from the workflow's
         # own terminal state.
         return Dispatched(
             workflow_id=str(workflow_id),
-            detail={"template_id": template_id, "action_taken": True},
+            detail={"template_id": template_id, "action_taken": True,
+                    "driving": driven.get("driving", False),
+                    # Carried even on success: an undriven dispatch is still a
+                    # valid dispatch, and the operator has to be able to see
+                    # that it is waiting on them rather than on Claude.
+                    "drive_reason": driven.get("reason", "")},
         )
+
+    # -- owner-driven coordination -------------------------------------------
+    @property
+    def coordinator_driver(self):
+        """The owner's single coordinator slot, built on first use."""
+        # Double-checked: the fast path stays lock-free once built, because
+        # coordinator_status() is on the snapshot path and runs every tick.
+        if self._driver is None:
+            with self._driver_lock:
+                if self._driver is None:
+                    self._driver = self._build_driver()
+        self._driver.fast = self.fast_mode
+        return self._driver
+
+    def _build_driver(self):
+        """Construct the driver. Called once, under `_driver_lock`.
+
+        `fast` is deliberately not passed here: the property re-reads it on each
+        access so a Settings toggle lands on the next dispatch rather than the
+        next owner restart.
+        """
+        from qlab.operator.coordinator import CoordinatorDriver
+        from qlab.paths import workspace_root
+
+        return CoordinatorDriver(
+            runtime_url=f"http://127.0.0.1:{self.port}",
+            cwd=workspace_root(),
+            record_event=self.registry.record_event,
+            offline=self.offline_default,
+        )
+
+    def drive_workflow(self, workflow_id: str, goal: str) -> dict:
+        """Spawn a coordinator for a workflow this owner just registered."""
+        return self.coordinator_driver.drive(workflow_id, goal)
+
+    def coordinator_status(self) -> dict:
+        """What the desk should say about unattended coordination."""
+        driver = self.coordinator_driver
+        ok, reason = driver.available()
+        return {
+            "driving": driver.busy,
+            "workflow_id": driver.current_workflow_id,
+            "can_drive": ok,
+            "reason": reason or driver.last_reason,
+        }
 
     def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
         """Start the queued work Atlas's current mode already permits.
@@ -1809,6 +1971,11 @@ class UISession:
                 **(self.heartbeat.status() if self.heartbeat
                    else {"running": False, "ticks": 0}),
                 "autonomous": self.autonomous,
+                # Whether a coordinator is walking a workflow's phases right
+                # now. Every client needs this to answer "is Claude working?",
+                # which the presence of a workflow row does not answer.
+                "coordinator": self.coordinator_status(),
+                "fast": self.fast_mode,
             },
             "atlas_tasks": self.registry.list_atlas_tasks(10),
             "approvals": self.registry.list_approval_requests(10, "pending"),
@@ -2090,6 +2257,21 @@ def handle_api(session: UISession, method: str, path: str,
                 debate["debate_id"])
         return 200, {"workflow_id": workflow_id, "debates": debates}
 
+    if (method == "POST" and path.startswith("/api/debates/")
+            and path.endswith("/adjudicate")):
+        debate_id = path.removeprefix("/api/debates/").removesuffix("/adjudicate")
+        try:
+            return 200, session.adjudicate_debate(debate_id, body)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+
+    if method == "GET" and path == "/api/debates":
+        # Open debates across every workflow: without this an operator has no
+        # way to find the one blocking a reporter.
+        return 200, {"debates": [
+            d for d in session.registry.list_debates()
+            if d.get("status") == "open"]}
+
     if method == "GET" and path.startswith("/api/workflows/"):
         workflow_id = path.removeprefix("/api/workflows/")
         workflow = session.registry.get_workflow(workflow_id)
@@ -2159,6 +2341,11 @@ def handle_api(session: UISession, method: str, path: str,
         status["heartbeat"] = (
             session.heartbeat.status() if session.heartbeat else
             {"running": False, "ticks": 0})
+        status["autonomous"] = bool(session.autonomous)
+        # Whether a coordinator is actually walking a workflow's phases. Without
+        # this the desk could only show that a workflow existed, which is why an
+        # unattended run read as "Claude is a black box doing nothing".
+        status["coordinator"] = session.coordinator_status()
         return 200, status
 
     if method == "GET" and path == "/api/atlas/read":
@@ -2219,6 +2406,12 @@ def handle_api(session: UISession, method: str, path: str,
         if not isinstance(enabled, bool):
             return 400, {"error": "enabled must be true or false"}
         return 200, session.set_autonomy(enabled)
+
+    if method == "POST" and path == "/api/workforce/fast":
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return 400, {"error": "enabled must be true or false"}
+        return 200, session.set_fast_mode(enabled)
 
     if method == "POST" and path == "/api/atlas/escalate":
         return 200, session.atlas_escalate_debate(off)
@@ -2841,6 +3034,9 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
         raise
     try:
         session = UISession(offline_default=offline, desk_mode=desk_mode)
+        # The bound port, not the env default: a driven coordinator addresses
+        # this owner by URL and must not be pointed at a different one.
+        session.port = int(port)
         market_stop, market_thread = _start_market_topics(session)
         _start_atlas_heartbeat(session, offline=offline)
     except Exception:
@@ -2863,6 +3059,13 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
                 session.heartbeat.stop()
         finally:
             try:
-                _stop_market_topics(market_stop, market_thread)
+                # Before the socket closes. A coordinator that outlives its
+                # owner is an orphaned Claude tree still billing tokens against
+                # a runtime URL that no longer answers.
+                if session._driver is not None:
+                    session._driver.stop("owner stopped")
             finally:
-                httpd.server_close()
+                try:
+                    _stop_market_topics(market_stop, market_thread)
+                finally:
+                    httpd.server_close()

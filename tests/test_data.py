@@ -672,3 +672,29 @@ def test_snapshot_forwards_policy(tmp_path, monkeypatch):
     with pytest.raises(market.DataUnavailable):
         market.snapshot(["AAA"], "2024-01-03",
                         policy=market.DataPolicy.alpaca_operational())
+
+
+def test_synthetic_cache_identity_includes_the_seed(tmp_path):
+    """A seed sweep must produce different samples, not one repeated sample.
+
+    The cache key omitted the seed, so the first offline call populated the
+    cache and every later call with a different seed silently got that first
+    panel back. A seed sweep is the standard way to check whether a research
+    result is robust or a fluke, and this made every sample identical — so any
+    result looked perfectly stable, including a spurious one. It corrupted a
+    real measurement before it was found.
+    """
+    import numpy as np
+
+    from qlab.core.data import get_prices
+
+    first = get_prices(["ACWI", "BNDW"], "2008-01-01", offline=True, seed=7,
+                       cache_dir=tmp_path)
+    other = get_prices(["ACWI", "BNDW"], "2008-01-01", offline=True, seed=999,
+                       cache_dir=tmp_path)
+    assert not np.allclose(first.to_numpy(), other.to_numpy())
+
+    # And the same seed is still served from cache, unchanged.
+    again = get_prices(["ACWI", "BNDW"], "2008-01-01", offline=True, seed=7,
+                       cache_dir=tmp_path)
+    assert np.allclose(first.to_numpy(), again.to_numpy())

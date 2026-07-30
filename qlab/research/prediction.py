@@ -17,6 +17,7 @@ import math
 import numpy as np
 import pandas as pd
 
+from qlab.research.quantum_features import AUGMENTATIONS, augment
 from qlab.signals import hard
 
 
@@ -303,13 +304,24 @@ def predict_vol_ridge(
     alphas: Sequence[float] = (0.1, 1.0, 10.0),
     *,
     n_splits: int = _DEFAULT_FOLDS,
+    augmentation: str = "none",
 ) -> dict:
     """Evaluate a portfolio-volatility ridge baseline with honest admission.
 
     The reported ICs are outer-fold Spearman correlations. Each outer fold's
     alpha comes from a separate purged inner walk-forward search, so the
     admission metrics never reuse their test block for hyperparameter tuning.
+
+    ``augmentation`` selects a quantum-inspired feature map (see
+    :mod:`qlab.research.quantum_features`). The maps are pointwise, but their
+    input scaling is not: the [0,1] bounds are fitted on each fold's training
+    block alone and then applied to its test block. Fitting them on the whole
+    sample is look-ahead, and it is the exact mistake that makes a "stateless"
+    preprocessing step leak.
     """
+    if augmentation not in AUGMENTATIONS:
+        raise ValueError(
+            f"unknown augmentation {augmentation!r}; available: {AUGMENTATIONS}")
     candidates = _validated_alphas(alphas)
     frame = build_vol_prediction_frame(panel)
     feature_matrix = frame.loc[:, FEATURE_COLUMNS].to_numpy(dtype=float)
@@ -324,15 +336,19 @@ def predict_vol_ridge(
     alpha_choices: list[float] = []
     fold_ics: list[float] = []
     for fold_number, (train, test) in enumerate(folds, start=1):
+        # Bounds from the training block only, then reused verbatim on the
+        # test block. This is the whole leak surface of the augmentation.
+        train_x, lo, hi = augment(feature_matrix[train], augmentation)
+        test_x, _, _ = augment(feature_matrix[test], augmentation, lo=lo, hi=hi)
         alpha = _choose_alpha(
-            feature_matrix[train],
+            train_x,
             target[train],
             candidates,
         )
         predicted = _ridge_predict(
-            feature_matrix[train],
+            train_x,
             target[train],
-            feature_matrix[test],
+            test_x,
             alpha,
         )
         ic = _spearman_ic(predicted, target[test])

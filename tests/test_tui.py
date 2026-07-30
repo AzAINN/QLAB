@@ -4226,7 +4226,7 @@ def test_claude_session_reports_agent_configuration_failure(tmp_path, monkeypatc
     monkeypatch.setattr(
         claude_module,
         "build_workforce_agents",
-        lambda prompt="": {
+        lambda prompt="", **_: {
             "untrusted-role": {
                 "description": "must be refused",
                 "prompt": "no",

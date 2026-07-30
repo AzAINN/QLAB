@@ -165,9 +165,12 @@ def test_run_once_referee_receives_portfolio_state_and_annualized_asset_vols(
 
     reg = Registry(":memory:")
     reg.init_account(10_000.0)
+    # The account is keyed by book now: the high-water mark is per-venue,
+    # because one shared row turned a venue switch into a fabricated drawdown
+    # that tripped the kill switch and halted the desk.
     reg.con.execute(
-        "UPDATE account SET high_water_mark=? WHERE id=1",
-        [11_000.0],
+        "UPDATE account SET high_water_mark=? WHERE book=?",
+        [11_000.0, "simulated_paper"],
     )
     mandate = dataclasses.replace(load_mandate(), stress_vol_limit=1e-9)
     captured = {}

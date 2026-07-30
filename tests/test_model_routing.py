@@ -39,6 +39,34 @@ def test_role_resolves_its_tier_predictably():
     assert q.requested_tier == QUICK and q.resolved_model == "sonnet"
 
 
+def test_fast_mode_speeds_up_judgment_but_never_the_gate():
+    # Fast mode is a speed/quality trade the operator makes explicitly. It is
+    # bounded: the approval gate is the one place a cheaper answer is worth
+    # nothing, because a PASS must never mean "passed on the fast model".
+    from qlab.operator import model_routing as routing
+
+    fast_analyst = routing.resolve_route("moments-analyst", fast=True)
+    assert fast_analyst.requested_tier == routing.DEEP
+    assert fast_analyst.resolved_model == routing.FAST_TIER_MODEL[routing.DEEP]
+
+    referee = routing.resolve_route("referee", fast=True)
+    assert referee.requested_tier == routing.DEEP
+    # The gate keeps its tier's model, and says why in the audit record.
+    assert referee.resolved_model == routing.TIER_MODEL[routing.DEEP]
+    assert "required-deep" in (referee.fallback_reason or "")
+
+    # Every required-deep role is exempt, not just the one we happened to name.
+    for role in routing.REQUIRED_DEEP_ROLES:
+        assert routing.resolve_route(role, fast=True).resolved_model == (
+            routing.TIER_MODEL[routing.DEEP])
+
+    # And an explicit agent override still outranks fast mode.
+    override = routing.resolve_route(
+        "moments-analyst", source_model="opus", fast=True)
+    assert override.resolved_model == "opus"
+    assert override.source == "agent_override"
+
+
 def test_agent_source_override_wins_over_the_tier():
     d = resolve_route("reporter", source_model="opus")
     assert d.resolved_model == "opus" and d.source == "agent_override"

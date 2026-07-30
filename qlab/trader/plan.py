@@ -143,7 +143,9 @@ def build_plan(
 
     # kill-switch — a breached mandate refuses everything EXCEPT de-risking.
     if mandate.drawdown_breached(equity, float(state.get("high_water_mark", equity))):
-        registry.set_halt(True)
+        # Scoped to the venue that breached: halting every book because one did
+        # is the same cross-book leak the account partitioning exists to stop.
+        registry.set_halt(True, book=broker.name)
         if not is_liquidating:
             raise MandateViolation(
                 f"trailing-drawdown kill-switch fired (>{mandate.trailing_drawdown_pct:.0%}); "
@@ -305,7 +307,7 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan,
                 float(live["equity"]),
                 float(live.get("high_water_mark", live["equity"]))):
             if not is_liquidating:
-                registry.set_halt(True)
+                registry.set_halt(True, book=broker.name)
                 raise MandateViolation(
                     "trailing-drawdown kill-switch fired since this plan was "
                     "checked; only liquidation may execute")

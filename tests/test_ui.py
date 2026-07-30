@@ -565,10 +565,12 @@ def test_model_invocations_route(session):
     assert status == 200 and out["invocations"][0]["role"] == "reporter"
 
 
-def test_atlas_status_starts_in_observe(session):
+def test_atlas_status_starts_in_research(session):
+    # Research by default: it researches unattended and still cannot create a
+    # plan, which needs Propose mode AND a human approval.
     status, out = handle_api(session, "GET", "/api/atlas/status", {}, {})
     assert status == 200
-    assert out["mode"] == "observe"
+    assert out["mode"] == "research"
     assert out["manager_id"] == "atlas"
 
 
@@ -1511,6 +1513,7 @@ def test_quote_event_cli_format_shows_three_tickers_and_total():
 def test_atlas_task_start_respects_mode_authority(session):
     """Starting a Atlas task through the owner runs the governed workflow — and
     only when the mode allows it. Observe mode must refuse."""
+    session.atlas.set_mode("observe")   # Research is the default now
     facts = session.atlas_facts(True)
     facts["regime"]["flip"] = True
     out = session.atlas.observe(facts, trading_date="2020-01-02")
@@ -1908,6 +1911,71 @@ def test_transitioning_an_unknown_approval_is_refused_not_ignored(session):
         session, "POST", "/api/approvals/no-such-approval/challenge", {},
         {"challenge": "ghost"})
     assert status == 404
+
+
+def test_news_follows_the_data_lane_the_operator_chose(session, monkeypatch):
+    # A desk on live prices whose qualitative side is deterministic fixtures
+    # carries a real market and an invented narrative under one heading. News
+    # follows the lane, so signing in and running --live is the whole setup.
+    monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+
+    # Offline is always synthetic: it is the demo and must not reach the network.
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: object())
+    assert session.news_provider_for(True) == "synthetic"
+    # Live with a resolvable credential upgrades without being asked.
+    assert session.news_provider_for(False) == "alpaca"
+
+    # Live with no credential stays synthetic rather than failing the desk.
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: None)
+    assert session.news_provider_for(False) == "synthetic"
+
+    # An explicit provider is an instruction and is never second-guessed —
+    # including naming synthetic on a live desk on purpose.
+    monkeypatch.setenv("QLAB_NEWS_PROVIDER", "synthetic")
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: object())
+    assert session.news_provider_for(False) == "synthetic"
+
+
+def test_an_opened_debate_can_be_closed_so_the_reporter_can_run(session):
+    # `adjudicate()` had no caller anywhere, and the reporter refuses to start
+    # while any debate on its workflow is open — so an opened debate was a
+    # permanent deadlock: the run could neither finish nor be finished.
+    from qlab.governance.debate import open_debate
+
+    workflow = session.registry.start_workflow("portfolio_review", {"goal": "g"})
+    wid = workflow["workflow_id"]
+    debate_id = open_debate(
+        session.registry, workflow_id=wid,
+        original_decision_id="dec-1",
+        material_claims=["estimation_window"],
+        panel_snapshot_id=None)
+
+    # Visible, so the operator can find what is blocking the run.
+    status, listing = handle_api(session, "GET", "/api/debates", {}, {})
+    assert status == 200
+    assert debate_id in [d["debate_id"] for d in listing["debates"]]
+
+    # Closable, with a reasoned adjudication covering every claim.
+    status, out = handle_api(
+        session, "POST", f"/api/debates/{debate_id}/adjudicate", {},
+        {"resolution": "756d retained; conditioning checked out",
+         "winning_claim_positions": {"estimation_window": "756d upheld"}})
+    assert status == 200 and out["resolution"].startswith("756d retained")
+    assert session.registry.get_debate(debate_id)["status"] != "open"
+
+    # An adjudication that leaves a claim undecided is refused, not accepted.
+    other = open_debate(
+        session.registry, workflow_id=wid, original_decision_id="dec-1",
+        material_claims=["estimation_window", "shrinkage"],
+        panel_snapshot_id=None)
+    status, out = handle_api(
+        session, "POST", f"/api/debates/{other}/adjudicate", {},
+        {"resolution": "half an answer",
+         "winning_claim_positions": {"estimation_window": "upheld"}})
+    assert status == 400 and "undecided" in out["error"]
 
 
 def test_a_real_venue_valuation_is_reused_between_polls(session, monkeypatch):
@@ -2633,3 +2701,21 @@ def test_an_unparseable_post_body_is_refused_rather_than_silently_emptied(
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_a_non_finite_weight_is_reported_not_rendered_as_a_number():
+    """NaN and inf survive float() and rendered as "SPY nan%".
+
+    That is a number-shaped non-number on a trading surface — it reads as a
+    real target. Python's json emits and parses NaN by default, so an agent
+    artifact carries one all the way to the render; it must be reported the
+    same way a string weight is.
+    """
+    from qlab.tui.app import _format_targets
+
+    out = _format_targets({"SPY": float("nan"), "GLD": 0.4})
+    assert "nan%" not in out
+    assert "GLD 40.0%" in out and "[unreadable: SPY]" in out
+    assert "[unreadable: SPY]" in _format_targets({"SPY": float("inf")})
+    # And a clean set is untouched.
+    assert _format_targets({"SPY": 0.6, "GLD": 0.4}) == "SPY 60.0% · GLD 40.0%"

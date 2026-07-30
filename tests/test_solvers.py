@@ -99,3 +99,91 @@ def test_dirac3_unavailable_without_credentials(moment_set, monkeypatch):
         get_solver("dirac3").solve(obj, Constraints())
     # the compiled continuous-HUBO payload is still attached for inspection
     assert exc.value.payload["n_variables"] == obj.n
+
+
+# --- multistart early stopping -----------------------------------------------
+#
+# The restart budget is 4n — 100 restarts at n=25, 160 at n=40 — and measurement
+# (planning-docs/2026-07-30-optimizer-audit.md) put the winning basin at restart
+# 2-4 on every landscape tried, from effectively convex to strongly non-convex.
+# The rest was 20ms each of nothing: 71s for one n=40 solve.
+
+
+def _nonconvex_moments(n: int, seed: int, factors: int = 5, T: int = 500):
+    """A frustrated MVSK landscape: multi-factor with sign-mixed loadings.
+
+    A single-factor panel is effectively convex under MVSK — one restart finds
+    the same optimum as two hundred — so it cannot tell early stopping apart
+    from a solver that simply gave up.
+    """
+    rng = np.random.default_rng(seed)
+    panel = np.zeros((T, n))
+    for k in range(factors):
+        load = rng.uniform(-1.2, 1.4, n) * (1.0 if k == 0 else 0.6)
+        panel += rng.normal(0.0004, 0.011, T)[:, None] * load[None, :]
+    rets = panel + rng.normal(0, 1, (T, n)) * rng.uniform(0.004, 0.02, n)
+    dev = rets - rets.mean(axis=0)
+    ms = MomentSet(
+        tickers=[f"A{i:02d}" for i in range(n)], as_of=date(2026, 7, 30),
+        cov=np.cov(rets, rowvar=False) * 252, mu=rets.mean(axis=0) * 252)
+    ms.coskew = np.einsum("ti,tj,tk->ijk", dev, dev, dev) / T
+    ms.cokurt = np.einsum("ti,tj,tk,tl->ijkl", dev, dev, dev, dev) / T
+    return ms
+
+
+def test_early_stopping_finds_the_same_optimum_as_the_full_budget():
+    """The property that makes the speedup free rather than a quality trade."""
+    obj = build_objective("mvsk", _nonconvex_moments(14, 11),
+                          skew_lambda=3.0, kurt_lambda=3.0)
+    cons = Constraints(max_weight=0.40)
+    full = get_solver("classical_multistart", patience=None).solve(obj, cons)
+    early = get_solver("classical_multistart").solve(obj, cons)
+    assert early.objective_value == pytest.approx(full.objective_value, rel=1e-9)
+    assert early.diagnostics["stopped_early"] is True
+    assert early.diagnostics["n_starts_run"] < early.diagnostics["n_starts"]
+
+
+def test_this_landscape_actually_needs_restarts():
+    """Guards the test above from being vacuous.
+
+    If one restart already found the optimum, "early stopping matches the full
+    budget" would prove nothing about early stopping.
+    """
+    obj = build_objective("mvsk", _nonconvex_moments(14, 11),
+                          skew_lambda=3.0, kurt_lambda=3.0)
+    cons = Constraints(max_weight=0.40)
+    one = get_solver("classical_multistart", n_starts=1, patience=None).solve(obj, cons)
+    many = get_solver("classical_multistart", patience=None).solve(obj, cons)
+    assert many.objective_value < one.objective_value * (1 - 1e-6), (
+        "landscape is effectively convex — it cannot discriminate")
+
+
+def test_diagnostics_report_the_budget_and_what_was_actually_run():
+    # An audit reading n_starts=160 must not believe 160 restarts happened.
+    obj = build_objective("mvsk", _nonconvex_moments(10, 5),
+                          skew_lambda=1.0, kurt_lambda=1.0)
+    res = get_solver("classical_multistart").solve(obj, Constraints(max_weight=0.5))
+    d = res.diagnostics
+    assert d["n_starts"] == max(8, 4 * 10)
+    assert 0 < d["n_starts_run"] <= d["n_starts"]
+    assert d["patience"] == 12
+
+
+def test_patience_none_restores_the_exhaustive_sweep():
+    obj = build_objective("mvsk", _nonconvex_moments(10, 5),
+                          skew_lambda=1.0, kurt_lambda=1.0)
+    res = get_solver("classical_multistart", patience=None).solve(
+        obj, Constraints(max_weight=0.5))
+    assert res.diagnostics["n_starts_run"] == res.diagnostics["n_starts"]
+    assert res.diagnostics["stopped_early"] is False
+
+
+def test_early_stopping_stays_deterministic():
+    # Replaying an audited decision must reproduce it exactly.
+    obj = build_objective("mvsk", _nonconvex_moments(12, 3),
+                          skew_lambda=2.0, kurt_lambda=2.0)
+    cons = Constraints(max_weight=0.40)
+    a = get_solver("classical_multistart").solve(obj, cons)
+    b = get_solver("classical_multistart").solve(obj, cons)
+    assert np.allclose(a.weights.as_array(), b.weights.as_array(), atol=1e-12)
+    assert a.diagnostics["n_starts_run"] == b.diagnostics["n_starts_run"]

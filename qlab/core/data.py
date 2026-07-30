@@ -276,7 +276,24 @@ def get_prices(
                 "market fetch unavailable - serving deterministic synthetic data",
                 stacklevel=2,
             )
-        df = synthetic_prices(tickers, start, end, seed=seed)
+        # Seed-keyed, and deliberately not `cache_path`. Sharing the provider's
+        # entry meant the first offline call populated it and every later call
+        # with a different seed silently got that first panel back — so a seed
+        # sweep, the standard way to check whether a research result is robust
+        # or a fluke, produced one repeated sample and made every result look
+        # perfectly stable. It corrupted a real measurement before it was found.
+        synthetic_path = cache_dir / (
+            f"{_cache_key(tickers, start, end, 'synthetic', seed)}.parquet")
+        try:
+            reused = _read_cache(synthetic_path, "synthetic")
+        except _InvalidCacheError:
+            reused = None
+        if reused is not None and policy.allow_cache:
+            return reused
+        df = _normalize_daily_prices(synthetic_prices(tickers, start, end,
+                                                      seed=seed))
+        _write_cache(synthetic_path, df, "synthetic")
+        return df
     else:
         df.attrs["source"] = provider_name
         df.attrs["synthetic"] = False
@@ -328,6 +345,7 @@ def cached_provenance(
     *,
     cache_dir: Path | None = None,
     provider: str | None = None,
+    seed: int = 7,
 ) -> tuple[str, int] | None:
     """Network-free provenance for an already-cached price panel.
 
@@ -355,6 +373,19 @@ def cached_provenance(
         )
     except _InvalidCacheError:
         return None
+    if cached is None or cached.empty:
+        # A synthetic panel is filed under its own seed-keyed entry, because two
+        # seeds are two different samples and must not share one. Consult it
+        # before reporting "no data" — otherwise an offline desk that has only
+        # ever served synthetic prices reports its source as "none".
+        try:
+            cached = _read_cache(
+                cache_dir / (
+                    f"{_cache_key(tickers, start, end, 'synthetic', seed)}"
+                    ".parquet"),
+                "synthetic")
+        except _InvalidCacheError:
+            return None
     if cached is None or cached.empty:
         return None
     source = _recorded_source(cached)
@@ -588,8 +619,21 @@ def _legacy_cache_key(tickers: list[str], start, end) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def _cache_key(tickers: list[str], start, end, provider: str) -> str:
+def _cache_key(tickers: list[str], start, end, provider: str,
+               seed: int | None = None) -> str:
+    """Cache identity for a panel.
+
+    ``seed`` participates only for synthetic data, where it *is* part of the
+    panel's identity: two seeds are two different samples. Leaving it out meant
+    a seed sweep — the standard way to check whether a research result is robust
+    or a fluke — silently re-served the first seed's panel for every subsequent
+    seed, so every sample looked identical and any result looked perfectly
+    stable. Real providers ignore the seed, so their keys are unchanged and
+    existing caches stay valid.
+    """
     raw = f"{provider}|{'-'.join(sorted(tickers))}|{start}|{end}"
+    if seed is not None:
+        raw = f"{raw}|seed={int(seed)}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 

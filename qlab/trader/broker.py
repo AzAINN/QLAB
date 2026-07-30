@@ -62,8 +62,8 @@ class SimulatedPaperBroker(Broker):
         # are priced from ONE panel (buy price == mark price at the same instant).
         # This also sidesteps the synthetic feed's set-dependent RNG stream.
         self._marks: dict[str, float] | None = None
-        if not self.reg.get_account():
-            self.reg.init_account(starting_cash)
+        if not self.reg.get_account(self.name):
+            self.reg.init_account(starting_cash, book=self.name)
 
     def prices(self, tickers: list[str]) -> dict[str, float]:
         if self._marks is None:
@@ -78,7 +78,9 @@ class SimulatedPaperBroker(Broker):
     def portfolio_state(self, tickers: list[str]) -> dict:
         px = self.prices(tickers)
         positions = self.reg.get_positions()
-        acct = self.reg.get_account()
+        # Named explicitly: a high-water mark belongs to the venue that reached
+        # it, and sharing one across books reads the difference as a drawdown.
+        acct = self.reg.get_account(self.name)
         cash = float(acct.get("cash", 0.0))
         holdings = {}
         pos_value = 0.0
@@ -91,7 +93,7 @@ class SimulatedPaperBroker(Broker):
         equity = cash + pos_value
         weights = {t: (holdings[t]["value"] / equity if equity > 0 else 0.0)
                    for t in holdings}
-        self.reg.update_high_water_mark(equity)
+        self.reg.update_high_water_mark(equity, book=self.name)
         return {
             "cash": cash, "equity": equity, "positions": holdings,
             "weights": weights, "high_water_mark": float(acct.get("high_water_mark", equity)),
@@ -112,7 +114,7 @@ class SimulatedPaperBroker(Broker):
         filled_notional = qty * price
         dqty = qty if side == "buy" else -qty
         cash_delta = -filled_notional if side == "buy" else filled_notional
-        self.reg.apply_fill(ticker, dqty, price, cash_delta)
+        self.reg.apply_fill(ticker, dqty, price, cash_delta, book=self.name)
         return {"client_order_id": client_order_id, "ticker": ticker, "side": side,
                 "qty": qty, "price": price, "notional": filled_notional, "state": "filled"}
 
@@ -238,10 +240,10 @@ class AlpacaPaperBroker(Broker):
         # the HWM would make drawdown always zero and silently disable the
         # kill switch and drawdown tiers on the live account. Seed the account
         # row on first read so the monotone update has something to raise.
-        if not self.reg.get_account():
-            self.reg.init_account(equity)
-        self.reg.update_high_water_mark(equity)
-        hwm = float(self.reg.get_account().get("high_water_mark", equity)
+        if not self.reg.get_account(self.name):
+            self.reg.init_account(equity, book=self.name)
+        self.reg.update_high_water_mark(equity, book=self.name)
+        hwm = float(self.reg.get_account(self.name).get("high_water_mark", equity)
                     or equity)
         return {"cash": float(acct.cash), "equity": equity, "positions": positions,
                 "weights": weights, "high_water_mark": max(hwm, equity),

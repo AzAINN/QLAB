@@ -113,6 +113,15 @@ _ROLE_MODEL = {
     for role, tier in _routing.ROLE_TIER.items()
 }
 
+
+def fast_mode_enabled() -> bool:
+    """Whether the operator asked for latency over depth on judgment roles.
+
+    Off by default: the deep tier is what makes a review worth reading, so
+    trading it away is an explicit choice rather than a quiet default.
+    """
+    return os.environ.get("QLAB_LLM_FAST", "0") == "1"
+
 # The analyst's regime call is a five-level ladder, most to least stressed.
 # This is the workforce's *judgment* regime (richer than the binary heartbeat in
 # qlab.core.moments.detect_regime, which is unchanged and still drives triggers).
@@ -242,11 +251,20 @@ def _proxy_tool(tool: str) -> str | None:
     return _claude_tool(mapped) if mapped else None
 
 
-def _routed_model(name: str, source_model: str) -> str:
-    """Apply role defaults while preserving a concrete source-file override."""
+def _routed_model(name: str, source_model: str, *, fast: bool = False) -> str:
+    """Apply role defaults while preserving a concrete source-file override.
+
+    Routes through ``resolve_route`` rather than reading the tier map directly,
+    so fast mode's one exemption applies here too: REQUIRED_DEEP_ROLES keep
+    their tier, because a referee PASS must never mean "passed on the fast
+    model".
+    """
     if source_model and source_model != "inherit":
         return source_model
-    return _ROLE_MODEL.get(name, source_model or "inherit")
+    if not fast:
+        return _ROLE_MODEL.get(name, source_model or "inherit")
+    return _routing.resolve_route(
+        name, source_model=source_model, fast=True).resolved_model
 
 
 def _goal_uses_news_views(goal: str) -> bool:
@@ -254,7 +272,7 @@ def _goal_uses_news_views(goal: str) -> bool:
     return bool(re.search(r"\b(?:news|views?)\b", goal, flags=re.IGNORECASE))
 
 
-def build_workforce_agents(goal: str = "") -> dict[str, dict]:
+def build_workforce_agents(goal: str = "", *, fast: bool = False) -> dict[str, dict]:
     """Build goal-scoped Claude roles against the owner-backed proxy."""
     from qlab.agents.loader import load_agents
 
@@ -297,7 +315,7 @@ QLAB OWNER-WORKFORCE QUARANTINE MODE:
                 "description": source.description,
                 "prompt": source.body + "\n\n" + quarantine_override,
                 "tools": expected_tools,
-                "model": _routed_model(source.name, source.model),
+                "model": _routed_model(source.name, source.model, fast=fast),
                 "permissionMode": "dontAsk",
                 "maxTurns": 8,
             }
@@ -333,7 +351,7 @@ QLAB OWNER-WORKFORCE ADVISOR MODE:
                 "description": source.description,
                 "prompt": source.body + "\n\n" + advisor_override,
                 "tools": list(dict.fromkeys(tools)),
-                "model": _routed_model(source.name, source.model),
+                "model": _routed_model(source.name, source.model, fast=fast),
                 "permissionMode": "dontAsk",
                 "maxTurns": 16,
             }
@@ -456,7 +474,7 @@ QLAB REGIME CALL (analyst only):
             "description": source.description,
             "prompt": source.body + "\n\n" + override,
             "tools": tools,
-            "model": _routed_model(source.name, source.model),
+            "model": _routed_model(source.name, source.model, fast=fast),
             "permissionMode": "dontAsk",
             "maxTurns": 24,
         }
@@ -922,11 +940,15 @@ class ClaudeSession:
         cwd: Path | None = None,
         runtime_url: str = "http://127.0.0.1:8765",
         offline: bool = True,
+        fast: bool | None = None,
     ):
         self.on_event = on_event
         self.cwd = cwd or Path.cwd()
         self.runtime_url = runtime_url.rstrip("/")
         self.offline = offline
+        # None means "whatever the operator configured"; an explicit bool is a
+        # per-session override.
+        self.fast = fast_mode_enabled() if fast is None else bool(fast)
         self.process: subprocess.Popen[str] | None = None
         self._thread: threading.Thread | None = None
         self._session_dir: tempfile.TemporaryDirectory | None = None
@@ -982,7 +1004,8 @@ class ClaudeSession:
                 process_cwd = Path(self._session_dir.name)
                 write_session_agents(
                     process_cwd,
-                    build_workforce_agents(prompt) if governed else _chat_agent(),
+                    build_workforce_agents(prompt, fast=self.fast)
+                    if governed else _chat_agent(),
                 )
             # Use the exact path already resolved by the availability check. This
             # avoids a second, cwd-dependent executable lookup on Windows.

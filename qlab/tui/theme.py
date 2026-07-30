@@ -593,6 +593,18 @@ APP_CSS_TEMPLATE = Template("""
     #settings-desk-actions Button {
         margin-right: 1;
     }
+    #settings-workforce, #settings-workforce-copy {
+        width: 1fr;
+        height: auto;
+    }
+    #settings-workforce-actions {
+        height: auto;
+        min-height: 3;
+        padding-top: 1;
+    }
+    #settings-workforce-actions Button {
+        margin-right: 1;
+    }
     .settings-card {
         width: 1fr;
         height: auto;

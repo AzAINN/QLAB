@@ -43,6 +43,11 @@ const FRAME: Duration = Duration::from_millis(100);
 const REFRESH: Duration = Duration::from_secs(3);
 
 fn main() -> Result<()> {
+    // Before anything reads a colour: the theme is resolved once, from what the
+    // terminal actually reports. Reading it first would lock in truecolor and
+    // flatten the depth ramp on a 256-colour terminal.
+    theme::init(theme::detect());
+
     let offline = !std::env::args().any(|a| a == "--live");
     let mut app = app::App::new(client::OwnerClient::from_env(), offline);
     if app.readiness.is_ready() {

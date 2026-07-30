@@ -14,6 +14,7 @@ pub mod widgets;
 
 use crate::app::App;
 use crate::glyph;
+use crate::theme::theme;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -22,14 +23,27 @@ use ratatui::{
     Frame,
 };
 
-// Kept in step with qlab/tui/theme.py. Two clients drifting apart on colour
-// would read as two different products.
-const AMBER: Color = Color::Rgb(0xE8, 0xB3, 0x39);
-const TEXT_HI: Color = Color::Rgb(0xE6, 0xE9, 0xEF);
-const DIM: Color = Color::Rgb(0x7A, 0x83, 0x94);
-const UP: Color = Color::Rgb(0x4E, 0xC9, 0x8A);
-const DOWN: Color = Color::Rgb(0xE0, 0x5A, 0x5A);
-const BORDER: Color = Color::Rgb(0x2A, 0x31, 0x3D);
+// This layout predates the Obsidian palette and carried its own hex constants.
+// They are aliases onto `theme` now, so the one colour contract holds crate-wide
+// while this module waits to be absorbed. Task 5 drops the aliases with it.
+fn amber() -> Color {
+    theme().accent
+}
+fn text_hi() -> Color {
+    theme().text_primary
+}
+fn dim() -> Color {
+    theme().text_secondary
+}
+fn up() -> Color {
+    theme().positive
+}
+fn down() -> Color {
+    theme().negative
+}
+fn border() -> Color {
+    theme().border_med
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -63,18 +77,18 @@ fn draw_unreachable(f: &mut Frame, area: Rect, app: &App) {
     let lines = vec![
         Line::from(Span::styled(
             "NO OWNER RUNTIME",
-            Style::default().fg(DOWN).add_modifier(Modifier::BOLD),
+            Style::default().fg(down()).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled(app.readiness.reason(), Style::default().fg(TEXT_HI))),
+        Line::from(Span::styled(app.readiness.reason(), Style::default().fg(text_hi()))),
         Line::from(""),
         Line::from(Span::styled(
             "This client never opens the registry itself — the owner is the only",
-            Style::default().fg(DIM),
+            Style::default().fg(dim()),
         )),
         Line::from(Span::styled(
             "writer. Start one with `qlab tui` or `qlab ui`, then press r.",
-            Style::default().fg(DIM),
+            Style::default().fg(dim()),
         )),
     ];
     f.render_widget(
@@ -94,10 +108,10 @@ fn draw_atlas(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     let tone = match mood {
-        glyph::Mood::Working => UP,
-        glyph::Mood::Alarmed => DOWN,
-        glyph::Mood::Dormant => DIM,
-        glyph::Mood::Idle => AMBER,
+        glyph::Mood::Working => up(),
+        glyph::Mood::Alarmed => down(),
+        glyph::Mood::Dormant => dim(),
+        glyph::Mood::Idle => amber(),
     };
     // The glyph advances on its mood's own tempo, so a busy desk visibly moves
     // faster than a quiet one without anything else changing.
@@ -112,20 +126,20 @@ fn draw_atlas(f: &mut Frame, area: Rect, app: &App) {
     let body = vec![
         Line::from(vec![
             Span::styled(mood.label(), Style::default().fg(tone).add_modifier(Modifier::BOLD)),
-            Span::styled("   mode ", Style::default().fg(DIM)),
+            Span::styled("   mode ", Style::default().fg(dim())),
             Span::styled(
                 format!("{}/{}", d.mode.to_uppercase(), d.state.to_uppercase()),
-                Style::default().fg(TEXT_HI),
+                Style::default().fg(text_hi()),
             ),
-            Span::styled("   autonomy ", Style::default().fg(DIM)),
+            Span::styled("   autonomy ", Style::default().fg(dim())),
             Span::styled(
                 if d.autonomous { "ON" } else { "OFF" },
-                Style::default().fg(if d.autonomous { UP } else { DIM }),
+                Style::default().fg(if d.autonomous { up() } else { dim() }),
             ),
-            Span::styled("   tier ", Style::default().fg(DIM)),
+            Span::styled("   tier ", Style::default().fg(dim())),
             Span::styled(
                 if d.fast { "FAST" } else { "FULL" },
-                Style::default().fg(if d.fast { AMBER } else { TEXT_HI }),
+                Style::default().fg(if d.fast { amber() } else { text_hi() }),
             ),
         ]),
         Line::from(""),
@@ -135,14 +149,14 @@ fn draw_atlas(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 "no coordinator running".to_string()
             },
-            Style::default().fg(if d.driving { UP } else { DIM }),
+            Style::default().fg(if d.driving { up() } else { dim() }),
         )),
         Line::from(Span::styled(
             format!("regime {} · desk {} · news {}",
                     d.regime.to_uppercase(),
                     d.desk_label,
                     if d.news_source.is_empty() { "—" } else { &d.news_source }),
-            Style::default().fg(DIM),
+            Style::default().fg(dim()),
         )),
     ];
     f.render_widget(
@@ -159,8 +173,8 @@ fn draw_why(f: &mut Frame, area: Rect, app: &App) {
         .flat_map(|w| {
             vec![
                 Line::from(vec![
-                    Span::styled("• ", Style::default().fg(AMBER)),
-                    Span::styled(w, Style::default().fg(TEXT_HI)),
+                    Span::styled("• ", Style::default().fg(amber())),
+                    Span::styled(w, Style::default().fg(text_hi())),
                 ]),
                 Line::from(""),
             ]
@@ -177,49 +191,49 @@ fn draw_why(f: &mut Frame, area: Rect, app: &App) {
 fn draw_desk(f: &mut Frame, area: Rect, app: &App) {
     let d = &app.desk;
     let mut lines = vec![Line::from(vec![
-        Span::styled("equity   ", Style::default().fg(DIM)),
+        Span::styled("equity   ", Style::default().fg(dim())),
         Span::styled(
             d.equity.map(money).unwrap_or_else(|| "—".into()),
-            Style::default().fg(TEXT_HI).add_modifier(Modifier::BOLD),
+            Style::default().fg(text_hi()).add_modifier(Modifier::BOLD),
         ),
     ])];
     lines.push(Line::from(vec![
-        Span::styled("drawdown ", Style::default().fg(DIM)),
+        Span::styled("drawdown ", Style::default().fg(dim())),
         Span::styled(
             d.drawdown.map(|v| format!("{:.2}%", v * 100.0)).unwrap_or_else(|| "—".into()),
             Style::default().fg(match d.drawdown {
-                Some(v) if v > 0.10 => DOWN,
-                Some(v) if v > 0.05 => AMBER,
-                _ => TEXT_HI,
+                Some(v) if v > 0.10 => down(),
+                Some(v) if v > 0.05 => amber(),
+                _ => text_hi(),
             }),
         ),
     ]));
     if d.halted {
         lines.push(Line::from(Span::styled(
             "HALTED — the mandate kill switch is tripped",
-            Style::default().fg(DOWN).add_modifier(Modifier::BOLD),
+            Style::default().fg(down()).add_modifier(Modifier::BOLD),
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("recent runs", Style::default().fg(AMBER))));
+    lines.push(Line::from(Span::styled("recent runs", Style::default().fg(amber()))));
     let runs = app.workflows();
     if runs.is_empty() {
-        lines.push(Line::from(Span::styled("none yet", Style::default().fg(DIM))));
+        lines.push(Line::from(Span::styled("none yet", Style::default().fg(dim()))));
     }
     for (id, status, goal) in runs {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{status:<10}"),
                 Style::default().fg(match status.as_str() {
-                    "done" => UP,
-                    "failed" | "blocked" => DOWN,
-                    "working" => AMBER,
-                    _ => DIM,
+                    "done" => up(),
+                    "failed" | "blocked" => down(),
+                    "working" => amber(),
+                    _ => dim(),
                 }),
             ),
-            Span::styled(format!("{id}  "), Style::default().fg(DIM)),
+            Span::styled(format!("{id}  "), Style::default().fg(dim())),
             Span::styled(goal.chars().take(30).collect::<String>(),
-                         Style::default().fg(TEXT_HI)),
+                         Style::default().fg(text_hi())),
         ]));
     }
     f.render_widget(
@@ -238,53 +252,22 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
-            Style::default().fg(if app.last_error.is_empty() { DIM } else { DOWN }),
+            Style::default().fg(if app.last_error.is_empty() { dim() } else { down() }),
         ))),
         area,
     );
 }
 
-/// Thousands-grouped currency. Rust has no `{:,}`, and an ungrouped equity
-/// figure is genuinely harder to read at a glance on a book this size.
-pub fn money(value: f64) -> String {
-    let negative = value < 0.0;
-    let cents = format!("{:.2}", value.abs());
-    let (whole, frac) = cents.split_once('.').unwrap_or((cents.as_str(), "00"));
-    let mut grouped = String::new();
-    for (i, ch) in whole.chars().enumerate() {
-        if i > 0 && (whole.len() - i) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(ch);
-    }
-    format!("{}${grouped}.{frac}", if negative { "-" } else { "" })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::money;
-
-    #[test]
-    fn money_groups_thousands() {
-        assert_eq!(money(10_000.0), "$10,000.00");
-        assert_eq!(money(1_234_567.891), "$1,234,567.89");
-    }
-
-    #[test]
-    fn money_handles_small_and_negative_values() {
-        // A negative mark is possible on a short book; the sign must lead the
-        // currency symbol rather than land inside the number.
-        assert_eq!(money(0.0), "$0.00");
-        assert_eq!(money(999.5), "$999.50");
-        assert_eq!(money(-1_500.25), "-$1,500.25");
-    }
-}
+// This module used to carry its own thousands-grouped currency formatter; it is
+// `format::money` now, tested there. Two implementations of the same money
+// column is how two surfaces start disagreeing about the same number.
+use crate::format::money;
 
 fn bordered(title: &str) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER))
-        .title(Span::styled(title.to_string(), Style::default().fg(AMBER)))
+        .border_style(Style::default().fg(border()))
+        .title(Span::styled(title.to_string(), Style::default().fg(amber())))
 }
 
 #[cfg(test)]

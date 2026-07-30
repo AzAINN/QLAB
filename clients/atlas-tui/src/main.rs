@@ -64,10 +64,7 @@ fn main() -> Result<()> {
     result
 }
 
-fn run<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    app: &mut app::App,
-) -> Result<()>
+fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut app::App) -> Result<()>
 where
     // ratatui 0.30 made the backend error an associated type; `anyhow` can only
     // absorb it once it is a real, thread-safe error.

@@ -67,8 +67,19 @@ def run_ablation(
     run_id = reg.log_run(ABLATION_RUN_KIND, spec)
 
     uni = load_universe()
-    tickers = uni.tickers(spec.get("data", {}).get("universe", "core"))
     d = spec.get("data", {})
+    # An explicit ticker list pins a spec's identity by value. Resolving
+    # `universe: core` at runtime means editing the universe silently redefines
+    # every published result: the synthetic generator draws its factor loadings
+    # per panel, so growing `core` does not add assets to an existing arm — it
+    # changes the data underneath the ones already there. A spec may not claim
+    # both, because then which one it ran under is unrecoverable from the file.
+    if d.get("tickers") and d.get("universe"):
+        raise ValueError(
+            "experiment spec sets both data.tickers and data.universe; pick "
+            "one — a spec that names two universes cannot be reproduced")
+    tickers = (list(d["tickers"]) if d.get("tickers")
+               else uni.tickers(d.get("universe", "core")))
     seed = int(spec.get("seed", 7))
     prices = market.get_prices(tickers, d.get("start", "2008-01-01"),
                                d.get("end"), offline=offline, seed=seed)

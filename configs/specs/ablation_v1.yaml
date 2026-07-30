@@ -16,7 +16,11 @@ name: ablation_v1
 seed: 7
 
 data:
-  universe: core            # the ~7 cross-asset ETFs from configs/universe.yaml
+  # Pinned BY VALUE, deliberately. These seven names are the published
+  # submission numbers; resolving a tier name at runtime would let a later
+  # universe edit silently redefine them, and the synthetic panel re-partitions
+  # when n changes, so the change would not even be visible as a diff.
+  tickers: [ACWI, BNDW, GSG, IGF, GLD, VNQ, EMB]
   start: "2008-01-01"
   end: "2024-12-31"
   # If offline / no network, the engine serves the synthetic generator seeded

@@ -3702,6 +3702,49 @@ def test_workforce_note_follows_the_dependency_graph():
     assert "Nothing was traded" in nxt
 
 
+def test_the_atlas_strip_shows_the_mode_value_not_just_the_label():
+    # `MODE [{mode}]` put the value in square brackets, so Rich parsed
+    # `[OBSERVE]` as a style tag and dropped it: the strip read "MODE │
+    # STARTING" and the authority statement — the single most important fact
+    # about what Atlas may do — was invisible.
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(_AtlasStubClient(_atlas_snapshot()), refresh_interval=0,
+                      desk_mode=_SYNTH, claude_start="off")
+        async with app.run_test(size=(200, 52)) as pilot:
+            await pilot.pause(0.25)
+            app.action_view("atlas")
+            await pilot.pause(0.15)
+            strip = str(app.query_one("#atlas-status-strip").content)
+            assert "OBSERVE" in strip, strip
+
+    asyncio.run(run())
+
+
+def test_the_atlas_view_says_why_nothing_is_running():
+    # "OBSERVING" is a state, not a reason — a desk that is deliberately idle
+    # and one that is broken looked identical. Atlas is deterministic, so this
+    # is its reasoning: what it may start, and what has fired.
+    from qlab.tui.app import QlabTui
+
+    async def run():
+        app = QlabTui(_AtlasStubClient(_atlas_snapshot()), refresh_interval=0,
+                      desk_mode=_SYNTH, claude_start="off")
+        async with app.run_test(size=(200, 52)) as pilot:
+            await pilot.pause(0.25)
+            app.action_view("atlas")
+            await pilot.pause(0.15)
+            read = str(app.query_one("#atlas-read").content)
+            assert "WHY NOTHING IS RUNNING" in read
+            # The authority that gates it, and the honest statement that there
+            # is no model reasoning to stream.
+            assert "OBSERVE" in read
+            assert "deterministic code, not a model" in read
+
+    asyncio.run(run())
+
+
 def test_settings_offers_a_route_to_the_desk_mode_and_alpaca_sign_in():
     # The desk mode was reachable only from a modal shown once at startup, so a
     # session that answered it — or was started with a flag — had no way back.

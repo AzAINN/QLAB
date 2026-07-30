@@ -49,7 +49,10 @@ impl Desk {
             // False is the honest default; the equity panel shows the number.
             halted: dig_bool(snap, "portfolio.halted").unwrap_or(false),
             desk_label: dig_str(snap, "desk_mode.label").unwrap_or_else(|| "—".into()),
-            regime: dig_str(snap, "regime.regime").unwrap_or_else(|| "unknown".into()),
+            // The owner serves the regime nested under `market`; there is no
+            // top-level `regime` and never was, so reading one rendered
+            // "unknown" for every regime the detectors ever produced.
+            regime: dig_str(snap, "market.regime.regime").unwrap_or_else(|| "unknown".into()),
             news_source: dig_str(snap, "atlas_read.news_source").unwrap_or_default(),
         }
     }
@@ -201,6 +204,21 @@ mod tests {
         assert_eq!(desk.driving_workflow, "wf-9");
         assert_eq!(desk.open_tasks, 2);
         assert_eq!(desk.mood(), Mood::Working);
+    }
+
+    #[test]
+    fn the_regime_is_read_from_under_market_where_the_owner_serves_it() {
+        // The owner has no top-level `regime` key. Reading one meant the desk
+        // said "unknown" no matter what the detectors reported.
+        let snap = json!({
+            "market": {
+                "as_of": "2026-07-29",
+                "regime": {"regime": "calm", "robust_state": "uncertain"}
+            }
+        });
+        assert_eq!(Desk::from_snapshot(&snap).regime, "calm");
+        // A payload with no market block still says so rather than guessing.
+        assert_eq!(Desk::from_snapshot(&json!({})).regime, "unknown");
     }
 
     #[test]

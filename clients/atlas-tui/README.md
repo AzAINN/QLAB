@@ -7,7 +7,7 @@ one rail beside eight peer views.
 ```bash
 cargo run                 # synthetic lane, against the owner on QLAB_UI_PORT
 cargo run -- --live       # live data lane
-cargo test                # 22 tests, no owner required
+cargo test                # fully offline: committed fixtures, no owner required
 ```
 
 ## What it is

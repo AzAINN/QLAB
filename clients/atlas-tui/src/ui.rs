@@ -318,6 +318,7 @@ mod render_tests {
                 "coordinator": {"driving": true, "workflow_id": "wf-42"}
             },
             "portfolio": {"equity": 10450.0, "drawdown": 0.021, "halted": false},
+            "market": {"regime": {"regime": "calm", "robust_state": "uncertain"}},
             "desk_mode": {"label": "SYNTHETIC"}
         }));
         let out = render(&app, 100, 24);
@@ -325,6 +326,9 @@ mod render_tests {
         assert!(out.contains("wf-42"));
         assert!(out.contains("RESEARCH/COORDINATING"));
         assert!(out.contains("$10,450.00"));
+        // The regime reaches the frame, not just the struct: this line read
+        // "regime UNKNOWN" on every snapshot until the dig path was repointed.
+        assert!(out.contains("regime CALM"), "regime must reach the frame");
     }
 
     #[test]

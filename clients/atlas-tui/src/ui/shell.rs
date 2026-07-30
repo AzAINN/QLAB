@@ -15,13 +15,14 @@
 
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
+use crate::fx::FlashTracker;
 use crate::glyph;
 use crate::model::Snapshot;
 use crate::store::{Store, ViewId};
 use crate::theme::theme;
 use crate::theme::Theme;
 use crate::ui::views;
-use crate::ui::widgets::{panel_block, panel_header};
+use crate::ui::widgets::{panel_block, panel_header, ticker};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -42,7 +43,13 @@ const PULSE_W: u16 = 34;
 /// The label column inside the rails.
 const LABEL_W: usize = 11;
 
-pub fn draw(f: &mut Frame, store: &Store, now: Instant) {
+/// One frame.
+///
+/// `fx` rides alongside the store rather than inside it: the store is what the
+/// owner said plus the diff of it, and a decaying animation stamp is neither.
+/// Passing it here is what keeps the frame a pure function of (state, effects,
+/// instant) — the property every golden test depends on.
+pub fn draw(f: &mut Frame, store: &Store, fx: &FlashTracker, now: Instant) {
     let t = theme();
     let area = f.area();
     fill(f, area, t.bg_base);
@@ -61,7 +68,17 @@ pub fn draw(f: &mut Frame, store: &Store, now: Instant) {
     ])
     .split(rows[1]);
 
-    draw_ticker(f, rows[0], store, t, stale.is_some());
+    // The tick count is the offset: one display cell per 120 ms beat, so the
+    // tape's position is state rather than a clock read inside a renderer.
+    ticker::draw(
+        f,
+        rows[0],
+        &store.asset_views(),
+        store.tick as usize,
+        stale.is_some(),
+        fx,
+        now,
+    );
     draw_nav(f, cols[0], store, t);
 
     // The rules belong to the shell, not to the panes: a view that drew its own
@@ -144,66 +161,6 @@ fn left_rule(f: &mut Frame, area: Rect, t: &Theme) -> Rect {
     let inner = rule.inner(area);
     f.render_widget(rule, area);
     inner
-}
-
-/// One row of `SYM price ±x.xx%`.
-///
-/// Static for now. Task 8 replaces this with the scrolling widget — rotation by
-/// display cell, quote-overlay prices, and the flash decay — which is why the
-/// row is assembled from `format` helpers rather than growing a private one.
-fn draw_ticker(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: bool) {
-    fill(f, area, t.bg_raised);
-    let assets = store
-        .snapshot
-        .as_ref()
-        .and_then(|s| s.market.as_ref())
-        .map(|m| m.assets.as_slice())
-        .unwrap_or_default();
-
-    let mut spans = vec![Span::raw(" ")];
-    for asset in assets {
-        let Some(ticker) = format::text(asset.ticker.as_ref()) else {
-            continue;
-        };
-        let price = asset.price.map(format::price);
-        let change = asset.change_1d.map(format::signed_pct);
-        // Stale prices lose their colour along with their claim to be current.
-        // A green tick that is four minutes old is a statement about the tape
-        // that nobody made.
-        let tone = if stale {
-            t.text_tertiary
-        } else {
-            asset
-                .change_1d
-                .map(|c| t.change(c))
-                .unwrap_or(t.text_secondary)
-        };
-        let value = if stale {
-            t.text_tertiary
-        } else {
-            t.text_primary
-        };
-        let symbol = if stale { t.text_tertiary } else { t.cyan };
-        spans.push(Span::styled(
-            format!("{ticker} "),
-            Style::default().fg(symbol).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            price.unwrap_or_else(|| MISSING.into()),
-            Style::default().fg(value),
-        ));
-        spans.push(Span::styled(
-            format!(" {}   ", change.unwrap_or_else(|| MISSING.into())),
-            Style::default().fg(tone),
-        ));
-    }
-    if spans.len() == 1 {
-        spans.push(Span::styled(
-            "no market assets in the last snapshot",
-            Style::default().fg(t.text_tertiary),
-        ));
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_nav(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
@@ -420,9 +377,21 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Optio
     let mut right = vec![
         dot(store.conn.stream, t),
         Span::styled("SSE  ", Style::default().fg(t.text_secondary)),
+    ];
+    // Beside the stream chip, for the same reason STALE sits beside OWNER: a
+    // green dot says the subscription is open, which is a different claim from
+    // "every event it delivered was readable". Task 16 gives this a toast; the
+    // count is what keeps a dropping stream from being invisible until then.
+    if store.stream_malformed_count > 0 {
+        right.push(Span::styled(
+            format!("STREAM ⚠ {}  ", store.stream_malformed_count),
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        ));
+    }
+    right.extend([
         dot(store.conn.owner, t),
         Span::styled("OWNER  ", Style::default().fg(t.text_secondary)),
-    ];
+    ]);
     // Beside the chip, not instead of it: a reachable owner and current numbers
     // are two claims, and the red dot only ever spoke to the first.
     if let Some(age) = stale {

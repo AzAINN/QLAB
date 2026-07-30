@@ -15,9 +15,10 @@
 
 use atlas::bus::{AppEvent, Channel, Tx};
 use atlas::cmd::Command;
+use atlas::fx::{FlashKey, FlashTracker};
 use atlas::net::http::{self, PollerHandle};
 use atlas::net::sse;
-use atlas::store::{should_render, Store};
+use atlas::store::{should_render, Store, Trigger};
 use atlas::{theme, ui};
 use color_eyre::eyre::Result;
 use crossterm::{
@@ -98,10 +99,16 @@ async fn run(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     poller: &PollerHandle,
 ) -> Result<()> {
+    // Effect state lives here rather than on the `Store`: the store is what the
+    // owner said plus the diff of it, and a decaying animation stamp is neither.
+    // Keeping it out is what lets a golden frame be a pure function of the store
+    // and an instant.
+    let mut fx = FlashTracker::default();
+
     // One frame before the first event, or the operator stares at the shell's
     // leftovers until the ticker fires.
     let mut last_frame = Instant::now();
-    terminal.draw(|f| ui::shell::draw(f, store, last_frame))?;
+    terminal.draw(|f| ui::shell::draw(f, store, &fx, last_frame))?;
 
     loop {
         // Block until something happens. The 120 ms tick is what guarantees the
@@ -113,16 +120,18 @@ async fn run(
         // decides against the instant the caller measured, not against whatever
         // the clock says several statements later.
         let now = Instant::now();
-        let mut quit = ingest(first, store, poller, now);
+        let mut quit = ingest(first, store, poller, &mut fx, now);
         // Drain-then-render: fifty quote events coalesce into one repaint.
         while let Ok(ev) = rx.try_recv() {
-            quit |= ingest(ev, store, poller, now);
+            quit |= ingest(ev, store, poller, &mut fx, now);
         }
 
-        // Task 15 replaces this literal with the effect manager's running flag.
-        let fx_active = false;
-        if should_render(store.take_dirty(), fx_active, last_frame, now) {
-            terminal.draw(|f| ui::shell::draw(f, store, now))?;
+        // A decaying flash owes frames nothing else asked for: the 100 ms idle
+        // heartbeat would sample a 200 ms step visibly late, and a desk with no
+        // other news would freeze the row mid-flash. Task 15 ORs the effect
+        // manager's running flag in here.
+        if should_render(store.take_dirty(), fx.active(now), last_frame, now) {
+            terminal.draw(|f| ui::shell::draw(f, store, &fx, now))?;
             last_frame = now;
         }
         if quit {
@@ -136,7 +145,13 @@ async fn run(
 /// The runtime is the only thing that acts: the shell decides what a keystroke
 /// *means* and hands back a `Command`, and nothing in `ui/` can reach the
 /// network or the process lifetime on its own.
-fn ingest(ev: AppEvent, store: &mut Store, poller: &PollerHandle, now: Instant) -> bool {
+fn ingest(
+    ev: AppEvent,
+    store: &mut Store,
+    poller: &PollerHandle,
+    fx: &mut FlashTracker,
+    now: Instant,
+) -> bool {
     let mut quit = false;
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
@@ -151,7 +166,14 @@ fn ingest(ev: AppEvent, store: &mut Store, poller: &PollerHandle, now: Instant) 
         }
     }
     for trigger in store.apply(ev, now) {
-        // Task 15 turns these into effects. Logging them now means the diff has
+        // The diff decides *what moved*; this decides what that looks like. The
+        // translation lives here rather than in the store so the motion
+        // vocabulary can change without touching the diff — and so no renderer
+        // ever needs a clock to know how far a flash has decayed.
+        if let Trigger::QuoteTick(ticker) = &trigger {
+            fx.flash(FlashKey::price(ticker), now);
+        }
+        // Task 15 turns the rest into effects. Logging them means the diff has
         // a consumer today and its behaviour is observable during QA.
         tracing::debug!(?trigger, "desk transition");
     }

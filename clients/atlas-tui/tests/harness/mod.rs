@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use atlas::bus::{AppEvent, Channel};
+use atlas::fx::FlashTracker;
 use atlas::model::Snapshot;
 use atlas::store::Store;
 use std::time::Instant;
@@ -40,16 +41,50 @@ pub fn frame_to_string(store: &Store, w: u16, h: u16) -> String {
     frame_to_string_at(store, w, h, now)
 }
 
-/// One shell frame, drawn at an instant the caller chooses.
+/// One shell frame, drawn at an instant the caller chooses, with nothing
+/// flashing — the state every frame is in a second after the desk went quiet.
+pub fn frame_to_string_at(store: &Store, w: u16, h: u16, now: Instant) -> String {
+    frame_to_string_fx(store, &FlashTracker::default(), w, h, now)
+}
+
+/// One shell frame with effect state, for the tests that pin motion.
 ///
 /// The backend's `Display` quotes each row, so trailing space is visible in a
 /// golden file instead of being silently trimmed by an editor.
-pub fn frame_to_string_at(store: &Store, w: u16, h: u16, now: Instant) -> String {
+pub fn frame_to_string_fx(
+    store: &Store,
+    fx: &FlashTracker,
+    w: u16,
+    h: u16,
+    now: Instant,
+) -> String {
     let backend = ratatui::backend::TestBackend::new(w, h);
     let mut term = ratatui::Terminal::new(backend).unwrap();
-    term.draw(|f| atlas::ui::shell::draw(f, store, now))
+    term.draw(|f| atlas::ui::shell::draw(f, store, fx, now))
         .unwrap();
     format!("{}", term.backend())
+}
+
+/// The styled cells of one rendered row — what a golden string cannot say.
+pub fn row_styles(
+    store: &Store,
+    fx: &FlashTracker,
+    w: u16,
+    h: u16,
+    now: Instant,
+    y: u16,
+) -> Vec<(String, ratatui::style::Style)> {
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut term = ratatui::Terminal::new(backend).unwrap();
+    term.draw(|f| atlas::ui::shell::draw(f, store, fx, now))
+        .unwrap();
+    let buf = term.backend().buffer().clone();
+    (0..w)
+        .map(|x| {
+            let cell = &buf[(x, y)];
+            (cell.symbol().to_string(), cell.style())
+        })
+        .collect()
 }
 
 /// The one rendered line containing `needle`, panicking with the frame when

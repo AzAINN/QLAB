@@ -6,11 +6,13 @@
 //! every repaint; an effect fired from a diff animates once, when the desk
 //! actually moved.
 
-use crate::bus::{AppEvent, Channel, HttpResult};
+use crate::bus::{AppEvent, Channel, HttpResult, SseEvent};
 use crate::format::text;
 use crate::glyph::Mood;
-use crate::model::{RegimePanel, Snapshot};
+use crate::model::{Asset, RegimePanel, Snapshot};
 use crate::net::http;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// The idle heartbeat. Three indicators on screen claim the client is alive —
@@ -150,6 +152,32 @@ pub struct Malformed {
 /// owner from growing the store by a decode message every three seconds.
 const MALFORMED_ERROR_MAX: usize = 200;
 
+/// One price the quote stream reported, stamped with when this client saw it.
+///
+/// Held beside the snapshot and never merged into it. The periodic `/api/tui`
+/// poll rebuilds `market.assets` from the owner's cached valuations, so an
+/// in-place merge is silently overwritten by an *older* price seconds later —
+/// the Textual client's `_apply_quote_event` (`qlab/tui/app.py:1900`) accepts
+/// that regression; this does not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuoteMark {
+    pub price: f64,
+    pub change_1d: f64,
+    pub at: Instant,
+}
+
+/// What one asset is worth right now, after the overlay has had its say.
+///
+/// The one way a price reaches a frame. A surface that read `market.assets`
+/// directly would render the poll's price and silently lose every quote that
+/// arrived since it — which is the whole reason the overlay exists.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AssetView<'a> {
+    pub ticker: &'a str,
+    pub price: Option<f64>,
+    pub change_1d: Option<f64>,
+}
+
 #[derive(Debug)]
 pub struct Store {
     pub snapshot: Option<Snapshot>,
@@ -173,6 +201,16 @@ pub struct Store {
     pub last_snapshot_at: Option<Instant>,
     /// The last payload that did not decode, cleared by the next that does.
     pub malformed: Option<Malformed>,
+    /// Live prices, by ticker — read through `asset_view`, never rendered from
+    /// directly. See `QuoteMark` for why this is an overlay and not a merge.
+    pub quote_overlay: HashMap<String, QuoteMark>,
+    /// How many stream frames this client could not read.
+    ///
+    /// A count rather than the frame itself: the parser already logs each one
+    /// whole, and what the desk needs on screen is that the audit stream is
+    /// dropping events at all. Task 16 gives it the toast; until then the status
+    /// line is the only thing that can say it happened.
+    pub stream_malformed_count: u32,
     /// The animation beat, counted rather than read from a clock. Every frame
     /// the shell draws is a pure function of the store, so the phase an
     /// automaton is at has to be state — a renderer that called `Instant::now`
@@ -201,6 +239,8 @@ impl Store {
             stale_after,
             last_snapshot_at: None,
             malformed: None,
+            quote_overlay: HashMap::new(),
+            stream_malformed_count: 0,
             tick: 0,
             dirty: false,
         }
@@ -227,9 +267,7 @@ impl Store {
             AppEvent::Tick => self.tick = self.tick.wrapping_add(1),
             AppEvent::ConnUp(channel) => self.set_conn(channel, true),
             AppEvent::ConnDown(channel) => self.set_conn(channel, false),
-            // Task 8 stores the audit stream. Until something holds an event,
-            // dirtying on one would repaint an unchanged frame.
-            AppEvent::Sse(_) => {}
+            AppEvent::Sse(event) => return self.apply_sse(event, now),
             AppEvent::Http(HttpResult::Malformed { url, error }) => {
                 // Fail loud, on screen. The log alone was not enough: an owner
                 // that answers with a payload the model cannot read is up, so
@@ -252,6 +290,137 @@ impl Store {
     /// Read the repaint flag and clear it in one move.
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
+    }
+
+    /// What one asset is worth right now.
+    ///
+    /// The overlay wins while its stamp is at least as new as the snapshot's
+    /// arrival, and the snapshot takes over once a later one lands. "At least"
+    /// rather than "after" is load-bearing: the loop stamps a whole drain with
+    /// one instant, so a quote and a poll delivered in the same batch carry the
+    /// same stamp — and the stream is the fresher account of a price.
+    pub fn asset_view<'a>(&'a self, ticker: &'a str) -> AssetView<'a> {
+        let asset = self.market_asset(ticker);
+        let mark = self.quote_overlay.get(ticker).filter(|mark| {
+            self.last_snapshot_at
+                .is_none_or(|arrived| mark.at >= arrived)
+        });
+        match mark {
+            Some(mark) => AssetView {
+                ticker,
+                price: Some(mark.price),
+                change_1d: Some(mark.change_1d),
+            },
+            None => AssetView {
+                ticker,
+                price: asset.and_then(|a| a.price),
+                change_1d: asset.and_then(|a| a.change_1d),
+            },
+        }
+    }
+
+    /// Every asset the last snapshot carried, in its order, each resolved
+    /// through `asset_view`.
+    ///
+    /// Quadratic in the universe on purpose: it is a dozen rows, and one
+    /// resolution rule with one call site is worth more here than a map build
+    /// that could drift from the rule `asset_view` applies.
+    pub fn asset_views(&self) -> Vec<AssetView<'_>> {
+        self.market_assets()
+            .iter()
+            .filter_map(|asset| text(asset.ticker.as_ref()))
+            .map(|ticker| self.asset_view(ticker))
+            .collect()
+    }
+
+    fn market_assets(&self) -> &[Asset] {
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.market.as_ref())
+            .map(|m| m.assets.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn market_asset(&self, ticker: &str) -> Option<&Asset> {
+        self.market_assets()
+            .iter()
+            .find(|a| text(a.ticker.as_ref()) == Some(ticker))
+    }
+
+    /// Fold one stream frame in.
+    ///
+    /// Only the two kinds something on screen renders. The durable audit kinds
+    /// already nudge the poller in `net::sse`, and the snapshot they bring
+    /// forward is the single account of what they did — holding a second copy
+    /// here would be a second source for the same fact. Tasks 14/18 give the
+    /// event list its own renderer.
+    fn apply_sse(&mut self, event: SseEvent, now: Instant) -> Vec<Trigger> {
+        match event.kind.as_str() {
+            "quote" => self.apply_quote(&event.payload, now),
+            "stream.malformed" => {
+                self.stream_malformed_count = self.stream_malformed_count.saturating_add(1);
+                self.dirty = true;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Merge a quote frame into the overlay, and say which rows actually moved.
+    ///
+    /// Fail loud, not fatal: the owner publishes every row with a ticker, a
+    /// price, and a change (`_publish_quote_event`, `qlab/ui/server.py:2129`),
+    /// so a row missing one is a broken contract worth naming — but one bad row
+    /// must not cost the frame the readable rows belong to, and must never be
+    /// read as a price.
+    fn apply_quote(&mut self, payload: &Value, now: Instant) -> Vec<Trigger> {
+        let Some(rows) = payload.get("rows").and_then(Value::as_array) else {
+            tracing::warn!(
+                payload = %payload,
+                "quote event carried no rows array"
+            );
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for row in rows {
+            let ticker = row
+                .get("ticker")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty());
+            let price = finite(row.get("price"));
+            let change_1d = finite(row.get("change_1d"));
+            let (Some(ticker), Some(price), Some(change_1d)) = (ticker, price, change_1d) else {
+                tracing::warn!(row = %row, "quote row needs ticker, price, and change_1d");
+                continue;
+            };
+
+            // Exact comparison on purpose: the question is whether the owner
+            // sent a different number, not whether two numbers are close. The
+            // owner republishes the same row on its own beat, and a tick per
+            // publish rather than per move would leave every row permanently
+            // lit — a highlight that never goes out says nothing.
+            let moved = self
+                .quote_overlay
+                .get(ticker)
+                .is_none_or(|prev| prev.price != price || prev.change_1d != change_1d);
+            if moved {
+                out.push(Trigger::QuoteTick(ticker.to_string()));
+                self.dirty = true;
+            }
+            // The stamp advances either way: an unchanged price that was just
+            // reconfirmed is still the newest thing known about it, and letting
+            // the stamp go stale would hand the row back to the poll.
+            self.quote_overlay.insert(
+                ticker.to_string(),
+                QuoteMark {
+                    price,
+                    change_1d,
+                    at: now,
+                },
+            );
+        }
+        out
     }
 
     /// The manager's mood, derived from desk facts rather than set.
@@ -329,6 +498,13 @@ impl Store {
             self.dirty = true;
         }
     }
+}
+
+/// A JSON number this client can render. `NaN` and the infinities are not
+/// prices, and letting one through would put `--` on the tape while the flash
+/// said something had moved.
+fn finite(value: Option<&Value>) -> Option<f64> {
+    value?.as_f64().filter(|v| v.is_finite())
 }
 
 /// A trigger fires when the new value is present and differs. An absent new
@@ -691,6 +867,257 @@ mod tests {
             held.len()
         );
         assert!(held.ends_with('…'), "a cut error has to say it was cut");
+    }
+
+    /// One `quote` frame as the owner writes it (`qlab/ui/server.py:2129`):
+    /// every row carries all three fields or the owner does not publish it.
+    fn quote(rows: serde_json::Value) -> AppEvent {
+        AppEvent::Sse(SseEvent {
+            kind: "quote".into(),
+            payload: json!({ "rows": rows }),
+            ts: Some("2026-07-30T12:00:00+00:00".into()),
+            id: Some("e1".into()),
+        })
+    }
+
+    fn sse(kind: &str) -> AppEvent {
+        AppEvent::Sse(SseEvent {
+            kind: kind.into(),
+            payload: json!({"raw": "{oops"}),
+            ts: None,
+            id: None,
+        })
+    }
+
+    /// A snapshot carrying one asset at `price`.
+    fn market(ticker: &str, price: f64, change: f64) -> AppEvent {
+        snap(json!({"market": {"assets": [
+            {"ticker": ticker, "price": price, "change_1d": change}
+        ]}}))
+    }
+
+    #[test]
+    fn a_quote_lands_in_the_overlay_and_never_in_the_snapshot() {
+        // The snapshot is the owner's account of the desk. A client that edited
+        // it would have no way left to tell what the owner actually said.
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        store.apply(market("SPY", 700.0, -0.01), t0);
+        store.apply(
+            quote(json!([{"ticker": "SPY", "price": 701.5, "change_1d": 0.002}])),
+            t0 + Duration::from_millis(500),
+        );
+
+        let snapshot_price = store
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .market
+            .as_ref()
+            .unwrap()
+            .assets[0]
+            .price
+            .unwrap();
+        assert_eq!(snapshot_price, 700.0, "the snapshot was mutated");
+        let view = store.asset_view("SPY");
+        assert_eq!(view.price, Some(701.5), "the overlay has to win here");
+        assert_eq!(view.change_1d, Some(0.002));
+    }
+
+    #[test]
+    fn with_no_overlay_an_asset_view_is_the_snapshot_verbatim() {
+        let mut store = Store::default();
+        store.apply(market("SPY", 700.0, -0.01), Instant::now());
+        let view = store.asset_view("SPY");
+        assert_eq!(view.ticker, "SPY");
+        assert_eq!(view.price, Some(700.0));
+        assert_eq!(view.change_1d, Some(-0.01));
+
+        // A ticker nothing has ever reported is absent, not zero.
+        let unknown = store.asset_view("GLD");
+        assert_eq!(unknown.price, None);
+        assert_eq!(unknown.change_1d, None);
+    }
+
+    #[test]
+    fn a_snapshot_that_arrives_after_a_mark_wins_and_one_that_arrives_with_it_does_not() {
+        // The loop stamps a whole drain with one instant, so a quote and a
+        // snapshot delivered in the same batch carry the same stamp. The stream
+        // is the fresher account of a price, so it must not be clobbered by the
+        // aggregate it arrived alongside.
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        store.apply(market("SPY", 700.0, -0.01), t0);
+        store.apply(
+            quote(json!([{"ticker": "SPY", "price": 701.5, "change_1d": 0.002}])),
+            t0 + Duration::from_secs(1),
+        );
+
+        store.apply(market("SPY", 699.0, -0.02), t0 + Duration::from_secs(1));
+        assert_eq!(
+            store.asset_view("SPY").price,
+            Some(701.5),
+            "a snapshot drained beside the quote clobbered it"
+        );
+
+        // A snapshot that genuinely arrives later is newer information and does
+        // take over — the overlay is a lead on the poll, not a replacement.
+        store.apply(market("SPY", 699.0, -0.02), t0 + Duration::from_secs(2));
+        assert_eq!(store.asset_view("SPY").price, Some(699.0));
+        assert!(
+            store.quote_overlay.contains_key("SPY"),
+            "the mark is superseded, not destroyed"
+        );
+    }
+
+    #[test]
+    fn the_same_price_twice_is_not_a_tick() {
+        // The owner republishes on its own beat. A trigger per frame rather than
+        // per move would light every row permanently and mean nothing.
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        store.apply(market("SPY", 700.0, -0.01), t0);
+        let rows = json!([{"ticker": "SPY", "price": 701.5, "change_1d": 0.002}]);
+
+        assert_eq!(
+            store.apply(quote(rows.clone()), t0 + Duration::from_millis(100)),
+            vec![Trigger::QuoteTick("SPY".into())]
+        );
+        assert!(store.take_dirty(), "a moved price owes a frame");
+
+        assert_eq!(
+            store.apply(quote(rows), t0 + Duration::from_millis(200)),
+            vec![],
+            "the same number again is not news"
+        );
+        assert!(!store.take_dirty(), "and repaints nothing");
+    }
+
+    #[test]
+    fn only_the_rows_that_moved_tick() {
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        store.apply(
+            quote(json!([
+                {"ticker": "SPY", "price": 700.0, "change_1d": 0.0},
+                {"ticker": "QQQ", "price": 600.0, "change_1d": 0.0}
+            ])),
+            t0,
+        );
+        store.take_dirty();
+        let triggers = store.apply(
+            quote(json!([
+                {"ticker": "SPY", "price": 700.0, "change_1d": 0.0},
+                {"ticker": "QQQ", "price": 601.0, "change_1d": 0.01}
+            ])),
+            t0 + Duration::from_millis(100),
+        );
+        assert_eq!(triggers, vec![Trigger::QuoteTick("QQQ".into())]);
+        assert!(store.take_dirty());
+    }
+
+    #[test]
+    fn a_quote_row_the_client_cannot_read_is_skipped_rather_than_fatal() {
+        // Fail loud, not fatal: one bad row must not cost the whole frame, and
+        // must not be read as a price either. Every row the owner publishes
+        // carries ticker, price, and change_1d (`_publish_quote_event`), so a
+        // row missing one is a contract break worth logging and skipping.
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        let triggers = store.apply(
+            quote(json!([
+                {"ticker": "SPY", "price": 700.0},
+                {"ticker": "", "price": 1.0, "change_1d": 0.0},
+                {"price": 1.0, "change_1d": 0.0},
+                {"ticker": "IWM", "price": "cheap", "change_1d": 0.0},
+                "not even an object",
+                {"ticker": "QQQ", "price": 600.0, "change_1d": 0.01}
+            ])),
+            t0,
+        );
+        assert_eq!(
+            triggers,
+            vec![Trigger::QuoteTick("QQQ".into())],
+            "the readable row still has to land"
+        );
+        assert_eq!(store.quote_overlay.len(), 1);
+        assert_eq!(store.asset_view("SPY").price, None);
+    }
+
+    #[test]
+    fn a_quote_payload_with_no_rows_moves_nothing() {
+        let mut store = Store::default();
+        let now = Instant::now();
+        assert_eq!(store.apply(quote(json!([])), now), vec![]);
+        assert_eq!(
+            store.apply(
+                AppEvent::Sse(SseEvent {
+                    kind: "quote".into(),
+                    payload: json!({"assets": []}),
+                    ts: None,
+                    id: None,
+                }),
+                now
+            ),
+            vec![]
+        );
+        assert!(!store.take_dirty());
+        assert!(store.quote_overlay.is_empty());
+    }
+
+    #[test]
+    fn a_frame_the_stream_could_not_read_is_counted_on_the_desk() {
+        // The parser logs each one whole; what the desk needs to know is that
+        // the audit stream is dropping events at all, which a green STREAM chip
+        // actively denies.
+        let mut store = Store::default();
+        let now = Instant::now();
+        assert_eq!(store.stream_malformed_count, 0);
+        store.apply(sse("stream.malformed"), now);
+        store.apply(sse("stream.malformed"), now);
+        assert_eq!(store.stream_malformed_count, 2);
+        assert!(
+            store.take_dirty(),
+            "a dropped frame owes the operator a frame"
+        );
+
+        // Everything else on the bus is Tasks 14/18's to render; counting it
+        // here would make the number mean nothing.
+        store.apply(sse("workflow_phase"), now);
+        assert_eq!(store.stream_malformed_count, 2);
+        assert!(!store.take_dirty());
+    }
+
+    #[test]
+    fn the_views_are_the_snapshots_assets_in_the_snapshots_order() {
+        // The snapshot decides the universe on screen. A ticker the stream
+        // reported and the desk does not hold is not a row.
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        store.apply(
+            snap(json!({"market": {"assets": [
+                {"ticker": "ACWI", "price": 152.47, "change_1d": -0.013},
+                {"ticker": "", "price": 1.0},
+                {"ticker": "SPY", "price": 729.46, "change_1d": -0.015}
+            ]}})),
+            t0,
+        );
+        store.apply(
+            quote(json!([
+                {"ticker": "SPY", "price": 730.0, "change_1d": -0.01},
+                {"ticker": "GLD", "price": 201.77, "change_1d": 0.01}
+            ])),
+            t0 + Duration::from_millis(1),
+        );
+
+        let views = store.asset_views();
+        assert_eq!(
+            views.iter().map(|v| v.ticker).collect::<Vec<_>>(),
+            vec!["ACWI", "SPY"],
+            "an unnamed asset is not a row, and the stream does not add one"
+        );
+        assert_eq!(views[0].price, Some(152.47));
+        assert_eq!(views[1].price, Some(730.0));
     }
 
     #[test]

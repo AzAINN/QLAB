@@ -109,6 +109,18 @@ pub fn arrow_chg(value: f64) -> (String, Color) {
     (format!("{arrow} {:.2}", value.abs()), t.change(value))
 }
 
+/// A change as arrow-plus-percent, tight enough for the ticker: `▲1.34%`.
+///
+/// No space after the glyph, unlike `arrow_chg`: the ticker separates its
+/// triplets by three spaces, and a fourth inside one would break the rhythm the
+/// eye reads the row by.
+pub fn arrow_pct(fraction: f64) -> String {
+    let Some((negative, digits)) = fixed(fraction * 100.0, 2) else {
+        return MISSING.to_string();
+    };
+    format!("{}{}%", if negative { "▼" } else { "▲" }, digits)
+}
+
 /// A quote. Two decimals above a dollar, four below it — sub-dollar instruments
 /// carry their information in the third and fourth places, and truncating there
 /// makes distinct prices look identical.
@@ -162,6 +174,15 @@ mod tests {
         let (s, c) = arrow_chg(-1.234);
         assert_eq!(s, "▼ 1.23");
         assert_eq!(c, theme().negative);
+    }
+
+    #[test]
+    fn arrow_pct_carries_the_sign_in_the_glyph_and_stays_tight() {
+        assert_eq!(arrow_pct(-0.013394), "▼1.34%");
+        assert_eq!(arrow_pct(0.0042), "▲0.42%");
+        // A minus that rounds away is not a loss, matching `Theme::change`.
+        assert_eq!(arrow_pct(-0.00001), "▲0.00%");
+        assert_eq!(arrow_pct(f64::NAN), MISSING);
     }
 
     #[test]

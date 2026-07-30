@@ -6,11 +6,13 @@
 
 mod harness;
 
-use atlas::bus::{AppEvent, Channel, HttpResult};
+use atlas::bus::{AppEvent, Channel, HttpResult, SseEvent};
+use atlas::fx::{FlashKey, FlashTracker};
 use atlas::model::Snapshot;
 use atlas::store::{Store, ViewId};
+use atlas::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use harness::{fixture_store, frame_to_string, frame_to_string_at, line_with};
+use harness::{fixture_store, frame_to_string, frame_to_string_at, line_with, row_styles};
 use std::time::{Duration, Instant};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -325,6 +327,134 @@ fn the_desk_view_explains_why_the_desk_is_doing_what_it_is_doing() {
                               "reason": "the `claude` CLI is not on PATH"}}}"#,
     );
     assert!(frame_to_string(&blocked, 120, 36).contains("not on PATH"));
+}
+
+/// One `quote` frame as the owner writes it.
+fn quote(rows: serde_json::Value) -> AppEvent {
+    AppEvent::Sse(SseEvent {
+        kind: "quote".into(),
+        payload: serde_json::json!({ "rows": rows }),
+        ts: Some("2026-07-30T12:00:01+00:00".into()),
+        id: Some("q1".into()),
+    })
+}
+
+#[test]
+fn a_quote_reaches_the_ticker_without_a_new_snapshot() {
+    // The whole point of the overlay: a price that moved on the stream is on
+    // screen before the next three-second poll, and the snapshot behind it is
+    // untouched.
+    let mut store = fixture_store();
+    let arrived = store.last_snapshot_at.unwrap();
+    let at = arrived + Duration::from_millis(900);
+    store.apply(
+        quote(serde_json::json!([{"ticker": "SPY", "price": 731.11, "change_1d": 0.0042}])),
+        at,
+    );
+
+    let frame = frame_to_string_at(&store, 120, 36, at);
+    let row = frame.lines().next().unwrap();
+    assert!(row.contains("SPY 731.11 ▲0.42%"), "{row}");
+    assert!(!row.contains("729.46"), "the poll's price survived: {row}");
+    assert!(
+        row.contains("ACWI 152.47"),
+        "an asset the stream did not mention still comes off the snapshot: {row}"
+    );
+}
+
+#[test]
+fn a_quote_tick_flashes_the_price_cell_and_the_flash_decays_out() {
+    // The flash is what makes a moving tape readable at a glance. It has to be
+    // on the price *cell* — a whole-row highlight says the row is selected,
+    // which is a different fact — and it has to end.
+    let mut store = fixture_store();
+    let arrived = store.last_snapshot_at.unwrap();
+    let at = arrived + Duration::from_millis(900);
+    store.apply(
+        quote(serde_json::json!([{"ticker": "SPY", "price": 731.11, "change_1d": 0.0042}])),
+        at,
+    );
+    let mut fx = FlashTracker::default();
+    fx.flash(FlashKey::price("SPY"), at);
+
+    let t = Theme::truecolor();
+    let lit = row_styles(&store, &fx, 120, 36, at, 0);
+    let flashed: String = lit
+        .iter()
+        .filter(|(_, style)| style.bg == Some(t.accent_dim))
+        .map(|(symbol, _)| symbol.as_str())
+        .collect();
+    // The tape tiles, so the lit cells are the price once per repetition —
+    // never a neighbouring symbol, an arrow, or a gap.
+    assert!(!flashed.is_empty(), "the quote did not light anything");
+    assert_eq!(
+        flashed.replace("731.11", ""),
+        "",
+        "only the price cell may carry the flash: {flashed}"
+    );
+
+    // And 700 ms later the row is back to a plain quote.
+    let cooled = row_styles(&store, &fx, 120, 36, at + Duration::from_millis(700), 0);
+    assert!(
+        cooled
+            .iter()
+            .all(|(_, style)| style.bg != Some(t.accent_dim)),
+        "a flash that never decays lights the row for the session"
+    );
+}
+
+#[test]
+fn the_tape_moves_one_cell_per_beat() {
+    // The ticker is one of the three indicators that claim this client is
+    // alive. A row that does not move while ticks arrive is the exact shape a
+    // hung client has.
+    let store = fixture_store();
+    let now = store.last_snapshot_at.unwrap();
+    let first = frame_to_string_at(&store, 120, 36, now);
+
+    let mut moved = fixture_store();
+    moved.apply(AppEvent::Tick, now);
+    let second = frame_to_string_at(&moved, 120, 36, now);
+    assert_ne!(
+        first.lines().next(),
+        second.lines().next(),
+        "the tape did not advance on a tick"
+    );
+    // And the desk under it did not move: a beat is not news. (The glyph is the
+    // one other thing a tick drives, on its mood's own slower tempo.)
+    assert_eq!(line_with(&first, "GLASS"), line_with(&second, "GLASS"));
+    assert_eq!(line_with(&first, "▌1 DESK"), line_with(&second, "▌1 DESK"));
+}
+
+#[test]
+fn a_stream_dropping_frames_says_so_beside_the_chip() {
+    // A green SSE dot says the subscription is open. It does not say every
+    // event it delivered was readable, and an audit stream quietly losing rows
+    // is exactly the failure a governed desk may not have.
+    let mut store = fixture_store();
+    let now = store.last_snapshot_at.unwrap();
+    store.apply(AppEvent::ConnUp(Channel::Stream), now);
+    let clean = frame_to_string_at(&store, 120, 36, now);
+    assert!(!clean.contains("STREAM"), "{clean}");
+
+    for _ in 0..3 {
+        store.apply(
+            AppEvent::Sse(SseEvent {
+                kind: "stream.malformed".into(),
+                payload: serde_json::json!({"raw": "{oops"}),
+                ts: None,
+                id: None,
+            }),
+            now,
+        );
+    }
+    let frame = frame_to_string_at(&store, 120, 36, now);
+    let status = line_with(&frame, "GLASS");
+    assert!(status.contains("STREAM ⚠ 3"), "{status}");
+    assert!(
+        status.contains("SSE"),
+        "beside the chip, not instead: {status}"
+    );
 }
 
 #[test]

@@ -31,7 +31,7 @@ color-eyre = "0.6.5"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 unicode-width = "0.2.2"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

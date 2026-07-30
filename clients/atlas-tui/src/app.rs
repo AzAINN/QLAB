@@ -131,23 +131,9 @@ impl App {
         }
     }
 
-    /// Pull a fresh snapshot. A failure downgrades readiness rather than
-    /// leaving stale numbers on screen labelled as current — the one thing a
-    /// trading surface must never do.
-    pub fn refresh(&mut self) {
-        match self.client.snapshot(self.offline) {
-            Ok(snap) => {
-                self.desk = Desk::from_snapshot(&snap);
-                self.snapshot = Some(snap);
-                self.readiness = Readiness::Ready;
-                self.last_error.clear();
-            }
-            Err(err) => {
-                self.last_error = err.to_string();
-                self.readiness = Readiness::Unreachable(err.to_string());
-            }
-        }
-    }
+    // `refresh()` used to live here and fetch inline, which froze the loop for
+    // the length of the request. The poller owns the fetch now and `main`
+    // applies the result; nothing in the client blocks on the owner.
 
     pub fn workflows(&self) -> Vec<(String, String, String)> {
         let Some(snap) = &self.snapshot else { return Vec::new() };

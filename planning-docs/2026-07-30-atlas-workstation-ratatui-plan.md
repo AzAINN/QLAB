@@ -291,13 +291,17 @@ fn snapshot_fixture_deserializes_and_regime_is_nested_under_market() {
 - [ ] **Step 1:** Failing test for pacing (pure function — no terminal needed):
 
 ```rust
+// The clock is an argument (global time-as-data constraint): the 3-arg form
+// that computed elapsed() internally raced the scheduler — the exact flake
+// class this plan exists to kill.
 #[test]
 fn renders_on_dirty_or_fx_or_idle_heartbeat() {
     let t0 = Instant::now();
-    assert!(should_render(true,  false, t0));              // dirty
-    assert!(should_render(false, true,  t0));              // effects running
-    assert!(!should_render(false, false, Instant::now())); // idle, frame fresh
-    assert!(should_render(false, false, t0 - Duration::from_millis(150))); // heartbeat
+    let now = t0 + Duration::from_millis(50);
+    assert!(should_render(true,  false, t0, now));  // dirty
+    assert!(should_render(false, true,  t0, now));  // effects running
+    assert!(!should_render(false, false, t0, now)); // idle, frame fresh (50ms < 100ms)
+    assert!(should_render(false, false, t0, t0 + Duration::from_millis(150))); // heartbeat
 }
 ```
 

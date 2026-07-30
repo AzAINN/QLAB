@@ -1,12 +1,21 @@
 # ---------------------------------------------------------------------------
 # Investable universe.
 #
-# The core universe is ~7 CROSS-ASSET ETFs, not sector SPDRs. Sector SPDRs are
+# The core universe is 20 CROSS-ASSET ETFs, not sector SPDRs. Sector SPDRs are
 # dominated by shared equity beta; the cross-asset basket supplies more varied
 # correlation and regime behavior for allocation research.
 #
-# The `candidates` set (~19 ETFs) supports wider-universe stress tests and an
+# The `candidates` set (23 ETFs) supports wider-universe stress tests and an
 # explicitly offline asset-selection experiment.
+#
+# Why 20 and not 7: cardinality over the tradable set is only a decision when
+# n > k. At n=7, k=7 there is exactly one combination, so `select_k_of_n`
+# returns the whole universe and its redundancy term never trades anything off.
+# At n=20, k=7 it enumerates C=77,520 in ~0.03s and returns a chosen basket.
+#
+# Why not more: MAX_EXACT_ASSETS = 25 in qlab/core/selection.py is a hard
+# ceiling on exact enumeration, and the MVSK cokurt tensor is n^4 — 3.1 MB at
+# n=25, 104 MB at n=60. 20 leaves headroom under both.
 # ---------------------------------------------------------------------------
 
 # Benchmark definitions (arms B0 / B1).
@@ -18,29 +27,68 @@ benchmarks:
 
 # The primary ~7-asset cross-asset core for staged allocation experiments.
 core:
-  - ticker: ACWI          # global equities
+  - ticker: ACWI        # global equities
     name: iShares MSCI ACWI
     asset_class: equity
-  - ticker: BNDW          # global aggregate bonds
+  - ticker: SPY         # US large cap
+    name: SPDR S&P 500
+    asset_class: equity
+  - ticker: QQQ         # US large-cap growth
+    name: Invesco QQQ
+    asset_class: equity
+  - ticker: IWM         # US small cap
+    name: iShares Russell 2000
+    asset_class: equity
+  - ticker: EEM         # emerging equity
+    name: iShares MSCI Emerging Markets
+    asset_class: equity
+  - ticker: BNDW        # global aggregate bonds
     name: Vanguard Total World Bond
     asset_class: bonds
-  - ticker: GSG           # broad commodities
-    name: iShares S&P GSCI Commodity
-    asset_class: commodities
-  - ticker: IGF           # global infrastructure
-    name: iShares Global Infrastructure
-    asset_class: infrastructure
-  - ticker: GLD           # gold
-    name: SPDR Gold Shares
-    asset_class: gold
-  - ticker: VNQ           # real estate
-    name: Vanguard Real Estate
-    asset_class: real_estate
-  - ticker: EMB           # emerging-market USD bonds
+  - ticker: TLT         # US long duration
+    name: iShares 20+ Year Treasury
+    asset_class: treasuries
+  - ticker: IEF         # US intermediate duration
+    name: iShares 7-10 Year Treasury
+    asset_class: treasuries
+  - ticker: TIP         # US real rates
+    name: iShares TIPS Bond
+    asset_class: tips
+  - ticker: LQD         # IG spread
+    name: iShares iBoxx IG Corporate
+    asset_class: corporate_credit
+  - ticker: HYG         # HY spread
+    name: iShares iBoxx High Yield
+    asset_class: high_yield_credit
+  - ticker: EMB         # EM sovereign
     name: iShares JPM USD EM Bond
     asset_class: em_bonds
+  - ticker: GLD         # gold
+    name: SPDR Gold Shares
+    asset_class: gold
+  - ticker: SLV         # silver
+    name: iShares Silver Trust
+    asset_class: precious_metals
+  - ticker: GSG         # broad commodities
+    name: iShares S&P GSCI Commodity
+    asset_class: commodities
+  - ticker: DBC         # diversified commodities
+    name: Invesco DB Commodity
+    asset_class: commodities
+  - ticker: USO         # crude energy
+    name: United States Oil Fund
+    asset_class: energy
+  - ticker: IGF         # global infrastructure
+    name: iShares Global Infrastructure
+    asset_class: infrastructure
+  - ticker: VNQ         # US real estate
+    name: Vanguard Real Estate
+    asset_class: real_estate
+  - ticker: RWO         # global real estate
+    name: SPDR Dow Jones Global Real Estate
+    asset_class: real_estate
 
-# The ~19-ETF candidate pool for wider-universe and offline selection research.
+# The 23-ETF candidate pool for wider-universe and offline selection research.
 # `core` tickers are a subset; the selector should be able to (re)discover
 # a well-diversified k≈7 basket out of the wider set.
 candidates:
@@ -63,6 +111,10 @@ candidates:
   - RWO     # global real estate
   - IGF     # infrastructure
   - USO     # oil
+  - QQQ     # US large-cap growth
+  - IEF     # intermediate treasuries
+  - LQD     # IG corporate credit
+  - SLV     # silver
 
 # Research-only stock candidate pool. Stocks have no paper-trading path until
 # promoted through the algorithm catalog gate.

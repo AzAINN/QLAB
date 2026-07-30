@@ -634,7 +634,7 @@ def test_live_portfolio_marks_to_market_with_provenance(session, monkeypatch):
     assert status == 200
     assert live["blocked"] is False
     assert live["equity"] > 0
-    assert len(live["positions"]) == 7
+    assert len(live["positions"]) == len(session.mandate.universe_whitelist)
     # A fully-invested long book: gross ~ net ~ 1.0.
     assert live["gross_exposure"] == pytest.approx(live["net_exposure"], abs=1e-6)
     assert 0.9 < live["gross_exposure"] <= 1.0 + 1e-6
@@ -657,7 +657,7 @@ def test_tui_snapshot_is_provenance_first(session):
     assert "human confirmation" in snap["system"]["governed_lock_reason"]
     assert snap["market"]["frequency"] == "daily"
     assert snap["market"]["source"] in {"synthetic", "yfinance"}
-    assert len(snap["market"]["assets"]) == 7
+    assert len(snap["market"]["assets"]) == len(session.mandate.universe_whitelist)
     assert snap["events"][-1]["kind"] == "demo"
     assert {agent["name"] for agent in snap["agents"]} == {
         "moments-analyst", "challenger", "optimization-runner", "referee", "reporter"
@@ -726,7 +726,10 @@ def test_owner_exposes_safe_lab_tools_and_durable_workflows(session):
         session, "POST", "/api/lab/data.fetch_universe", {},
         {"which": "core", "offline": True},
     )
-    assert status == 200 and len(result["result"]["tickers"]) == 7
+    assert status == 200
+    # The core tier, whatever its size — pinning a literal here just re-breaks
+    # on the next universe change without testing anything extra.
+    assert len(result["result"]["tickers"]) == len(session.mandate.universe_whitelist)
 
     status, workflow = handle_api(
         session, "POST", "/api/workflows/start", {},

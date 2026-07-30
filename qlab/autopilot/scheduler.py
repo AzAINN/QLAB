@@ -271,10 +271,12 @@ def evaluate_triggers(state: Mapping[str, object]) -> list[dict[str, object]]:
     current = _weights(state.get("current_weights"), "current_weights")
     targets = _weights(state.get("target_weights"), "target_weights")
     breaches = []
+    total_drift = 0.0
     for ticker in sorted(current.keys() | targets.keys()):
         current_weight = current.get(ticker, 0.0)
         target_weight = targets.get(ticker, 0.0)
         drift = abs(current_weight - target_weight)
+        total_drift += drift
         if drift > band:
             breaches.append({
                 "ticker": ticker,
@@ -282,6 +284,22 @@ def evaluate_triggers(state: Mapping[str, object]) -> list[dict[str, object]]:
                 "target": target_weight,
                 "absolute_drift": drift,
             })
+    # The per-asset band cannot scale: with an equal-weight target over n names
+    # every weight is 1/n, so at n >= 20 the largest drift any single name can
+    # have — a book entirely in cash — is exactly the 0.05 band and never
+    # exceeds it. A completely uninvested portfolio then produced no trigger at
+    # all. One-way turnover is the same quantity aggregated, so it catches
+    # "everything is a little off" and "we are not invested" at any n, while
+    # twenty names each off by a harmless 0.005 still sums to exactly the band
+    # and correctly does not fire.
+    one_way_drift = total_drift / 2.0
+    if not breaches and one_way_drift > band:
+        breaches.append({
+            "ticker": "*portfolio*",
+            "current": round(sum(current.values()), 10),
+            "target": round(sum(targets.values()), 10),
+            "absolute_drift": one_way_drift,
+        })
     if breaches:
         triggers.append({
             "kind": "drift",

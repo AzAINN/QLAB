@@ -234,8 +234,13 @@ def test_referee_blocks_exposure_increase_at_control_drawdown():
     }
     state = {
         "drawdown": mandate.drawdown_tiers.control,
+        # Half the target weight each, so current gross is 0.5 against a
+        # target gross of 1.0 — an increase, whatever the universe size. The
+        # old literal 0.10 silently meant "less than 1/n", which inverted into
+        # a *decrease* the moment n passed 10 and the test then asserted the
+        # opposite of what it reads as.
         "weights": {
-            ticker: 0.10
+            ticker: 0.5 / len(mandate.universe_whitelist)
             for ticker in mandate.universe_whitelist
         },
     }

@@ -10,42 +10,9 @@ from qlab.paths import data_path
 from qlab.trader.mandate import MandateViolation, load_mandate
 
 
-CORE = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
-CANDIDATES = [
-    "ACWI",
-    "SPY",
-    "EFA",
-    "EEM",
-    "IWM",
-    "BNDW",
-    "AGG",
-    "BNDX",
-    "TLT",
-    "EMB",
-    "HYG",
-    "TIP",
-    "GLD",
-    "GSG",
-    "DBC",
-    "VNQ",
-    "RWO",
-    "IGF",
-    "USO",
-]
-EXTENDED = [
-    *CANDIDATES,
-    "VTV",
-    "MTUM",
-    "QUAL",
-    "USMV",
-    "XLK",
-    "XLF",
-    "XLV",
-    "XLE",
-    "SHY",
-    "IEF",
-    "LQD",
-]
+CORE = ['ACWI', 'SPY', 'QQQ', 'IWM', 'EEM', 'BNDW', 'TLT', 'IEF', 'TIP', 'LQD', 'HYG', 'EMB', 'GLD', 'SLV', 'GSG', 'DBC', 'USO', 'IGF', 'VNQ', 'RWO']
+CANDIDATES = ['ACWI', 'SPY', 'EFA', 'EEM', 'IWM', 'BNDW', 'AGG', 'BNDX', 'TLT', 'EMB', 'HYG', 'TIP', 'GLD', 'GSG', 'DBC', 'VNQ', 'RWO', 'IGF', 'USO', 'QQQ', 'IEF', 'LQD', 'SLV']
+EXTENDED = ['ACWI', 'SPY', 'EFA', 'EEM', 'IWM', 'BNDW', 'AGG', 'BNDX', 'TLT', 'EMB', 'HYG', 'TIP', 'GLD', 'GSG', 'DBC', 'VNQ', 'RWO', 'IGF', 'USO', 'VTV', 'MTUM', 'QUAL', 'USMV', 'XLK', 'XLF', 'XLV', 'XLE', 'SHY', 'IEF', 'LQD']
 STOCKS = [
     "AAPL",
     "MSFT",

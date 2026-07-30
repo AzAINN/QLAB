@@ -13,11 +13,11 @@
 //! owner poll — writes into one bus, and the loop drains it before drawing at
 //! most one frame. A burst of events is a frame, not a stampede.
 
-use atlas::bus::{AppEvent, Channel, HttpResult, Tx};
+use atlas::bus::{AppEvent, Channel, Tx};
 use atlas::cmd::Command;
-use atlas::model::Snapshot;
+use atlas::net::http::{self, PollerHandle};
 use atlas::store::{should_render, Store};
-use atlas::{client, theme, ui};
+use atlas::{theme, ui};
 use color_eyre::eyre::Result;
 use crossterm::{
     cursor,
@@ -27,23 +27,16 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use serde::Deserialize;
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{RecvTimeoutError, Sender},
-    },
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tracing_subscriber::EnvFilter;
 
 /// The animation beat: ticker, throbbers, and the Atlas glyph advance on it.
 const TICK: Duration = Duration::from_millis(120);
-/// Snapshots are far more expensive than frames, so they run on their own beat.
-/// Task 6 makes this adaptive; a flat poll is the Textual client's habit.
-const REFRESH: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,13 +52,15 @@ async fn main() -> Result<()> {
 
     let offline = !args.iter().any(|a| a == "--live");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let (nudge_tx, nudge_rx) = std::sync::mpsc::channel::<()>();
+    let base = http::base_from_env();
 
-    let mut store = Store::default();
+    // The threshold the frame marks stale numbers at comes from the cadence that
+    // refreshes them, so the two cannot drift apart.
+    let mut store = Store::new(http::stale_after(http::POLL_INTERVAL));
     // Probe before the screen is taken. The first frame is drawn before any
     // event arrives, and a frame that says "no owner" because it has not asked
     // yet has already lied to the operator once.
-    let readiness = client::OwnerClient::from_env().readiness();
+    let readiness = http::readiness(&base).await;
     if !readiness.is_ready() {
         tracing::warn!(reason = readiness.reason(), "owner is not reachable");
     }
@@ -78,7 +73,7 @@ async fn main() -> Result<()> {
         Instant::now(),
     );
 
-    spawn_owner_poll(tx.clone(), nudge_rx, offline);
+    let poller = http::spawn_poller(base, offline, tx.clone());
     spawn_ticker(tx.clone());
     spawn_signal_watch();
 
@@ -89,14 +84,14 @@ async fn main() -> Result<()> {
     // line-buffered would sit in the kernel until Enter.
     spawn_terminal_events(tx);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    run(&mut terminal, &mut store, &mut rx, &nudge_tx).await
+    run(&mut terminal, &mut store, &mut rx, &poller).await
 }
 
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     store: &mut Store,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-    nudge: &Sender<()>,
+    poller: &PollerHandle,
 ) -> Result<()> {
     // One frame before the first event, or the operator stares at the shell's
     // leftovers until the ticker fires.
@@ -113,10 +108,10 @@ async fn run(
         // decides against the instant the caller measured, not against whatever
         // the clock says several statements later.
         let now = Instant::now();
-        let mut quit = ingest(first, store, nudge, now);
+        let mut quit = ingest(first, store, poller, now);
         // Drain-then-render: fifty quote events coalesce into one repaint.
         while let Ok(ev) = rx.try_recv() {
-            quit |= ingest(ev, store, nudge, now);
+            quit |= ingest(ev, store, poller, now);
         }
 
         // Task 15 replaces this literal with the effect manager's running flag.
@@ -136,7 +131,7 @@ async fn run(
 /// The runtime is the only thing that acts: the shell decides what a keystroke
 /// *means* and hands back a `Command`, and nothing in `ui/` can reach the
 /// network or the process lifetime on its own.
-fn ingest(ev: AppEvent, store: &mut Store, nudge: &Sender<()>, now: Instant) -> bool {
+fn ingest(ev: AppEvent, store: &mut Store, poller: &PollerHandle, now: Instant) -> bool {
     let mut quit = false;
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
@@ -145,9 +140,7 @@ fn ingest(ev: AppEvent, store: &mut Store, nudge: &Sender<()>, now: Instant) -> 
                 // The refresh jumps the poll queue instead of fetching inline:
                 // a synchronous fetch in this loop froze the client for its
                 // duration.
-                Some(Command::Refresh) => {
-                    let _ = nudge.send(());
-                }
+                Some(Command::Refresh) => poller.now(),
                 None => {}
             }
         }
@@ -161,69 +154,6 @@ fn ingest(ev: AppEvent, store: &mut Store, nudge: &Sender<()>, now: Instant) -> 
 }
 
 // -- producers -------------------------------------------------------------
-
-/// The owner poll, on a thread of its own.
-///
-/// Blocking `ureq` on a blocking thread rather than in the loop: the old client
-/// fetched inline every three seconds and stopped answering keys while it did.
-/// Task 6 replaces this bridge with the adaptive `reqwest` poller.
-fn spawn_owner_poll(tx: Tx, nudge: std::sync::mpsc::Receiver<()>, offline: bool) {
-    std::thread::spawn(move || {
-        let client = client::OwnerClient::from_env();
-        let url = format!("{}/api/tui", client.base());
-        let mut up: Option<bool> = None;
-        loop {
-            match client.snapshot(offline) {
-                // An answer is not a snapshot. `ConnUp` is only sent once one
-                // decodes: reporting the channel up on any HTTP 200 is what let
-                // an owner serving a payload this client cannot read render as
-                // "waiting for the first snapshot" for as long as it stayed
-                // broken, with the reason visible only in the log.
-                Ok(value) => match Snapshot::deserialize(&value) {
-                    Ok(snapshot) => {
-                        if tx.send(AppEvent::Snapshot(Box::new(snapshot))).is_err() {
-                            return;
-                        }
-                        if up != Some(true) {
-                            up = Some(true);
-                            if tx.send(AppEvent::ConnUp(Channel::Owner)).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                    // Fail loud, and on screen. A payload the model cannot read
-                    // is a broken contract with the owner, never a frame to skip.
-                    Err(err) => {
-                        let event = AppEvent::Http(HttpResult::Malformed {
-                            url: url.clone(),
-                            error: err.to_string(),
-                        });
-                        if tx.send(event).is_err() {
-                            return;
-                        }
-                    }
-                },
-                Err(err) => {
-                    // The reason goes to the log rather than to the screen:
-                    // the status chip says the owner is down and the content
-                    // area names the remedy, but "connection refused" versus
-                    // "404" is a distinction Task 16's toasts will carry.
-                    tracing::warn!(%err, "owner poll failed");
-                    if up != Some(false) {
-                        up = Some(false);
-                        if tx.send(AppEvent::ConnDown(Channel::Owner)).is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-            match nudge.recv_timeout(REFRESH) {
-                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-        }
-    });
-}
 
 /// Keys and resizes onto the bus, so the loop has exactly one drain point.
 fn spawn_terminal_events(tx: Tx) {
@@ -359,7 +289,7 @@ fn install_hooks() -> Result<()> {
 /// readable after the client is gone.
 ///
 /// `-v` raises this crate only. A global debug filter buried the two lines that
-/// mattered under thirty of `ureq`'s connection plumbing.
+/// mattered under thirty of the HTTP stack's connection plumbing.
 fn init_tracing(verbose: bool) -> io::Result<()> {
     let path = PathBuf::from(std::env::var("ATLAS_LOG").unwrap_or_else(|_| "atlas.log".into()));
     let file = path

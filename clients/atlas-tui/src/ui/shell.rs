@@ -41,13 +41,6 @@ const NAV_W: u16 = 8;
 const PULSE_W: u16 = 34;
 /// The label column inside the rails.
 const LABEL_W: usize = 11;
-/// When the numbers on screen stop counting as current.
-///
-/// Three poll intervals plus slack — the poller runs every 3 s
-/// (`main::REFRESH`) — so one missed poll is not staleness but a stopped feed
-/// is. A desk that keeps drawing old marks unmarked is the one failure a
-/// trading surface may not have.
-const STALE_AFTER: Duration = Duration::from_secs(10);
 
 pub fn draw(f: &mut Frame, store: &Store, now: Instant) {
     let t = theme();
@@ -89,9 +82,13 @@ pub fn draw(f: &mut Frame, store: &Store, now: Instant) {
 
 /// How long the numbers on screen have been unrefreshed, once that is long
 /// enough to matter. `None` while they are current, or while there are none.
+///
+/// The threshold is carried by the store rather than stated here: it is a fact
+/// about the poll cadence, and a renderer that owned its own copy of it would
+/// keep that copy after the cadence moved.
 fn stale_for(store: &Store, now: Instant) -> Option<Duration> {
     let age = now.saturating_duration_since(store.last_snapshot_at?);
-    (age > STALE_AFTER).then_some(age)
+    (age > store.stale_after).then_some(age)
 }
 
 /// Global keys, then the active view's.

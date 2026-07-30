@@ -10,6 +10,7 @@ use crate::bus::{AppEvent, Channel, HttpResult};
 use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{RegimePanel, Snapshot};
+use crate::net::http;
 use std::time::{Duration, Instant};
 
 /// The idle heartbeat. Three indicators on screen claim the client is alive —
@@ -149,12 +150,20 @@ pub struct Malformed {
 /// owner from growing the store by a decode message every three seconds.
 const MALFORMED_ERROR_MAX: usize = 200;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Store {
     pub snapshot: Option<Snapshot>,
     pub regime_panel: Option<RegimePanel>,
     pub nav: Nav,
     pub conn: Conn,
+    /// How old the numbers on screen may get before the frame says so.
+    ///
+    /// Data, not a constant in the renderer: it was a literal `10 s` beside a
+    /// `3 s` poll, two facts about the same cadence with nothing tying them
+    /// together. It is set from the poller's interval at startup, so a cadence
+    /// change carries the threshold with it instead of quietly widening the
+    /// window in which stale marks render as current.
+    pub stale_after: Duration,
     /// When the snapshot on screen arrived. Absent means none ever has.
     ///
     /// Time as data: `apply` is told the instant, and the shell is told the
@@ -174,7 +183,29 @@ pub struct Store {
     dirty: bool,
 }
 
+impl Default for Store {
+    /// The desk as this client opens it: nothing seen, both feeds down, and the
+    /// staleness threshold the poller's own cadence implies.
+    fn default() -> Self {
+        Self::new(http::stale_after(http::POLL_INTERVAL))
+    }
+}
+
 impl Store {
+    pub fn new(stale_after: Duration) -> Self {
+        Self {
+            snapshot: None,
+            regime_panel: None,
+            nav: Nav::default(),
+            conn: Conn::default(),
+            stale_after,
+            last_snapshot_at: None,
+            malformed: None,
+            tick: 0,
+            dirty: false,
+        }
+    }
+
     /// Fold one event in and report what changed on the desk.
     ///
     /// `now` is the caller's instant, never a clock read here: the loop stamps
@@ -558,6 +589,18 @@ mod tests {
             })),
         );
         assert_eq!(store.mood(), Mood::Alarmed);
+    }
+
+    #[test]
+    fn the_default_desk_takes_its_staleness_threshold_from_the_poll_cadence() {
+        // A derived `Default` would hand out `Duration::ZERO` here and mark
+        // every frame ever drawn as stale — the failure mode this field's whole
+        // point is to prevent, arriving as a one-line derive.
+        assert_eq!(
+            Store::default().stale_after,
+            http::stale_after(http::POLL_INTERVAL)
+        );
+        assert!(Store::default().stale_after >= http::POLL_INTERVAL * 3);
     }
 
     #[test]

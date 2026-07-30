@@ -28,6 +28,20 @@ fn store_from(json: &str) -> Store {
     store
 }
 
+/// A store carrying its own staleness threshold, holding one snapshot that
+/// arrived at `at`.
+fn store_with_threshold(stale_after: Duration, at: Instant) -> Store {
+    let mut store = Store::new(stale_after);
+    store.apply(AppEvent::ConnUp(Channel::Owner), at);
+    store.apply(
+        AppEvent::Snapshot(Box::new(
+            serde_json::from_str::<Snapshot>(r#"{"portfolio": {"equity": 1.0}}"#).unwrap(),
+        )),
+        at,
+    );
+    store
+}
+
 /// A store that has seen the owner answer with something it cannot read.
 fn malformed_store(with_snapshot: bool) -> Store {
     let mut store = if with_snapshot {
@@ -216,6 +230,25 @@ fn numbers_that_stopped_refreshing_say_so_rather_than_passing_as_current() {
     );
     // Beside the chip, not instead of it: reachable and current are two claims.
     assert!(status.contains("OWNER"), "{status}");
+}
+
+#[test]
+fn the_staleness_threshold_is_the_pollers_fact_not_the_renderers() {
+    // It was a literal `10 s` in the shell beside a `3 s` poll, with nothing
+    // tying them together: a cadence change would have widened the window in
+    // which stale marks render as current, and no test would have noticed. The
+    // pin is that the *frame* moves with the threshold it is given.
+    let arrived = Instant::now();
+    let patient = store_with_threshold(Duration::from_secs(60), arrived);
+    let frame = frame_to_string_at(&patient, 120, 36, arrived + Duration::from_secs(47));
+    assert!(
+        !frame.contains("STALE"),
+        "the renderer is still deciding for itself:\n{frame}"
+    );
+
+    let twitchy = store_with_threshold(Duration::from_secs(2), arrived);
+    let frame = frame_to_string_at(&twitchy, 120, 36, arrived + Duration::from_secs(9));
+    assert!(line_with(&frame, "GLASS").contains("STALE 9s"), "{frame}");
 }
 
 #[test]

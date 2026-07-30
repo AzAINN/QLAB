@@ -7,7 +7,6 @@
 //! — one initialised, one not, depending on which copy the caller reached.
 
 pub mod bus;
-pub mod client;
 pub mod cmd;
 pub mod format;
 pub mod fx;

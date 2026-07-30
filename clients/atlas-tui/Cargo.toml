@@ -6,6 +6,12 @@ description = "Ratatui client for the qlab owner runtime — Atlas-first, read-o
 license = "MIT"
 
 # The crate keeps its published name; the binary the operator types is `atlas`.
+# The library carries every module so integration tests can decode payloads and
+# render frames without a terminal.
+[lib]
+name = "atlas"
+path = "src/lib.rs"
+
 [[bin]]
 name = "atlas"
 path = "src/main.rs"

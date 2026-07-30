@@ -9,21 +9,8 @@
 //! `/api/tui` snapshot, so there is no cutover cliff and no window where the
 //! desk has two disagreeing faces.
 
-mod app;
-mod bus;
-mod client;
-mod cmd;
-mod format;
-mod fx;
-mod glyph;
-mod input;
-mod model;
-mod net;
-mod store;
-mod theme;
-mod ui;
-
 use anyhow::Result;
+use atlas::{app, client, theme, ui};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,

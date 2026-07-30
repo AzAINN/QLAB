@@ -2639,12 +2639,20 @@ class QlabTui(App[None]):
             lines.append(
                 f"[{DOWN}]⚠ supervisor error: "
                 f"{escape(str(beat.get('last_error'))[:160])}[/]")
-        # Mode/state/heartbeat live in the pinned strip above; only the
-        # advisory disclaimer and news source belong in the scrollable body.
+        # The tick count alone cannot answer "is the supervisor working" — a
+        # thread that is alive but failing every tick, and one that is doing its
+        # job, both just count. The health word is the answer, so it stays here
+        # in the body next to the read it produced, not only in the rail.
+        if not beat.get("running"):
+            beat_health = "stopped"
+        elif beat_errors:
+            beat_health = f"FAILING ({beat_errors} errors)"
+        else:
+            beat_health = "live"
         lines.append(
             f"[{DIM}]news {read.get('news_source','—')} · "
-            f"heartbeat {int(beat.get('ticks', 0))} ticks · "
-            f"advisory only — Atlas cannot trade[/]")
+            f"heartbeat {beat_health} ({int(beat.get('ticks', 0))} ticks) · "
+            f"advisory, never an instruction — Atlas cannot trade[/]")
         target.update("\n".join(lines))
 
     def action_atlas_drawer(self) -> None:

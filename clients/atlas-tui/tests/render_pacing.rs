@@ -15,5 +15,10 @@ fn renders_on_dirty_or_fx_or_idle_heartbeat() {
     assert!(should_render(true, false, t0, now)); // dirty
     assert!(should_render(false, true, t0, now)); // effects running
     assert!(!should_render(false, false, t0, now)); // idle, frame fresh
-    assert!(should_render(false, false, t0, t0 + Duration::from_millis(150))); // heartbeat
+    assert!(should_render(
+        false,
+        false,
+        t0,
+        t0 + Duration::from_millis(150)
+    )); // heartbeat
 }

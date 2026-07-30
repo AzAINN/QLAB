@@ -6,7 +6,6 @@
 //! second copy of every module, and `theme`'s `OnceLock` would then exist twice
 //! — one initialised, one not, depending on which copy the caller reached.
 
-pub mod app;
 pub mod bus;
 pub mod client;
 pub mod cmd;

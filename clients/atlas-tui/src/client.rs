@@ -49,7 +49,10 @@ impl OwnerClient {
             .timeout_read(TIMEOUT)
             .timeout_connect(TIMEOUT)
             .build();
-        Self { base: base.into().trim_end_matches('/').to_string(), agent }
+        Self {
+            base: base.into().trim_end_matches('/').to_string(),
+            agent,
+        }
     }
 
     /// Resolve the owner URL the same way every other qlab surface does, so a
@@ -85,7 +88,11 @@ impl OwnerClient {
     /// Textual client uses: two clients disagreeing about the desk would be
     /// worse than having only one.
     pub fn snapshot(&self, offline: bool) -> Result<Value> {
-        let url = format!("{}/api/tui?offline={}", self.base, if offline { 1 } else { 0 });
+        let url = format!(
+            "{}/api/tui?offline={}",
+            self.base,
+            if offline { 1 } else { 0 }
+        );
         let value: Value = self
             .agent
             .get(&url)
@@ -97,50 +104,15 @@ impl OwnerClient {
     }
 }
 
-/// Read a dotted path out of a snapshot without unwrapping through five levels.
-///
-/// The owner is free to omit keys — a desk with no coordinator has no
-/// `coordinator` object at all — so every read here is a miss, not a panic.
-pub fn dig<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
-    let mut node = root;
-    for key in path.split('.') {
-        node = node.get(key)?;
-    }
-    Some(node)
-}
-
-pub fn dig_str(root: &Value, path: &str) -> Option<String> {
-    dig(root, path).and_then(|v| v.as_str()).map(|s| s.to_string())
-}
-
-pub fn dig_f64(root: &Value, path: &str) -> Option<f64> {
-    dig(root, path).and_then(|v| v.as_f64())
-}
-
-pub fn dig_bool(root: &Value, path: &str) -> Option<bool> {
-    dig(root, path).and_then(|v| v.as_bool())
-}
+// The `dig*` helpers that used to live here are gone with the untyped render
+// path. Every field the client draws now comes from `model::Snapshot`, so a
+// fact like the regime has exactly one source — the string-path version of it
+// read `regime` top-level, where the owner has never served it, and rendered
+// "unknown" for every regime the detectors ever produced.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn dig_walks_a_dotted_path() {
-        let v = json!({"atlas": {"mode": "research", "open_tasks": 2}});
-        assert_eq!(dig_str(&v, "atlas.mode").as_deref(), Some("research"));
-        assert_eq!(dig_f64(&v, "atlas.open_tasks"), Some(2.0));
-    }
-
-    #[test]
-    fn a_missing_key_is_a_miss_not_a_panic() {
-        // The owner omits whole objects for state that does not exist yet, so
-        // absence has to be ordinary.
-        let v = json!({"atlas": {}});
-        assert!(dig(&v, "atlas.coordinator.driving").is_none());
-        assert!(dig_bool(&v, "nothing.here").is_none());
-    }
 
     #[test]
     fn readiness_carries_the_reason() {

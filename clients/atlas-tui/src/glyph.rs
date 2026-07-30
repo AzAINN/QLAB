@@ -87,8 +87,7 @@ pub fn frame(mood: Mood, tick: u64) -> Vec<String> {
             let amp = if mood == Mood::Idle { 1.6 } else { 0.7 };
             for x in 0..subw {
                 let t = x as f64 / subw as f64;
-                let y = (subh as f64 / 2.0)
-                    + (t * std::f64::consts::TAU + phase).sin() * amp;
+                let y = (subh as f64 / 2.0) + (t * std::f64::consts::TAU + phase).sin() * amp;
                 mark(&mut dots, x, y as isize, subw, subh);
             }
         }
@@ -98,10 +97,8 @@ pub fn frame(mood: Mood, tick: u64) -> Vec<String> {
             let phase = tick as f64 * 0.5;
             for x in 0..subw {
                 let t = x as f64 / subw as f64;
-                let a = (subh as f64 / 2.0)
-                    + (t * std::f64::consts::TAU * 1.5 + phase).sin() * 3.2;
-                let b = (subh as f64 / 2.0)
-                    - (t * std::f64::consts::TAU * 1.5 + phase).sin() * 3.2;
+                let a = (subh as f64 / 2.0) + (t * std::f64::consts::TAU * 1.5 + phase).sin() * 3.2;
+                let b = (subh as f64 / 2.0) - (t * std::f64::consts::TAU * 1.5 + phase).sin() * 3.2;
                 mark(&mut dots, x, a as isize, subw, subh);
                 mark(&mut dots, x, b as isize, subw, subh);
             }
@@ -185,7 +182,10 @@ mod tests {
         // The failure this guards is a glyph that renders once and then looks
         // identical forever, which reads as a hung client.
         let a = frame(Mood::Working, 0);
-        let distinct = (0..12).map(|t| frame(Mood::Working, t)).filter(|f| *f != a).count();
+        let distinct = (0..12)
+            .map(|t| frame(Mood::Working, t))
+            .filter(|f| *f != a)
+            .count();
         assert!(distinct > 0, "working glyph never changes between frames");
     }
 
@@ -208,11 +208,10 @@ mod tests {
     #[test]
     fn moods_animate_at_distinct_tempos() {
         // Tempo carries as much of the signal as shape does.
-        let mut rates: Vec<u64> =
-            [Mood::Idle, Mood::Working, Mood::Dormant, Mood::Alarmed]
-                .iter()
-                .map(|m| m.tempo())
-                .collect();
+        let mut rates: Vec<u64> = [Mood::Idle, Mood::Working, Mood::Dormant, Mood::Alarmed]
+            .iter()
+            .map(|m| m.tempo())
+            .collect();
         rates.sort_unstable();
         rates.dedup();
         assert_eq!(rates.len(), 4);

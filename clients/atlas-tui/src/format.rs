@@ -19,6 +19,21 @@ pub const MISSING: &str = "--";
 /// from `MISSING`: "not yet" and "not there" are different facts about the desk.
 pub const PENDING: &str = "…";
 
+/// A string the owner actually set.
+///
+/// The owner serialises a string it never set as `""`, so absent and empty are
+/// one fact here. Every surface that prints an optional string goes through
+/// this: a view that told the two apart would print a blank where it means to
+/// print `MISSING`, and the store would diff a flash onto every sparse payload.
+pub fn text(value: Option<&String>) -> Option<&str> {
+    value.map(String::as_str).filter(|s| !s.is_empty())
+}
+
+/// `text`, resolved for display.
+pub fn or_missing(value: Option<&String>) -> &str {
+    text(value).unwrap_or(MISSING)
+}
+
 /// Thousands-grouped currency. Rust has no `{:,}`, and an ungrouped equity
 /// figure is genuinely harder to read at a glance on a book this size.
 pub fn money(value: f64) -> String {
@@ -202,6 +217,15 @@ mod tests {
         assert_eq!(arrow_chg(f64::NAN).0, "--");
         assert_eq!(MISSING, "--");
         assert_ne!(MISSING, PENDING);
+    }
+
+    #[test]
+    fn an_unset_owner_string_is_absent_rather_than_empty() {
+        assert_eq!(text(Some(&String::new())), None);
+        assert_eq!(text(None::<&String>), None);
+        assert_eq!(text(Some(&"calm".to_string())), Some("calm"));
+        assert_eq!(or_missing(Some(&String::new())), MISSING);
+        assert_eq!(or_missing(Some(&"alpaca".to_string())), "alpaca");
     }
 
     #[test]

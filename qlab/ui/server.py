@@ -26,6 +26,7 @@ GET  /api/debates                  open debates across every workflow
 POST /api/debates/<id>/adjudicate  close a debate (human act; no agent may)
 GET  /api/models/invocations   model tier/route audit records
 GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
+GET  /api/news                   the news window, its coverage, and provenance
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
 POST /api/atlas/escalate         open a bounded debate on a material disagreement
 GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
@@ -1323,6 +1324,64 @@ class UISession:
             self._desk_news = window
         return window
 
+    def news_payload(self, offline: bool) -> dict:
+        """The news window as a client renders it: stories, coverage, provenance.
+
+        Coverage is reported per universe member and is the part worth showing.
+        A cross-asset desk holding ACWI/BNDW/EMB gets almost no symbol-tagged
+        coverage, so "0 stories about your holdings" and "the market was quiet"
+        are completely different facts and the desk must not conflate them.
+        """
+        with self._news_lock:
+            window = dict(self._desk_news or {})
+        # Deliberately cache-only. `news_payload` is reached from
+        # `tui_snapshot`, which runs under the dispatch lock, and
+        # `fetch_desk_news` is the seam the network lives behind. Calling it
+        # here "only when offline" is not safe either: offline is a runtime
+        # value, so the next caller that passes False would block every request
+        # on a slow provider. The window is filled by the heartbeat or by an
+        # explicit `?refresh=1`, which the HTTP handler runs outside the lock.
+        items = list(window.get("items") or [])
+        universe = list(self.mandate.universe_whitelist)
+
+        per_ticker = {t: 0 for t in universe}
+        rows = []
+        for item in items:
+            tickers = tuple(getattr(item, "tickers", ()) or ())
+            for t in tickers:
+                if t in per_ticker:
+                    per_ticker[t] += 1
+            rows.append({
+                "published": str(getattr(item, "published", "")),
+                "headline": str(getattr(item, "headline", "")),
+                "summary": str(getattr(item, "summary", ""))[:400],
+                "source": str(getattr(item, "source", "")),
+                "url": str(getattr(item, "url", "")),
+                "tickers": list(tickers),
+                # Untagged items are macro context. Labelling them keeps a
+                # reader from treating a story about an unrelated single name
+                # as evidence about a holding.
+                "scope": "holding" if tickers else "macro",
+            })
+        tagged = sum(1 for r in rows if r["scope"] == "holding")
+        return {
+            "provider": window.get("provider_name", "—"),
+            "error": window.get("error"),
+            "as_of": self._now_iso(),
+            "lookback_hours": 48,
+            "items": rows,
+            "counts": {
+                "total": len(rows),
+                "holding": tagged,
+                "macro": len(rows) - tagged,
+            },
+            "coverage": [
+                {"ticker": t, "stories": per_ticker[t]}
+                for t in sorted(per_ticker, key=lambda k: (-per_ticker[k], k))
+            ],
+            "uncovered": [t for t in universe if per_ticker[t] == 0],
+        }
+
     def compose_desk_read(
         self,
         offline: bool,
@@ -1977,6 +2036,7 @@ class UISession:
                 "coordinator": self.coordinator_status(),
                 "fast": self.fast_mode,
             },
+            "news": self.news_payload(offline),
             "atlas_tasks": self.registry.list_atlas_tasks(10),
             "approvals": self.registry.list_approval_requests(10, "pending"),
             "quotes": self.quotes(),
@@ -2347,6 +2407,10 @@ def handle_api(session: UISession, method: str, path: str,
         # unattended run read as "Claude is a black box doing nothing".
         status["coordinator"] = session.coordinator_status()
         return 200, status
+
+    if method == "GET" and path == "/api/news":
+        offline = _qbool(query, "offline", session.offline_default)
+        return 200, session.news_payload(offline)
 
     if method == "GET" and path == "/api/atlas/read":
         # refresh=1 recomposes here; the HTTP handler intercepts that case
@@ -2763,6 +2827,20 @@ class _Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             try:
                 if (
+                    parsed.path == "/api/news"
+                    and _qbool(query, "refresh", False)
+                ):
+                    # Same rule as the Atlas read: the network fetch happens
+                    # here, outside the dispatch lock, because nothing reached
+                    # from handle_api may block every other request on a slow
+                    # news provider.
+                    offline = _qbool(
+                        query, "offline", self.session.offline_default)
+                    self.session.fetch_desk_news(offline)
+                    with _LOCK:
+                        obj = self.session.news_payload(offline)
+                    status = 200
+                elif (
                     parsed.path == "/api/atlas/read"
                     and _qbool(query, "refresh", False)
                 ):

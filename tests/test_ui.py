@@ -2719,3 +2719,60 @@ def test_a_non_finite_weight_is_reported_not_rendered_as_a_number():
     assert "[unreadable: SPY]" in _format_targets({"SPY": float("inf")})
     # And a clean set is untouched.
     assert _format_targets({"SPY": 0.6, "GLD": 0.4}) == "SPY 60.0% · GLD 40.0%"
+
+
+# --- the news window ----------------------------------------------------------
+
+
+def test_news_payload_separates_holding_stories_from_macro_context(session):
+    """A cross-asset desk gets almost no symbol-tagged coverage.
+
+    Benzinga tags US equities; six of this desk's seven ETFs return nothing. If
+    untagged macro items were dropped, the desk would report "quiet" for a
+    market that was not quiet at all — it simply was not naming these tickers.
+    Macro items are kept, and labelled so nothing mistakes one for evidence
+    about a holding.
+    """
+    session.fetch_desk_news(True)
+    out = session.news_payload(True)
+    assert out["counts"]["total"] == len(out["items"])
+    assert out["counts"]["holding"] + out["counts"]["macro"] == out["counts"]["total"]
+    for row in out["items"]:
+        assert row["scope"] == ("holding" if row["tickers"] else "macro")
+
+
+def test_news_payload_names_the_holdings_no_story_mentioned(session):
+    # "0 stories about your holdings" and "the market was quiet" are different
+    # facts, and only the coverage list can tell them apart.
+    session.fetch_desk_news(True)
+    out = session.news_payload(True)
+    universe = set(session.mandate.universe_whitelist)
+    assert {c["ticker"] for c in out["coverage"]} == universe
+    assert set(out["uncovered"]) <= universe
+    for ticker in out["uncovered"]:
+        assert next(c for c in out["coverage"] if c["ticker"] == ticker)["stories"] == 0
+
+
+def test_news_route_is_cache_only_and_never_fetches_under_the_lock(session):
+    """A cold desk answers, and answers empty, rather than fetching.
+
+    `news_payload` is reached from `tui_snapshot`, which runs under the
+    dispatch lock, and `fetch_desk_news` is the seam the network lives behind.
+    Filling the window from here — even "only when offline", since offline is a
+    runtime value — would block every request on a slow provider.
+    """
+    def forbidden(*_a, **_k):
+        raise AssertionError("news_payload fetched under the dispatch lock")
+
+    session.fetch_desk_news = forbidden
+    status, out = handle_api(session, "GET", "/api/news", {}, {})
+    assert status == 200
+    assert out["items"] == []
+    # The window is filled by the heartbeat or by an explicit ?refresh=1, which
+    # the HTTP handler runs outside the lock.
+    assert out["counts"]["total"] == 0
+
+
+def test_the_news_window_rides_the_one_consistent_snapshot(session):
+    snap = session.tui_snapshot(True)
+    assert "news" in snap and "coverage" in snap["news"]

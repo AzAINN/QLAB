@@ -45,7 +45,12 @@ def _client():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
     from test_tui import InProcessClient
 
-    return InProcessClient()
+    client = InProcessClient()
+    # Populate the news window the way the owner heartbeat does. The snapshot
+    # path is cache-only by design (it runs under the dispatch lock), so
+    # without this every capture of the News view shows its empty state.
+    client.session.fetch_desk_news(True)
+    return client
 
 
 def _isolate_runtime_state() -> None:

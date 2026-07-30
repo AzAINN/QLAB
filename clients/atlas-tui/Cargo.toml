@@ -30,7 +30,10 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 unicode-width = "0.2.2"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
-reqwest = { version = "0.13.4", features = ["json", "stream"] }
+# `query` is what percent-encodes the stream's resume cursor. An ISO timestamp
+# carries `+00:00`, and a raw `+` formatted into a url decodes to a space on the
+# owner — a resume point silently off by the whole offset.
+reqwest = { version = "0.13.4", features = ["json", "stream", "query"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [profile.release]

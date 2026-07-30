@@ -16,6 +16,7 @@
 use atlas::bus::{AppEvent, Channel, Tx};
 use atlas::cmd::Command;
 use atlas::net::http::{self, PollerHandle};
+use atlas::net::sse;
 use atlas::store::{should_render, Store};
 use atlas::{theme, ui};
 use color_eyre::eyre::Result;
@@ -73,7 +74,11 @@ async fn main() -> Result<()> {
         Instant::now(),
     );
 
-    let poller = http::spawn_poller(base, offline, tx.clone());
+    let poller = http::spawn_poller(base.clone(), offline, tx.clone());
+    // The stream holds the poller so the two feeds are one story: an event that
+    // says the desk moved brings the next snapshot forward instead of letting
+    // the frame show a plan that already executed for another whole interval.
+    sse::spawn_sse(base, tx.clone(), poller.clone());
     spawn_ticker(tx.clone());
     spawn_signal_watch();
 

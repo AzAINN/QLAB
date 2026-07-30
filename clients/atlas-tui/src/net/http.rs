@@ -12,6 +12,7 @@
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
 use crate::model::{RegimePanel, Snapshot};
+use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -108,6 +109,12 @@ pub enum Refetch {
 }
 
 /// The runtime's end of the poller.
+///
+/// Clonable because two callers hold one: the frame loop's `r` key and the SSE
+/// task, which brings the next poll forward when an event says the snapshot is
+/// already out of date. Cloning cannot widen what the handle can ask for —
+/// `Refetch` has one variant.
+#[derive(Clone)]
 pub struct PollerHandle {
     pub refetch: UnboundedSender<Refetch>,
 }
@@ -129,30 +136,6 @@ pub fn spawn_poller(base: String, offline: bool, tx: Tx) -> PollerHandle {
         let _ = poll_loop(base, offline, tx, rx).await;
     });
     PollerHandle { refetch }
-}
-
-/// The bus is closed: the frame loop that these events were for has stopped.
-struct Gone;
-
-fn emit(tx: &Tx, ev: AppEvent) -> Result<(), Gone> {
-    tx.send(ev).map_err(|_| Gone)
-}
-
-/// Report a connection edge, never a repeat: a chip that redraws every poll
-/// would dirty the frame three times a second for no news.
-fn mark(tx: &Tx, up: &mut Option<bool>, next: bool) -> Result<(), Gone> {
-    if *up == Some(next) {
-        return Ok(());
-    }
-    *up = Some(next);
-    emit(
-        tx,
-        if next {
-            AppEvent::ConnUp(Channel::Owner)
-        } else {
-            AppEvent::ConnDown(Channel::Owner)
-        },
-    )
 }
 
 async fn poll_loop(
@@ -188,7 +171,7 @@ async fn poll_loop(
                 Readiness::Ready => true,
                 Readiness::Unreachable(why) => {
                     tracing::warn!(%why, "owner is not reachable");
-                    mark(&tx, &mut up, false)?;
+                    mark(&tx, Channel::Owner, &mut up, false)?;
                     false
                 }
             }
@@ -202,7 +185,7 @@ async fn poll_loop(
                 // "waiting for the first snapshot" for as long as it stayed
                 // broken, with the reason visible only in the log.
                 Fetched::Decoded(snapshot) => {
-                    mark(&tx, &mut up, true)?;
+                    mark(&tx, Channel::Owner, &mut up, true)?;
                     emit(&tx, AppEvent::Snapshot(Box::new(snapshot)))?;
                 }
                 // Fail loud, and on screen. A payload the model cannot read is a
@@ -220,7 +203,7 @@ async fn poll_loop(
                     // names the remedy, but "connection refused" versus "404" is
                     // a distinction Task 16's toasts will carry.
                     tracing::warn!(%error, "owner poll failed");
-                    mark(&tx, &mut up, false)?;
+                    mark(&tx, Channel::Owner, &mut up, false)?;
                 }
             }
 
@@ -282,22 +265,6 @@ async fn probe(client: &reqwest::Client, base: &str) -> Readiness {
             because(&err)
         )),
     }
-}
-
-/// The failure with its causes, not just its headline.
-///
-/// `reqwest`'s `Display` names the request that failed and stops there, so
-/// "connection refused" and "timed out" arrive as the same sentence — and those
-/// are different problems with different remedies. The chain is the half of the
-/// message worth logging.
-fn because(err: &(dyn std::error::Error + 'static)) -> String {
-    let mut out = err.to_string();
-    let mut cause = err.source();
-    while let Some(next) = cause {
-        out.push_str(&format!(": {next}"));
-        cause = next.source();
-    }
-    out
 }
 
 /// The three outcomes of one GET, kept apart because they mean different things

@@ -16,12 +16,25 @@ account:
 # universe_tier: extended       # Optional: resolve this list from configs/universe.yaml.
 universe_whitelist:
   - ACWI
+  - SPY
+  - QQQ
+  - IWM
+  - EEM
   - BNDW
-  - GSG
-  - IGF
-  - GLD
-  - VNQ
+  - TLT
+  - IEF
+  - TIP
+  - LQD
+  - HYG
   - EMB
+  - GLD
+  - SLV
+  - GSG
+  - DBC
+  - USO
+  - IGF
+  - VNQ
+  - RWO
 
 constraints:
   long_only: true               # no shorts
@@ -31,7 +44,11 @@ constraints:
   max_turnover_per_rebalance: 0.50   # sum |Δw| capped per rebalance
   max_gross_exposure: 1.0       # abs-sum, so the cap also covers future shorts
   stress_vol_limit: 0.30        # annualized correlation-to-one warning threshold
-  max_orders_per_day: 20
+  # 60, not 20: a full rebalance across a 20-name universe can need a sell and
+  # a buy leg per name plus retries, and the cap is a circuit breaker against a
+  # runaway loop — not a portfolio-construction constraint. Left at 20 it would
+  # refuse the defensive basket below, which is exactly when it must not.
+  max_orders_per_day: 60
   order_type: marketable_limit  # never plain market orders
 
 # Pre-kill-switch drawdown controls. These tiers inform the referee before the
@@ -55,14 +72,21 @@ rebalance:
 # Pre-validated risk-off proposal used only when the robust regime is stress
 # or uncertain. It is still a proposal: the referee, cost gate, and explicit
 # human confirmation remain mandatory before any paper order can execute.
+# Every weight names a whitelisted ticker: the risk-off basket must be
+# executable under the same mandate as any other target, or it is decorative.
 defensive_targets:
-  ACWI: 0.10
-  BNDW: 0.40
-  GSG: 0.05
-  IGF: 0.05
-  GLD: 0.30
-  VNQ: 0.05
-  EMB: 0.05
+  BNDW: 0.20
+  TLT: 0.14
+  IEF: 0.12
+  TIP: 0.10
+  LQD: 0.06
+  GLD: 0.20
+  ACWI: 0.06
+  SPY: 0.04
+  EMB: 0.03
+  IGF: 0.02
+  VNQ: 0.02
+  RWO: 0.01
 
 # Fractional / notional orders are required — whole shares of a $250 ETF give
 # ~2.5% weight granularity, which would make the optimized weights fiction.

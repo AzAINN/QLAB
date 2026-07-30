@@ -149,7 +149,10 @@ APP_CSS_TEMPLATE = Template("""
         text-style: bold;
     }
     #nav {
-        height: 9;
+        /* One row per view. Hard-coding 9 silently truncated the tenth the
+           moment a view was added — the row simply was not drawn, with no
+           error anywhere. */
+        height: 10;
         color: $muted;
         margin-top: 0;
     }
@@ -592,6 +595,20 @@ APP_CSS_TEMPLATE = Template("""
     }
     #settings-desk-actions Button {
         margin-right: 1;
+    }
+    #news-summary {
+        height: auto;
+        padding: 0 1;
+    }
+    /* The story list is the only part that should scroll: the window summary
+       and the coverage line must stay visible while reading down. */
+    #news-scroll {
+        height: 1fr;
+        overflow-y: auto;
+        padding: 0 1;
+    }
+    #news-stories {
+        height: auto;
     }
     #settings-workforce, #settings-workforce-copy {
         width: 1fr;

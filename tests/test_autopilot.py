@@ -16,8 +16,13 @@ def test_defensive_targets_are_validated_when_mandate_loads(tmp_path):
 
     mandate = load_mandate()
     mandate.check_targets(mandate.defensive_targets)
-    assert mandate.defensive_targets["BNDW"] == 0.40
-    assert mandate.defensive_targets["GLD"] == 0.30
+    # The basket is risk-off by construction: duration plus gold dominate, and
+    # every leg names a whitelisted ticker so it is executable under the same
+    # mandate as any other target.
+    assert mandate.defensive_targets["BNDW"] == 0.20
+    assert mandate.defensive_targets["GLD"] == 0.20
+    assert set(mandate.defensive_targets) <= set(mandate.universe_whitelist)
+    assert sum(mandate.defensive_targets.values()) == pytest.approx(1.0)
 
     raw = yaml.safe_load(data_path("mandate.yaml").read_text(encoding="utf-8"))
     raw["defensive_targets"]["GLD"] = 0.90

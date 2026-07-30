@@ -89,8 +89,12 @@ _WORKSPACE_ROOT = workspace_root()
 _DEFAULT_TICKERS = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
 _VIEWS = (
     "atlas", "dashboard", "market", "workforce", "research", "book", "audit",
-    "reference", "settings",
+    "reference", "settings", "news",
 )
+# The key that actually selects each view. The nav used to number its rows by
+# position, which silently lies the moment the order and the bindings diverge —
+# a row reading "4" that does not respond to 4 is worse than an unnumbered one.
+_VIEW_KEYS = {view: str((index + 1) % 10) for index, view in enumerate(_VIEWS)}
 _DASHBOARD_TILE_KEYS = (
     "equity", "allocation", "regime", "market-pulse", "verdict", "run", "alerts",
     "stress",
@@ -913,9 +917,10 @@ class NavMenu(Static):
         # uppercase labels for Bloomberg-style scan-readability.
         return "\n".join(
             (
-                f"[bold {AMBER}]▐[/][bold {TEXT_HI}] {index}  {view.upper()}[/]"
+                f"[bold {AMBER}]▐[/][bold {TEXT_HI}] "
+                f"{_VIEW_KEYS[view]}  {view.upper()}[/]"
                 if view == self.active_view
-                else f"[{MUTED}]   {index}  {view.title()}[/]"
+                else f"[{MUTED}]   {_VIEW_KEYS[view]}  {view.title()}[/]"
             )
             for index, view in enumerate(_VIEWS, start=1)
         )
@@ -1050,6 +1055,8 @@ class QlabTui(App[None]):
         Binding("7", "view('audit')", "Audit", show=False),
         Binding("8", "view('reference')", "Reference", show=False),
         Binding("9", "view('settings')", "Settings", show=False),
+        Binding("0", "view('news')", "News", show=False),
+        Binding("f10", "view('news')", "News", show=False),
         Binding("f1", "view('atlas')", "Atlas", show=False),
         Binding("f2", "view('dashboard')", "Dashboard", show=False),
         Binding("f3", "view('market')", "Market", show=False),
@@ -1360,6 +1367,12 @@ class QlabTui(App[None]):
                         classes="book-section",
                         markup=True,
                     )
+                with Vertical(id="news", classes="canvas-view"):
+                    yield Static(f"[{AMBER}]\u258d[/] NEWS", classes="canvas-title",
+                                 markup=True)
+                    yield Static(id="news-summary", markup=True)
+                    with Vertical(id="news-scroll"):
+                        yield Static(id="news-stories", markup=True)
                 with Vertical(id="audit", classes="canvas-view"):
                     yield Static(f"[{AMBER}]\u258d[/] AUDIT", classes="canvas-title", markup=True)
                     yield Static(id="audit-summary", markup=True)
@@ -1451,7 +1464,7 @@ class QlabTui(App[None]):
         yield RichLog(id="timeline", wrap=True, markup=False, max_lines=500)
         # CHANGE #1: Bloomberg-style status bar — command prompt + chip strip
         with Horizontal(id="command-row"):
-            yield Input(placeholder="  : command  ·  ctrl+p  ·  1-9 views  ·  j/k symbol", id="command")
+            yield Input(placeholder="  : command  ·  ctrl+p  ·  0-9 views  ·  j/k symbol", id="command")
             yield Static("CONNECTING", id="conn-chip", markup=True)
             yield Static("CONNECTING", id="mode-chip")
 
@@ -2184,6 +2197,7 @@ class QlabTui(App[None]):
             "workforce": self._render_workforce,
             "research": self._render_research,
             "book": self._render_book,
+            "news": self._render_news,
             "audit": self._render_audit,
             "settings": self._render_settings,
         }
@@ -2653,6 +2667,32 @@ class QlabTui(App[None]):
                 [f"NEWS FEED UNAVAILABLE — {read['news_error']}",
                  "The qualitative side of this read is missing, not quiet."],
                 tone=DOWN, max_len=200))
+
+        qual = _record(read.get("qualitative_signals"))
+        if qual.get("signals"):
+            lines.append("")
+            lines.append(f"[bold {AMBER}]\u258c WHAT THE RECORD COVERS[/]")
+            lines.append(f"[{BORDER_HI}]{'\u2500' * 48}[/]")
+            if not qual.get("sufficient"):
+                # Absence stated, never rendered as a calm reading.
+                lines.append(
+                    f"[{AMBER}]window too thin to interpret[/]  [{DIM}]"
+                    f"{int(qual.get('item_count') or 0)} record(s); "
+                    f"{int(qual.get('min_items') or 0)} needed before a ratio "
+                    f"is a measurement rather than one story.[/]")
+            named = _record(qual.get("by_name"))
+            for key, label in (("coverage_breadth", "HOLDINGS NAMED"),
+                               ("asset_class_reach", "CLASSES COVERED"),
+                               ("corroboration_ratio", "CORROBORATED")):
+                sig = _record(named.get(key))
+                value = sig.get("value")
+                lines.extend(_key_number_markup(
+                    [(label, "\u2014" if value is None else pct(value))],
+                    value_tones=[MUTED if value is None
+                                 else UP if value >= 0.6
+                                 else AMBER if value >= 0.3 else DOWN]))
+                if sig.get("reason"):
+                    lines.append(f"    [{DIM}]{escape(str(sig['reason']))}[/]")
 
         tensions = [str(t) for t in (read.get("tensions") or [])]
         if tensions:
@@ -3984,6 +4024,107 @@ class QlabTui(App[None]):
         self.query_one("#settings-theme", Static).update(
             "\n".join(theme_lines)
         )
+
+    def _render_news(self) -> None:
+        """The news window, with its coverage stated rather than implied.
+
+        A thin window has two completely different causes — the market was
+        quiet, or the wire simply is not writing about these tickers — and a
+        list of headlines alone cannot tell them apart. This desk holds
+        cross-asset ETFs that get almost no symbol-tagged coverage, so the
+        coverage line is not a diagnostic detail; it is the main thing a reader
+        needs in order to know what the absence of news means.
+        """
+        news = _record(self.snapshot.get("news")) if self.snapshot else {}
+        counts = _record(news.get("counts"))
+        provider = str(news.get("provider") or "—")
+        error = str(news.get("error") or "")
+
+        head = [f"[{LABEL_GOLD}]THE WINDOW[/]"]
+        pending = bool(error) and "not fetched yet" in error.lower()
+        if pending:
+            # A window the desk has not asked for yet is not a broken feed.
+            # Painting it red taught the operator to distrust a working feed.
+            head.append("")
+            head.extend(_bulletin_markup(
+                ["Fetching the first window — the owner heartbeat populates it "
+                 "within one tick.",
+                 "Press r to fetch now."],
+                tone=MUTED, max_len=200))
+            self.query_one("#news-summary", Static).update("\n".join(head))
+            self.query_one("#news-stories", Static).update("")
+            return
+        if error:
+            head.extend(_bulletin_markup(
+                [f"NEWS FEED UNAVAILABLE — {error}",
+                 "The qualitative side of the read is missing, not quiet."],
+                tone=DOWN, max_len=240))
+            self.query_one("#news-summary", Static).update("\n".join(head))
+            self.query_one("#news-stories", Static).update("")
+            return
+
+        total = int(counts.get("total") or 0)
+        head.extend(_key_number_markup(
+            [
+                ("stories", str(total)),
+                ("about holdings", str(int(counts.get("holding") or 0))),
+                ("macro context", str(int(counts.get("macro") or 0))),
+                ("provider", provider.upper()),
+            ],
+            value_tones=[
+                TEXT_HI,
+                UP if int(counts.get("holding") or 0) else MUTED,
+                TEXT_HI,
+                AMBER if provider == "synthetic" else UP,
+            ],
+        ))
+        if provider == "synthetic":
+            head.append("")
+            head.append(
+                f"[{AMBER}]synthetic (demo)[/]  [{DIM}]deterministic fixtures, "
+                f"not a news record. Sign in and run --live for the real "
+                f"window; see docs/news-setup.md.[/]")
+
+        coverage = [c for c in (news.get("coverage") or []) if isinstance(c, dict)]
+        if coverage:
+            head.append("")
+            covered = [c for c in coverage if int(c.get("stories") or 0) > 0]
+            head.append(f"[{LABEL_GOLD}]COVERAGE[/]  [{DIM}]"
+                        f"{len(covered)}/{len(coverage)} holdings named[/]")
+            head.append("  " + "   ".join(
+                f"[{UP if int(c.get('stories') or 0) else MUTED}]"
+                f"{escape(str(c.get('ticker')))} {int(c.get('stories') or 0)}[/]"
+                for c in coverage))
+            uncovered = [str(t) for t in (news.get("uncovered") or [])]
+            if uncovered:
+                head.append(
+                    f"[{DIM}]No story named {escape(', '.join(uncovered))} in this "
+                    f"window. For broad cross-asset ETFs that is normal — the "
+                    f"macro items above are the relevant record, and silence "
+                    f"here is not evidence of calm.[/]")
+        self.query_one("#news-summary", Static).update("\n".join(head))
+
+        if not (news.get("items") or []):
+            self.query_one("#news-stories", Static).update(
+                f"[{MUTED}]No stories in the last "
+                f"{int(news.get('lookback_hours') or 48)} hours.[/]")
+            return
+
+        lines = [f"[{BORDER_HI}]{'─' * 60}[/]", ""]
+        for item in (news.get("items") or [])[:40]:
+            row = _record(item)
+            when = str(row.get("published") or "")[:16].replace("T", " ")
+            tickers = [str(t) for t in (row.get("tickers") or [])]
+            scope = (f"[{UP}]{escape(','.join(tickers))}[/]" if tickers
+                     else f"[{MUTED}]macro[/]")
+            lines.append(
+                f"[{DIM}]{escape(when)}[/]  {scope}  "
+                f"[{TEXT_HI}]{escape(str(row.get('headline') or ''))}[/]")
+            source = str(row.get("source") or "")
+            if source:
+                lines.append(f"        [{DIM}]{escape(source)}[/]")
+            lines.append("")
+        self.query_one("#news-stories", Static).update("\n".join(lines))
 
     def _render_audit(self) -> None:
         decisions = self.snapshot.get("decisions", [])

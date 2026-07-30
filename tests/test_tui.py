@@ -4795,3 +4795,38 @@ def test_switching_theme_repaints_chrome_not_just_content():
             assert sum(light_screen) > sum(dark_screen)
 
     asyncio.run(run())
+
+
+def test_every_view_row_shows_the_key_that_selects_it():
+    """The nav numbered its rows by position, which lies once order diverges.
+
+    Inserting a tenth view made row 4 read "4" while 4 still selected the fifth
+    view. A row whose number does not work is worse than an unnumbered one.
+    """
+    import re
+
+    from qlab.tui.app import _VIEWS, _VIEW_KEYS
+
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "qlab/tui/app.py").read_text()
+    bound = {view: key for key, view in
+             re.findall(r'Binding\("(\d)", "view\(\'(\w+)\'\)"', src)}
+    for view in _VIEWS:
+        assert bound.get(view) == _VIEW_KEYS[view], view
+
+
+def test_the_nav_is_tall_enough_for_every_view():
+    """`height: 9` silently truncated the tenth row — no error, just missing.
+
+    The row was simply not drawn, so a whole view became unreachable by mouse
+    with nothing anywhere to say why.
+    """
+    import re
+
+    from qlab.tui.app import _VIEWS
+    from qlab.tui.theme import APP_CSS
+
+    match = re.search(r"#nav \{[^}]*height:\s*(\d+)", APP_CSS)
+    assert match, "#nav has no explicit height"
+    assert int(match.group(1)) >= len(_VIEWS)

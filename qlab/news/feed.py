@@ -16,6 +16,7 @@ from __future__ import annotations
 import calendar
 import hashlib
 import os
+import sys
 import random
 import threading
 import urllib.parse
@@ -34,7 +35,18 @@ import yaml
 from qlab.paths import data_path
 
 _FETCH_TIMEOUT_S = 5
-_SYNTHETIC_OFFSETS_HOURS = (3, 9, 18, 30, 42, 54, 66)
+# Publication ages for synthetic items, in hours. Every entry is <= 45 so the
+# +0..2 jitter below can never push an item past a 48h window: the count of
+# in-window items is then a function of universe size alone, not of which
+# template the shuffle happened to draw. The old 7-entry schedule combined with
+# `block * 72` dated the eighth item onward up to nine days back, so a 20-name
+# universe returned a mean of 2.1 items over a 48h window and zero on some
+# dates — which would leave the qualitative signals with no input at all.
+# One item is deliberately left outside any plausible window (54) so the cutoff
+# filter stays exercised rather than becoming vacuously true.
+_SYNTHETIC_OFFSETS_HOURS = (
+    3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 54,
+)
 
 
 @dataclass(frozen=True)
@@ -113,7 +125,12 @@ def fetch_news(
             for ticker in _normalize_universe(item.tickers)
             if ticker in universe_set
         )
-        if not mapped:
+        # An untagged item is macro context, not a mis-tagged holding item.
+        # Dropping it made a cross-asset desk report "quiet" whenever the wire
+        # simply was not naming ACWI or BNDW — which is almost always. It is
+        # kept with no tickers, so nothing downstream can mistake it for
+        # evidence about a specific position.
+        if not mapped and item.tickers:
             continue
         items.append(
             replace(
@@ -187,9 +204,11 @@ def _fetch_synthetic(
         choices = raw_templates if isinstance(raw_templates, list) else [raw_templates]
         template = choices[rng.randrange(len(choices))]
         block, offset_index = divmod(index, len(_SYNTHETIC_OFFSETS_HOURS))
+        # `block` adds one hour per wrap, not 72: it only breaks ties between
+        # tickers sharing a slot, and must not walk items out of the window.
         offset = (
             _SYNTHETIC_OFFSETS_HOURS[offset_index]
-            + block * 72
+            + block
             + rng.randrange(0, 3)
         )
         published = as_of - timedelta(hours=offset)
@@ -598,9 +617,16 @@ def _validate_ticker_list(value: Any, label: str) -> None:
         raise ValueError(f"{label} must be a non-empty list of strings")
 
 
+# Alpaca's per-request ceiling. Named because it bounds every window the desk
+# shows, and a silent cap on a news feed reads as "that is all there was".
+_ALPACA_LIMIT = 50
+
+
 def _fetch_alpaca(
     as_of: datetime,
     universe: tuple[str, ...],
+    *,
+    market_context: bool = True,
 ) -> list[NewsItem]:
     """Fetch ticker-tagged news from Alpaca (Benzinga-backed).
 
@@ -635,49 +661,81 @@ def _fetch_alpaca(
         from alpaca.data.historical.news import NewsClient
         from alpaca.data.requests import NewsRequest
     except ImportError as exc:
+        # Name the interpreter. "install qlab[trader]" alone is actively
+        # misleading on a machine that HAS installed it — into a different
+        # environment. An editable install shares the source between
+        # environments but not the dependencies, so the desk can be running
+        # this exact file from a Python that never got alpaca-py, and the
+        # operator reads a message telling them to do what they already did.
         raise RuntimeError(
-            "alpaca news provider requires the 'alpaca-py' package; "
-            "install qlab[trader]") from exc
+            f"alpaca news provider requires the 'alpaca-py' package, which is "
+            f"not installed in {sys.executable}. Install it into THIS "
+            f"interpreter: {sys.executable} -m pip install 'qlab[trader]' "
+            f"(a different environment having it does not help — that is the "
+            f"usual cause of this message)") from exc
 
     client = (
         NewsClient(oauth_token=creds.oauth_token)
         if creds.kind == "oauth"
         else NewsClient(creds.api_key, creds.secret_key)
     )
-    request = NewsRequest(
-        symbols=",".join(universe),
-        start=as_of - timedelta(days=7),
-        end=as_of,
-        limit=50,
-        include_content=True,
-        exclude_contentless=True,
-    )
-    try:
-        response = client.get_news(request)
-    except Exception as exc:
-        raise RuntimeError(f"alpaca news request failed ({exc})") from exc
+    def _query(symbols: str | None) -> list:
+        request = NewsRequest(
+            symbols=symbols,
+            start=as_of - timedelta(days=7),
+            end=as_of,
+            limit=_ALPACA_LIMIT,
+            include_content=True,
+            exclude_contentless=True,
+        )
+        try:
+            response = client.get_news(request)
+        except Exception as exc:
+            raise RuntimeError(f"alpaca news request failed ({exc})") from exc
+        raw = getattr(response, "data", None)
+        return raw.get("news", []) if isinstance(raw, dict) else (raw or [])
 
-    raw = getattr(response, "data", None)
-    records = raw.get("news", []) if isinstance(raw, dict) else (raw or [])
     universe_set = set(universe)
     items: list[NewsItem] = []
-    for record in records:
-        symbols = tuple(
-            s for s in (getattr(record, "symbols", None) or [])
-            if s in universe_set)
-        if not symbols:
-            continue
-        published = getattr(record, "created_at", None)
-        items.append(NewsItem(
-            source=str(getattr(record, "source", "") or "alpaca"),
-            published=_iso_timestamp(_as_datetime(published)) if published
-            else _iso_timestamp(as_of),
-            headline=str(getattr(record, "headline", "") or ""),
-            summary=str(getattr(record, "summary", "") or ""),
-            url=str(getattr(record, "url", "") or ""),
-            tickers=tuple(sorted(symbols)),
-            provider="alpaca",
-        ))
+    seen: set[str] = set()
+
+    def _collect(records, *, require_universe: bool) -> None:
+        for record in records:
+            symbols = tuple(
+                s for s in (getattr(record, "symbols", None) or [])
+                if s in universe_set)
+            if require_universe and not symbols:
+                continue
+            url = str(getattr(record, "url", "") or "")
+            headline = str(getattr(record, "headline", "") or "")
+            # The two queries overlap by construction, so dedupe on the record's
+            # own identity rather than letting one story count twice toward
+            # corroboration — that would manufacture agreement out of nothing.
+            key = url or headline
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            published = getattr(record, "created_at", None)
+            items.append(NewsItem(
+                source=str(getattr(record, "source", "") or "alpaca"),
+                published=_iso_timestamp(_as_datetime(published)) if published
+                else _iso_timestamp(as_of),
+                headline=headline,
+                summary=str(getattr(record, "summary", "") or ""),
+                url=url,
+                tickers=tuple(sorted(symbols)),
+                provider="alpaca",
+            ))
+
+    _collect(_query(",".join(universe)), require_universe=True)
+    if market_context:
+        # A cross-asset desk holding ACWI/BNDW/EMB gets almost no symbol-tagged
+        # coverage — Benzinga tags US equities, and six of this desk's seven
+        # tickers return nothing. Without the untagged market window the desk
+        # reports "quiet" for a market that was not quiet at all; it simply was
+        # not talking about these tickers. Items carry no tickers, which is
+        # honest: they are macro context, not evidence about a holding.
+        _collect(_query(None), require_universe=False)
     return items
 
 

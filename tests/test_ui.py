@@ -634,7 +634,7 @@ def test_live_portfolio_marks_to_market_with_provenance(session, monkeypatch):
     assert status == 200
     assert live["blocked"] is False
     assert live["equity"] > 0
-    assert len(live["positions"]) == 7
+    assert len(live["positions"]) == len(session.mandate.universe_whitelist)
     # A fully-invested long book: gross ~ net ~ 1.0.
     assert live["gross_exposure"] == pytest.approx(live["net_exposure"], abs=1e-6)
     assert 0.9 < live["gross_exposure"] <= 1.0 + 1e-6
@@ -657,7 +657,7 @@ def test_tui_snapshot_is_provenance_first(session):
     assert "human confirmation" in snap["system"]["governed_lock_reason"]
     assert snap["market"]["frequency"] == "daily"
     assert snap["market"]["source"] in {"synthetic", "yfinance"}
-    assert len(snap["market"]["assets"]) == 7
+    assert len(snap["market"]["assets"]) == len(session.mandate.universe_whitelist)
     assert snap["events"][-1]["kind"] == "demo"
     assert {agent["name"] for agent in snap["agents"]} == {
         "moments-analyst", "challenger", "optimization-runner", "referee", "reporter"
@@ -726,7 +726,10 @@ def test_owner_exposes_safe_lab_tools_and_durable_workflows(session):
         session, "POST", "/api/lab/data.fetch_universe", {},
         {"which": "core", "offline": True},
     )
-    assert status == 200 and len(result["result"]["tickers"]) == 7
+    assert status == 200
+    # The core tier, whatever its size — pinning a literal here just re-breaks
+    # on the next universe change without testing anything extra.
+    assert len(result["result"]["tickers"]) == len(session.mandate.universe_whitelist)
 
     status, workflow = handle_api(
         session, "POST", "/api/workflows/start", {},
@@ -2719,3 +2722,84 @@ def test_a_non_finite_weight_is_reported_not_rendered_as_a_number():
     assert "[unreadable: SPY]" in _format_targets({"SPY": float("inf")})
     # And a clean set is untouched.
     assert _format_targets({"SPY": 0.6, "GLD": 0.4}) == "SPY 60.0% · GLD 40.0%"
+
+
+# --- the news window ----------------------------------------------------------
+
+
+def test_news_payload_separates_holding_stories_from_macro_context(session):
+    """A cross-asset desk gets almost no symbol-tagged coverage.
+
+    Benzinga tags US equities; six of this desk's seven ETFs return nothing. If
+    untagged macro items were dropped, the desk would report "quiet" for a
+    market that was not quiet at all — it simply was not naming these tickers.
+    Macro items are kept, and labelled so nothing mistakes one for evidence
+    about a holding.
+    """
+    session.fetch_desk_news(True)
+    out = session.news_payload(True)
+    assert out["counts"]["total"] == len(out["items"])
+    assert out["counts"]["holding"] + out["counts"]["macro"] == out["counts"]["total"]
+    for row in out["items"]:
+        assert row["scope"] == ("holding" if row["tickers"] else "macro")
+
+
+def test_news_payload_names_the_holdings_no_story_mentioned(session):
+    # "0 stories about your holdings" and "the market was quiet" are different
+    # facts, and only the coverage list can tell them apart.
+    session.fetch_desk_news(True)
+    out = session.news_payload(True)
+    universe = set(session.mandate.universe_whitelist)
+    assert {c["ticker"] for c in out["coverage"]} == universe
+    assert set(out["uncovered"]) <= universe
+    for ticker in out["uncovered"]:
+        assert next(c for c in out["coverage"] if c["ticker"] == ticker)["stories"] == 0
+
+
+def test_news_route_is_cache_only_and_never_fetches_under_the_lock(session):
+    """A cold desk answers, and answers empty, rather than fetching.
+
+    `news_payload` is reached from `tui_snapshot`, which runs under the
+    dispatch lock, and `fetch_desk_news` is the seam the network lives behind.
+    Filling the window from here — even "only when offline", since offline is a
+    runtime value — would block every request on a slow provider.
+    """
+    def forbidden(*_a, **_k):
+        raise AssertionError("news_payload fetched under the dispatch lock")
+
+    session.fetch_desk_news = forbidden
+    status, out = handle_api(session, "GET", "/api/news", {}, {})
+    assert status == 200
+    assert out["items"] == []
+    # The window is filled by the heartbeat or by an explicit ?refresh=1, which
+    # the HTTP handler runs outside the lock.
+    assert out["counts"]["total"] == 0
+
+
+def test_the_news_window_rides_the_one_consistent_snapshot(session):
+    snap = session.tui_snapshot(True)
+    assert "news" in snap and "coverage" in snap["news"]
+
+
+def test_the_desk_read_carries_qualitative_signals(session):
+    session.fetch_desk_news(True)
+    read = session.compose_desk_read(True, prefetched_news=session.desk_news_window())
+    qual = read["qualitative_signals"]
+    assert {s["name"] for s in qual["signals"]} == {
+        "coverage_breadth", "asset_class_reach", "attention_concentration",
+        "corroboration_ratio", "publisher_concentration", "window_age_hours"}
+    assert session.atlas_facts(True)["news_window_sufficient"] is qual["sufficient"]
+
+
+def test_a_failed_recompose_zeroes_the_signals_rather_than_carrying_them(session):
+    """Stale coverage is worse than none — it is a number the desk cannot stand
+    behind, rendered as though it could."""
+    session.fetch_desk_news(True)
+    session.compose_desk_read(True, prefetched_news=session.desk_news_window())
+    assert session.desk_read(True)["qualitative_signals"]["sufficient"] is True
+
+    session.mark_desk_read_stale("grounding rejected a malformed record")
+    qual = session.desk_read(True)["qualitative_signals"]
+    assert qual["sufficient"] is False
+    assert all(s["value"] is None for s in qual["signals"])
+    assert all(s["state"] == "no_window" for s in qual["signals"])

@@ -286,7 +286,7 @@ fn snapshot_fixture_deserializes_and_regime_is_nested_under_market() {
 **Interfaces:**
 - Consumes: `AppEvent` (Task 1), `Snapshot` (Task 3).
 - Produces: `Store { pub snapshot: Option<Snapshot>, pub regime_panel: Option<RegimePanel>, pub nav: Nav, pub conn: Conn, dirty: bool }` with `apply(&mut self, ev: AppEvent) -> Vec<Trigger>` returning motion triggers (empty until Task 15; the enum exists now: `Trigger { RegimeChanged, DrawdownTierWorse, Halted, Resumed, ApprovalCreated, PhaseAdvanced, PlanExecuted, QuoteTick(String), ReadChanged }`). `Nav { view: ViewId, focus: Focus }`, `ViewId` = the 7 views.
-- Produces: `main.rs` run loop: crossterm raw mode + alternate screen, EventStream forwarded to bus, 120 ms `Tick` interval, `should_render(&store, fx_active, last_frame) -> bool` implementing the Part III pacing rule as a **pure function**.
+- Produces: `main.rs` run loop: crossterm raw mode + alternate screen, EventStream forwarded to bus, 120 ms `Tick` interval, `should_render(dirty, fx_active, last_frame, now) -> bool` implementing the Part III pacing rule as a **pure function** — the clock enters as the `now` argument, never read inside.
 
 - [ ] **Step 1:** Failing test for pacing (pure function — no terminal needed):
 

@@ -128,3 +128,133 @@ synthetic:
       headline: Listed real-estate risk centers on refinancing schedules
       summary: Debt maturities and segment-level fundamentals shape the latest synthetic property risk brief.
       url: synthetic://qlab/vnq/refinancing
+
+  SPY:
+    - source: qlab synthetic us equity
+      headline: US large-cap leadership narrows into the close
+      summary: Index-level breadth and concentration are the stated risk context for US large caps.
+      url: synthetic://qlab/spy/us-breadth
+    - source: qlab synthetic index desk
+      headline: Passive flows steady as US benchmark volatility eases
+      summary: Benchmark flow and realized-volatility context for the US large-cap complex.
+      url: synthetic://qlab/spy/index-flows
+
+  QQQ:
+    - source: qlab synthetic tech desk
+      headline: Growth leadership concentrates in a narrowing cohort
+      summary: Concentration in large-cap growth is the dominant dispersion story this window.
+      url: synthetic://qlab/qqq/growth-concentration
+    - source: qlab synthetic us equity
+      headline: Rate sensitivity returns to long-duration equity
+      summary: Duration-sensitive equity reprices as the policy path is re-read.
+      url: synthetic://qlab/qqq/duration-equity
+
+  IWM:
+    - source: qlab synthetic us equity
+      headline: Small caps lag as credit conditions tighten
+      summary: Small-cap breadth tracks credit availability rather than index-level risk appetite.
+      url: synthetic://qlab/iwm/smallcap-credit
+    - source: qlab synthetic index desk
+      headline: Domestic cyclicals diverge from megacap leadership
+      summary: Cyclical and megacap return paths separate, widening cross-sectional dispersion.
+      url: synthetic://qlab/iwm/cyclical-divergence
+
+  EEM:
+    - source: qlab synthetic emerging markets
+      headline: Emerging equity tracks dollar and policy differentials
+      summary: EM equity risk is framed by currency and relative-policy context.
+      url: synthetic://qlab/eem/em-dollar
+    - source: qlab synthetic global markets
+      headline: Regional dispersion widens across emerging markets
+      summary: Country-level dispersion within EM widens relative to developed markets.
+      url: synthetic://qlab/eem/em-dispersion
+
+  TLT:
+    - source: qlab synthetic rates desk
+      headline: Long-duration Treasuries repricing on term-premium shifts
+      summary: Term premium rather than the policy rate drives the long end this window.
+      url: synthetic://qlab/tlt/term-premium
+    - source: qlab synthetic fixed income
+      headline: Duration demand shifts with auction supply
+      summary: Supply and duration demand are the stated context for the long end.
+      url: synthetic://qlab/tlt/auction-supply
+
+  IEF:
+    - source: qlab synthetic rates desk
+      headline: Intermediate Treasuries anchor to the expected policy path
+      summary: The belly of the curve reflects expected policy over the coming cycle.
+      url: synthetic://qlab/ief/policy-anchor
+    - source: qlab synthetic fixed income
+      headline: Belly of the curve steepens against the front end
+      summary: Curve shape between the front end and the belly is the reported development.
+      url: synthetic://qlab/ief/belly-steepening
+
+  TIP:
+    - source: qlab synthetic inflation desk
+      headline: Breakevens drift as real yields lead nominal moves
+      summary: Real yields and breakeven inflation are the framing for index-linked exposure.
+      url: synthetic://qlab/tip/breakevens
+    - source: qlab synthetic rates desk
+      headline: Inflation-linked demand tracks realized price data
+      summary: Index-linked demand follows realized rather than surveyed inflation.
+      url: synthetic://qlab/tip/linked-demand
+
+  LQD:
+    - source: qlab synthetic credit desk
+      headline: Investment-grade spreads compress on steady issuance
+      summary: IG spread context with issuance and duration composition noted.
+      url: synthetic://qlab/lqd/ig-spreads
+    - source: qlab synthetic fixed income
+      headline: High-grade credit duration lengthens with new supply
+      summary: New issuance shifts the duration profile of the high-grade index.
+      url: synthetic://qlab/lqd/ig-duration
+
+  HYG:
+    - source: qlab synthetic credit desk
+      headline: High-yield spreads widen ahead of refinancing walls
+      summary: Refinancing supply is the stated risk context for high yield.
+      url: synthetic://qlab/hyg/hy-refi
+    - source: qlab synthetic risk desk
+      headline: Lower-rated credit decouples from investment grade
+      summary: Rating-tier dispersion within credit is the reported development.
+      url: synthetic://qlab/hyg/hy-decoupling
+
+  SLV:
+    - source: qlab synthetic metals
+      headline: Silver tracks both industrial demand and haven flows
+      summary: Silver carries a dual industrial and monetary framing this window.
+      url: synthetic://qlab/slv/silver-dual
+    - source: qlab synthetic commodities desk
+      headline: Precious-metals ratios move with real-rate expectations
+      summary: Cross-metal ratios are read against real-rate expectations.
+      url: synthetic://qlab/slv/metals-ratios
+
+  DBC:
+    - source: qlab synthetic commodities desk
+      headline: Diversified commodity baskets diverge by sector weight
+      summary: Index construction drives dispersion across commodity baskets.
+      url: synthetic://qlab/dbc/basket-weights
+    - source: qlab synthetic macro desk
+      headline: Carry and roll dominate commodity index returns
+      summary: Roll yield rather than spot direction is the reported return driver.
+      url: synthetic://qlab/dbc/roll-carry
+
+  USO:
+    - source: qlab synthetic energy desk
+      headline: Crude curves shift between contango and backwardation
+      summary: Term structure is the reported context for oil-linked exposure.
+      url: synthetic://qlab/uso/crude-curve
+    - source: qlab synthetic commodities desk
+      headline: Energy inventories reset the near-dated curve
+      summary: Inventory data is the stated driver of near-dated energy pricing.
+      url: synthetic://qlab/uso/energy-inventories
+
+  RWO:
+    - source: qlab synthetic real assets
+      headline: Global property yields diverge by region
+      summary: Regional cap-rate dispersion is the reported real-estate development.
+      url: synthetic://qlab/rwo/global-property
+    - source: qlab synthetic real estate
+      headline: Listed real estate reprices against long rates
+      summary: Listed property is read against the long end rather than the policy rate.
+      url: synthetic://qlab/rwo/reit-rates

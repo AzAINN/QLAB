@@ -35,7 +35,18 @@ import yaml
 from qlab.paths import data_path
 
 _FETCH_TIMEOUT_S = 5
-_SYNTHETIC_OFFSETS_HOURS = (3, 9, 18, 30, 42, 54, 66)
+# Publication ages for synthetic items, in hours. Every entry is <= 45 so the
+# +0..2 jitter below can never push an item past a 48h window: the count of
+# in-window items is then a function of universe size alone, not of which
+# template the shuffle happened to draw. The old 7-entry schedule combined with
+# `block * 72` dated the eighth item onward up to nine days back, so a 20-name
+# universe returned a mean of 2.1 items over a 48h window and zero on some
+# dates — which would leave the qualitative signals with no input at all.
+# One item is deliberately left outside any plausible window (54) so the cutoff
+# filter stays exercised rather than becoming vacuously true.
+_SYNTHETIC_OFFSETS_HOURS = (
+    3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 54,
+)
 
 
 @dataclass(frozen=True)
@@ -193,9 +204,11 @@ def _fetch_synthetic(
         choices = raw_templates if isinstance(raw_templates, list) else [raw_templates]
         template = choices[rng.randrange(len(choices))]
         block, offset_index = divmod(index, len(_SYNTHETIC_OFFSETS_HOURS))
+        # `block` adds one hour per wrap, not 72: it only breaks ties between
+        # tickers sharing a slot, and must not walk items out of the window.
         offset = (
             _SYNTHETIC_OFFSETS_HOURS[offset_index]
-            + block * 72
+            + block
             + rng.randrange(0, 3)
         )
         published = as_of - timedelta(hours=offset)

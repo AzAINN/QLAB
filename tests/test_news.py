@@ -193,3 +193,60 @@ def test_news_source_config_covers_the_cross_asset_core() -> None:
 
     assert set(CORE) <= mapped
     assert set(CORE) <= set(config["synthetic"])
+
+
+def test_the_synthetic_window_does_not_thin_as_the_universe_grows():
+    """The offline news window must scale with the universe, not collapse.
+
+    The old schedule had 7 offsets and added `block * 72` hours per wrap, so the
+    eighth ticker onward was dated up to nine days back. Measured on the 20-name
+    universe that gave a mean of 2.1 items in a 48h window and ZERO on some
+    dates — which would leave the qualitative signals with no input at all, on a
+    lane whose entire purpose is to be deterministic.
+    """
+    from datetime import date, timedelta
+
+    from qlab.news.feed import fetch_news
+
+    core7 = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
+    wide = ["ACWI", "SPY", "QQQ", "IWM", "EEM", "BNDW", "TLT", "IEF", "TIP",
+            "LQD", "HYG", "EMB", "GLD", "SLV", "GSG", "DBC", "USO", "IGF",
+            "VNQ", "RWO"]
+    for universe, expected in ((core7, 7), (wide, 19)):
+        counts = {
+            len(fetch_news(date(2026, 7, 30) - timedelta(days=k), universe,
+                           lookback_hours=48, offline=True))
+            for k in range(12)
+        }
+        # One count, not a range: the in-window total is a function of universe
+        # size alone, never of which template the shuffle happened to draw.
+        assert counts == {expected}, (len(universe), counts)
+
+
+def test_one_synthetic_item_stays_outside_the_window():
+    """Otherwise the cutoff filter is vacuously true and stops being a test."""
+    from datetime import date
+
+    from qlab.news.feed import fetch_news
+
+    wide = ["ACWI", "SPY", "QQQ", "IWM", "EEM", "BNDW", "TLT", "IEF", "TIP",
+            "LQD", "HYG", "EMB", "GLD", "SLV", "GSG", "DBC", "USO", "IGF",
+            "VNQ", "RWO"]
+    inside = fetch_news(date(2026, 7, 30), wide, lookback_hours=48, offline=True)
+    outside = fetch_news(date(2026, 7, 30), wide, lookback_hours=168, offline=True)
+    assert len(outside) > len(inside)
+
+
+def test_every_whitelisted_ticker_has_a_synthetic_template():
+    """`_fetch_synthetic` silently skips a ticker with no template.
+
+    That is correct for an ad-hoc caller passing arbitrary symbols, but a
+    mandate whitelist member with no fixture is a config error that would show
+    up only as a quietly thinner window.
+    """
+    from qlab.news.feed import load_news_sources
+    from qlab.trader.mandate import load_mandate
+
+    templates = load_news_sources()["synthetic"]
+    missing = [t for t in load_mandate().universe_whitelist if t not in templates]
+    assert not missing, f"whitelisted tickers with no synthetic news: {missing}"

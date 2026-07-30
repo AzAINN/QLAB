@@ -2779,3 +2779,27 @@ def test_news_route_is_cache_only_and_never_fetches_under_the_lock(session):
 def test_the_news_window_rides_the_one_consistent_snapshot(session):
     snap = session.tui_snapshot(True)
     assert "news" in snap and "coverage" in snap["news"]
+
+
+def test_the_desk_read_carries_qualitative_signals(session):
+    session.fetch_desk_news(True)
+    read = session.compose_desk_read(True, prefetched_news=session.desk_news_window())
+    qual = read["qualitative_signals"]
+    assert {s["name"] for s in qual["signals"]} == {
+        "coverage_breadth", "asset_class_reach", "attention_concentration",
+        "corroboration_ratio", "publisher_concentration", "window_age_hours"}
+    assert session.atlas_facts(True)["news_window_sufficient"] is qual["sufficient"]
+
+
+def test_a_failed_recompose_zeroes_the_signals_rather_than_carrying_them(session):
+    """Stale coverage is worse than none — it is a number the desk cannot stand
+    behind, rendered as though it could."""
+    session.fetch_desk_news(True)
+    session.compose_desk_read(True, prefetched_news=session.desk_news_window())
+    assert session.desk_read(True)["qualitative_signals"]["sufficient"] is True
+
+    session.mark_desk_read_stale("grounding rejected a malformed record")
+    qual = session.desk_read(True)["qualitative_signals"]
+    assert qual["sufficient"] is False
+    assert all(s["value"] is None for s in qual["signals"])
+    assert all(s["state"] == "no_window" for s in qual["signals"])

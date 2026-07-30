@@ -25,6 +25,8 @@ Copied from `CLAUDE.md` — every task inherits these:
 - Comments state constraints the code cannot show; match existing density.
 - Rust code lives in `clients/atlas-tui` (existing crate, evolved in place — history preserved). `cd clients/atlas-tui && cargo test` must stay green after every task.
 - AGPL boundary: FinceptTerminal is **mechanism reference only**. Reimplement from the descriptions in this plan; never open its source while writing code for this repo.
+- **Time flows in as data.** No `Instant::now()` or wall-clock reads inside render, style, or effect code — `now`/`elapsed` arrive as parameters from the main loop. This is the systemic fix for the flaky-test class the Textual client suffered (`test_quote_event_repaints_only_market_pulse_and_universe` racing a 50 ms timer margin): every animation test runs on a mocked clock, zero sleeps, fully deterministic.
+- **Truecolor is detected, not assumed.** `theme::detect()` reads `COLORTERM`/`TERM`; without truecolor the 4-level background ramp maps to xterm-256 greys 232–237 and semantic colors to their nearest 256-color indices (Terminal.app has no truecolor — the Obsidian depth ramp would otherwise collapse to one grey). One switch point; the no-hardcoded-color test keeps it that way.
 
 ---
 
@@ -65,6 +67,11 @@ Motion always *means* something. Each rule is a (trigger → effect) pair evalua
 | Ticker bar | rotate 1 cell / 120 ms, pauses on hover-focus | continuous |
 | Data in flight | braille throbber `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` in the panel header | continuous |
 | Atlas heartbeat | existing `glyph.rs` mood automaton, kept as the identity element | continuous |
+| New Atlas read (`atlas_read.as_of` change) | typewriter reveal — the brief uncovers left-to-right, oldest line first | 600 ms |
+| Stress-gauge value change | needle tweens with ease-out instead of jumping | 400 ms |
+| View entry (charts) | sparkline/curve draw-in reveals points left→right | 300 ms |
+
+Full-frame effects (the HALT treatment) are capped at 30 fps — a 120×36 truecolor full rewrite per frame is pty-bandwidth-bound on slower emulators; per-pane effects run at 60.
 
 ### The shell
 
@@ -84,7 +91,7 @@ Motion always *means* something. Each rule is a (trigger → effect) pair evalua
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Views: **DESK** (tiles + tui-big-text equity hero), **MARKETS** (ETF grid, SPY hero chart, SPDR sector heatmap), **BOOK** (stats ribbon, blotter, holdings heatmap, perf chart), **RESEARCH** (leaderboard, runs), **WORKFORCE** (phase pipeline + console), **AUDIT** (event stream), **SETTINGS**. Keys `1–7`, `Tab`/`BackTab` cycle, `q` quits, `/` focuses command line.
+Views: **DESK** (the Atlas read + tiles + tui-big-text equity hero), **MARKETS** (ETF grid, SPY hero chart, SPDR sector heatmap), **BOOK** (stats ribbon, blotter, holdings heatmap, perf chart), **RESEARCH** (leaderboard, runs, algorithm catalog), **WORKFORCE** (phase pipeline + console), **AUDIT** (event stream + approvals), **SETTINGS**. Keys `1–7`, `Tab`/`BackTab` cycle, `q` quits, `/` focuses command line, `z` zen mode (rails collapse, content maximizes), `f` fullscreens the focused pane.
 
 ---
 
@@ -161,7 +168,7 @@ net::http task results ─┘                  render if (dirty || effects_activ
 
 ### Owner API surface consumed
 
-GET: `/readyz`, `/api/tui?offline=N&event_limit=100` (poll 2 s), `/api/regime/panel` (poll 30 s), `/api/stream` (SSE: `quote` + the durable audit kinds).
+GET: `/readyz`, `/api/tui?offline=N&event_limit=100` — polled **adaptively**: 10 s idle, 2 s while a coordinator is driving or an operator action is in flight, and an immediate refetch when an SSE kind implies aggregate state changed (`workflow_phase`, `plan_executed`, `approval_*`, `halt`, `resume`, `atlas_mode`). Hammering a ~200 KB aggregate every 2 s around the clock (the Textual default) buys nothing the SSE bus doesn't already announce. Also `/api/regime/panel` (poll 30 s), `/api/stream` (SSE: `quote` + the durable audit kinds).
 POST (operator posture only, each behind a modal): `/api/approvals/<id>/…` approve/reject, `/api/plans/execute` (`human_confirmed: true`), `/api/atlas/{mode,pause,resume,autonomy,message}`, `/api/workforce/fast`, `/api/workflows/start`, `/api/desk_mode`, halt/resume via their existing routes.
 
 ---
@@ -278,7 +285,7 @@ fn snapshot_fixture_deserializes_and_regime_is_nested_under_market() {
 
 **Interfaces:**
 - Consumes: `AppEvent` (Task 1), `Snapshot` (Task 3).
-- Produces: `Store { pub snapshot: Option<Snapshot>, pub regime_panel: Option<RegimePanel>, pub nav: Nav, pub conn: Conn, dirty: bool }` with `apply(&mut self, ev: AppEvent) -> Vec<Trigger>` returning motion triggers (empty until Task 15; the enum exists now: `Trigger { RegimeChanged, DrawdownTierWorse, Halted, Resumed, ApprovalCreated, PhaseAdvanced, PlanExecuted, QuoteTick(String) }`). `Nav { view: ViewId, focus: Focus }`, `ViewId` = the 7 views.
+- Produces: `Store { pub snapshot: Option<Snapshot>, pub regime_panel: Option<RegimePanel>, pub nav: Nav, pub conn: Conn, dirty: bool }` with `apply(&mut self, ev: AppEvent) -> Vec<Trigger>` returning motion triggers (empty until Task 15; the enum exists now: `Trigger { RegimeChanged, DrawdownTierWorse, Halted, Resumed, ApprovalCreated, PhaseAdvanced, PlanExecuted, QuoteTick(String), ReadChanged }`). `Nav { view: ViewId, focus: Focus }`, `ViewId` = the 7 views.
 - Produces: `main.rs` run loop: crossterm raw mode + alternate screen, EventStream forwarded to bus, 120 ms `Tick` interval, `should_render(&store, fx_active, last_frame) -> bool` implementing the Part III pacing rule as a **pure function**.
 
 - [ ] **Step 1:** Failing test for pacing (pure function — no terminal needed):
@@ -359,11 +366,11 @@ pub fn frame_to_string(store: &Store, w: u16, h: u16) -> String {
 - Test: in-module + `tests/golden_shell.rs` addition
 
 **Interfaces:**
-- Produces: `Store::apply` handling `Sse{kind:"quote"}` — merge `rows[{ticker,price,change_1d}]` into `market.assets`, returning `Trigger::QuoteTick(ticker)` per changed row (parity with `_apply_quote_event`, `qlab/tui/app.py:1887`).
-- Produces: `FlashTracker { map: HashMap<FlashKey, Instant> }` with `flash(key)`, `style_for(key, base: Style) -> Style` (bg = `accent_dim` while `now < start + 600ms`, linear alpha step-down at 200/400 ms via the three dim tokens — discrete decay, no per-cell timers).
+- Produces: `Store.quote_overlay: HashMap<String, QuoteMark>` where `QuoteMark { price, change_1d, at: Instant }` — SSE quotes land in the **overlay and never mutate the snapshot**. All price reads go through `Store::asset_view(ticker) -> AssetView`, which applies the overlay when its stamp is newer than the snapshot's arrival. This exists because the naive merge has a regression bug: the periodic `/api/tui` poll rebuilds `market.assets` from the owner's cached valuations (quote TTL up to 30 s), so an in-place merge gets silently overwritten by *older* prices seconds later — the Python client (`_apply_quote_event`, `qlab/tui/app.py:1887`) accepts that brief regression; we don't. Returns `Trigger::QuoteTick(ticker)` per changed row.
+- Produces: `FlashTracker { map: HashMap<FlashKey, Instant> }` with `flash(key, now: Instant)`, `style_for(key, now: Instant, base: Style) -> Style` (bg = `accent_dim` while `now < start + 600ms`, stepped decay at 200/400 ms via the dim tokens — discrete, deterministic, testable with a mocked clock per the global time-as-data constraint).
 - Produces: `ticker::draw(area, assets, offset_cells)` — one row, `SYM price ▲x.xx%` triplets separated by 3 spaces, tiled so it wraps seamlessly; `offset_cells` advances 1 per `Tick` (120 ms) in `main.rs`.
 
-- [ ] **Step 1:** Failing tests: quote event mutates the right asset and returns the trigger; `style_for` returns base style after 700 ms; ticker string tiles (render at width 40 with 2 assets → content repeats).
+- [ ] **Step 1:** Failing tests: quote event fills the overlay and `asset_view` prefers it over the stale snapshot price; a fresh snapshot arrival does **not** clobber a newer overlay mark; `style_for` with `now = start + 700ms` returns the base style (no sleeps — clock is a parameter); ticker string tiles (render at width 40 with 2 assets → content repeats). Ticker rotation advances by display cell, not byte (`unicode-width`), so `▲` never splits.
 - [ ] **Step 2:** Implement; golden snapshot updated (ticker now populated from fixture).
 - [ ] **Step 3:** Commit: `feat(atlas): live quote merge, 600ms flash decay, scrolling ticker bar`
 
@@ -444,8 +451,8 @@ pub fn frame_to_string(store: &Store, w: u16, h: u16) -> String {
 - Test: golden
 
 **Interfaces:**
-- Produces: DESK = 2×3 `Tile` grid (equity hero via `tui-big-text` `PixelSize::Quadrant` rendering `money(equity)`, regime tile, allocation tile with `▰▱` weight bars current-vs-target, alerts tile from `stress` fields, verdict tile from latest `decisions` verdict, replay tile 2008/2020/2022) + throbber in any tile whose section is absent while `conn.owner` is up (in-flight, not missing).
-- [ ] Steps: failing golden with hero digits visible → implement → PASS → commit `feat(atlas): desk view — big-text equity hero and status tiles`.
+- Produces: DESK is a 40/60 split. **Left: THE READ** — the desk's soul, not a rail afterthought: conviction + agreement chips, `quantitative_state` line, then `tensions[]` (amber `▌`), `would_change_my_mind[]` (cyan `▌`), `news{tone, headlines[]}` with `news_source`, grounding-hash footer in `text_dim` — all from `atlas_read`. A changed `atlas_read.as_of` emits `Trigger::ReadChanged` and the pane re-reveals typewriter-style: `reveal_chars = elapsed/600ms × total` sliced top-to-bottom (hand-rolled — it is a substring render, no crate needed). **Right:** 2×3 `Tile` grid (equity hero via `tui-big-text` `PixelSize::Quadrant` rendering `money(equity)`, regime tile, allocation tile with `▰▱` weight bars current-vs-target, alerts tile from `stress` fields, verdict tile from latest `decisions` verdict, replay tile 2008/2020/2022) + throbber in any tile whose section is absent while `conn.owner` is up (in-flight, not missing).
+- [ ] Steps: failing golden with hero digits, a tension line, and a mid-reveal frame (mocked clock at 300 ms → assert exactly half the read is visible) → implement → PASS → commit `feat(atlas): desk view — the Atlas read with typewriter reveal, big-text equity hero, status tiles`.
 
 ### Task 15: tachyonfx effect manager and motion rules
 
@@ -478,9 +485,9 @@ pub fn frame_to_string(store: &Store, w: u16, h: u16) -> String {
 - Test: `tests/operator_gate.rs`
 
 **Interfaces:**
-- Produces: `WriteClient` (constructed **only** inside `if args.operator { … }` at the composition root; `App`'s type in glass mode contains no writer — enforce with a test that constructs glass `App` and type-asserts `app.writer.is_none()` **and** a compile-boundary comment; status chip flips `GLASS`→`OPERATOR` amber). Methods, mirroring the owner routes verbatim: `approve(id, note)` / `reject(id, note)` → `POST /api/approvals/<id>/…`; `execute_plan(plan_id)` → `POST /api/plans/execute {plan_id, human_confirmed: true}`; `atlas_mode(mode)`, `atlas_autonomy(on)`, `atlas_message(text)`, `workforce_fast(on)`, `desk_mode(label)`, `start_workflow(template, goal)`, `halt()`/`resume()`.
-- Produces: `confirm::Modal { title, facts: Vec<(label, value)>, challenge: "CONFIRM" }` — centered 50×12, renders plan id / `targets_hash` / turnover / legs, requires literally typing `CONFIRM` then Enter; Esc cancels. `execute_plan` is *only* callable from this modal's accept path (the method takes a `ConfirmToken` constructible only by the modal — capability-style guard).
-- [ ] Steps: failing tests (glass app has no writer; `ConfirmToken` can't be built outside the modal module — compile-fail test via `trybuild` or a unit test on the module boundary) → implement → commit `feat(atlas): operator posture — allowlisted write client behind typed confirm modals`.
+- Produces: `WriteClient` behind a **Cargo feature `operator`** (`#[cfg(feature = "operator")]` on `net/http.rs`'s write half, the confirm modal, and every operator key branch). The default glass build **contains no write code at all** — "read-only by construction … holds by absence" survives the rewrite as a compile-time fact, not a runtime `Option`. The `--operator` CLI flag additionally gates activation inside an operator-featured binary (feature gates existence, flag gates activation); `qlab tui` builds/invokes with the feature, a monitoring box runs the default build. Status chip: `GLASS` / `OPERATOR` amber. Methods, mirroring the owner routes verbatim: `approve(id, note)` / `reject(id, note)` → `POST /api/approvals/<id>/…`; `execute_plan(plan_id)` → `POST /api/plans/execute {plan_id, human_confirmed: true}`; `atlas_mode(mode)`, `atlas_autonomy(on)`, `atlas_message(text)`, `workforce_fast(on)`, `desk_mode(label)`, `start_workflow(template, goal)`, `halt()`/`resume()`.
+- Produces: `confirm::Modal { title, facts: Vec<(label, value)>, challenge: String }` — centered 50×12, renders plan id / `targets_hash` / turnover / legs. For plan execution the challenge is the **last 6 characters of the plan's `targets_hash`**, displayed only inside the modal — the confirmation is thereby bound to the exact checked plan (echoing how the referee PASS binds to `targets_hash`) and a blind scripted keystroke replay cannot confirm the wrong plan. Halt/resume/mode use a static `CONFIRM`. `execute_plan` takes a `ConfirmToken` constructible only inside the modal module — capability-style guard.
+- [ ] Steps: failing tests — build matrix `cargo test` (glass: `#[cfg(not(feature = "operator"))]` test asserts the write module does not exist via `cfg!`) and `cargo test --features operator` (modal challenge derives from fixture `targets_hash`; `ConfirmToken` unconstructible outside the modal module) → implement → both matrices green → commit `feat(atlas): operator posture — feature-gated writes, hash-bound confirm modals`.
 
 ### Task 18: Approvals + plans surfaces
 
@@ -515,29 +522,66 @@ pub fn frame_to_string(store: &Store, w: u16, h: u16) -> String {
 - Produces: pure parser `parse(buf: &str) -> CmdState` where `CmdState = Picker(Vec<Scope>) | Scoped(Scope, query) | Verb(cmd, args) | Empty` — mode **derived from the text** (`/` opens picker; accepting a scope rewrites the buffer to e.g. `/ticker `; backspacing past the space reverts to picker). Scopes: `/view <name>`, `/ticker <SYM>` (selects in markets/blotter), `/plan <id>`, `/mode <desk-mode>` (operator), `/halt` `/resume` (operator, still modal-gated). Bare uppercase token ≤ 6 chars parses as `Ticker(sym)` (function-code grammar). Suggestions render in a one-line strip above the input; Enter dispatches `Command` to the store/router — parser never executes.
 - [ ] Steps: table-driven parser tests (12 cases incl. revert-on-backspace) failing → implement → golden of picker open → commit `feat(atlas): slash-scoped command line with text-derived mode`.
 
-### Task 21: Settings view + cutover + Python TUI removal
+### Task 21: Settings + research views, cutover behind a `--classic` soak valve
 
 **Files:**
-- Create: `src/ui/views/settings.rs`, `src/ui/views/research.rs` (leaderboard `Table` + runs list from `leaderboard`/`runs`), `clients/atlas-tui/scripts/qa.sh`, `clients/atlas-tui/demo/atlas.tape`
-- Modify: `qlab/autopilot/cli.py:_cmd_tui` (spawn `atlas` binary), `pyproject.toml` (drop textual deps from `[operator]`), `CLAUDE.md`, `README.md`
-- Delete: `qlab/tui/` (all files), TUI-only tests in `tests/test_ui.py` (server tests stay)
-- Test: `tests/test_ui.py` (Python, updated), full `python -m pytest`, `cargo test`
+- Create: `src/ui/views/settings.rs`, `src/ui/views/research.rs`, `clients/atlas-tui/scripts/qa.sh`, `clients/atlas-tui/demo/atlas.tape`
+- Modify: `qlab/autopilot/cli.py:_cmd_tui` (spawn `atlas` binary by default; `--classic` keeps the Textual path), `README.md`
+- Test: `tests/test_ui.py` addition (Python), `cargo test`
 
 **Interfaces:**
-- Produces: settings view rendering `desk_mode`, `policy` constraints, `system` provenance, mandate universe, theme name — read-only facts (mode switching lives behind `/mode`, operator only).
-- Produces: `_cmd_tui` keeps owner spawn/readiness verbatim, then resolves the binary (`$QLAB_ATLAS_BIN` → `shutil.which("atlas")` → `clients/atlas-tui/target/release/atlas`) and `os.execvpe`s it with `QLAB_UI_PORT` set; missing binary → `SystemExit` with `cargo build --release` instructions (fail loud). `--operator` passthrough flag added to the `tui` subparser.
-- Cutover checklist inside the task: port the flaky-test note (the Textual quote-repaint race test dies with the code it tested — note that in this plan's completion entry); CLAUDE.md client paragraph rewritten (glass/operator postures; invariant 3 sentence repointed at the Rust confirm modal); README quickstart updated; delete `qlab/tui/`; `grep -rn "qlab.tui" qlab/ tests/` must come back empty.
-- [ ] **Step 1:** Python-side failing test: `_cmd_tui` with `QLAB_ATLAS_BIN=/bin/false`-style stub asserts exec is attempted with `QLAB_UI_PORT` in env (monkeypatch `os.execvpe`).
-- [ ] **Step 2:** Implement cli change; delete `qlab/tui/`; fix imports; `python -m pytest` green offline.
-- [ ] **Step 3:** Record `demo/atlas.tape` (VHS: launch, tab through views, trigger a flash) and check in the tape (not the GIF).
-- [ ] **Step 4:** Docs edits; final `cargo test` + `python -m pytest`; tmux QA full pass.
-- [ ] **Step 5:** Commit: `feat(atlas)!: replace the Textual workstation with the Ratatui client` (+ separate `docs:` commit for CLAUDE.md/README).
+- Produces: settings view rendering `desk_mode`, `policy` constraints, `system` provenance, mandate universe, theme name — read-only facts (mode switching lives behind `/mode`, operator only). Research view: leaderboard `Table` (champion `★`, `OVERLAY_METRICS` columns), runs list, **and the algorithm catalog** (`algorithms` payload: id + stage chip `operational`/`research`/`offline`, stage-colored) — parity with the Textual reference view so no surface silently disappears at cutover.
+- Produces: `_cmd_tui` keeps owner spawn/readiness verbatim, then: default path resolves the binary (`$QLAB_ATLAS_BIN` → `shutil.which("atlas")` → `clients/atlas-tui/target/release/atlas`) and `os.execvpe`s it with `QLAB_UI_PORT` set — missing binary → `SystemExit` with `cargo build --release` instructions (fail loud); `--classic` runs `QlabTui` exactly as today. `--operator` passthrough flag added to the `tui` subparser (sets the feature-build binary's flag).
+- **`qlab/tui/` is NOT deleted in this task.** The soak valve exists so a week of real desk use can catch parity gaps while rollback is one flag, not a revert.
+- [ ] **Step 1:** Python-side failing test: `_cmd_tui` with `QLAB_ATLAS_BIN` pointing at a stub asserts exec is attempted with `QLAB_UI_PORT` in env (monkeypatch `os.execvpe`); `--classic` asserts `QlabTui` is instantiated.
+- [ ] **Step 2:** Implement both views + cli change; `python -m pytest` and `cargo test` green offline.
+- [ ] **Step 3:** Record `demo/atlas.tape` (VHS: launch, tab through all 7 views, trigger a flash and a modal) and check in the tape (not the GIF).
+- [ ] **Step 4:** tmux QA full pass; commit `feat(atlas): research + settings views; qlab tui launches the Ratatui workstation (--classic keeps Textual during soak)`.
+
+### Task 22: Python TUI removal (after soak)
+
+**Files:**
+- Delete: `qlab/tui/` (all files), TUI-only tests in `tests/test_ui.py` (server tests stay)
+- Modify: `qlab/autopilot/cli.py` (drop `--classic`), `pyproject.toml` (drop textual from `[operator]`), `CLAUDE.md`, `README.md`
+
+**Interfaces:**
+- Entry condition: at least one week of daily `qlab tui` use on the Rust client with no parity blocker filed. Parity gaps found during soak become tasks *before* this one runs.
+- Produces: CLAUDE.md rewritten deliberately — the `clients/atlas-tui` paragraph becomes the glass/operator posture description ("glass build is read-only by absence — the write code is not compiled in"); invariant 3's TUI sentence repoints at the Rust hash-bound confirm modal; the flaky quote-repaint test note is retired with a line in this plan's completion entry (the race class is extinct under the time-as-data constraint).
+- [ ] **Step 1:** Delete `qlab/tui/`; `grep -rn "qlab.tui" qlab/ tests/` returns empty; fix `pyproject.toml`.
+- [ ] **Step 2:** `python -m pytest` green offline; `cargo test` + `cargo test --features operator` green.
+- [ ] **Step 3:** Docs edits; commit `feat(atlas)!: retire the Textual workstation` + separate `docs:` commit for CLAUDE.md/README.
+
+### Task 23 (stretch): Flight-recorder replay
+
+**Files:**
+- Create: `src/replay.rs`
+- Modify: `src/main.rs` (`--replay <from-ts>`), `src/net/http.rs` (events fetch)
+
+**Interfaces:**
+- The audit bus is durable and cursor-addressable (`/api/events` serves the same rows SSE streams). `atlas --replay <from-ts>` feeds historical events through the **same store + fx pipeline** at ×1/×10/×60 speed (`+`/`-` keys), status line shows `REPLAY dd MMM hh:mm ×10` in warning amber. The desk becomes a reviewable flight recorder — watch yesterday's regime flip, approvals, and HALT exactly as they animated live. Zero new rendering code: this is the payoff of routing *everything* through `AppEvent` — replay is just another event source. Glass-only (replay never constructs a writer; the flag conflicts with `--operator`, refuse loudly).
+- [ ] Steps: failing test — a canned event script through `replay::source()` produces the same `Trigger` sequence as the SSE path; implement; tmux QA on a real day's events; commit `feat(atlas): flight-recorder replay over the audit bus`.
 
 ---
+
+## Deep-review addendum (v2 — same day)
+
+A second adversarial pass over v1 changed the plan in ten places. Recorded here because the *reasons* are the deliverable:
+
+1. **Quote-overlay instead of in-place merge (Task 8).** v1 copied the Python client's merge design, which has a latent regression: the aggregate poll rebuilds `market.assets` from owner-side cached valuations (quote TTL up to 30 s) and silently overwrites fresher SSE prices. Overlay-with-timestamp wins by construction.
+2. **Adaptive polling (Part III).** A flat 2 s poll of a ~200 KB aggregate is the Textual client's habit, not a requirement — SSE already announces every state change worth refetching for. Idle drops to 10 s; state-changing SSE kinds trigger immediate refetch.
+3. **Time-as-data global constraint.** The flaky Textual test (`50 ms` repaint race) is a *class*, not an incident. Banning wall-clock reads inside render/effect code makes every animation test deterministic and retires the class.
+4. **Truecolor detection.** Terminal.app has no truecolor; without a 256-color fallback the entire 4-level Obsidian depth ramp collapses to one grey. One detect point, enforced by the existing no-hardcoded-color test.
+5. **Feature-gated writes (Task 17).** A runtime `--operator` flag leaves write code compiled into the glass binary — "read-only by absence" would quietly become "read-only by if-statement." A Cargo feature keeps the CLAUDE.md claim literally true of the default build.
+6. **Hash-bound confirm challenge (Task 17).** Typing the last 6 chars of `targets_hash` (shown only in the modal) binds the human confirmation to the exact checked plan — the same binding philosophy as the referee PASS — and defeats blind scripted keystroke replay (a tmux-driven agent typing a static `CONFIRM` would otherwise succeed).
+7. **The Atlas read is first-class (Task 14).** v1 demoted the desk's judgment surface — tensions, would-change-my-mind, conviction — to a side rail. It is the soul of a governed desk and now anchors DESK, with a typewriter reveal as its signature motion.
+8. **Catalog parity (Task 21).** v1 dropped the Textual reference view silently; the algorithm catalog (with stage chips) now lands in RESEARCH so nothing disappears unannounced at cutover.
+9. **Soak valve (Tasks 21/22).** Hard-deleting `qlab/tui/` in the cutover commit made rollback a revert. Split: cutover with `--classic` fallback, deletion only after a week of real use — parity gaps become tasks, not incidents.
+10. **Flight-recorder replay (Task 23, stretch).** Routing everything through `AppEvent` makes replaying the durable audit bus through the same store/fx pipeline nearly free — a governance-native feature no reference terminal has: watch yesterday's HALT animate exactly as it happened.
 
 ## Self-review notes
 
 - Every consumed field named in Tasks 9–19 exists in the `/api/tui` payload map verified against `qlab/ui/server.py:1926-1996` on 2026-07-30; `/api/regime/panel` route confirmed at `server.py:2371`; POST routes confirmed at `server.py:2320-2621`.
-- Type-consistency: `Trigger` (Task 4) is the contract consumed by Task 15; `frame_to_string` (Task 5) is the harness for every golden test; `heat_cell` is created in Task 13 and explicitly retrofitted into Task 9's import.
+- Type-consistency: `Trigger` (Task 4, incl. `ReadChanged`) is the contract consumed by Tasks 14/15; `frame_to_string` (Task 5) is the harness for every golden test; `heat_cell` is created in Task 13 and explicitly retrofitted into Task 9's import; `FlashTracker` and the confirm `Modal` take `now`/challenge as data per the global constraints.
 - Known open risk, called out rather than hidden: tachyonfx API names in Task 15 are indicative — the task's first step is a context7 doc pull, and the rule-coverage test is API-agnostic.
-- Scope deliberately excluded (YAGNI): symbol A–J group linking across panes (single-process app — the universe selection already links views), ratatui-image, mouse support, a second theme, Claude-CLI embedding (workforce speaks to the owner's coordinator instead — the owner drives dispatched workflows since c4b17ea).
+- Workforce parity decision: the TUI console shows event-level progress (SSE `workflow_*` + `atlas_message`); deep per-role streaming remains available via the existing `qlab workforce run "GOAL"` headless path — the Claude-CLI embedding (`qlab/tui/claude.py`, 1181 lines) is deliberately not ported, since the owner drives dispatched workflows itself as of c4b17ea.
+- Scope deliberately excluded (YAGNI): symbol A–J group linking across panes (single-process app — the universe selection already links views), ratatui-image / kitty graphics protocol (fragmented terminal support; braille is universal), mouse support, a second theme.

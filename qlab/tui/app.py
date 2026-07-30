@@ -2668,6 +2668,32 @@ class QlabTui(App[None]):
                  "The qualitative side of this read is missing, not quiet."],
                 tone=DOWN, max_len=200))
 
+        qual = _record(read.get("qualitative_signals"))
+        if qual.get("signals"):
+            lines.append("")
+            lines.append(f"[bold {AMBER}]\u258c WHAT THE RECORD COVERS[/]")
+            lines.append(f"[{BORDER_HI}]{'\u2500' * 48}[/]")
+            if not qual.get("sufficient"):
+                # Absence stated, never rendered as a calm reading.
+                lines.append(
+                    f"[{AMBER}]window too thin to interpret[/]  [{DIM}]"
+                    f"{int(qual.get('item_count') or 0)} record(s); "
+                    f"{int(qual.get('min_items') or 0)} needed before a ratio "
+                    f"is a measurement rather than one story.[/]")
+            named = _record(qual.get("by_name"))
+            for key, label in (("coverage_breadth", "HOLDINGS NAMED"),
+                               ("asset_class_reach", "CLASSES COVERED"),
+                               ("corroboration_ratio", "CORROBORATED")):
+                sig = _record(named.get(key))
+                value = sig.get("value")
+                lines.extend(_key_number_markup(
+                    [(label, "\u2014" if value is None else pct(value))],
+                    value_tones=[MUTED if value is None
+                                 else UP if value >= 0.6
+                                 else AMBER if value >= 0.3 else DOWN]))
+                if sig.get("reason"):
+                    lines.append(f"    [{DIM}]{escape(str(sig['reason']))}[/]")
+
         tensions = [str(t) for t in (read.get("tensions") or [])]
         if tensions:
             lines.append("")

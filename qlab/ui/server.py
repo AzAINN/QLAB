@@ -1190,6 +1190,9 @@ class UISession:
             # The grounded window the news-analyst would interpret. Present so
             # template preconditions can refuse an empty record rather than
             # letting the analyst narrate silence.
+            "news_window_sufficient": bool(
+                (self.desk_read(offline).get("qualitative_signals") or {})
+                .get("sufficient")),
             "news_window_items": len(
                 (self.desk_read(offline).get("grounding") or {})
                 .get("hashes", [])),
@@ -1410,6 +1413,20 @@ class UISession:
         grounded = ground(
             items, as_of=datetime.now(timezone.utc).isoformat(),
             provider=provider_name, universe=universe)
+        # Deterministic properties of the record, computed before anything
+        # interprets it. These describe what the window covers and how well
+        # supported it is — never a direction, which is the whole reason they
+        # can sit next to price signals without becoming a forecast.
+        from qlab.core.universe import load_universe
+        from qlab.news.qualitative import qualitative_signals
+
+        try:
+            asset_classes = load_universe().asset_classes("core")
+        except Exception:
+            asset_classes = {}
+        qualitative = qualitative_signals(
+            grounded, universe=universe, asset_classes=asset_classes,
+            lookback_hours=48)
         news = read_news(grounded.items)
         portfolio = {"drawdown_tier": self.mandate.drawdown_tier(
             float(self.portfolio(offline).get("drawdown", 0.0)))}
@@ -1435,6 +1452,7 @@ class UISession:
                 "qualitative side of this read is missing, not quiet.",
                 *payload["observations"],
             ]
+        payload["qualitative_signals"] = qualitative.to_dict()
         self._desk_read = payload
         return self._desk_read
 
@@ -1486,6 +1504,19 @@ class UISession:
             "qualitative side of this read is STALE, not quiet.",
             *(payload.get("observations") or []),
         ]
+        # The grounding was just zeroed, so carrying the previous window's
+        # signals forward would report coverage the desk can no longer stand
+        # behind. Recompute them over nothing: every value becomes None with a
+        # no_window state, which is the honest reading of a failed recompose.
+        from qlab.news.grounding import ground
+        from qlab.news.qualitative import qualitative_signals
+
+        payload["qualitative_signals"] = qualitative_signals(
+            ground([], as_of=self._now_iso(), provider="synthetic",
+                   universe=list(self.mandate.universe_whitelist)),
+            universe=self.mandate.universe_whitelist,
+            asset_classes={},
+        ).to_dict()
         self._desk_read = payload
 
     def set_autonomy(self, enabled: bool) -> dict:

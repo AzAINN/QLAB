@@ -5,10 +5,6 @@
 //! allowed to be about. An effect fired from a render pass would animate on
 //! every repaint; an effect fired from a diff animates once, when the desk
 //! actually moved.
-//!
-//! Time enters as data: the only clock read is `elapsed()` on a stamp handed in
-//! from outside, so every decision here is a function of its arguments and is
-//! testable by arithmetic rather than by a sleep.
 
 use crate::bus::{AppEvent, Channel, HttpResult};
 use crate::model::{RegimePanel, Snapshot};
@@ -21,12 +17,14 @@ const IDLE_FRAME: Duration = Duration::from_millis(100);
 
 /// Whether the loop owes the terminal a frame.
 ///
-/// Pure, and it lives beside the store rather than in `main` so it can be
-/// tested without a terminal. `fx_active` renders unconditionally: effects are
-/// sampled per frame, and the 16 ms cadence they want is the loop's wake
-/// interval, not a gate here.
-pub fn should_render(dirty: bool, fx_active: bool, last_frame: Instant) -> bool {
-    dirty || fx_active || last_frame.elapsed() >= IDLE_FRAME
+/// `now` is a parameter, never a clock read: a rule that called `elapsed()`
+/// would decide against a different instant than the caller measured, and its
+/// own test would race a descheduled thread. It lives beside the store rather
+/// than in `main` so it can be tested without a terminal. `fx_active` renders
+/// unconditionally: effects are sampled per frame, and the 16 ms cadence they
+/// want is the loop's wake interval, not a gate here.
+pub fn should_render(dirty: bool, fx_active: bool, last_frame: Instant, now: Instant) -> bool {
+    dirty || fx_active || now.saturating_duration_since(last_frame) >= IDLE_FRAME
 }
 
 /// A desk change worth animating.

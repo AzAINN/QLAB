@@ -113,6 +113,10 @@ async fn run(
         let Some(first) = rx.recv().await else {
             return Ok(()); // every producer is gone
         };
+        // The iteration's one clock read, taken where its work begins. Pacing
+        // decides against the instant the caller measured, not against whatever
+        // the clock says several statements later.
+        let now = Instant::now();
         let mut quit = ingest(first, store, app, nudge);
         // Drain-then-render: fifty quote events coalesce into one repaint. The
         // poller writes the legacy payload before the bus event that wakes us,
@@ -126,9 +130,9 @@ async fn run(
 
         // Task 15 replaces this literal with the effect manager's running flag.
         let fx_active = false;
-        if should_render(store.take_dirty(), fx_active, last_frame) {
+        if should_render(store.take_dirty(), fx_active, last_frame, now) {
             terminal.draw(|f| ui::draw(f, app))?;
-            last_frame = Instant::now();
+            last_frame = now;
         }
         if quit {
             return Ok(());

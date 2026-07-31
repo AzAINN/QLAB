@@ -96,6 +96,27 @@ pub fn body(frame: &str) -> String {
     lines[1..lines.len().saturating_sub(1)].join("\n")
 }
 
+/// The rows *and* columns one view owns.
+///
+/// `body` drops the tape and the status line; this drops the two rails as well.
+/// The pulse rail renders tickers, arrows and percentages of its own — the same
+/// accident the tape is, one column over — so a pin on what a view drew reads
+/// through here rather than across the whole frame.
+pub fn content(frame: &str) -> String {
+    let left = atlas::ui::shell::NAV_W as usize + 1; // the rail, plus its rule
+    body(frame)
+        .lines()
+        .map(|row| {
+            let cells: Vec<char> = row.chars().collect();
+            let right = cells
+                .len()
+                .saturating_sub(atlas::ui::shell::PULSE_W as usize);
+            cells[left.min(right)..right].iter().collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The style of the first cell of the first run of `needle` *in the body*.
 ///
 /// A golden string cannot say what colour a column is, and "the amber one" is
@@ -134,6 +155,21 @@ pub fn fixture_store() -> Store {
     let now = Instant::now();
     store.apply(AppEvent::ConnUp(Channel::Owner), now);
     store.apply(AppEvent::Snapshot(Box::new(snapshot)), now);
+    store
+}
+
+/// The captured payload plus the regime panel the 30 s poller fetches.
+///
+/// A second fixture rather than a field on the first: the two come from two
+/// endpoints on their own cadences, and a rail that could only be tested with
+/// both present would never exercise the minutes after startup when the desk has
+/// a snapshot and no panel yet.
+pub fn fixture_store_with_panel() -> Store {
+    let panel: atlas::model::RegimePanel =
+        serde_json::from_str(include_str!("../fixtures/regime_panel.json")).unwrap();
+    let mut store = fixture_store();
+    let now = store.last_snapshot_at.unwrap_or_else(Instant::now);
+    store.apply(AppEvent::RegimePanel(panel), now);
     store
 }
 

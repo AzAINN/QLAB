@@ -308,9 +308,9 @@ fn draw_grid(
                     Style::default().fg(tone),
                 ),
             ),
-            (opt_pct(facts.change_20d), tone_of(facts.change_20d)),
+            (format::opt_pct(facts.change_20d), tone_of(facts.change_20d)),
             (
-                opt_pct(facts.realized_vol),
+                format::opt_pct(facts.realized_vol),
                 Style::default().fg(t.text_secondary),
             ),
             spark_cell(facts.history),
@@ -404,10 +404,6 @@ fn spark_cell(history: &[f64]) -> (String, Style) {
         glyphs,
         Style::default().fg(if rising { t.positive } else { t.negative }),
     )
-}
-
-fn opt_pct(value: Option<f64>) -> String {
-    value.map(format::pct1).unwrap_or_else(|| MISSING.to_string())
 }
 
 fn tone_of(value: Option<f64>) -> Style {

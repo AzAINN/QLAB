@@ -34,6 +34,24 @@ pub fn or_missing(value: Option<&String>) -> &str {
     text(value).unwrap_or(MISSING)
 }
 
+/// A state word as the workstation prints one: uppercase, or `MISSING`.
+///
+/// Here rather than at each call site because a panel that disagreed with its
+/// neighbours about casing would read as a different kind of thing — the same
+/// reason `panel_header` uppercases its title.
+pub fn upper(value: Option<&str>) -> String {
+    value
+        .map(str::to_uppercase)
+        .unwrap_or_else(|| MISSING.to_string())
+}
+
+/// A fraction at 1 dp, or `MISSING` when the owner did not send one. The one
+/// spelling of it: three surfaces wrote this out, which is how three of them end
+/// up disagreeing about what an absent percentage looks like.
+pub fn opt_pct(value: Option<f64>) -> String {
+    value.map(pct1).unwrap_or_else(|| MISSING.to_string())
+}
+
 /// Thousands-grouped currency. Rust has no `{:,}`, and an ungrouped equity
 /// figure is genuinely harder to read at a glance on a book this size.
 pub fn money(value: f64) -> String {
@@ -247,6 +265,10 @@ mod tests {
         assert_eq!(text(Some(&"calm".to_string())), Some("calm"));
         assert_eq!(or_missing(Some(&String::new())), MISSING);
         assert_eq!(or_missing(Some(&"alpaca".to_string())), "alpaca");
+        assert_eq!(upper(Some("calm")), "CALM");
+        assert_eq!(upper(None), MISSING);
+        assert_eq!(opt_pct(Some(-0.125)), "-12.5%");
+        assert_eq!(opt_pct(None), MISSING);
     }
 
     #[test]

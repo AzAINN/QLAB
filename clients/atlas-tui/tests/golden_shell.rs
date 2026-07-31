@@ -13,7 +13,10 @@ use atlas::store::{Store, ViewId};
 use atlas::ui::views::Views;
 use atlas::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use harness::{fixture_store, frame_to_string, frame_to_string_at, line_with, row_styles};
+use harness::{
+    body_style_of, fixture_store, fixture_store_with_panel, frame_to_string, frame_to_string_at,
+    line_with, row_styles, Client,
+};
 use std::time::{Duration, Instant};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -474,20 +477,222 @@ fn a_stream_dropping_frames_says_so_beside_the_chip() {
     );
 }
 
+/// A desk whose posterior and whose panel tell the same story.
+///
+/// Hand-built rather than assembled from the two captured fixtures: those are
+/// internally contradictory where they were edited by hand (the snapshot carries
+/// an HMM posterior while the panel says `hmmlearn` never ran), so a frame drawn
+/// from both would pin a gauge reading that no owner can actually produce. The
+/// numbers here are one consistent desk — a mixed panel, an uncertain robust
+/// state, three advancers and two decliners.
+fn rail_store() -> Store {
+    let mut store = Store::default();
+    let now = Instant::now();
+    store.apply(AppEvent::ConnUp(Channel::Owner), now);
+    store.apply(
+        AppEvent::Snapshot(Box::new(
+            serde_json::from_str::<Snapshot>(
+                r#"{"market": {"regime": {"regime": "stress", "robust_state": "uncertain",
+                                          "posterior": {"calm": 0.5, "neutral": 0.3, "stress": 0.2}},
+                               "assets": [
+                     {"ticker": "SPY", "price": 729.46, "change_1d": 0.0042},
+                     {"ticker": "QQQ", "price": 661.73, "change_1d": 0.011},
+                     {"ticker": "XLF", "price": 52.40, "change_1d": 0.0015},
+                     {"ticker": "GLD", "price": 201.77, "change_1d": -0.0088},
+                     {"ticker": "VNQ", "price": 88.12, "change_1d": -0.0163}]},
+                    "stress": {"drawdown_tier": "warning", "gross_exposure": 0.94},
+                    "live_portfolio": {"drawdown": -0.031},
+                    "atlas": {"mode": "research"}}"#,
+            )
+            .unwrap(),
+        )),
+        now,
+    );
+    store.apply(
+        AppEvent::RegimePanel(
+            serde_json::from_str(
+                r#"{"readings": [
+                     {"indicator_id": "turbulence", "state": "stress", "percentile": 0.88},
+                     {"indicator_id": "absorption", "state": "calm", "percentile": 0.41},
+                     {"indicator_id": "drawdown", "state": "stress", "percentile": 0.93},
+                     {"indicator_id": "tail_risk", "state": "calm", "percentile": 0.55},
+                     {"indicator_id": "volatility_term_structure", "state": "calm",
+                      "percentile": 0.3}],
+                    "robust_state": "uncertain"}"#,
+            )
+            .unwrap(),
+        ),
+        now,
+    );
+    store
+}
+
+#[test]
+fn the_pulse_rail_renders_every_section_at_120x36() {
+    insta::assert_snapshot!(frame_to_string(&rail_store(), 120, 36));
+}
+
+#[test]
+fn the_rail_counts_the_breadth_of_the_tape_it_is_looking_at() {
+    // The bar and the caption are one fact drawn twice; a bar that disagreed
+    // with its own caption would be worse than either alone.
+    let store = rail_store();
+    let frame = frame_to_string(&store, 120, 36);
+    assert!(
+        line_with(&frame, "adv ").contains("adv 3 / dec 2"),
+        "{frame}"
+    );
+
+    // The row above the caption, not "the first line with a block in it" — the
+    // gauge is also drawn out of full blocks, three rows higher.
+    let rows: Vec<&str> = frame.lines().collect();
+    let caption = rows
+        .iter()
+        .position(|row| row.contains("adv 3 / dec 2"))
+        .expect("the caption is what the bar is read against");
+    let bar = rows[caption - 1];
+    assert_eq!(
+        bar.matches('█').count(),
+        31,
+        "the bar has to fill the rail it was given: {bar}"
+    );
+
+    // Three up and two down of 31 cells, in the two semantic colours: a golden
+    // string cannot tell one █ from another, and a bar drawn in one colour is
+    // not a breadth bar.
+    let t = Theme::truecolor();
+    let cells = row_styles(
+        &store,
+        &FlashTracker::default(),
+        120,
+        36,
+        store.last_snapshot_at.unwrap(),
+        caption as u16 - 1,
+    );
+    let painted = |tone| {
+        cells
+            .iter()
+            .filter(|(symbol, style)| symbol == "█" && style.fg == Some(tone))
+            .count()
+    };
+    assert_eq!((painted(t.positive), painted(t.negative)), (19, 12));
+
+    // And it moves with the tape rather than being drawn once: the fixture desk
+    // is four-fifths red.
+    let frame = frame_to_string(&fixture_store(), 120, 36);
+    assert!(
+        line_with(&frame, "adv ").contains("adv 1 / dec 4"),
+        "{frame}"
+    );
+}
+
+#[test]
+fn the_rail_names_the_best_and_the_worst_of_the_universe() {
+    let store = rail_store();
+    let frame = frame_to_string(&store, 120, 36);
+    let best = line_with(&frame, "best");
+    assert!(best.contains("QQQ") && best.contains("+1.10%"), "{best}");
+    let worst = line_with(&frame, "worst");
+    assert!(worst.contains("VNQ") && worst.contains("-1.63%"), "{worst}");
+
+    // The arrow carries the direction in a colour *and* a glyph, so the row is
+    // still readable where the two greens are one shade apart.
+    let buf = Client::new(store).buffer(120, 36);
+    assert_eq!(
+        body_style_of(&buf, "▲ best").fg,
+        Some(Theme::truecolor().positive)
+    );
+    assert_eq!(
+        body_style_of(&buf, "▼ worst").fg,
+        Some(Theme::truecolor().negative)
+    );
+}
+
+#[test]
+fn the_gauge_reads_the_panel_and_says_pending_until_one_arrives() {
+    // The first reader `store.regime_panel` has ever had. Before this the poller
+    // fetched the panel every 30 s into a field nothing on screen consumed.
+    let waiting = frame_to_string(&fixture_store(), 120, 36);
+    assert!(
+        line_with(&waiting, "desk stress").contains('…'),
+        "a desk with no panel must say not-yet, not 50 NEUTRAL:\n{waiting}"
+    );
+
+    let frame = frame_to_string(&rail_store(), 120, 36);
+    // 50 + 50·(0.50 − 0.20) − 10 for the stressed drawdown reading. The band is
+    // the pin; the arithmetic itself is pinned in the widget's own tests.
+    assert!(line_with(&frame, "NEUTRAL").contains("55"), "{frame}");
+}
+
+#[test]
+fn the_regime_strip_gives_every_reading_a_row_including_one_that_did_not_run() {
+    // The panel's own rule: a detector that failed still occupies a row, so the
+    // strip shows what did not run rather than quietly shortening.
+    let frame = frame_to_string(&fixture_store_with_panel(), 120, 36);
+    // By the bar rather than by the name: `drawdown` is also a desk fact in the
+    // section above, and a pin that matched the first line saying the word would
+    // pass on the wrong row.
+    let rows: Vec<&str> = frame
+        .lines()
+        .filter(|line| line.contains('▰') || line.contains('▱'))
+        .collect();
+    assert_eq!(rows.len(), 5, "one row per reading that ran:\n{frame}");
+    // In the panel's own order, which is the owner's.
+    for (row, indicator) in rows.iter().zip([
+        "absorption",
+        "drawdown",
+        "tail risk",
+        "turbulence",
+        "vol term",
+    ]) {
+        assert!(row.contains(indicator), "{indicator} is not on {row}");
+    }
+    let failed = line_with(&frame, "hmm");
+    assert!(
+        failed.contains("--") && !failed.contains('▰'),
+        "a detector that did not run has no percentile to draw: {failed}"
+    );
+}
+
+#[test]
+fn a_rail_too_short_for_the_next_section_says_how_many_are_below() {
+    // The sub-floor rule this workstation holds everywhere: a section that
+    // cannot render whole refuses out loud. A clipped breadth bar and a working
+    // one are indistinguishable, and this rail is read at a glance.
+    let frame = frame_to_string(&rail_store(), 120, 24);
+    assert!(frame.contains("▾ 3 more below"), "{frame}");
+    assert!(
+        !frame.contains("▌ BREADTH") && !frame.contains("adv "),
+        "half a section is worse than none of it:\n{frame}"
+    );
+    // What did fit is still whole.
+    assert!(
+        frame.contains("▌ PULSE") && frame.contains("NEUTRAL"),
+        "{frame}"
+    );
+}
+
 #[test]
 fn a_narrow_terminal_still_renders_without_panicking() {
     // Ported from `ui.rs`. Ratatui panics on some zero-area splits, and a
     // client that dies when the window is dragged narrow is worse than one
     // that truncates.
-    let store = fixture_store();
-    for (w, h) in [
-        (40u16, 12u16),
-        (20, 8),
-        (80, 10),
-        (200, 60),
-        (1, 1),
-        (34, 3),
-    ] {
-        let _ = frame_to_string(&store, w, h);
+    //
+    // Both stores, because the rail's sections are only *built* once the panel
+    // has arrived: a degenerate rect that the empty rail never reaches is a rect
+    // the populated one meets on the first 30-second poll.
+    for store in [fixture_store(), rail_store()] {
+        for (w, h) in [
+            (40u16, 12u16),
+            (20, 8),
+            (80, 10),
+            (200, 60),
+            (1, 1),
+            (34, 3),
+            (120, 15),
+            (120, 21),
+        ] {
+            let _ = frame_to_string(&store, w, h);
+        }
     }
 }

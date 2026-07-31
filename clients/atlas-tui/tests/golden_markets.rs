@@ -9,7 +9,9 @@
 //! repeats every symbol, price and arrow in the universe along the top row, so
 //! `frame.contains("XLF")` passes on the tape alone and says nothing about the
 //! grid under it — a test that read the tape by accident would survive deleting
-//! this entire view.
+//! this entire view. Where the pulse rail draws the same *kind* of thing this
+//! view does — a ticker, an arrow, a signed percent — the pin narrows further to
+//! `content`, which is the columns the view itself owns.
 
 mod harness;
 
@@ -19,7 +21,7 @@ use atlas::model::Snapshot;
 use atlas::store::Store;
 use atlas::theme::Theme;
 use crossterm::event::KeyCode;
-use harness::{body, body_style_of, line_with, Client};
+use harness::{body, body_style_of, content, line_with, Client};
 use std::time::{Duration, Instant};
 
 /// The fixture desk, already switched to MARKETS.
@@ -83,9 +85,11 @@ fn the_last_column_is_the_amber_one() {
 
 #[test]
 fn the_sector_strip_names_the_spdrs_the_snapshot_actually_carried() {
-    // Found by the signed percent, which only the strip renders: the grid's own
-    // XLK row spells the same move as `▼ 2.08` under a `CHG%` header.
-    let body = body(&markets().frame(120, 36));
+    // Found by the signed percent, which only the strip renders *in this view*:
+    // the grid's own XLK row spells the same move as `▼ 2.08` under a `CHG%`
+    // header. Read through `content`, since the pulse rail names the same worst
+    // mover in the same units one column to the right.
+    let body = content(&markets().frame(120, 36));
     let strip = line_with(&body, "-2.08%");
     assert!(strip.contains("XLK"), "{body}");
     assert!(
@@ -314,7 +318,10 @@ fn a_terminal_below_the_grids_floor_refuses_rather_than_drawing_wrong_numbers() 
     // columns a -10.1% fall would draw as a gain. The pane says so instead.
     let mut client = markets();
     client.keys(&[KeyCode::Down, KeyCode::Right, KeyCode::Right]);
-    let body = body(&client.frame(90, 30));
+    // The columns this view owns: the arrows the rail's movers carry are not
+    // grid cells that survived, and a pin that could not tell them apart would
+    // fail on the rail rather than on the regression.
+    let body = content(&client.frame(90, 30));
     // Read off the body rather than one line: the refusal is longer than the
     // pane that could not hold the grid, so it wraps — which is the whole
     // reason it is a wrapped `Paragraph` and not a `Line`.

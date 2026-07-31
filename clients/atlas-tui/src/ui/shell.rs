@@ -17,12 +17,11 @@ use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
 use crate::glyph;
-use crate::model::Snapshot;
 use crate::store::{Store, ViewId};
 use crate::theme::theme;
 use crate::theme::Theme;
 use crate::ui::views::Views;
-use crate::ui::widgets::{panel_block, panel_header, ticker};
+use crate::ui::widgets::{panel_block, panel_header, pulse, ticker};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -36,12 +35,20 @@ use unicode_width::UnicodeWidthStr;
 
 /// Exactly wide enough for `▌6 AUDIT` — the active marker, the digit, a space,
 /// and the longest label. Widening it would take cells from the content.
-const NAV_W: u16 = 8;
+///
+/// Public because the golden harness crops a frame down to the columns a view
+/// owns, and a second spelling of the layout in the tests would drift from this
+/// one the first time a rail is resized.
+pub const NAV_W: u16 = 8;
 /// The pulse rail. Wide enough for a label column and a value column at the
 /// widths `format` produces; narrower and the money figures start truncating.
-const PULSE_W: u16 = 34;
+pub const PULSE_W: u16 = 34;
 /// The label column inside the rails.
 const LABEL_W: usize = 11;
+/// The read panel: header, four facts, and the rule its block reserves.
+const READ_H: u16 = 6;
+/// The glyph and the mood word under it.
+const GLYPH_H: u16 = glyph::H as u16 + 1;
 
 /// One frame.
 ///
@@ -95,7 +102,7 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &FlashTracker, now:
 
     let pulse = left_rule(f, cols[2], t);
     fill(f, pulse, t.bg_surface);
-    draw_pulse(f, pulse, store, t);
+    draw_pulse(f, pulse, store, t, now);
 
     draw_status(f, rows[2], store, t, stale);
 }
@@ -125,7 +132,7 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
         // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at
         // all — and the reflex every operator has has to work.
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Some(Command::Quit)
+            return Some(Command::Quit);
         }
         KeyCode::Char('r') => return Some(Command::Refresh),
         KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -270,55 +277,37 @@ fn draw_no_data(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
 
 /// The always-on rail: what the market is doing, and what Atlas makes of it.
 ///
-/// Placeholder shape. Task 10 replaces the numbers with the stress gauge,
-/// breadth bar, and movers; Task 14's read pane takes the lower half. The
-/// facts below are the ones the old single-screen client stated, kept on
-/// screen so the rewrite never renders less than what it replaced.
-fn draw_pulse(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
+/// The sections take the room that is left after the read panel and the glyph,
+/// which are anchored to the foot of the rail: the rail reads top-down as market
+/// → read → manager, and the manager is what an operator glances at last. Task
+/// 14's read pane replaces the middle block; the pulse sections above it decide
+/// for themselves how much of their own allocation they can honestly fill.
+fn draw_pulse(f: &mut Frame, area: Rect, store: &Store, t: &Theme, now: Instant) {
     let rows = Layout::vertical([
-        Constraint::Length(7), // PULSE
-        Constraint::Length(6), // ATLAS READ
-        Constraint::Min(0),    // the glyph, bottom-anchored
+        Constraint::Min(0),          // the pulse sections
+        Constraint::Length(READ_H),  // ATLAS READ
+        Constraint::Length(GLYPH_H), // the glyph
     ])
     .split(area);
 
+    pulse::draw(f, rows[0], store, now);
+
     let snapshot = store.snapshot.as_ref();
-    let regime = snapshot
-        .and_then(|s| s.market.as_ref())
-        .and_then(|m| m.regime.as_ref());
-    let stress = snapshot.and_then(|s| s.stress.as_ref());
-
-    let pulse = vec![
-        panel_header("pulse"),
-        kv(
-            "regime",
-            upper(regime.and_then(|r| format::text(r.regime.as_ref()))),
-        ),
-        kv(
-            "robust",
-            upper(regime.and_then(|r| format::text(r.robust_state.as_ref()))),
-        ),
-        kv("drawdown", opt_pct(drawdown(snapshot))),
-        kv(
-            "tier",
-            upper(stress.and_then(|s| format::text(s.drawdown_tier.as_ref()))),
-        ),
-        kv("gross", opt_pct(stress.and_then(|s| s.gross_exposure))),
-    ];
-    panel(f, rows[0], pulse);
-
     let read = snapshot.and_then(|s| s.atlas_read.as_ref());
     let read_lines = vec![
         panel_header("atlas read"),
         kv(
             "state",
-            upper(read.and_then(|r| format::text(r.quantitative_state.as_ref()))),
+            format::upper(read.and_then(|r| format::text(r.quantitative_state.as_ref()))),
         ),
         kv(
             "agreement",
-            upper(read.and_then(|r| format::text(r.agreement.as_ref()))),
+            format::upper(read.and_then(|r| format::text(r.agreement.as_ref()))),
         ),
-        kv("conviction", opt_pct(read.and_then(|r| r.conviction))),
+        kv(
+            "conviction",
+            format::opt_pct(read.and_then(|r| r.conviction)),
+        ),
         kv(
             "news",
             format::or_missing(read.and_then(|r| r.news_source.as_ref())).to_string(),
@@ -464,27 +453,4 @@ fn kv(label: &str, value: String) -> Line<'static> {
         ),
         Span::styled(value, Style::default().fg(t.text_primary)),
     ])
-}
-
-fn upper(value: Option<&str>) -> String {
-    value
-        .map(str::to_uppercase)
-        .unwrap_or_else(|| MISSING.to_string())
-}
-
-fn opt_pct(value: Option<f64>) -> String {
-    value
-        .map(format::pct1)
-        .unwrap_or_else(|| MISSING.to_string())
-}
-
-/// The live book decides the drawdown for the same reason it decides the halt:
-/// it is the one marked to the tape.
-fn drawdown(snapshot: Option<&Snapshot>) -> Option<f64> {
-    let snapshot = snapshot?;
-    snapshot
-        .live_portfolio
-        .as_ref()
-        .and_then(|p| p.drawdown)
-        .or_else(|| snapshot.portfolio.as_ref().and_then(|p| p.drawdown))
 }

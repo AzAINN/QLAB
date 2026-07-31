@@ -733,4 +733,204 @@ mod operator {
         let client = WriteClient::new("http://127.0.0.1:1").unwrap();
         assert!(client.atlas_pause().await.is_err());
     }
+
+    // -- the dispatch seam -------------------------------------------------
+    //
+    // What turns a confirmed `Command` into a request, and what a write outcome
+    // owes the poller. This lived in `main.rs`, where nothing could reach it:
+    // the routing that decides which owner verb a keystroke lands on, and the
+    // predicate that decides whether a *failed* write refreshes the desk, both
+    // shipped with no test at all. Invariant 10, one layer above the seams it
+    // usually catches.
+
+    use atlas::bus::{AppEvent, Wrote};
+    use atlas::cmd::Command;
+    use atlas::dispatch::{perform, refetches, Writes};
+
+    /// An armed token for the fixture plan, minted the only way one can be.
+    fn token() -> atlas::ui::widgets::confirm::ConfirmToken {
+        armed_token()
+    }
+
+    #[tokio::test]
+    async fn each_write_command_lands_on_the_owner_verb_it_names() {
+        // The routing itself. A `Reject` that reached `/approve` would be an
+        // operator's refusal recorded as consent, and nothing downstream could
+        // tell — both answer 200 with a status the client does not re-read.
+        let owner = spawn_owner(200, r#"{"status": "approved"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, Command::Approve("1a2b3c4d5e6f7081".into())).await,
+            Some(Wrote::Decided {
+                approval_id: "1a2b3c4d5e6f7081".into(),
+                decision: "approved",
+            })
+        );
+        assert_eq!(owner.only().path, "/api/approvals/1a2b3c4d5e6f7081/approve");
+
+        let owner = spawn_owner(200, r#"{"status": "rejected"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, Command::Reject("1a2b3c4d5e6f7081".into())).await,
+            Some(Wrote::Decided {
+                approval_id: "1a2b3c4d5e6f7081".into(),
+                decision: "rejected",
+            })
+        );
+        assert_eq!(owner.only().path, "/api/approvals/1a2b3c4d5e6f7081/reject");
+
+        let owner = spawn_owner(200, r#"{"executed": true, "n_fills": 2}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, Command::Execute(token())).await,
+            Some(Wrote::Executed {
+                plan_id: "9661b0e88b4a669e".into(),
+            })
+        );
+        let seen = owner.only();
+        assert_eq!(seen.path, "/api/plans/execute");
+        let body: serde_json::Value = serde_json::from_str(&seen.body).unwrap();
+        assert_eq!(body["human_confirmed"], serde_json::json!(true));
+        assert_eq!(body["approval_id"], serde_json::json!("1a2b3c4d5e6f7081"));
+    }
+
+    #[tokio::test]
+    async fn a_gate_refusal_survives_the_seam_as_a_refusal() {
+        // The 200-shaped decline, carried through the dispatch layer with the
+        // owner's own words intact. Folded into `Executed` here it would reach
+        // the toast and the card as a booked fill.
+        let owner = spawn_owner(
+            200,
+            r#"{"executed": false, "blocked_by": "approval",
+                "reasons": ["approval has expired"]}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, Command::Execute(token())).await,
+            Some(Wrote::Refused {
+                plan_id: "9661b0e88b4a669e".into(),
+                blocked_by: "approval".into(),
+                reasons: vec!["approval has expired".into()],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_never_landed_names_what_it_was_and_what_was_said() {
+        // Port 1: nothing listens. The outcome has to name the plan it was
+        // about — an audit trail ending at "a write failed" cannot be matched
+        // to the key that was pressed.
+        let client = WriteClient::new("http://127.0.0.1:1").unwrap();
+        match perform(&client, Command::Execute(token())).await {
+            Some(Wrote::Failed { what, said }) => {
+                assert!(what.contains("9661b0e88b4a669e"), "{what}");
+                assert!(!said.is_empty(), "a failure must carry the reason");
+            }
+            other => panic!("an unreachable owner is a failure, got {other:?}"),
+        }
+        let client = WriteClient::new("http://127.0.0.1:1").unwrap();
+        match perform(&client, Command::Approve("a1".into())).await {
+            Some(Wrote::Failed { what, .. }) => assert!(what.contains("a1"), "{what}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_two_commands_the_runtime_handles_itself_send_nothing() {
+        // A stray `Quit` reaching the writer must not put a meaningless row on
+        // the bus — every `Wrote` raises a toast and refetches the desk.
+        let client = WriteClient::new("http://127.0.0.1:1").unwrap();
+        assert_eq!(perform(&client, Command::Quit).await, None);
+        assert_eq!(perform(&client, Command::Refresh).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_dispatched_command_puts_its_outcome_on_the_bus() {
+        // The other half of the seam: the runtime never awaits a write, so an
+        // outcome that never reached the channel would be a key an operator
+        // pressed and heard nothing back from.
+        let owner = spawn_owner(200, r#"{"status": "approved"}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, Posture::Operator, tx).unwrap();
+        assert!(writes.armed());
+        writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()));
+        match rx.recv().await {
+            Some(AppEvent::Wrote(Wrote::Decided { decision, .. })) => {
+                assert_eq!(decision, "approved")
+            }
+            other => panic!("the outcome never reached the bus: {:?}", other.is_some()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_window_the_human_did_not_arm_holds_no_writer_and_sends_nothing() {
+        // The flag arms the build, not the feature. A featured binary started
+        // without `--operator` reads GLASS on the status line, and the runtime
+        // has to agree with it rather than merely the renderer.
+        let owner = spawn_owner(200, r#"{"status": "approved"}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, Posture::Glass, tx).unwrap();
+        assert!(!writes.armed());
+        writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "an unarmed window wrote to the desk"
+        );
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "an unarmed window reached the owner"
+        );
+    }
+
+    #[test]
+    fn every_write_outcome_brings_the_next_poll_forward_failures_included() {
+        // The rule this pins is the counter-intuitive one. A refusal moved the
+        // registry — the gate invalidates the approval it declined — and a
+        // *failure* is the outcome where the desk's state is least knowable,
+        // because the write shares the poller's timeout and a request that gave
+        // up may still be booking. Suppressing the refetch there kept the least
+        // trustworthy frame on screen at the moment an operator is most likely
+        // to press the key again.
+        for outcome in [
+            Wrote::Executed {
+                plan_id: "p1".into(),
+            },
+            Wrote::Refused {
+                plan_id: "p1".into(),
+                blocked_by: "approval".into(),
+                reasons: vec!["expired".into()],
+            },
+            Wrote::Decided {
+                approval_id: "a1".into(),
+                decision: "approved",
+            },
+            Wrote::Failed {
+                what: "execute p1".into(),
+                said: "the owner did not answer".into(),
+            },
+        ] {
+            assert!(
+                refetches(&AppEvent::Wrote(outcome.clone())),
+                "{outcome:?} must bring the next poll forward"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_but_a_write_outcome_refetches_from_here() {
+        // The stream already nudges the poller for the durable kinds
+        // (`net::sse::REFETCH_KINDS`), and a second rule for the same events in
+        // a second place is how the two come to disagree.
+        assert!(!refetches(&AppEvent::Tick));
+        assert!(!refetches(&AppEvent::Resize));
+        assert!(!refetches(&AppEvent::ConnUp(atlas::bus::Channel::Owner)));
+        assert!(!refetches(&AppEvent::Sse(atlas::bus::SseEvent {
+            kind: "plan_executed".into(),
+            payload: serde_json::json!({}),
+            ts: None,
+            id: None,
+        })));
+        assert!(!refetches(&AppEvent::Snapshot(Box::new(snapshot()))));
+    }
 }

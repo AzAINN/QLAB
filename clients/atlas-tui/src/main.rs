@@ -29,6 +29,7 @@
 
 use atlas::bus::{AppEvent, Channel, Tx};
 use atlas::cmd::Command;
+use atlas::dispatch::Writes;
 use atlas::fx::Fx;
 use atlas::net::http::{self, PollerHandle};
 use atlas::net::sse;
@@ -115,119 +116,6 @@ async fn main() -> Result<()> {
     spawn_terminal_events(tx);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     run(&mut terminal, &mut store, &mut rx, &poller, &writes).await
-}
-
-/// The runtime's end of the write path.
-///
-/// A type in both builds so the loop has one shape, and holding nothing at all
-/// in the default one — `WriteClient` is not in that crate, so this is empty by
-/// absence rather than by an `Option` a bug could fill.
-///
-/// It is the *only* thing that dispatches a write. `ui/` returns `Command`s and
-/// this turns one into a request, which is what keeps every view free of a
-/// client and keeps the order path to one call site with a composition root
-/// above it.
-#[cfg(feature = "operator")]
-struct Writes {
-    client: Option<std::sync::Arc<atlas::net::write::WriteClient>>,
-    tx: Tx,
-}
-
-#[cfg(not(feature = "operator"))]
-struct Writes;
-
-#[cfg(feature = "operator")]
-impl Writes {
-    fn new(base: &str, posture: atlas::store::Posture, tx: Tx) -> Result<Self> {
-        let client = match posture {
-            atlas::store::Posture::Operator => Some(std::sync::Arc::new(
-                atlas::net::write::WriteClient::new(base)?,
-            )),
-            // A featured binary the human did not arm holds no writer at all,
-            // so the posture chip's claim — "this window cannot place an order"
-            // — is true of the runtime and not only of the status line.
-            atlas::store::Posture::Glass => None,
-        };
-        Ok(Self { client, tx })
-    }
-
-    /// Carry one confirmed decision to the owner, off the frame loop.
-    ///
-    /// Spawned rather than awaited: a write shares the poller's eight-second
-    /// timeout, and eight seconds of a frozen terminal after pressing `x` is
-    /// how an operator ends up pressing it again. The answer comes back on the
-    /// bus, which is the one place that owns the store, the toasts and the
-    /// poller — and every outcome comes back, refusals included.
-    fn dispatch(&self, cmd: Command) {
-        use atlas::bus::Wrote;
-        use atlas::net::write::Execution;
-
-        let Some(client) = self.client.clone() else {
-            // Unreachable through the key path — a glass window has no view
-            // that opens a modal, because `confirm` is gated too — and loud
-            // rather than silent if that ever stops being true.
-            tracing::error!("a write was requested by a window holding no writer");
-            return;
-        };
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let outcome = match cmd {
-                Command::Approve(id) => match client.approve(&id).await {
-                    Ok(_) => Wrote::Decided {
-                        approval_id: id,
-                        decision: "approved",
-                    },
-                    Err(err) => Wrote::Failed {
-                        what: format!("approve {id}"),
-                        said: err.to_string(),
-                    },
-                },
-                Command::Reject(id) => match client.reject(&id).await {
-                    Ok(_) => Wrote::Decided {
-                        approval_id: id,
-                        decision: "rejected",
-                    },
-                    Err(err) => Wrote::Failed {
-                        what: format!("reject {id}"),
-                        said: err.to_string(),
-                    },
-                },
-                Command::Execute(token) => {
-                    // Read before the token is spent by the call: the outcome
-                    // has to name the plan it was about whichever way it goes.
-                    let plan_id = token.plan_id().to_string();
-                    match client.execute_plan(token).await {
-                        Ok(Execution::Executed(_)) => Wrote::Executed { plan_id },
-                        Ok(Execution::Refused {
-                            blocked_by,
-                            reasons,
-                        }) => Wrote::Refused {
-                            plan_id,
-                            blocked_by,
-                            reasons,
-                        },
-                        Err(err) => Wrote::Failed {
-                            what: format!("execute {plan_id}"),
-                            said: err.to_string(),
-                        },
-                    }
-                }
-                // Handled by the loop before they reach here; the arm exists
-                // because the match is over the whole type.
-                Command::Quit | Command::Refresh => return,
-            };
-            let _ = tx.send(AppEvent::Wrote(outcome));
-        });
-    }
-}
-
-#[cfg(not(feature = "operator"))]
-impl Writes {
-    /// Same signature, nothing to build. The default artifact has no writer to
-    /// point at an owner, whatever it is passed.
-    fn new(_base: &str, _posture: atlas::store::Posture, _tx: Tx) -> Result<Self> {
-        Ok(Self)
-    }
 }
 
 /// What this window may do to the desk, decided once and never re-read.
@@ -441,16 +329,12 @@ fn ingest(
             }
         }
     }
-    // Every write outcome brings the next poll forward, the failures included.
-    // A refusal moved the registry — the gate invalidates the approval it
-    // declined (`execute_plan_with_approval`, `server.py:1876`) — and a
-    // *failure* is the outcome where the desk's state is least knowable: the
-    // eight-second write timeout is shared with the poller precisely because a
-    // request that gave up may still be booking, so the snapshot on screen is
-    // then both stale and the one an operator is about to press `x` against
-    // again. Suppressing the refetch there kept the least trustworthy frame.
+    // What a write outcome owes the poller is `dispatch::refetches`, which is
+    // where it can be pinned per variant. The rule is not obvious enough to
+    // live as a `matches!` in a loop nothing tests: a *failed* write is the
+    // outcome that most needs the refresh, not the one that needs it least.
     #[cfg(feature = "operator")]
-    if matches!(ev, AppEvent::Wrote(_)) {
+    if atlas::dispatch::refetches(&ev) {
         poller.now();
     }
     // Before the fold, because the fold consumes the event. A toast is about the

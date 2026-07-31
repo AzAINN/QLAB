@@ -115,8 +115,20 @@ impl View for AuditView {
             // Walls at both ends, exactly as every other cursor on this
             // workstation: an operator holding an arrow must never wrap onto a
             // decision at the other end of a queue they did not scroll to.
-            KeyCode::Up => self.selected = self.cursor(rows).saturating_sub(1),
-            KeyCode::Down => self.selected = (self.cursor(rows) + 1).min(rows.saturating_sub(1)),
+            //
+            // Posture-gated like every other key on this pane, and for the same
+            // reason the marker is: the only thing this cursor selects is a
+            // decision, so an unarmed window has nothing to point at. Ungated it
+            // swallowed the arrows to move a cursor it never drew — a key
+            // pressed with no effect anyone can see reads as a hung client, and
+            // the pane declining them leaves them free for whatever claims them
+            // next.
+            KeyCode::Up if store.posture.writes() => {
+                self.selected = self.cursor(rows).saturating_sub(1)
+            }
+            KeyCode::Down if store.posture.writes() => {
+                self.selected = (self.cursor(rows) + 1).min(rows.saturating_sub(1))
+            }
             // Both decisions go through a typed word rather than a keypress.
             // There is no plan hash to bind here — approving is not booking —
             // but a decision that authorises a later fill is still not

@@ -57,13 +57,33 @@ fn an_unarmed_window_says_view_only_in_both_builds() {
     // read it. In the glass build the branches do not exist; in the operator
     // build they exist and the posture has not armed them — and the pane must
     // look identical either way.
-    let frame = audit().frame(120, 36);
+    let mut client = audit();
+    let frame = client.frame(120, 36);
     let header = line_with(&frame, "APPROVALS");
     assert!(header.contains("view-only"), "{header}");
     assert!(
         !header.contains("approve"),
         "an unarmed window offered a decision key: {header}"
     );
+
+    // And no key on this pane does anything at all. The arrows included: the
+    // only thing the cursor selects is a decision, so ungated they were
+    // swallowed to move a marker an unarmed window never draws — a keystroke
+    // with no visible effect reads as a hung client.
+    for code in [
+        KeyCode::Down,
+        KeyCode::Down,
+        KeyCode::Up,
+        KeyCode::Char('a'),
+        KeyCode::Char('R'),
+    ] {
+        client.press(code);
+        assert_eq!(
+            client.frame(120, 36),
+            frame,
+            "{code:?} changed an unarmed window"
+        );
+    }
 }
 
 #[test]
@@ -197,26 +217,6 @@ fn a_narrow_queue_drops_the_expiry_whole_rather_than_half_a_clock() {
         );
         assert!(row.contains("pending"), "{row}");
     }
-}
-
-#[test]
-fn the_queue_scrolls_so_the_cursor_is_never_off_screen() {
-    // The cursor is clamped to the whole queue, not to what fits. A fixed top
-    // would leave `a`/`R` acting on a row nobody can see.
-    let rows: Vec<String> = (0..12)
-        .map(|i| {
-            format!(
-                r#"{{"approval_id": "ap{i:02}00000000", "plan_id": "pl{i:02}", "status": "pending"}}"#
-            )
-        })
-        .collect();
-    let mut client = audit_from(&format!(r#"{{"approvals": [{}]}}"#, rows.join(",")));
-    for _ in 0..11 {
-        client.press(KeyCode::Down);
-    }
-    // Shown as an eleven-character prefix, like every other id in this pane.
-    let short = content(&client.frame(120, 14));
-    assert!(short.contains("ap110000000"), "{short}");
 }
 
 #[test]
@@ -377,6 +377,30 @@ mod armed {
         // Esc is the way out, and it decides nothing.
         assert_eq!(press(&mut client, KeyCode::Esc), None);
         assert!(!client.frame(120, 36).contains("APPROVE APPROVAL"));
+    }
+
+    #[test]
+    fn the_queue_scrolls_so_the_cursor_is_never_off_screen() {
+        // The cursor is clamped to the whole queue, not to what fits. A fixed top
+        // would leave `a`/`R` acting on a row nobody can see.
+        //
+        // Armed, because the cursor is: the only thing it selects is a decision, so
+        // an unarmed window declines the arrows rather than moving a marker it
+        // never draws.
+        let rows: Vec<String> = (0..12)
+            .map(|i| {
+                format!(
+                    r#"{{"approval_id": "ap{i:02}00000000", "plan_id": "pl{i:02}", "status": "pending"}}"#
+                )
+            })
+            .collect();
+        let mut client = armed(&format!(r#"{{"approvals": [{}]}}"#, rows.join(",")));
+        for _ in 0..11 {
+            client.press(KeyCode::Down);
+        }
+        // Shown as an eleven-character prefix, like every other id in this pane.
+        let short = content(&client.frame(120, 14));
+        assert!(short.contains("ap110000000"), "{short}");
     }
 
     #[test]

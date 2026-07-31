@@ -8,6 +8,10 @@
 
 pub mod bus;
 pub mod cmd;
+/// The seam between a confirmed `Command` and a request. Here rather than in
+/// `main.rs` because the binary has no test harness, and what reaches the owner
+/// is the last thing in this crate that should be untestable.
+pub mod dispatch;
 pub mod format;
 pub mod fx;
 pub mod glyph;

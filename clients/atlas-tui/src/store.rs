@@ -456,6 +456,18 @@ impl Store {
         out
     }
 
+    /// Whether the desk is halted, by the one rule the client has for it.
+    ///
+    /// The rule itself is `halted` below — the live book decides, and the
+    /// reconciled book answers only when it has not been marked. Exposed rather
+    /// than re-derived per surface for the reason `mood` states: the glyph and
+    /// the BOOK ribbon must never disagree about whether the desk is halted, and
+    /// two spellings of "the live book decides" is how they would come to.
+    /// `None` is its own fact — no book has said either way.
+    pub fn halted(&self) -> Option<bool> {
+        self.snapshot.as_ref().and_then(halted)
+    }
+
     /// The manager's mood, derived from desk facts rather than set.
     ///
     /// Ported from `Desk::mood`. Derived is the whole point: an animation that

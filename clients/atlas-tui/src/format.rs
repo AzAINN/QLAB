@@ -70,6 +70,37 @@ pub fn signed_money(value: f64) -> String {
     format!("{}${}", if negative { "-" } else { "+" }, group(&digits))
 }
 
+/// Money at ribbon altitude: three significant figures and a unit suffix.
+///
+/// `money` is unbounded in width — a nine-figure book is six cells wider than a
+/// five-figure one — and a KPI chip is sized once, at build time, for the widest
+/// thing it can hold. A line that grew past its cell would be clipped by the
+/// `Paragraph` that draws it, which turns `$6,821.21` into `$6,821.` — a number
+/// that is wrong rather than one that is coarse. So the headline figures use
+/// `money` and the chips beside them use this.
+///
+/// `B` is the top band, as in `compact_volume`: a larger figure renders as
+/// thousands of `B` rather than inventing a unit.
+pub fn compact_money(value: f64) -> String {
+    // The sign comes off the *rounded* value, so a cash balance of -1e-13 — what
+    // a fully-invested paper book actually carries — is not drawn as a debt.
+    let Some((negative, _)) = fixed(value, 2) else {
+        return MISSING.to_string();
+    };
+    let mut magnitude = value.abs();
+    let mut suffix = "";
+    // Banded on the rounded value: 999_999 would otherwise print `1000.00K`, a
+    // number whose digits disagree with its own unit.
+    for next in ["K", "M", "B"] {
+        if magnitude < 999.995 {
+            break;
+        }
+        magnitude /= 1000.0;
+        suffix = next;
+    }
+    format!("{}${magnitude:.2}{suffix}", if negative { "-" } else { "" })
+}
+
 /// A fraction as a signed percentage: `0.0123` → `+1.23%`.
 pub fn signed_pct(fraction: f64) -> String {
     let Some((negative, digits)) = fixed(fraction * 100.0, 2) else {
@@ -223,6 +254,28 @@ mod tests {
         assert_eq!(money(999.5), "$999.50");
         assert_eq!(money(-1_500.25), "-$1,500.25");
         assert_eq!(money(0.0), "$0.00");
+    }
+
+    #[test]
+    fn compact_money_bands_and_stays_inside_a_chip() {
+        assert_eq!(compact_money(0.0), "$0.00");
+        assert_eq!(compact_money(999.5), "$999.50");
+        assert_eq!(compact_money(6_821.21), "$6.82K");
+        assert_eq!(compact_money(1_234_567.0), "$1.23M");
+        assert_eq!(compact_money(-1_500.25), "-$1.50K");
+        assert_eq!(compact_money(f64::NAN), MISSING);
+        // The cash a fully-invested paper book carries. Absent the rounded-sign
+        // rule this is `-$0.00`, a debt of nothing.
+        assert_eq!(compact_money(6.821210263296962e-13), "$0.00");
+        assert_eq!(compact_money(-1e-13), "$0.00");
+        // The property the chip is sized on: nine characters, whatever the book.
+        for value in [0.0, 999.99, 1e4, 4.2e6, -7.7e9, 1e12, -1e-9] {
+            assert!(
+                compact_money(value).chars().count() <= 9,
+                "{value} rendered {}",
+                compact_money(value)
+            );
+        }
     }
 
     #[test]

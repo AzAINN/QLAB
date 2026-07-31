@@ -17,6 +17,7 @@
 //! disagree about the book, and a frame stays a pure function of (store,
 //! effects, instant) — plus, now, the cursor the operator put somewhere.
 
+pub mod book;
 pub mod desk;
 pub mod markets;
 
@@ -54,7 +55,7 @@ pub trait View {
 pub struct Views {
     desk: desk::DeskView,
     markets: markets::MarketsView,
-    book: Unbuilt,
+    book: book::BookView,
     research: Unbuilt,
     workforce: Unbuilt,
     audit: Unbuilt,
@@ -72,7 +73,7 @@ impl Views {
         Self {
             desk: desk::DeskView,
             markets: markets::MarketsView::default(),
-            book: Unbuilt(ViewId::Book),
+            book: book::BookView,
             research: Unbuilt(ViewId::Research),
             workforce: Unbuilt(ViewId::Workforce),
             audit: Unbuilt(ViewId::Audit),

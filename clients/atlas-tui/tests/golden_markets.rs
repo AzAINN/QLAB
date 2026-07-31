@@ -184,7 +184,12 @@ fn the_selection_survives_a_trip_through_another_view() {
     assert!(client.frame(120, 36).contains("▌ QQQ"));
 
     client.press(KeyCode::Char('3'));
-    assert!(client.frame(120, 36).contains("▌ BOOK"), "left MARKETS");
+    // BOOK's own headline, which only that view renders: until Task 11 this
+    // read `▌ BOOK` off the placeholder that used to stand there.
+    assert!(
+        client.frame(120, 36).contains("PORTFOLIO VALUE"),
+        "left MARKETS"
+    );
     client.press(KeyCode::Char('2'));
     assert!(
         client.frame(120, 36).contains("▌ QQQ"),

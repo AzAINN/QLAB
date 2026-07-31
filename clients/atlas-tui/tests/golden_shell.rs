@@ -7,16 +7,19 @@
 mod harness;
 
 use atlas::bus::{AppEvent, Channel, HttpResult, SseEvent};
-use atlas::fx::{FlashKey, FlashTracker};
+use atlas::fx::{FlashKey, Fx, TWEEN};
 use atlas::model::Snapshot;
 use atlas::store::{Store, ViewId};
 use atlas::theme::Theme;
+use atlas::ui::shell::{NAV_W, PULSE_W};
 use atlas::ui::views::Views;
+use atlas::ui::widgets::pulse;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use harness::{
     body_style_of, fixture_store, fixture_store_with_panel, frame_to_string, frame_to_string_at,
-    line_with, row_styles, Client,
+    frame_to_string_fx, line_with, row_styles, Client,
 };
+use ratatui::layout::Rect;
 use std::time::{Duration, Instant};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -397,8 +400,8 @@ fn a_quote_tick_flashes_the_price_cell_and_the_flash_decays_out() {
         quote(serde_json::json!([{"ticker": "SPY", "price": 731.11, "change_1d": 0.0042}])),
         at,
     );
-    let mut fx = FlashTracker::default();
-    fx.flash(FlashKey::price("SPY"), at);
+    let mut fx = Fx::default();
+    fx.flashes.flash(FlashKey::price("SPY"), at);
 
     let t = Theme::truecolor();
     let lit = row_styles(&store, &fx, 120, 36, at, 0);
@@ -536,6 +539,116 @@ fn the_pulse_rail_renders_every_section_at_120x36() {
 }
 
 #[test]
+fn the_gauge_needle_eases_toward_a_new_reading_and_lands_exactly_on_it() {
+    // The bar is drawn out of full blocks, so the eased ratio is legible in the
+    // frame text itself rather than only in a style.
+    let store = rail_store();
+    let at = store.last_snapshot_at.unwrap();
+    let score = pulse::desk_stress_of(&store).expect("this rail has a reading");
+
+    // A tween nobody ever set draws the reading verbatim — which is what every
+    // golden in this crate holds, and why none of them can catch a mid-tween
+    // frame by accident.
+    let settled = frame_to_string_fx(&store, &Fx::default(), 120, 36, at);
+    assert!(line_with(&settled, "NEUTRAL").contains("█"), "{settled}");
+
+    let mut fx = Fx::default();
+    fx.gauge.set(0.0, at); // a previous reading to set off from
+    fx.gauge.set(score, at);
+    let leaving = frame_to_string_fx(&store, &fx, 120, 36, at);
+    let mid = frame_to_string_fx(&store, &fx, 120, 36, at + Duration::from_millis(80));
+
+    let bar = |frame: &str| line_with(frame, "NEUTRAL").matches('█').count();
+    assert_eq!(
+        bar(&leaving),
+        0,
+        "the needle did not set off from where it was"
+    );
+    assert!(
+        bar(&mid) > bar(&leaving) && bar(&mid) < bar(&settled),
+        "80 ms in the bar should be part way: {} → {} → {}",
+        bar(&leaving),
+        bar(&mid),
+        bar(&settled)
+    );
+    assert_eq!(
+        frame_to_string_fx(&store, &fx, 120, 36, at + TWEEN),
+        settled,
+        "the tween has to land on the reading, not near it"
+    );
+}
+
+#[test]
+fn the_number_beside_the_gauge_never_tweens_with_the_bar() {
+    // A sliding bar is the desk moving. A printed score counting up through
+    // readings that were never taken is the rail inventing measurements — and
+    // the band word would flicker across its threshold on the way.
+    let store = rail_store();
+    let at = store.last_snapshot_at.unwrap();
+    let score = pulse::desk_stress_of(&store).unwrap();
+    let mut fx = Fx::default();
+    fx.gauge.set(0.0, at);
+    fx.gauge.set(score, at);
+    let mid = frame_to_string_fx(&store, &fx, 120, 36, at + Duration::from_millis(80));
+    assert!(
+        line_with(&mid, "NEUTRAL").contains(&format!("{score:.0}  NEUTRAL")),
+        "{mid}"
+    );
+}
+
+#[test]
+fn drawing_a_frame_publishes_the_rects_the_rules_aim_at() {
+    // Invariant 10 at the seam it is easiest to lose: `Fx::rules` aims at these
+    // rects, and a shell that computed its layout without publishing it would
+    // leave every effect running over a zero rect — visibly nothing, silently
+    // fine, and green in every other test in this file.
+    let store = rail_store();
+    let at = store.last_snapshot_at.unwrap();
+    let fx = Fx::default();
+    assert_eq!(fx.rects.content.get(), Rect::ZERO, "nothing has drawn yet");
+
+    let _ = frame_to_string_fx(&store, &fx, 120, 36, at);
+
+    assert_eq!(fx.rects.frame.get(), Rect::new(0, 0, 120, 36));
+    let content = fx.rects.content.get();
+    assert_eq!(
+        content.x,
+        NAV_W + 1,
+        "content starts after the nav rail's rule"
+    );
+    assert_eq!(content.right(), 120 - PULSE_W, "and ends at the pulse rail");
+
+    // The rail's two targets live inside the rail, and nowhere else.
+    for (name, rect) in [
+        ("regime", fx.rects.regime.get()),
+        ("read", fx.rects.read.get()),
+    ] {
+        assert_eq!(rect.x, 120 - PULSE_W + 1, "{name} is not in the pulse rail");
+        assert_eq!(rect.right(), 120, "{name} does not reach the rail's edge");
+        assert!(rect.height > 0, "{name} was published empty");
+    }
+
+    // The chips are the right-hand end of the status line, which is the last row.
+    let chips = fx.rects.chips.get();
+    assert_eq!(chips.bottom(), 36);
+    assert_eq!(chips.height, 1);
+    assert_eq!(chips.right(), 120);
+}
+
+#[test]
+fn a_terminal_too_narrow_for_the_chip_run_publishes_what_it_has() {
+    // The chip rect is a fixed width carved off the right of the status line;
+    // on a terminal narrower than that the subtraction is what would underflow.
+    let store = rail_store();
+    let at = store.last_snapshot_at.unwrap();
+    let fx = Fx::default();
+    let _ = frame_to_string_fx(&store, &fx, 24, 12, at);
+    let chips = fx.rects.chips.get();
+    assert_eq!(chips.x, 0);
+    assert_eq!(chips.width, 24);
+}
+
+#[test]
 fn the_rail_counts_the_breadth_of_the_tape_it_is_looking_at() {
     // The bar and the caption are one fact drawn twice; a bar that disagreed
     // with its own caption would be worse than either alone.
@@ -566,7 +679,7 @@ fn the_rail_counts_the_breadth_of_the_tape_it_is_looking_at() {
     let t = Theme::truecolor();
     let cells = row_styles(
         &store,
-        &FlashTracker::default(),
+        &Fx::default(),
         120,
         36,
         store.last_snapshot_at.unwrap(),

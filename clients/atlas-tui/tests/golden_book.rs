@@ -559,7 +559,7 @@ fn the_last_column_takes_the_stream_price_and_flashes_when_it_moves() {
     let content = content(&client.frame(120, 36));
     assert!(line_with(&content, "ACWI").contains("153.99"), "{content}");
 
-    client.fx.flash(FlashKey::price("ACWI"), at);
+    client.fx.flashes.flash(FlashKey::price("ACWI"), at);
     assert_eq!(
         cell_style_on(&client.buffer(120, 36), "ACWI", "153.99").bg,
         Some(Theme::truecolor().accent_dim),
@@ -567,7 +567,7 @@ fn the_last_column_takes_the_stream_price_and_flashes_when_it_moves() {
     );
 
     // And it ends. A highlight that never goes out stops meaning "this moved".
-    client.fx = atlas::fx::FlashTracker::default();
+    client.fx = atlas::fx::Fx::default();
     client.now = at + Duration::from_millis(700);
     assert_ne!(
         cell_style_on(&client.buffer(120, 36), "ACWI", "153.99").bg,

@@ -14,6 +14,7 @@
 //! only way this rail is ever read.
 
 use crate::format::{self, MISSING, PENDING};
+use crate::fx::Tween;
 use crate::model::{Reading, Regime, RegimePanel, Snapshot};
 use crate::store::{AssetView, Store};
 use crate::theme::theme;
@@ -65,19 +66,25 @@ const INDICATORS: [(&str, &str, &str); 6] = [
 /// silently.
 const UNKNOWN_GLYPH: &str = "◌";
 
-/// One frame of the rail.
+/// One frame of the rail, and where it put the regime strip.
 ///
-/// `now` is taken and not read: Task 15 tweens the gauge value with an ease-out,
-/// which needs the caller's instant. A renderer that reached for a clock instead
-/// could not be pinned by a golden frame, so the parameter is here from the
-/// start rather than arriving with the effect.
-pub fn draw(f: &mut Frame, area: Rect, store: &Store, _now: Instant) {
+/// The strip's rect goes back to the caller because the shell owns publishing —
+/// a widget that reached into `Fx` to register its own rect would be a second
+/// place layout is written down. `None` means the rail was too short to draw it.
+///
+/// `now` is read only through `gauge`: the needle is a value on its way to
+/// another value, and a renderer that reached for a clock instead could not be
+/// pinned by a golden frame.
+pub fn draw(f: &mut Frame, area: Rect, store: &Store, gauge: &Tween, now: Instant) -> Option<Rect> {
     let sections = [
-        stress_section(store),
+        stress_section(store, gauge, now),
         breadth_section(store, area.width),
         movers_section(store),
         regime_section(store),
     ];
+    // The regime strip is last, so its rect is the one the loop ends on.
+    let strip = sections.len() - 1;
+    let mut regime = None;
 
     let mut y = area.y;
     let bottom = area.y.saturating_add(area.height);
@@ -105,18 +112,20 @@ pub fn draw(f: &mut Frame, area: Rect, store: &Store, _now: Instant) {
                     },
                 );
             }
-            return;
+            return regime;
         }
-        section.draw(
-            f,
-            Rect {
-                y,
-                height: section.height(),
-                ..area
-            },
-        );
+        let rect = Rect {
+            y,
+            height: section.height(),
+            ..area
+        };
+        section.draw(f, rect);
+        if i == strip {
+            regime = Some(rect);
+        }
         y += section.height();
     }
+    regime
 }
 
 /// One block of the rail: the lines above its gauge, the gauge, and the lines
@@ -178,7 +187,7 @@ fn lines_at(f: &mut Frame, area: Rect, y: u16, lines: &[Line<'static>]) -> u16 {
 }
 
 /// The gauge, and the desk facts that put a number beside it.
-fn stress_section(store: &Store) -> Section {
+fn stress_section(store: &Store, tween: &Tween, now: Instant) -> Section {
     let t = theme();
     let snapshot = store.snapshot.as_ref();
     let regime = snapshot
@@ -190,12 +199,15 @@ fn stress_section(store: &Store) -> Section {
     let gauge = match desk_stress(regime, store.regime_panel.as_ref()) {
         Some(score) => {
             let (word, tone) = band(score);
+            // The bar eases toward the reading; the number and the band word do
+            // not. A needle sliding is the desk moving, but a printed 62 that
+            // counts up through 58, 60, 61 is a rail inventing readings that
+            // were never taken — and the band word would flicker across its
+            // threshold on the way.
+            let shown = tween.shown(score, now);
             Some(
                 Gauge::default()
-                    // The raw value. Task 15 gives it an ease-out tween, which
-                    // needs the previous value and an instant — state this
-                    // renderer deliberately does not hold yet.
-                    .ratio((score / 100.0).clamp(0.0, 1.0))
+                    .ratio((shown / 100.0).clamp(0.0, 1.0))
                     .gauge_style(Style::default().fg(tone).bg(t.bg_hover))
                     .label(Span::styled(
                         format!("{score:.0}  {word}"),
@@ -385,6 +397,21 @@ fn reading_row(reading: &Reading) -> Line<'static> {
             Style::default().fg(tone),
         ),
     ])
+}
+
+/// The score this rail would draw, from the store alone.
+///
+/// Public so the runtime can hand it to the gauge's tween the instant a snapshot
+/// lands. The alternative — a renderer that noticed the change while drawing —
+/// would only ever see it one frame late, with no previous value left to set off
+/// from, which is exactly the jump the tween exists to remove.
+pub fn desk_stress_of(store: &Store) -> Option<f64> {
+    let regime = store
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.market.as_ref())
+        .and_then(|m| m.regime.as_ref());
+    desk_stress(regime, store.regime_panel.as_ref())
 }
 
 /// The desk stress score, 0–100, or `None` when nothing it reads is there.

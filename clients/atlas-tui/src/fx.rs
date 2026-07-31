@@ -11,12 +11,29 @@
 //! what the owner said plus the diff of it; a decaying animation stamp is
 //! neither, and a store that carried one would no longer be a plain record of
 //! the desk that a golden frame can be a pure function of.
+//!
+//! Three kinds of motion live here, and they are different because a cell grid
+//! makes them different:
+//!
+//! * **Flashes and the reveal** are *styles*, chosen at draw time from an
+//!   arrival stamp. They are part of the frame `shell::draw` paints.
+//! * **tachyonfx effects** are a *pass over the painted buffer*, applied after
+//!   every widget has rendered. They are stateful, created once when the desk
+//!   moves, and driven by elapsed time rather than by a stamp. Deliberately not
+//!   part of `shell::draw`: a golden frame calls `draw` and never `process`, so
+//!   no snapshot can capture a half-finished effect.
+//! * **Value easing** is the gauge needle — `Interpolation` eases effects, not
+//!   application numbers, so the tween is hand-rolled (`ease_out_cubic`).
 
 use crate::store::Trigger;
 use crate::theme::theme;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tachyonfx::fx::RepeatMode;
+use tachyonfx::{fx, Effect, EffectManager, Interpolation, Motion, RefRect};
 
 /// How long a flash lives. Long enough to catch the eye on a glance-away
 /// surface, short enough that a fast tape does not leave the row permanently
@@ -99,9 +116,10 @@ impl FlashTracker {
                 self.flash(FlashKey::change(ticker), now);
             }
             Trigger::ReadChanged => self.reveal(now),
-            // Task 15 gives the rest their effects. A trigger with no motion
-            // behind it is not a bug — the diff is deliberately ahead of the
-            // vocabulary — but one with motion and no test would be.
+            // The rest are the tachyonfx lane's (`Fx::on_trigger`): a sweep, a
+            // pulse or a coalesce is a pass over the painted buffer, not a
+            // style a renderer can pick. The two lanes are kept apart rather
+            // than merged because only one of them can appear in a golden.
             _ => {}
         }
     }
@@ -186,6 +204,486 @@ impl FlashTracker {
 
 fn alive(start: Instant, now: Instant) -> bool {
     now.saturating_duration_since(start) < FLASH
+}
+
+// -- value easing ----------------------------------------------------------
+
+/// Ease-out cubic, on the unit interval.
+///
+/// tachyonfx's `Interpolation` eases *effects* — it decides how far through a
+/// dissolve the buffer is — and cannot be asked where a number is on its way to
+/// another number. The gauge needle is a number, so it gets this.
+///
+/// One curve, not a library of them: a companion easing with no caller is
+/// exactly the shape invariant 10 names. The next one arrives with the widget
+/// that needs it.
+pub fn ease_out_cubic(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// How long a tweened value takes to arrive.
+pub const TWEEN: Duration = Duration::from_millis(400);
+
+/// A number on its way to another number.
+///
+/// The pulse rail's stress gauge jumped between readings, which on a 0–100 scale
+/// reads as a different desk rather than as the same desk moving. This holds the
+/// value it left, the value it is going to, and when it set off — nothing else,
+/// and no clock.
+#[derive(Debug, Default)]
+pub struct Tween {
+    from: f64,
+    to: f64,
+    started_at: Option<Instant>,
+}
+
+impl Tween {
+    /// Tell the tween what the desk now reads.
+    ///
+    /// The first value lands instantly. A needle that swept up from a zero
+    /// nobody measured would be animating a number the desk never held — and an
+    /// operator opening onto a stressed desk would watch it look calm first.
+    pub fn set(&mut self, to: f64, now: Instant) {
+        match self.started_at {
+            None => {
+                self.from = to;
+                self.to = to;
+                self.started_at = Some(now);
+            }
+            // Interrupting mid-flight leaves from where the needle actually is,
+            // not from where the last leg started: the alternative snaps
+            // backwards before setting off again.
+            Some(_) if self.to != to => {
+                self.from = self.at(now);
+                self.to = to;
+                self.started_at = Some(now);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Where the needle is at `now`, given the value the rail actually reads.
+    ///
+    /// Takes the true value rather than owning it, because that is what keeps a
+    /// golden frame deterministic: a tween nobody ever `set` — every golden — has
+    /// no claim to be part way anywhere, so it renders the number verbatim. The
+    /// only frames this moves are the ones the runtime drew after a snapshot it
+    /// told the tween about.
+    pub fn shown(&self, value: f64, now: Instant) -> f64 {
+        if self.started_at.is_none() || self.to != value {
+            return value;
+        }
+        self.at(now)
+    }
+
+    /// Whether the needle still owes frames.
+    pub fn active(&self, now: Instant) -> bool {
+        self.from != self.to
+            && self
+                .started_at
+                .is_some_and(|start| now.saturating_duration_since(start) < TWEEN)
+    }
+
+    fn at(&self, now: Instant) -> f64 {
+        let Some(start) = self.started_at else {
+            return self.to;
+        };
+        // Saturating for the reason `style_for` saturates: the loop stamps a
+        // whole drain with one instant, so a frame can be drawn at the instant
+        // the value was set.
+        let elapsed = now.saturating_duration_since(start).as_secs_f64();
+        let t = elapsed / TWEEN.as_secs_f64();
+        if t >= 1.0 {
+            return self.to;
+        }
+        self.from + (self.to - self.from) * ease_out_cubic(t)
+    }
+}
+
+// -- the tachyonfx lane ----------------------------------------------------
+
+/// How often the loop wakes while anything is moving — 60 fps.
+///
+/// Load-bearing, and the reason this constant exists at all. `should_render`
+/// renders unconditionally while effects are active, but nothing woke the loop
+/// to act on it: the idle heartbeat is 100 ms and the animation beat 120 ms, so
+/// the fastest an "active" effect could be sampled was roughly eight times a
+/// second. The read's 600 ms reveal typed itself in in five visible chunks. The
+/// loop waits with this as a timeout instead of blocking on the channel while
+/// anything is moving, and blocks again the moment nothing is.
+pub const FX_FRAME: Duration = Duration::from_millis(FX_FRAME_MS);
+const FX_FRAME_MS: u64 = 16;
+
+/// The full-frame lane's cadence — Part I's 30 fps cap, expressed as the thing
+/// a 60 fps loop can actually do: one step every second wake, so 31 fps.
+///
+/// Two wakes rather than a flat 33 ms because 33 is not a whole number of 16 ms
+/// frames — a 33 ms floor fed 16 ms wakes pays out on every *third* one, and the
+/// halt would pulse at 20 fps while claiming 30. Deriving it from `FX_FRAME`
+/// keeps that arithmetic from silently coming apart again.
+///
+/// A full-frame effect rewrites every cell of the terminal, and the halt
+/// treatment repeats until the desk resumes; at 60 fps that is a permanent
+/// full-buffer rewrite at twice the rate anyone can see. The lane is separate
+/// rather than throttled in place because one `EffectManager` advances every
+/// effect it holds with one elapsed duration — there is no per-effect skip.
+pub const FULL_FRAME: Duration = Duration::from_millis(2 * FX_FRAME_MS);
+
+/// The most time one frame may advance an effect.
+///
+/// While anything is moving the loop wakes every `FX_FRAME`, so a gap wider than
+/// this can only mean the loop was idle — and an effect registered in the very
+/// iteration that ended the idle has not been playing for the length of it.
+/// Unclamped, a coalesce fired by a keystroke 120 ms after the last heartbeat
+/// frame would open a third of the way through itself, and the transition an
+/// operator sees would be the tail of one.
+///
+/// The trade is deliberate: under a terminal so slow that frames are genuinely
+/// dropped, an effect plays for its full count of frames and takes longer in
+/// wall time. On a cell grid that is the better failure — a transition that
+/// skips is worse than one that lingers.
+const MAX_STEP: Duration = FULL_FRAME;
+
+/// Part I's motion vocabulary, in milliseconds.
+///
+/// Durations rather than magic numbers at the call sites so the table below
+/// reads as the vocabulary it is meant to be.
+const COALESCE: u32 = 300;
+const REGIME_SWEEP: u32 = 400;
+const REGIME_SETTLE: u32 = 400;
+const ALERT_HALF: u32 = 200;
+const PLAN_SWEEP: u32 = 500;
+const HALT_HALF: u32 = 700;
+const RESTORE: u32 = 400;
+const CHIP_HALF: u32 = 150;
+const READ_WASH: u32 = 400;
+
+/// Which effect an add replaces.
+///
+/// The key *is* the lifecycle: `add_unique_effect` cancels whatever was running
+/// under the same key, so a HALT that runs forever is retired by adding the
+/// restore fade under `Halt`, and a second view switch restarts the coalesce
+/// instead of racing the first one. Two desk events share a key only when they
+/// share a region and the later one genuinely supersedes the earlier.
+/// `Default` is derived only because `EffectManager<K>`'s own derived `Default`
+/// demands `K: Default` — a quirk of the derive, not a decision. Nothing reads
+/// the default key, and no rule may come to depend on which variant it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FxKey {
+    /// The content rect materialising after a nav change.
+    #[default]
+    ViewSwitch,
+    /// The regime strip in the pulse rail.
+    Regime,
+    /// The whole frame, while the desk is halted — and its restore.
+    Halt,
+    /// The read panel, behind DESK's typewriter.
+    Read,
+    /// The content rect, when a plan executed.
+    PlanCard,
+    /// The content rect, when a guardrail worsened.
+    ///
+    /// Not in the brief's key set. It is here because a key is a cancellation
+    /// lane: sharing `PlanCard` would mean a plan executing silently killed the
+    /// drawdown alarm that had just fired, which is precisely the alert an
+    /// operator must not lose.
+    Alert,
+    /// The status line's chip run — approvals and workflow phases.
+    Toast,
+}
+
+/// Where the rules may aim.
+///
+/// `RefRect` rather than plain rects: the shell republishes what it computed on
+/// every frame, so an effect created three frames ago follows its pane through a
+/// resize instead of sweeping a strip that has moved out from under it. Views do
+/// not write here — only `shell::draw`, which already computes every one of
+/// these, so the layout keeps exactly one spelling.
+///
+/// Interior mutability is what lets `shell::draw` stay a `&self` renderer: it
+/// publishes the layout it derived, and the frame it paints is still a pure
+/// function of (store, effects, instant).
+#[derive(Debug, Clone)]
+pub struct ShellRects {
+    /// The whole terminal.
+    pub frame: RefRect,
+    /// The view's area, inside both rails.
+    pub content: RefRect,
+    /// The regime strip in the pulse rail.
+    pub regime: RefRect,
+    /// The read panel in the pulse rail.
+    pub read: RefRect,
+    /// The right-hand chip run of the status line.
+    pub chips: RefRect,
+}
+
+impl Default for ShellRects {
+    fn default() -> Self {
+        // Zero rects until the first frame publishes real ones. An effect over a
+        // zero rect is a no-op, which is the honest behaviour for a client that
+        // has not drawn yet — and cannot happen in the runtime, which draws one
+        // frame before it reads its first event.
+        Self {
+            frame: RefRect::new(Rect::ZERO),
+            content: RefRect::new(Rect::ZERO),
+            regime: RefRect::new(Rect::ZERO),
+            read: RefRect::new(Rect::ZERO),
+            chips: RefRect::new(Rect::ZERO),
+        }
+    }
+}
+
+/// Every kind of motion the client owns, in one place beside the `Store`.
+///
+/// Two managers, not one, because they run at different cadences — see
+/// `FULL_FRAME`. Both are keyed by `FxKey`, so a key names one lane and the
+/// replace-on-add semantics hold within it.
+#[derive(Debug, Default)]
+pub struct Fx {
+    /// Per-cell flashes and the read's reveal — styles, drawn by the widgets.
+    pub flashes: FlashTracker,
+    /// The pulse rail's stress needle.
+    pub gauge: Tween,
+    /// Where the last frame put things.
+    pub rects: ShellRects,
+    /// Pane-scoped effects, at 60 fps.
+    panes: EffectManager<FxKey>,
+    /// Full-frame effects, at 30 fps.
+    full: EffectManager<FxKey>,
+    /// Time the full-frame lane has been owed but not yet paid.
+    debt: Duration,
+}
+
+impl Fx {
+    /// Turn one desk transition into motion.
+    ///
+    /// `opening` is true while the client's very first snapshot is being folded
+    /// in. That snapshot is diffed against nothing, so it announces the state it
+    /// arrived in — deliberately, because an operator opening onto a halted desk
+    /// has to see the halt. What it must not do is stack: the regime sweep is
+    /// suppressed on the open and nothing else is, because the sweep is the one
+    /// arm that would fight the frame arriving underneath it.
+    pub fn on_trigger(&mut self, trigger: &Trigger, now: Instant, opening: bool) {
+        self.flashes.on_trigger(trigger, now);
+        self.rules(trigger, opening);
+    }
+
+    /// The vocabulary. One arm per `Trigger` variant, no catch-all: a variant
+    /// added to the diff cannot reach the runtime without someone deciding here
+    /// what it looks like — including deciding it looks like nothing.
+    fn rules(&mut self, trigger: &Trigger, opening: bool) {
+        let t = theme();
+        match trigger {
+            // A sweep across the strip, then the colour settling out of it.
+            Trigger::RegimeChanged => {
+                if opening {
+                    return;
+                }
+                self.panes.add_unique_effect(
+                    FxKey::Regime,
+                    aim(
+                        &self.rects.regime,
+                        fx::sequence(&[
+                            fx::sweep_in(
+                                Motion::LeftToRight,
+                                6,
+                                0,
+                                t.bg_surface,
+                                (REGIME_SWEEP, Interpolation::CubicInOut),
+                            ),
+                            fx::fade_from_fg(t.accent, (REGIME_SETTLE, Interpolation::CubicInOut)),
+                        ]),
+                    ),
+                );
+            }
+            // Two red pulses over the view. The book's own alert pane is a rect
+            // only BOOK knows; the content rect is the coarsest true target, and
+            // the guardrail is desk news whichever view is up. Tasks 18/19 give
+            // the panes that own it a published rect to narrow this to.
+            Trigger::DrawdownTierWorse => {
+                self.panes.add_unique_effect(
+                    FxKey::Alert,
+                    aim(
+                        &self.rects.content,
+                        fx::repeat(
+                            fx::ping_pong(fx::fade_to_fg(
+                                t.negative,
+                                (ALERT_HALF, Interpolation::CubicInOut),
+                            )),
+                            RepeatMode::Times(2),
+                        ),
+                    ),
+                );
+            }
+            // The one effect that does not end. It runs until `Resumed` replaces
+            // it under the same key, which is the whole reason the manager is
+            // keyed — a halt that stopped pulsing on its own would say the desk
+            // had recovered.
+            //
+            // Full-frame fade rather than a border ring: the frame's outer rows
+            // are the ticker tape and the status line, and reddening those makes
+            // two always-on chrome elements lie about themselves.
+            Trigger::Halted => {
+                self.full.add_unique_effect(
+                    FxKey::Halt,
+                    fx::repeating(fx::ping_pong(fx::fade_to_fg(
+                        t.negative_dim,
+                        (HALT_HALF, Interpolation::SineInOut),
+                    ))),
+                );
+            }
+            Trigger::Resumed => {
+                self.full.add_unique_effect(
+                    FxKey::Halt,
+                    fx::fade_from_fg(t.negative_dim, (RESTORE, Interpolation::CubicOut)),
+                );
+            }
+            // Not emitted yet — Task 18 diffs the approvals queue. The rule is
+            // here so the match stays exhaustive and the arm is one line of
+            // wiring rather than a design decision on that task's critical path.
+            Trigger::ApprovalCreated => {
+                self.panes.add_unique_effect(
+                    FxKey::Toast,
+                    aim(
+                        &self.rects.chips,
+                        fx::repeat(
+                            fx::ping_pong(fx::fade_to_fg(
+                                t.warning,
+                                (CHIP_HALF, Interpolation::CubicInOut),
+                            )),
+                            RepeatMode::Times(2),
+                        ),
+                    ),
+                );
+            }
+            // Not emitted yet — Task 19 diffs the workflow phase. Shares
+            // `Toast` with the approval on purpose: one chip region, one pulse,
+            // and the newer piece of governance news is the one to show.
+            Trigger::PhaseAdvanced => {
+                self.panes.add_unique_effect(
+                    FxKey::Toast,
+                    aim(
+                        &self.rects.chips,
+                        fx::fade_from_fg(t.accent, (CHIP_HALF * 2, Interpolation::CubicOut)),
+                    ),
+                );
+            }
+            // Not emitted yet — Task 18 diffs the plan ledger.
+            Trigger::PlanExecuted => {
+                self.panes.add_unique_effect(
+                    FxKey::PlanCard,
+                    aim(
+                        &self.rects.content,
+                        fx::sweep_in(
+                            Motion::LeftToRight,
+                            10,
+                            0,
+                            t.positive,
+                            (PLAN_SWEEP, Interpolation::CubicOut),
+                        ),
+                    ),
+                );
+            }
+            // No tachyonfx rule: a quote is a cell, and `FlashTracker` already
+            // lights exactly the two cells that moved. A sweep over the grid
+            // would animate the rows that did not.
+            Trigger::QuoteTick(_) => {}
+            // The reveal is DESK's, hand-rolled, and stays hand-rolled: it types
+            // a substring in, which is a render of different text rather than an
+            // effect over the same text. All this adds is the wash behind the
+            // rail's copy of the read, so the panel that is on screen under
+            // every view acknowledges the change too.
+            Trigger::ReadChanged => {
+                self.panes.add_unique_effect(
+                    FxKey::Read,
+                    aim(
+                        &self.rects.read,
+                        fx::fade_from_fg(t.accent_dim, (READ_WASH, Interpolation::CubicOut)),
+                    ),
+                );
+            }
+        }
+    }
+
+    /// The new view materialising.
+    ///
+    /// Fired from the runtime rather than from a `Trigger`, because which pane
+    /// an operator is looking at is not something the owner said — and the store
+    /// diffs only what the owner said.
+    pub fn on_view_switch(&mut self) {
+        self.panes.add_unique_effect(
+            FxKey::ViewSwitch,
+            aim(
+                &self.rects.content,
+                fx::coalesce((COALESCE, Interpolation::CubicOut)),
+            ),
+        );
+    }
+
+    /// Whether anything owes the terminal a frame.
+    pub fn active(&self, now: Instant) -> bool {
+        self.budget(now).is_some()
+    }
+
+    /// How long the loop may sleep before it owes the next frame, or `None` to
+    /// block on the channel.
+    ///
+    /// The two cadences are not interchangeable: a desk whose *only* motion is
+    /// the halt pulse must not be repainted at 60 fps for a lane that advances
+    /// at 30.
+    pub fn budget(&self, now: Instant) -> Option<Duration> {
+        budget(
+            self.flashes.active(now) || self.gauge.active(now) || self.panes.is_running(),
+            self.full.is_running(),
+        )
+    }
+
+    /// Advance every effect over the painted buffer.
+    ///
+    /// Called after the widgets have rendered and never from inside
+    /// `shell::draw` — that separation is what makes a golden frame structurally
+    /// incapable of catching a half-finished effect.
+    ///
+    /// Pane effects first, then the full frame over the top: a halted desk
+    /// reddens everything, including whatever else is moving.
+    ///
+    /// `elapsed` is clamped: see `MAX_STEP`.
+    pub fn process(&mut self, elapsed: Duration, buf: &mut Buffer, area: Rect) {
+        let elapsed = elapsed.min(MAX_STEP);
+        self.panes.process_effects(elapsed.into(), buf, area);
+        if let Some(spent) = spend(&mut self.debt, elapsed, FULL_FRAME) {
+            self.full.process_effects(spent.into(), buf, area);
+        }
+    }
+}
+
+/// Bind an effect to a rect that may move under it.
+fn aim(rect: &RefRect, effect: Effect) -> Effect {
+    fx::dynamic_area(rect.clone(), effect)
+}
+
+/// The loop's wait, given which lanes are running.
+///
+/// Separated from `Fx` so the choice that fixes the starved-effect bug is a
+/// function of two booleans that a test can enumerate, rather than something
+/// only reachable by driving a terminal.
+pub const fn budget(fast: bool, full: bool) -> Option<Duration> {
+    match (fast, full) {
+        (true, _) => Some(FX_FRAME),
+        (false, true) => Some(FULL_FRAME),
+        (false, false) => None,
+    }
+}
+
+/// Whether the capped lane owes a step, and how much time to tell it about.
+///
+/// A debt that only pays out in whole `floor`s is what keeps the cap from also
+/// *losing* time: woken at 16 ms, the lane steps on every second frame and is
+/// told about 32 ms, so a 700 ms pulse still takes 700 ms.
+fn spend(debt: &mut Duration, elapsed: Duration, floor: Duration) -> Option<Duration> {
+    *debt += elapsed;
+    (*debt >= floor).then(|| std::mem::take(debt))
 }
 
 #[cfg(test)]
@@ -411,6 +909,172 @@ mod tests {
             fx.map.len(),
             1,
             "expired stamps are dropped as new ones land"
+        );
+    }
+
+    // -- value easing ------------------------------------------------------
+
+    #[test]
+    fn ease_out_cubic_starts_fast_ends_flat_and_is_clamped() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        // Ease-*out*: more than half the distance is covered in the first half.
+        assert!(ease_out_cubic(0.5) > 0.5, "{}", ease_out_cubic(0.5));
+        assert!((ease_out_cubic(0.5) - 0.875).abs() < 1e-12);
+        // Monotone, so a needle never doubles back on its way.
+        let mut prev = 0.0;
+        for i in 0..=100 {
+            let v = ease_out_cubic(f64::from(i) / 100.0);
+            assert!(v >= prev, "not monotone at {i}");
+            prev = v;
+        }
+        // Out of range is clamped rather than extrapolated: the alternative
+        // overshoots the target on a frame drawn late.
+        assert_eq!(ease_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_out_cubic(4.0), 1.0);
+    }
+
+    #[test]
+    fn the_first_value_lands_instantly_rather_than_sweeping_up_from_zero() {
+        let start = Instant::now();
+        let mut gauge = Tween::default();
+        gauge.set(62.0, start);
+        assert_eq!(gauge.shown(62.0, start), 62.0);
+        assert!(
+            !gauge.active(start),
+            "an opening frame must not owe the loop 400 ms of animation"
+        );
+    }
+
+    #[test]
+    fn a_moved_value_eases_over_the_tween_and_then_stops() {
+        let start = Instant::now();
+        let mut gauge = Tween::default();
+        gauge.set(20.0, start);
+        gauge.set(60.0, start);
+
+        assert_eq!(
+            gauge.shown(60.0, start),
+            20.0,
+            "it sets off from where it was"
+        );
+        let half = gauge.shown(60.0, start + Duration::from_millis(200));
+        assert!(
+            (half - (20.0 + 40.0 * 0.875)).abs() < 1e-9,
+            "half way through the tween is 87.5% of the way there, not 50%: {half}"
+        );
+        assert_eq!(gauge.shown(60.0, start + TWEEN), 60.0);
+        assert_eq!(gauge.shown(60.0, start + Duration::from_secs(60)), 60.0);
+        assert!(gauge.active(start + Duration::from_millis(399)));
+        assert!(
+            !gauge.active(start + TWEEN),
+            "a finished tween must not pin the loop at the effect cadence forever"
+        );
+    }
+
+    #[test]
+    fn a_value_the_tween_was_never_told_about_renders_verbatim() {
+        // This is what keeps a golden frame deterministic: every golden builds
+        // an `Fx` nobody ever set, so the rail draws the number the store holds.
+        let start = Instant::now();
+        let untouched = Tween::default();
+        assert_eq!(untouched.shown(37.5, start), 37.5);
+
+        // And a tween that is mid-flight toward 60 does not claim to know where
+        // 90 came from — it renders 90 until it is told.
+        let mut gauge = Tween::default();
+        gauge.set(20.0, start);
+        gauge.set(60.0, start);
+        assert_eq!(gauge.shown(90.0, start + Duration::from_millis(100)), 90.0);
+    }
+
+    #[test]
+    fn interrupting_a_tween_leaves_from_where_the_needle_actually_is() {
+        let start = Instant::now();
+        let mut gauge = Tween::default();
+        gauge.set(0.0, start);
+        gauge.set(100.0, start);
+        let mid = start + Duration::from_millis(100);
+        let seen = gauge.shown(100.0, mid);
+        gauge.set(10.0, mid);
+        assert_eq!(
+            gauge.shown(10.0, mid),
+            seen,
+            "the needle jumped when the target changed"
+        );
+    }
+
+    #[test]
+    fn a_tween_told_the_same_value_twice_does_not_restart() {
+        let start = Instant::now();
+        let mut gauge = Tween::default();
+        gauge.set(10.0, start);
+        gauge.set(50.0, start);
+        gauge.set(50.0, start + Duration::from_millis(300));
+        assert_eq!(
+            gauge.shown(50.0, start + TWEEN),
+            50.0,
+            "a republished snapshot restarted the animation"
+        );
+    }
+
+    // -- pacing ------------------------------------------------------------
+
+    #[test]
+    fn the_wait_is_the_fastest_lane_that_is_running() {
+        assert_eq!(budget(false, false), None, "idle blocks on the channel");
+        assert_eq!(budget(true, false), Some(FX_FRAME));
+        assert_eq!(budget(true, true), Some(FX_FRAME));
+        assert_eq!(
+            budget(false, true),
+            Some(FULL_FRAME),
+            "a desk whose only motion is the halt pulse is repainted at 30 fps"
+        );
+    }
+
+    #[test]
+    fn the_fast_wake_is_faster_than_the_beats_that_starved_it() {
+        // The bug this constant exists for: `should_render` said "effects are
+        // active, paint" and the only things waking the loop were a 100 ms
+        // heartbeat and a 120 ms tick.
+        assert!(FX_FRAME < crate::store::IDLE_FRAME);
+        assert!(FX_FRAME < crate::store::TICK);
+        assert!(FULL_FRAME < crate::store::IDLE_FRAME);
+        assert!(FX_FRAME < FULL_FRAME);
+    }
+
+    #[test]
+    fn the_capped_lane_steps_every_other_frame_and_loses_no_time() {
+        let floor = FULL_FRAME;
+        let mut debt = Duration::ZERO;
+        // Woken at 60 fps, the capped lane steps on every second wake. This is
+        // the assertion the constant is derived for: a 33 ms floor pays out on
+        // every third 16 ms wake, which is 20 fps calling itself 30.
+        assert_eq!(spend(&mut debt, FX_FRAME, floor), None);
+        assert_eq!(spend(&mut debt, FX_FRAME, floor), Some(FULL_FRAME));
+        assert_eq!(spend(&mut debt, FX_FRAME, floor), None);
+        assert_eq!(spend(&mut debt, FX_FRAME, floor), Some(FULL_FRAME));
+
+        // Over a second of 16 ms wakes the lane is told about every millisecond
+        // that passed — a cap that dropped the skipped frames' time would make
+        // a 700 ms pulse take 1.4 s.
+        let mut debt = Duration::ZERO;
+        let mut told = Duration::ZERO;
+        for _ in 0..60 {
+            told += spend(&mut debt, FX_FRAME, floor).unwrap_or_default();
+        }
+        assert_eq!(told + debt, FX_FRAME * 60);
+        assert_eq!(
+            told,
+            FX_FRAME * 60,
+            "with an even count nothing is left owed"
+        );
+
+        // A wake slower than the floor pays out every time.
+        let mut debt = Duration::ZERO;
+        assert_eq!(
+            spend(&mut debt, Duration::from_millis(120), floor),
+            Some(Duration::from_millis(120))
         );
     }
 }

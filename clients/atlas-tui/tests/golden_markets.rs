@@ -16,7 +16,7 @@
 mod harness;
 
 use atlas::bus::{AppEvent, Channel, SseEvent};
-use atlas::fx::{FlashKey, FlashTracker};
+use atlas::fx::{FlashKey, Fx};
 use atlas::model::Snapshot;
 use atlas::store::Store;
 use atlas::theme::Theme;
@@ -284,7 +284,7 @@ fn a_quote_tick_flashes_the_change_cell_and_not_the_whole_row() {
     let mut client = markets();
     let at = client.now;
     client.store.apply(quote("SPY", 731.11, 0.0042), at);
-    client.fx.flash(FlashKey::change("SPY"), at);
+    client.fx.flashes.flash(FlashKey::change("SPY"), at);
 
     let buf = client.buffer(120, 36);
     let t = Theme::truecolor();
@@ -297,7 +297,7 @@ fn a_quote_tick_flashes_the_change_cell_and_not_the_whole_row() {
     );
 
     // And it ends. A highlight that never goes out stops meaning "this moved".
-    client.fx = FlashTracker::default();
+    client.fx = Fx::default();
     client.now = at + Duration::from_millis(700);
     let cooled = client.buffer(120, 36);
     assert_ne!(body_style_of(&cooled, "▲ 0.42").bg, Some(t.accent_dim));

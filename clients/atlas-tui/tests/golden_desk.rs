@@ -175,7 +175,7 @@ fn the_read_types_itself_in_top_to_bottom() {
     // than sampled — the flaky class this client refuses to write.
     let mut client = desk_from(DESK);
     let t0 = client.now;
-    client.fx.reveal(t0);
+    client.fx.flashes.reveal(t0);
 
     client.now = t0 + Duration::from_millis(300);
     let half = content(&client.frame(120, 36));
@@ -203,12 +203,12 @@ fn a_new_read_starts_the_reveal_over() {
     // was still mid-reveal, which reads as a glitch rather than as news.
     let mut client = desk_from(DESK);
     let t0 = client.now;
-    client.fx.reveal(t0);
+    client.fx.flashes.reveal(t0);
     client.now = t0 + Duration::from_secs(5);
     assert!(content(&client.frame(120, 36)).contains(LAST_WORDS));
 
     let t1 = t0 + Duration::from_secs(5);
-    client.fx.reveal(t1);
+    client.fx.flashes.reveal(t1);
     let restarted = content(&client.frame(120, 36));
     assert!(
         !restarted.contains(FIRST_WORDS),
@@ -231,7 +231,7 @@ fn what_the_read_is_grounded_in_never_types_itself_in_and_never_folds_away() {
     // long read pushes its own tail behind a `▾ more` marker, and the one line
     // that may not go that way is the one that says which read this is.
     let mut client = desk_from(DESK);
-    client.fx.reveal(client.now);
+    client.fx.flashes.reveal(client.now);
     let opening = content(&client.frame(120, 36));
     assert!(
         !opening.contains(FIRST_WORDS),

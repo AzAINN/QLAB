@@ -15,11 +15,12 @@
 
 use atlas::bus::{AppEvent, Channel, Tx};
 use atlas::cmd::Command;
-use atlas::fx::FlashTracker;
+use atlas::fx::Fx;
 use atlas::net::http::{self, PollerHandle};
 use atlas::net::sse;
-use atlas::store::{should_render, Store};
+use atlas::store::{should_render, Store, TICK};
 use atlas::ui::views::Views;
+use atlas::ui::widgets::pulse;
 use atlas::{theme, ui};
 use color_eyre::eyre::Result;
 use crossterm::{
@@ -34,12 +35,9 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tracing_subscriber::EnvFilter;
-
-/// The animation beat: ticker, throbbers, and the Atlas glyph advance on it.
-const TICK: Duration = Duration::from_millis(120);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -104,28 +102,45 @@ async fn run(
     // owner said plus the diff of it, and a decaying animation stamp is neither.
     // Keeping it out is what lets a golden frame be a pure function of the store
     // and an instant.
-    let mut fx = FlashTracker::default();
+    let mut fx = Fx::default();
     // The views, built once. Built per keystroke and per frame — which is what
     // this replaced — every selection and crosshair an operator moved was
     // dropped before the frame that would have drawn it.
     let mut views = Views::new();
 
     // One frame before the first event, or the operator stares at the shell's
-    // leftovers until the ticker fires.
+    // leftovers until the ticker fires. It is also what publishes the first set
+    // of rects, so the rules of the opening snapshot have somewhere to aim.
     let mut last_frame = Instant::now();
     terminal.draw(|f| ui::shell::draw(f, store, &views, &fx, last_frame))?;
+    let mut budget = fx.budget(last_frame);
 
     loop {
-        // Block until something happens. The 120 ms tick is what guarantees the
-        // loop keeps waking, so the idle heartbeat below is reachable.
-        let Some(first) = rx.recv().await else {
-            return Ok(()); // every producer is gone
+        // Two waits, and which one is used is the whole difference between an
+        // effect that plays and one that steps. Idle, the loop blocks on the
+        // channel and the tick guarantees it keeps waking. Moving, it waits with
+        // a timeout instead: `should_render` has always said "paint while
+        // effects are active", but nothing woke this loop faster than the 100 ms
+        // heartbeat, so a 600 ms reveal arrived in five visible chunks.
+        let next = match budget {
+            Some(wait) => match tokio::time::timeout(wait, rx.recv()).await {
+                Ok(Some(ev)) => Some(ev),
+                Ok(None) => return Ok(()), // every producer is gone
+                Err(_) => None,            // the effect beat came due first
+            },
+            None => match rx.recv().await {
+                Some(ev) => Some(ev),
+                None => return Ok(()),
+            },
         };
         // The iteration's one clock read, taken where its work begins. Pacing
         // decides against the instant the caller measured, not against whatever
         // the clock says several statements later.
         let now = Instant::now();
-        let mut quit = ingest(first, store, poller, &mut views, &mut fx, now);
+        let mut quit = false;
+        if let Some(first) = next {
+            quit |= ingest(first, store, poller, &mut views, &mut fx, now);
+        }
         // Drain-then-render: fifty quote events coalesce into one repaint.
         while let Ok(ev) = rx.try_recv() {
             quit |= ingest(ev, store, poller, &mut views, &mut fx, now);
@@ -133,12 +148,26 @@ async fn run(
 
         // A decaying flash owes frames nothing else asked for: the 100 ms idle
         // heartbeat would sample a 200 ms step visibly late, and a desk with no
-        // other news would freeze the row mid-flash. Task 15 ORs the effect
-        // manager's running flag in here.
+        // other news would freeze the row mid-flash.
         if should_render(store.take_dirty(), fx.active(now), last_frame, now) {
-            terminal.draw(|f| ui::shell::draw(f, store, &views, &fx, now))?;
+            // Effects are driven by elapsed time rather than by a stamp, and the
+            // elapsed they get is the gap between the frames they were actually
+            // drawn into — not the wall clock, which would advance through the
+            // frames this rule skipped.
+            let elapsed = now.saturating_duration_since(last_frame);
+            terminal.draw(|f| {
+                ui::shell::draw(f, store, &views, &fx, now);
+                // After every widget, over the painted buffer. Deliberately not
+                // inside `shell::draw`: a golden frame calls `draw` and never
+                // this, so no snapshot can capture a half-finished effect.
+                let area = f.area();
+                fx.process(elapsed, f.buffer_mut(), area);
+            })?;
             last_frame = now;
         }
+        // Decided after the frame, from the state the frame left behind: an
+        // effect that just finished must let the loop go back to blocking.
+        budget = fx.budget(now);
         if quit {
             return Ok(());
         }
@@ -155,12 +184,13 @@ fn ingest(
     store: &mut Store,
     poller: &PollerHandle,
     views: &mut Views,
-    fx: &mut FlashTracker,
+    fx: &mut Fx,
     now: Instant,
 ) -> bool {
     let mut quit = false;
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
+            let before = store.nav.view;
             match ui::shell::on_key(*key, store, views) {
                 Some(Command::Quit) => quit = true,
                 // The refresh jumps the poll queue instead of fetching inline:
@@ -169,18 +199,43 @@ fn ingest(
                 Some(Command::Refresh) => poller.now(),
                 None => {}
             }
+            // A view switch is not a desk transition and so is not a `Trigger`:
+            // the store diffs what the owner said, and which pane an operator is
+            // looking at is not something the owner said. This is the one place
+            // that can see the nav move, so the coalesce is fired from here.
+            if store.nav.view != before {
+                fx.on_view_switch();
+            }
         }
     }
+    // Read before the fold, because the fold is what sets it. The first
+    // snapshot is diffed against nothing and therefore announces the state it
+    // arrived in — wanted for the halt and the read, and suppressed for the
+    // regime sweep, which would otherwise fight the frame arriving under it.
+    let opening = store.last_snapshot_at.is_none();
+    // Only these two can move the gauge, and asking on every quote frame would
+    // walk the panel's readings fifty times a second for an answer that cannot
+    // have changed.
+    let scored = matches!(ev, AppEvent::Snapshot(_) | AppEvent::RegimePanel(_));
+
     for trigger in store.apply(ev, now) {
-        // The diff decides *what moved*; the tracker decides what that looks
-        // like. The translation lives beside the tracker rather than in the
-        // store so the motion vocabulary can change without touching the diff —
-        // and so no renderer ever needs a clock to know how far a flash has
-        // decayed or how much of the read has arrived.
-        fx.on_trigger(&trigger, now);
-        // Logged as well as animated: a transition whose effect is still Task
-        // 15's to write is observable during QA rather than silent.
+        // The diff decides *what moved*; `Fx` decides what that looks like. The
+        // translation lives beside the effect state rather than in the store so
+        // the motion vocabulary can change without touching the diff — and so
+        // no renderer ever needs a clock to know how far a flash has decayed or
+        // how much of the read has arrived.
+        fx.on_trigger(&trigger, now, opening);
+        // Logged as well as animated: a transition is then observable during QA
+        // rather than only visible for the 300 ms it moves for.
         tracing::debug!(?trigger, "desk transition");
+    }
+
+    // The needle is told the new reading here rather than discovering it at
+    // draw time, which is one frame late and has no value left to set off from.
+    if scored {
+        if let Some(score) = pulse::desk_stress_of(store) {
+            fx.gauge.set(score, now);
+        }
     }
     quit
 }

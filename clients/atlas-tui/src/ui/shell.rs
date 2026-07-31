@@ -12,10 +12,16 @@
 //! frame looks forty seconds after the last snapshot — and what keeps the
 //! read-only posture a property of the composition root rather than a rule
 //! each view has to remember.
+//!
+//! It also *publishes* the regions it carved, into the `RefRect`s `Fx` holds, so
+//! the effect rules can aim at panes without a second spelling of this layout
+//! and without the shell growing state of its own. Publishing is not painting:
+//! the frame is still a pure function of (store, effects, instant), and the
+//! effect pass that reads those rects runs after `draw` returns.
 
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
-use crate::fx::FlashTracker;
+use crate::fx::{Fx, ShellRects};
 use crate::glyph;
 use crate::store::{Store, ViewId};
 use crate::theme::theme;
@@ -49,6 +55,14 @@ const LABEL_W: usize = 11;
 const READ_H: u16 = 6;
 /// The glyph and the mood word under it.
 const GLYPH_H: u16 = glyph::H as u16 + 1;
+/// The status line's chip run. Every chip `draw_status` renders is
+/// right-aligned, and this is how many columns they occupy at their loudest —
+/// stream warning, staleness, malformed, posture and the GLASS badge.
+///
+/// A rect for the effect pass to aim at, not a layout constraint: `draw_status`
+/// packs the line itself. Task 18 replaces it with the approvals chip's own
+/// rect, at which point the amber pulse lands on the thing it is about.
+const CHIPS_W: u16 = 40;
 
 /// One frame.
 ///
@@ -59,7 +73,7 @@ const GLYPH_H: u16 = glyph::H as u16 + 1;
 ///
 /// `views` is borrowed rather than built: the instances outlive the frame, so
 /// where an operator has put a selection or a crosshair survives the repaint.
-pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &FlashTracker, now: Instant) {
+pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) {
     let t = theme();
     let area = f.area();
     fill(f, area, t.bg_base);
@@ -78,15 +92,15 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &FlashTracker, now:
     ])
     .split(rows[1]);
 
-    // The tick count is the offset: one display cell per 120 ms beat, so the
-    // tape's position is state rather than a clock read inside a renderer.
+    // The tick count is the offset: one display cell per beat, so the tape's
+    // position is state rather than a clock read inside a renderer.
     ticker::draw(
         f,
         rows[0],
         &store.asset_views(),
         store.tick as usize,
         stale.is_some(),
-        fx,
+        &fx.flashes,
         now,
     );
     draw_nav(f, cols[0], store, t);
@@ -97,14 +111,28 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &FlashTracker, now:
     if store.snapshot.is_none() {
         draw_no_data(f, content, store, t);
     } else {
-        views.draw(store.nav.view, f, content, store, fx, now);
+        views.draw(store.nav.view, f, content, store, &fx.flashes, now);
     }
 
     let pulse = left_rule(f, cols[2], t);
     fill(f, pulse, t.bg_surface);
-    draw_pulse(f, pulse, store, t, now);
+    draw_pulse(f, pulse, store, t, fx, now);
 
     draw_status(f, rows[2], store, t, stale);
+
+    fx.rects.frame.set(area);
+    fx.rects.content.set(content);
+    fx.rects.chips.set(chips(rows[2]));
+}
+
+/// The columns of the status line the chips actually occupy.
+fn chips(status: Rect) -> Rect {
+    let width = CHIPS_W.min(status.width);
+    Rect {
+        x: status.x + status.width - width,
+        width,
+        ..status
+    }
 }
 
 /// How long the numbers on screen have been unrefreshed, once that is long
@@ -282,7 +310,7 @@ fn draw_no_data(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
 /// → read → manager, and the manager is what an operator glances at last. Task
 /// 14's read pane replaces the middle block; the pulse sections above it decide
 /// for themselves how much of their own allocation they can honestly fill.
-fn draw_pulse(f: &mut Frame, area: Rect, store: &Store, t: &Theme, now: Instant) {
+fn draw_pulse(f: &mut Frame, area: Rect, store: &Store, t: &Theme, fx: &Fx, now: Instant) {
     let rows = Layout::vertical([
         Constraint::Min(0),          // the pulse sections
         Constraint::Length(READ_H),  // ATLAS READ
@@ -290,7 +318,8 @@ fn draw_pulse(f: &mut Frame, area: Rect, store: &Store, t: &Theme, now: Instant)
     ])
     .split(area);
 
-    pulse::draw(f, rows[0], store, now);
+    let regime = pulse::draw(f, rows[0], store, &fx.gauge, now);
+    publish_rail(&fx.rects, rows[0], rows[1], regime);
 
     let snapshot = store.snapshot.as_ref();
     let read = snapshot.and_then(|s| s.atlas_read.as_ref());
@@ -316,6 +345,16 @@ fn draw_pulse(f: &mut Frame, area: Rect, store: &Store, t: &Theme, now: Instant)
     panel(f, rows[1], read_lines);
 
     draw_glyph(f, rows[2], store, t);
+}
+
+/// Hand the rail's two effect targets to `Fx`.
+///
+/// A rail too short for the regime strip drops it; the sweep then crosses the
+/// section block that still carries the `regime`/`robust` line the diff actually
+/// watches, rather than crossing nothing and reading as a dropped frame.
+fn publish_rail(rects: &ShellRects, sections: Rect, read: Rect, regime: Option<Rect>) {
+    rects.regime.set(regime.unwrap_or(sections));
+    rects.read.set(read);
 }
 
 /// The Atlas glyph, on its mood's own tempo.

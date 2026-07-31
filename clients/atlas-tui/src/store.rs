@@ -18,7 +18,18 @@ use std::time::{Duration, Instant};
 /// The idle heartbeat. Three indicators on screen claim the client is alive —
 /// the glyph, the throbbers, the quote ages — and a frame this often is what
 /// makes that claim true when no event has arrived.
-const IDLE_FRAME: Duration = Duration::from_millis(100);
+///
+/// Public so `fx` can assert the ordering the effect cadence depends on. The
+/// three beats belong together: this one and `TICK` are the floor a frame can
+/// arrive on when nothing is moving, and `fx::FX_FRAME` is what replaces them
+/// as the wake interval when something is.
+pub const IDLE_FRAME: Duration = Duration::from_millis(100);
+
+/// The animation beat: the ticker tape, the throbbers, and the Atlas glyph
+/// advance on it. Beside `IDLE_FRAME` rather than in `main` because it is one of
+/// the cadences the pacing rule is about, and the two drifting apart is how the
+/// glyph would start stepping between frames that never get drawn.
+pub const TICK: Duration = Duration::from_millis(120);
 
 /// Whether the loop owes the terminal a frame.
 ///
@@ -26,8 +37,8 @@ const IDLE_FRAME: Duration = Duration::from_millis(100);
 /// would decide against a different instant than the caller measured, and its
 /// own test would race a descheduled thread. It lives beside the store rather
 /// than in `main` so it can be tested without a terminal. `fx_active` renders
-/// unconditionally: effects are sampled per frame, and the 16 ms cadence they
-/// want is the loop's wake interval, not a gate here.
+/// unconditionally: effects are sampled per frame, and the cadence they want is
+/// the loop's wake interval (`fx::Fx::budget`), not a gate here.
 pub fn should_render(dirty: bool, fx_active: bool, last_frame: Instant, now: Instant) -> bool {
     dirty || fx_active || now.saturating_duration_since(last_frame) >= IDLE_FRAME
 }
@@ -516,13 +527,18 @@ impl Store {
         if changed(prev.and_then(robust_state), robust_state(&next)) {
             out.push(Trigger::RegimeChanged);
         }
+        // Only worse. A guardrail relaxing is good news and needs no alarm, and
+        // a desk oscillating across a threshold would otherwise fire on every
+        // crossing in both directions.
+        if tier_rank(drawdown_tier(&next)) > tier_rank(prev.and_then(drawdown_tier)) {
+            out.push(Trigger::DrawdownTierWorse);
+        }
         if changed(prev.and_then(read_as_of), read_as_of(&next)) {
             out.push(Trigger::ReadChanged);
         }
-        // Tasks 8/15 emit the remaining variants — `QuoteTick` from the SSE
-        // overlay, the tier/approval/phase/plan diffs with the views that
-        // render them. A trigger with no view to move is motion for its own
-        // sake, and would ship untestable.
+        // Tasks 18/19 emit the remaining variants — the approval, phase and
+        // plan diffs arrive with the views that render them. A trigger with no
+        // view to move is motion for its own sake, and would ship untestable.
 
         self.snapshot = Some(next);
         self.last_snapshot_at = Some(now);
@@ -588,6 +604,30 @@ fn robust_state(snap: &Snapshot) -> Option<&str> {
 
 fn read_as_of(snap: &Snapshot) -> Option<&str> {
     text(snap.atlas_read.as_ref()?.as_of.as_ref())
+}
+
+fn drawdown_tier(snap: &Snapshot) -> Option<&str> {
+    text(snap.stress.as_ref()?.drawdown_tier.as_ref())
+}
+
+/// The drawdown tiers in the owner's own order, worst last.
+///
+/// `qlab/trader/mandate.py::tier` classifies a trailing drawdown into exactly
+/// these four, ascending: `none` below the warning threshold, then `warning`,
+/// `control`, `breaker`. Ranking them is what lets the diff say *worse* rather
+/// than merely *different* — the only direction that deserves an alarm.
+///
+/// An absent or unrecognised tier ranks with `none`, which means it can never
+/// fire this trigger. A tier that stopped being reported is missing information
+/// rather than a recovery, and a tier this client has never heard of is a
+/// contract change that the rail already shows verbatim beside `tier`.
+fn tier_rank(tier: Option<&str>) -> u8 {
+    match tier {
+        Some("warning") => 1,
+        Some("control") => 2,
+        Some("breaker") => 3,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -706,6 +746,77 @@ mod tests {
                 snap(json!({"market": {"regime": {"robust_state": ""}}}))
             ),
             vec![]
+        );
+    }
+
+    #[test]
+    fn a_worsening_drawdown_tier_announces_itself_and_a_recovery_does_not() {
+        let tier = |name: &str| snap(json!({"stress": {"drawdown_tier": name}}));
+        let mut store = Store::default();
+        // `none` is the floor, so arriving at it is not a worsening.
+        assert_eq!(apply(&mut store, tier("none")), vec![]);
+        assert_eq!(
+            apply(&mut store, tier("warning")),
+            vec![Trigger::DrawdownTierWorse]
+        );
+        assert_eq!(apply(&mut store, tier("warning")), vec![]);
+        assert_eq!(
+            apply(&mut store, tier("breaker")),
+            vec![Trigger::DrawdownTierWorse],
+            "skipping a tier is still a worsening"
+        );
+        // Coming back down is good news. An alarm on it would teach an operator
+        // that the red pulse means "the tier moved", which is not what it means.
+        assert_eq!(apply(&mut store, tier("control")), vec![]);
+        assert_eq!(
+            apply(&mut store, tier("breaker")),
+            vec![Trigger::DrawdownTierWorse]
+        );
+    }
+
+    #[test]
+    fn a_tier_that_stopped_being_reported_is_not_a_worsening_either_way() {
+        let mut store = Store::default();
+        assert_eq!(
+            apply(
+                &mut store,
+                snap(json!({"stress": {"drawdown_tier": "control"}}))
+            ),
+            vec![Trigger::DrawdownTierWorse]
+        );
+        // Missing information, so it ranks with `none` and fires nothing. It
+        // also cannot re-fire when the field comes back at the same tier —
+        // which it does here, because the rank it fell to was lower.
+        assert_eq!(apply(&mut store, snap(json!({"stress": {}}))), vec![]);
+        assert_eq!(
+            apply(
+                &mut store,
+                snap(json!({"stress": {"drawdown_tier": "control"}}))
+            ),
+            vec![Trigger::DrawdownTierWorse]
+        );
+        // A tier this client has never heard of ranks with `none` rather than
+        // guessing. The rail renders it verbatim, so it is visible regardless.
+        assert_eq!(
+            apply(
+                &mut store,
+                snap(json!({"stress": {"drawdown_tier": "molten"}}))
+            ),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn opening_onto_a_breached_guardrail_announces_it() {
+        // Same rule as the halt: the transition happened before this client
+        // existed, and a desk in the control tier must not open quietly.
+        let mut store = Store::default();
+        assert_eq!(
+            apply(
+                &mut store,
+                snap(json!({"stress": {"drawdown_tier": "breaker"}}))
+            ),
+            vec![Trigger::DrawdownTierWorse]
         );
     }
 

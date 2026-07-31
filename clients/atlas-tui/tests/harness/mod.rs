@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 
 use atlas::bus::{AppEvent, Channel};
-use atlas::fx::FlashTracker;
+use atlas::fx::Fx;
 use atlas::model::Snapshot;
 use atlas::store::Store;
 use atlas::ui::views::Views;
@@ -29,7 +29,7 @@ use std::time::Instant;
 pub struct Client {
     pub store: Store,
     pub views: Views,
-    pub fx: FlashTracker,
+    pub fx: Fx,
     /// The instant every frame is drawn at. Fixed at the snapshot's arrival so
     /// a golden is never a function of how long the test took.
     pub now: Instant,
@@ -45,7 +45,7 @@ impl Client {
         Self {
             store,
             views: Views::new(),
-            fx: FlashTracker::default(),
+            fx: Fx::default(),
             now,
         }
     }
@@ -184,20 +184,14 @@ pub fn frame_to_string(store: &Store, w: u16, h: u16) -> String {
 /// One shell frame, drawn at an instant the caller chooses, with nothing
 /// flashing — the state every frame is in a second after the desk went quiet.
 pub fn frame_to_string_at(store: &Store, w: u16, h: u16, now: Instant) -> String {
-    frame_to_string_fx(store, &FlashTracker::default(), w, h, now)
+    frame_to_string_fx(store, &Fx::default(), w, h, now)
 }
 
 /// One shell frame with effect state, for the tests that pin motion.
 ///
 /// The backend's `Display` quotes each row, so trailing space is visible in a
 /// golden file instead of being silently trimmed by an editor.
-pub fn frame_to_string_fx(
-    store: &Store,
-    fx: &FlashTracker,
-    w: u16,
-    h: u16,
-    now: Instant,
-) -> String {
+pub fn frame_to_string_fx(store: &Store, fx: &Fx, w: u16, h: u16, now: Instant) -> String {
     let views = Views::new();
     let backend = ratatui::backend::TestBackend::new(w, h);
     let mut term = ratatui::Terminal::new(backend).unwrap();
@@ -209,7 +203,7 @@ pub fn frame_to_string_fx(
 /// The styled cells of one rendered row — what a golden string cannot say.
 pub fn row_styles(
     store: &Store,
-    fx: &FlashTracker,
+    fx: &Fx,
     w: u16,
     h: u16,
     now: Instant,

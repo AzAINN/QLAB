@@ -99,6 +99,14 @@ fn the_ribbon_states_the_equity_exactly_once() {
     // The anti-duplication rule the ribbon exists for: a second panel repeating
     // the headline is a second account of it, and two accounts of one number is
     // how a desk ends up trusting neither.
+    //
+    // The rule is about *this view* and about the KPI vocabulary the ribbon
+    // owns — cash, P&L, exposure, drawdown, the window's change. DESK's equity
+    // hero is the one other place the figure renders, deliberately: it is the
+    // same `live_portfolio.equity` at a different altitude, on a view an
+    // operator reaches instead of this one rather than alongside it. What would
+    // break this rule is a *second* panel on BOOK, or a hero that read the
+    // registry's `portfolio` and quietly meant something else.
     let content = content(&book().frame(120, 36));
     assert_eq!(
         content.matches("$10,000.00").count(),

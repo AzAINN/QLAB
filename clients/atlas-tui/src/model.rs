@@ -55,6 +55,8 @@ pub struct Snapshot {
     pub orders: Vec<Order>,
     #[serde(default, deserialize_with = "null_or_default")]
     pub workflows: Vec<Workflow>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub decisions: Vec<Decision>,
     #[serde(default)]
     pub atlas: Option<Atlas>,
     #[serde(default)]
@@ -379,6 +381,38 @@ pub struct Order {
     pub fee: Option<f64>,
 }
 
+// -- the decision log ------------------------------------------------------
+
+/// One row of the registry's decision log, newest first as the owner serves it.
+///
+/// Only the fields a surface renders. The row also carries `choice`,
+/// `rationale`, and `challenger_view` — the referee's reasoning runs to
+/// thousands of characters, and a client that decoded all of it on every
+/// three-second poll would be paying for text no tile can hold. Task 18's audit
+/// view is where the whole record belongs.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Decision {
+    pub decision_id: Option<String>,
+    pub as_of: Option<String>,
+    pub kind: Option<String>,
+    pub created_at: Option<String>,
+    /// The referee's word on this decision, attached by the owner from the
+    /// verdict table. `None` is the common case: most rows are logged before
+    /// anything adjudicates them, and a missing verdict is not a failed one.
+    pub verdict: Option<Verdict>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Verdict {
+    pub verdict: Option<String>,
+    pub verdict_id: Option<String>,
+    /// `deterministic` or `referee-agent` — which authority said it, which is
+    /// half of what the word means.
+    pub source: Option<String>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub reasons: Vec<String>,
+}
+
 // -- the workforce ---------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -472,6 +506,10 @@ pub struct AtlasRead {
     pub read_hash: Option<String>,
     pub advisory: Option<bool>,
     pub news_source: Option<String>,
+    /// Why there is no news window, when there is none. The owner sets this
+    /// rather than shipping an empty window, because "the feed is down" and
+    /// "the tape is quiet" are opposite facts about the same silence.
+    pub news_error: Option<String>,
     pub grounding: Option<Value>,
     #[serde(default, deserialize_with = "null_or_default")]
     pub supported_claims: Vec<Value>,

@@ -15,10 +15,10 @@
 
 use atlas::bus::{AppEvent, Channel, Tx};
 use atlas::cmd::Command;
-use atlas::fx::{FlashKey, FlashTracker};
+use atlas::fx::FlashTracker;
 use atlas::net::http::{self, PollerHandle};
 use atlas::net::sse;
-use atlas::store::{should_render, Store, Trigger};
+use atlas::store::{should_render, Store};
 use atlas::ui::views::Views;
 use atlas::{theme, ui};
 use color_eyre::eyre::Result;
@@ -172,19 +172,14 @@ fn ingest(
         }
     }
     for trigger in store.apply(ev, now) {
-        // The diff decides *what moved*; this decides what that looks like. The
-        // translation lives here rather than in the store so the motion
-        // vocabulary can change without touching the diff — and so no renderer
-        // ever needs a clock to know how far a flash has decayed.
-        // One move, two lit cells: the tape carries the price and the markets
-        // grid carries CHG%, and they are separate keys so neither cell's decay
-        // depends on whether the other is on screen.
-        if let Trigger::QuoteTick(ticker) = &trigger {
-            fx.flash(FlashKey::price(ticker), now);
-            fx.flash(FlashKey::change(ticker), now);
-        }
-        // Task 15 turns the rest into effects. Logging them means the diff has
-        // a consumer today and its behaviour is observable during QA.
+        // The diff decides *what moved*; the tracker decides what that looks
+        // like. The translation lives beside the tracker rather than in the
+        // store so the motion vocabulary can change without touching the diff —
+        // and so no renderer ever needs a clock to know how far a flash has
+        // decayed or how much of the read has arrived.
+        fx.on_trigger(&trigger, now);
+        // Logged as well as animated: a transition whose effect is still Task
+        // 15's to write is observable during QA rather than silent.
         tracing::debug!(?trigger, "desk transition");
     }
     quit

@@ -12,6 +12,7 @@
 //! neither, and a store that carried one would no longer be a plain record of
 //! the desk that a golden frame can be a pure function of.
 
+use crate::store::Trigger;
 use crate::theme::theme;
 use ratatui::style::{Modifier, Style};
 use std::collections::HashMap;
@@ -21,6 +22,14 @@ use std::time::{Duration, Instant};
 /// surface, short enough that a fast tape does not leave the row permanently
 /// lit — at which point the highlight stops meaning "this just moved".
 pub const FLASH: Duration = Duration::from_millis(600);
+
+/// How long the Atlas read takes to type itself in.
+///
+/// Its own constant rather than `FLASH`: a flash is a cell saying it moved and
+/// a reveal is a paragraph arriving, and the day one of them wants a different
+/// tempo the other must not follow it silently. That they are equal today is a
+/// coincidence of taste, not a shared fact.
+pub const REVEAL: Duration = Duration::from_millis(600);
 
 /// The decay is stepped, not continuous. Three discrete styles at 200 ms each
 /// beat a per-frame interpolation here: a cell grid has no alpha, so a "fade"
@@ -62,13 +71,61 @@ impl FlashKey {
     }
 }
 
-/// When each cell last moved.
+/// When each cell last moved, and when the read last changed.
 #[derive(Debug, Default)]
 pub struct FlashTracker {
     map: HashMap<FlashKey, Instant>,
+    /// When the Atlas read on screen arrived. `None` means none ever announced
+    /// itself to this client — which is a fully revealed read, not an empty one.
+    revealed_at: Option<Instant>,
 }
 
 impl FlashTracker {
+    /// Turn one desk transition into motion.
+    ///
+    /// The vocabulary lives here rather than in `main` so it has a test that
+    /// exercises it: the translation used to be a `match` inside the runtime
+    /// loop, where the only way to prove a trigger reached its effect was to
+    /// run the client and look. It stays out of the `Store` for the reason this
+    /// module's doc gives — the store is what the owner said, and an animation
+    /// stamp is not.
+    pub fn on_trigger(&mut self, trigger: &Trigger, now: Instant) {
+        match trigger {
+            // One move, two lit cells: the tape carries the price and the
+            // markets grid carries CHG%, and they are separate keys so neither
+            // cell's decay depends on whether the other is on screen.
+            Trigger::QuoteTick(ticker) => {
+                self.flash(FlashKey::price(ticker), now);
+                self.flash(FlashKey::change(ticker), now);
+            }
+            Trigger::ReadChanged => self.reveal(now),
+            // Task 15 gives the rest their effects. A trigger with no motion
+            // behind it is not a bug — the diff is deliberately ahead of the
+            // vocabulary — but one with motion and no test would be.
+            _ => {}
+        }
+    }
+
+    /// Start the read's reveal at `now`. A second read restarts it: the pane is
+    /// typing in *this* read, and continuing the last one would show the new
+    /// text arriving from wherever the old one had got to.
+    pub fn reveal(&mut self, now: Instant) {
+        self.revealed_at = Some(now);
+    }
+
+    /// How much of the read is on screen at `now`, from 0.0 to 1.0.
+    ///
+    /// A read nothing announced is already whole. An operator who opens DESK an
+    /// hour after the last read must see it, not wait out a reveal that
+    /// happened before this client was looking — and a golden frame that never
+    /// called `reveal` must pin the read, not a blank pane.
+    pub fn revealed(&self, now: Instant) -> f64 {
+        let Some(start) = self.revealed_at else {
+            return 1.0;
+        };
+        let elapsed = now.saturating_duration_since(start).as_millis() as f64;
+        (elapsed / REVEAL.as_millis() as f64).min(1.0)
+    }
     /// Mark a cell as having just changed. A second flash restarts the decay:
     /// a tape that keeps moving keeps the cell lit, which is the honest
     /// rendering of a price that keeps moving.
@@ -100,12 +157,18 @@ impl FlashTracker {
         }
     }
 
-    /// Whether any cell is still decaying, and the frame therefore owes another
-    /// paint. The pacing rule renders unconditionally while this is true: a
-    /// decay the loop only samples on the idle heartbeat would step visibly
-    /// late, and one it never samples would freeze mid-flash.
+    /// Whether any cell is still decaying or the read is still arriving, and
+    /// the frame therefore owes another paint. The pacing rule renders
+    /// unconditionally while this is true: a decay the loop only samples on the
+    /// idle heartbeat would step visibly late, and one it never samples would
+    /// freeze mid-flash — or, for the read, mid-sentence.
     pub fn active(&self, now: Instant) -> bool {
-        self.map.values().any(|start| alive(*start, now))
+        self.map.values().any(|start| alive(*start, now)) || self.revealing(now)
+    }
+
+    fn revealing(&self, now: Instant) -> bool {
+        self.revealed_at
+            .is_some_and(|start| now.saturating_duration_since(start) < REVEAL)
     }
 
     /// Which of the three steps a flash is in, or `None` once it is spent.
@@ -255,6 +318,83 @@ mod tests {
             fx.style_for(&FlashKey::price("SPY"), earlier, base()).bg,
             Some(theme().accent_dim)
         );
+    }
+
+    #[test]
+    fn a_read_nobody_announced_is_whole_and_an_announced_one_arrives_over_600ms() {
+        let start = Instant::now();
+        let mut fx = FlashTracker::default();
+        assert_eq!(
+            fx.revealed(start),
+            1.0,
+            "a read this client never saw arrive must render whole"
+        );
+
+        fx.reveal(start);
+        assert_eq!(fx.revealed(start), 0.0);
+        assert_eq!(fx.revealed(start + Duration::from_millis(300)), 0.5);
+        assert_eq!(fx.revealed(start + Duration::from_millis(600)), 1.0);
+        assert_eq!(
+            fx.revealed(start + Duration::from_secs(60)),
+            1.0,
+            "the fraction is clamped, not unbounded"
+        );
+        // Same reason `style_for` saturates: the loop stamps a whole drain with
+        // one instant, so a frame can be drawn at — or before — the stamp.
+        assert_eq!(fx.revealed(start - Duration::from_millis(50)), 0.0);
+    }
+
+    #[test]
+    fn a_second_read_types_itself_in_from_the_top() {
+        let start = Instant::now();
+        let mut fx = FlashTracker::default();
+        fx.reveal(start);
+        fx.reveal(start + Duration::from_secs(30));
+        assert_eq!(fx.revealed(start + Duration::from_secs(30)), 0.0);
+    }
+
+    #[test]
+    fn a_reveal_keeps_the_loop_painting_exactly_as_a_flash_does() {
+        // Without this the read would type itself in at the 100 ms idle
+        // heartbeat — six visible steps instead of a reveal.
+        let start = Instant::now();
+        let mut fx = FlashTracker::default();
+        fx.reveal(start);
+        assert!(fx.active(start));
+        assert!(fx.active(start + Duration::from_millis(599)));
+        assert!(
+            !fx.active(start + REVEAL),
+            "a finished reveal must not pin the loop at the effect cadence forever"
+        );
+    }
+
+    #[test]
+    fn every_trigger_with_motion_behind_it_reaches_its_effect() {
+        // Invariant 10, at the one seam where it has bitten three times: a
+        // translation that exists and is never called is indistinguishable from
+        // one that does not exist.
+        let start = Instant::now();
+        let mut fx = FlashTracker::default();
+
+        fx.on_trigger(&Trigger::QuoteTick("SPY".into()), start);
+        assert_eq!(
+            fx.style_for(&FlashKey::price("SPY"), start, base()).bg,
+            Some(theme().accent_dim)
+        );
+        assert_eq!(
+            fx.style_for(&FlashKey::change("SPY"), start, base()).bg,
+            Some(theme().accent_dim),
+            "one move lights both cells of the row"
+        );
+
+        fx.on_trigger(&Trigger::ReadChanged, start + Duration::from_secs(1));
+        assert_eq!(fx.revealed(start + Duration::from_secs(1)), 0.0);
+
+        // A trigger Task 15 has not given motion to yet moves nothing, rather
+        // than falling through to whatever the previous arm did.
+        let mut quiet = FlashTracker::default();
+        quiet.on_trigger(&Trigger::Halted, start);
+        assert!(!quiet.active(start));
     }
 
     #[test]

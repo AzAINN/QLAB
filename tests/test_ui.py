@@ -3147,3 +3147,53 @@ def test_atlas_context_survives_a_broken_regime_panel(session):
 def test_atlas_context_route_is_reachable(session):
     status, ctx = handle_api(session, "GET", "/api/atlas/context", {}, {})
     assert status == 200 and "regime_panel" in ctx
+
+
+def test_atlas_context_names_a_board_that_never_ran(session):
+    # A desk that never measured its predictors must say so, not show zeros.
+    assert session.atlas_context(True)["predictors"] == {"status": "never_ran"}
+
+
+def test_atlas_context_carries_the_predictor_board(session):
+    run_id = session.registry.log_run("predictor_board", {
+        "as_of": "2026-07-01",
+        "source": "synthetic",
+        "board": {
+            "baseline": "ridge:none",
+            "champion": "kernel:zz",
+            "admitted_any": True,
+            "ranking": ["kernel:zz", "ridge:none"],
+            "models": [
+                {"model_id": "kernel:zz", "mean_ic": 0.09,
+                 "ic_stability": 1.4, "usable": True,
+                 "delta_mean_ic_vs_baseline": 0.03,
+                 "paired_t_vs_baseline": 2.1},
+                {"model_id": "ridge:none", "mean_ic": 0.06,
+                 "ic_stability": 1.1, "usable": True,
+                 "delta_mean_ic_vs_baseline": 0.0,
+                 "paired_t_vs_baseline": None},
+            ],
+        },
+        "dsr_trial_counted": False,
+    })
+
+    predictors = session.atlas_context(True)["predictors"]
+    assert predictors["status"] == "ok"
+    assert predictors["run_id"] == run_id
+    assert predictors["as_of"] == "2026-07-01"
+    assert predictors["champion"]["model_id"] == "kernel:zz"
+    assert predictors["champion"]["usable"] is True
+    assert predictors["baseline"]["mean_ic"] == 0.06
+    assert predictors["admitted_any"] is True
+    assert predictors["best_delta_vs_baseline"] == 0.03
+    # A number, not a judgment: whether it is too old is the reasoner's call.
+    assert isinstance(predictors["age_days"], int)
+
+
+def test_atlas_context_names_an_unreadable_board(session):
+    session.registry.log_run(
+        "predictor_board", {"as_of": "2026-07-01", "board": "corrupt"}
+    )
+    predictors = session.atlas_context(True)["predictors"]
+    assert predictors["status"] == "unreadable"
+    assert predictors["run_id"]

@@ -21,6 +21,7 @@ pub mod audit;
 pub mod book;
 pub mod desk;
 pub mod markets;
+pub mod settings;
 pub mod workforce;
 
 use crate::cmd::Command;
@@ -114,7 +115,7 @@ pub struct Views {
     research: Unbuilt,
     workforce: workforce::WorkforceView,
     audit: audit::AuditView,
-    settings: Unbuilt,
+    settings: settings::SettingsView,
 }
 
 impl Default for Views {
@@ -132,7 +133,7 @@ impl Views {
             research: Unbuilt(ViewId::Research),
             workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
-            settings: Unbuilt(ViewId::Settings),
+            settings: settings::SettingsView,
         }
     }
 

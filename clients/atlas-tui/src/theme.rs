@@ -182,6 +182,20 @@ pub fn theme() -> &'static Theme {
     THEME.get_or_init(Theme::truecolor)
 }
 
+/// Which palette this process resolved, in words.
+///
+/// Read off the resolved theme rather than from a flag beside it: two fields
+/// that both claim to say which ramp is on screen can disagree, and the one an
+/// operator is looking at is the one `theme()` returns. The fallback is not
+/// cosmetic — on a 256-colour terminal the four-level depth ramp is a different
+/// set of colours — so a screenshot has to be able to say which it was.
+pub fn palette() -> &'static str {
+    match *theme() == Theme::truecolor() {
+        true => "obsidian · truecolor",
+        false => "obsidian · 256-colour",
+    }
+}
+
 /// Whether this terminal can render 24-bit colour.
 pub fn detect() -> bool {
     let colorterm = std::env::var("COLORTERM").ok();

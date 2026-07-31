@@ -855,7 +855,7 @@ fn draw_status(
 fn desk_mode_chip(store: &Store, t: &Theme) -> Option<Span<'static>> {
     let mode = store.desk_mode()?;
     let label = format::text(mode.label.as_ref())?;
-    if mode.book.as_deref() == Some("alpaca") && mode.credentials_ok != Some(true) {
+    if mode.book_unreachable() {
         return Some(Span::styled(
             format!("{label}  "),
             Style::default().fg(t.warning).add_modifier(Modifier::BOLD),

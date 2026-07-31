@@ -113,6 +113,22 @@ pub struct DeskMode {
     pub credentials_ok: Option<bool>,
 }
 
+impl DeskMode {
+    /// Whether this desk is pointed at a book it cannot actually reach.
+    ///
+    /// One definition, because two surfaces draw it — the status line's chip
+    /// and the SETTINGS card — and a desk that read as unreachable on one and
+    /// fine on the other would be worse than either alone.
+    ///
+    /// Only the Alpaca book: the simulated book has no login to be broken, so a
+    /// failing credential source there is not a desk that cannot trade. And
+    /// silence is unreachable rather than fine — the owner always sends the
+    /// flag, so its absence is a contract this client cannot read.
+    pub fn book_unreachable(&self) -> bool {
+        self.book.as_deref() == Some("alpaca") && self.credentials_ok != Some(true)
+    }
+}
+
 // -- the policy and its limits ---------------------------------------------
 
 /// `allocation_policy()`: the operational policy plus the mandate's constraints.

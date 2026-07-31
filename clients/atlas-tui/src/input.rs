@@ -144,10 +144,15 @@ impl Source {
             Source::WorkforceAsk => ("ui/views/workforce.rs", "", "ask_key"),
             Source::WorkforcePicker => ("ui/views/workforce.rs", "", "picker_key"),
             Source::View(ViewId::Audit) => ("ui/views/audit.rs", "", "on_key"),
-            // RSCH and SETT are `Unbuilt`, which declines every key.
-            Source::View(ViewId::Research) | Source::View(ViewId::Settings) => {
+            // RSCH is still `Unbuilt`, which declines every key.
+            Source::View(ViewId::Research) => {
                 ("ui/views/mod.rs", "impl View for Unbuilt", "on_key")
             }
+            // SETT is built and binds nothing: everything on it is read-only
+            // and nothing scrolls, so a key pressed there belongs to whoever
+            // claims it next. The check reads the real router either way, which
+            // is what would catch a cursor added without a help row.
+            Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "on_key"),
             Source::Confirm => ("ui/widgets/confirm.rs", "", "on_key"),
         }
     }

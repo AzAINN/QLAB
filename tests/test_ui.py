@@ -689,6 +689,58 @@ def test_tui_without_a_built_workstation_says_how_to_build_it(monkeypatch, tmp_p
     assert "--classic" in message
 
 
+def test_tui_classic_without_textual_names_the_extra_to_install(monkeypatch):
+    """The rollback valve may not fail obscurely.
+
+    An operator reaching for --classic is already having a bad day; a bare
+    `ModuleNotFoundError: textual` names no remedy. The Textual import moved
+    into the branch so the default path does not pay for it, and this is what
+    keeps that move from having cost the message.
+    """
+    import sys
+
+    import qlab.autopilot.cli as cli_module
+
+    _attached_owner(monkeypatch, cli_module)
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("--classic must not exec the workstation"))
+    # A `None` entry is how the import system is told a module is unavailable;
+    # `from qlab.tui.app import QlabTui` then raises ImportError.
+    monkeypatch.setitem(sys.modules, "qlab.tui.app", None)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(classic=True))
+    message = str(exit_info.value)
+    assert "TUI extra is not installed" in message
+    assert "pip install -e '.[operator]'" in message
+
+
+def test_tui_refuses_classic_and_operator_together(monkeypatch):
+    """--operator is a word only the Ratatui client understands.
+
+    Dropping it silently would leave an operator believing they had asked for
+    something. The Textual client has no posture to arm — it is the complete
+    surface and already reaches the confirm gate.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    # Refused on the arguments alone: nothing is spawned, probed or exec'd, so
+    # the refusal cannot depend on a desk being there.
+    monkeypatch.setattr(
+        cli_module.subprocess, "Popen",
+        lambda *_a, **_k: pytest.fail("a refused invocation must not spawn"))
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("a refused invocation must not exec"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(classic=True, operator=True))
+    message = str(exit_info.value)
+    assert "--operator" in message and "--classic" in message
+    assert "no operator posture" in message
+
+
 def test_tui_classic_runs_the_textual_client_against_the_same_owner(monkeypatch):
     """The soak valve: one flag, no revert."""
     import qlab.autopilot.cli as cli_module
@@ -3012,3 +3064,86 @@ def test_a_failed_recompose_zeroes_the_signals_rather_than_carrying_them(session
     assert qual["sufficient"] is False
     assert all(s["value"] is None for s in qual["signals"])
     assert all(s["state"] == "no_window" for s in qual["signals"])
+
+
+# --- the reasoner's surface ---------------------------------------------------
+
+
+def test_the_gate_input_stays_narrow(session):
+    """`atlas_facts` feeds `check_startable`, the authority gate.
+
+    A gate whose input is narrow, boolean and stable is auditable; one reading a
+    large free-form context is not. Enriching this surface — the obvious move
+    when Atlas starts reasoning — would quietly put the gate in the same
+    epistemic class as the thing it exists to constrain. The reasoning surface
+    is `atlas_context`; this one is pinned deliberately.
+    """
+    facts = session.atlas_facts(True)
+    assert set(facts) == {
+        "universe", "data", "portfolio", "regime", "open_workflows",
+        "pending_approvals", "order_anomaly", "news_window_sufficient",
+        "news_window_items",
+    }
+    # Scalars and small records only — nothing a reasoner would need, and
+    # nothing whose meaning depends on reading prose.
+    assert isinstance(facts["regime"]["flip"], bool)
+    assert isinstance(facts["news_window_items"], int)
+
+
+def test_atlas_context_carries_content_the_gate_facts_do_not(session):
+    """A boolean cannot be reasoned about. This is the whole point of the split."""
+    session.fetch_desk_news(True)
+    ctx = session.atlas_context(True)
+
+    readings = ctx["regime_panel"]["readings"]
+    assert len(readings) == 5
+    # Each indicator explains itself: state plus its own trailing threshold,
+    # percentile and the sentence saying what the number means.
+    for reading in readings:
+        assert reading["reasoning"]
+        assert reading["state"] in {"calm", "stress"}
+        assert reading["threshold"] is not None
+
+    # The six unsigned news properties, each with its own reason.
+    assert len(ctx["qualitative_signals"]["signals"]) == 6
+    assert ctx["news"]["headlines"]
+    assert "coverage" in ctx["news"]
+
+    # The gate's own view is carried verbatim, so the reasoner can see exactly
+    # what the deterministic layer will permit rather than guessing.
+    assert ctx["gate_facts"] == session.atlas_facts(True)
+
+
+def test_atlas_context_shows_what_the_gate_would_refuse(session):
+    """The reasoner must argue within its authority, not propose refused work."""
+    facts = session.atlas_facts(True)
+    facts["regime"]["flip"] = True
+    session.atlas.observe(facts, trading_date="2026-07-31")
+    session.atlas.set_mode("observe")
+
+    startable = session.atlas_context(True)["startable"]
+    assert startable and all(not s["startable"] for s in startable)
+    assert all(s["reason"] for s in startable)
+
+
+def test_the_absent_risk_profile_is_named_not_omitted(session):
+    # Omitting it would let a reasoner assume a default it was never given.
+    assert session.atlas_context(True)["mandate"]["risk_profile"] is None
+
+
+def test_atlas_context_survives_a_broken_regime_panel(session):
+    """A broken panel is a fact about the desk, not a reason to have no context."""
+    def boom(_offline):
+        raise RuntimeError("panel unavailable")
+
+    session.regime_panel = boom
+    ctx = session.atlas_context(True)
+    assert ctx["regime_panel"]["readings"] == []
+    assert "panel unavailable" in ctx["regime_panel"].get("error", "")
+    # Everything else still composes.
+    assert ctx["gate_facts"] and "news" in ctx
+
+
+def test_atlas_context_route_is_reachable(session):
+    status, ctx = handle_api(session, "GET", "/api/atlas/context", {}, {})
+    assert status == 200 and "regime_panel" in ctx

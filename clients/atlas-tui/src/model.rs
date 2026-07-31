@@ -32,6 +32,29 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// A JSON object decoded into `T`, and anything else decoded as absent.
+///
+/// For a free-form column that is *usually* an object. `runs.spec` is JSON the
+/// registry stored verbatim, so a row written by an older or stranger producer
+/// can hold a string, a list, or a number — and a bare `Option<T>` would reject
+/// the whole snapshot over one such row rather than losing one readout. The
+/// Textual client guards the same column the same way (`if not isinstance(spec,
+/// dict)`), so this is the owner-side rule kept rather than a new tolerance.
+///
+/// A well-formed object that does not match `T` also decodes as absent, which is
+/// the point: every field of `T` here is already optional, so the only way to
+/// fail is a type collision, and one of those is a spec this client cannot read.
+fn object_or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(object @ Value::Object(_)) => T::deserialize(object).ok(),
+        _ => None,
+    })
+}
+
 /// One `/api/tui` response.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Snapshot {
@@ -203,14 +226,52 @@ pub struct LeaderboardRow {
     pub deflated_sharpe: Option<f64>,
 }
 
-/// One row of the `runs` table, newest first as the owner serves it. The row
-/// also carries `spec`, which is a whole research payload — thousands of
-/// characters no list can hold, and re-decoded on every three-second poll.
+/// One row of the `runs` table, newest first as the owner serves it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Run {
     pub run_id: Option<String>,
     pub kind: Option<String>,
     pub created_at: Option<String>,
+    #[serde(default, deserialize_with = "object_or_none")]
+    pub spec: Option<RunSpec>,
+}
+
+/// **A deliberate subset of `runs.spec`.**
+///
+/// The column is a whole research payload whose keys differ per run kind — the
+/// live prediction spec alone runs to two kilobytes of per-fold diagnostics,
+/// feature lists and index bounds, re-decoded on every three-second poll. Only
+/// the fields the vol-forecast readout renders are named here. Everything else
+/// is dropped on decode rather than carried; a surface that needs more should
+/// add the field it needs and say why, not widen this to the whole blob.
+///
+/// Every field is optional because most runs are not predictions and carry none
+/// of them — a `backtest` spec decodes into an all-absent `RunSpec`, which is
+/// the honest reading of "this row is not a vol forecast".
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RunSpec {
+    /// Mean information coefficient across the purged walk-forward folds.
+    pub mean_ic: Option<f64>,
+    /// How much of that survives fold to fold. The forecast is admitted on
+    /// both, not on the mean alone.
+    pub ic_stability: Option<f64>,
+    /// The owner's own admission verdict.
+    pub usable: Option<bool>,
+    /// The rule that verdict was reached by, as the run recorded it.
+    pub admission: Option<Admission>,
+}
+
+/// The admission gate a prediction run states about itself.
+///
+/// Read off the payload rather than duplicated as constants here. The owner
+/// writes its thresholds into every spec (`research/prediction.py`), so a client
+/// that hard-coded `0.03` and `0.5` would keep asserting an old gate after the
+/// owner moved it — and this is a research-admission signal, which is exactly
+/// the kind of number that must not drift silently.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Admission {
+    pub mean_ic_strictly_above: Option<f64>,
+    pub ic_stability_strictly_above: Option<f64>,
 }
 
 /// One catalog entry. `stage` is the boundary `algorithms.solve` enforces in

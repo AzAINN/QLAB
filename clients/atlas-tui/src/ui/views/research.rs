@@ -21,7 +21,7 @@
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
-use crate::model::{Algorithm, LeaderboardRow};
+use crate::model::{Algorithm, LeaderboardRow, RunSpec};
 use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
@@ -101,7 +101,7 @@ impl View for ResearchView {
         // every cell was held to, and a right-aligned cell loses its *leading*
         // characters — the sign first. A return of `-11.3%` drawn as `11.3%` is
         // a loss rendered as a gain, so the pane refuses instead.
-        if area.width < BOARD_W || area.height < BOTTOM_MIN + 4 {
+        if area.width < BOARD_W || area.height < BOTTOM_MIN + 5 {
             refuse(
                 f,
                 area,
@@ -118,14 +118,23 @@ impl View for ResearchView {
         // takes the rest: the catalog is the pane that grows with the owner's
         // deployment, so it is the one that should get the spare rows.
         let arms = store.leaderboard().len().max(1) as u16;
-        let board = (arms + 3).min(area.height.saturating_sub(BOTTOM_MIN));
-        let rows = Layout::vertical([Constraint::Length(board), Constraint::Min(0)]).split(area);
-        draw_board(f, rows[0], store);
+        let board = (arms + 3).min(area.height.saturating_sub(BOTTOM_MIN + 1));
+        // The forecast readout leads, on one row of its own. It is the only
+        // admission verdict on this view — whether the desk may use the vol
+        // forecast at all — and everything below it is evidence.
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(board),
+            Constraint::Min(0),
+        ])
+        .split(area);
+        draw_forecast(f, rows[0], store);
+        draw_board(f, rows[1], store);
 
-        let left = RUNS_W.min(rows[1].width.saturating_sub(CATALOG_MIN + 1));
+        let left = RUNS_W.min(rows[2].width.saturating_sub(CATALOG_MIN + 1));
         let cols = Layout::horizontal([Constraint::Length(left), Constraint::Min(0)])
             .spacing(1)
-            .split(rows[1]);
+            .split(rows[2]);
         draw_runs(f, cols[0], store);
         draw_catalog(f, cols[1], store);
     }
@@ -139,6 +148,134 @@ impl View for ResearchView {
     fn on_key(&mut self, _k: KeyEvent, _store: &mut Store) -> Option<Command> {
         None
     }
+}
+
+/// The vol forecast, and whether the desk may use it.
+///
+/// Parity with the Textual reference view's research summary. Left out of the
+/// cutover this would be a research-admission signal that silently disappeared:
+/// the IC says how much of next month's realized volatility the model explains
+/// out of sample, and the verdict says whether anything downstream is allowed
+/// to read it.
+///
+/// Three states rather than two, because "the desk has never forecast" and
+/// "there is a run and this client cannot read its spec" have different
+/// remedies and must not share a sentence.
+fn draw_forecast(f: &mut Frame, area: Rect, store: &Store) {
+    let t = theme();
+    let label = Span::styled(" vol forecast  ", Style::default().fg(t.text_secondary));
+    let Some(run) = store
+        .runs()
+        .iter()
+        .find(|run| run.kind.as_deref() == Some("prediction"))
+    else {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                label,
+                Span::styled(
+                    "no prediction run yet",
+                    Style::default().fg(theme().text_dim),
+                ),
+            ])),
+            area,
+        );
+        return;
+    };
+    let Some(spec) = run.spec.as_ref() else {
+        // A run exists and its record is unreadable. Loud rather than folded
+        // into "none yet": one is a desk that has not looked, the other is a
+        // desk whose answer this client cannot read.
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                label,
+                Span::styled(
+                    format!(
+                        "run {} carries no readable spec",
+                        format::text(run.run_id.as_ref()).unwrap_or(MISSING)
+                    ),
+                    Style::default().fg(t.warning),
+                ),
+            ])),
+            area,
+        );
+        return;
+    };
+
+    let admitted = admitted(spec);
+    let mut spans = vec![
+        label,
+        Span::styled("IC ", Style::default().fg(t.text_tertiary)),
+        // Three decimals, because the admission threshold is 0.03 and two would
+        // round the gate itself away.
+        match spec.mean_ic {
+            Some(ic) => Span::styled(
+                decimals(ic, 3),
+                Style::default().fg(format::change_tone(ic, 3)),
+            ),
+            None => Span::styled(MISSING.to_string(), Style::default().fg(t.text_tertiary)),
+        },
+        Span::styled("  stability ", Style::default().fg(t.text_tertiary)),
+        Span::styled(
+            spec.ic_stability
+                .map(|v| decimals(v, 3))
+                .unwrap_or_else(|| MISSING.to_string()),
+            Style::default().fg(t.text_secondary),
+        ),
+    ];
+    // The word only when the run stated the threshold it would be judged
+    // against. Calling a number stable against a gate nobody named would be
+    // this client inventing the admission rule.
+    if let Some(word) = stability_word(spec) {
+        spans.push(Span::styled(
+            format!(" ({word})"),
+            Style::default().fg(t.text_secondary),
+        ));
+    }
+    spans.push(Span::styled(
+        if admitted {
+            "  —  usable"
+        } else {
+            "  —  not usable"
+        },
+        Style::default()
+            .fg(if admitted { t.positive } else { t.negative })
+            .add_modifier(Modifier::BOLD),
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Whether the desk may use this forecast.
+///
+/// The owner's own `usable` flag **and** the run's own stated gate, cleared by
+/// the run's own numbers. The thresholds are read off the payload rather than
+/// carried here: the owner writes them into every spec, and a client holding
+/// `0.03` and `0.5` of its own would keep asserting an old gate after the owner
+/// moved it — on a research-admission signal, which is exactly the number that
+/// must not drift quietly.
+///
+/// Absent evidence is not a pass. A `usable: true` with no IC behind it is a
+/// verdict nothing supports, and this pane will not repeat it.
+fn admitted(spec: &RunSpec) -> bool {
+    if spec.usable != Some(true) {
+        return false;
+    }
+    let (Some(ic), Some(stability)) = (spec.mean_ic, spec.ic_stability) else {
+        return false;
+    };
+    let gate = spec.admission.clone().unwrap_or_default();
+    gate.mean_ic_strictly_above.is_none_or(|floor| ic > floor)
+        && gate
+            .ic_stability_strictly_above
+            .is_none_or(|floor| stability > floor)
+}
+
+/// `stable` or `unstable`, when the run named the threshold that decides it.
+fn stability_word(spec: &RunSpec) -> Option<&'static str> {
+    let floor = spec.admission.as_ref()?.ic_stability_strictly_above?;
+    Some(match spec.ic_stability? > floor {
+        true => "stable",
+        false => "unstable",
+    })
 }
 
 /// The newest ablation, ranked as the owner ranked it.
@@ -291,18 +428,23 @@ fn metric(value: Option<f64>, show: fn(f64) -> String, unit: Unit, dp: usize) ->
 }
 
 /// A Sharpe or a deflated Sharpe: a ratio, not a percentage.
-///
-/// The sign comes from the *rounded* value, not from the double. `{:.2}` on
-/// -1e-13 prints `-0.00` — a minus sign drawn on a zero, which reads as a small
-/// loss in a column an operator scans for direction. This is the same rule
-/// every money and percent helper in `format` applies; `negative_at` is that
-/// rule, asked at the precision this cell prints at.
 fn ratio(value: f64) -> String {
+    decimals(value, 2)
+}
+
+/// A plain decimal, signed by what is *printed* rather than by the double.
+///
+/// `{:.2}` on -1e-13 prints `-0.00` — a minus sign drawn on a zero, which reads
+/// as a small loss in a column an operator scans for direction. Two columns on
+/// this view need it at two different precisions (the leaderboard's ratios, the
+/// forecast's IC), so the rule is one function. `negative_at` is `format`'s own
+/// rule, asked at the precision this cell prints at.
+fn decimals(value: f64, dp: usize) -> String {
     if !value.is_finite() {
         return MISSING.to_string();
     }
-    let digits = format!("{:.2}", value.abs());
-    match format::negative_at(value, 2) {
+    let digits = format!("{:.*}", dp, value.abs());
+    match format::negative_at(value, dp) {
         true => format!("-{digits}"),
         false => digits,
     }

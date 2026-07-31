@@ -26,6 +26,12 @@ htmlcov/
 .superpowers/
 codex-info-log/
 
+# The Ratatui client's tracing sink. `qlab tui` execs the binary in the
+# operator's cwd, so this lands wherever the desk was started from — the repo
+# root included. `clients/atlas-tui/.gitignore` cannot reach here, and a tracked
+# runtime log is appended on every launch and permanently dirties the tree.
+/atlas.log
+
 # OS / editor
 .DS_Store
 Thumbs.db

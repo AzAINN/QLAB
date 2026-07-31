@@ -354,6 +354,17 @@ def _cmd_tui(args) -> int:
     screen.
     """
     classic = bool(getattr(args, "classic", False))
+    if classic and getattr(args, "operator", False):
+        # Loud, not silent. `--operator` is a word only the Ratatui client
+        # understands, and the Textual client has no posture to arm — it is the
+        # complete surface and already reaches the confirm gate. Dropping the
+        # flag would leave an operator believing they had asked for something.
+        raise SystemExit(
+            "--operator is a Ratatui-workstation flag and --classic is the "
+            "Textual client, which has no operator posture to arm.\n"
+            "    qlab tui --operator     the armed workstation\n"
+            "    qlab tui --classic      the Textual client (already complete)"
+        )
     try:
         from qlab.tui.client import ApiClient
     except ImportError as exc:
@@ -469,7 +480,19 @@ def _cmd_tui(args) -> int:
                 f"the requested desk mode ({mode.label}): {exc}") from exc
 
     if classic:
-        from qlab.tui.app import QlabTui
+        # Imported here rather than beside `ApiClient` above, so the default
+        # path never pays for Textual — and wrapped, because the rollback valve
+        # is exactly the thing that must not fail obscurely. An operator
+        # reaching for `--classic` is already having a bad day; a bare
+        # `ModuleNotFoundError: textual` names no remedy.
+        try:
+            from qlab.tui.app import QlabTui
+        except ImportError as exc:
+            raise SystemExit(
+                "The TUI extra is not installed. Run:\n"
+                "    pip install -e '.[operator]'\n"
+                f"(original error: {exc})"
+            ) from exc
 
         QlabTui(
             client,
@@ -645,12 +668,18 @@ def build_parser() -> argparse.ArgumentParser:
     tui.add_argument(
         "--classic", action="store_true",
         help="use the Textual client instead of the Ratatui workstation")
-    # Passthrough. The word reaches the workstation; whether there is anything
-    # behind it is the binary's own question — a default build has no order path
-    # to arm and refuses the flag itself.
+    # Passthrough. The word reaches the workstation and that is all this
+    # launcher does with it.
+    #
+    # A binary built without the feature does *not* refuse it: the flag parses,
+    # the posture compiles to Glass, and the window is read-only with nothing to
+    # arm. That is safe by construction rather than by check — there is no write
+    # path in the artifact — and the mitigation for the operator who expected
+    # otherwise is the GLASS chip the status line carries on every frame.
     tui.add_argument(
         "--operator", action="store_true",
-        help="arm the workstation's write affordances (Ratatui client only)")
+        help="arm the workstation's write affordances (Ratatui client only; a "
+             "binary built without the feature stays GLASS and says so)")
     tui.set_defaults(func=_cmd_tui)
 
     from qlab.desk_cli import register_subcommands

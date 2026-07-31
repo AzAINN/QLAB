@@ -243,9 +243,15 @@
      "deflated_sharpe": null}
   ],
   "runs": [
-    {"run_id": "805e0729cf5a4d19", "kind": "ablation", "created_at": "2026-07-30T17:58:41.102934+00:00"},
-    {"run_id": "ece2abcefa1b4c07", "kind": "prediction", "created_at": "2026-07-30T16:41:12.884301+00:00"},
-    {"run_id": "3f2a91cc70de4b88", "kind": "backtest", "created_at": "2026-07-29T22:03:55.410772+00:00"}
+    {"run_id": "805e0729cf5a4d19", "kind": "ablation", "created_at": "2026-07-30T17:58:41.102934+00:00",
+     "spec": {"arms": ["B1", "B2", "A3"]}},
+    {"run_id": "ece2abcefa1b4c07", "kind": "prediction", "created_at": "2026-07-30T16:41:12.884301+00:00",
+     "spec": {"algorithm_id": "vol_prediction_ridge", "mean_ic": -0.1208, "ic_stability": -0.4245,
+              "ic_std": 0.2847, "usable": false, "n_obs": 671, "horizon_days": 21,
+              "target": "next_21d_equal_weight_realized_vol",
+              "admission": {"mean_ic_strictly_above": 0.03, "ic_stability_strictly_above": 0.5}}},
+    {"run_id": "3f2a91cc70de4b88", "kind": "backtest", "created_at": "2026-07-29T22:03:55.410772+00:00",
+     "spec": {"arm_id": "B2"}}
   ],
   "algorithms": [
     {"id": "equal_weight", "label": "Equal weight", "category": "benchmark", "stage": "operational",

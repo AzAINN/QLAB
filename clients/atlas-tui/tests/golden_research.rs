@@ -236,6 +236,156 @@ fn a_pane_too_narrow_for_the_metrics_says_what_it_would_take() {
     assert!(narrow.contains("RESEARCH needs"), "{narrow}");
 }
 
+// -- the vol-forecast readout ------------------------------------------------
+//
+// Parity with `qlab/tui/app.py::_render_research`. Left behind at the cutover
+// this would be a research-admission signal that silently disappeared from the
+// desk — the one number that says whether the forecast may be used at all.
+
+#[test]
+fn the_vol_forecast_states_its_ic_and_whether_the_desk_may_use_it() {
+    let frame = research().frame(120, 36);
+    let row = line_with(&frame, "vol forecast");
+    // Three decimals, as the Textual readout reports it: the admission
+    // threshold is 0.03, so two would round the gate away.
+    assert!(row.contains("-0.121"), "{row}");
+    assert!(row.contains("unstable"), "{row}");
+    assert!(row.contains("not usable"), "{row}");
+}
+
+#[test]
+fn a_forecast_that_clears_its_own_stated_gate_reads_as_usable() {
+    let t = Theme::truecolor();
+    let client = research_from(
+        r#"{"runs": [{"run_id": "r1", "kind": "prediction",
+             "spec": {"mean_ic": 0.081, "ic_stability": 0.63, "usable": true,
+                      "admission": {"mean_ic_strictly_above": 0.03,
+                                    "ic_stability_strictly_above": 0.5}}}]}"#,
+    );
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "vol forecast");
+    assert!(row.contains("stable") && !row.contains("unstable"), "{row}");
+    assert!(
+        row.contains("usable") && !row.contains("not usable"),
+        "{row}"
+    );
+    assert_eq!(
+        body_style_of(&client.buffer(120, 36), "usable").fg,
+        Some(t.positive)
+    );
+}
+
+#[test]
+fn the_gate_is_the_runs_own_thresholds_and_not_a_copy_of_them() {
+    // The owner writes its admission rule into every spec, so this client reads
+    // it rather than carrying `0.03` and `0.5` of its own — a hard-coded gate
+    // keeps asserting an old threshold after the owner moves it, and this is a
+    // research-admission signal, which is exactly the number that must not
+    // drift quietly.
+    //
+    // The same evidence under a stricter stated rule is not usable.
+    let strict = research_from(
+        r#"{"runs": [{"run_id": "r1", "kind": "prediction",
+             "spec": {"mean_ic": 0.081, "ic_stability": 0.63, "usable": true,
+                      "admission": {"mean_ic_strictly_above": 0.09,
+                                    "ic_stability_strictly_above": 0.5}}}]}"#,
+    );
+    let frame = strict.frame(120, 36);
+    assert!(
+        line_with(&frame, "vol forecast").contains("not usable"),
+        "the client kept a threshold of its own"
+    );
+
+    // And a run whose own flag says no is not usable however good the numbers
+    // look: the owner made that call, and this pane reports it.
+    let refused = research_from(
+        r#"{"runs": [{"run_id": "r1", "kind": "prediction",
+             "spec": {"mean_ic": 0.4, "ic_stability": 0.9, "usable": false,
+                      "admission": {"mean_ic_strictly_above": 0.03,
+                                    "ic_stability_strictly_above": 0.5}}}]}"#,
+    );
+    let frame = refused.frame(120, 36);
+    assert!(line_with(&frame, "vol forecast").contains("not usable"));
+}
+
+#[test]
+fn a_forecast_with_no_evidence_is_not_admitted_on_a_flag_alone() {
+    // `usable: true` with no IC behind it is a verdict nothing supports. Absent
+    // evidence is not a pass, and the number renders `--` rather than zero.
+    let client = research_from(
+        r#"{"runs": [{"run_id": "r1", "kind": "prediction", "spec": {"usable": true}}]}"#,
+    );
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "vol forecast");
+    assert!(row.contains("--"), "{row}");
+    assert!(row.contains("not usable"), "{row}");
+    assert!(
+        !row.contains("0.000"),
+        "an absent IC became a number: {row}"
+    );
+}
+
+#[test]
+fn a_dust_sized_ic_is_signed_by_what_is_printed() {
+    // At three decimals a -1e-9 IC prints `0.000`; `{:.3}` would write `-0.000`,
+    // a minus sign on a zero in the one column that says which way the forecast
+    // leans. The same rule the leaderboard's ratios take.
+    let client = research_from(
+        r#"{"runs": [{"run_id": "r1", "kind": "prediction",
+             "spec": {"mean_ic": -0.000000001, "ic_stability": 0.6, "usable": false}}]}"#,
+    );
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "vol forecast");
+    assert!(row.contains(" 0.000"), "{row}");
+    assert!(!row.contains("-0.000"), "a sign was drawn on a zero: {row}");
+}
+
+#[test]
+fn a_desk_that_has_never_forecast_says_so_rather_than_showing_nothing() {
+    let client = research_from(r#"{"runs": [{"run_id": "r1", "kind": "ablation"}]}"#);
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "vol forecast");
+    assert!(row.contains("no prediction run yet"), "{row}");
+}
+
+#[test]
+fn a_spec_that_is_not_an_object_costs_one_readout_and_not_the_snapshot() {
+    // `runs.spec` is JSON the registry stored verbatim, so a row from an older
+    // producer can hold anything. The Textual client guards the same column the
+    // same way; a client that refused the payload over it would blank the whole
+    // desk to lose one line.
+    let client = research_from(
+        r#"{"runs": [{"run_id": "r1", "kind": "prediction", "spec": "legacy string"},
+                     {"run_id": "r2", "kind": "ablation", "created_at": "2026-07-30T17:58:41+00:00"}]}"#,
+    );
+    let frame = client.frame(120, 36);
+    // And it is said as its own fact. "The desk has never forecast" and "there
+    // is a run whose record this client cannot read" have different remedies,
+    // so they may not share a sentence — the Textual client folds the second
+    // into an empty dict and reports `IC 0.000`, a number nobody computed.
+    let row = line_with(&frame, "vol forecast");
+    assert!(row.contains("no readable spec"), "{row}");
+    assert!(row.contains("r1"), "the unreadable run is named: {row}");
+    assert!(!row.contains("0.000"), "{row}");
+    // The rest of the pane is unharmed.
+    assert!(content(&frame).contains("r2"), "{frame}");
+}
+
+#[test]
+fn the_newest_prediction_is_the_one_reported() {
+    // `runs` is newest-first as the owner serves it, and a stale forecast shown
+    // beside a newer one is a gate an operator would read as current.
+    let client = research_from(
+        r#"{"runs": [
+             {"run_id": "new", "kind": "prediction", "spec": {"mean_ic": 0.222, "usable": false}},
+             {"run_id": "old", "kind": "prediction", "spec": {"mean_ic": 0.111, "usable": true}}]}"#,
+    );
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "vol forecast");
+    assert!(row.contains("0.222"), "{row}");
+    assert!(!row.contains("0.111"), "{row}");
+}
+
 #[test]
 fn research_claims_no_key_at_all() {
     // Every pane here is read-only and nothing selects, so a key pressed on it

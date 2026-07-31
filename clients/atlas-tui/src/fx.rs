@@ -219,7 +219,12 @@ mod tests {
         );
         fx.flash(FlashKey::change("SPY"), start + Duration::from_millis(400));
         assert_eq!(
-            fx.style_for(&FlashKey::change("SPY"), start + Duration::from_millis(400), base()).bg,
+            fx.style_for(
+                &FlashKey::change("SPY"),
+                start + Duration::from_millis(400),
+                base()
+            )
+            .bg,
             Some(theme().accent_dim)
         );
     }

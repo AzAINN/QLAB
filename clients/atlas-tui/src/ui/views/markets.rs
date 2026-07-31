@@ -328,10 +328,7 @@ fn draw_grid(
         .column_spacing(1)
         // A marker, not only a shade: on a 256-colour terminal the highlight is
         // a shade, and a shade is not an answer to "which row is the chart".
-        .highlight_symbol(Text::from(Span::styled(
-            "▌",
-            Style::default().fg(t.accent),
-        )))
+        .highlight_symbol(Text::from(Span::styled("▌", Style::default().fg(t.accent))))
         .row_highlight_style(Style::default().bg(t.bg_hover));
     f.render_stateful_widget(
         table,

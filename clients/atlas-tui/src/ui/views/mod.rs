@@ -194,21 +194,11 @@ mod tests {
     }
 
     fn draw_once(views: &Views, store: &Store) {
-        let mut term =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
         let fx = FlashTracker::default();
         let now = Instant::now();
-        term.draw(|f| {
-            views.draw(
-                store.nav.view,
-                f,
-                Rect::new(0, 0, 120, 36),
-                store,
-                &fx,
-                now,
-            )
-        })
-        .unwrap();
+        term.draw(|f| views.draw(store.nav.view, f, Rect::new(0, 0, 120, 36), store, &fx, now))
+            .unwrap();
     }
 
     #[test]

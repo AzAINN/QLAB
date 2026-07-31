@@ -76,12 +76,9 @@ impl Client {
     }
 
     fn terminal(&self, w: u16, h: u16) -> ratatui::Terminal<ratatui::backend::TestBackend> {
-        let mut term =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-        term.draw(|f| {
-            atlas::ui::shell::draw(f, &self.store, &self.views, &self.fx, self.now)
-        })
-        .unwrap();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        term.draw(|f| atlas::ui::shell::draw(f, &self.store, &self.views, &self.fx, self.now))
+            .unwrap();
         term
     }
 }

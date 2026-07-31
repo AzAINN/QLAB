@@ -67,7 +67,10 @@ fn the_grid_carries_the_change_arrows_rather_than_a_bare_minus() {
     // also the hero header's and the sector strip's.
     let body = body(&markets().frame(120, 36));
     assert!(line_with(&body, "52.40").contains('▲'), "XLF rose:\n{body}");
-    assert!(line_with(&body, "661.73").contains('▼'), "QQQ fell:\n{body}");
+    assert!(
+        line_with(&body, "661.73").contains('▼'),
+        "QQQ fell:\n{body}"
+    );
 }
 
 #[test]
@@ -311,7 +314,10 @@ fn a_quote_reaches_the_grid_without_a_new_snapshot() {
     client.store.apply(quote("SPY", 731.11, 0.0042), at);
     let body = body(&client.frame(120, 36));
     assert!(body.contains("731.11"), "{body}");
-    assert!(!body.contains("729.46"), "the poll's price survived:\n{body}");
+    assert!(
+        !body.contains("729.46"),
+        "the poll's price survived:\n{body}"
+    );
 }
 
 #[test]
@@ -342,7 +348,10 @@ fn a_terminal_below_the_grids_floor_refuses_rather_than_drawing_wrong_numbers() 
         "a CHG% cell survived below the floor:\n{body}"
     );
     for number in ["152.47", "729.46", "661.73", "-10.1", "6.3%"] {
-        assert!(!body.contains(number), "{number} survived below the floor:\n{body}");
+        assert!(
+            !body.contains(number),
+            "{number} survived below the floor:\n{body}"
+        );
     }
     // The crosshair chip goes with the chart it labelled.
     assert!(!body.contains('$'), "{body}");
@@ -382,7 +391,14 @@ fn the_floor_is_the_grids_allocation_and_not_the_pane_it_was_split_from() {
 fn a_narrow_terminal_still_renders_the_grid_without_panicking() {
     let mut client = markets();
     client.keys(&[KeyCode::Down, KeyCode::Right, KeyCode::Right]);
-    for (w, h) in [(40u16, 12u16), (20, 8), (80, 10), (200, 60), (1, 1), (34, 3)] {
+    for (w, h) in [
+        (40u16, 12u16),
+        (20, 8),
+        (80, 10),
+        (200, 60),
+        (1, 1),
+        (34, 3),
+    ] {
         let _ = client.frame(w, h);
     }
 }
@@ -433,7 +449,10 @@ fn a_strip_too_narrow_for_its_sectors_says_so_rather_than_clipping_one_away() {
     let narrow = body(&client.frame(109, 30));
     assert!(narrow.contains("sector map needs 72 columns"), "{narrow}");
     assert!(narrow.contains("widen the terminal"), "{narrow}");
-    assert!(narrow.contains("SYMBOL"), "the grid still fits at 109:\n{narrow}");
+    assert!(
+        narrow.contains("SYMBOL"),
+        "the grid still fits at 109:\n{narrow}"
+    );
     for label in labels {
         assert!(
             !narrow.contains(label),
@@ -444,7 +463,10 @@ fn a_strip_too_narrow_for_its_sectors_says_so_rather_than_clipping_one_away() {
     // Wide enough, and all twelve are on the map rather than the ten that fit.
     let wide = body(&client.frame(160, 30));
     for label in labels {
-        assert!(wide.contains(label), "{label} is missing from the map:\n{wide}");
+        assert!(
+            wide.contains(label),
+            "{label} is missing from the map:\n{wide}"
+        );
     }
 }
 

@@ -10,8 +10,8 @@ use atlas::bus::{AppEvent, Channel, HttpResult, SseEvent};
 use atlas::fx::{FlashKey, FlashTracker};
 use atlas::model::Snapshot;
 use atlas::store::{Store, ViewId};
-use atlas::ui::views::Views;
 use atlas::theme::Theme;
+use atlas::ui::views::Views;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use harness::{
     body_style_of, fixture_store, fixture_store_with_panel, frame_to_string, frame_to_string_at,
@@ -131,7 +131,10 @@ fn the_nav_highlight_moves_with_the_number_keys() {
     // Starting one past the entry the shell opens on, so the seventh press is
     // the one that has to come back to DESK.
     for marked in NAV_MARKED.iter().cycle().skip(1).take(NAV_MARKED.len()) {
-        let digit = marked.chars().nth(1).expect("every entry carries its digit");
+        let digit = marked
+            .chars()
+            .nth(1)
+            .expect("every entry carries its digit");
         atlas::ui::shell::on_key(key(KeyCode::Char(digit)), &mut store, &mut views);
         let frame = frame_to_string(&store, 120, 36);
         assert!(

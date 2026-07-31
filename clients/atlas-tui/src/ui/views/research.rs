@@ -48,8 +48,13 @@ use std::time::Instant;
 /// `RET` and `MAXDD` are seven because both are routinely negative and can be
 /// double-digit: `-11.3%` needs six and the header needs five. `CVAR95` is
 /// seven for the same reason at two decimals.
+///
+/// `METHOD` is 24 because the owner's longest arm name is
+/// `Equal risk contribution` at 23 (`core/reference.py::ARM_NAMES`). At 22 it
+/// rendered `Equal risk contributio`, which a live capture caught and no
+/// fixture would have — the fixture's names are all short.
 const COLS: [(&str, u16, bool); 7] = [
-    ("METHOD", 22, LEFT),
+    ("METHOD", 24, LEFT),
     ("", 5, LEFT),
     ("SHARPE", 6, RIGHT),
     ("RET", 7, RIGHT),
@@ -175,9 +180,7 @@ fn draw_board(f: &mut Frame, area: Rect, store: &Store) {
     // the end is counted rather than dropped — nothing here scrolls, and a
     // truncated ranking reads as a shorter ablation than the desk ran.
     let room = head_rows[1].height.saturating_sub(1) as usize;
-    let shown = arms
-        .len()
-        .min(room.saturating_sub(usize::from(arms.len() > room)));
+    let shown = fits(arms.len(), room);
     let table = Table::new(
         arms.iter().take(shown).map(arm_row),
         COLS.map(|(_, w, _)| Constraint::Length(w)),
@@ -217,8 +220,8 @@ fn arm_row(arm: &LeaderboardRow) -> Row<'static> {
             mark.to_string(),
             Style::default().fg(mark_tone).add_modifier(Modifier::BOLD),
         ),
-        metric(arm.sharpe, ratio, 2),
-        metric(arm.ann_return, format::signed_pct1, 1),
+        metric(arm.sharpe, ratio, Unit::Ratio, 2),
+        metric(arm.ann_return, format::signed_pct1, Unit::Percent, 1),
         // A drawdown and a tail loss are losses by construction: colouring them
         // red would say nothing an operator does not already know from the
         // column header, and would leave the two columns that *do* carry a
@@ -250,21 +253,37 @@ fn arm_row(arm: &LeaderboardRow) -> Row<'static> {
     )
 }
 
+/// Whether a metric is a fraction the formatter will multiply out, or a raw
+/// ratio that prints itself.
+///
+/// Named rather than inferred from the decimal count. `change_tone` has to be
+/// handed the same expression the formatter prints — the whole point of it is
+/// that the colour is decided on the printed value — and deriving that from
+/// `dp` would be two facts that happen to agree today: a two-decimal percent
+/// column would silently be toned as if it were a ratio, a factor of a hundred
+/// out, and the only visible symptom would be the colour of small numbers.
+#[derive(Debug, Clone, Copy)]
+enum Unit {
+    Ratio,
+    Percent,
+}
+
 /// One metric cell, toned at the precision it is printed to.
 ///
 /// The precision matters: dust magnitudes are real in a leaderboard, and an arm
 /// at -1e-13 prints `0.00` — a cell painted red over a zero says the arm lost
-/// money when what it did was round away. `change_tone` is fed the same
-/// expression the formatter uses, which is what keeps the two in step.
-fn metric(value: Option<f64>, show: fn(f64) -> String, dp: usize) -> (String, Style) {
+/// money when what it did was round away.
+fn metric(value: Option<f64>, show: fn(f64) -> String, unit: Unit, dp: usize) -> (String, Style) {
     let t = theme();
     let Some(value) = value else {
         // Absent is not zero and not neutral-because-flat: the ablation
         // produced no comparable number for this arm.
         return (MISSING.to_string(), Style::default().fg(t.text_tertiary));
     };
-    // The percent helpers print `fraction * 100`; a raw ratio prints itself.
-    let printed = if dp == 2 { value } else { value * 100.0 };
+    let printed = match unit {
+        Unit::Ratio => value,
+        Unit::Percent => value * 100.0,
+    };
     (
         show(value),
         Style::default().fg(format::change_tone(printed, dp)),
@@ -455,6 +474,23 @@ mod tests {
         assert_eq!(BOARD_W, columns + COLS.len() as u16 - 1);
     }
 
+    /// The longest name the owner's `ARM_NAMES` can send, verbatim. A name
+    /// column that clips is a method an operator has to guess at, and this one
+    /// is the arm the champion is compared against.
+    const LONGEST_ARM: &str = "Equal risk contribution";
+
+    #[test]
+    fn the_method_column_holds_the_owners_longest_arm_name() {
+        let width = COLS[0].1 as usize;
+        assert!(
+            LONGEST_ARM.chars().count() <= width,
+            "METHOD is {width} and {LONGEST_ARM:?} needs {}",
+            LONGEST_ARM.chars().count()
+        );
+        // And the cell holds it whole rather than the `head` cut kicking in.
+        assert_eq!(head(LONGEST_ARM.to_string(), COLS[0].1), LONGEST_ARM);
+    }
+
     #[test]
     fn every_metric_column_fits_its_widest_honest_rendering() {
         // The failure this guards is silent and inverts the number: ratatui
@@ -470,17 +506,36 @@ mod tests {
     #[test]
     fn an_unscored_arm_is_absent_rather_than_zero_or_flat() {
         let t = theme();
-        let (text, style) = metric(None, ratio, 2);
+        let (text, style) = metric(None, ratio, Unit::Ratio, 2);
         assert_eq!(text, MISSING);
         assert_eq!(style.fg, Some(t.text_tertiary), "absent is not flat");
         // And a dust magnitude takes the tone of what is printed, not of the
         // double: an arm at -1e-13 prints `0.00`, and a red cell over a zero
         // says the arm lost money when what it did was round away.
-        let (text, style) = metric(Some(-1e-13), ratio, 2);
+        let (text, style) = metric(Some(-1e-13), ratio, Unit::Ratio, 2);
         assert_eq!(text, "0.00");
         assert_ne!(style.fg, Some(t.negative));
         // The neighbour that survives the rounding still reads as a loss.
-        assert_eq!(metric(Some(-0.006), ratio, 2).1.fg, Some(t.negative));
+        assert_eq!(
+            metric(Some(-0.006), ratio, Unit::Ratio, 2).1.fg,
+            Some(t.negative)
+        );
+        // A percent column is toned on the multiplied-out value. At -0.006 the
+        // *fraction* rounds away and the *percent* does not — read as a ratio,
+        // a -0.6% return would be painted as flat.
+        assert_eq!(
+            metric(Some(-0.006), format::signed_pct1, Unit::Percent, 1)
+                .1
+                .fg,
+            Some(t.negative)
+        );
+        assert_eq!(
+            metric(Some(-0.006), format::signed_pct1, Unit::Ratio, 1)
+                .1
+                .fg,
+            Some(t.positive),
+            "the wrong unit tones a real loss as flat — this is what Unit prevents"
+        );
         assert_eq!(ratio(-0.006), "-0.01");
         // Found by the test above: `{:.2}` prints `-0.00` for a dust-sized
         // negative, drawing a minus sign on a zero in a column read for

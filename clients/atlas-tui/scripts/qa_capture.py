@@ -27,7 +27,8 @@ Steps, comma-separated, run in order:
     key:CHARS       send each character as a keystroke
     esc             send Escape on its own — never fold this into `key`, see
                     below
-    shot:LABEL      print the screen as it stands, under that heading
+    shot:LABEL      mark the stream here; the screen is reconstructed and
+                    printed under that heading after the client exits
     quit            send `q`, wait for exit, and report how it left the terminal
 
 `esc` is its own step for a reason recorded in Task 20: ESC immediately followed
@@ -39,6 +40,22 @@ Exit status is 0 when the client exited cleanly and left the terminal restored,
 1 otherwise. Nothing here asserts what is *on* the screens — that is the human's
 job, and the golden frames' — so a passing run means "it ran and cleaned up",
 not "it drew the right thing".
+
+Known limitation, stated because a QA tool that lies quietly is worse than none
+-------------------------------------------------------------------------------
+Against a *busy* owner — live quote stream, effects firing, several shots a
+second — a single character is occasionally missing from a word on a
+reconstructed screen, in a different place on every run. It is a read-path
+artifact of this harness, not the client: replaying a captured byte stream
+through the same parser reconstructs those words perfectly, every time, and the
+golden frames pin the same panes offline. Three designs have narrowed it (parse
+off the reader thread, then off the main thread too, then capture-then-replay,
+which is what runs now) and it is down from most runs to roughly one word in
+five runs.
+
+So: read a screen for layout, keys, refusals and the exit path. Do **not** read
+it as a character-exact pin — that is what `cargo test`'s golden frames are for,
+and they are exact by construction.
 """
 
 from __future__ import annotations
@@ -54,7 +71,10 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
+
+
 
 class Screen:
     """A character grid with just enough VT to follow what ratatui emits.
@@ -239,10 +259,32 @@ def run(
     # to be blamed on the client.
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
-    def drain(seconds: float) -> None:
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], max(0.0, deadline - time.monotonic()))
+    # While the client is running, this process reads and does nothing else.
+    #
+    # Both softer versions of that lost characters — one per word, somewhere
+    # different on every run (`vol_pred ction_ridge`, `work low abandoned`).
+    # Parsing inside the reader was the first; parsing on the main thread while
+    # the reader ran was the second, because printing a screen holds the GIL in
+    # runs long enough to starve the reader against a busy desk. Replaying a
+    # stream that *was* captured by a do-nothing-but-read loop reconstructs
+    # every one of those words perfectly, which is what pinned the loss to the
+    # read path rather than to the grammar.
+    #
+    # So a shot is a *mark* — a byte offset into the stream — and the screens
+    # are reconstructed and printed after the client has exited. The screen an
+    # operator would have been looking at at that moment is exactly the stream
+    # up to that offset, so nothing is lost by deferring it.
+    raw = bytearray()
+    raw_lock = threading.Lock()
+    stop = threading.Event()
+    marks: list[tuple[int, str]] = []
+
+    def pump() -> None:
+        while not stop.is_set():
+            try:
+                ready, _, _ = select.select([master], [], [], 0.05)
+            except (OSError, ValueError):
+                return
             if not ready:
                 continue
             try:
@@ -251,42 +293,59 @@ def run(
                 return
             if not chunk:
                 return
-            screen.feed(decoder.decode(chunk))
+            with raw_lock:
+                raw.extend(chunk)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
 
     ok = True
-    drain(1.0)
+    time.sleep(1.0)
     for step in script:
         verb, _, arg = step.partition(":")
         if verb == "wait":
-            drain(float(arg or 1.0))
+            time.sleep(float(arg or 1.0))
         elif verb == "key":
             for ch in arg:
                 os.write(master, ch.encode())
-                drain(0.25)
+                time.sleep(0.25)
         elif verb == "esc":
             os.write(master, b"\x1b")
-            drain(0.4)
+            time.sleep(0.4)
         elif verb == "shot":
-            print(f"\n=== {arg or 'screen'} " + "=" * max(0, 60 - len(arg)))
-            print(screen.text())
+            with raw_lock:
+                marks.append((len(raw), arg or "screen"))
         elif verb == "quit":
             os.write(master, b"q")
-            drain(1.0)
+            time.sleep(1.0)
         else:
             print(f"qa_capture: unknown step {step!r}", file=sys.stderr)
             ok = False
 
     if child.poll() is None:
         os.write(master, b"q")
-        drain(1.0)
+        time.sleep(1.0)
     if child.poll() is None:
         child.send_signal(signal.SIGTERM)
-        drain(1.0)
+        time.sleep(1.0)
     if child.poll() is None:
         child.kill()
         ok = False
         print("qa_capture: the client had to be killed", file=sys.stderr)
+    stop.set()
+    reader.join(1.0)
     os.close(master)
+
+    # Replay: the stream up to each mark, then everything after the last one —
+    # the restore sequences are at the very end, so the exit report below is
+    # about a screen that has seen them.
+    at = 0
+    for offset, label in [*marks, (len(raw), "")]:
+        screen.feed(decoder.decode(bytes(raw[at:offset])))
+        at = offset
+        if label:
+            print(f"\n=== {label} " + "=" * max(0, 60 - len(label)))
+            print(screen.text())
 
     code = child.wait()
     print("\n=== exit " + "=" * 56)

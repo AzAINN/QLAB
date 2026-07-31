@@ -855,16 +855,14 @@ fn draw_status(
 fn desk_mode_chip(store: &Store, t: &Theme) -> Option<Span<'static>> {
     let mode = store.desk_mode()?;
     let label = format::text(mode.label.as_ref())?;
-    if mode.book_unreachable() {
-        return Some(Span::styled(
-            format!("{label}  "),
-            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
-        ));
-    }
-    Some(Span::styled(
-        format!("{label}  "),
-        Style::default().fg(t.text_secondary),
-    ))
+    // Bold with the warning, like STALE and MALFORMED beside it: the tone alone
+    // is a shade on a 256-colour terminal, and a shade is not an answer to
+    // "can this desk reach the book it is pointed at".
+    let style = match mode.book_unreachable() {
+        true => Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        false => Style::default().fg(t.text_secondary),
+    };
+    Some(Span::styled(format!("{label}  "), style))
 }
 
 /// What one feed's chip can say.

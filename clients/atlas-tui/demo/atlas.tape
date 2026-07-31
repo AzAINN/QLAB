@@ -46,17 +46,17 @@ Sleep 2s
 # The seven views in rail order. Tab rather than the digits, because the tape
 # is also a demonstration that the rails never leave the screen.
 Tab
-Sleep 2s500ms
+Sleep 2.5s
 Tab
-Sleep 2s500ms
+Sleep 2.5s
 Tab
-Sleep 2s500ms
+Sleep 2.5s
 Tab
-Sleep 2s500ms
+Sleep 2.5s
 Tab
-Sleep 2s500ms
+Sleep 2.5s
 Tab
-Sleep 2s500ms
+Sleep 2.5s
 Tab
 Sleep 2s
 
@@ -72,9 +72,9 @@ Sleep 3s
 # The command line, opened carrying the slash it was opened with, so the first
 # frame is already the scope picker.
 Type "/"
-Sleep 1s500ms
+Sleep 1.5s
 Type "ticker SPY"
-Sleep 1s500ms
+Sleep 1.5s
 Enter
 Sleep 2s
 
@@ -86,9 +86,9 @@ Type "?"
 Sleep 3s
 Down
 Down
-Sleep 1s500ms
+Sleep 1.5s
 Escape
-Sleep 1s500ms
+Sleep 1.5s
 
 # Out, cleanly: the alternate screen is released and the cursor comes back.
 Type "q"

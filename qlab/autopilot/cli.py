@@ -482,7 +482,11 @@ def _cmd_tui(args) -> int:
         return 0
 
     binary = _atlas_binary()
-    if not os.access(binary, os.X_OK):
+    # `isfile` as well as `access`: X_OK is true of every directory, so a path
+    # that resolved to `clients/atlas-tui/target/release/` — an interrupted
+    # build leaves exactly that — would pass the check and fail at exec, after
+    # the owner had already been started.
+    if not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
         # Fail loud, and never fall back to the Textual client. Silently running
         # a different client would make `--classic` unfalsifiable as a soak
         # valve: an operator soaking the workstation would have spent the week

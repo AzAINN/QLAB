@@ -1,5 +1,6 @@
 //! Widgets shared across views. A widget lives here only once a second view needs it.
 
+pub mod braille_chart;
 mod panel_header;
 pub mod ticker;
 

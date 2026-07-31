@@ -19,6 +19,7 @@ use atlas::fx::{FlashKey, FlashTracker};
 use atlas::net::http::{self, PollerHandle};
 use atlas::net::sse;
 use atlas::store::{should_render, Store, Trigger};
+use atlas::ui::views::Views;
 use atlas::{theme, ui};
 use color_eyre::eyre::Result;
 use crossterm::{
@@ -104,11 +105,15 @@ async fn run(
     // Keeping it out is what lets a golden frame be a pure function of the store
     // and an instant.
     let mut fx = FlashTracker::default();
+    // The views, built once. Built per keystroke and per frame — which is what
+    // this replaced — every selection and crosshair an operator moved was
+    // dropped before the frame that would have drawn it.
+    let mut views = Views::new();
 
     // One frame before the first event, or the operator stares at the shell's
     // leftovers until the ticker fires.
     let mut last_frame = Instant::now();
-    terminal.draw(|f| ui::shell::draw(f, store, &fx, last_frame))?;
+    terminal.draw(|f| ui::shell::draw(f, store, &views, &fx, last_frame))?;
 
     loop {
         // Block until something happens. The 120 ms tick is what guarantees the
@@ -120,10 +125,10 @@ async fn run(
         // decides against the instant the caller measured, not against whatever
         // the clock says several statements later.
         let now = Instant::now();
-        let mut quit = ingest(first, store, poller, &mut fx, now);
+        let mut quit = ingest(first, store, poller, &mut views, &mut fx, now);
         // Drain-then-render: fifty quote events coalesce into one repaint.
         while let Ok(ev) = rx.try_recv() {
-            quit |= ingest(ev, store, poller, &mut fx, now);
+            quit |= ingest(ev, store, poller, &mut views, &mut fx, now);
         }
 
         // A decaying flash owes frames nothing else asked for: the 100 ms idle
@@ -131,7 +136,7 @@ async fn run(
         // other news would freeze the row mid-flash. Task 15 ORs the effect
         // manager's running flag in here.
         if should_render(store.take_dirty(), fx.active(now), last_frame, now) {
-            terminal.draw(|f| ui::shell::draw(f, store, &fx, now))?;
+            terminal.draw(|f| ui::shell::draw(f, store, &views, &fx, now))?;
             last_frame = now;
         }
         if quit {
@@ -149,13 +154,14 @@ fn ingest(
     ev: AppEvent,
     store: &mut Store,
     poller: &PollerHandle,
+    views: &mut Views,
     fx: &mut FlashTracker,
     now: Instant,
 ) -> bool {
     let mut quit = false;
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
-            match ui::shell::on_key(*key, store) {
+            match ui::shell::on_key(*key, store, views) {
                 Some(Command::Quit) => quit = true,
                 // The refresh jumps the poll queue instead of fetching inline:
                 // a synchronous fetch in this loop froze the client for its
@@ -170,8 +176,12 @@ fn ingest(
         // translation lives here rather than in the store so the motion
         // vocabulary can change without touching the diff — and so no renderer
         // ever needs a clock to know how far a flash has decayed.
+        // One move, two lit cells: the tape carries the price and the markets
+        // grid carries CHG%, and they are separate keys so neither cell's decay
+        // depends on whether the other is on screen.
         if let Trigger::QuoteTick(ticker) = &trigger {
             fx.flash(FlashKey::price(ticker), now);
+            fx.flash(FlashKey::change(ticker), now);
         }
         // Task 15 turns the rest into effects. Logging them means the diff has
         // a consumer today and its behaviour is observable during QA.

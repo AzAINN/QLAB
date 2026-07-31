@@ -21,7 +21,7 @@ use crate::model::Snapshot;
 use crate::store::{Store, ViewId};
 use crate::theme::theme;
 use crate::theme::Theme;
-use crate::ui::views;
+use crate::ui::views::Views;
 use crate::ui::widgets::{panel_block, panel_header, ticker};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -49,7 +49,10 @@ const LABEL_W: usize = 11;
 /// owner said plus the diff of it, and a decaying animation stamp is neither.
 /// Passing it here is what keeps the frame a pure function of (state, effects,
 /// instant) — the property every golden test depends on.
-pub fn draw(f: &mut Frame, store: &Store, fx: &FlashTracker, now: Instant) {
+///
+/// `views` is borrowed rather than built: the instances outlive the frame, so
+/// where an operator has put a selection or a crosshair survives the repaint.
+pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &FlashTracker, now: Instant) {
     let t = theme();
     let area = f.area();
     fill(f, area, t.bg_base);
@@ -87,7 +90,7 @@ pub fn draw(f: &mut Frame, store: &Store, fx: &FlashTracker, now: Instant) {
     if store.snapshot.is_none() {
         draw_no_data(f, content, store, t);
     } else {
-        views::for_id(store.nav.view).draw(f, content, store);
+        views.draw(store.nav.view, f, content, store, fx, now);
     }
 
     let pulse = left_rule(f, cols[2], t);
@@ -113,7 +116,10 @@ fn stale_for(store: &Store, now: Instant) -> Option<Duration> {
 /// The shell claims first so a view can never take a binding the whole
 /// workstation depends on. Returns what the runtime should do; nav is store
 /// state, so a view switch is applied here rather than travelling as a command.
-pub fn on_key(key: KeyEvent, store: &mut Store) -> Option<Command> {
+///
+/// The arrow keys are deliberately *not* claimed here: they mean "move the
+/// cursor in whatever I am looking at", which only the active view can answer.
+pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Command::Quit),
         // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at
@@ -144,7 +150,7 @@ pub fn on_key(key: KeyEvent, store: &mut Store) -> Option<Command> {
         KeyCode::Char('z') | KeyCode::Char('f') => return None,
         _ => {}
     }
-    views::for_id(store.nav.view).on_key(key, store)
+    views.on_key(store.nav.view, key, store)
 }
 
 /// The depth ramp: a region reads as a surface stacked over the frame only if

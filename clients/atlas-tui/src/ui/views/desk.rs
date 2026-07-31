@@ -8,6 +8,7 @@
 
 use crate::cmd::Command;
 use crate::format::{text, MISSING};
+use crate::fx::FlashTracker;
 use crate::model::Snapshot;
 use crate::store::Store;
 use crate::theme::theme;
@@ -21,6 +22,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
     Frame,
 };
+use std::time::Instant;
 
 /// The tiles Task 14 fills, in the order it lays them out.
 const TILES: [&str; 6] = [
@@ -35,7 +37,7 @@ const TILES: [&str; 6] = [
 pub struct DeskView;
 
 impl View for DeskView {
-    fn draw(&self, f: &mut Frame, area: Rect, store: &Store) {
+    fn draw(&self, f: &mut Frame, area: Rect, store: &Store, _fx: &FlashTracker, _now: Instant) {
         let cols = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
         draw_why(f, cols[0], store);

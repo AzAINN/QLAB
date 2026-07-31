@@ -2,7 +2,7 @@
 source: tests/golden_shell.rs
 expression: "frame_to_string(&fixture_store(), 120, 36)"
 ---
-" ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%"
+" ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
 "▌1 DESK │▌ WHY THE DESK IS QUIET        ▌ EQUITY               ▌ REGIME               │▌ PULSE                          "
 " 2 MKTS │                               --                     --                     │ regime     CALM                 "
 " 3 BOOK │• Mode is PROPOSE and autonomy ──────────────────────────────────────────────│ robust     UNCERTAIN            "

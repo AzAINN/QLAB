@@ -10,6 +10,7 @@ use atlas::bus::{AppEvent, Channel, HttpResult, SseEvent};
 use atlas::fx::{FlashKey, FlashTracker};
 use atlas::model::Snapshot;
 use atlas::store::{Store, ViewId};
+use atlas::ui::views::Views;
 use atlas::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use harness::{fixture_store, frame_to_string, frame_to_string_at, line_with, row_styles};
@@ -102,28 +103,40 @@ fn the_regime_reaches_the_frame_from_the_typed_snapshot() {
     assert!(line_with(&frame, "regime").contains("STRESS"), "{frame}");
 }
 
+/// The seven nav entries as the rail renders them once the shell has marked one.
+///
+/// Spelled out rather than counted off the frame's `▌` glyphs: `▌` is the
+/// workstation's accent bar everywhere — panel headers wear it, and so does the
+/// markets grid's selected row — so the only reading that stays about *the nav*
+/// is the entries themselves.
+const NAV_MARKED: [&str; 7] = [
+    "▌1 DESK",
+    "▌2 MKTS",
+    "▌3 BOOK",
+    "▌4 RSCH",
+    "▌5 WORK",
+    "▌6 AUDIT",
+    "▌7 SETT",
+];
+
 #[test]
 fn the_nav_highlight_moves_with_the_number_keys() {
     let mut store = fixture_store();
-    assert!(frame_to_string(&store, 120, 36).contains("▌1 DESK"));
+    let mut views = Views::new();
+    assert!(frame_to_string(&store, 120, 36).contains(NAV_MARKED[0]));
 
-    for (digit, marked) in [
-        ('2', "▌2 MKTS"),
-        ('3', "▌3 BOOK"),
-        ('4', "▌4 RSCH"),
-        ('5', "▌5 WORK"),
-        ('6', "▌6 AUDIT"),
-        ('7', "▌7 SETT"),
-        ('1', "▌1 DESK"),
-    ] {
-        atlas::ui::shell::on_key(key(KeyCode::Char(digit)), &mut store);
+    // Starting one past the entry the shell opens on, so the seventh press is
+    // the one that has to come back to DESK.
+    for marked in NAV_MARKED.iter().cycle().skip(1).take(NAV_MARKED.len()) {
+        let digit = marked.chars().nth(1).expect("every entry carries its digit");
+        atlas::ui::shell::on_key(key(KeyCode::Char(digit)), &mut store, &mut views);
         let frame = frame_to_string(&store, 120, 36);
         assert!(
             frame.contains(marked),
             "key {digit} did not mark {marked}:\n{frame}"
         );
         assert_eq!(
-            frame.matches('▌').count() - frame.matches("▌ ").count(),
+            NAV_MARKED.iter().filter(|e| frame.contains(*e)).count(),
             1,
             "exactly one nav entry may be marked:\n{frame}"
         );
@@ -133,6 +146,7 @@ fn the_nav_highlight_moves_with_the_number_keys() {
 #[test]
 fn tab_cycles_the_views_and_wraps_in_both_directions() {
     let mut store = fixture_store();
+    let mut views = Views::new();
     for expected in [
         ViewId::Markets,
         ViewId::Book,
@@ -142,10 +156,10 @@ fn tab_cycles_the_views_and_wraps_in_both_directions() {
         ViewId::Settings,
         ViewId::Desk,
     ] {
-        atlas::ui::shell::on_key(key(KeyCode::Tab), &mut store);
+        atlas::ui::shell::on_key(key(KeyCode::Tab), &mut store, &mut views);
         assert_eq!(store.nav.view, expected);
     }
-    atlas::ui::shell::on_key(key(KeyCode::BackTab), &mut store);
+    atlas::ui::shell::on_key(key(KeyCode::BackTab), &mut store, &mut views);
     assert_eq!(store.nav.view, ViewId::Settings, "BackTab wraps backwards");
 }
 
@@ -153,12 +167,13 @@ fn tab_cycles_the_views_and_wraps_in_both_directions() {
 fn q_quits_and_r_refreshes_and_an_unclaimed_key_does_neither() {
     use atlas::cmd::Command;
     let mut store = fixture_store();
+    let mut views = Views::new();
     assert_eq!(
-        atlas::ui::shell::on_key(key(KeyCode::Char('q')), &mut store),
+        atlas::ui::shell::on_key(key(KeyCode::Char('q')), &mut store, &mut views),
         Some(Command::Quit)
     );
     assert_eq!(
-        atlas::ui::shell::on_key(key(KeyCode::Char('r')), &mut store),
+        atlas::ui::shell::on_key(key(KeyCode::Char('r')), &mut store, &mut views),
         Some(Command::Refresh)
     );
     // Raw mode disables ISIG, so the reflex every operator has must be handled
@@ -166,12 +181,13 @@ fn q_quits_and_r_refreshes_and_an_unclaimed_key_does_neither() {
     assert_eq!(
         atlas::ui::shell::on_key(
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            &mut store
+            &mut store,
+            &mut views
         ),
         Some(Command::Quit)
     );
     assert_eq!(
-        atlas::ui::shell::on_key(key(KeyCode::Char('x')), &mut store),
+        atlas::ui::shell::on_key(key(KeyCode::Char('x')), &mut store, &mut views),
         None
     );
     assert_eq!(
@@ -186,10 +202,11 @@ fn zen_and_fullscreen_are_claimed_even_though_they_do_nothing_yet() {
     // They are swallowed here so no later view can bind them and then have the
     // binding taken away when the layout modes land.
     let mut store = fixture_store();
+    let mut views = Views::new();
     let before = frame_to_string(&store, 120, 36);
     for k in ['z', 'f'] {
         assert_eq!(
-            atlas::ui::shell::on_key(key(KeyCode::Char(k)), &mut store),
+            atlas::ui::shell::on_key(key(KeyCode::Char(k)), &mut store, &mut views),
             None
         );
     }

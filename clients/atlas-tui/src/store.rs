@@ -178,6 +178,22 @@ pub struct AssetView<'a> {
     pub change_1d: Option<f64>,
 }
 
+/// The half of an asset row the quote stream does not speak to.
+///
+/// `price` and `change_1d` are deliberately absent. The overlay owns those two
+/// facts, and a struct that carried them beside the snapshot's history would be
+/// a second way to read them — which is exactly how a surface ends up rendering
+/// the poll's price and silently losing every quote since. A grid that wants
+/// both halves takes this and `asset_view(ticker)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AssetFacts<'a> {
+    pub ticker: &'a str,
+    pub change_20d: Option<f64>,
+    pub realized_vol: Option<f64>,
+    /// Closing prices, oldest first.
+    pub history: &'a [f64],
+}
+
 #[derive(Debug)]
 pub struct Store {
     pub snapshot: Option<Snapshot>,
@@ -330,6 +346,23 @@ impl Store {
             .iter()
             .filter_map(|asset| text(asset.ticker.as_ref()))
             .map(|ticker| self.asset_view(ticker))
+            .collect()
+    }
+
+    /// Every asset the last snapshot carried, in its order, minus the two
+    /// fields the overlay owns. Same universe and same order as `asset_views`,
+    /// so a grid can zip the two halves of a row by position.
+    pub fn asset_facts(&self) -> Vec<AssetFacts<'_>> {
+        self.market_assets()
+            .iter()
+            .filter_map(|asset| {
+                Some(AssetFacts {
+                    ticker: text(asset.ticker.as_ref())?,
+                    change_20d: asset.change_20d,
+                    realized_vol: asset.realized_vol,
+                    history: &asset.history,
+                })
+            })
             .collect()
     }
 

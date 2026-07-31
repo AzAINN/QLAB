@@ -30,13 +30,14 @@ const STEP: Duration = Duration::from_millis(200);
 
 /// Which cell of a row a flash belongs to.
 ///
-/// One variant today: the ticker flashes the price. Task 9's markets table
-/// flashes `CHG%` and adds `Change` here — the key is a (ticker, column) pair so
-/// that arrives as a variant rather than as a second key type, and so two cells
-/// of the same row decay on their own clocks.
+/// The key is a (ticker, column) pair so two cells of the same row decay on
+/// their own clocks: the ticker tape lights the price, the markets grid lights
+/// `CHG%`, and one quote that moved both must not make either cell's decay a
+/// function of where else the same ticker happens to be on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Column {
     Price,
+    Change,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -50,6 +51,13 @@ impl FlashKey {
         Self {
             ticker: ticker.to_string(),
             column: Column::Price,
+        }
+    }
+
+    pub fn change(ticker: &str) -> Self {
+        Self {
+            ticker: ticker.to_string(),
+            column: Column::Change,
         }
     }
 }
@@ -194,6 +202,26 @@ mod tests {
         fx.flash(FlashKey::price("QQQ"), start + Duration::from_millis(400));
         assert_eq!(at(&fx, "SPY", start, 500).fg, Some(theme().accent));
         assert_eq!(at(&fx, "QQQ", start, 500).bg, Some(theme().accent_dim));
+    }
+
+    #[test]
+    fn two_columns_of_one_row_are_two_cells_not_one() {
+        // The tape lights the price and the grid lights CHG%. Keying on the
+        // ticker alone would make either cell's decay a function of where else
+        // the same ticker happens to be on screen.
+        let start = Instant::now();
+        let mut fx = FlashTracker::default();
+        fx.flash(FlashKey::price("SPY"), start);
+        assert_eq!(
+            fx.style_for(&FlashKey::change("SPY"), start, base()),
+            base(),
+            "the price flash reached the change cell"
+        );
+        fx.flash(FlashKey::change("SPY"), start + Duration::from_millis(400));
+        assert_eq!(
+            fx.style_for(&FlashKey::change("SPY"), start + Duration::from_millis(400), base()).bg,
+            Some(theme().accent_dim)
+        );
     }
 
     #[test]

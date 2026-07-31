@@ -201,6 +201,21 @@ pub fn negative_at(printed: f64, dp: usize) -> bool {
     matches!(fixed(printed, dp), Some((true, _)))
 }
 
+/// Whether a number rounds away to nothing at the `dp` decimals it is printed at.
+///
+/// The third state `change_tone` does not have. Zero is positive by contract for
+/// a single hero figure — flat is not a loss — and wrong for a *column* of them:
+/// a paper book that opened flat would render as ten green rows, a claim the desk
+/// made money on all ten. Surfaces that need "neither" ask this first, and get
+/// the answer at the precision they print rather than off the raw double.
+///
+/// Absent is the caller's to handle, exactly as with `negative_at`: a value that
+/// is not finite is not flat, it is unmeasured, and both callers guard it before
+/// they get here.
+pub fn zero_at(printed: f64, dp: usize) -> bool {
+    matches!(fixed(printed, dp), Some((_, digits)) if is_zero(&digits))
+}
+
 /// The colour of a change, decided at the precision it is printed to.
 ///
 /// Replaces `Theme::change`, which read the raw double. Absent — anything that
@@ -281,8 +296,14 @@ fn fixed(value: f64, dp: usize) -> Option<(bool, String)> {
         return None;
     }
     let digits = format!("{:.*}", dp, value.abs());
-    let is_zero = digits.bytes().all(|b| b == b'0' || b == b'.');
-    Some((value < 0.0 && !is_zero, digits))
+    Some((value < 0.0 && !is_zero(&digits), digits))
+}
+
+/// Whether already-formatted digits are all zero — the test `fixed` makes to
+/// decide a sign, and the one `zero_at` makes to decide there is no direction.
+/// One spelling, because two would be two answers to "did this round away".
+fn is_zero(digits: &str) -> bool {
+    digits.bytes().all(|b| b == b'0' || b == b'.')
 }
 
 /// Comma-group the integer part of an already-formatted decimal string.

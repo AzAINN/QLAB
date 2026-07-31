@@ -43,7 +43,7 @@ use crate::ui::widgets::{braille_chart, heat_cell, panel_block, panel_header, re
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Row, Table},
     Frame,
@@ -588,17 +588,22 @@ fn hero(text: String, tone: ratatui::style::Color) -> Line<'static> {
 /// position that has not moved is not a gainer, and counting it as one would
 /// tilt every quiet book green. A position the owner sent no P&L for is not
 /// counted at all — it is not flat, it is unmeasured.
+///
+/// Flat at the two decimals the blotter's own P&L cell prints, so the two panes
+/// cannot disagree about one row: a position drawn `+$0.00` in the neutral tone
+/// and counted as a decliner in the ribbon above it is the same desk saying both.
 fn gainers_and_losers(positions: &[Position]) -> (usize, usize) {
     positions
         .iter()
         .filter_map(|p| p.unrealized_pnl)
+        .filter(|pnl| pnl.is_finite())
         .fold((0, 0), |(up, down), pnl| {
-            if pnl > 0.0 {
-                (up + 1, down)
-            } else if pnl < 0.0 {
+            if format::zero_at(pnl, 2) {
+                (up, down)
+            } else if format::negative_at(pnl, 2) {
                 (up, down + 1)
             } else {
-                (up, down)
+                (up + 1, down)
             }
         })
 }
@@ -1006,16 +1011,8 @@ impl BookView {
         // make money", so both take their tone from the P&L itself — a percent
         // coloured off its own sign would be a second axis that can disagree
         // with the first, and a green `+1.20%` beside a red `-$4.00` is a row
-        // that says both. Flat is neither: `format::change_tone` paints zero green,
-        // which is right for the ribbon's single hero and wrong for a column of
-        // them, since a paper book that opened flat would render as ten green
-        // rows — a claim the desk made money on all ten.
-        let pnl_tone = match row.pnl {
-            Some(v) if v > 0.0 => t.positive,
-            Some(v) if v < 0.0 => t.negative,
-            Some(_) => t.text_primary,
-            None => t.text_secondary,
-        };
+        // that says both.
+        let pnl_tone = pnl_tone(row.pnl);
         let (trend, trend_style) = tristate_spark::tristate(row.history);
         let marker = if selected { "▌" } else { " " };
 
@@ -1537,19 +1534,51 @@ fn weight_step(weight: f64) -> u8 {
     heat_cell::step((weight * 100.0).abs() / WEIGHT_FULL_SCALE)
 }
 
+/// A blotter row's P&L tone, in three states.
+///
+/// Beside `pnl_shade` rather than inline in `draw_row`, because it is the same
+/// rule the rail applies at a different precision, and a rule with a name is a
+/// rule a test can hold to its own boundary instead of scraping it back out of
+/// a rendered buffer.
+///
+/// Flat is neither: `format::change_tone` paints zero green, which is right for
+/// the ribbon's single hero and wrong for a column of them — a paper book that
+/// opened flat would render as ten green rows, a claim the desk made money on
+/// all ten. Absent is a fourth thing again, and not flat.
+///
+/// Decided at the two decimals `signed_compact_money` prints, never off the raw
+/// double: a fully-invested paper book carries -1e-13, which renders `+$0.00`
+/// and was drawn in red beside itself.
+fn pnl_tone(pnl: Option<f64>) -> Color {
+    let t = theme();
+    match pnl {
+        Some(v) if format::zero_at(v, 2) => t.text_primary,
+        Some(v) if format::negative_at(v, 2) => t.negative,
+        // A number that is not finite reaches neither guard — absent is what it
+        // is, and the cell beside it already renders `--`.
+        Some(v) if v.is_finite() => t.positive,
+        _ => t.text_secondary,
+    }
+}
+
 fn pnl_shade(pct: f64) -> Style {
     let t = theme();
     // Flat is neither, exactly as the blotter's paired P&L columns: `format::change_tone`
     // paints zero green, which is right for one hero number and wrong for a grid
     // of them — a paper book that opened flat would render as a rail of green
     // tiles, a claim the desk made money on every name it holds.
-    if pct == 0.0 {
+    //
+    // At the one decimal of a percent `signed_pct1` prints on the tile, not off
+    // the raw double: a P&L of -1e-13 reads `+0.0%` and took the negative ramp,
+    // the shade contradicting the digits it was painting.
+    let printed = pct * 100.0;
+    if format::zero_at(printed, 1) {
         return Style::default().bg(t.bg_base).fg(t.text_primary);
     }
-    let (dim, bright) = if pct > 0.0 {
-        (t.positive_dim, t.positive)
-    } else {
+    let (dim, bright) = if format::negative_at(printed, 1) {
         (t.negative_dim, t.negative)
+    } else {
+        (t.positive_dim, t.positive)
     };
     heat_cell::style(pnl_step(pct), dim, bright)
 }
@@ -1611,7 +1640,7 @@ fn mover(role: &str, row: &BlotterRow<'_>) -> Line<'static> {
     // `signed_pct1` prints — a ▼ over `+0.0%`, or a red `▲`, is a row
     // contradicting itself. Flat gets neither arrow — a ▲ over a book that did
     // not move is a rise the desk did not make.
-    let (arrow, tone) = if pct == 0.0 {
+    let (arrow, tone) = if format::zero_at(pct * 100.0, 1) {
         ("·", t.text_primary)
     } else if format::negative_at(pct * 100.0, 1) {
         ("▼", t.negative)
@@ -1644,6 +1673,17 @@ mod tests {
         // all is unmeasured rather than flat.
         assert_eq!(gainers_and_losers(&positions), (2, 1));
         assert_eq!(gainers_and_losers(&[]), (0, 0));
+
+        // A figure that is not finite is unmeasured too, not a gainer. Both
+        // rounded thresholds answer false for a NaN, so without the explicit
+        // guard it falls through to the winners — the one direction a count may
+        // never guess in. Built by hand because JSON cannot carry a NaN: it is
+        // unreachable from the owner and reachable from arithmetic this client
+        // may grow, which is the same reason the heat tile guards its own.
+        let mut broken: Vec<Position> =
+            serde_json::from_value(serde_json::json!([{"unrealized_pnl": 0.0}])).unwrap();
+        broken[0].unrealized_pnl = Some(f64::NAN);
+        assert_eq!(gainers_and_losers(&broken), (0, 0));
     }
 
     #[test]
@@ -1960,8 +2000,88 @@ mod tests {
         let t = theme();
         let flat = pnl_shade(0.0);
         assert_eq!(flat.fg, Some(t.text_primary));
-        assert_ne!(flat, pnl_shade(0.0001), "flat took the winners' ramp");
-        assert_ne!(flat, pnl_shade(-0.0001));
+        // A move that survives the tile's own precision still takes a side.
+        assert_ne!(flat, pnl_shade(0.001), "flat took the winners' ramp");
+        assert_ne!(flat, pnl_shade(-0.001));
+    }
+
+    #[test]
+    fn the_pnl_pair_takes_its_side_at_the_precision_each_surface_prints() {
+        // The round-once rule at the two sites it had not reached. Both keep
+        // three states — flat is neither, which is why they cannot simply use
+        // `change_tone` — and both now decide *which* of the other two at the
+        // precision the cell beside them actually prints.
+        let t = theme();
+        let flat = pnl_shade(0.0);
+
+        // A fully-invested paper book carries -1e-13; `desk.rs` cites the same
+        // magnitude off a real one. The tile renders it `+0.0%`, and shading
+        // that on the negative ramp is the shade contradicting the digits it is
+        // painting, in the half of the cell a reader trusts first.
+        for tiny in [-1e-13, -1e-9, -0.0004] {
+            assert_eq!(
+                format::signed_pct1(tiny),
+                "+0.0%",
+                "{tiny} is not the case this test is about"
+            );
+            assert_eq!(pnl_shade(tiny), flat, "{tiny} shaded a loss nobody had");
+            assert_eq!(pnl_tone(Some(tiny)), t.text_primary, "{tiny}");
+        }
+
+        // The true-negative neighbour, at the edge where the printed digit
+        // survives — one decimal of a percent for the tile, two decimals of
+        // money for the row. Without these the rule would swallow real losses.
+        for real in [-0.0005, -0.001, -0.12] {
+            assert!(format::signed_pct1(real).starts_with('-'), "{real}");
+            assert_eq!(
+                pnl_shade(real),
+                heat_cell::style(pnl_step(real), t.negative_dim, t.negative),
+                "{real} left the negative ramp"
+            );
+        }
+        assert_eq!(pnl_tone(Some(-0.005)), t.negative, "-$0.01 is a loss");
+        assert_eq!(pnl_tone(Some(0.005)), t.positive);
+        assert_eq!(pnl_tone(Some(-0.004)), t.text_primary, "+$0.00 is not");
+
+        // And absent is none of the three: the tone for "the owner declined to
+        // say", which a rounding rule must never turn into flat.
+        assert_eq!(pnl_tone(None), t.text_secondary);
+        assert_eq!(pnl_tone(Some(f64::NAN)), t.text_secondary);
+
+        // The two neighbours the sweep for this pattern turned up, on the same
+        // rule. The footer's mover glyph — `▲` over `+0.0%` is the row arguing
+        // with itself just as `▼` over it would be.
+        let glyph = |pct: f64| {
+            let row = BlotterRow {
+                ticker: Some("SPY"),
+                qty: None,
+                last: None,
+                avg: None,
+                weight: None,
+                value: None,
+                pnl: None,
+                pnl_pct: Some(pct),
+                history: None,
+            };
+            mover("best", &row).spans[0].content.trim().to_string()
+        };
+        assert_eq!(glyph(-1e-13), "·", "a debt of nothing took an arrow");
+        assert_eq!(glyph(0.0), "·");
+        assert_eq!(glyph(-0.0005), "▼");
+        assert_eq!(glyph(0.0005), "▲");
+
+        // And the ribbon's breadth count, which has to agree with the blotter
+        // row under it about whether one position moved.
+        let pnl = |v: f64| {
+            gainers_and_losers(&[serde_json::from_value::<crate::model::Position>(
+                serde_json::json!({"ticker": "SPY", "unrealized_pnl": v}),
+            )
+            .unwrap()])
+        };
+        assert_eq!(pnl(-1e-13), (0, 0), "a row drawn `+$0.00` was a decliner");
+        assert_eq!(pnl(0.0), (0, 0));
+        assert_eq!(pnl(-0.005), (0, 1));
+        assert_eq!(pnl(0.005), (1, 0));
     }
 
     #[test]

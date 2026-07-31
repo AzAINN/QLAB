@@ -460,10 +460,16 @@ fn draw_sectors(f: &mut Frame, area: Rect, store: &Store) {
 /// the magnitude lands on.
 fn heat_style(change: f64) -> Style {
     let t = theme();
-    let (dim, bright) = if change >= 0.0 {
-        (t.positive_dim, t.positive)
-    } else {
+    // At the two decimals of a percent the cell's own label prints through
+    // `signed_pct`, never off the raw double: a sector at -1e-13 reads `+0.00%`
+    // and took the negative pair, the shade contradicting the digits on it.
+    // Two states rather than three here, matching `change_tone`: a sector map is
+    // read for direction, and one cell of it painted neutral would read as a
+    // sector that failed to arrive rather than one that did not move.
+    let (dim, bright) = if format::negative_at(change * 100.0, 2) {
         (t.negative_dim, t.negative)
+    } else {
+        (t.positive_dim, t.positive)
     };
     heat_cell::style(heat_step(change * 100.0), dim, bright)
 }
@@ -510,6 +516,15 @@ mod tests {
         // And the colour is the direction: two cells of the same magnitude must
         // not be the same style, or the map says nothing about rotation.
         assert_ne!(heat_style(0.021), heat_style(-0.021));
+
+        // The direction is read at the two decimals of a percent the cell's own
+        // label prints. A sector at -1e-13 reads `+0.00%` and took the negative
+        // pair — the shade contradicting the digits printed on it.
+        assert_eq!(format::signed_pct(-1e-13), "+0.00%");
+        assert_eq!(heat_style(-1e-13), heat_style(0.0));
+        // The neighbour that survives the rounding still takes the other pair,
+        // or the rule would have swallowed a real move.
+        assert_ne!(heat_style(-0.00005), heat_style(0.00005));
     }
 
     #[test]

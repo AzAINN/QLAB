@@ -872,6 +872,52 @@ fn a_position_the_owner_sent_no_ticker_for_is_still_a_row() {
 /// A book of four holdings, one of each thing a tile can be: a runaway winner,
 /// a loser inside the ramp, a position that has not moved, and one the owner
 /// sent no P&L for at all.
+#[test]
+fn a_debt_of_nothing_is_not_drawn_as_a_loss_on_either_surface() {
+    // The magnitude a fully-invested paper book actually carries — `desk.rs`
+    // cites -2.2e-16 off a real one. Both surfaces round it away in the digits
+    // (`+$0.00`, `+0.0%`) and both used to threshold the raw double, so the
+    // shade and the tone contradicted the number they were painting.
+    let t = Theme::truecolor();
+    let client = book_from(
+        r#"{"live_portfolio": {"equity": 1000.0, "unrealized_pnl": 5.0, "positions": [
+             {"ticker": "REAL", "qty": 1.0, "value": 400.0, "weight": 0.4,
+              "unrealized_pnl": -8.0, "unrealized_pnl_pct": -0.02},
+             {"ticker": "DUST", "qty": 1.0, "value": 100.0, "weight": 0.1,
+              "unrealized_pnl": -1e-13, "unrealized_pnl_pct": -1e-13}]}}"#,
+    );
+    let buf = client.buffer(120, 36);
+
+    // The blotter row: both money cells take one tone, and `+$0.00` beside a
+    // red one is a row arguing with itself.
+    assert_eq!(
+        cell_style_on(&buf, "DUST", "+$0.00").fg,
+        Some(t.text_primary),
+        "a debt of nothing drew red"
+    );
+    assert_eq!(
+        cell_style_on(&buf, "DUST", "+0.00%").fg,
+        Some(t.text_primary)
+    );
+    // The holdings rail's tile, at its own one-decimal precision.
+    let tile = cell_style_on(&buf, "DUST  +0.0%", "DUST");
+    assert_eq!(tile.fg, Some(t.text_primary), "the tile shaded a loss");
+    assert_eq!(tile.bg, Some(t.bg_base));
+
+    // And the neighbour that really did lose money still reads as it: the rule
+    // must round a nothing away, not round a loss away.
+    assert_eq!(
+        cell_style_on(&buf, "REAL", "-$8.00").fg,
+        Some(t.negative),
+        "the rounding swallowed a real loss"
+    );
+    assert_eq!(
+        cell_style_on(&buf, "REAL  -2.0%", "REAL").fg,
+        Some(t.negative_dim),
+        "the tile left the negative ramp"
+    );
+}
+
 fn shaded_book() -> Client {
     book_from(
         r#"{"live_portfolio": {"equity": 1000.0, "positions": [

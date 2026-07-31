@@ -358,6 +358,44 @@ fn from_stream(event: &SseEvent) -> Option<Toast> {
                 None => "a checked plan booked a paper fill".to_string(),
             },
         )),
+        // The sentence behind the chip pulse. `Trigger::PhaseAdvanced` crosses
+        // the status line's chip run from every view, which is right — a
+        // governed run moving is desk news wherever an operator is looking —
+        // but amber crossing the chips with nothing saying why is a pulse they
+        // learn to read past. This is what keeps that pulse meaning something
+        // on MARKETS and BOOK, where no pipeline is drawn.
+        //
+        // `Info`, not `Warn`: a phase advancing is the desk getting on with
+        // work it was already doing. The two lifecycle events that *are* a
+        // human's problem — `workflow_interrupted` and `workflow_abandoned` —
+        // are the console's and AUDIT's, and giving them a box is a decision
+        // for whoever builds the controls that resolve them.
+        //
+        // The owner writes `{workflow_id, phase, agent, status, summary}`
+        // (`registry.py:1596`). The workflow's *goal* is deliberately not
+        // reached for: it lives in the snapshot's `request`, not on the event,
+        // and a toast that read the store would stop being a function of the
+        // moment it is about. The phase's own summary is the better line
+        // anyway — it is what that role just said, rather than what the run was
+        // asked for twenty minutes ago.
+        "workflow_phase" => Some(Toast::new(
+            Level::Info,
+            &match field(payload, &["phase"]) {
+                Some(phase) => format!("phase {phase}"),
+                None => "workflow phase".to_string(),
+            },
+            match (
+                field(payload, &["summary"]),
+                field(payload, &["status"]),
+                field(payload, &["workflow_id"]),
+            ) {
+                (Some(summary), _, _) => summary,
+                (None, Some(status), Some(id)) => format!("{status} on {id}"),
+                (None, Some(status), None) => format!("the phase is {status}"),
+                (None, None, Some(id)) => format!("workflow {id} moved"),
+                (None, None, None) => "a governed run advanced a phase".to_string(),
+            },
+        )),
         "halt" => Some(Toast::new(
             Level::Alarm,
             "desk halted",
@@ -530,10 +568,39 @@ mod tests {
     }
 
     #[test]
+    fn a_phase_advancing_says_which_phase_and_what_it_said() {
+        // This pin was the other way round: `workflow_phase` was listed among
+        // the events that "do not deserve a box". It inverted when the chip
+        // pulse got its own effect key — the pulse crosses the status line from
+        // every view, and on MARKETS or BOOK, where no pipeline is drawn, amber
+        // with nothing explaining it is a pulse an operator learns to read past.
+        let advanced = for_event(&sse(
+            "workflow_phase",
+            json!({"workflow_id": "805e0729", "phase": "referee", "agent": "referee",
+                   "status": "done", "summary": "Targets check out against the mandate."}),
+        ))
+        .expect("the pulse on the chip run needs a sentence behind it");
+        assert_eq!(advanced.level, Level::Info, "routine work is not an alarm");
+        assert!(advanced.title.contains("referee"), "{advanced:?}");
+        assert!(advanced.message.contains("mandate"), "{advanced:?}");
+
+        // No summary yet — the common case for a phase that just opened. The
+        // box still has to say something an operator can act on.
+        let opened = for_event(&sse(
+            "workflow_phase",
+            json!({"workflow_id": "805e0729", "phase": "optimizer", "status": "working"}),
+        ))
+        .expect("a phase opening is a moment too");
+        assert!(opened.title.contains("optimizer"), "{opened:?}");
+        assert!(opened.message.contains("805e0729"), "{opened:?}");
+        assert!(opened.message.contains("working"), "{opened:?}");
+    }
+
+    #[test]
     fn the_events_that_are_not_moments_get_nothing() {
         // A toast per quote frame would be a box on screen permanently, which is
         // the failure mode the four-second life exists to prevent.
-        for kind in ["quote", "workflow_phase", "resume", "referee_verdict"] {
+        for kind in ["quote", "resume", "referee_verdict"] {
             assert!(
                 for_event(&sse(kind, json!({}))).is_none(),
                 "{kind} does not deserve a box"
@@ -552,6 +619,7 @@ mod tests {
             "plan_executed",
             "halt",
             "stream.malformed",
+            "workflow_phase",
         ] {
             let toast = for_event(&sse(kind, json!({}))).expect(kind);
             assert!(!toast.title.is_empty(), "{kind}");

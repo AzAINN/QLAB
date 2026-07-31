@@ -215,6 +215,73 @@ fn a_phase_advancing_on_the_desk_reaches_the_effect_that_moves_for_it() {
 }
 
 #[test]
+fn a_phase_advance_does_not_retire_the_approval_pulse_it_arrived_beside() {
+    // A key is a cancellation lane, not a region. These two share the chip run
+    // and shared a key, so a routine phase advance silently killed the pulse
+    // that says a human decision is waiting — the same failure `Alert` was
+    // split out of `PlanCard` to avoid, one region over.
+    //
+    // Measured through the buffer rather than through `active()`: with one key
+    // the manager still reports something running, so only the painted cells
+    // can tell "both effects" from "the second one replaced the first".
+    // Asserted through *lifetime*, not through one frame's cells. A cancelled
+    // effect still paints the frame it was cancelled on, so a buffer compare at
+    // frame one cannot tell "both registered" from "the second replaced the
+    // first" — the first version of this test could not, and passed against the
+    // shared key it was written to catch.
+    //
+    // The durations are what make it sharp. The approval pulse is two ping-pong
+    // repetitions of `CHIP_HALF`, so 600 ms; the phase pulse is a single
+    // `CHIP_HALF * 2` fade, so 300 ms. Sharing a key means the phase advance
+    // retires the approval at once and the chips fall still at 300 ms — half
+    // the life of the pulse that says a human decision is waiting.
+    let now = Instant::now();
+    let span = Duration::from_millis(400);
+
+    let mut fx = staged();
+    fx.on_trigger(&Trigger::ApprovalCreated, now, false);
+    fx.on_trigger(&Trigger::PhaseAdvanced, now, false);
+    run_for(&mut fx, span);
+    assert!(
+        fx.active(now + span),
+        "the phase advance retired the approval pulse it arrived beside"
+    );
+
+    // The other side of it: the approval alone really does outlive the window,
+    // and the phase alone really does not — so the assertion above is about the
+    // two keys coexisting and not about either effect's own length.
+    let mut approval = staged();
+    approval.on_trigger(&Trigger::ApprovalCreated, now, false);
+    run_for(&mut approval, span);
+    assert!(approval.active(now + span));
+
+    let mut phase = staged();
+    phase.on_trigger(&Trigger::PhaseAdvanced, now, false);
+    run_for(&mut phase, span);
+    assert!(
+        !phase.active(now + span),
+        "the phase pulse outlived its own 300 ms, so the window proves nothing"
+    );
+
+    // And both really reach the chip run, or the whole comparison is between
+    // two ways of drawing nothing.
+    let chips = Rect::new(80, 35, 40, 1);
+    for trigger in [Trigger::ApprovalCreated, Trigger::PhaseAdvanced] {
+        let mut fx = staged();
+        fx.on_trigger(&trigger, now, false);
+        let buf = frame(&mut fx, FX_FRAME);
+        let clean = painted();
+        assert!(
+            chips
+                .rows()
+                .flat_map(|row| row.columns())
+                .any(|c| buf[(c.x, c.y)] != clean[(c.x, c.y)]),
+            "{trigger:?} painted nothing on the chip run"
+        );
+    }
+}
+
+#[test]
 fn a_quote_still_moves_the_only_lane_that_should_move_it() {
     // The other half of the arm above: `QuoteTick` has no tachyonfx rule, which
     // must not be confused with having no motion at all.

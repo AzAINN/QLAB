@@ -82,6 +82,21 @@ const PANE_MIN_W: u16 = (1 + ID_W + STATUS_W + GOAL_MIN + SPAN_W) as u16;
 /// A header and one workflow's two lines, plus a header and one console row.
 const PANE_MIN_H: u16 = 6;
 
+/// The picker's own floor, in rows of the *view's* area.
+///
+/// Four rows inside the box are not optional — the header, one template, the
+/// goal field, and the sentence about whose phase graph actually runs — plus
+/// its two borders, and `centred` insets the box by two rows top and bottom.
+///
+/// It is a floor of its own because the view's is far lower. At `PANE_MIN_H`
+/// the box came out two rows tall with an inner height of zero: nothing drawn,
+/// no template list, no goal field, no disclosure — while the field still held
+/// the keyboard and Enter still started a governed run. An armed control an
+/// operator cannot see is worse than one that refuses, so below this the picker
+/// refuses to open and says what it would take.
+#[cfg(feature = "operator")]
+const PICKER_MIN_H: u16 = 10;
+
 /// How much of the frame the pipelines take before the console gets the rest.
 ///
 /// Deliberately not a fixed height: a workflow occupies two lines and the owner
@@ -101,9 +116,24 @@ pub struct WorkforceView {
     /// distinction is about the operator rather than about the owner.
     #[cfg(feature = "operator")]
     ask: Option<String>,
-    /// The template picker, while it is open.
+    /// The template picker, while the operator is asking for it.
+    ///
+    /// *Asking for*, not *showing*: below [`PICKER_MIN_H`] the pane refuses to
+    /// draw the box and says so instead, and this stays `Some` only until the
+    /// next keystroke retires it. What must never happen is the third state —
+    /// a box that is armed and invisible.
     #[cfg(feature = "operator")]
     picker: Option<Picker>,
+    /// The view's height at the last frame, published by `draw`.
+    ///
+    /// Interior mutability for the same reason `fx::ShellRects` has it: `draw`
+    /// is a `&self` renderer that publishes the layout it derived, and whether
+    /// the picker fits is a fact about that layout. Nothing *renders* from it —
+    /// the frame stays a pure function of (store, effects, instant) — it only
+    /// decides whether a key may open a box that would not fit, which is a
+    /// question about the last frame and can only be answered by it.
+    #[cfg(feature = "operator")]
+    height: std::cell::Cell<u16>,
 }
 
 /// The picker's state: which template is under the cursor, and the goal typed
@@ -163,7 +193,11 @@ impl View for WorkforceView {
     fn typing(&self) -> bool {
         #[cfg(feature = "operator")]
         {
-            self.ask.is_some() || self.picker.is_some()
+            // A picker too tall for the pane is drawn as a refusal, not as a
+            // box, so it holds no keyboard. This is the load-bearing half of
+            // that: without it the goal field would still swallow every key —
+            // and Enter would still start a run — against a box nobody can see.
+            self.ask.is_some() || (self.picker.is_some() && self.picker_fits())
         }
         #[cfg(not(feature = "operator"))]
         false
@@ -179,6 +213,16 @@ impl WorkforceView {
         store.posture.writes()
     }
 
+    /// Whether the last frame left room to draw the picker.
+    ///
+    /// Read off the height `draw` published, because the floor is a fact about
+    /// the pane and a key handler is never told one. Zero before the first
+    /// frame, which refuses — a client that has not drawn cannot know it has
+    /// room, and the runtime draws once before it reads its first event.
+    fn picker_fits(&self) -> bool {
+        self.height.get() >= PICKER_MIN_H
+    }
+
     /// Every key this pane claims, gated on the posture rather than the build.
     ///
     /// The order is load-bearing: an open picker outranks a focused input row,
@@ -188,6 +232,15 @@ impl WorkforceView {
         if !store.posture.writes() {
             // Same rule as AUDIT's arrows: a key with no visible effect reads as
             // a hung client, so an unarmed window declines rather than swallows.
+            return None;
+        }
+        // A terminal that shrank under an open picker retires it, on the first
+        // key after the resize. The box is already refusing to draw and already
+        // holding no keyboard by then — this is what keeps the *state* from
+        // outliving the box too, so a later resize back up cannot restore a
+        // half-typed goal the operator has not seen since.
+        if self.picker.is_some() && !self.picker_fits() {
+            self.picker = None;
             return None;
         }
         if self.picker.is_some() {
@@ -521,10 +574,37 @@ impl WorkforceView {
     /// The template picker, drawn over the view that opened it.
     fn draw_picker(&self, f: &mut Frame, area: Rect, store: &Store) {
         use ratatui::widgets::{Block, Borders, Clear};
+        // Published first, and on every frame including the ones that draw no
+        // box: this is what a later keystroke reads to decide whether the
+        // picker may open, and a height only recorded when the box already fits
+        // could never report that it stopped fitting.
+        self.height.set(area.height);
         let Some(picker) = &self.picker else {
             return;
         };
         let t = theme();
+        // Refuse rather than open invisible. Below the floor the box would have
+        // an inner height of zero — no list, no goal field, no disclosure —
+        // and `typing` declines the keyboard for exactly this frame, so the
+        // refusal is the whole of what the operator gets.
+        if area.height < PICKER_MIN_H {
+            let row = Rect {
+                x: area.x,
+                y: area.y + area.height / 2,
+                width: area.width,
+                height: 1,
+            };
+            f.render_widget(Clear, row);
+            refuse(
+                f,
+                row,
+                format!(
+                    "the template picker needs {PICKER_MIN_H} rows; this pane has {}.",
+                    area.height
+                ),
+            );
+            return;
+        }
         let rect = centred(area);
         if rect.width == 0 || rect.height == 0 {
             return;

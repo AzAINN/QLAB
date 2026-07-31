@@ -465,8 +465,18 @@ pub enum FxKey {
     /// drawdown alarm that had just fired, which is precisely the alert an
     /// operator must not lose.
     Alert,
-    /// The status line's chip run — approvals and workflow phases.
+    /// The status line's chip run, when a human decision arrives at the queue.
     Toast,
+    /// The same chip run, when a workflow phase advances.
+    ///
+    /// A separate key from `Toast` although it aims at the same rect, because a
+    /// key is a cancellation lane rather than a region — the reason `Alert` is
+    /// not `PlanCard`. Sharing meant a routine phase advance silently retired
+    /// the approval pulse that had just fired, and those two are not
+    /// interchangeable news: an approval is a human decision waiting, and a
+    /// phase advance is the desk getting on with work it was already doing.
+    /// Both effects now run over the chip run together.
+    Phase,
 }
 
 /// Where the rules may aim.
@@ -647,13 +657,20 @@ impl Fx {
                     ),
                 );
             }
-            // Not emitted yet — Task 19 diffs the workflow phase. Shares
-            // `Toast` with the approval on purpose: one chip region, one pulse,
-            // and the newer piece of governance news is the one to show.
-            // Invariant 10 is owed a caller here, and Task 19 is where it lands.
+            // Emitted by `store::phase_advanced` when a step of a workflow both
+            // snapshots carry changes state. Its own key rather than `Toast`'s:
+            // see `FxKey::Phase`.
+            //
+            // The chip run is the target because a phase advancing is
+            // governance news whichever view is up — an operator on MARKETS
+            // should see that the desk moved. That only works while the pulse
+            // still *means* something there, which is why the same event also
+            // raises a toast (`toast::from_stream`, `workflow_phase`): amber
+            // crossing the chips with nothing anywhere saying why is a pulse an
+            // operator learns to read past.
             Trigger::PhaseAdvanced => {
                 self.panes.add_unique_effect(
-                    FxKey::Toast,
+                    FxKey::Phase,
                     aim(
                         &self.rects.chips,
                         fx::fade_from_fg(t.accent, (CHIP_HALF * 2, Interpolation::CubicOut)),

@@ -317,6 +317,11 @@ mod armed {
         store.apply(AppEvent::Templates(templates()), Instant::now());
         let mut client = Client::new(store);
         client.press(KeyCode::Char('5'));
+        // One frame before any key, exactly as the runtime draws one before it
+        // reads its first event. The pane publishes its height there, and the
+        // picker's floor is read off it — a client that has never drawn cannot
+        // know it has room, and refuses.
+        client.frame(120, 36);
         client
     }
 
@@ -513,6 +518,98 @@ mod armed {
         assert!(!client.frame(120, 36).contains("START A WORKFLOW"));
     }
 
+    /// Whether the active view is holding a text field open — the shell's own
+    /// question, asked the way the shell asks it.
+    fn typing(client: &Client) -> bool {
+        client.views.typing(client.store.nav.view)
+    }
+
+    #[test]
+    fn a_pane_too_short_for_the_picker_refuses_to_open_it_rather_than_arming_it() {
+        // The state that must not exist: the box drawn two rows tall with an
+        // inner height of zero — no template list, no goal field, no
+        // phase-graph disclosure — while the field still held the keyboard and
+        // Enter still started a governed run against it.
+        let mut client = desk();
+        // The frame is what publishes the height a key handler reads, exactly
+        // as the runtime's loop does it.
+        let short = client.frame(120, 8);
+        assert!(!short.contains("START A WORKFLOW"), "{short}");
+
+        press(&mut client, KeyCode::Char('S'));
+        let refused = client.frame(120, 8);
+        assert!(
+            content(&refused).contains("the template picker needs"),
+            "{}",
+            content(&refused)
+        );
+        assert!(
+            !refused.contains("START A WORKFLOW"),
+            "the box opened anyway: {refused}"
+        );
+        // It holds no keyboard, so the workstation's keys still work...
+        assert!(!typing(&client), "an invisible picker armed the keyboard");
+        // ...and Enter cannot start the run it never showed.
+        assert_eq!(press(&mut client, KeyCode::Enter), None);
+    }
+
+    #[test]
+    fn a_terminal_that_shrinks_under_an_open_picker_closes_it() {
+        // Never an armed state an operator cannot see. Opening at a height that
+        // fits and then shrinking must not leave the goal field holding the
+        // keyboard behind a box that is no longer drawn.
+        let mut client = desk();
+        client.frame(120, 36);
+        press(&mut client, KeyCode::Char('S'));
+        typed(&mut client, "check the drift");
+        assert!(client.frame(120, 36).contains("START A WORKFLOW"));
+        assert!(typing(&client), "the open picker should hold the keyboard");
+
+        let shrunk = client.frame(120, 8);
+        assert!(
+            content(&shrunk).contains("the template picker needs"),
+            "{}",
+            content(&shrunk)
+        );
+        assert!(!typing(&client), "the shrunk picker kept the keyboard");
+        // Enter retires it rather than starting the run whose goal is still
+        // typed into a box nobody can see.
+        assert_eq!(press(&mut client, KeyCode::Enter), None);
+        // And the half-typed goal is gone with it, so growing back cannot
+        // restore a field the operator has not looked at since.
+        client.frame(120, 36);
+        let back = client.frame(120, 36);
+        assert!(!back.contains("check the drift"), "{back}");
+        assert!(!typing(&client));
+    }
+
+    #[test]
+    fn the_pickers_floor_is_bracketed_on_both_sides() {
+        // One row below it refuses, and the floor itself draws every row the
+        // box cannot do without — the header, a template, the goal field, and
+        // the sentence about whose phase graph runs.
+        let mut client = desk();
+        client.frame(120, 9);
+        press(&mut client, KeyCode::Char('S'));
+        assert!(content(&client.frame(120, 9)).contains("the template picker needs"));
+        assert!(!typing(&client));
+
+        // The view's area is two rows shorter than the terminal (the tape and
+        // the status line), so the floor of ten lands at a terminal of twelve.
+        let mut client = desk();
+        client.frame(120, 12);
+        press(&mut client, KeyCode::Char('S'));
+        let at_floor = client.frame(120, 12);
+        assert!(at_floor.contains("START A WORKFLOW"), "{at_floor}");
+        assert!(at_floor.contains("regime_review"), "{at_floor}");
+        assert!(at_floor.contains("goal >"), "{at_floor}");
+        assert!(
+            at_floor.contains("the owner runs its own phase graph"),
+            "{at_floor}"
+        );
+        assert!(typing(&client), "the box at its floor holds the keyboard");
+    }
+
     #[test]
     fn the_picker_draws_at_every_width_the_view_itself_admits() {
         // An arithmetic underflow in a render path is a panic behind the
@@ -537,6 +634,8 @@ mod armed {
         store.posture = Posture::Operator;
         let mut client = Client::new(store);
         client.press(KeyCode::Char('5'));
+        // The frame that publishes the pane's height, as `armed` does it.
+        client.frame(120, 36);
         press(&mut client, KeyCode::Char('S'));
         typed(&mut client, "anything");
         assert_eq!(press(&mut client, KeyCode::Enter), None);

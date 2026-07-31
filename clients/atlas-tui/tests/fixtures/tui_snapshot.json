@@ -1,9 +1,5 @@
 {
-  "desk_mode": {
-    "mode": "demo",
-    "book": "simulated_paper",
-    "live_capable": false
-  },
+  "desk_mode": {"mode": "demo", "book": "simulated_paper", "live_capable": false},
   "portfolio": {
     "broker": "simulated_paper",
     "cash": 6.821210263296962e-13,
@@ -14,35 +10,12 @@
     "kill_switch_distance": 0.15,
     "halted": false,
     "positions": {
-      "ACWI": {
-        "qty": 4.121014846223033,
-        "price": 152.47000122070312,
-        "value": 628.3311386341614,
-        "unrealized_pl": 0.0
-      },
-      "BNDW": {
-        "qty": 59.18910760019987,
-        "price": 67.58000183105469,
-        "value": 4000.0,
-        "unrealized_pl": 0.0
-      },
-      "GLD": {
-        "qty": 2.1184739044533427,
-        "price": 371.0799865722656,
-        "value": 786.1232680182416,
-        "unrealized_pl": 0.0
-      }
+      "ACWI": {"qty": 4.121014846223033, "price": 152.47000122070312, "value": 628.3311386341614, "unrealized_pl": 0.0},
+      "BNDW": {"qty": 59.18910760019987, "price": 67.58000183105469, "value": 4000.0, "unrealized_pl": 0.0},
+      "GLD": {"qty": 2.1184739044533427, "price": 371.0799865722656, "value": 786.1232680182416, "unrealized_pl": 0.0}
     },
-    "weights": {
-      "ACWI": 0.06283311386341615,
-      "BNDW": 0.4000000000000001,
-      "GLD": 0.07861232680182417
-    },
-    "target_weights": {
-      "ACWI": 0.06283311386341615,
-      "BNDW": 0.4,
-      "GLD": 0.07861232680182416
-    }
+    "weights": {"ACWI": 0.06283311386341615, "BNDW": 0.4000000000000001, "GLD": 0.07861232680182417},
+    "target_weights": {"ACWI": 0.06283311386341615, "BNDW": 0.4, "GLD": 0.07861232680182416}
   },
   "live_portfolio": {
     "blocked": false,
@@ -58,35 +31,10 @@
     "net_exposure": 1.0,
     "unrealized_pnl": 0.0,
     "positions": [
-      {
-        "ticker": "ACWI",
-        "qty": 4.121014846223033,
-        "avg_price": 152.47000122070312,
-        "price": 152.47000122070312,
-        "value": 628.3311386341614,
-        "weight": 0.062833,
-        "unrealized_pnl": 0.0,
-        "unrealized_pnl_pct": 0.0
-      },
-      {
-        "ticker": "BNDW",
-        "qty": 59.18910760019987,
-        "avg_price": 67.58000183105469,
-        "price": 67.58000183105469,
-        "value": 4000.0,
-        "weight": 0.4,
-        "unrealized_pnl": 0.0,
-        "unrealized_pnl_pct": 0.0
-      }
+      {"ticker": "ACWI", "qty": 4.121014846223033, "avg_price": 152.47000122070312, "price": 152.47000122070312, "value": 628.3311386341614, "weight": 0.062833, "unrealized_pnl": 0.0, "unrealized_pnl_pct": 0.0},
+      {"ticker": "BNDW", "qty": 59.18910760019987, "avg_price": 67.58000183105469, "price": 67.58000183105469, "value": 4000.0, "weight": 0.4, "unrealized_pnl": 0.0, "unrealized_pnl_pct": 0.0}
     ],
-    "marks": {
-      "live": false,
-      "source": "synthetic",
-      "feed": null,
-      "execution_grade": false,
-      "quotes_fresh": null,
-      "quote_health": null
-    }
+    "marks": {"live": false, "source": "synthetic", "feed": null, "execution_grade": false, "quotes_fresh": null, "quote_health": null}
   },
   "market": {
     "source": "yfinance",
@@ -102,201 +50,56 @@
       "robust_state": "uncertain",
       "confidence": 0.6666666666666666,
       "effective_risk_fraction": 0.5,
-      "posterior": {
-        "calm": 0.71,
-        "normal": 0.22,
-        "stress": 0.07
-      },
+      "posterior": {"calm": 0.71, "normal": 0.22, "stress": 0.07},
       "hmm_label": "calm"
     },
     "assets": [
-      {
-        "ticker": "ACWI",
-        "price": 152.47000122070312,
-        "change_1d": -0.013394539636073843,
-        "change_20d": -0.02866789810157999,
-        "realized_vol": 0.15424374532370141,
-        "history": [
-          156.36,
-          155.0,
-          154.48,
-          156.29,
-          156.19,
-          154.34,
-          154.3,
-          154.61,
-          154.54,
-          152.47
-        ]
-      },
-      {
-        "ticker": "SPY",
-        "price": 729.4600219726562,
-        "change_1d": -0.015387473482586067,
-        "change_20d": -0.023179823916149256,
-        "realized_vol": 0.13313066884462604,
-        "history": [
-          750.72,
-          743.29,
-          742.09,
-          748.28,
-          747.41,
-          738.18,
-          738.93,
-          739.09,
-          740.86,
-          729.46
-        ]
-      },
-      {
-        "ticker": "QQQ",
-        "price": 661.72998046875,
-        "change_1d": -0.0203704125369063,
-        "change_20d": -0.10139875267484655,
-        "realized_vol": 0.2470991302004331,
-        "history": [
-          705.94,
-          695.33,
-          696.06,
-          708.97,
-          705.35,
-          691.96,
-          684.23,
-          682.12,
-          675.49,
-          661.73
-        ]
-      },
-      {
-        "ticker": "XLK",
-        "price": 285.239990234375,
-        "change_1d": -0.020837252842882296,
-        "change_20d": -0.04553921568627451,
-        "realized_vol": 0.2412406715982941,
-        "history": [
-          297.12,
-          294.8,
-          293.55,
-          296.1,
-          295.44,
-          291.02,
-          290.66,
-          291.88,
-          291.31,
-          285.24
-        ]
-      },
-      {
-        "ticker": "XLF",
-        "price": 52.400001525878906,
-        "change_1d": 0.012364760432766615,
-        "change_20d": 0.018181818181818184,
-        "realized_vol": 0.1638204731992185,
-        "history": [
-          50.88,
-          51.02,
-          50.74,
-          51.31,
-          51.6,
-          51.44,
-          51.72,
-          51.9,
-          51.76,
-          52.4
-        ]
-      }
+      {"ticker": "ACWI", "price": 152.47000122070312, "change_1d": -0.013394539636073843, "change_20d": -0.02866789810157999, "realized_vol": 0.15424374532370141,
+       "history": [156.36, 155.0, 154.48, 156.29, 156.19, 154.34, 154.3, 154.61, 154.54, 152.47]},
+      {"ticker": "SPY", "price": 729.4600219726562, "change_1d": -0.015387473482586067, "change_20d": -0.023179823916149256, "realized_vol": 0.13313066884462604,
+       "history": [750.72, 743.29, 742.09, 748.28, 747.41, 738.18, 738.93, 739.09, 740.86, 729.46]},
+      {"ticker": "QQQ", "price": 661.72998046875, "change_1d": -0.0203704125369063, "change_20d": -0.10139875267484655, "realized_vol": 0.2470991302004331,
+       "history": [705.94, 695.33, 696.06, 708.97, 705.35, 691.96, 684.23, 682.12, 675.49, 661.73]},
+      {"ticker": "XLK", "price": 285.239990234375, "change_1d": -0.020837252842882295, "change_20d": -0.04553921568627451, "realized_vol": 0.2412406715982941,
+       "history": [297.12, 294.8, 293.55, 296.1, 295.44, 291.02, 290.66, 291.88, 291.31, 285.24]},
+      {"ticker": "XLF", "price": 52.400001525878906, "change_1d": 0.012364760432766615, "change_20d": 0.018181818181818184, "realized_vol": 0.1638204731992185,
+       "history": [50.88, 51.02, 50.74, 51.31, 51.6, 51.44, 51.72, 51.9, 51.76, 52.4]}
     ]
   },
   "stress": {
     "drawdown_tier": "none",
-    "drawdown_thresholds": {
-      "warning": 0.05,
-      "control": 0.1,
-      "breaker": 0.15
-    },
+    "drawdown_thresholds": {"warning": 0.05, "control": 0.1, "breaker": 0.15},
     "gross_exposure": 1.0000000000000002,
     "max_gross_exposure": 1.0,
     "leverage_headroom": -2.220446049250313e-16,
     "stressed_vol": 0.10114663609284644,
     "stress_vol_limit": 0.3,
     "replays": {
-      "2008": {
-        "available": false,
-        "start": "2008-09-01",
-        "end": "2009-03-09",
-        "return": null,
-        "reason": "unavailable: snapshot span does not cover the window"
-      },
-      "2020": {
-        "available": true,
-        "start": "2020-02-19",
-        "end": "2020-03-23",
-        "return": -0.17299098257408982,
-        "reason": null
-      },
-      "2022": {
-        "available": true,
-        "start": "2022-01-03",
-        "end": "2022-10-12",
-        "return": -0.13906720068825856,
-        "reason": null
-      }
+      "2008": {"available": false, "start": "2008-09-01", "end": "2009-03-09", "return": null,
+               "reason": "unavailable: snapshot span does not cover the window"},
+      "2020": {"available": true, "start": "2020-02-19", "end": "2020-03-23", "return": -0.17299098257408982, "reason": null},
+      "2022": {"available": true, "start": "2022-01-03", "end": "2022-10-12", "return": -0.13906720068825856, "reason": null}
     },
     "cost_gate_refusals": [
-      {
-        "ts": "2026-07-30T15:41:02.100000+00:00",
-        "plan_id": "0f1e2d3c4b5a6978",
-        "reasons": [
-          "est_cost 41bp exceeds the 25bp gate"
-        ]
-      }
+      {"ts": "2026-07-30T15:41:02.100000+00:00", "plan_id": "0f1e2d3c4b5a6978", "reasons": ["est_cost 41bp exceeds the 25bp gate"]}
     ]
   },
   "performance": {
     "series": [
-      {
-        "ts": "2026-07-26",
-        "equity": 10000.0
-      },
-      {
-        "ts": "2026-07-27",
-        "equity": 10012.4
-      },
-      {
-        "ts": "2026-07-28",
-        "equity": 9987.1
-      },
-      {
-        "ts": "2026-07-29",
-        "equity": 10000.0
-      },
-      {
-        "ts": "2026-07-30",
-        "equity": 9999.999999999998
-      }
+      {"ts": "2026-07-26", "equity": 10000.0},
+      {"ts": "2026-07-27", "equity": 10012.4},
+      {"ts": "2026-07-28", "equity": 9987.1},
+      {"ts": "2026-07-29", "equity": 10000.0},
+      {"ts": "2026-07-30", "equity": 9999.999999999998}
     ],
     "metrics": {
-      "n_obs": 4,
-      "ann_return": 0.0412,
-      "ann_vol": 0.1533,
-      "sharpe": 0.2688,
-      "sortino": 0.3311,
-      "downside_deviation": 0.1244,
-      "omega_ratio": 1.08,
-      "max_drawdown": -0.0253,
-      "cvar_95": -0.0231,
-      "realized_skew": -0.31,
-      "realized_kurtosis": 0.94,
-      "deflated_sharpe": 0.11
+      "n_obs": 4, "ann_return": 0.0412, "ann_vol": 0.1533, "sharpe": 0.2688, "sortino": 0.3311,
+      "downside_deviation": 0.1244, "omega_ratio": 1.08, "max_drawdown": -0.0253, "cvar_95": -0.0231,
+      "realized_skew": -0.31, "realized_kurtosis": 0.94, "deflated_sharpe": 0.11
     },
     "since_start": -2.220446049250313e-16,
     "window_change": -2.220446049250313e-16,
-    "cadence": {
-      "periods_per_year": 365.25,
-      "observed_span_days": 4.0,
-      "mean_step_days": 1.0,
-      "basis": "observed mark cadence"
-    },
+    "cadence": {"periods_per_year": 365.25, "observed_span_days": 4.0, "mean_step_days": 1.0, "basis": "observed mark cadence"},
     "note": "history capped at the newest 5000 marks of 12",
     "book": "simulated_paper",
     "marks": 12,
@@ -309,314 +112,103 @@
     "live_stream": true,
     "feed": "iex",
     "quotes": {
-      "ACWI": {
-        "price": 152.47,
-        "age_seconds": 0.412
-      },
-      "SPY": {
-        "price": 729.46,
-        "age_seconds": 1.204
-      }
+      "ACWI": {"price": 152.47, "age_seconds": 0.412},
+      "SPY": {"price": 729.46, "age_seconds": 1.204}
     },
-    "health": {
-      "state": "LIVE",
-      "feed": "iex",
-      "connected": true,
-      "symbols": [
-        "ACWI",
-        "SPY"
-      ],
-      "stale_symbols": [],
-      "quote_ages": {
-        "ACWI": 0.412,
-        "SPY": 1.204
-      },
-      "reconnects": 0,
-      "fresh": true,
-      "last_error": null
-    }
+    "health": {"state": "LIVE", "feed": "iex", "connected": true, "symbols": ["ACWI", "SPY"],
+               "stale_symbols": [], "quote_ages": {"ACWI": 0.412, "SPY": 1.204},
+               "reconnects": 0, "fresh": true, "last_error": null}
   },
   "approvals": [
-    {
-      "approval_id": "1a2b3c4d5e6f7081",
-      "task_id": null,
-      "plan_id": "9661b0e88b4a669e",
-      "plan_digest": "b7c8d9e0f1a2b3c4",
-      "decision_id": "77d478e96907f910",
-      "targets_hash": "c4d5e6f708192a3b",
-      "data_permit_id": null,
-      "broker": "simulated_paper",
-      "book_revision": "3",
-      "expected_cost": {
-        "total": 2.32,
-        "commission": 0.0,
-        "currency": "USD"
-      },
-      "summary": {
-        "n_legs": 7,
-        "turnover": 0.42
-      },
-      "status": "pending",
-      "challenge_digest": null,
-      "expires_at": "2026-07-30T19:12:18+00:00",
-      "decided_at": null,
-      "consumed_at": null,
-      "invalidated_reason": null,
-      "created_at": "2026-07-30T18:12:18.773652+00:00"
-    }
+    {"approval_id": "1a2b3c4d5e6f7081", "task_id": null, "plan_id": "9661b0e88b4a669e",
+     "plan_digest": "b7c8d9e0f1a2b3c4", "decision_id": "77d478e96907f910", "targets_hash": "c4d5e6f708192a3b",
+     "data_permit_id": null, "broker": "simulated_paper", "book_revision": "3",
+     "expected_cost": {"total": 2.32, "commission": 0.0, "currency": "USD"},
+     "summary": {"n_legs": 7, "turnover": 0.42}, "status": "pending", "challenge_digest": null,
+     "expires_at": "2026-07-30T19:12:18+00:00", "decided_at": null, "consumed_at": null,
+     "invalidated_reason": null, "created_at": "2026-07-30T18:12:18.773652+00:00"}
   ],
   "plans": [
-    {
-      "plan_id": "9661b0e88b4a669e",
-      "decision_id": "77d478e96907f910",
-      "state": "checked",
-      "targets": {
-        "ACWI": 0.06283311386341615,
-        "BNDW": 0.4,
-        "GLD": 0.07861232680182416
-      },
-      "pre_trade": {
-        "equity": 10000.0,
-        "est_cost": 4.999999999999999,
-        "initial_deployment": false,
-        "liquidating": false,
-        "mandate_ok": true,
-        "n_legs": 2,
-        "order_type": "marketable_limit",
-        "turnover": 0.42
-      },
-      "created_at": "2026-07-30T18:12:18.700000+00:00",
-      "legs": [
-        {
-          "client_order_id": "04117f6fa5752ebe",
-          "notional": 628.3311386341616,
-          "side": "buy",
-          "ticker": "ACWI"
-        },
-        {
-          "client_order_id": "1d2e3f4051627384",
-          "notional": 4000.0,
-          "side": "buy",
-          "ticker": "BNDW"
-        }
-      ]
-    },
-    {
-      "plan_id": "978594965d2f570b",
-      "decision_id": "2652ac36ca4d9e9a",
-      "state": "superseded",
-      "targets": {
-        "ACWI": 0.1,
-        "BNDW": 0.9
-      },
-      "pre_trade": {
-        "turnover": 1.0
-      },
-      "created_at": "2026-07-17T19:08:07.893146+00:00",
-      "legs": null
-    }
+    {"plan_id": "9661b0e88b4a669e", "decision_id": "77d478e96907f910", "state": "checked",
+     "targets": {"ACWI": 0.06283311386341615, "BNDW": 0.4, "GLD": 0.07861232680182416},
+     "pre_trade": {"equity": 10000.0, "est_cost": 4.999999999999999, "initial_deployment": false,
+                   "liquidating": false, "mandate_ok": true, "n_legs": 2,
+                   "order_type": "marketable_limit", "turnover": 0.42},
+     "created_at": "2026-07-30T18:12:18.700000+00:00",
+     "legs": [
+       {"client_order_id": "04117f6fa5752ebe", "notional": 628.3311386341616, "side": "buy", "ticker": "ACWI"},
+       {"client_order_id": "1d2e3f4051627384", "notional": 4000.0, "side": "buy", "ticker": "BNDW"}
+     ]},
+    {"plan_id": "978594965d2f570b", "decision_id": "2652ac36ca4d9e9a", "state": "superseded",
+     "targets": {"ACWI": 0.1, "BNDW": 0.9}, "pre_trade": {"turnover": 1.0},
+     "created_at": "2026-07-17T19:08:07.893146+00:00", "legs": null}
   ],
   "orders": [
-    {
-      "client_order_id": "8ba3fbe2a076fbb0",
-      "plan_id": "a06ecb5aef417e17",
-      "ticker": "VNQ",
-      "side": "buy",
-      "notional": 506.9052489186214,
-      "state": "filled",
-      "created_at": "2026-07-30T18:12:09.861698+00:00",
-      "filled_qty": 5.035815919699113,
-      "avg_fill_price": 100.66000366210938,
-      "fee": 0.0
-    },
-    {
-      "client_order_id": "7c6d5e4f3a2b1908",
-      "plan_id": "a06ecb5aef417e17",
-      "ticker": "GLD",
-      "side": "buy",
-      "notional": 786.1232680182416,
-      "state": "submitted",
-      "created_at": "2026-07-30T18:12:09.870000+00:00",
-      "filled_qty": null,
-      "avg_fill_price": null,
-      "fee": null
-    }
+    {"client_order_id": "8ba3fbe2a076fbb0", "plan_id": "a06ecb5aef417e17", "ticker": "VNQ", "side": "buy",
+     "notional": 506.9052489186214, "state": "filled", "created_at": "2026-07-30T18:12:09.861698+00:00",
+     "filled_qty": 5.035815919699113, "avg_fill_price": 100.66000366210938, "fee": 0.0},
+    {"client_order_id": "7c6d5e4f3a2b1908", "plan_id": "a06ecb5aef417e17", "ticker": "GLD", "side": "buy",
+     "notional": 786.1232680182416, "state": "submitted", "created_at": "2026-07-30T18:12:09.870000+00:00",
+     "filled_qty": null, "avg_fill_price": null, "fee": null}
   ],
   "workflows": [
-    {
-      "workflow_id": "805e0729cfec4d67",
-      "kind": "portfolio_review",
-      "status": "running",
-      "current_phase": "reporter",
-      "request": {
-        "as_of": "2026-07-30",
-        "goal": "Review the current portfolio and market read.",
-        "offline": false,
-        "universe": "core"
-      },
-      "result": {
-        "final_summary": "DRY recommendation compiled and a checked plan opened.",
-        "artifacts": {
-          "plan_id": "a06ecb5aef417e17",
-          "verdict": "PASS",
-          "regime": "neutral",
-          "executed": false
-        }
-      },
-      "created_at": "2026-07-30T15:29:22.831208+00:00",
-      "updated_at": "2026-07-30T15:58:50.091972+00:00",
-      "steps": [
-        {
-          "step_id": "805e0729cfec4d67:analyst",
-          "workflow_id": "805e0729cfec4d67",
-          "seq": 0,
-          "phase": "analyst",
-          "agent": "moments-analyst",
-          "status": "done",
-          "summary": "Regime NEUTRAL (fragile calm, 2 of 5 disagree).",
-          "artifacts": {
-            "window": 756,
-            "shrinkage": "ledoit_wolf",
-            "regime": "neutral"
-          },
-          "started_at": "2026-07-30T15:29:37.684751+00:00",
-          "completed_at": "2026-07-30T15:32:08.353678+00:00",
-          "updated_at": "2026-07-30T15:32:08.353678+00:00"
-        },
-        {
-          "step_id": "805e0729cfec4d67:referee",
-          "workflow_id": "805e0729cfec4d67",
-          "seq": 3,
-          "phase": "referee",
-          "agent": "referee",
-          "status": "working",
-          "summary": null,
-          "artifacts": {},
-          "started_at": "2026-07-30T15:52:00.000000+00:00",
-          "completed_at": null,
-          "updated_at": "2026-07-30T15:52:00.000000+00:00"
-        }
-      ]
-    }
+    {"workflow_id": "805e0729cfec4d67", "kind": "portfolio_review", "status": "running",
+     "current_phase": "reporter",
+     "request": {"as_of": "2026-07-30", "goal": "Review the current portfolio and market read.", "offline": false, "universe": "core"},
+     "result": {"final_summary": "DRY recommendation compiled and a checked plan opened.",
+                "artifacts": {"plan_id": "a06ecb5aef417e17", "verdict": "PASS", "regime": "neutral", "executed": false}},
+     "created_at": "2026-07-30T15:29:22.831208+00:00",
+     "updated_at": "2026-07-30T15:58:50.091972+00:00",
+     "steps": [
+       {"step_id": "805e0729cfec4d67:analyst", "workflow_id": "805e0729cfec4d67", "seq": 0, "phase": "analyst",
+        "agent": "moments-analyst", "status": "done", "summary": "Regime NEUTRAL (fragile calm, 2 of 5 disagree).",
+        "artifacts": {"window": 756, "shrinkage": "ledoit_wolf", "regime": "neutral"},
+        "started_at": "2026-07-30T15:29:37.684751+00:00", "completed_at": "2026-07-30T15:32:08.353678+00:00",
+        "updated_at": "2026-07-30T15:32:08.353678+00:00"},
+       {"step_id": "805e0729cfec4d67:referee", "workflow_id": "805e0729cfec4d67", "seq": 3, "phase": "referee",
+        "agent": "referee", "status": "working", "summary": null, "artifacts": {},
+        "started_at": "2026-07-30T15:52:00.000000+00:00", "completed_at": null,
+        "updated_at": "2026-07-30T15:52:00.000000+00:00"}
+     ]}
   ],
   "atlas": {
-    "manager_id": "atlas",
-    "mode": "propose",
-    "state": "observing",
-    "current_task_id": null,
-    "last_wake_reason": null,
-    "last_brief_at": null,
-    "blocked_reason": null,
-    "coordinator_available": true
+    "manager_id": "atlas", "mode": "propose", "state": "observing", "current_task_id": null,
+    "last_wake_reason": null, "last_brief_at": null, "blocked_reason": null, "coordinator_available": true
   },
   "atlas_heartbeat": {
-    "running": true,
-    "interval_s": 30.0,
-    "ticks": 72,
-    "errors": 0,
-    "last_tick_at": 1034246.190896333,
-    "last_error": "",
-    "last_error_at": "",
-    "last_state": "observing",
-    "autonomous": true,
-    "coordinator": {
-      "driving": false,
-      "workflow_id": "",
-      "can_drive": true,
-      "reason": ""
-    },
+    "running": true, "interval_s": 30.0, "ticks": 72, "errors": 0, "last_tick_at": 1034246.190896333,
+    "last_error": "", "last_error_at": "", "last_state": "observing", "autonomous": true,
+    "coordinator": {"driving": false, "workflow_id": "", "can_drive": true, "reason": ""},
     "fast": false
   },
   "atlas_read": {
-    "as_of": "2026-07-30",
-    "quantitative_state": "stress",
+    "as_of": "2026-07-30", "quantitative_state": "stress",
     "news": {
-      "item_count": 24,
-      "risk_off_hits": 12,
-      "risk_on_hits": 4,
-      "tone": "risk_off",
-      "intensity": 0.583,
-      "top_tickers": [
-        "QQQ",
-        "SPY",
-        "USO",
-        "IWM",
-        "TLT"
-      ],
+      "item_count": 24, "risk_off_hits": 12, "risk_on_hits": 4, "tone": "risk_off", "intensity": 0.583,
+      "top_tickers": ["QQQ", "SPY", "USO", "IWM", "TLT"],
       "headlines": [
-        {
-          "headline": "Rate-path comments move index futures",
-          "source": "wire-a",
-          "published": "2026-07-29T21:13:27+00:00",
-          "tickers": [
-            "SPY"
-          ],
-          "tone": "risk_off"
-        },
-        {
-          "headline": "Energy inventories build ahead of the print",
-          "source": "wire-b",
-          "published": "2026-07-29T18:02:00+00:00",
-          "tickers": [
-            "USO"
-          ],
-          "tone": "neutral"
-        }
+        {"headline": "Rate-path comments move index futures", "source": "wire-a",
+         "published": "2026-07-29T21:13:27+00:00", "tickers": ["SPY"], "tone": "risk_off"},
+        {"headline": "Energy inventories build ahead of the print", "source": "wire-b",
+         "published": "2026-07-29T18:02:00+00:00", "tickers": ["USO"], "tone": "neutral"}
       ]
     },
-    "agreement": "aligned",
-    "conviction": 0.84,
-    "tensions": [],
-    "observations": [
-      "Indicator panel reads stress with 3 of 5 detectors agreeing."
-    ],
-    "would_change_my_mind": [
-      "Absorption falling back below its threshold for five sessions."
-    ],
-    "evidence_refs": [
-      "snapshot:5d68be1cc58b4910"
-    ],
-    "read_hash": "c60c46006d926733",
-    "advisory": true,
-    "news_source": "alpaca",
-    "grounding": {
-      "as_of": "2026-07-30T21:16:06.295827+00:00",
-      "provider": "alpaca",
-      "item_count": 24,
-      "corroborated_count": 0,
-      "dropped_future": 0,
-      "dropped_untagged": 45,
-      "window_hash": "45fbb3f32be5bef9",
-      "quality_flags": [
-        "all 24 records come from one secondary publisher"
-      ]
-    },
+    "agreement": "aligned", "conviction": 0.84, "tensions": [],
+    "observations": ["Indicator panel reads stress with 3 of 5 detectors agreeing."],
+    "would_change_my_mind": ["Absorption falling back below its threshold for five sessions."],
+    "evidence_refs": ["snapshot:5d68be1cc58b4910"], "read_hash": "c60c46006d926733",
+    "advisory": true, "news_source": "alpaca",
+    "grounding": {"as_of": "2026-07-30T21:16:06.295827+00:00", "provider": "alpaca", "item_count": 24,
+                  "corroborated_count": 0, "dropped_future": 0, "dropped_untagged": 45,
+                  "window_hash": "45fbb3f32be5bef9",
+                  "quality_flags": ["all 24 records come from one secondary publisher"]},
     "supported_claims": [],
-    "qualitative_signals": {
-      "item_count": 24,
-      "claim_count": 5,
-      "sufficient": true,
-      "min_items": 5
-    }
+    "qualitative_signals": {"item_count": 24, "claim_count": 5, "sufficient": true, "min_items": 5}
   },
   "events": [
-    {
-      "event_id": "6f3ce0fcf613430e",
-      "ts": "2026-07-30T18:12:09.864336+00:00",
-      "kind": "approval_consumed",
-      "payload": {
-        "approval_id": "5a101fb351d746da",
-        "plan_id": "a06ecb5aef417e17"
-      }
-    },
-    {
-      "event_id": "93c6afc5e71345e2",
-      "ts": "2026-07-30T18:12:18.773652+00:00",
-      "kind": "approval_created",
-      "payload": {
-        "approval_id": "1a2b3c4d5e6f7081",
-        "plan_id": "9661b0e88b4a669e"
-      }
-    }
+    {"event_id": "6f3ce0fcf613430e", "ts": "2026-07-30T18:12:09.864336+00:00", "kind": "approval_consumed",
+     "payload": {"approval_id": "5a101fb351d746da", "plan_id": "a06ecb5aef417e17"}},
+    {"event_id": "93c6afc5e71345e2", "ts": "2026-07-30T18:12:18.773652+00:00", "kind": "approval_created",
+     "payload": {"approval_id": "1a2b3c4d5e6f7081", "plan_id": "9661b0e88b4a669e"}}
   ]
 }

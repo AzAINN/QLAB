@@ -3,6 +3,10 @@
 pub mod braille_chart;
 mod panel_header;
 pub mod pulse;
+mod refusal;
+pub mod table_cell;
 pub mod ticker;
+pub mod tristate_spark;
 
 pub use panel_header::{panel_block, panel_header};
+pub use refusal::refuse;

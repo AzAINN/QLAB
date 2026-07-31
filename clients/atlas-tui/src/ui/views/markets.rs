@@ -15,13 +15,15 @@ use crate::fx::{FlashKey, FlashTracker};
 use crate::store::{AssetFacts, Store};
 use crate::theme::theme;
 use crate::ui::views::View;
-use crate::ui::widgets::{braille_chart, panel_block, panel_header};
+use crate::ui::widgets::table_cell::{cell, LEFT, RIGHT};
+use crate::ui::widgets::tristate_spark::{self, SPARK_W};
+use crate::ui::widgets::{braille_chart, panel_block, panel_header, refuse};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Cell, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Paragraph, Row, Table, TableState},
     Frame,
 };
 use std::time::Instant;
@@ -50,13 +52,6 @@ const COLS: [(&str, u16, bool); 8] = [
     ("TGT", 5, RIGHT),
 ];
 
-const LEFT: bool = false;
-const RIGHT: bool = true;
-
-/// How many bars of the tail the `SPARK` cell draws. Eight, matching the eight
-/// levels: a window narrower than the ramp cannot use all of it.
-const SPARK_W: usize = 8;
-
 /// The grid's floor, derived from the columns so the two cannot drift.
 const GRID_W: u16 = grid_w();
 
@@ -78,9 +73,6 @@ const HEAT_W: u16 = 12;
 /// Header plus two rows of cells — twelve sectors at any width the workstation
 /// is usable at.
 const HEAT_H: u16 = 3;
-
-/// Eight levels, low to high.
-const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// The band edges of the sector ramp, in percent.
 ///
@@ -313,7 +305,7 @@ fn draw_grid(
                 format::opt_pct(facts.realized_vol),
                 Style::default().fg(t.text_secondary),
             ),
-            spark_cell(facts.history),
+            tristate_spark::cell(facts.history),
             (
                 weight(book.and_then(|b| b.weights.get(facts.ticker))),
                 Style::default().fg(t.text_primary),
@@ -348,62 +340,6 @@ fn draw_grid(
         // selection has exactly one home, and it is the view.
         &mut TableState::new().with_selected(Some(selected)),
     );
-}
-
-/// One table cell, right-aligned unless it is a name or a picture, and held to
-/// its column's width.
-///
-/// Right because a column of numbers only reads as a column when the decimal
-/// points line up. Held because ratatui right-aligns an overlong line by
-/// dropping its *leading* cells, and the leading cell of a number is its sign:
-/// a `-10.1%` twenty-day change renders as `10.1%` in a five-wide column — a
-/// loss drawn as a gain. Keeping the head instead costs the last digit, which
-/// is a number that is coarse rather than one that is wrong.
-fn cell(text: String, style: Style, right: bool, width: u16) -> Cell<'static> {
-    let line = Line::from(Span::styled(head(text, width), style));
-    Cell::from(if right {
-        line.right_aligned()
-    } else {
-        line.left_aligned()
-    })
-}
-
-/// The leading `width` characters of `text`, or all of it.
-///
-/// Characters rather than bytes, and every glyph this grid renders is one cell
-/// wide — the arrows in `CHG%` and the eight spark levels included.
-fn head(text: String, width: u16) -> String {
-    match text.char_indices().nth(width as usize) {
-        Some((byte, _)) => text[..byte].to_string(),
-        None => text,
-    }
-}
-
-/// The 8-level quantize of a series tail, and the tone that says which way it
-/// went.
-///
-/// Ratatui's `Sparkline` is a `Widget` and a `Table` cell holds `Text`, so a
-/// real sparkline cannot live in this column. The glyphs are the same eight
-/// levels drawn as text.
-fn spark_cell(history: &[f64]) -> (String, Style) {
-    let t = theme();
-    let glyphs = spark(history, SPARK_W);
-    if glyphs.is_empty() {
-        return (MISSING.to_string(), Style::default().fg(t.text_tertiary));
-    }
-    // Slope over the window the cell actually draws — the same slice `spark`
-    // quantized, not the whole series. The reference desk colours a sparkline by
-    // its own visible direction, and it has to: a tail climbing out of a crash
-    // painted red says the bars on screen are falling, which they are not.
-    let window = tail(history, SPARK_W);
-    let rising = match (window.first(), window.last()) {
-        (Some(first), Some(last)) => last >= first,
-        _ => true,
-    };
-    (
-        glyphs,
-        Style::default().fg(if rising { t.positive } else { t.negative }),
-    )
 }
 
 fn tone_of(value: Option<f64>) -> Style {
@@ -475,7 +411,8 @@ fn draw_sectors(f: &mut Frame, area: Rect, store: &Store) {
         refuse(
             f,
             rows[1],
-            "sector map needs the extended universe — qlab prewarm --universe candidates".to_string(),
+            "sector map needs the extended universe — qlab prewarm --universe candidates"
+                .to_string(),
         );
         return;
     }
@@ -503,26 +440,6 @@ fn draw_sectors(f: &mut Frame, area: Rect, store: &Store) {
         return;
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
-}
-
-/// A pane refusing to draw, and saying what it would take.
-///
-/// One shape for all three refusals on this view — no sectors prewarmed, a grid
-/// under its floor, a strip under its own — because they are one statement:
-/// what is missing, then the remedy. Wrapped, since a pane too narrow to hold
-/// the numbers is also too narrow to hold the sentence about them, and a remedy
-/// clipped to `qlab prewar` cannot be run. Silence, a clipped pane and a
-/// half-drawn grid are the three renderings an operator cannot tell from a
-/// working desk.
-fn refuse(f: &mut Frame, area: Rect, message: String) {
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            message,
-            Style::default().fg(theme().text_dim),
-        )))
-        .wrap(Wrap { trim: true }),
-        area,
-    );
 }
 
 /// The quantized heat ramp.
@@ -564,103 +481,9 @@ fn heat_step(change_pct: f64) -> u8 {
     (1 + crossed).min(6) as u8
 }
 
-/// The window a spark is drawn from: the last `width` closes, or all of them.
-///
-/// One definition, because the glyphs and the colour must be reading the same
-/// slice. Two spellings of "the tail" is how the bars came to say one thing and
-/// the colour another.
-fn tail(history: &[f64], width: usize) -> &[f64] {
-    &history[history.len().saturating_sub(width)..]
-}
-
-/// The last `width` closes, quantized into the eight block glyphs.
-///
-/// Scaled to the window rather than the whole series: the cell's job is the
-/// recent shape, and an outlier twenty bars back would flatten every bar the
-/// operator is actually looking at. `history` is finite by construction — JSON
-/// carries no NaN, so the model cannot decode one.
-fn spark(history: &[f64], width: usize) -> String {
-    if history.is_empty() || width == 0 {
-        return String::new();
-    }
-    let tail = tail(history, width);
-    let lo = tail.iter().copied().fold(f64::INFINITY, f64::min);
-    let hi = tail.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let span = hi - lo;
-    let top = SPARK_GLYPHS.len() - 1;
-    tail.iter()
-        .map(|value| {
-            let level = if span > 0.0 {
-                (((value - lo) / span) * top as f64).round() as usize
-            } else {
-                // A series with no range is neither at the top of its range nor
-                // at the bottom of it. A row of `▁` claims one and a row of `█`
-                // claims the other; the middle claims neither.
-                SPARK_GLYPHS.len() / 2 - 1
-            };
-            SPARK_GLYPHS[level.min(top)]
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_spark_quantizes_a_known_series_into_the_eight_glyphs() {
-        // A `Sparkline` cannot live inside a `Table` cell, so the row draws its
-        // own. Pinning the exact string is the only way a quantizer that is
-        // subtly off by a level fails loudly rather than looking plausible.
-        assert_eq!(
-            spark(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 8),
-            "▁▂▃▄▅▆▇█"
-        );
-        assert_eq!(
-            spark(&[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0], 8),
-            "█▇▆▅▄▃▂▁"
-        );
-    }
-
-    #[test]
-    fn the_spark_reads_the_tail_and_scales_to_it() {
-        // The window is the recent shape, so an old outlier must not flatten
-        // every bar the operator is actually looking at.
-        assert_eq!(spark(&[100.0, 1.0, 2.0, 3.0], 3), "▁▅█");
-    }
-
-    #[test]
-    fn the_spark_takes_its_colour_from_the_window_it_draws() {
-        // The bars are the window, so the colour has to be the window's. Read
-        // off the whole series instead, a tail climbing out of a crash paints
-        // red — the cell then says the eight bars on screen are falling while
-        // they visibly rise, which is the one thing a sparkline must not do.
-        let crashed_then_climbing = [100.0, 50.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
-        let (glyphs, style) = spark_cell(&crashed_then_climbing);
-        assert_eq!(glyphs, "▁▂▃▄▅▆▇█", "the window is the last eight closes");
-        assert_eq!(
-            style.fg,
-            Some(theme().positive),
-            "a rising window painted as a fall"
-        );
-
-        // The mirror, so this cannot be satisfied by colouring everything green.
-        let rallied_then_sliding = [1.0, 2.0, 100.0, 99.0, 98.0, 97.0, 96.0, 95.0, 94.0, 93.0];
-        assert_eq!(spark_cell(&rallied_then_sliding).1.fg, Some(theme().negative));
-    }
-
-    #[test]
-    fn a_flat_series_reads_from_the_middle_rather_than_the_floor() {
-        // A row of `▁` reads as "at the bottom of its range" and a row of `█` as
-        // "at the top". A series with no range is neither.
-        assert_eq!(spark(&[5.0, 5.0, 5.0], 3), "▄▄▄");
-        assert_eq!(spark(&[5.0], 4), "▄");
-    }
-
-    #[test]
-    fn a_series_the_owner_did_not_send_draws_nothing_at_all() {
-        assert_eq!(spark(&[], 8), "");
-    }
 
     #[test]
     fn the_heat_ramp_bands_at_the_documented_edges_and_then_saturates() {
@@ -698,7 +521,13 @@ mod tests {
             .collect();
         for i in 0..styles.len() {
             for j in (i + 1)..styles.len() {
-                assert_ne!(styles[i], styles[j], "step {} and step {} collide", i + 1, j + 1);
+                assert_ne!(
+                    styles[i],
+                    styles[j],
+                    "step {} and step {} collide",
+                    i + 1,
+                    j + 1
+                );
             }
         }
     }
@@ -712,17 +541,6 @@ mod tests {
         for sector in SPDR_SECTORS {
             assert!(sector.len() <= 4, "{sector} does not fit a heat cell");
         }
-    }
-
-    #[test]
-    fn a_column_too_narrow_for_its_number_loses_the_last_digit_and_not_the_sign() {
-        // Ratatui right-aligns an overlong line by dropping its leading cells,
-        // so `-10.1%` in a five-wide column renders `10.1%` — a loss drawn as a
-        // gain. This is the half of the guard that does not depend on any
-        // particular column being wide enough.
-        assert_eq!(head("-10.1%".into(), 5), "-10.1");
-        assert_eq!(head("▼ 12.34".into(), 6), "▼ 12.3");
-        assert_eq!(head("6.3%".into(), 5), "6.3%");
     }
 
     #[test]

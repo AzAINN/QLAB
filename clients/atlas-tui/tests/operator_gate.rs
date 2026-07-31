@@ -1228,16 +1228,25 @@ mod operator {
             other => panic!("{other:?}"),
         }
 
-        let vague = spawn_owner(
-            200,
-            desk_mode_body("LIVE · ALPACA BOOK", r#""credentials_ok": false"#),
-        );
-        let client = WriteClient::new(&vague.base).unwrap();
-        match perform(&client, point_at("alpaca")).await {
-            Some(Wrote::Pointed { warning, .. }) => {
-                assert!(warning.unwrap().contains("no usable Alpaca credentials"));
+        // Two shapes of "false with nothing said": the field missing, and the
+        // field present and empty. `Some("")` is absent everywhere else in this
+        // client, and a warning that renders as a dangling dash says less than
+        // the fallback sentence does.
+        for credentials in [
+            r#""credentials_ok": false"#,
+            r#""credentials_ok": false, "credentials": """#,
+        ] {
+            let vague = spawn_owner(200, desk_mode_body("LIVE · ALPACA BOOK", credentials));
+            let client = WriteClient::new(&vague.base).unwrap();
+            match perform(&client, point_at("alpaca")).await {
+                Some(Wrote::Pointed { warning, .. }) => {
+                    assert!(
+                        warning.unwrap().contains("no usable Alpaca credentials"),
+                        "{credentials}"
+                    );
+                }
+                other => panic!("{credentials}: {other:?}"),
             }
-            other => panic!("{other:?}"),
         }
     }
 

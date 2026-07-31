@@ -45,6 +45,17 @@ fn files_mentioning(needle: &str) -> Vec<String> {
     found
 }
 
+/// The files that may never perform IO, by path prefix.
+///
+/// `ui/` renders and returns `Command`s. `cmd.rs` is the other half of that
+/// seam and joined it at Task 20: it turns text into a typed intent, and a
+/// parser that could send its own request would put an order path behind a
+/// keystroke with nothing in between — the same arrangement one module over,
+/// where nobody would think to look for it.
+fn never_io(file: &str) -> bool {
+    file.starts_with("ui/") || file == "cmd.rs"
+}
+
 // -- the gate, asserted in both legs ---------------------------------------
 
 #[test]
@@ -118,10 +129,15 @@ fn no_view_or_widget_can_reach_the_writer() {
     // bring the type in without the module path ever appearing.
     reachers.extend(files_mentioning("dispatch::Writes"));
     reachers.extend(files_mentioning(r"\bWrites\b"));
-    let escaped: Vec<&String> = reachers.iter().filter(|f| f.starts_with("ui/")).collect();
+    // And the HTTP stack itself, not only the types this crate wraps it in: a
+    // view that built its own `reqwest::Client` would be an order path with no
+    // composition root in between, and would name neither of the above.
+    reachers.extend(files_mentioning("reqwest"));
+    let escaped: Vec<&String> = reachers.iter().filter(|f| never_io(f)).collect();
     assert!(
         escaped.is_empty(),
-        "nothing under ui/ may name the writer or its dispatcher, found: {escaped:?}"
+        "nothing that renders or parses may name the writer, its dispatcher, or the HTTP \
+         stack, found: {escaped:?}"
     );
     // And the search really ran. A grep that cannot read the tree returns no
     // matches, which would read as a clean crate — the same reasoning the

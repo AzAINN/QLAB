@@ -1,9 +1,23 @@
 //! atlas-tui — a Ratatui client for the qlab owner runtime.
 //!
-//! Read-only by construction. It talks to the owner over HTTP and has no order
-//! path, no registry handle, and no way to acquire either — invariant 3 is
-//! preserved by absence rather than by a check that could be removed. Paper
-//! execution stays in the Textual client, where the confirm dialog lives.
+//! Read-only by construction, in the build that ships by default. It talks to
+//! the owner over HTTP and has no registry handle and no way to acquire one, and
+//! in the default build no order path either — invariant 3 is preserved by
+//! absence rather than by a check that could be removed.
+//!
+//! "By absence" stays literal under the `operator` feature, which is the only
+//! thing that compiles a write path into this crate at all: without it there is
+//! no `net::write` module, no POST call site, and no `Posture::Operator` for the
+//! status line to hold. A monitoring box builds the default and cannot be
+//! argued, configured, or flagged into writing. `--operator` then decides
+//! whether the human armed the build they have.
+//!
+//! What the write path can reach is still the owner's governed API and nothing
+//! else: an approval decision, a plan execution that consumes a persisted
+//! approval, and Atlas's own controls. There is no raw-order tool here and no
+//! agent-reachable execution path — a fill requires a human to type six
+//! characters of the plan's `targets_hash` into `ui::widgets::confirm`, and the
+//! owner refuses the request regardless unless a matching approval is on record.
 //!
 //! Runs alongside the Textual TUI rather than replacing it. Both read the same
 //! `/api/tui` snapshot, so there is no cutover cliff and no window where the
@@ -62,6 +76,7 @@ async fn main() -> Result<()> {
     // owner on a port they did not choose — otherwise has to read a chip that
     // names no host and guess which desk it is about.
     store.base = base.clone();
+    store.posture = posture(&args);
     // Probe before the screen is taken. The first frame is drawn before any
     // event arrives, and a frame that says "no owner" because it has not asked
     // yet has already lied to the operator once.
@@ -94,6 +109,40 @@ async fn main() -> Result<()> {
     spawn_terminal_events(tx);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     run(&mut terminal, &mut store, &mut rx, &poller).await
+}
+
+/// What this window may do to the desk, decided once and never re-read.
+///
+/// Two gates in series, and they answer different questions. The `operator`
+/// Cargo feature decides whether a write path exists in this binary at all — a
+/// monitoring box builds the default and has no `net::write` to reach, whatever
+/// it is passed. `--operator` then decides whether the human armed the build
+/// they have: a featured binary started without it runs as glass, so an operator
+/// who wants to watch does not have to find a different executable, and the
+/// status chip answers "can the next keystroke place an order" rather than
+/// "which binary is this".
+///
+/// The flag is parsed under `cfg` too, not just acted on under it. In the
+/// default build the string `--operator` means nothing at all, which is the
+/// property CLAUDE.md's "read-only by construction" claim rests on: there is no
+/// argument, environment variable, or config file that can widen what a glass
+/// binary does, because the code that would widen it was never compiled.
+#[cfg(feature = "operator")]
+fn posture(args: &[String]) -> atlas::store::Posture {
+    if args.iter().any(|a| a == "--operator") {
+        // On the record before the screen is taken. A fill found in the audit
+        // log later should be traceable to a client that said, in its own log,
+        // that it was armed and against which owner.
+        tracing::warn!("operator posture armed: this client can write to the desk");
+        atlas::store::Posture::Operator
+    } else {
+        atlas::store::Posture::Glass
+    }
+}
+
+#[cfg(not(feature = "operator"))]
+fn posture(_args: &[String]) -> atlas::store::Posture {
+    atlas::store::Posture::Glass
 }
 
 async fn run(

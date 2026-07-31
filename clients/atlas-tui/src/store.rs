@@ -247,6 +247,38 @@ pub struct AssetFacts<'a> {
     pub history: &'a [f64],
 }
 
+/// What this window may do to the desk.
+///
+/// Two words, and in the default build only one of them exists. `Operator` is
+/// behind the `operator` feature, so a monitoring box does not hold a value it
+/// could be assigned by a bug, a config read, or a stray `..Default::default()`
+/// — the amber word is unreachable because the variant is not in the type.
+///
+/// Which one is held is decided once, in `main`, from the `--operator` flag: the
+/// feature says what the binary is capable of, the flag says whether the human
+/// armed it. A featured build that was not armed reads `GLASS`, because the
+/// question the chip answers is "can the next keystroke place an order", not
+/// "which binary is this".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Posture {
+    #[default]
+    Glass,
+    #[cfg(feature = "operator")]
+    Operator,
+}
+
+impl Posture {
+    /// The word on the status line. Not `Display`: this is a fixed badge with a
+    /// fixed width, and a formatting impl invites a caller to pad it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Posture::Glass => "GLASS",
+            #[cfg(feature = "operator")]
+            Posture::Operator => "OPERATOR",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Store {
     pub snapshot: Option<Snapshot>,
@@ -279,6 +311,13 @@ pub struct Store {
     /// Empty means nothing set it, and renders as absent like every other unset
     /// string in this client.
     pub base: String,
+    /// What this window may do to the desk, set once by the composition root.
+    ///
+    /// Here beside `base` — the store's other composition-root fact — rather
+    /// than read by the renderer, for the same reason: a status line that
+    /// consulted a flag or a `cfg!` directly would be a frame that is not a pure
+    /// function of the store, and no golden test could then pin either word.
+    pub posture: Posture,
     /// Live prices, by ticker — read through `asset_view`, never rendered from
     /// directly. See `QuoteMark` for why this is an overlay and not a merge.
     pub quote_overlay: HashMap<String, QuoteMark>,
@@ -318,6 +357,7 @@ impl Store {
             last_snapshot_at: None,
             malformed: None,
             base: String::new(),
+            posture: Posture::Glass,
             quote_overlay: HashMap::new(),
             stream_malformed_count: 0,
             tick: 0,

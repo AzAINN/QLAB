@@ -12,6 +12,23 @@ license = "MIT"
 name = "atlas"
 path = "src/lib.rs"
 
+# The operator posture is a build, not a setting.
+#
+# CLAUDE.md invariant 3 forbids an agent-reachable execution path, and this
+# client's claim has always been the stronger one: "read-only by construction —
+# no order path, no registry handle — so invariant 3 holds there by absence".
+# A runtime `Option<WriteClient>` would demote that to a branch, and a branch
+# can be flipped by a flag, a config file, or a bug. Under this feature the
+# write half does not exist in the artifact: the default build has no POST call
+# site to reach, mis-set, or exploit.
+#
+# `--operator` gates *activation* on top of it. The feature says what the binary
+# is capable of; the flag says whether the operator armed it. A monitoring box
+# runs the default build and cannot be talked into writing at all.
+[features]
+default = []
+operator = []
+
 [[bin]]
 name = "atlas"
 path = "src/main.rs"

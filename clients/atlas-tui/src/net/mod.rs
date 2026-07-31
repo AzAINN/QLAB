@@ -5,6 +5,13 @@ use crate::bus::{AppEvent, Channel, Tx};
 
 pub mod http;
 pub mod sse;
+// The write half, and the only place in the crate that can POST. Gated so the
+// default build has no such call site at all — see `write.rs` and the
+// `[features]` note in Cargo.toml. The attribute and the declaration are pinned
+// verbatim by `tests/operator_gate.rs`, because a gate that named the wrong
+// feature would compile the writer into the monitoring build in silence.
+#[cfg(feature = "operator")]
+pub mod write;
 
 /// The bus is closed: the frame loop that these events were for has stopped.
 pub(crate) struct Gone;

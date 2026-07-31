@@ -23,7 +23,7 @@ use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::{Fx, ShellRects};
 use crate::glyph;
-use crate::store::{Store, ViewId};
+use crate::store::{Posture, Store, ViewId};
 use crate::theme::theme;
 use crate::theme::Theme;
 use crate::ui::views::Views;
@@ -467,18 +467,29 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Optio
             Style::default().fg(t.text_secondary),
         ),
         // The posture, on every frame. An operator must never have to wonder
-        // whether this surface can place an order: it holds no writer, and
-        // Task 17 is what makes the other word possible.
+        // whether this surface can place an order. In the default build the
+        // word can only be GLASS — `Posture::Operator` is not in the type —
+        // so this is a statement about the artifact, not a rendering choice.
         Span::styled(
-            "GLASS ",
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            format!("{} ", store.posture.label()),
+            Style::default()
+                .fg(match store.posture {
+                    Posture::Glass => t.accent,
+                    // Amber-on-warning rather than the accent: OPERATOR is the
+                    // one chip that means "the next keystroke can move money",
+                    // and it must not read as another piece of chrome in the
+                    // desk's own colour.
+                    #[cfg(feature = "operator")]
+                    Posture::Operator => t.warning,
+                })
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
 
     let mut spans = left;
     // The one thing on this line that gives way. Every chip beside it is a claim
     // about the desk; this is only *where the desk is*, and a `Paragraph` that
-    // ran past the frame would clip the right-hand end — which is the GLASS
+    // ran past the frame would clip the right-hand end — which is the posture
     // badge, the one statement that may never leave the frame.
     let used: usize = spans
         .iter()

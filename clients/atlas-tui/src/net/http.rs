@@ -272,7 +272,12 @@ async fn poll_loop(
     }
 }
 
-fn build_client() -> reqwest::Result<reqwest::Client> {
+/// One client builder for both halves of the boundary.
+///
+/// `pub(crate)` so `net::write` shares this timeout rather than choosing its
+/// own: a write that gave up sooner than a read would report a plan as failed
+/// while the owner was still booking it.
+pub(crate) fn build_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder().timeout(TIMEOUT).build()
 }
 

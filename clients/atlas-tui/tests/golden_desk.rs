@@ -422,6 +422,28 @@ fn a_frame_too_short_for_the_hero_refuses_the_tiles_rather_than_clipping_them() 
 }
 
 #[test]
+fn a_pane_under_its_floor_states_the_floor_and_under_that_draws_nothing() {
+    // Both halves of the ledger's Task 13 finding, which this view applies from
+    // the start rather than after someone reports a smear. Between the two
+    // floors the pane says what it would take; below the width the sentence
+    // itself needs, it draws nothing — a frame missing a panel is at least not
+    // a frame lying about one.
+    let stated = content(&desk_from(DESK).frame(62, 24));
+    assert!(
+        stated.contains("columns"),
+        "the pane vanished instead of saying why:\n{stated}"
+    );
+
+    // The shell's own rules survive the crop, so the claim is that the view
+    // wrote no words rather than that the columns are empty.
+    let blank = content(&desk_from(DESK).frame(50, 24));
+    assert!(
+        !blank.chars().any(char::is_alphanumeric),
+        "a refusal too narrow to read was drawn anyway:\n{blank:?}"
+    );
+}
+
+#[test]
 fn the_desk_draws_at_every_size_a_terminal_can_be() {
     // Every sub-floor bug on this branch has been an arithmetic one that only
     // appears a column or a row either side of a boundary, so the boundaries are

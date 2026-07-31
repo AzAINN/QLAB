@@ -1035,7 +1035,12 @@ fn pending(store: &Store, what: &str) -> Vec<Line<'static>> {
 /// so under that the pane draws nothing — a frame missing a panel is at least
 /// not a frame lying about one.
 fn refuse_or_drop(f: &mut Frame, area: Rect, message: String) {
-    const LEGIBLE_W: u16 = 24;
+    // Fifteen because the finding's own numbers say so: one to fourteen cells is
+    // where a wrapped refusal becomes a column of single words. Deliberately
+    // below `READ_W`, so a read pane between the two floors states its floor
+    // rather than vanishing — a threshold equal to `READ_W` would make this
+    // branch unreachable from the pane that needs it most.
+    const LEGIBLE_W: u16 = 15;
     const LEGIBLE_H: u16 = 2;
     if area.width < LEGIBLE_W || area.height < LEGIBLE_H {
         return;

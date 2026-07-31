@@ -253,11 +253,13 @@ mod tests {
     }
 
     #[test]
-    fn the_blotters_sort_and_page_survive_a_switch_away_and_back() {
-        // The same regression as the markets cursor, on the two things BOOK
+    fn everything_the_book_retains_survives_a_switch_away_and_back() {
+        // The same regression as the markets cursor, on the four things BOOK
         // retains. A registry that rebuilt the view would hand back a blotter
-        // sorted by weight at page one, silently discarding the column the
-        // operator chose and the page they scrolled to.
+        // sorted by weight at page one, shaded by P&L over the whole series —
+        // silently discarding the column the operator chose, the page they
+        // scrolled to, the quantity they asked the rail to shade by and the
+        // window they sliced the curve to.
         let mut store = store_with_a_book(40);
         let mut views = Views::new();
 
@@ -265,11 +267,23 @@ mod tests {
         // comes before the page turn exactly as the runtime's loop does it.
         store.nav.view = ViewId::Book;
         draw_once(&views, &store);
-        views.on_key(ViewId::Book, key(KeyCode::Char('s')), &mut store);
-        views.on_key(ViewId::Book, key(KeyCode::Char(']')), &mut store);
-        let chosen = (views.book.sort(), views.book.top());
+        for k in ['s', ']', 'h', 'p'] {
+            views.on_key(ViewId::Book, key(KeyCode::Char(k)), &mut store);
+        }
+        let chosen = (
+            views.book.sort(),
+            views.book.top(),
+            views.book.heat(),
+            views.book.period(),
+        );
         assert_ne!(chosen.0, book::Sort::default(), "the sort key did not move");
         assert!(chosen.1 > 0, "the page did not turn");
+        assert_ne!(
+            chosen.2,
+            book::Heat::default(),
+            "the heat mode did not move"
+        );
+        assert_ne!(chosen.3, book::Period::default(), "the period did not move");
 
         store.nav.view = ViewId::Markets;
         views.on_key(ViewId::Markets, key(KeyCode::Down), &mut store);
@@ -277,9 +291,14 @@ mod tests {
         store.nav.view = ViewId::Book;
         draw_once(&views, &store);
         assert_eq!(
-            (views.book.sort(), views.book.top()),
+            (
+                views.book.sort(),
+                views.book.top(),
+                views.book.heat(),
+                views.book.period()
+            ),
             chosen,
-            "the blotter lost its sort or its page across a view switch"
+            "BOOK lost something the operator moved across a view switch"
         );
     }
 

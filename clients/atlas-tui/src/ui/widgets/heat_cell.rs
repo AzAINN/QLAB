@@ -21,6 +21,26 @@ use ratatui::style::{Color, Modifier, Style};
 /// would collapse into its neighbour.
 pub const STEPS: u8 = 6;
 
+/// Which step a normalized intensity lands on, `1..=STEPS`.
+///
+/// The intensity is the caller's arithmetic — `|pnl| / 20` for a holding,
+/// `weight / 40` for an allocation — because the divisor is the scale of the
+/// quantity and nothing here knows what is being measured. What is here is the
+/// quantization, which the surfaces must share or two of them will band the
+/// same intensity differently.
+///
+/// Clamped at both ends: an intensity past 1 saturates rather than indexing off
+/// the ramp, and one the caller could not compute (a NaN out of a division by
+/// zero) reads as the dimmest step rather than as the brightest — a failed
+/// measurement must not render as the loudest cell on the surface.
+pub fn step(intensity: f64) -> u8 {
+    if !intensity.is_finite() {
+        return 1;
+    }
+    let crossed = (intensity.clamp(0.0, 1.0) * STEPS as f64) as u8;
+    (1 + crossed).min(STEPS)
+}
+
 /// Which step a magnitude lands on against explicit band edges, `1..=STEPS`.
 ///
 /// The last edge only bites through the clamp, which is the intent: the ramp
@@ -53,6 +73,23 @@ pub fn style(step: u8, dim: Color, bright: Color) -> Style {
 mod tests {
     use super::*;
     use crate::theme::theme;
+
+    #[test]
+    fn an_intensity_quantizes_into_six_even_steps_and_then_saturates() {
+        // The sixth band is entered at five sixths and never left: an intensity
+        // the caller already clamped at 1 must not index a seventh step.
+        assert_eq!(step(0.0), 1);
+        assert_eq!(step(1.0 / 6.0 - 1e-9), 1);
+        assert_eq!(step(1.0 / 6.0), 2);
+        assert_eq!(step(0.5), 4);
+        assert_eq!(step(5.0 / 6.0), 6);
+        assert_eq!(step(1.0), 6);
+        // Neither end runs off the ramp, whatever the caller's arithmetic did.
+        assert_eq!(step(9.0), 6);
+        assert_eq!(step(-1.0), 1);
+        assert_eq!(step(f64::NAN), 1);
+        assert_eq!(step(f64::INFINITY), 1);
+    }
 
     #[test]
     fn explicit_edges_band_where_they_are_written_and_then_saturate() {

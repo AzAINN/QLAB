@@ -1,14 +1,16 @@
-//! BOOK's stats ribbon, pinned as a whole frame plus the facts a golden cannot state.
+//! BOOK's four panes, pinned as a whole frame plus the facts a golden cannot state.
 //!
-//! The ribbon is the desk's single account of its own headline numbers, so most
-//! of these tests are about what it must *not* do: invent a zero for a number
-//! the owner never sent, state the equity twice, keep drawing when its cells are
-//! too narrow for the digits in them, or stay silent about a halted book.
+//! The ribbon is the desk's single account of its own headline numbers, the
+//! blotter is the book position by position, the rail shades it and the curve
+//! draws where it has been. Most of these tests are about what those must *not*
+//! do: invent a zero for a number the owner never sent, state the equity twice,
+//! keep drawing when a pane is too small for the digits in it, or stay silent
+//! about a halted book.
 //!
 //! Content assertions go through `content`, the columns this view owns. The
 //! ticker tape along the top and the pulse rail down the right render prices,
 //! percentages and `--` of their own, so a pin on the whole frame could pass on
-//! chrome and say nothing about the ribbon.
+//! chrome and say nothing about the view under it.
 
 mod harness;
 
@@ -48,7 +50,7 @@ fn book_from(json: &str) -> Client {
 }
 
 #[test]
-fn the_book_view_renders_the_ribbon_at_120x36() {
+fn the_book_view_renders_its_four_panes_at_120x36() {
     insta::assert_snapshot!(book().frame(120, 36));
 }
 
@@ -273,16 +275,19 @@ fn a_pane_too_short_for_three_rows_refuses_rather_than_dropping_one() {
 }
 
 #[test]
-fn the_rest_of_the_book_names_the_task_that_fills_it() {
-    // "Nothing here yet" and "this broke" have to be distinguishable at a
-    // glance for as long as this branch is half-built. Task 12 is no longer
-    // named because the blotter under the ribbon *is* Task 12.
+fn the_book_names_no_task_because_every_pane_of_it_is_built() {
+    // BOOK carried a placeholder line naming the task that would fill it for as
+    // long as it was half-built. All four panes are here now, so the line is
+    // gone — and a view that still advertised pending work would be the same
+    // "nothing here yet" ambiguity in reverse.
     let content = content(&book().frame(120, 36));
-    assert!(content.contains("Task 13"), "{content}");
     assert!(
-        !content.contains("Task 12"),
-        "the blotter is built and still advertised as pending:\n{content}"
+        !content.contains("Task"),
+        "a built view still names a task:\n{content}"
     );
+    for pane in ["PORTFOLIO VALUE", "POSITIONS", "EQUITY", "HOLDINGS"] {
+        assert!(content.contains(pane), "{pane} is missing:\n{content}");
+    }
 }
 
 // -- the blotter -----------------------------------------------------------
@@ -358,7 +363,12 @@ fn blotter_rows(client: &Client, w: u16, h: u16) -> Vec<String> {
         .unwrap_or_else(|| panic!("the blotter drew no column header:\n{content}"));
     lines[header + 1..]
         .iter()
-        .take_while(|l| !l.is_empty() && !l.contains("sort"))
+        // Stopping on a blank row is not enough once the footer sits directly
+        // under a full blotter: at the heights the pager tests use there is no
+        // blank between them, and the heat tiles would be counted as positions.
+        // `▌ ` is a panel header — a selected blotter row's marker is `▌BNDW`,
+        // with no space — so it is the one prefix that says "a new pane".
+        .take_while(|l| !l.is_empty() && !l.contains("sort") && !l.starts_with("▌ "))
         .cloned()
         .collect()
 }
@@ -398,10 +408,15 @@ fn the_blotter_does_not_restate_a_headline_the_ribbon_owns() {
     // is a second account of it. The blotter's money is per position.
     let content = content(&book().frame(120, 36));
     assert_eq!(content.matches("$10,000.00").count(), 1, "{content}");
+    // Read off the blotter's own column header rather than the whole view: the
+    // curve at the foot is headed EQUITY, and it is a *series* rather than a
+    // second statement of today's number — its scale runs $9,987.10 to
+    // $10,012.40 and states the hero figure nowhere.
+    let columns = line_with(&content, "SYMBOL");
     for header in ["EQUITY", "CASH", "TOTAL"] {
         assert!(
-            !content.contains(header),
-            "the blotter grew a {header} column:\n{content}"
+            !columns.contains(header),
+            "the blotter grew a {header} column: {columns}"
         );
     }
 }
@@ -654,6 +669,15 @@ fn sorting_by_symbol_is_alphabetical_and_the_rest_are_biggest_first() {
     assert_eq!(blotter_symbols(&client, 120, 36), vec!["AAA", "ZZZ"]);
 }
 
+/// The frame height at which the blotter gets exactly five rows for positions.
+///
+/// The tape and the status line take one each, the ribbon four, the footer ten,
+/// and the blotter spends two of what is left on its panel header and its
+/// column header. Spelled once here because Task 13's footer moved every one of
+/// these numbers, and a page size hard-coded in six tests is six places to
+/// re-derive it the next time a band changes height.
+const PAGE_5: u16 = 23;
+
 #[test]
 fn the_pager_appears_only_when_the_rows_outrun_the_rows_they_were_given() {
     // Twelve positions in a pane with five rows for them: three pages.
@@ -663,7 +687,7 @@ fn the_pager_appears_only_when_the_rows_outrun_the_rows_they_were_given() {
         !tall.contains("1/"),
         "a blotter that fits drew a pager anyway:\n{tall}"
     );
-    let short = content(&client.frame(120, 15));
+    let short = content(&client.frame(120, PAGE_5));
     assert!(short.contains("1/3"), "{short}");
     assert!(short.contains('»'), "{short}");
 }
@@ -671,36 +695,36 @@ fn the_pager_appears_only_when_the_rows_outrun_the_rows_they_were_given() {
 #[test]
 fn the_page_size_is_the_rows_the_blotter_was_given_and_not_the_frame() {
     // Task 9's lesson: the pane is not the allocation. Sized off the frame the
-    // page would be eleven rows too long and the pager would claim one page.
+    // page would be nineteen rows too long and the pager would claim one page.
     let client = book_of(12);
-    assert_eq!(blotter_symbols(&client, 120, 15).len(), 5);
-    assert_eq!(blotter_symbols(&client, 120, 16).len(), 6);
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5).len(), 5);
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5 + 1).len(), 6);
 }
 
 #[test]
 fn the_bracket_keys_walk_the_pages_and_stop_at_both_ends() {
     let mut client = book_of(12);
-    let _ = client.frame(120, 15); // the draw is what tells the view its page size
-    assert_eq!(blotter_symbols(&client, 120, 15)[0], "P00");
+    let _ = client.frame(120, PAGE_5); // the draw tells the view its page size
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5)[0], "P00");
 
     client.press(KeyCode::Char(']'));
-    assert_eq!(blotter_symbols(&client, 120, 15)[0], "P05");
-    assert!(content(&client.frame(120, 15)).contains("2/3"));
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5)[0], "P05");
+    assert!(content(&client.frame(120, PAGE_5)).contains("2/3"));
 
     client.press(KeyCode::Char(']'));
-    assert_eq!(blotter_symbols(&client, 120, 15)[0], "P10");
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5)[0], "P10");
     client.press(KeyCode::Char(']'));
     assert_eq!(
-        blotter_symbols(&client, 120, 15)[0],
+        blotter_symbols(&client, 120, PAGE_5)[0],
         "P10",
         "the last page wrapped"
     );
 
     client.press(KeyCode::Char('['));
-    assert_eq!(blotter_symbols(&client, 120, 15)[0], "P05");
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5)[0], "P05");
     client.keys(&[KeyCode::Char('['); 3]);
     assert_eq!(
-        blotter_symbols(&client, 120, 15)[0],
+        blotter_symbols(&client, 120, PAGE_5)[0],
         "P00",
         "the first page wrapped"
     );
@@ -712,13 +736,13 @@ fn a_resize_keeps_the_row_that_was_at_the_top_at_the_top() {
     // size it lands somewhere the operator never scrolled to. The top row is
     // what is kept, and the page number is recomputed from it.
     let mut client = book_of(12);
-    let _ = client.frame(120, 15);
+    let _ = client.frame(120, PAGE_5);
     client.press(KeyCode::Char(']'));
-    assert_eq!(blotter_symbols(&client, 120, 15)[0], "P05");
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5)[0], "P05");
 
     // Five rows a page becomes ten. A page index of 2 would put P10 on top.
     assert_eq!(
-        blotter_symbols(&client, 120, 20)[0],
+        blotter_symbols(&client, 120, PAGE_5 + 5)[0],
         "P05",
         "the resize moved the operator somewhere they did not scroll to"
     );
@@ -727,9 +751,9 @@ fn a_resize_keeps_the_row_that_was_at_the_top_at_the_top() {
 #[test]
 fn a_book_that_shrinks_under_the_cursor_cannot_page_off_the_end() {
     let mut client = book_of(12);
-    let _ = client.frame(120, 15);
+    let _ = client.frame(120, PAGE_5);
     client.keys(&[KeyCode::Char(']'); 2]);
-    assert_eq!(blotter_symbols(&client, 120, 15)[0], "P10");
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5)[0], "P10");
     // The owner closes everything but two positions.
     client.store.apply(
         AppEvent::Snapshot(Box::new(
@@ -742,7 +766,7 @@ fn a_book_that_shrinks_under_the_cursor_cannot_page_off_the_end() {
         )),
         client.now,
     );
-    assert_eq!(blotter_symbols(&client, 120, 15), vec!["P00", "P01"]);
+    assert_eq!(blotter_symbols(&client, 120, PAGE_5), vec!["P00", "P01"]);
 }
 
 #[test]
@@ -787,9 +811,20 @@ fn a_pane_below_the_blotters_floor_refuses_rather_than_clipping_a_number() {
 fn a_blotter_with_no_room_for_a_row_says_so_rather_than_drawing_a_header() {
     // A header and a pager over zero rows is a blotter that says the book is
     // empty. It says the pane is instead.
-    let content = content(&book().frame(120, 10));
-    assert!(content.contains("positions blotter needs"), "{content}");
-    assert!(content.contains("taller"), "{content}");
+    //
+    // Eight rows is where that now bites: the footer's height is arithmetic
+    // rather than a constraint, so the blotter keeps its own three rows until
+    // there are not three left to keep — a footer that survived by pushing the
+    // book off the screen would be a trade-off nobody chose.
+    let refused = content(&book().frame(120, 8));
+    assert!(refused.contains("positions blotter needs"), "{refused}");
+    assert!(refused.contains("taller"), "{refused}");
+    // Bracketed: one row more and the blotter has its floor back.
+    let admitted = content(&book().frame(120, 9));
+    assert!(
+        admitted.contains("SYMBOL"),
+        "the blotter refused a pane it fits in:\n{admitted}"
+    );
 }
 
 #[test]
@@ -824,9 +859,348 @@ fn a_position_the_owner_sent_no_ticker_for_is_still_a_row() {
     );
 }
 
+// -- the holdings rail -----------------------------------------------------
+
+/// A book of four holdings, one of each thing a tile can be: a runaway winner,
+/// a loser inside the ramp, a position that has not moved, and one the owner
+/// sent no P&L for at all.
+fn shaded_book() -> Client {
+    book_from(
+        r#"{"live_portfolio": {"equity": 1000.0, "positions": [
+             {"ticker": "UPUP", "qty": 1.0, "value": 400.0, "weight": 0.4,
+              "unrealized_pnl": 80.0, "unrealized_pnl_pct": 0.25},
+             {"ticker": "DOWN", "qty": 1.0, "value": 200.0, "weight": 0.2,
+              "unrealized_pnl": -7.0, "unrealized_pnl_pct": -0.034},
+             {"ticker": "EVEN", "qty": 1.0, "value": 100.0, "weight": 0.1,
+              "unrealized_pnl": 0.0, "unrealized_pnl_pct": 0.0},
+             {"ticker": "QUIET", "qty": 1.0, "value": 50.0}]}}"#,
+    )
+}
+
+/// The view read back as one line, with the wrapping taken back out.
+///
+/// A refusal is a wrapped `Paragraph` by design — a remedy clipped to `make the
+/// terminal ta` is one an operator cannot act on — so in a 23-cell rail its
+/// sentence is spread over five rows. Pinning it needs the sentence, not the
+/// row it happened to break on.
+fn flat(content: &str) -> String {
+    content
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The two rows under the rail's `TOP MOVERS` header, trimmed.
+///
+/// Read by position rather than by searching for a ticker: the movers restate
+/// names the blotter and the heat grid have already drawn, so a search would
+/// find whichever of the three came first in the frame.
+fn movers_lines(content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.contains("TOP MOVERS"))
+        .unwrap_or_else(|| panic!("the rail drew no movers footer:\n{content}"));
+    lines[at + 1..]
+        .iter()
+        .take(2)
+        // `content` keeps the shell's own rules on both edges of every row, so
+        // an otherwise blank row reads as `│  …  │` rather than as empty.
+        .map(|l| l.trim_matches(|c| c == '│' || c == ' ').to_string())
+        .collect()
+}
+
+#[test]
+fn the_rail_shades_every_holding_by_the_open_pnl_it_carries() {
+    // Eleven cells a tile: a five-cell ticker and the six the percentage gets.
+    // The pins are on whole tiles rather than on tickers, because every one of
+    // these names is also a blotter row two panes up.
+    let client = shaded_book();
+    let content = content(&client.frame(120, 36));
+    for tile in ["UPUP +25.0%", "DOWN  -3.4%", "EVEN  +0.0%", "QUIET    --"] {
+        assert!(content.contains(tile), "no tile {tile:?}:\n{content}");
+    }
+
+    let buf = client.buffer(120, 36);
+    let t = Theme::truecolor();
+    // A quarter is past the twenty-percent full scale, so it saturates at the
+    // brightest step rather than setting a scale of its own.
+    assert_eq!(
+        cell_style_on(&buf, "UPUP +25.0%", "UPUP").bg,
+        Some(t.positive)
+    );
+    // 3.4% is one band in: the dim tone on the second depth level, and it is
+    // the *negative* pair, so magnitude and direction are two separate reads.
+    assert_eq!(
+        cell_style_on(&buf, "DOWN  -3.4%", "DOWN").fg,
+        Some(t.negative_dim)
+    );
+    // Flat is neither. `Theme::change` paints zero green, which would make a
+    // paper book that opened flat a rail of green tiles.
+    let even = cell_style_on(&buf, "EVEN  +0.0%", "EVEN");
+    assert_eq!(even.fg, Some(t.text_primary));
+    assert_eq!(even.bg, Some(t.bg_base));
+    // And absent is not flat: the tone for "the owner declined to say".
+    assert_eq!(
+        cell_style_on(&buf, "QUIET    --", "QUIET").fg,
+        Some(t.text_secondary)
+    );
+}
+
+#[test]
+fn the_h_key_swaps_the_pnl_ramp_for_an_amber_allocation_one() {
+    // Two questions, one rail: what is winning, and where is the money. The
+    // second has no direction, so it cannot borrow the semantic pair.
+    let mut client = shaded_book();
+    client.press(KeyCode::Char('h'));
+    let weights = content(&client.frame(120, 36));
+    for tile in ["UPUP  40.0%", "DOWN  20.0%", "EVEN  10.0%"] {
+        assert!(weights.contains(tile), "no tile {tile:?}:\n{weights}");
+    }
+    assert!(
+        !weights.contains("+40.0%"),
+        "a weight was drawn with a P&L's sign:\n{weights}"
+    );
+
+    let buf = client.buffer(120, 36);
+    let t = Theme::truecolor();
+    assert_eq!(
+        cell_style_on(&buf, "UPUP  40.0%", "UPUP").bg,
+        Some(t.accent)
+    );
+    assert_ne!(
+        cell_style_on(&buf, "UPUP  40.0%", "UPUP").bg,
+        Some(t.positive),
+        "an allocation was drawn as a gain"
+    );
+    // The header says which of the two is live, so the operator is never
+    // reading a percentage without knowing what it measures.
+    assert!(weights.contains("h WT"), "{weights}");
+
+    // And back: the toggle is a cycle, not a one-way switch.
+    client.press(KeyCode::Char('h'));
+    let back = content(&client.frame(120, 36));
+    assert!(back.contains("UPUP +25.0%"), "{back}");
+    assert!(back.contains("h P&L"), "{back}");
+}
+
+#[test]
+fn the_movers_name_the_two_ends_of_the_whole_book() {
+    // The ends of the book, not of the page: an operator turning to page two
+    // has not changed which name is winning.
+    let content = content(&shaded_book().frame(120, 36));
+    let movers = movers_lines(&content);
+    assert!(movers[0].contains("best"), "{movers:?}");
+    assert!(movers[0].contains("UPUP"), "{movers:?}");
+    assert!(movers[0].contains("+25.0%"), "{movers:?}");
+    assert!(movers[0].contains('▲'), "{movers:?}");
+    assert!(movers[1].contains("worst"), "{movers:?}");
+    assert!(movers[1].contains("DOWN"), "{movers:?}");
+    assert!(movers[1].contains("-3.4%"), "{movers:?}");
+    assert!(movers[1].contains('▼'), "{movers:?}");
+}
+
+#[test]
+fn a_book_of_one_position_is_its_own_only_mover() {
+    // Two identical rows would read as two movers, which is a desk this client
+    // is not looking at. The rail borrows the pulse's own wording for it.
+    let content = content(
+        &book_from(
+            r#"{"live_portfolio": {"equity": 100.0, "positions": [
+                 {"ticker": "SOLO", "qty": 1.0, "value": 100.0, "weight": 1.0,
+                  "unrealized_pnl": 5.0, "unrealized_pnl_pct": 0.05}]}}"#,
+        )
+        .frame(120, 36),
+    );
+    let movers = movers_lines(&content);
+    assert!(movers[0].contains("only"), "{movers:?}");
+    assert!(movers[0].contains("SOLO"), "{movers:?}");
+    assert!(
+        !movers[1].contains("SOLO"),
+        "one holding was drawn as two movers:\n{movers:?}"
+    );
+}
+
+#[test]
+fn a_flat_book_gets_no_arrow_it_did_not_earn() {
+    // A ▲ over `+0.0%` is a rise the desk did not make, and the fixture book —
+    // a paper desk that has just opened — is exactly that book.
+    let movers = movers_lines(&content(&book().frame(120, 36)));
+    assert!(movers[0].contains('·'), "{movers:?}");
+    assert!(
+        !movers[0].contains('▲') && !movers[0].contains('▼'),
+        "a book that has not moved was given a direction:\n{movers:?}"
+    );
+}
+
+#[test]
+fn a_book_with_nothing_in_it_has_no_movers_rather_than_a_zero() {
+    // `--`, not `+0.00%`: a book with no positions has no best one, and a
+    // percentage here would be a measurement of an empty set.
+    let content = content(
+        &book_from(r#"{"live_portfolio": {"equity": 1000.0, "positions": []}}"#).frame(120, 36),
+    );
+    let movers = movers_lines(&content);
+    assert!(movers[0].ends_with("--"), "{movers:?}");
+    // And the grid above it says nothing at all: the blotter two panes up
+    // already names which kind of nothing this is, and a second copy of the
+    // same sentence reads as two separate failures.
+    assert_eq!(
+        content.matches("no positions").count(),
+        1,
+        "the empty book is stated twice:\n{content}"
+    );
+}
+
+#[test]
+fn a_heatmap_with_more_holdings_than_rows_says_so_rather_than_dropping_one() {
+    // The same sub-floor class as the sector strip: a `Paragraph` taller than
+    // its area is clipped without complaint, and a book missing its last two
+    // names is a rail that says the desk does not hold them.
+    let refused = flat(&content(&book_of(20).frame(120, 36)));
+    assert!(
+        refused.contains("holdings heatmap needs 10 rows for 20 positions"),
+        "{refused}"
+    );
+    assert!(refused.contains("this pane has 6"), "{refused}");
+    assert!(refused.contains("taller"), "{refused}");
+    // Bracketed: twelve fit the six rows the rail gives the grid, two to a row.
+    assert!(
+        !content(&book_of(12).frame(120, 36)).contains("holdings heatmap needs"),
+        "a book that fits was refused"
+    );
+}
+
+// -- the equity curve ------------------------------------------------------
+
+/// A book whose owner has booked `n` marks, each one a dollar above the last.
+///
+/// Rising monotonically so that every period slice has a different *bottom* to
+/// its scale: a window that silently drew the whole series would otherwise be
+/// indistinguishable from one that drew the trailing part of it.
+fn book_with_marks(n: usize) -> Client {
+    let points: Vec<String> = (0..n)
+        .map(|i| format!(r#"{{"ts": "2026-01-01", "equity": {}.0}}"#, 1000 + i))
+        .collect();
+    book_from(&format!(
+        r#"{{"live_portfolio": {{"equity": 1.0, "positions": []}},
+             "performance": {{"series": [{}]}}}}"#,
+        points.join(",")
+    ))
+}
+
+#[test]
+fn the_curve_draws_the_owners_series_against_a_money_scale() {
+    // The gutter is the series' own range, spelled as money: `compact_money`
+    // would render four identical `$10.00K` labels on a book that moved a
+    // hundred dollars, which is a scale with no scale on it.
+    let content = content(&book().frame(120, 36));
+    assert!(
+        content.contains("$10,012.40"),
+        "the top of the scale:\n{content}"
+    );
+    assert!(
+        content.contains("$9,987.10"),
+        "the bottom of the scale:\n{content}"
+    );
+    // And the line itself: a scale with nothing plotted against it is a gutter.
+    assert!(
+        content
+            .chars()
+            .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)),
+        "the curve drew no line:\n{content}"
+    );
+}
+
+#[test]
+fn the_p_key_cycles_the_slice_and_the_strip_says_which_one_is_live() {
+    // Four hundred marks, so every window is a different slice of them: at
+    // three of the four, a curve that quietly drew the whole series would show
+    // a bottom label it has no business showing.
+    let mut client = book_with_marks(400);
+    let t = Theme::truecolor();
+    for (period, floor) in [
+        ("ALL", "$1,000.00"),
+        ("1Y", "$1,035.00"),
+        ("3M", "$1,337.00"),
+        ("1M", "$1,379.00"),
+    ] {
+        let content = content(&client.frame(120, 36));
+        assert!(
+            content.contains(floor),
+            "{period} did not slice to {floor}:\n{content}"
+        );
+        // The top of the scale is the same mark whatever the window: every
+        // slice is a *trailing* one, so they all end at the latest mark.
+        assert!(content.contains("$1,399.00"), "{content}");
+        let buf = client.buffer(120, 36);
+        assert_eq!(
+            cell_style_on(&buf, "p period", period).fg,
+            Some(t.text_primary),
+            "{period} is live and the strip does not say so:\n{content}"
+        );
+        client.press(KeyCode::Char('p'));
+    }
+    // The cycle closes: a fifth press is back at the whole series.
+    assert!(content(&client.frame(120, 36)).contains("$1,000.00"));
+}
+
+#[test]
+fn a_slice_with_one_mark_asks_for_more_history_rather_than_drawing_a_dot() {
+    // The honest analogue of a greyed-out period button. One mark rendered as a
+    // point in the middle of an empty pane is a chart of nothing, and a flat
+    // line through it is a chart of something that did not happen.
+    let content = content(&book_with_marks(1).frame(120, 36));
+    assert!(content.contains("needs more history"), "{content}");
+    assert!(content.contains("daily marks only"), "{content}");
+    assert!(
+        !content.contains("$1,000.00"),
+        "a scale was drawn for a series with nothing to plot:\n{content}"
+    );
+}
+
+#[test]
+fn a_desk_that_has_booked_no_series_says_that_rather_than_asking_for_history() {
+    // Two different facts: the owner sent no performance section at all, and
+    // the owner sent one the window is too short to draw. One sentence for both
+    // would hide a broken poll behind a young book.
+    let content = content(&book_from(r#"{"live_portfolio": {"equity": 1.0}}"#).frame(120, 36));
+    assert!(content.contains("no equity series"), "{content}");
+    assert!(!content.contains("needs more history"), "{content}");
+}
+
+#[test]
+fn a_footer_below_its_floor_refuses_rather_than_handing_the_curve_no_columns() {
+    // Split without a floor, a narrow footer gives the rail its fixed 23 and
+    // the curve whatever is left — which at some widths is nothing, and a pane
+    // with no cells in it has nowhere to print the refusal it owes. So the band
+    // says it once, before the split.
+    let refused = flat(&content(&book().frame(85, 30)));
+    assert!(
+        refused.contains("book footer needs 43 columns for an equity curve"),
+        "{refused}"
+    );
+    assert!(refused.contains("this pane has 42"), "{refused}");
+    assert!(refused.contains("widen"), "{refused}");
+    assert!(
+        !refused.contains("HOLDINGS") && !refused.contains("$10,012.40"),
+        "half a footer survived below the floor:\n{refused}"
+    );
+
+    // Bracketed: one column more and both panes draw, curve scale included.
+    let admitted = content(&book().frame(86, 30));
+    assert!(admitted.contains("HOLDINGS"), "{admitted}");
+    assert!(
+        admitted.contains("$10,012.40"),
+        "the curve lost its scale at the boundary:\n{admitted}"
+    );
+}
+
 #[test]
 fn a_narrow_terminal_still_renders_the_book_without_panicking() {
-    let client = book();
+    let mut client = book();
+    client.keys(&[KeyCode::Char('h'), KeyCode::Char('p')]);
     for (w, h) in [
         (40u16, 12u16),
         (20, 8),
@@ -834,6 +1208,8 @@ fn a_narrow_terminal_still_renders_the_book_without_panicking() {
         (200, 60),
         (1, 1),
         (34, 3),
+        (44, 9),
+        (86, 9),
     ] {
         let _ = client.frame(w, h);
     }

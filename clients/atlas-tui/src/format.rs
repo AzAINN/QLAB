@@ -133,6 +133,19 @@ pub fn signed_pct(fraction: f64) -> String {
     format!("{}{}%", if negative { "-" } else { "+" }, digits)
 }
 
+/// A fraction as a signed percentage at 1 dp: `0.0123` → `+1.2%`.
+///
+/// The heat cell's spelling. `signed_pct` runs to eight cells at three figures
+/// and a holding cell is eleven wide including its ticker; the second decimal is
+/// the one thing on that cell a colour ramp has not already said. Signed, unlike
+/// `pct1`, because the direction is the whole question a P&L cell answers.
+pub fn signed_pct1(fraction: f64) -> String {
+    let Some((negative, digits)) = fixed(fraction * 100.0, 1) else {
+        return MISSING.to_string();
+    };
+    format!("{}{}%", if negative { "-" } else { "+" }, digits)
+}
+
 /// A fraction as an unsigned-unless-negative percentage at 1 dp — weights,
 /// allocations, exposures, where two decimals is more precision than the
 /// number carries.
@@ -350,6 +363,11 @@ mod tests {
         assert_eq!(signed_pct(-0.0018), "-0.18%");
         assert_eq!(pct1(0.2534), "25.3%");
         assert_eq!(pct1(-0.125), "-12.5%");
+        // One decimal and always signed — the heat cell's eleven columns hold a
+        // ticker and this, and a `+` is the half of it a ramp cannot state.
+        assert_eq!(signed_pct1(0.0123), "+1.2%");
+        assert_eq!(signed_pct1(-0.1254), "-12.5%");
+        assert_eq!(signed_pct1(0.0), "+0.0%");
     }
 
     #[test]
@@ -365,6 +383,7 @@ mod tests {
         assert_eq!(pct1(f64::NAN), "--");
         assert_eq!(signed_money(f64::NAN), "--");
         assert_eq!(signed_pct(f64::NAN), "--");
+        assert_eq!(signed_pct1(f64::NAN), "--");
         assert_eq!(arrow_chg(f64::NAN).0, "--");
         assert_eq!(MISSING, "--");
         assert_ne!(MISSING, PENDING);

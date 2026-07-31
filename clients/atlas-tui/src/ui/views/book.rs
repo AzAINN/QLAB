@@ -2,11 +2,18 @@
 //!
 //! The ribbon is the workstation's single account of its headline KPIs: what the
 //! book is worth, what it is up or down, what the window did, and how it is
-//! positioned. Everything under it — the blotter here, the allocation heatmap
-//! and the equity chart (Task 13) — reads positions and series, never these
-//! aggregates. One panel repeating the equity is a second account of it, and two
-//! accounts of one number is how a desk ends up trusting neither. The blotter
-//! carries no equity, no cash and no total P&L for exactly that reason.
+//! positioned. Everything under it — the blotter, the holdings heatmap and the
+//! equity curve — reads positions and series, never these aggregates. One panel
+//! repeating the equity is a second account of it, and two accounts of one
+//! number is how a desk ends up trusting neither. The blotter carries no equity,
+//! no cash and no total P&L for exactly that reason.
+//!
+//! The heatmap is a rail beside the curve at the foot of the view rather than
+//! beside the blotter, which is where the plan drew it. It cannot go there: the
+//! blotter's nine columns need 75 cells and the workstation's baseline frame
+//! hands this view 77, so a rail up there would refuse on every terminal anyone
+//! actually opens. The rail is 23 cells of the curve's width instead, which the
+//! curve can spare and the blotter cannot.
 //!
 //! Every number comes from `live_portfolio` (the mark-to-market view) and
 //! `performance` (the realized-metrics bundle). The registry's own `portfolio`
@@ -23,22 +30,22 @@
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::{FlashKey, FlashTracker};
-use crate::model::{LivePortfolio, Metrics, Performance, Position};
+use crate::model::{EquityPoint, LivePortfolio, Metrics, Performance, Position};
 use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
 // The ribbon is one panel — one rule under a band of four cells — so it takes
 // `panel_block` and heads its cells with `label` rather than `panel_header`:
 // four amber bars across one band would read as four panels.
-use crate::ui::widgets::table_cell::{cell, LEFT, RIGHT};
+use crate::ui::widgets::table_cell::{cell, head, LEFT, RIGHT};
 use crate::ui::widgets::tristate_spark::{self, SPARK_W};
-use crate::ui::widgets::{panel_block, panel_header, refuse};
+use crate::ui::widgets::{braille_chart, heat_cell, panel_block, panel_header, refuse};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Row, Table, Wrap},
+    widgets::{Paragraph, Row, Table},
     Frame,
 };
 use std::cell::Cell;
@@ -89,18 +96,25 @@ const CHIP_LABEL_W: usize = 6;
 /// it would cost a digit off a percentage.
 const RIBBON_W: u16 = 74;
 
-/// The rows Task 13's panels are held out of the blotter's share.
+/// The rows the footer takes from the blotter's share.
 ///
-/// Two rather than none, because "nothing here yet" and "this pane failed to
-/// draw" have to stay distinguishable while this branch is half-built.
-const REST_H: u16 = 2;
+/// Ten: the curve's header and nine rows of canvas, which is also the rail's
+/// header, six rows of holdings and the three its movers need. A shorter band
+/// would put the curve under its own four-row floor at the workstation's
+/// baseline height, and a chart that refuses on every terminal is not a chart.
+const BOTTOM_H: u16 = 10;
 
-/// Where the operator is looking in the blotter. Never what the desk says —
-/// that is the `Store`'s, and a view that held a copy would be a second account
-/// of it.
+/// Where the operator is looking in the blotter, the heatmap and the curve.
+/// Never what the desk says — that is the `Store`'s, and a view that held a copy
+/// would be a second account of it.
 #[derive(Default)]
 pub struct BookView {
     sort: Sort,
+    /// Which quantity the holdings rail is shaded by, and which slice of the
+    /// series the curve draws. Both are where the operator is looking, so both
+    /// live here and survive a trip through another view.
+    heat: Heat,
+    period: Period,
     /// The first blotter row on screen, as an index into the *sorted* rows.
     ///
     /// The scroll position is kept as a row and not as a page number: a stored
@@ -123,10 +137,16 @@ impl View for BookView {
     fn draw(&self, f: &mut Frame, area: Rect, store: &Store, fx: &FlashTracker, now: Instant) {
         let rows = Layout::vertical([Constraint::Length(RIBBON_H), Constraint::Min(0)]).split(area);
         draw_ribbon(f, rows[0], store);
+        // The band's height is arithmetic rather than a constraint, so the
+        // blotter keeps its floor and the footer is what shrinks. Handed to the
+        // solver as two constraints, a short pane resolves in the solver's
+        // favour and not the desk's: the footer would survive by pushing the
+        // book itself off the screen, which is a trade-off nobody chose.
+        let bottom = BOTTOM_H.min(rows[1].height.saturating_sub(BLOTTER_H));
         let under =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(REST_H)]).split(rows[1]);
+            Layout::vertical([Constraint::Min(0), Constraint::Length(bottom)]).split(rows[1]);
         self.draw_blotter(f, under[0], store, fx, now);
-        draw_rest(f, under[1]);
+        self.draw_footer(f, under[1], store);
     }
 
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
@@ -145,6 +165,10 @@ impl View for BookView {
             }
             KeyCode::Char(']') => self.page_to(self.top + page, rows, page),
             KeyCode::Char('[') => self.page_to(self.top.saturating_sub(page), rows, page),
+            // Neither touches the blotter: the rail shades the same rows the
+            // blotter orders, and the curve is a different section entirely.
+            KeyCode::Char('h') => self.heat = self.heat.next(),
+            KeyCode::Char('p') => self.period = self.period.next(),
             // Both ends are walls, not wraps, exactly as the markets grid: an
             // operator holding an arrow must land on the first or last row,
             // never at the other end of a book they did not scroll to.
@@ -215,6 +239,16 @@ impl BookView {
     #[cfg(test)]
     pub(crate) fn top(&self) -> usize {
         self.top
+    }
+
+    #[cfg(test)]
+    pub(crate) fn heat(&self) -> Heat {
+        self.heat
+    }
+
+    #[cfg(test)]
+    pub(crate) fn period(&self) -> Period {
+        self.period
     }
 }
 
@@ -1127,25 +1161,462 @@ fn qty(value: f64) -> String {
     }
 }
 
-/// What the rest of the view is, while it is not built yet.
+// -- the footer: the equity curve, and the holdings rail beside it -----------
+
+/// One holding cell: a five-cell ticker and the six-cell percentage beside it.
 ///
-/// Named rather than left empty: for as long as this branch is half-built,
-/// "nothing here yet" and "this pane failed to draw" have to be distinguishable
-/// at a glance. Wrapped, because at 100 columns the unwrapped line is cut to
-/// `…and equi` — a half-sentence reads as a rendering fault, which is the one
-/// thing this line exists to rule out.
-fn draw_rest(f: &mut Frame, area: Rect) {
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "allocation heatmap and equity chart — Task 13",
-                Style::default().fg(theme().text_dim),
-            )),
+/// Five is the longest ticker the owner's universes carry (`XLRE`, `GOOGL`);
+/// six is `-123.4%`'s worth less its last digit, which is what `head` costs a
+/// runaway loss rather than costing it the sign.
+const HOLD_W: u16 = 11;
+
+/// Two columns of holdings, and the cell between them.
+///
+/// Two rather than three because the movers under them are 22 cells wide — a
+/// glyph, a role, a ticker and a percentage — and a rail whose footer is wider
+/// than its grid reads as two panels that happen to be stacked.
+const RAIL_W: u16 = HOLD_W * 2 + 1;
+
+/// The rail's header, one row of holdings, and its movers footer.
+const RAIL_H: u16 = 1 + 1 + MOVERS_H;
+
+/// The movers footer: its header and the two rows under it.
+const MOVERS_H: u16 = 3;
+
+/// The narrowest curve pane worth splitting the footer for.
+///
+/// A `$10,012.40` scale and the cell that keeps it off the line, plus the eight
+/// columns of plot `braille_chart` holds itself to. Spelled here as well because
+/// the split happens before the chart sees anything: without it a narrow footer
+/// hands the curve a pane with no cells in it, where a refusal has nowhere to be
+/// drawn. The chart's own guard is the exact one — this is only what says the
+/// band is worth splitting at all — and a test pins the two together.
+const CURVE_W: u16 = 19;
+
+/// The footer's floor: the rail, the cell between the panes, and the curve.
+const BOTTOM_W: u16 = RAIL_W + 1 + CURVE_W;
+
+/// Which quantity the holdings rail is shaded by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Heat {
+    /// Open P&L, on the semantic pair: green up, red down.
+    #[default]
+    Pnl,
+    /// Allocation, on the accent pair: a weight has a size and no direction.
+    Weight,
+}
+
+impl Heat {
+    fn next(self) -> Heat {
+        match self {
+            Heat::Pnl => Heat::Weight,
+            Heat::Weight => Heat::Pnl,
+        }
+    }
+
+    /// What the header calls the live mode. Not `P&L%`/`WT%`: those are blotter
+    /// column names, and a rail that borrowed them would read as a third view of
+    /// the same two columns rather than as a shading of the whole book.
+    fn label(self) -> &'static str {
+        match self {
+            Heat::Pnl => "P&L",
+            Heat::Weight => "WT",
+        }
+    }
+}
+
+/// Which slice of the equity series the curve draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Period {
+    #[default]
+    All,
+    Y1,
+    M3,
+    M1,
+}
+
+impl Period {
+    /// The cycle `p` walks, longest first — the same direction the eye reads the
+    /// row in, so the key and the strip agree about which way is "shorter".
+    const ALL: [Period; 4] = [Period::All, Period::Y1, Period::M3, Period::M1];
+
+    fn next(self) -> Period {
+        let at = Period::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Period::ALL[(at + 1) % Period::ALL.len()]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Period::All => "ALL",
+            Period::Y1 => "1Y",
+            Period::M3 => "3M",
+            Period::M1 => "1M",
+        }
+    }
+
+    /// How many trailing marks the slice keeps, or the whole series.
+    ///
+    /// Marks, not days. The owner's `performance.series` is one point per
+    /// booked mark and it is not guaranteed dense — a desk that was down for a
+    /// week has no marks for it — so 63 is "the last 63 marks", which is a
+    /// quarter of trading days only on a series with no gaps. A window measured
+    /// in dates would need the owner to serve them; `EquityPoint::ts` carries a
+    /// date string this client does not parse, and parsing one to slice by it
+    /// would be a calendar this client invented.
+    fn marks(self) -> Option<usize> {
+        match self {
+            Period::All => None,
+            Period::Y1 => Some(365),
+            Period::M3 => Some(63),
+            Period::M1 => Some(21),
+        }
+    }
+
+    /// The trailing window of `series` this period names.
+    fn slice(self, series: &[EquityPoint]) -> &[EquityPoint] {
+        match self.marks() {
+            Some(marks) => &series[series.len().saturating_sub(marks)..],
+            None => series,
+        }
+    }
+}
+
+impl BookView {
+    /// The footer: the curve, and the holdings rail on its right.
+    fn draw_footer(&self, f: &mut Frame, area: Rect, store: &Store) {
+        // A band with no cells in it. Nothing can be said here, refusal
+        // included; the blotter above it has the whole pane.
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        if area.width < BOTTOM_W {
+            refuse(
+                f,
+                area,
+                format!(
+                    "book footer needs {BOTTOM_W} columns for an equity curve beside \
+                     {RAIL_W} of holdings — this pane has {}, widen the terminal",
+                    area.width
+                ),
+            );
+            return;
+        }
+
+        // Split first, then guard each allocation — the pane is not the pane.
+        let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(RAIL_W)])
+            .spacing(1)
+            .split(area);
+        self.draw_curve(f, cols[0], store);
+        self.draw_holdings(f, cols[1], store);
+    }
+
+    /// The equity curve over the slice `p` last chose.
+    fn draw_curve(&self, f: &mut Frame, area: Rect, store: &Store) {
+        let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+        f.render_widget(
+            Paragraph::new(header_keys("equity", self.period_keys(), rows[0].width)),
+            rows[0],
+        );
+
+        let Some(performance) = store.snapshot.as_ref().and_then(|s| s.performance.as_ref()) else {
+            refuse(f, rows[1], "no equity series in the last snapshot".into());
+            return;
+        };
+        // A mark the owner sent no equity for is not a zero: plotted at one it
+        // would draw a cliff to the axis and back. Dropped, the curve is the
+        // marks that were valued, which is what the window it is sliced from
+        // was measured over.
+        let equity: Vec<f64> = self
+            .period
+            .slice(&performance.series)
+            .iter()
+            .filter_map(|point| point.equity)
+            .collect();
+        if equity.len() < 2 {
+            // The honest analogue of a greyed-out period button: two points is
+            // the least a line can be drawn between, and one mark rendered as a
+            // dot in the middle of an empty pane is a chart of nothing.
+            refuse(f, rows[1], "needs more history — daily marks only".into());
+            return;
+        }
+
+        braille_chart::draw(
+            f,
+            rows[1],
+            braille_chart::Chart {
+                name: "equity curve",
+                series: &equity,
+                // No crosshair: the markets hero's chip is indexed because a
+                // price series carries no dates, and this one is *sliced* by
+                // period — an index into a window that moves under the key
+                // would name a different mark every time `p` is pressed.
+                crosshair: None,
+                // Grouped money at book scale. `compact_money` would render
+                // four identical `$10.00K` labels on a book that moved a
+                // hundred dollars, which is a scale with no scale on it.
+                label: format::money,
+            },
+        );
+    }
+
+    /// The period strip, with the live slice lit.
+    fn period_keys(&self) -> Vec<Span<'static>> {
+        let t = theme();
+        let mut keys = vec![Span::styled("p period ", Style::default().fg(t.text_dim))];
+        for period in Period::ALL {
+            let style = if period == self.period {
+                Style::default().fg(t.text_primary)
+            } else {
+                Style::default().fg(t.text_dim)
+            };
+            keys.push(Span::styled(format!(" {}", period.label()), style));
+        }
+        keys
+    }
+
+    /// The holdings rail: a heat grid over the book, and its two ends under it.
+    fn draw_holdings(&self, f: &mut Frame, area: Rect, store: &Store) {
+        if area.width < RAIL_W || area.height < RAIL_H {
+            refuse(
+                f,
+                area,
+                format!(
+                    "holdings rail needs {RAIL_W}×{RAIL_H} for a row of cells and its \
+                     movers — this pane is {}×{}, make the terminal larger",
+                    area.width, area.height
+                ),
+            );
+            return;
+        }
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(MOVERS_H),
         ])
-        .wrap(Wrap { trim: true }),
-        area,
-    );
+        .split(area);
+        f.render_widget(
+            Paragraph::new(header_keys("holdings", self.heat_keys(), rows[0].width)),
+            rows[0],
+        );
+
+        // The blotter's rows in the blotter's order: one book, one ordering. A
+        // rail that sorted itself would put a name in a different place from
+        // the row an operator just read it off.
+        let holdings = sorted(blotter_rows(store), self.sort);
+        draw_heat_grid(f, rows[1], &holdings, self.heat);
+        draw_movers(f, rows[2], &holdings);
+    }
+
+    fn heat_keys(&self) -> Vec<Span<'static>> {
+        let t = theme();
+        vec![
+            Span::styled("h ", Style::default().fg(t.text_dim)),
+            Span::styled(self.heat.label(), Style::default().fg(t.text_primary)),
+        ]
+    }
+}
+
+/// A panel header with the keys that drive it pushed to the far side.
+///
+/// The keys go whole or not at all: a `Paragraph` clips from the right, and
+/// `ALL 1Y 3` is a control an operator reads as broken rather than as absent.
+fn header_keys(title: &str, keys: Vec<Span<'static>>, width: u16) -> Line<'static> {
+    let title = panel_header(title);
+    let title_w = title.width();
+    let keys_w: usize = keys.iter().map(|s| s.content.width()).sum();
+    let mut spans = title.spans;
+    if let Some(gap) = (width as usize).checked_sub(title_w + keys_w) {
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.extend(keys);
+    }
+    Line::from(spans)
+}
+
+/// Every holding as a shaded tile, two to a row.
+fn draw_heat_grid(f: &mut Frame, area: Rect, holdings: &[BlotterRow<'_>], mode: Heat) {
+    // Which kind of nothing this is has already been said by the blotter above,
+    // and a second copy of the same sentence reads as two separate failures.
+    if holdings.is_empty() {
+        return;
+    }
+    let gap = Span::raw(" ");
+    let lines: Vec<Line<'static>> = holdings
+        .chunks(2)
+        .map(|pair| {
+            let mut spans = Vec::with_capacity(3);
+            for (i, row) in pair.iter().enumerate() {
+                if i > 0 {
+                    spans.push(gap.clone());
+                }
+                spans.push(heat_tile(row, mode));
+            }
+            Line::from(spans)
+        })
+        .collect();
+
+    // The same sub-floor class as the sector strip: a `Paragraph` taller than
+    // its area is clipped without complaint, and a book missing its last two
+    // names is a rail that says the desk does not hold them.
+    if lines.len() > area.height as usize {
+        refuse(
+            f,
+            area,
+            format!(
+                "holdings heatmap needs {} rows for {} positions — this pane has {}, \
+                 make the terminal taller",
+                lines.len(),
+                holdings.len(),
+                area.height
+            ),
+        );
+        return;
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// One holding: its ticker, the number the mode is about, and the shade.
+fn heat_tile(row: &BlotterRow<'_>, mode: Heat) -> Span<'static> {
+    let t = theme();
+    let (value, style) = match mode {
+        Heat::Pnl => match row.pnl_pct {
+            Some(pct) => (format::signed_pct1(pct), pnl_shade(pct)),
+            // Absent is not flat and not zero: the tile takes the tone for
+            // "the owner declined to say", exactly as the blotter's row does.
+            None => (MISSING.to_string(), Style::default().fg(t.text_secondary)),
+        },
+        Heat::Weight => match row.weight {
+            // Unsigned: a weight's sign is which side of the book it is on, and
+            // the blotter's `WT%` column is where that is read.
+            Some(weight) => (format::pct1(weight), weight_shade(weight)),
+            None => (MISSING.to_string(), Style::default().fg(t.text_secondary)),
+        },
+    };
+    // Through `head` on both halves: the value is right-aligned inside its six
+    // cells, and ratatui drops *leading* cells from an overlong right-aligned
+    // run — which on `-123.4%` is the minus. Costing the last digit instead
+    // makes a runaway loss coarse rather than making it a gain.
+    Span::styled(
+        format!(
+            "{:<5}{:>6}",
+            head(row.ticker.unwrap_or(MISSING).to_string(), 5),
+            head(value, 6)
+        ),
+        style,
+    )
+}
+
+/// The P&L ramp: the magnitude against a twenty-percent full scale.
+///
+/// Twenty because that is the move at which a position is the story of the book
+/// rather than noise in it. Past it the ramp saturates rather than letting one
+/// runaway name be the only lit tile on the rail — a heatmap whose scale is set
+/// by its outlier says nothing about the other nine holdings.
+const PNL_FULL_SCALE: f64 = 20.0;
+
+/// The allocation ramp's full scale, in percent. Forty because a position past
+/// it is the book, on a desk the mandate holds to a handful of names.
+const WEIGHT_FULL_SCALE: f64 = 40.0;
+
+fn pnl_step(pct: f64) -> u8 {
+    heat_cell::step((pct * 100.0).abs() / PNL_FULL_SCALE)
+}
+
+fn weight_step(weight: f64) -> u8 {
+    // The magnitude, so a short leg shades by its size rather than reading as
+    // the dimmest tile on the rail whatever it is worth.
+    heat_cell::step((weight * 100.0).abs() / WEIGHT_FULL_SCALE)
+}
+
+fn pnl_shade(pct: f64) -> Style {
+    let t = theme();
+    // Flat is neither, exactly as the blotter's paired P&L columns: `Theme::change`
+    // paints zero green, which is right for one hero number and wrong for a grid
+    // of them — a paper book that opened flat would render as a rail of green
+    // tiles, a claim the desk made money on every name it holds.
+    if pct == 0.0 {
+        return Style::default().bg(t.bg_base).fg(t.text_primary);
+    }
+    let (dim, bright) = if pct > 0.0 {
+        (t.positive_dim, t.positive)
+    } else {
+        (t.negative_dim, t.negative)
+    };
+    heat_cell::style(pnl_step(pct), dim, bright)
+}
+
+fn weight_shade(weight: f64) -> Style {
+    let t = theme();
+    // Amber rather than the semantic pair: an allocation has a size and no
+    // direction, and a green 40% would say the position is winning.
+    heat_cell::style(weight_step(weight), t.accent_dim, t.accent)
+}
+
+/// The two ends of the book by open P&L.
+///
+/// The ends of the *book*, not of the page: an operator turning to page two has
+/// not changed which name is winning, and a footer that followed the pager would
+/// be answering a different question every keystroke.
+fn draw_movers(f: &mut Frame, area: Rect, holdings: &[BlotterRow<'_>]) {
+    let mut lines = vec![panel_header("top movers")];
+    match movers(holdings) {
+        // A book of one is its own best and worst; two identical rows would read
+        // as two movers, which is a desk this client is not looking at.
+        Some((best, worst)) if best == worst => lines.push(mover("only", &holdings[best])),
+        Some((best, worst)) => {
+            lines.push(mover("best", &holdings[best]));
+            lines.push(mover("worst", &holdings[worst]));
+        }
+        None => lines.push(Line::from(Span::styled(
+            format!(" {MISSING}"),
+            Style::default().fg(theme().text_tertiary),
+        ))),
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// The best and worst holdings by the P&L percentage they carry, as indices.
+///
+/// Indices rather than rows, so "the same holding twice" is an identity the
+/// caller can check: two positions can tie at the same percentage and they are
+/// still two movers, while one position is one.
+fn movers(holdings: &[BlotterRow<'_>]) -> Option<(usize, usize)> {
+    let marked: Vec<usize> = (0..holdings.len())
+        .filter(|i| holdings[*i].pnl_pct.is_some())
+        .collect();
+    let key = |i: &usize| holdings[*i].pnl_pct.unwrap_or_default();
+    let by_pnl = |a: &usize, b: &usize| key(a).partial_cmp(&key(b)).unwrap_or(Ordering::Equal);
+    Some((
+        *marked.iter().max_by(|a, b| by_pnl(a, b))?,
+        *marked.iter().min_by(|a, b| by_pnl(a, b))?,
+    ))
+}
+
+/// One end of the book: a direction glyph, the role, the name and the number.
+fn mover(role: &str, row: &BlotterRow<'_>) -> Line<'static> {
+    let t = theme();
+    // `movers` only ever hands back rows that carry a percentage.
+    let pct = row.pnl_pct.unwrap_or_default();
+    let text = format::signed_pct1(pct);
+    // The glyph reads the *rendered* number, not the raw one: `signed_pct1`
+    // takes its sign from the rounded value, and a ▼ over `+0.0%` is a row
+    // contradicting itself. Flat gets neither arrow — a ▲ over a book that did
+    // not move is a rise the desk did not make.
+    let (arrow, tone) = if pct == 0.0 {
+        ("·", t.text_primary)
+    } else if text.starts_with('-') {
+        ("▼", t.negative)
+    } else {
+        ("▲", t.positive)
+    };
+    Line::from(vec![
+        Span::styled(format!(" {arrow} "), Style::default().fg(tone)),
+        Span::styled(format!("{role:<6}"), Style::default().fg(t.text_secondary)),
+        Span::styled(
+            format!("{:<5}", head(row.ticker.unwrap_or(MISSING).to_string(), 5)),
+            Style::default().fg(t.cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{:>8}", head(text, 8)), Style::default().fg(tone)),
+    ])
 }
 
 #[cfg(test)]
@@ -1446,6 +1917,194 @@ mod tests {
         // The case a resize creates: a top past the last page's first row. A
         // forward key must not answer by moving the operator *up* the book.
         assert_eq!(turn(11, 21, 12, 10), (11, 11));
+    }
+
+    // -- the footer ---------------------------------------------------------
+
+    #[test]
+    fn the_holdings_ramp_bands_at_a_twentieth_of_its_full_scale() {
+        // Six even steps to 20%: a position under 3.33% is the dimmest tile and
+        // one past 20% is the brightest, however far past. A ramp scaled by its
+        // own outlier would say nothing about the nine names beside it.
+        let step = |pct: f64| pnl_step(pct / 100.0);
+        assert_eq!(step(0.0), 1);
+        assert_eq!(step(0.4), 1);
+        assert_eq!(step(3.3), 1);
+        assert_eq!(step(3.4), 2);
+        assert_eq!(step(10.0), 4);
+        assert_eq!(step(20.0), 6);
+        assert_eq!(step(21.0), 6, "the ramp did not clamp");
+        assert_eq!(step(900.0), 6);
+        // Magnitude only: brightness says how much, the pair says which way.
+        for pct in [0.4, 3.4, 12.0, 99.0] {
+            assert_eq!(step(pct), step(-pct), "{pct}");
+        }
+        assert_ne!(pnl_shade(0.034), pnl_shade(-0.034));
+    }
+
+    #[test]
+    fn a_position_that_has_not_moved_is_neither_a_gain_nor_a_loss_on_the_rail() {
+        // The blotter's rule, one pane over: `Theme::change` paints zero green,
+        // and a paper book that opened flat would render as a rail of green
+        // tiles — a claim the desk made money on every name it holds.
+        let t = theme();
+        let flat = pnl_shade(0.0);
+        assert_eq!(flat.fg, Some(t.text_primary));
+        assert_ne!(flat, pnl_shade(0.0001), "flat took the winners' ramp");
+        assert_ne!(flat, pnl_shade(-0.0001));
+    }
+
+    #[test]
+    fn the_allocation_ramp_is_amber_from_nothing_to_forty_percent() {
+        // Amber, not the semantic pair: a weight has a size and no direction.
+        let step = |pct: f64| weight_step(pct / 100.0);
+        assert_eq!(step(0.0), 1);
+        assert_eq!(step(20.0), 4);
+        assert_eq!(step(40.0), 6);
+        assert_eq!(step(90.0), 6, "the ramp did not clamp");
+        // A short leg shades by its size rather than reading as the dimmest
+        // tile on the rail whatever it is worth.
+        assert_eq!(step(-40.0), 6);
+        let t = theme();
+        assert_eq!(weight_shade(0.4).bg, Some(t.accent));
+        assert_ne!(weight_shade(0.4).bg, Some(t.positive));
+    }
+
+    #[test]
+    fn a_period_is_a_trailing_window_of_marks_and_never_the_head_of_the_series() {
+        // A window off the *front* would draw the oldest quarter of the book
+        // under a label that says the most recent one.
+        let series: Vec<EquityPoint> = (0..400)
+            .map(|i| serde_json::from_str(&format!(r#"{{"equity": {i}.0}}"#)).unwrap())
+            .collect();
+        let ends = |p: Period| {
+            let slice = p.slice(&series);
+            (slice.len(), slice.first().unwrap().equity.unwrap())
+        };
+        assert_eq!(ends(Period::All), (400, 0.0));
+        assert_eq!(ends(Period::Y1), (365, 35.0));
+        assert_eq!(ends(Period::M3), (63, 337.0));
+        assert_eq!(ends(Period::M1), (21, 379.0));
+        // A window longer than the series is the series, not a panic and not a
+        // pad: 21 marks of a five-mark book is those five marks.
+        let short = &series[..5];
+        assert_eq!(Period::M1.slice(short).len(), 5);
+        assert_eq!(Period::All.slice(&[]).len(), 0);
+    }
+
+    #[test]
+    fn both_footer_cycles_visit_every_option_once_and_come_back() {
+        let mut at = Period::default();
+        let mut seen = vec![at];
+        for _ in 1..Period::ALL.len() {
+            at = at.next();
+            seen.push(at);
+        }
+        assert_eq!(seen, Period::ALL.to_vec());
+        assert_eq!(at.next(), Period::default(), "the cycle does not close");
+
+        assert_eq!(Heat::default(), Heat::Pnl);
+        assert_eq!(Heat::Pnl.next(), Heat::Weight);
+        assert_eq!(Heat::Weight.next(), Heat::Pnl);
+        assert_ne!(Heat::Pnl.label(), Heat::Weight.label());
+    }
+
+    #[test]
+    fn the_footers_split_leaves_the_curve_the_columns_the_chart_asks_for() {
+        // `CURVE_W` is spelled here and derived in `braille_chart`, and the two
+        // going out of step is silent in both directions: too low and the split
+        // hands the curve a pane the chart refuses, too high and the footer
+        // refuses a curve that would have drawn. So the constant is checked
+        // against the widget it is a promise about.
+        let equity = [9987.1, 10012.4, 10000.0];
+        let drawn = |w: u16| {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, 9)).unwrap();
+            term.draw(|f| {
+                braille_chart::draw(
+                    f,
+                    Rect::new(0, 0, w, 9),
+                    braille_chart::Chart {
+                        name: "equity curve",
+                        series: &equity,
+                        crosshair: None,
+                        label: format::money,
+                    },
+                )
+            })
+            .unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..9)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .map(|(x, y)| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(
+            drawn(CURVE_W).contains("$10,012.40"),
+            "the footer's floor is under the chart's own"
+        );
+        assert!(
+            drawn(CURVE_W - 1).contains("needs"),
+            "the footer's floor is above the chart's own"
+        );
+        assert_eq!(BOTTOM_W, RAIL_W + 1 + CURVE_W);
+    }
+
+    #[test]
+    fn the_movers_are_the_ends_of_the_book_and_a_book_of_one_is_only_itself() {
+        let rows = |keys: Vec<Option<f64>>| -> Vec<BlotterRow<'static>> {
+            keys.into_iter()
+                .map(|pct| BlotterRow {
+                    ticker: Some("X"),
+                    qty: None,
+                    last: None,
+                    avg: None,
+                    weight: None,
+                    value: None,
+                    pnl: None,
+                    pnl_pct: pct,
+                    history: None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            movers(&rows(vec![Some(0.1), Some(-0.2), Some(0.05)])),
+            Some((0, 1))
+        );
+        // One holding is its own best and worst; two identical rows would read
+        // as two movers, which is a desk this client is not looking at.
+        assert_eq!(movers(&rows(vec![Some(0.1)])), Some((0, 0)));
+        // Two positions that tie are still two movers.
+        assert_eq!(movers(&rows(vec![Some(0.0), Some(0.0)])), Some((1, 0)));
+        // A row the owner sent no percentage for is not a mover at either end —
+        // absent is not the worst holding in the book.
+        assert_eq!(movers(&rows(vec![None, Some(0.1)])), Some((1, 1)));
+        assert_eq!(movers(&rows(vec![None, None])), None);
+        assert_eq!(movers(&[]), None);
+    }
+
+    #[test]
+    fn a_tile_loses_its_last_digit_and_never_its_sign() {
+        // The same clamp the blotter's cells take, at the one place on the rail
+        // where a number meets a fixed column. `-123.4%` is seven characters in
+        // six cells, and ratatui drops the *leading* one from a right-aligned
+        // run — which here is the minus, turning a wipeout into a doubling.
+        let row = BlotterRow {
+            ticker: Some("TOOLONG"),
+            qty: None,
+            last: None,
+            avg: None,
+            weight: Some(0.4),
+            value: None,
+            pnl: None,
+            pnl_pct: Some(-1.2345),
+            history: None,
+        };
+        let text = |row: &BlotterRow, mode| heat_tile(row, mode).content.to_string();
+        assert_eq!(text(&row, Heat::Pnl), "TOOLO-123.4");
+        assert_eq!(text(&row, Heat::Pnl).chars().count(), HOLD_W as usize);
+        // The weight side is unsigned — its direction is the blotter's column.
+        assert_eq!(text(&row, Heat::Weight), "TOOLO 40.0%");
     }
 
     #[test]

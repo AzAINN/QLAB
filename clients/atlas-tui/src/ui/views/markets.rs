@@ -130,6 +130,23 @@ impl MarketsView {
         self.selected.min(rows.saturating_sub(1))
     }
 
+    /// Put the cursor on a symbol, and say whether this pane holds one.
+    ///
+    /// The grid's own rows, so a symbol the market section does not carry gets
+    /// `false` rather than a cursor parked on the wrong row — the command line
+    /// is what turns that into a sentence.
+    pub(crate) fn select_ticker(&mut self, symbol: &str, store: &Store) -> bool {
+        let Some(row) = store
+            .asset_facts()
+            .iter()
+            .position(|asset| asset.ticker == symbol)
+        else {
+            return false;
+        };
+        self.select(row);
+        true
+    }
+
     fn select(&mut self, row: usize) {
         if self.selected != row {
             // Index 3 of one asset's history is a different point from index 3

@@ -7,6 +7,7 @@
 //! actually moved.
 
 use crate::bus::{AppEvent, Channel, HttpResult, SseEvent};
+use crate::cmd::CmdLine;
 use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{Approval, Asset, Coordinator, Plan, RegimePanel, Snapshot, Template, Workflow};
@@ -131,11 +132,19 @@ impl ViewId {
 
 /// Which surface owns the next keystroke. A view-local pane index is not
 /// modeled until a view has more than one focusable pane.
+///
+/// One field rather than a flag per surface: "the command line is focused" and
+/// "the help overlay is up" are answers to the same question, and two booleans
+/// could say yes to both — a client typing into a field nobody can see behind an
+/// overlay. Ctrl-C is above all of them, in the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
     #[default]
     Content,
     Command,
+    /// The help overlay, which is modal: it is what an operator opens when they
+    /// have lost the keyboard, so it may not leave any of it behind a view.
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -344,6 +353,25 @@ pub struct Store {
     /// `Vec` is a field anything could push to.
     templates: Vec<Template>,
     pub nav: Nav,
+    /// What the operator has typed into the command line, and what it said back.
+    ///
+    /// Beside `nav` rather than inside a view, because the line belongs to the
+    /// whole workstation — and beside `nav.focus` in particular, which is the
+    /// flag that says whether it owns the keyboard: a focus with no buffer under
+    /// it is a caret nothing is typing into. Keeping it here is also what leaves
+    /// a frame a pure function of (store, effects, instant), which every golden
+    /// on this branch depends on.
+    ///
+    /// It is where the *operator* is looking, never what the desk says — the
+    /// same line every view's cursor is on the right side of.
+    pub cmd: CmdLine,
+    /// How far the help overlay is scrolled.
+    ///
+    /// Meaningful only while `nav.focus` is `Help`; opening resets it, so a
+    /// stale offset from a previous look can never decide what the overlay
+    /// shows. Not an `Option` beside the focus state, because two fields that
+    /// both claim to say whether the overlay is up can disagree.
+    pub help_top: usize,
     pub conn: Conn,
     /// How old the numbers on screen may get before the frame says so.
     ///
@@ -431,6 +459,8 @@ impl Store {
             regime_panel: None,
             templates: Vec::new(),
             nav: Nav::default(),
+            cmd: CmdLine::default(),
+            help_top: 0,
             conn: Conn::default(),
             stale_after,
             last_snapshot_at: None,

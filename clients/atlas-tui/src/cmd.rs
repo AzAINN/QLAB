@@ -33,10 +33,15 @@ use crossterm::event::{KeyCode, KeyEvent};
 /// added before something dispatches it would be exactly the reachable-code-
 /// with-no-caller shape this crate keeps tripping over.
 ///
-/// The three write verbs exist only under the `operator` feature, beside the
-/// client that can serve them. A glass build has no `WriteClient` for the
-/// runtime to dispatch against, so a variant it could still construct would be
-/// a key path that reaches a match arm and stops — the same shape, one layer up.
+/// The write verbs exist only under the `operator` feature, beside the client
+/// that can serve them. A glass build has no writer for the runtime to dispatch
+/// against, so a variant it could still construct would be a key path that
+/// reaches a match arm and stops — the same shape, one layer up.
+///
+/// This file names none of the types on the far side of that seam, and
+/// `tests/operator_gate.rs` greps it to keep that true: the pin is a plain text
+/// search, deliberately, so it cannot be talked out of a match — which means
+/// even a comment here may not spell them.
 #[derive(Debug)]
 pub enum Command {
     Quit,
@@ -141,7 +146,8 @@ impl PartialEq for Command {
 /// Four, and the two that are missing are the point: the plan's Part IV lists
 /// `/halt` and `/resume`, and `qlab/ui/server.py` serves no HTTP route for
 /// either — `set_halt` is reachable only from the MCP tools and the autopilot's
-/// own kill switch (see the note in `net::write`). A scope whose Enter key
+/// own kill switch (the gated writer module carries the same note). A scope
+/// whose Enter key
 /// reached a match arm and stopped is the caller-less shape this crate keeps
 /// tripping over, one layer up from the `Command` variant it would need. They
 /// return here when the owner grows the routes, not before.

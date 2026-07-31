@@ -94,6 +94,18 @@ pub trait View {
     }
 }
 
+/// Which panes took a symbol the operator named.
+///
+/// Both flags, because both are possible on their own: a position held outside
+/// the polled universe has a blotter row and no grid row, and every quoted
+/// asset the desk does not hold is the other way round. A caller that only knew
+/// "something moved" could not say which pane to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selected {
+    pub markets: bool,
+    pub blotter: bool,
+}
+
 /// The seven views, alive for the life of the process.
 pub struct Views {
     desk: desk::DeskView,
@@ -159,6 +171,26 @@ impl Views {
     /// ask, and cannot ask it of the wrong surface.
     pub fn typing(&self, id: ViewId) -> bool {
         self.at(id).typing()
+    }
+
+    /// Put every cursor that holds a symbol on this one, and say which panes
+    /// actually moved.
+    ///
+    /// Both panes, not the active one: an operator who names a symbol means the
+    /// desk's symbol, and a selection that only applied to whichever view
+    /// happened to be up would leave the other one pointing somewhere else.
+    /// Which panes hold it is the answer, not a detail — a book held wider than
+    /// the quoted universe has rows MARKETS cannot show, and the reverse.
+    pub fn select_ticker(&mut self, symbol: &str, store: &Store) -> Selected {
+        Selected {
+            markets: self.markets.select_ticker(symbol, store),
+            blotter: self.book.select_ticker(symbol, store),
+        }
+    }
+
+    /// Aim BOOK's plan cursor, and say where its band left it.
+    pub fn select_plan(&mut self, plan_id: &str, store: &Store) -> book::PlanAt {
+        self.book.select_plan(plan_id, store)
     }
 
     fn at(&self, id: ViewId) -> &dyn View {

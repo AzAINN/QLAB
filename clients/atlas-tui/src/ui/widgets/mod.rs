@@ -10,6 +10,7 @@ pub mod braille_chart;
 pub mod confirm;
 pub mod event_row;
 pub mod heat_cell;
+pub mod help;
 mod panel_header;
 pub mod pipeline;
 pub mod pulse;

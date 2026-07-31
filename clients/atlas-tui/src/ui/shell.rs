@@ -19,15 +19,15 @@
 //! the frame is still a pure function of (store, effects, instant), and the
 //! effect pass that reads those rects runs after `draw` returns.
 
-use crate::cmd::Command;
+use crate::cmd::{self, CmdState, Command, Edit, Resolved};
 use crate::format::{self, MISSING};
 use crate::fx::{Fx, ShellRects};
 use crate::glyph;
-use crate::store::{Posture, Store, ViewId};
+use crate::store::{Focus, Posture, Store, ViewId};
 use crate::theme::theme;
 use crate::theme::Theme;
-use crate::ui::views::Views;
-use crate::ui::widgets::{panel_block, panel_header, pulse, ticker};
+use crate::ui::views::{book::PlanAt, Selected, Views};
+use crate::ui::widgets::{help, panel_block, panel_header, pulse, ticker};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -84,10 +84,17 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     fill(f, area, t.bg_base);
     let stale = stale_for(store, now);
 
+    // The suggestion strip is a row the command line borrows from the content
+    // while it has focus, and gives back when it does not: a permanent strip
+    // would cost every view a row for a hint nobody is reading. Below
+    // `CMD_MIN_H` there is no row to borrow — see `draw_suggestions` for where
+    // the line says what it would have said there.
+    let strip = u16::from(store.nav.focus == Focus::Command && area.height >= CMD_MIN_H);
     let rows = Layout::vertical([
-        Constraint::Length(1), // ticker
-        Constraint::Min(0),    // rails + content
-        Constraint::Length(1), // command line / status
+        Constraint::Length(1),     // ticker
+        Constraint::Min(0),        // rails + content
+        Constraint::Length(strip), // the suggestions, while the line is focused
+        Constraint::Length(1),     // command line / status
     ])
     .split(area);
     let cols = Layout::horizontal([
@@ -123,7 +130,8 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     fill(f, pulse, t.bg_surface);
     draw_pulse(f, pulse, store, t, fx, now);
 
-    draw_status(f, rows[2], store, t, stale);
+    draw_suggestions(f, rows[2], store);
+    draw_status(f, rows[3], store, t, stale, strip == 0);
 
     // Last, and over the whole frame rather than the content rect: a question
     // about an order is not part of the view that asked it, and a box confined
@@ -133,11 +141,29 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     if let Some(host) = views.confirm(store.nav.view) {
         host.draw(f, area);
     }
+    // Over everything, including the confirm box: it is what an operator opens
+    // when they have lost the keyboard, and a key list half-covered by the
+    // thing they are stuck in would answer the wrong question. It cannot be up
+    // at the same time as a modal in practice — the modal claims every key
+    // before `?` is read — but the ordering is what makes that true on screen
+    // rather than only in the router.
+    if store.nav.focus == Focus::Help {
+        help::draw(f, area, store.posture, store.help_top);
+    }
 
     fx.rects.frame.set(area);
     fx.rects.content.set(content);
-    fx.rects.chips.set(chips(rows[2]));
+    fx.rects.chips.set(chips(rows[3]));
 }
+
+/// The frame height the suggestion strip needs: the tape, two rows of content
+/// worth looking at, the strip itself, and the status line.
+///
+/// Below it the strip is dropped rather than taken out of a content area that
+/// has nothing left to give. Nothing is lost silently: a refusal falls back
+/// onto the command row itself (`draw_status`), because a sentence the line
+/// said is a statement, and only the suggestions — a hint — may go.
+const CMD_MIN_H: u16 = 5;
 
 /// The columns of the status line the chips actually occupy.
 fn chips(status: Rect) -> Rect {
@@ -188,6 +214,20 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Command::Quit);
     }
+    // The two surfaces that take the keyboard outright, before anything a view
+    // or the shell claims. Both are things an operator opened deliberately, and
+    // both contain characters the shell binds — `q` is a letter in a goal and
+    // `r` is one in `/ticker`.
+    match store.nav.focus {
+        Focus::Command => return command_key(key, store, views),
+        Focus::Help => {
+            if !help::on_key(key, &mut store.help_top, help::rows(store.posture)) {
+                store.nav.focus = Focus::Content;
+            }
+            return None;
+        }
+        Focus::Content => {}
+    }
     // A view with a text field open owns every printable key, including the ones
     // claimed below. The shell claims `q`, `r` and the digits so that no view
     // can take a binding the whole workstation depends on; a goal being typed
@@ -197,6 +237,20 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
         return views.on_key(store.nav.view, key, store);
     }
     match key.code {
+        // The line opens carrying the slash that opened it, so the first frame
+        // an operator sees is already the picker rather than an empty field
+        // they have to guess the grammar of.
+        KeyCode::Char('/') => {
+            store.cmd.clear();
+            store.cmd.insert('/');
+            store.nav.focus = Focus::Command;
+            return None;
+        }
+        KeyCode::Char('?') => {
+            store.help_top = 0;
+            store.nav.focus = Focus::Help;
+            return None;
+        }
         KeyCode::Char('q') | KeyCode::Esc => return Some(Command::Quit),
         KeyCode::Char('r') => return Some(Command::Refresh),
         KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -222,6 +276,130 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
         _ => {}
     }
     views.on_key(store.nav.view, key, store)
+}
+
+// -- the command line -------------------------------------------------------
+
+/// One keystroke while the line has focus.
+///
+/// The field edits itself; everything that needs the desk happens here, because
+/// the suggestions and the store are the shell's to read and the field is a
+/// pure text model by design.
+fn command_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
+    match store.cmd.edit(key) {
+        Edit::Idle => None,
+        Edit::Close => {
+            store.cmd.clear();
+            store.nav.focus = Focus::Content;
+            None
+        }
+        Edit::Accept => {
+            if let Some(first) = suggestions(store).first() {
+                store.cmd.accept(first);
+            }
+            None
+        }
+        Edit::Submit => submit(store, views),
+    }
+}
+
+/// What the line could become from here, for this window.
+fn suggestions(store: &Store) -> Vec<String> {
+    cmd::suggestions(&cmd::parse(store.cmd.text()), store, store.posture)
+}
+
+/// Act on the line, or say why it cannot be acted on.
+///
+/// Every arm either does something visible or leaves a sentence behind. A key
+/// with no effect anyone can see is the hung-client reading this workstation
+/// refuses everywhere else, and a command line is where an operator would meet
+/// it first.
+fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
+    let state = cmd::parse(store.cmd.text());
+    // A picker with one answer accepts rather than acts. Enter on `/tick` means
+    // "that one", and rewriting the buffer to `/ticker ` puts the operator in
+    // front of the values instead of guessing which one they meant.
+    if let CmdState::Picker { .. } = state {
+        let choices = suggestions(store);
+        if let [only] = choices.as_slice() {
+            store.cmd.accept(only);
+            return None;
+        }
+    }
+    match cmd::resolve(&state, store, store.posture) {
+        Resolved::Refused(said) => {
+            // The line stays up carrying what it said, so the operator can fix
+            // the character that was wrong rather than retype the whole thing.
+            store.cmd.say(said);
+            None
+        }
+        Resolved::View(id) => {
+            store.nav.view = id;
+            done(store);
+            None
+        }
+        Resolved::Ticker(symbol) => {
+            let hit = views.select_ticker(&symbol, store);
+            match landing(store.nav.view, hit) {
+                Some(view) => {
+                    store.nav.view = view;
+                    done(store);
+                }
+                // Unreachable through `resolve`, which only yields symbols the
+                // desk is watching — and stated rather than assumed, because a
+                // cursor that moved nowhere with no sentence beside it is the
+                // phantom selection this scope exists to avoid.
+                None => store
+                    .cmd
+                    .say(format!("{symbol} is on no pane this client draws")),
+            }
+            None
+        }
+        Resolved::Plan(id) => {
+            // The jump happens either way: an operator who named a plan is
+            // asking to look at the ledger, and BOOK is where it is drawn even
+            // when the band cannot reach that card.
+            store.nav.view = ViewId::Book;
+            match views.select_plan(&id, store) {
+                PlanAt::Card(_) => done(store),
+                // The band is the newest few; a plan below it is on the desk
+                // and off the screen. Named, not fixed — see `book::PlanAt`.
+                PlanAt::Beyond { at, cards } => store.cmd.say(format!(
+                    "plan {id} is #{} on the ledger and BOOK draws the newest {cards}",
+                    at + 1
+                )),
+                PlanAt::NotHeld => store.cmd.say(format!("the desk is not holding plan {id}")),
+            }
+            None
+        }
+        #[cfg(feature = "operator")]
+        Resolved::Mode { data, book } => {
+            done(store);
+            Some(Command::DeskMode { data, book })
+        }
+    }
+}
+
+/// Which view to show a symbol on: the one the operator is already looking at
+/// when it holds the row, otherwise the one that does.
+///
+/// Staying put matters more than it sounds. An operator working through the
+/// blotter who types a symbol is naming a position, and being thrown to MARKETS
+/// for it would lose the column they had sorted by.
+fn landing(current: ViewId, hit: Selected) -> Option<ViewId> {
+    match (current, hit) {
+        (ViewId::Markets, Selected { markets: true, .. }) => Some(ViewId::Markets),
+        (ViewId::Book, Selected { blotter: true, .. }) => Some(ViewId::Book),
+        (_, Selected { markets: true, .. }) => Some(ViewId::Markets),
+        (_, Selected { blotter: true, .. }) => Some(ViewId::Book),
+        _ => None,
+    }
+}
+
+/// The line did what it was asked: record it and give the keyboard back.
+fn done(store: &mut Store) {
+    store.cmd.submitted();
+    store.nav.focus = Focus::Content;
 }
 
 /// The depth ramp: a region reads as a surface stacked over the frame only if
@@ -421,7 +599,118 @@ fn draw_glyph(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Option<Duration>) {
+/// The command row's own spans: the prompt, or the line being typed into it.
+///
+/// The caret is drawn *under* the character it is on rather than inserted
+/// beside it, so moving it does not shift the text an operator is reading.
+///
+/// `orphaned` says the strip below has no row on this frame, which is the one
+/// case where a refusal is carried here instead. The suggestions are a hint and
+/// may be lost; a sentence the line said back is a statement and may not.
+fn command_row(store: &Store, t: &Theme, orphaned: bool) -> Vec<Span<'static>> {
+    if store.nav.focus != Focus::Command {
+        return vec![Span::styled(
+            " /command …",
+            Style::default().fg(t.text_tertiary),
+        )];
+    }
+    let text = store.cmd.text();
+    let at = store.cmd.cursor();
+    let before: String = text.chars().take(at).collect();
+    let under: String = text.chars().skip(at).take(1).collect();
+    let after: String = text.chars().skip(at + 1).collect();
+    let typed = Style::default()
+        .fg(t.text_primary)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(before, typed),
+        // At the end of the line there is no character to sit under, so the
+        // caret is a bar of its own — a field with no caret is one an operator
+        // cannot tell from a label.
+        if under.is_empty() {
+            Span::styled("▏", Style::default().fg(t.accent))
+        } else {
+            Span::styled(under, Style::default().fg(t.bg_base).bg(t.accent))
+        },
+        Span::styled(after, typed),
+    ];
+    if orphaned {
+        if let Some(note) = store.cmd.note() {
+            spans.push(Span::styled(
+                format!("  {note}"),
+                Style::default().fg(t.warning),
+            ));
+        }
+    }
+    spans
+}
+
+/// The one-line strip above the input: what the line said back, or what it
+/// could become.
+///
+/// The note outranks the suggestions. An operator who has just been refused
+/// needs the reason, not a list of what else they might have typed.
+fn draw_suggestions(f: &mut Frame, area: Rect, store: &Store) {
+    if area.height == 0 || store.nav.focus != Focus::Command {
+        return;
+    }
+    let t = theme();
+    fill(f, area, t.bg_raised);
+    if let Some(note) = store.cmd.note() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {note}"),
+                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            ))),
+            area,
+        );
+        return;
+    }
+
+    let state = cmd::parse(store.cmd.text());
+    let mut spans = Vec::new();
+    // What the scope takes, while nothing has been typed into it. The words are
+    // the scope's own (`Scope::hint`), so the strip cannot describe an argument
+    // the parser would not accept.
+    if let CmdState::Scoped { scope, query } = &state {
+        if query.trim().is_empty() {
+            spans.push(Span::styled(
+                format!(" {} ·", scope.hint()),
+                Style::default().fg(t.text_dim),
+            ));
+        }
+    }
+    let choices = cmd::suggestions(&state, store, store.posture);
+    if choices.is_empty() && spans.is_empty() {
+        spans.push(Span::styled(
+            " nothing here answers that",
+            Style::default().fg(t.text_dim),
+        ));
+    }
+    for (i, choice) in choices.iter().enumerate() {
+        spans.push(Span::styled(
+            format!(" {choice}"),
+            if i == 0 {
+                // The one Tab and a lone Enter accept, so it cannot look like
+                // the rest of the list.
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.text_secondary)
+            },
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_status(
+    f: &mut Frame,
+    area: Rect,
+    store: &Store,
+    t: &Theme,
+    stale: Option<Duration>,
+    orphaned: bool,
+) {
     fill(f, area, t.bg_raised);
     let snapshot = store.snapshot.as_ref();
     let atlas = snapshot.and_then(|s| s.atlas.as_ref());
@@ -437,13 +726,7 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Optio
         if autonomous { "auto" } else { "manual" }
     );
 
-    // Task 20 turns this into the slash-scoped input; it is the prompt an
-    // operator will type into, so the space is reserved now rather than moving
-    // the whole status line later.
-    let left = vec![Span::styled(
-        " /command …",
-        Style::default().fg(t.text_tertiary),
-    )];
+    let left = command_row(store, t, orphaned);
     // A green dot says the subscription is open, which is a different claim from
     // "every event it delivered was readable" — so a stream that is dropping
     // frames is degraded rather than up, and the count says how badly.

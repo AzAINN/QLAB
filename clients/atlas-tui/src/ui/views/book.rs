@@ -106,6 +106,24 @@ const RIBBON_W: u16 = 74;
 /// baseline height, and a chart that refuses on every terminal is not a chart.
 const BOTTOM_H: u16 = 10;
 
+/// Where a plan the operator named ended up.
+///
+/// Three outcomes rather than a bool, because "not on this desk" and "on this
+/// desk and below the band" are different sentences with different remedies —
+/// and the second one is a known gap the plan's ledger holds open (the band
+/// draws the newest [`PLAN_CARDS`], so an executable plan below it is reachable
+/// from AUDIT and not from here). Naming it is not fixing it; a surface that
+/// silently selected nothing would be the version that hides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanAt {
+    /// The band draws it, at this card.
+    Card(usize),
+    /// The desk holds it at this position, and the band draws `cards`.
+    Beyond { at: usize, cards: usize },
+    /// No plan on this desk has that id.
+    NotHeld,
+}
+
 /// Where the operator is looking in the blotter, the heatmap and the curve.
 /// Never what the desk says — that is the `Store`'s, and a view that held a copy
 /// would be a second account of it.
@@ -278,6 +296,50 @@ impl BookView {
         let last = rows.saturating_sub(1) / page * page;
         self.top = top.min(last.max(self.top));
         self.selected = self.top;
+    }
+
+    /// Put the blotter's cursor on a symbol, and say whether the book holds one.
+    ///
+    /// The index is into the *sorted* rows, because that is what the cursor
+    /// means: a position found in payload order and selected by that index
+    /// would land the marker on whatever row the current sort happens to have
+    /// put there. The page follows the cursor exactly as an arrow key would.
+    pub(crate) fn select_ticker(&mut self, symbol: &str, store: &Store) -> bool {
+        let rows = sorted(blotter_rows(store), self.sort);
+        let Some(row) = rows.iter().position(|held| held.ticker == Some(symbol)) else {
+            return false;
+        };
+        self.select(row, self.page_rows.get().max(1));
+        true
+    }
+
+    /// Aim the plan cursor at one plan id, and say where the band left it.
+    ///
+    /// The band's arithmetic stays here: whether a plan is on screen is a fact
+    /// about how many cards BOOK draws, and a command line that decided it
+    /// would be a second copy of `PLAN_CARDS` to keep in step.
+    pub(crate) fn select_plan(&mut self, plan_id: &str, store: &Store) -> PlanAt {
+        let Some(at) = store
+            .plans()
+            .iter()
+            .position(|plan| format::text(plan.plan_id.as_ref()) == Some(plan_id))
+        else {
+            return PlanAt::NotHeld;
+        };
+        if at >= PLAN_CARDS {
+            return PlanAt::Beyond {
+                at,
+                cards: PLAN_CARDS,
+            };
+        }
+        // Only where a key can act on it. A glass window draws no marker (see
+        // `draw_plans`), so moving a cursor it never shows would be a selection
+        // an operator cannot see — the phantom this whole path refuses.
+        #[cfg(feature = "operator")]
+        {
+            self.plan = at;
+        }
+        PlanAt::Card(at)
     }
 
     /// Which sort column is live, for the registry's own tests.

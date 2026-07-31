@@ -493,7 +493,7 @@ fn rail_store() -> Store {
         AppEvent::Snapshot(Box::new(
             serde_json::from_str::<Snapshot>(
                 r#"{"market": {"regime": {"regime": "stress", "robust_state": "uncertain",
-                                          "posterior": {"calm": 0.5, "neutral": 0.3, "stress": 0.2}},
+                                          "posterior": {"calm": 0.5, "normal": 0.3, "stress": 0.2}},
                                "assets": [
                      {"ticker": "SPY", "price": 729.46, "change_1d": 0.0042},
                      {"ticker": "QQQ", "price": 661.73, "change_1d": 0.011},

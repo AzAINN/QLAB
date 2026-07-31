@@ -50,7 +50,7 @@
       "robust_state": "uncertain",
       "confidence": 0.6666666666666666,
       "effective_risk_fraction": 0.5,
-      "posterior": {"calm": 0.71, "neutral": 0.22, "stress": 0.07},
+      "posterior": {"calm": 0.71, "normal": 0.22, "stress": 0.07},
       "hmm_label": "calm"
     },
     "assets": [

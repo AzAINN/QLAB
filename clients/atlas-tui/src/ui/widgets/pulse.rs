@@ -635,7 +635,7 @@ mod tests {
         // the number under it is the one the plan states.
         let calm = regime(json!({"posterior": {"calm": 1.0, "stress": 0.0}}));
         let stressed = regime(json!({"posterior": {"calm": 0.0, "stress": 1.0}}));
-        let mixed = regime(json!({"posterior": {"calm": 0.71, "neutral": 0.22, "stress": 0.07}}));
+        let mixed = regime(json!({"posterior": {"calm": 0.71, "normal": 0.22, "stress": 0.07}}));
         let quiet = penalties(Some(0.5), "calm");
 
         // 50 + 50·(1 − 0) with nothing to dock.

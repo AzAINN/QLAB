@@ -1477,18 +1477,22 @@ fn draw_heat_grid(f: &mut Frame, area: Rect, holdings: &[BlotterRow<'_>], mode: 
 /// One holding: its ticker, the number the mode is about, and the shade.
 fn heat_tile(row: &BlotterRow<'_>, mode: Heat) -> Span<'static> {
     let t = theme();
+    // Absent is not flat and not zero: the tile takes the tone for "the owner
+    // declined to say", exactly as the blotter's row does. A value that is not
+    // finite reads the same way — `signed_pct1` already renders it `--`, and a
+    // tile that said `--` on a red background would shade a number nobody
+    // computed.
+    let unmeasured = (MISSING.to_string(), Style::default().fg(t.text_secondary));
     let (value, style) = match mode {
         Heat::Pnl => match row.pnl_pct {
-            Some(pct) => (format::signed_pct1(pct), pnl_shade(pct)),
-            // Absent is not flat and not zero: the tile takes the tone for
-            // "the owner declined to say", exactly as the blotter's row does.
-            None => (MISSING.to_string(), Style::default().fg(t.text_secondary)),
+            Some(pct) if pct.is_finite() => (format::signed_pct1(pct), pnl_shade(pct)),
+            _ => unmeasured,
         },
         Heat::Weight => match row.weight {
             // Unsigned: a weight's sign is which side of the book it is on, and
             // the blotter's `WT%` column is where that is read.
-            Some(weight) => (format::pct1(weight), weight_shade(weight)),
-            None => (MISSING.to_string(), Style::default().fg(t.text_secondary)),
+            Some(weight) if weight.is_finite() => (format::pct1(weight), weight_shade(weight)),
+            _ => unmeasured,
         },
     };
     // Through `head` on both halves: the value is right-aligned inside its six

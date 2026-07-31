@@ -1195,6 +1195,14 @@ fn a_footer_below_its_floor_refuses_rather_than_handing_the_curve_no_columns() {
         admitted.contains("$10,012.40"),
         "the curve lost its scale at the boundary:\n{admitted}"
     );
+    // At the floor the curve's pane is 19 cells and its period strip is 30, so
+    // the strip goes whole rather than rendering as `ALL 1Y 3` — a control an
+    // operator reads as broken rather than as absent.
+    assert!(
+        !admitted.contains("p period"),
+        "the period strip was clipped instead of dropped:\n{admitted}"
+    );
+    assert!(admitted.contains("EQUITY"), "{admitted}");
 }
 
 #[test]

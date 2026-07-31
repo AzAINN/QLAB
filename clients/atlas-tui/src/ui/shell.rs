@@ -99,7 +99,7 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
         rows[0],
         &store.asset_views(),
         store.tick as usize,
-        stale.is_some(),
+        store.stale_after,
         &fx.flashes,
         now,
     );

@@ -281,6 +281,58 @@ fn the_staleness_threshold_is_the_pollers_fact_not_the_renderers() {
 }
 
 #[test]
+fn a_live_stream_keeps_its_own_prices_bright_while_the_aggregate_goes_stale() {
+    // Two feeds refresh a price and either can die alone. The tape dimmed on the
+    // snapshot's age alone, so a dead poller greyed out a row of quotes that
+    // were a second old — the exact lie the dimming exists to prevent, in the
+    // other direction. The `STALE` chip stays on the aggregate: it is about the
+    // desk as a whole, and the stream speaks for five prices out of it.
+    let t = Theme::truecolor();
+    let mut store = fixture_store();
+    let arrived = store.last_snapshot_at.unwrap();
+    let quoted = arrived + Duration::from_secs(60);
+    store.apply(
+        quote(serde_json::json!([{"ticker": "SPY", "price": 731.11, "change_1d": 0.0042}])),
+        quoted,
+    );
+    let now = quoted + Duration::from_secs(1);
+
+    let frame = frame_to_string_at(&store, 120, 36, now);
+    assert!(
+        line_with(&frame, "GLASS").contains("STALE"),
+        "the aggregate really is stale here:\n{frame}"
+    );
+
+    let tape = row_styles(&store, &Fx::default(), 120, 36, now, 0);
+    let toned = |needle: &str| -> Vec<ratatui::style::Color> {
+        let row: String = tape.iter().map(|(symbol, _)| symbol.as_str()).collect();
+        let at = row.find(needle).expect(needle);
+        // Byte offset back to a cell index — the row carries `▲` and `▼`.
+        let mut cell = 0;
+        let mut seen = 0;
+        for (i, (symbol, _)) in tape.iter().enumerate() {
+            if seen == at {
+                cell = i;
+                break;
+            }
+            seen += symbol.len();
+        }
+        tape[cell..cell + needle.chars().count()]
+            .iter()
+            .filter_map(|(_, style)| style.fg)
+            .collect()
+    };
+    assert!(
+        toned("731.11").iter().all(|fg| *fg == t.text_primary),
+        "the stream's own price was dimmed by the poller's silence"
+    );
+    assert!(
+        toned("ACWI").iter().all(|fg| *fg == t.text_tertiary),
+        "a row only the dead poller feeds still has to dim"
+    );
+}
+
+#[test]
 fn a_desk_that_has_never_had_a_snapshot_is_not_stale() {
     // Nothing to be stale: the no-data panel is what speaks here, and a client
     // that opened a second ago must not accuse the owner of going quiet.

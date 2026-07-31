@@ -181,11 +181,21 @@ const MALFORMED_ERROR_MAX: usize = 200;
 /// in-place merge is silently overwritten by an *older* price seconds later —
 /// the Textual client's `_apply_quote_event` (`qlab/tui/app.py:1900`) accepts
 /// that regression; this does not.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuoteMark {
     pub price: f64,
     pub change_1d: f64,
     pub at: Instant,
+    /// The owner's own stamp on the frame this came off, which is what orders
+    /// two marks against each other.
+    ///
+    /// Arrival cannot: a reconnect resumes from the cursor and replays whatever
+    /// the outage held, so frames arrive in the owner's order but *later* than
+    /// frames this client already has. Without this an older price overwrites a
+    /// newer one every time the stream heals. ISO-8601 with a fixed offset, so
+    /// lexical order is chronological order — `qlab/state/registry.py` writes
+    /// the column that way and the SSE cursor already relies on it.
+    pub ts: Option<String>,
 }
 
 /// What one asset is worth right now, after the overlay has had its say.
@@ -198,6 +208,27 @@ pub struct AssetView<'a> {
     pub ticker: &'a str,
     pub price: Option<f64>,
     pub change_1d: Option<f64>,
+    /// When this client learned *this* price — the winning feed's stamp, not the
+    /// snapshot's. `None` while nothing has ever arrived.
+    pub at: Option<Instant>,
+}
+
+impl AssetView<'_> {
+    /// Whether this cell's price has stopped being refreshed.
+    ///
+    /// Per cell, and against the feed that actually fed it. Keying every cell to
+    /// the snapshot's age dimmed a whole tape of live quotes whenever the poller
+    /// died — the numbers were current to the second and rendered as four
+    /// minutes old, which is the exact lie the dimming exists to prevent, told
+    /// in the other direction.
+    ///
+    /// The aggregate `STALE` chip stays on the snapshot's age on purpose: that
+    /// one is about the desk as a whole, and the stream speaks for five prices
+    /// out of everything a snapshot carries.
+    pub fn stale(&self, after: Duration, now: Instant) -> bool {
+        self.at
+            .is_some_and(|at| now.saturating_duration_since(at) > after)
+    }
 }
 
 /// The half of an asset row the quote stream does not speak to.
@@ -348,11 +379,13 @@ impl Store {
                 ticker,
                 price: Some(mark.price),
                 change_1d: Some(mark.change_1d),
+                at: Some(mark.at),
             },
             None => AssetView {
                 ticker,
                 price: asset.and_then(|a| a.price),
                 change_1d: asset.and_then(|a| a.change_1d),
+                at: self.last_snapshot_at,
             },
         }
     }
@@ -411,7 +444,7 @@ impl Store {
     /// event list its own renderer.
     fn apply_sse(&mut self, event: SseEvent, now: Instant) -> Vec<Trigger> {
         match event.kind.as_str() {
-            "quote" => self.apply_quote(&event.payload, now),
+            "quote" => self.apply_quote(&event.payload, event.ts.as_deref(), now),
             "stream.malformed" => {
                 self.stream_malformed_count = self.stream_malformed_count.saturating_add(1);
                 self.dirty = true;
@@ -428,7 +461,12 @@ impl Store {
     /// so a row missing one is a broken contract worth naming — but one bad row
     /// must not cost the frame the readable rows belong to, and must never be
     /// read as a price.
-    fn apply_quote(&mut self, payload: &Value, now: Instant) -> Vec<Trigger> {
+    ///
+    /// `ts` is the owner's stamp on the frame, and it is what decides whether a
+    /// row may land at all — see `QuoteMark::ts`. A frame older than the mark it
+    /// would replace is dropped whole rather than merged: it is not new
+    /// information about the price, it is the same feed catching up.
+    fn apply_quote(&mut self, payload: &Value, ts: Option<&str>, now: Instant) -> Vec<Trigger> {
         let Some(rows) = payload.get("rows").and_then(Value::as_array) else {
             tracing::warn!(
                 payload = %payload,
@@ -450,15 +488,26 @@ impl Store {
                 continue;
             };
 
+            let incumbent = self.quote_overlay.get(ticker);
+            // A reconnect resumes from the cursor and replays the outage, so a
+            // frame can arrive now and be about a moment before the price
+            // already on screen. Only the owner's own stamp can tell, and only
+            // when both sides carry one — an unstamped frame is not evidence of
+            // anything and is taken at face value, as the cursor does.
+            if let (Some(held), Some(next)) = (incumbent.and_then(|m| m.ts.as_deref()), ts) {
+                if next < held {
+                    tracing::debug!(%ticker, %next, %held, "a replayed quote is older than the mark it would replace");
+                    continue;
+                }
+            }
+
             // Exact comparison on purpose: the question is whether the owner
             // sent a different number, not whether two numbers are close. The
             // owner republishes the same row on its own beat, and a tick per
             // publish rather than per move would leave every row permanently
             // lit — a highlight that never goes out says nothing.
-            let moved = self
-                .quote_overlay
-                .get(ticker)
-                .is_none_or(|prev| prev.price != price || prev.change_1d != change_1d);
+            let moved =
+                incumbent.is_none_or(|prev| prev.price != price || prev.change_1d != change_1d);
             if moved {
                 out.push(Trigger::QuoteTick(ticker.to_string()));
                 self.dirty = true;
@@ -472,6 +521,7 @@ impl Store {
                     price,
                     change_1d,
                     at: now,
+                    ts: ts.map(str::to_string),
                 },
             );
         }
@@ -1052,6 +1102,17 @@ mod tests {
         })
     }
 
+    /// One `quote` frame carrying the owner's stamp, which is what orders two
+    /// marks for the same ticker against each other.
+    fn quote_at(rows: serde_json::Value, ts: &str) -> AppEvent {
+        AppEvent::Sse(SseEvent {
+            kind: "quote".into(),
+            payload: json!({ "rows": rows }),
+            ts: Some(ts.into()),
+            id: Some("e1".into()),
+        })
+    }
+
     fn sse(kind: &str) -> AppEvent {
         AppEvent::Sse(SseEvent {
             kind: kind.into(),
@@ -1140,6 +1201,102 @@ mod tests {
             store.quote_overlay.contains_key("SPY"),
             "the mark is superseded, not destroyed"
         );
+    }
+
+    #[test]
+    fn a_price_is_stale_only_when_the_feed_that_actually_fed_it_is() {
+        // Two feeds refresh a price and either can die alone. Keying every cell
+        // to the snapshot's age dimmed a whole tape of second-old quotes the
+        // moment the poller stopped — the same lie the dimming exists to
+        // prevent, told the other way round.
+        let mut store = Store::default();
+        let after = store.stale_after;
+        let t0 = Instant::now();
+        store.apply(market("SPY", 700.0, -0.01), t0);
+
+        // Dead poller, live stream: the snapshot is a minute old and the quote
+        // on top of it is a second old, so the cell is current.
+        let late = t0 + Duration::from_secs(60);
+        store.apply(
+            quote(json!([{"ticker": "SPY", "price": 701.5, "change_1d": 0.002}])),
+            late,
+        );
+        let now = late + Duration::from_secs(1);
+        assert!(!store.asset_view("SPY").stale(after, now));
+        assert!(
+            now.saturating_duration_since(store.last_snapshot_at.unwrap()) > after,
+            "this case only means something while the aggregate is stale"
+        );
+
+        // Live poller, dead stream: the mark is older than the snapshot, so the
+        // snapshot wins the row and its own age is the one that counts.
+        let mut store = Store::default();
+        store.apply(
+            quote(json!([{"ticker": "SPY", "price": 701.5, "change_1d": 0.002}])),
+            t0,
+        );
+        store.apply(market("SPY", 700.0, -0.01), late);
+        assert!(!store
+            .asset_view("SPY")
+            .stale(after, late + Duration::from_secs(1)));
+
+        // Both quiet: the row is stale, which is what the dimming is for.
+        assert!(store.asset_view("SPY").stale(after, late + after * 2));
+
+        // A ticker nothing has ever reported has no age to be stale at.
+        let empty = Store::default();
+        assert!(!empty.asset_view("GLD").stale(after, t0));
+    }
+
+    #[test]
+    fn a_replayed_quote_older_than_the_mark_it_would_replace_is_refused() {
+        // A reconnect resumes from the cursor and replays the outage, so a frame
+        // arrives *now* about a moment before the price already on screen.
+        // Arrival cannot order them; only the owner's own stamp can.
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        store.apply(
+            quote_at(
+                json!([{"ticker": "SPY", "price": 701.5, "change_1d": 0.002}]),
+                "2026-07-30T12:00:02+00:00",
+            ),
+            t0,
+        );
+        store.take_dirty();
+
+        let replayed = store.apply(
+            quote_at(
+                json!([{"ticker": "SPY", "price": 690.0, "change_1d": -0.01}]),
+                "2026-07-30T12:00:01+00:00",
+            ),
+            t0 + Duration::from_millis(100),
+        );
+        assert_eq!(store.asset_view("SPY").price, Some(701.5));
+        assert_eq!(replayed, vec![], "a replay is not a move");
+        assert!(!store.take_dirty(), "and it owes no frame");
+
+        // The next genuinely newer frame still lands.
+        store.apply(
+            quote_at(
+                json!([{"ticker": "SPY", "price": 702.0, "change_1d": 0.003}]),
+                "2026-07-30T12:00:03+00:00",
+            ),
+            t0 + Duration::from_millis(200),
+        );
+        assert_eq!(store.asset_view("SPY").price, Some(702.0));
+
+        // An unstamped frame is not evidence of anything and is taken at face
+        // value — the same rule the SSE cursor applies to a transient event.
+        store.apply(
+            AppEvent::Sse(SseEvent {
+                kind: "quote".into(),
+                payload: json!({"rows": [{"ticker": "SPY", "price": 3.0, "change_1d": 0.0}]}),
+                ts: None,
+                id: None,
+            }),
+            t0 + Duration::from_millis(300),
+        );
+        assert_eq!(store.asset_view("SPY").price, Some(3.0));
     }
 
     #[test]

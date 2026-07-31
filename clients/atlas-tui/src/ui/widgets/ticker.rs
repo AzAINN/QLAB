@@ -22,7 +22,7 @@ use ratatui::{
     widgets::{Block, Paragraph},
     Frame,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
 /// Between triplets. Three cells: two read as a wide word gap inside one
@@ -38,13 +38,14 @@ const GUTTER: u16 = 1;
 ///
 /// `now` and `offset` are both data: the offset is the tick count from the
 /// store, so the row's position is a pure function of state and a golden frame
-/// can pin it.
+/// can pin it. `stale_after` is data for the same reason it is on the `Store` —
+/// it is the poller's cadence, not the renderer's opinion.
 pub fn draw(
     f: &mut Frame,
     area: Rect,
     views: &[AssetView],
     offset: usize,
-    stale: bool,
+    stale_after: Duration,
     fx: &FlashTracker,
     now: Instant,
 ) {
@@ -62,7 +63,7 @@ pub fn draw(
         return;
     }
 
-    let cells = cells(&tape(views, stale, fx, now));
+    let cells = cells(&tape(views, stale_after, fx, now));
     if cells.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -85,7 +86,7 @@ pub fn draw(
 /// wrap point look like every other gap on the row.
 pub fn tape(
     views: &[AssetView],
-    stale: bool,
+    stale_after: Duration,
     fx: &FlashTracker,
     now: Instant,
 ) -> Vec<Span<'static>> {
@@ -95,6 +96,12 @@ pub fn tape(
         // Stale prices lose their colour along with their claim to be current.
         // A green tick that is four minutes old is a statement about the tape
         // that nobody made.
+        //
+        // Per cell, against the feed that fed it: a live stream and a dead
+        // poller is a tape of prices current to the second, and dimming those
+        // because the aggregate snapshot went quiet is the same lie told the
+        // other way round. `AssetView::stale` is the one rule for it.
+        let stale = view.stale(stale_after, now);
         let symbol = if stale { t.text_tertiary } else { t.cyan };
         let value = if stale {
             t.text_tertiary
@@ -231,17 +238,24 @@ mod tests {
     use ratatui::Terminal;
     use unicode_width::UnicodeWidthStr;
 
+    /// How long a price may go unrefreshed in these tests. Every fixture view
+    /// carries `at: None` — nothing has told them when they arrived — so none of
+    /// them is stale, which is the state these layout pins are about.
+    const FRESH: Duration = Duration::from_secs(10);
+
     fn views() -> Vec<AssetView<'static>> {
         vec![
             AssetView {
                 ticker: "SPY",
                 price: Some(729.46),
                 change_1d: Some(-0.0154),
+                at: None,
             },
             AssetView {
                 ticker: "QQQ",
                 price: Some(661.73),
                 change_1d: Some(0.0204),
+                at: None,
             },
         ]
     }
@@ -251,7 +265,7 @@ mod tests {
         let fx = FlashTracker::default();
         let now = Instant::now();
         let mut term = Terminal::new(TestBackend::new(w, 1)).unwrap();
-        term.draw(|f| draw(f, Rect::new(0, 0, w, 1), views, offset, false, &fx, now))
+        term.draw(|f| draw(f, Rect::new(0, 0, w, 1), views, offset, FRESH, &fx, now))
             .unwrap();
         let buf = term.backend().buffer().clone();
         let mut out = String::new();
@@ -269,7 +283,7 @@ mod tests {
 
     #[test]
     fn the_tape_is_triplets_separated_by_three_spaces() {
-        let text: String = tape(&views(), false, &FlashTracker::default(), Instant::now())
+        let text: String = tape(&views(), FRESH, &FlashTracker::default(), Instant::now())
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
@@ -300,7 +314,7 @@ mod tests {
 
         // The tape is 40 cells wide, so a full lap returns to where it started —
         // the property that makes "seamless" testable rather than a claim.
-        let period = tape(&views(), false, &FlashTracker::default(), Instant::now())
+        let period = tape(&views(), FRESH, &FlashTracker::default(), Instant::now())
             .iter()
             .map(|s| s.content.width())
             .sum::<usize>();
@@ -341,6 +355,7 @@ mod tests {
             ticker: "日経",
             price: Some(39000.0),
             change_1d: Some(0.01),
+            at: None,
         }];
         for offset in 0..24 {
             let rendered = row(&wide, offset, 12);

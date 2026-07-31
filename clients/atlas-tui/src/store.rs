@@ -515,9 +515,14 @@ impl Store {
                     // brings back — unlike a refusal, which the owner declines
                     // with a 200 and no state change, and which would otherwise
                     // be visible nowhere at all.
+                    //
+                    // A desk mode is the same: the owner persists the pair and
+                    // serves it back in the next snapshot, and a client copy
+                    // would be a second account of which desk this is.
                     Wrote::Decided { .. }
                     | Wrote::Asked { .. }
                     | Wrote::Started { .. }
+                    | Wrote::Pointed { .. }
                     | Wrote::Failed { .. } => {}
                 }
                 self.dirty = true;
@@ -690,6 +695,38 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Every symbol this desk holds a cursor over: the quoted universe, in the
+    /// owner's order, then anything the book holds that is not in it.
+    ///
+    /// Both halves, because both are selectable. A position outside the polled
+    /// universe still has a blotter row — that is a book held wider than the
+    /// data plane, which happens — and a command line that only knew the market
+    /// section would refuse to select a row an operator can see.
+    ///
+    /// One rule with one reader, so "is this ticker on this desk" cannot be
+    /// answered two ways by two surfaces.
+    pub fn universe(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self
+            .market_assets()
+            .iter()
+            .filter_map(|asset| text(asset.ticker.as_ref()))
+            .collect();
+        for held in self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.live_portfolio.as_ref())
+            .map(|b| b.positions.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| text(p.ticker.as_ref()))
+        {
+            if !out.contains(&held) {
+                out.push(held);
+            }
+        }
+        out
     }
 
     fn market_assets(&self) -> &[Asset] {

@@ -329,6 +329,20 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
             // the phases are advancing. The pipeline pane shows which it is.
             format!("{template} registered as {workflow_id}"),
         ),
+        // `Warn` when the owner took a book it cannot reach, `Info` otherwise.
+        // A desk pointed at Alpaca with no usable login changed and cannot
+        // trade, and an `Info` box would report that as a clean switch.
+        Wrote::Pointed { label, warning } => Toast::new(
+            match warning {
+                Some(_) => Level::Warn,
+                None => Level::Info,
+            },
+            "desk mode",
+            match warning {
+                Some(why) => format!("{label} — {why}"),
+                None => format!("the desk is now {label}"),
+            },
+        ),
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

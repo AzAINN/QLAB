@@ -65,6 +65,19 @@ pub enum Wrote {
         template: String,
         workflow_id: String,
     },
+    /// The desk is now pointed somewhere else. `label` is the owner's own word
+    /// for the pair (`DeskMode.label`), never one this client composed — the
+    /// two halves an operator typed are not the sentence the owner made of them.
+    ///
+    /// `warning` carries the owner's credential description when it accepted a
+    /// book it cannot reach. Pointing the desk at Alpaca with no usable login is
+    /// a 200 that changed the desk and cannot trade it, which is exactly the
+    /// "succeeded and did nothing" shape this client refuses to render as a
+    /// receipt.
+    Pointed {
+        label: String,
+        warning: Option<String>,
+    },
     /// The request itself failed: no owner, a timeout, a non-2xx. `said` is the
     /// owner's words verbatim when there were any.
     Failed { what: String, said: String },

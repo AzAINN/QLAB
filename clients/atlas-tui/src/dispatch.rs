@@ -206,8 +206,51 @@ mod armed {
                     },
                 }
             }
+            // Not a governance decision either, and it books nothing: it
+            // chooses which data the desk reads and which book it values
+            // against. The owner is the authority on the pair — it refuses the
+            // ones `DeskMode` cannot make — so whatever the operator typed is
+            // sent whole and the owner's own words come back on a refusal.
+            Command::DeskMode { data, book } => match client.desk_mode(&data, &book).await {
+                // The owner answers with `desk_mode_payload()`, whose `label`
+                // is the sentence *it* makes of the pair. A 200 without one is
+                // a broken contract and says so rather than this client
+                // inventing a receipt out of the two words it just sent.
+                Ok(said) => match said.get("label").and_then(|v| v.as_str()) {
+                    Some(label) if !label.is_empty() => Wrote::Pointed {
+                        label: label.to_string(),
+                        warning: credential_warning(&said, &book),
+                    },
+                    _ => Wrote::Failed {
+                        what: format!("point the desk at {data} · {book}"),
+                        said: format!("the owner answered without a label: {said}"),
+                    },
+                },
+                Err(err) => Wrote::Failed {
+                    what: format!("point the desk at {data} · {book}"),
+                    said: err.to_string(),
+                },
+            },
             Command::Quit | Command::Refresh => return None,
         })
+    }
+
+    /// What the owner said about the credentials of the book it just accepted.
+    ///
+    /// Only for the real book: the simulated one needs no login, and a warning
+    /// beside it would train an operator to read past the one that matters. The
+    /// owner sets `credentials_ok` false both when there is no login and when
+    /// there is an unusable one, and `credentials` is its description of which.
+    fn credential_warning(said: &serde_json::Value, book: &str) -> Option<String> {
+        if book != "alpaca" || said.get("credentials_ok")?.as_bool()? {
+            return None;
+        }
+        Some(
+            said.get("credentials")
+                .and_then(|v| v.as_str())
+                .unwrap_or("the owner reports no usable Alpaca credentials")
+                .to_string(),
+        )
     }
 }
 

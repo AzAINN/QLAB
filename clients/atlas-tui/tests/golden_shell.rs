@@ -259,6 +259,40 @@ fn numbers_that_stopped_refreshing_say_so_rather_than_passing_as_current() {
     );
     // Beside the chip, not instead of it: reachable and current are two claims.
     assert!(status.contains("OWNER"), "{status}");
+
+    // And an hour later it is still a number an operator can read at a glance.
+    // `STALE 3600s` is arithmetic homework beside the thing it is competing with
+    // for attention, which is the desk.
+    let old = frame_to_string_at(&store, 120, 36, arrived + Duration::from_secs(3_600));
+    assert!(line_with(&old, "GLASS").contains("STALE 1h"), "{old}");
+    let hour = frame_to_string_at(&store, 120, 36, arrived + Duration::from_secs(600));
+    assert!(line_with(&hour, "GLASS").contains("STALE 10m"), "{hour}");
+}
+
+#[test]
+fn the_status_line_says_which_owner_it_is_looking_at_and_drops_it_before_a_chip() {
+    // An operator with two desks up — or one owner on a port they did not
+    // choose — otherwise reads a chip run that names no host and has to guess
+    // which desk it is about.
+    let store = fixture_store();
+    let status_of = |w: u16| {
+        let frame = frame_to_string(&store, w, 36);
+        line_with(&frame, "GLASS").to_string()
+    };
+    assert!(status_of(120).contains("http://127.0.0.1:8765"));
+
+    // It is the one thing on the line that gives way. Every chip beside it is a
+    // claim about the desk; this is only where the desk is — and a line that ran
+    // past the frame would clip the GLASS badge off the right-hand end, which is
+    // the statement that may never leave the frame.
+    let tight = status_of(60);
+    assert!(!tight.contains("127.0.0.1"), "{tight}");
+    assert!(tight.contains("GLASS"), "{tight}");
+
+    // A client that was never told where it is looking says nothing rather than
+    // inventing a default — `Some("")` is absent here as everywhere.
+    let frame = frame_to_string(&Store::default(), 120, 36);
+    assert!(!frame.contains("http://"), "{frame}");
 }
 
 #[test]

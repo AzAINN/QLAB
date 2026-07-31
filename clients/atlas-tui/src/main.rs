@@ -58,6 +58,10 @@ async fn main() -> Result<()> {
     // The threshold the frame marks stale numbers at comes from the cadence that
     // refreshes them, so the two cannot drift apart.
     let mut store = Store::new(http::stale_after(http::POLL_INTERVAL));
+    // The frame says where it is looking. An operator with two desks up — or one
+    // owner on a port they did not choose — otherwise has to read a chip that
+    // names no host and guess which desk it is about.
+    store.base = base.clone();
     // Probe before the screen is taken. The first frame is drawn before any
     // event arrives, and a frame that says "no owner" because it has not asked
     // yet has already lied to the operator once.

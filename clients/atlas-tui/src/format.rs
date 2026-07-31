@@ -207,6 +207,25 @@ pub fn arrow_pct(fraction: f64) -> String {
     format!("{}{}%", if negative { "▼" } else { "▲" }, digits)
 }
 
+/// How long ago, at the coarsest unit that still says it: `47s`, `9m`, `2h`.
+///
+/// `STALE 3600s` is a number an operator has to divide before it means anything,
+/// and the thing it is competing with for attention is the desk. One unit rather
+/// than two (`1h 3m`) because the chip is read at a glance and the question it
+/// answers is "roughly how far behind", not "how far behind exactly" — the
+/// second figure is precision nobody spends.
+///
+/// Truncating, never rounding: 119 seconds is `1m`, because a chip that says
+/// `2m` about a mark ninety seconds old has aged it past what it is.
+pub fn age(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3_599 => format!("{}m", secs / 60),
+        _ => format!("{}h", secs / 3_600),
+    }
+}
+
 /// A quote. Two decimals above a dollar, four below it — sub-dollar instruments
 /// carry their information in the third and fourth places, and truncating there
 /// makes distinct prices look identical.
@@ -400,6 +419,39 @@ mod tests {
         assert_eq!(upper(None), MISSING);
         assert_eq!(opt_pct(Some(-0.125)), "-12.5%");
         assert_eq!(opt_pct(None), MISSING);
+    }
+
+    #[test]
+    fn an_age_states_the_coarsest_unit_that_still_says_it() {
+        use std::time::Duration;
+        let age = |secs| super::age(Duration::from_secs(secs));
+        assert_eq!(age(0), "0s");
+        assert_eq!(age(47), "47s");
+        // The band edges, both sides. `STALE 3600s` was the finding.
+        assert_eq!(age(59), "59s");
+        assert_eq!(age(60), "1m");
+        assert_eq!(
+            age(119),
+            "1m",
+            "truncated, so a mark is never aged past itself"
+        );
+        assert_eq!(age(3_599), "59m");
+        assert_eq!(age(3_600), "1h");
+        assert_eq!(age(7_200), "2h");
+        assert_eq!(
+            age(86_400),
+            "24h",
+            "a day is hours, not a new unit nobody asked for"
+        );
+        // Four characters through a day, which is what lets the chip run sit at
+        // a fixed width beside everything else on the status line.
+        for secs in [0, 59, 60, 3_599, 3_600, 86_400] {
+            assert!(
+                age(secs).chars().count() <= 4,
+                "{secs} rendered {}",
+                age(secs)
+            );
+        }
     }
 
     #[test]

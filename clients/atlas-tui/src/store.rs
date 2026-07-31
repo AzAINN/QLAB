@@ -270,6 +270,15 @@ pub struct Store {
     pub last_snapshot_at: Option<Instant>,
     /// The last payload that did not decode, cleared by the next that does.
     pub malformed: Option<Malformed>,
+    /// Where this client is looking — the owner base every request goes to.
+    ///
+    /// Data rather than an environment read inside the renderer, for the reason
+    /// every other fact on the frame is: a status line that called
+    /// `base_from_env` would be a frame that is not a pure function of the
+    /// store, and two tests setting `QLAB_UI_PORT` would race each other.
+    /// Empty means nothing set it, and renders as absent like every other unset
+    /// string in this client.
+    pub base: String,
     /// Live prices, by ticker — read through `asset_view`, never rendered from
     /// directly. See `QuoteMark` for why this is an overlay and not a merge.
     pub quote_overlay: HashMap<String, QuoteMark>,
@@ -308,6 +317,7 @@ impl Store {
             stale_after,
             last_snapshot_at: None,
             malformed: None,
+            base: String::new(),
             quote_overlay: HashMap::new(),
             stream_malformed_count: 0,
             tick: 0,

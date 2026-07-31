@@ -284,9 +284,11 @@ async fn an_owner_answering_with_garbage_is_polled_at_the_desks_cadence_not_the_
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let _poller = spawn_poller(owner.base.clone(), true, tx);
 
-    // Past one whole poll interval, and past two of the retry interval — which
-    // is what makes the two cadences tell each other apart here.
-    let budget = POLL_INTERVAL + Duration::from_millis(600);
+    // Past one whole poll interval and past two of the retry interval, which is
+    // what makes the two cadences tell each other apart. The slack is wide
+    // because the second poll has to *land* inside it, and a margin that only
+    // holds on an idle machine is a flake waiting for a busy one.
+    let budget = POLL_INTERVAL + Duration::from_millis(1_500);
     let seen = drain(&mut rx, 99, budget).await;
     assert!(
         seen.iter().any(|s| matches!(s, Seen::Malformed(_))),

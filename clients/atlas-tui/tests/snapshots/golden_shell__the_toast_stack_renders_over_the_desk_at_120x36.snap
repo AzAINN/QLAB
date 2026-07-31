@@ -37,4 +37,4 @@ expression: "frame_with_toasts(&store, &toast_queue(now), 120, 36, now +\nDurati
 "        │  idle by accident.                                    2022     -13.9%       │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
 "        │read c60c46006d926733                                                        │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
 "        │window 45fbb3f32be5bef9        ─────────────────────── ──────────────────────│ WATCHING                        "
-" /command …                                                                         ● SSE  ● OWNER  propose·auto  GLASS "
+" /command …   http://127.0.0.1:8765                                                 ● SSE  ● OWNER  propose·auto  GLASS "

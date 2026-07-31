@@ -150,6 +150,10 @@ pub fn fixture_store() -> Store {
     let snapshot: Snapshot =
         serde_json::from_str(include_str!("../fixtures/tui_snapshot.json")).unwrap();
     let mut store = Store::default();
+    // Set here rather than read from the environment, so a golden pins one
+    // address instead of whichever `QLAB_UI_PORT` the test binary happened to
+    // see. The default port every qlab surface agrees on.
+    store.base = "http://127.0.0.1:8765".to_string();
     let now = Instant::now();
     store.apply(AppEvent::ConnUp(Channel::Owner), now);
     store.apply(AppEvent::Snapshot(Box::new(snapshot)), now);

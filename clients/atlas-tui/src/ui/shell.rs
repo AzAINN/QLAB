@@ -448,7 +448,7 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Optio
     // are two claims, and the red dot only ever spoke to the first.
     if let Some(age) = stale {
         right.push(Span::styled(
-            format!("STALE {}s  ", age.as_secs()),
+            format!("STALE {}  ", format::age(age)),
             Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
         ));
     }
@@ -472,15 +472,29 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Optio
         ),
     ]);
 
-    let used: usize = left
+    let mut spans = left;
+    // The one thing on this line that gives way. Every chip beside it is a claim
+    // about the desk; this is only *where the desk is*, and a `Paragraph` that
+    // ran past the frame would clip the right-hand end — which is the GLASS
+    // badge, the one statement that may never leave the frame.
+    let used: usize = spans
         .iter()
         .chain(right.iter())
         .map(|s| s.content.width())
         .sum();
-    let mut spans = left;
-    spans.push(Span::raw(
-        " ".repeat((area.width as usize).saturating_sub(used)),
-    ));
+    let mut slack = (area.width as usize).saturating_sub(used);
+    if let Some(base) = format::text(Some(&store.base)) {
+        // Two cells of separation either side, or it reads as part of the
+        // command prompt it sits after.
+        if slack >= base.width() + 4 {
+            spans.push(Span::styled(
+                format!("   {base}"),
+                Style::default().fg(t.text_tertiary),
+            ));
+            slack -= base.width() + 3;
+        }
+    }
+    spans.push(Span::raw(" ".repeat(slack)));
     spans.append(&mut right);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

@@ -39,6 +39,9 @@ const STATE_W: usize = 7;
 const PCT_CELLS: usize = 10;
 /// Above this percentile the turbulence reading is in its own tail.
 const TURBULENT: f64 = 0.9;
+/// What the owner writes in a reading whose detector did not run
+/// (`qlab/signals/panel.py`). Not a state of the market.
+const FAILED: &str = "failed";
 /// What each panel reading docks off the posterior's score.
 const TURBULENCE_PENALTY: f64 = 15.0;
 const DRAWDOWN_PENALTY: f64 = 10.0;
@@ -203,11 +206,19 @@ fn stress_section(store: &Store) -> Section {
             )
         }
         None => {
-            // Not a 50: a gauge with no panel behind it would put the needle
-            // exactly where NEUTRAL sits and mean nothing at all by it.
+            // Not a 50: a gauge with nothing behind it would put the needle
+            // exactly where NEUTRAL sits and mean nothing at all by it. Which
+            // kind of nothing is the renderer's to say — a panel that has not
+            // arrived is `…`, and one that arrived with nothing this gauge can
+            // read is `--`. The strip below spells out which detectors failed.
+            let absent = if store.regime_panel.is_none() {
+                PENDING
+            } else {
+                MISSING
+            };
             head.push(Line::from(vec![
                 label(" desk stress  "),
-                Span::styled(PENDING, Style::default().fg(t.text_dim)),
+                Span::styled(absent, Style::default().fg(t.text_dim)),
             ]));
             None
         }
@@ -376,19 +387,34 @@ fn reading_row(reading: &Reading) -> Line<'static> {
     ])
 }
 
-/// The desk stress score, 0–100, or `None` while the panel has not arrived.
+/// The desk stress score, 0–100, or `None` when nothing it reads is there.
 ///
 /// Two sources on purpose: the posterior is the HMM's own probability mass, and
 /// the two penalised readings are the detectors that disagree with it most often
 /// — a desk can be posterior-calm while sitting in the turbulence tail, and the
 /// gauge has to say so.
 fn desk_stress(regime: Option<&Regime>, panel: Option<&RegimePanel>) -> Option<f64> {
-    // The panel is what makes this a reading rather than a guess. Absent, the
-    // gauge is pending — never a confident 50.
+    // The panel is what makes this a reading rather than a guess.
     let panel = panel?;
     let posterior = regime.and_then(|r| r.posterior.as_ref());
-    // An absent posterior is no opinion, which is the middle of the scale — the
-    // owner ships without `hmmlearn` installed more often than with it.
+    let turbulence = reading(panel, "turbulence").and_then(|r| r.percentile);
+    // `failed` is the owner's word for a detector that did not run, so it is an
+    // absent input rather than a calm one — the distinction the score turns on.
+    let drawdown = reading(panel, "drawdown")
+        .and_then(|r| format::text(r.state.as_ref()))
+        .filter(|state| *state != FAILED);
+
+    // A panel whose detectors all failed is not a calm desk. Without a posterior
+    // *and* without either reading there is no input at all, and 50 NEUTRAL is
+    // the most confident thing this gauge can say — which is why it must not be
+    // what it says when it knows nothing.
+    if posterior.is_none() && turbulence.is_none() && drawdown.is_none() {
+        return None;
+    }
+
+    // An absent posterior beside a reading that did run is no opinion, which is
+    // the middle of the scale — the owner ships without `hmmlearn` installed
+    // more often than with it, and the panel still measured something.
     let mass = |state: &str| {
         posterior
             .and_then(|p| p.get(state))
@@ -398,16 +424,10 @@ fn desk_stress(regime: Option<&Regime>, panel: Option<&RegimePanel>) -> Option<f
     };
 
     let mut score = 50.0 + 50.0 * (mass("calm") - mass("stress"));
-    if reading(panel, "turbulence")
-        .and_then(|r| r.percentile)
-        .is_some_and(|percentile| percentile > TURBULENT)
-    {
+    if turbulence.is_some_and(|percentile| percentile > TURBULENT) {
         score -= TURBULENCE_PENALTY;
     }
-    if reading(panel, "drawdown")
-        .and_then(|r| format::text(r.state.as_ref()))
-        .is_some_and(is_stressed)
-    {
+    if drawdown.is_some_and(is_stressed) {
         score -= DRAWDOWN_PENALTY;
     }
     Some(score.clamp(0.0, 100.0))
@@ -522,6 +542,12 @@ fn reading<'a>(panel: &'a RegimePanel, id: &str) -> Option<&'a Reading> {
 }
 
 /// The leading `width` characters of `text`, or all of it.
+///
+/// A second copy of `markets::head`, deliberately: that one is about a
+/// right-aligned column dropping its *sign* when it overflows, and this one is a
+/// label column with no sign to lose. They graduate to one helper when a third
+/// grid wants it (Tasks 11/13), not before — a shared function whose doc comment
+/// has to describe both is worth less than either.
 fn head(text: String, width: usize) -> String {
     match text.char_indices().nth(width) {
         Some((byte, _)) => text[..byte].to_string(),
@@ -657,9 +683,35 @@ mod tests {
             desk_stress(Some(&no_hmm), Some(&penalties(Some(0.95), "stress"))),
             Some(25.0)
         );
-        // And a panel whose two readings are absent entirely docks nothing.
+    }
+
+    #[test]
+    fn a_panel_whose_detectors_all_failed_scores_nothing_at_all() {
+        // The reachable half of the same failure: the owner keeps a row per
+        // detector and marks it `failed`, so the readings are there and every
+        // input is null. With no posterior either, 50 NEUTRAL would be the most
+        // confident sentence this gauge can say about a desk it cannot see.
+        let no_hmm = regime(json!({"regime": "calm"}));
+        let all_failed = panel(json!({"readings": [
+            {"indicator_id": "turbulence", "state": "failed"},
+            {"indicator_id": "drawdown", "state": "failed"}
+        ]}));
+        assert_eq!(desk_stress(Some(&no_hmm), Some(&all_failed)), None);
         assert_eq!(
             desk_stress(Some(&no_hmm), Some(&panel(json!({"readings": []})))),
+            None
+        );
+
+        // One usable input is enough to score: the drawdown detector ran and
+        // said calm, which is a measurement even though it docks nothing.
+        assert_eq!(
+            desk_stress(
+                Some(&no_hmm),
+                Some(&panel(json!({"readings": [
+                    {"indicator_id": "turbulence", "state": "failed"},
+                    {"indicator_id": "drawdown", "state": "calm"}
+                ]})))
+            ),
             Some(50.0)
         );
     }

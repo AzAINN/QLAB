@@ -625,6 +625,37 @@ fn the_gauge_reads_the_panel_and_says_pending_until_one_arrives() {
 }
 
 #[test]
+fn a_panel_whose_detectors_all_failed_reads_missing_rather_than_neutral() {
+    // "Not yet" and "nothing measurable" are different facts about the desk, and
+    // both are different from a confident NEUTRAL. The owner keeps a row per
+    // detector and marks it `failed`, so this is the frame an operator sees when
+    // the panel ran against a snapshot it could not use.
+    // No posterior either — the owner ships without `hmmlearn` more often than
+    // with it, and that is the desk where the panel is the only input there was.
+    let mut store = store_from(r#"{"market": {"regime": {"regime": "calm"}}}"#);
+    let now = store.last_snapshot_at.unwrap();
+    store.apply(
+        AppEvent::RegimePanel(
+            serde_json::from_str(
+                r#"{"readings": [
+                     {"indicator_id": "turbulence", "state": "failed"},
+                     {"indicator_id": "drawdown", "state": "failed"}],
+                    "robust_state": "uncertain"}"#,
+            )
+            .unwrap(),
+        ),
+        now,
+    );
+    let frame = frame_to_string(&store, 120, 36);
+    let stress = line_with(&frame, "desk stress");
+    assert!(stress.contains("--"), "{stress}");
+    assert!(
+        !stress.contains('…'),
+        "the panel arrived; this is not a wait: {stress}"
+    );
+}
+
+#[test]
 fn the_regime_strip_gives_every_reading_a_row_including_one_that_did_not_run() {
     // The panel's own rule: a detector that failed still occupies a row, so the
     // strip shows what did not run rather than quietly shortening.

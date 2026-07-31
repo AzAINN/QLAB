@@ -291,8 +291,17 @@ fn is_function_code(token: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.' || c == '-')
 }
 
+/// Case-blind prefix match, safe for a prefix an operator pasted.
+///
+/// The boundary check is not decoration: `prefix` is whatever is in the buffer,
+/// so a multi-byte character makes `haystack[..prefix.len()]` a slice through
+/// the middle of one — a panic in the key path, which behind the alternate
+/// screen is a crash this client cannot report. Every haystack here is ASCII
+/// today; the guard is what keeps that from being load-bearing.
 fn starts_with_fold(haystack: &str, prefix: &str) -> bool {
-    haystack.len() >= prefix.len() && haystack[..prefix.len()].eq_ignore_ascii_case(prefix)
+    haystack.len() >= prefix.len()
+        && haystack.is_char_boundary(prefix.len())
+        && haystack[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 // -- resolution -------------------------------------------------------------
@@ -338,13 +347,23 @@ const DESK_MODES: [(&str, &str); 3] = [
 pub fn resolve(state: &CmdState, store: &Store, posture: Posture) -> Resolved {
     match state {
         CmdState::Empty => Resolved::Refused("type / for the scopes".into()),
-        CmdState::Picker { typed, matches } => match matches.len() {
-            0 => Resolved::Refused(format!("no scope is called {typed}")),
-            // One match is an accept, and the shell does that rather than
-            // acting: rewriting the buffer to `/view ` is what puts the
-            // operator in front of the values before anything happens.
-            _ => Resolved::Refused("choose a scope".into()),
-        },
+        // Counted as this window would *see* them: a glass operator typing `/m`
+        // is offered nothing, and "choose a scope" beside an empty strip would
+        // be an instruction they cannot follow. The scope they cannot use is
+        // still answered when it is typed in full — that is `mode` below.
+        CmdState::Picker { typed, matches } => {
+            match matches
+                .iter()
+                .filter(|scope| !scope.writes() || posture.writes())
+                .count()
+            {
+                0 => Resolved::Refused(format!("no scope is called {typed}")),
+                // One match is an accept, and the shell does that rather than
+                // acting: rewriting the buffer to `/view ` is what puts the
+                // operator in front of the values before anything happens.
+                _ => Resolved::Refused("choose a scope".into()),
+            }
+        }
         CmdState::Scoped { scope, query } => scoped(*scope, query.trim(), store, posture),
         CmdState::Verb(Verb::Ticker(symbol)) => ticker(symbol, store),
         CmdState::Unknown(text) => Resolved::Refused(format!(
@@ -392,7 +411,16 @@ fn ticker(query: &str, store: &Store) -> Resolved {
     // No phantom selection. A cursor moved to a symbol the desk is not watching
     // draws a row of `--` and reads as a measurement, which is the one thing a
     // selection may never be.
-    match store.universe().into_iter().find(|t| *t == wanted) {
+    //
+    // Matched case-blind and returned in the *owner's* spelling. The owner's
+    // universe is uppercase today, and a client that assumed so would tell an
+    // operator their own symbol is not on a desk that is holding it — while a
+    // cursor set from the typed spelling would then match no row at all.
+    match store
+        .universe()
+        .into_iter()
+        .find(|t| t.eq_ignore_ascii_case(&wanted))
+    {
         Some(found) => Resolved::Ticker(found.to_string()),
         None => Resolved::Refused(format!(
             "{wanted} is not in the universe this desk is watching"
@@ -495,7 +523,7 @@ fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Str
             store
                 .universe()
                 .into_iter()
-                .filter(|t| t.starts_with(&wanted))
+                .filter(|t| starts_with_fold(t, &wanted))
                 .map(str::to_string)
                 .collect()
         }
@@ -690,7 +718,10 @@ impl CmdLine {
             Some(0) => 0,
             Some(i) => i - 1,
         };
-        self.at = Some(at);
+        // Set after `set`, not before: `set` puts the field back on the live
+        // line — which is what every *edit* wants and is exactly wrong here,
+        // because a recall that forgot where it was would restart at the newest
+        // line on the next ↑.
         let line = self.history[at].clone();
         self.set(line);
         self.at = Some(at);
@@ -1040,6 +1071,46 @@ mod tests {
                 assert!(said.contains("ZZZZ"), "{said}");
                 assert!(said.contains("universe"), "{said}");
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_symbol_comes_back_in_the_owners_spelling_and_not_the_operators() {
+        // A cursor is set by comparing against the owner's own rows, so a
+        // client that handed back what was typed would select nothing on a desk
+        // whose universe is not uppercase.
+        let mut store = desk();
+        let mut snapshot = store.snapshot.take().unwrap();
+        snapshot.market.as_mut().unwrap().assets[0].ticker = Some("spy".into());
+        store.apply(AppEvent::Snapshot(Box::new(snapshot)), Instant::now());
+        assert_eq!(
+            resolve(&parse("/ticker SPY"), &store, Posture::Glass),
+            Resolved::Ticker("spy".into())
+        );
+    }
+
+    #[test]
+    fn a_prefix_the_operator_pasted_cannot_panic_the_key_path() {
+        // Byte-sliced, this is a slice through the middle of a character —
+        // a panic behind the alternate screen, which is the one failure a
+        // fullscreen client cannot report.
+        let store = desk();
+        for pasted in ["/vé", "/ticker é", "/plan ré", "é"] {
+            let _ = resolve(&parse(pasted), &store, Posture::Glass);
+            let _ = suggestions(&parse(pasted), &store, Posture::Glass);
+        }
+    }
+
+    #[test]
+    fn a_scope_this_window_cannot_see_is_not_a_scope_it_is_told_to_choose() {
+        // On glass `/m` matches only the hidden scope, so the strip is empty.
+        // "choose a scope" beside an empty strip is an instruction with nothing
+        // to follow — the honest answer is that no scope answers to `m`.
+        let store = desk();
+        assert!(suggestions(&parse("/m"), &store, Posture::Glass).is_empty());
+        match resolve(&parse("/m"), &store, Posture::Glass) {
+            Resolved::Refused(said) => assert!(said.contains("no scope"), "{said}"),
             other => panic!("{other:?}"),
         }
     }

@@ -8,7 +8,7 @@
 //! nothing invoked, and a motion rule is the easiest kind to write that way,
 //! because the only symptom of a rule with no call site is a desk that is calm.
 
-use atlas::fx::{Fx, FLASH, FULL_FRAME, FX_FRAME, REVEAL, TWEEN};
+use atlas::fx::{Fx, FLASH, FULL_FRAME, FX_FRAME, HALT_BREATH, HALT_FRAME, REVEAL, TWEEN};
 use atlas::store::Trigger;
 use atlas::theme::theme;
 use ratatui::buffer::Buffer;
@@ -75,11 +75,24 @@ fn painted() -> Buffer {
     buf
 }
 
+/// One frame exactly as the runtime draws it: repaint from scratch, then apply
+/// the effect pass over it.
+///
+/// Repainting per frame is load-bearing and was got wrong once here. Effects
+/// like `fade_to_fg` read the colour already in the cell, so feeding one buffer
+/// through N calls compounds the fade N times — which made two clients driven
+/// for the same wall time at different wake rates disagree wildly, and looked
+/// exactly like the pacing bug the test was written to catch.
+fn frame(fx: &mut Fx, elapsed: Duration) -> Buffer {
+    let mut buf = painted();
+    fx.process(elapsed, &mut buf, FRAME);
+    buf
+}
+
 /// Drive the loop's effect pass for `span`, in the 16 ms wakes it really uses.
 fn run_for(fx: &mut Fx, span: Duration) {
-    let mut buf = painted();
     for _ in 0..(span.as_millis() / FX_FRAME.as_millis()) {
-        fx.process(FX_FRAME, &mut buf, FRAME);
+        frame(fx, FX_FRAME);
     }
 }
 
@@ -286,7 +299,7 @@ fn an_effect_never_opens_part_way_through_itself() {
     // The gap this guards is real: while idle the loop draws on the 100 ms
     // heartbeat, so a coalesce fired by a keystroke arrives with up to that much
     // wall time since the last frame — and an effect that has existed for none
-    // of it would jump a third of the way in on its first paint.
+    // of it would jump 40% of the way into its 300 ms on the first paint.
     let now = Instant::now();
     let mut fx = staged();
     fx.on_view_switch();
@@ -300,25 +313,43 @@ fn an_effect_never_opens_part_way_through_itself() {
 }
 
 #[test]
-fn the_full_frame_lane_steps_at_half_the_rate_the_panes_do() {
-    // Part I's cap, observed on the buffer rather than on a counter. A halted
-    // desk repaints every cell of the terminal until it resumes, and at 60 fps
-    // that is twice the rate anyone can see.
+fn the_full_frame_lane_steps_at_half_the_rate_the_panes_do_without_strobing() {
+    // Part I's cap, observed on the buffer rather than on a counter, and with
+    // the property that matters most stated first: the halt tint is on *every*
+    // frame. The cap skips the advance, never the paint. Skipping the paint is
+    // what the first implementation did — the frame underneath is repainted
+    // from scratch, so every other frame showed a desk with no halt on it, a
+    // 30 Hz strobe that no test caught because they all reused one buffer.
     let now = Instant::now();
     let mut fx = staged();
     fx.on_trigger(&Trigger::Halted, now, false);
 
-    let mut buf = painted();
-    let before = buf.clone();
-    fx.process(FX_FRAME, &mut buf, FRAME);
-    assert_eq!(
-        buf, before,
-        "the full-frame lane advanced on the first 16 ms wake"
-    );
-    fx.process(FX_FRAME, &mut buf, FRAME);
+    // Warm to the steep middle of the breath, on an even wake count so the debt
+    // lands at zero. Near the ends of a `SineInOut` the curve is flat enough
+    // that one 32 ms step moves the fade by less than a whole colour level —
+    // true of the effect, invisible to a buffer comparison, and a place this
+    // assertion could only ever be read as passing by luck.
+    let warm = (HALT_BREATH.as_millis() / 2 / FX_FRAME.as_millis()) as u64 & !1;
+    for _ in 0..warm {
+        frame(&mut fx, FX_FRAME);
+    }
+
+    let owes_nothing = frame(&mut fx, FX_FRAME); // debt 16 ms — paints, does not advance
+    let advances = frame(&mut fx, FX_FRAME); // debt 32 ms — pays out
+    let holds = frame(&mut fx, FX_FRAME); // debt 16 ms again
+
     assert_ne!(
-        buf, before,
-        "and never advanced at all — a cap is not a mute"
+        owes_nothing,
+        painted(),
+        "a frame the lane owed nothing on showed the desk unhalted"
+    );
+    assert_ne!(
+        owes_nothing, advances,
+        "the breath never advanced at all — a cap is not a mute"
+    );
+    assert_eq!(
+        advances, holds,
+        "the breath advanced on a frame it owed nothing on"
     );
 }
 
@@ -326,7 +357,8 @@ fn the_full_frame_lane_steps_at_half_the_rate_the_panes_do() {
 fn the_loop_blocks_when_nothing_moves_and_wakes_fast_when_something_does() {
     // The finding this task opened on: `should_render` had always said "paint
     // while effects are active", and nothing woke the loop faster than the
-    // 100 ms heartbeat, so a 600 ms reveal arrived in five visible chunks.
+    // 100 ms heartbeat, so the 600 ms reveal arrived in 11 repaints of up to 96
+    // characters where it now takes ~30 of 5–29.
     let now = Instant::now();
     let mut fx = staged();
     assert_eq!(
@@ -344,10 +376,84 @@ fn the_loop_blocks_when_nothing_moves_and_wakes_fast_when_something_does() {
         "a spent effect has to hand the loop back to the channel"
     );
 
-    // A desk whose only motion is the halt pulse is repainted at the rate that
-    // pulse advances, not at 60 fps for a lane that steps at 30.
+    // A desk whose only motion is the halt breath is repainted at the breath's
+    // own cadence, not at 60 fps and not at the transition lane's 31.
     fx.on_trigger(&Trigger::Halted, now, false);
-    assert_eq!(fx.budget(now + PAST_EVERYTHING), Some(FULL_FRAME));
+    assert_eq!(fx.budget(now + PAST_EVERYTHING), Some(HALT_FRAME));
+}
+
+#[test]
+fn a_halted_desk_costs_the_heartbeat_and_nothing_more_until_something_else_moves() {
+    // The steady state an incident leaves a terminal in, for hours, possibly
+    // over ssh. It is the one regime where the cost of a frame is a bill
+    // somebody pays, so it is the one that must not sit at 31 fps.
+    let now = Instant::now();
+    let mut fx = staged();
+    fx.on_trigger(&Trigger::Halted, now, false);
+    let quiet = now + FLASH.max(REVEAL) + Duration::from_millis(1);
+    assert_eq!(fx.budget(quiet), Some(HALT_FRAME));
+
+    // Anything else moving takes the loop back off the breath's cadence, and
+    // the breath rides along on `spend`'s debt rather than stalling.
+    fx.on_trigger(&Trigger::QuoteTick("SPY".into()), quiet, false);
+    assert_eq!(
+        fx.budget(quiet),
+        Some(FX_FRAME),
+        "a quote during a halt must still flash at 60 fps"
+    );
+    assert_eq!(
+        fx.budget(quiet + FLASH),
+        Some(HALT_FRAME),
+        "and the desk must fall back to the breath when it decays out"
+    );
+
+    // The restore is a transition again the moment it replaces the breath —
+    // 400 ms at the halt's cadence would be four frames.
+    fx.on_trigger(&Trigger::Resumed, quiet, false);
+    assert_eq!(fx.budget(quiet + FLASH), Some(FULL_FRAME));
+    run_for(&mut fx, PAST_EVERYTHING);
+    assert_eq!(fx.budget(quiet + PAST_EVERYTHING), None);
+}
+
+#[test]
+fn the_breath_advances_in_real_time_at_its_own_cadence() {
+    // The clamp regression the per-lane split exists for: one shared 32 ms clamp
+    // against a 100 ms wake would advance the breath at a third of real time,
+    // and nothing on screen would say so. Measured through the buffer — two
+    // halted clients, one woken at 100 ms and one at 16 ms, must reach the same
+    // point in the breath after the same wall time.
+    let now = Instant::now();
+    let mut slow = staged();
+    let mut fast = staged();
+    slow.on_trigger(&Trigger::Halted, now, false);
+    fast.on_trigger(&Trigger::Halted, now, false);
+
+    // 600 ms of wall time each: six 100 ms wakes against thirty-seven 16 ms ones.
+    let mut slow_buf = painted();
+    let mut fast_buf = painted();
+    for _ in 0..6 {
+        slow_buf = frame(&mut slow, HALT_FRAME);
+    }
+    for _ in 0..37 {
+        fast_buf = frame(&mut fast, FX_FRAME);
+    }
+
+    let channel = |buf: &Buffer| match buf[(60, 18)].fg {
+        ratatui::style::Color::Rgb(r, _, _) => i32::from(r),
+        other => panic!("expected a truecolor fade, got {other:?}"),
+    };
+    assert!(
+        (channel(&slow_buf) - channel(&fast_buf)).abs() <= 6,
+        "the same 600 ms of wall time reached different points in the breath: \
+         100 ms wakes {} vs 16 ms wakes {}",
+        channel(&slow_buf),
+        channel(&fast_buf)
+    );
+    assert_ne!(
+        channel(&slow_buf),
+        channel(&painted()),
+        "the breath did not move at all"
+    );
 }
 
 #[test]

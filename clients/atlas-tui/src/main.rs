@@ -121,7 +121,10 @@ async fn run(
         // channel and the tick guarantees it keeps waking. Moving, it waits with
         // a timeout instead: `should_render` has always said "paint while
         // effects are active", but nothing woke this loop faster than the 100 ms
-        // heartbeat, so a 600 ms reveal arrived in five visible chunks.
+        // heartbeat, so the 600 ms reveal arrived in 11 repaints of up to 96
+        // characters against a live owner, rather than the ~30 of 5–29 it takes
+        // now. The timeout `Fx::budget` hands back is also what keeps a halted
+        // desk from repainting the whole buffer 31 times a second for hours.
         let next = match budget {
             Some(wait) => match tokio::time::timeout(wait, rx.recv()).await {
                 Ok(Some(ev)) => Some(ev),

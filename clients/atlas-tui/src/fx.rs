@@ -324,17 +324,52 @@ const FX_FRAME_MS: u64 = 16;
 /// halt would pulse at 20 fps while claiming 30. Deriving it from `FX_FRAME`
 /// keeps that arithmetic from silently coming apart again.
 ///
-/// A full-frame effect rewrites every cell of the terminal, and the halt
-/// treatment repeats until the desk resumes; at 60 fps that is a permanent
-/// full-buffer rewrite at twice the rate anyone can see. The lane is separate
-/// rather than throttled in place because one `EffectManager` advances every
-/// effect it holds with one elapsed duration — there is no per-effect skip.
+/// **This caps the animation, not the painting.** A post-render effect pass runs
+/// over a buffer the frame repainted from scratch, so the tint has to be
+/// reapplied every frame or it is simply absent from the frames in between —
+/// `Fx::process` therefore always calls the lane and varies only the duration it
+/// hands over. That means the cap saves no cells and no bytes; what pays for a
+/// long halt is `HALT_FRAME`, which cuts the number of frames drawn at all.
+///
+/// The lane is separate rather than throttled in place because one
+/// `EffectManager` advances every effect it holds with one elapsed duration —
+/// there is no per-effect step.
 pub const FULL_FRAME: Duration = Duration::from_millis(2 * FX_FRAME_MS);
 
-/// The most time one frame may advance an effect.
+/// The cadence of a halted desk, when the halt breath is the *only* thing moving.
 ///
-/// While anything is moving the loop wakes every `FX_FRAME`, so a gap wider than
-/// this can only mean the loop was idle — and an effect registered in the very
+/// This is the one steady state the client can sit in for hours — an operator
+/// walks away from an incident, possibly over ssh — so it is the one that must
+/// not cost 31 fps of full-buffer rewrites. A breath is not a transition: it can
+/// be sampled far more slowly than a sweep without reading as stepped.
+///
+/// 100 ms is chosen against two facts rather than picked round:
+///
+/// * **It equals `store::IDLE_FRAME`.** The heartbeat already wakes the loop
+///   every 100 ms to keep the glyph and the quote ages honest, so a halt costs
+///   *no extra wakes at all* over a quiet desk — only the effect pass on frames
+///   that were being drawn anyway. It must never exceed the heartbeat either: a
+///   client repainting slower than 10 fps during an incident is the one moment
+///   an operator would read a live desk as a hung one.
+/// * **It divides `HALT_BREATH` exactly, 14 ways.** `SineInOut` has a maximum
+///   slope of π/2, so the worst per-frame alpha step is (π/2)/14 ≈ 0.112. The
+///   widest channel span the fade crosses is `text_primary` → `negative_dim`
+///   (0xe5 → 0x1d, 200 levels), so the worst per-frame colour step is ≈ 22 of
+///   255 — under 9%, and only at the midpoint of the breath where the eye is
+///   tracking motion rather than shade. Dividing exactly also means the peak and
+///   the trough land on frames, so the breath does not beat against the
+///   sampling.
+///
+/// Any other effect running alongside the halt takes the budget back to
+/// `FX_FRAME`, and the breath then advances at `FULL_FRAME` through the debt in
+/// `spend` — the cap still applies, it simply stops being the thing that decides
+/// how often the loop wakes.
+pub const HALT_FRAME: Duration = Duration::from_millis(100);
+
+/// The most time one frame may advance a *pane* effect.
+///
+/// While pane effects run the loop wakes every `FX_FRAME`, so a gap wider than
+/// this can only mean the lane was idle — and an effect registered in the very
 /// iteration that ended the idle has not been playing for the length of it.
 /// Unclamped, a coalesce fired by a keystroke 120 ms after the last heartbeat
 /// frame would open 40% of the way through itself, and the transition an
@@ -344,7 +379,21 @@ pub const FULL_FRAME: Duration = Duration::from_millis(2 * FX_FRAME_MS);
 /// dropped, an effect plays for its full count of frames and takes longer in
 /// wall time. On a cell grid that is the better failure — a transition that
 /// skips is worse than one that lingers.
-const MAX_STEP: Duration = FULL_FRAME;
+const MAX_PANE_STEP: Duration = FULL_FRAME;
+
+/// The same, for the full-frame lane, whose slowest *designed* wake is the halt.
+///
+/// Two clamps rather than one because the lanes no longer share a cadence. A
+/// single `FULL_FRAME` clamp would bind on every frame of the halt-only regime —
+/// 32 ms of effect time for 100 ms of wall time — and the breath would run at a
+/// third of its stated period while every test still passed. The clamp must be
+/// each lane's own slowest legitimate wake, not the fastest of them.
+///
+/// It is close to a formality here: the only two effects in this lane are a
+/// repeating breath, where opening part way through is invisible, and the 400 ms
+/// restore. What it still buys is the genuinely idle gap — a `Halted` arriving
+/// on a desk that had been quiet for a whole heartbeat.
+const MAX_FULL_STEP: Duration = HALT_FRAME;
 
 /// Part I's motion vocabulary, in milliseconds.
 ///
@@ -355,7 +404,17 @@ const REGIME_SWEEP: u32 = 400;
 const REGIME_SETTLE: u32 = 400;
 const ALERT_HALF: u32 = 200;
 const PLAN_SWEEP: u32 = 500;
-const HALT_HALF: u32 = 700;
+/// Half a breath — 2.8 s in and out. Slower than the rest of the vocabulary on
+/// purpose: everything else marks a transition and is over, while this marks a
+/// condition that is still true. It is also what makes `HALT_FRAME` honest —
+/// fourteen samples per half, rather than the seven a 700 ms breath would have
+/// left, which is the difference between a breath and a stair.
+///
+/// Public as a `Duration` because it is half of the pair `HALT_FRAME` was chosen
+/// against, and a test that had to restate the period would be free to disagree
+/// with it.
+pub const HALT_BREATH: Duration = Duration::from_millis(HALT_HALF as u64);
+const HALT_HALF: u32 = 1400;
 const RESTORE: u32 = 400;
 const CHIP_HALF: u32 = 150;
 const READ_WASH: u32 = 400;
@@ -455,6 +514,14 @@ pub struct Fx {
     full: EffectManager<FxKey>,
     /// Time the full-frame lane has been owed but not yet paid.
     debt: Duration,
+    /// Whether what is registered under `FxKey::Halt` is the repeating breath
+    /// rather than the restore fade that replaces it.
+    ///
+    /// Tracked here because the manager cannot be asked: `is_running` says
+    /// *something* is running, never *which key*, and the two effects that share
+    /// this key want opposite cadences — a breath that can be sampled at 10 fps,
+    /// and a 400 ms restore that at 10 fps would be four frames.
+    halt_pulsing: bool,
 }
 
 impl Fx {
@@ -527,6 +594,7 @@ impl Fx {
             // are the ticker tape and the status line, and reddening those makes
             // two always-on chrome elements lie about themselves.
             Trigger::Halted => {
+                self.halt_pulsing = true;
                 self.full.add_unique_effect(
                     FxKey::Halt,
                     fx::repeating(fx::ping_pong(fx::fade_to_fg(
@@ -536,6 +604,11 @@ impl Fx {
                 );
             }
             Trigger::Resumed => {
+                // Cleared before the add, so the very frame that starts the
+                // restore is already budgeted as a transition rather than as a
+                // breath: a 400 ms fade sampled at the halt's cadence would be
+                // four frames, which is a blink and not a recovery.
+                self.halt_pulsing = false;
                 self.full.add_unique_effect(
                     FxKey::Halt,
                     fx::fade_from_fg(t.negative_dim, (RESTORE, Interpolation::CubicOut)),
@@ -631,13 +704,16 @@ impl Fx {
     /// How long the loop may sleep before it owes the next frame, or `None` to
     /// block on the channel.
     ///
-    /// The two cadences are not interchangeable: a desk whose *only* motion is
-    /// the halt pulse must not be repainted at 60 fps for a lane that advances
-    /// at 30.
+    /// Three cadences, not one, because a desk can sit in any of them for a very
+    /// different length of time. A transition is over in 300 ms and can afford
+    /// 60 fps. A halt lasts as long as the incident does — hours, possibly over
+    /// ssh — and is the one steady state where the cost of a frame is a bill
+    /// somebody pays.
     pub fn budget(&self, now: Instant) -> Option<Duration> {
         budget(
             self.flashes.active(now) || self.gauge.active(now) || self.panes.is_running(),
             self.full.is_running(),
+            self.halt_pulsing,
         )
     }
 
@@ -650,13 +726,23 @@ impl Fx {
     /// Pane effects first, then the full frame over the top: a halted desk
     /// reddens everything, including whatever else is moving.
     ///
-    /// `elapsed` is clamped: see `MAX_STEP`.
+    /// `elapsed` is clamped per lane: see `MAX_PANE_STEP` and `MAX_FULL_STEP`.
     pub fn process(&mut self, elapsed: Duration, buf: &mut Buffer, area: Rect) {
-        let elapsed = elapsed.min(MAX_STEP);
-        self.panes.process_effects(elapsed.into(), buf, area);
-        if let Some(spent) = spend(&mut self.debt, elapsed, FULL_FRAME) {
-            self.full.process_effects(spent.into(), buf, area);
-        }
+        self.panes
+            .process_effects(elapsed.min(MAX_PANE_STEP).into(), buf, area);
+        // The full lane is *painted* on every frame and *advanced* only on the
+        // frames it owes a step — a zero duration renders the tint it is already
+        // at without moving it on.
+        //
+        // Not `if let Some(…) { process }`. The buffer underneath is repainted
+        // from scratch every frame, so a frame the lane sat out would show the
+        // desk with no halt on it at all: a 30 Hz strobe between tinted and
+        // clean, which is worse than no cap. That was live for the whole of the
+        // first implementation and every test passed, because the tests fed one
+        // buffer through repeated calls and the tint accumulated in it.
+        let step =
+            spend(&mut self.debt, elapsed.min(MAX_FULL_STEP), FULL_FRAME).unwrap_or(Duration::ZERO);
+        self.full.process_effects(step.into(), buf, area);
     }
 }
 
@@ -667,14 +753,21 @@ fn aim(rect: &RefRect, effect: Effect) -> Effect {
 
 /// The loop's wait, given which lanes are running.
 ///
-/// Separated from `Fx` so the choice that fixes the starved-effect bug is a
-/// function of two booleans that a test can enumerate, rather than something
-/// only reachable by driving a terminal.
-pub const fn budget(fast: bool, full: bool) -> Option<Duration> {
-    match (fast, full) {
-        (true, _) => Some(FX_FRAME),
-        (false, true) => Some(FULL_FRAME),
-        (false, false) => None,
+/// Separated from `Fx` so the choice that fixes the starved-effect bug — and the
+/// one that keeps a halted desk cheap — is a function of three booleans a test
+/// can enumerate, rather than something only reachable by driving a terminal.
+///
+/// `halt_only` is a claim about *which* full-frame effect is registered, not
+/// about whether the halt is the only thing on screen: `fast` already outranks
+/// it, so any concurrent pane effect takes the whole loop back to `FX_FRAME` and
+/// the breath rides along at `FULL_FRAME` through `spend`'s debt.
+pub const fn budget(fast: bool, full: bool, halt_only: bool) -> Option<Duration> {
+    match (fast, full, halt_only) {
+        (true, _, _) => Some(FX_FRAME),
+        // The steady state an incident leaves a terminal in.
+        (false, true, true) => Some(HALT_FRAME),
+        (false, true, false) => Some(FULL_FRAME),
+        (false, false, _) => None,
     }
 }
 
@@ -1024,14 +1117,82 @@ mod tests {
 
     #[test]
     fn the_wait_is_the_fastest_lane_that_is_running() {
-        assert_eq!(budget(false, false), None, "idle blocks on the channel");
-        assert_eq!(budget(true, false), Some(FX_FRAME));
-        assert_eq!(budget(true, true), Some(FX_FRAME));
+        // (fast, full, halt_only)
         assert_eq!(
-            budget(false, true),
-            Some(FULL_FRAME),
-            "a desk whose only motion is the halt pulse is repainted at 30 fps"
+            budget(false, false, false),
+            None,
+            "idle blocks on the channel"
         );
+        assert_eq!(budget(true, false, false), Some(FX_FRAME));
+        assert_eq!(budget(true, true, false), Some(FX_FRAME));
+        assert_eq!(
+            budget(false, true, false),
+            Some(FULL_FRAME),
+            "a full-frame effect that is not the halt is still a transition"
+        );
+        // `halt_only` cannot resurrect a lane that is not running — a stale flag
+        // must never be able to pin the loop on its own.
+        assert_eq!(budget(false, false, true), None);
+    }
+
+    #[test]
+    fn a_halted_desk_is_the_one_steady_state_and_is_budgeted_as_one() {
+        assert_eq!(
+            budget(false, true, true),
+            Some(HALT_FRAME),
+            "a halt lasts as long as the incident does; 31 fps is a bill nobody agreed to"
+        );
+        // Anything else moving takes the loop back off the breath's cadence —
+        // the breath then advances through `spend`'s debt at `FULL_FRAME`, so
+        // the cap still applies, it just stops deciding how often we wake.
+        assert_eq!(budget(true, true, true), Some(FX_FRAME));
+        // And a restore fade is a transition again the moment it replaces the
+        // breath, rather than four frames at the breath's cadence.
+        assert_eq!(budget(false, true, false), Some(FULL_FRAME));
+    }
+
+    #[test]
+    fn the_halt_cadence_is_pinned_to_the_two_facts_it_was_chosen_from() {
+        // Never slower than the heartbeat: a client repainting under 10 fps
+        // during an incident is the one moment an operator would read a live
+        // desk as a hung one. At equality it costs no extra wakes at all.
+        assert!(HALT_FRAME <= crate::store::IDLE_FRAME);
+        assert!(
+            FULL_FRAME < HALT_FRAME,
+            "the cheap lane must be the slow one"
+        );
+
+        // And it divides the breath exactly, so the peak and the trough land on
+        // frames instead of beating against the sampling.
+        let per_half = HALT_BREATH.as_millis() / HALT_FRAME.as_millis();
+        assert_eq!(HALT_BREATH.as_millis() % HALT_FRAME.as_millis(), 0);
+        assert_eq!(per_half, 14);
+
+        // The smoothness claim, as arithmetic rather than as an assertion of
+        // taste: `SineInOut` peaks at slope π/2, and the widest channel the fade
+        // crosses is text_primary → negative_dim (0xe5 → 0x1d).
+        let worst_alpha_step = std::f64::consts::FRAC_PI_2 / per_half as f64;
+        let span = f64::from(0xe5 - 0x1d);
+        assert!(
+            worst_alpha_step * span < 24.0,
+            "the breath steps {} colour levels a frame",
+            worst_alpha_step * span
+        );
+    }
+
+    #[test]
+    fn each_lane_is_clamped_to_its_own_slowest_wake_not_to_the_fastest() {
+        // The regression this pins: with one shared `FULL_FRAME` clamp, the
+        // halt-only regime's 100 ms wake was cut to 32 ms of effect time every
+        // frame, and the breath ran at a third of its stated period while every
+        // other test still passed.
+        assert_eq!(MAX_FULL_STEP, HALT_FRAME);
+        assert_eq!(MAX_PANE_STEP, FULL_FRAME);
+        assert!(
+            MAX_FULL_STEP >= HALT_FRAME,
+            "the full lane's clamp must not bind on its own designed wake"
+        );
+        assert!(MAX_PANE_STEP >= FX_FRAME, "nor the pane lane's on its own");
     }
 
     #[test]
@@ -1059,7 +1220,7 @@ mod tests {
 
         // Over a second of 16 ms wakes the lane is told about every millisecond
         // that passed — a cap that dropped the skipped frames' time would make
-        // a 700 ms pulse take 1.4 s.
+        // the breath take twice its stated period.
         let mut debt = Duration::ZERO;
         let mut told = Duration::ZERO;
         for _ in 0..60 {

@@ -108,6 +108,7 @@ fn every_trigger() -> Vec<Trigger> {
         Trigger::PlanExecuted,
         Trigger::QuoteTick("SPY".into()),
         Trigger::ReadChanged,
+        Trigger::AuditEvent("e1".into()),
     ]
 }
 
@@ -127,8 +128,10 @@ fn has_effect(trigger: &Trigger) -> bool {
         | Trigger::PlanExecuted
         | Trigger::ReadChanged => true,
         // The flash lane owns a quote: it lights the two cells that moved, and
-        // a sweep over the grid would animate every row that did not.
-        Trigger::QuoteTick(_) => false,
+        // a sweep over the grid would animate every row that did not. An audit
+        // row is the same shape one pane over — the row that arrived lights,
+        // and the log under it stays where the operator left it.
+        Trigger::QuoteTick(_) | Trigger::AuditEvent(_) => false,
     }
 }
 

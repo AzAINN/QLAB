@@ -17,6 +17,7 @@
 //! disagree about the book, and a frame stays a pure function of (store,
 //! effects, instant) — plus, now, the cursor the operator put somewhere.
 
+pub mod audit;
 pub mod book;
 pub mod desk;
 pub mod markets;
@@ -25,6 +26,8 @@ use crate::cmd::Command;
 use crate::fx::FlashTracker;
 use crate::store::{Store, ViewId};
 use crate::theme::theme;
+#[cfg(feature = "operator")]
+use crate::ui::widgets::confirm;
 use crate::ui::widgets::{panel_block, panel_header};
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -49,6 +52,23 @@ pub trait View {
     /// A key the shell did not claim. Returning a `Command` asks the runtime to
     /// act; a view never acts itself, which is what keeps `ui/` free of IO.
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command>;
+
+    /// This view's modal slot, if it has one.
+    ///
+    /// Two accessors over one field rather than a `modal()`/`modal_key()` pair,
+    /// because those two can disagree: a view that reported a box on screen and
+    /// then declined its keystrokes would show a question nothing could answer.
+    /// Both of these are `Some(&self.confirm)` in every view that overrides
+    /// them, so there is no state to keep in step.
+    #[cfg(feature = "operator")]
+    fn confirm(&self) -> Option<&confirm::Host> {
+        None
+    }
+
+    #[cfg(feature = "operator")]
+    fn confirm_mut(&mut self) -> Option<&mut confirm::Host> {
+        None
+    }
 }
 
 /// The seven views, alive for the life of the process.
@@ -58,7 +78,7 @@ pub struct Views {
     book: book::BookView,
     research: Unbuilt,
     workforce: Unbuilt,
-    audit: Unbuilt,
+    audit: audit::AuditView,
     settings: Unbuilt,
 }
 
@@ -76,9 +96,23 @@ impl Views {
             book: book::BookView::default(),
             research: Unbuilt(ViewId::Research),
             workforce: Unbuilt(ViewId::Workforce),
-            audit: Unbuilt(ViewId::Audit),
+            audit: audit::AuditView::default(),
             settings: Unbuilt(ViewId::Settings),
         }
+    }
+
+    /// The modal the active view is showing, if any.
+    ///
+    /// Routed through the registry rather than reached for on a view, so the
+    /// shell has one question to ask and cannot ask it of the wrong surface.
+    #[cfg(feature = "operator")]
+    pub fn confirm(&self, id: ViewId) -> Option<&confirm::Host> {
+        self.at(id).confirm()
+    }
+
+    #[cfg(feature = "operator")]
+    pub fn confirm_mut(&mut self, id: ViewId) -> Option<&mut confirm::Host> {
+        self.at_mut(id).confirm_mut()
     }
 
     pub fn draw(
@@ -138,6 +172,8 @@ fn owner_task(id: ViewId) -> u8 {
         ViewId::Book => 11,
         ViewId::Research => 21,
         ViewId::Workforce => 19,
+        // AUDIT is built; this arm stays because `owner_task` is total over
+        // `ViewId` and the map is what a half-built branch is read through.
         ViewId::Audit => 18,
         ViewId::Settings => 21,
     }

@@ -64,6 +64,10 @@ const STEP: Duration = Duration::from_millis(200);
 pub enum Column {
     Price,
     Change,
+    /// One row of the audit stream. Keyed by event id rather than by ticker —
+    /// `FlashKey::ticker` is really "which thing", and an event's identity is
+    /// the owner's `event_id`.
+    Audit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -84,6 +88,14 @@ impl FlashKey {
         Self {
             ticker: ticker.to_string(),
             column: Column::Change,
+        }
+    }
+
+    /// The row one audit event landed on, by the owner's own event id.
+    pub fn audit(event_id: &str) -> Self {
+        Self {
+            ticker: event_id.to_string(),
+            column: Column::Audit,
         }
     }
 }
@@ -116,6 +128,9 @@ impl FlashTracker {
                 self.flash(FlashKey::change(ticker), now);
             }
             Trigger::ReadChanged => self.reveal(now),
+            // The audit row that just arrived, and only that row. A sweep over
+            // the pane would light thirty events that happened hours ago.
+            Trigger::AuditEvent(id) => self.flash(FlashKey::audit(id), now),
             // The rest are the tachyonfx lane's (`Fx::on_trigger`): a sweep, a
             // pulse or a coalesce is a pass over the painted buffer, not a
             // style a renderer can pick. The two lanes are kept apart rather
@@ -664,6 +679,11 @@ impl Fx {
             // lights exactly the two cells that moved. A sweep over the grid
             // would animate the rows that did not.
             Trigger::QuoteTick(_) => {}
+            // Same reason, one pane over: an audit row is a row, and the
+            // tracker lights the one that arrived. A pass over the stream pane
+            // would animate the whole log every time anything happened on the
+            // desk, which is most of the time.
+            Trigger::AuditEvent(_) => {}
             // The reveal is DESK's, hand-rolled, and stays hand-rolled: it types
             // a substring in, which is a render of different text rather than an
             // effect over the same text. All this adds is the wash behind the

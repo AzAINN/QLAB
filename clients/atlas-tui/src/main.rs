@@ -93,6 +93,12 @@ async fn main() -> Result<()> {
         Instant::now(),
     );
 
+    // The write half, built here and only here. Fallibly, and before the screen
+    // is taken: a client armed with `--operator` whose writer could not be
+    // built would run looking armed and refuse every key at the moment it
+    // mattered. Invariant 4 — refuse loudly rather than degrade quietly.
+    let writes = Writes::new(&base, store.posture, tx.clone())?;
+
     let poller = http::spawn_poller(base.clone(), offline, tx.clone());
     // The stream holds the poller so the two feeds are one story: an event that
     // says the desk moved brings the next snapshot forward instead of letting
@@ -108,7 +114,120 @@ async fn main() -> Result<()> {
     // line-buffered would sit in the kernel until Enter.
     spawn_terminal_events(tx);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    run(&mut terminal, &mut store, &mut rx, &poller).await
+    run(&mut terminal, &mut store, &mut rx, &poller, &writes).await
+}
+
+/// The runtime's end of the write path.
+///
+/// A type in both builds so the loop has one shape, and holding nothing at all
+/// in the default one — `WriteClient` is not in that crate, so this is empty by
+/// absence rather than by an `Option` a bug could fill.
+///
+/// It is the *only* thing that dispatches a write. `ui/` returns `Command`s and
+/// this turns one into a request, which is what keeps every view free of a
+/// client and keeps the order path to one call site with a composition root
+/// above it.
+#[cfg(feature = "operator")]
+struct Writes {
+    client: Option<std::sync::Arc<atlas::net::write::WriteClient>>,
+    tx: Tx,
+}
+
+#[cfg(not(feature = "operator"))]
+struct Writes;
+
+#[cfg(feature = "operator")]
+impl Writes {
+    fn new(base: &str, posture: atlas::store::Posture, tx: Tx) -> Result<Self> {
+        let client = match posture {
+            atlas::store::Posture::Operator => Some(std::sync::Arc::new(
+                atlas::net::write::WriteClient::new(base)?,
+            )),
+            // A featured binary the human did not arm holds no writer at all,
+            // so the posture chip's claim — "this window cannot place an order"
+            // — is true of the runtime and not only of the status line.
+            atlas::store::Posture::Glass => None,
+        };
+        Ok(Self { client, tx })
+    }
+
+    /// Carry one confirmed decision to the owner, off the frame loop.
+    ///
+    /// Spawned rather than awaited: a write shares the poller's eight-second
+    /// timeout, and eight seconds of a frozen terminal after pressing `x` is
+    /// how an operator ends up pressing it again. The answer comes back on the
+    /// bus, which is the one place that owns the store, the toasts and the
+    /// poller — and every outcome comes back, refusals included.
+    fn dispatch(&self, cmd: Command) {
+        use atlas::bus::Wrote;
+        use atlas::net::write::Execution;
+
+        let Some(client) = self.client.clone() else {
+            // Unreachable through the key path — a glass window has no view
+            // that opens a modal, because `confirm` is gated too — and loud
+            // rather than silent if that ever stops being true.
+            tracing::error!("a write was requested by a window holding no writer");
+            return;
+        };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let outcome = match cmd {
+                Command::Approve(id) => match client.approve(&id).await {
+                    Ok(_) => Wrote::Decided {
+                        approval_id: id,
+                        decision: "approved",
+                    },
+                    Err(err) => Wrote::Failed {
+                        what: format!("approve {id}"),
+                        said: err.to_string(),
+                    },
+                },
+                Command::Reject(id) => match client.reject(&id).await {
+                    Ok(_) => Wrote::Decided {
+                        approval_id: id,
+                        decision: "rejected",
+                    },
+                    Err(err) => Wrote::Failed {
+                        what: format!("reject {id}"),
+                        said: err.to_string(),
+                    },
+                },
+                Command::Execute(token) => {
+                    // Read before the token is spent by the call: the outcome
+                    // has to name the plan it was about whichever way it goes.
+                    let plan_id = token.plan_id().to_string();
+                    match client.execute_plan(token).await {
+                        Ok(Execution::Executed(_)) => Wrote::Executed { plan_id },
+                        Ok(Execution::Refused {
+                            blocked_by,
+                            reasons,
+                        }) => Wrote::Refused {
+                            plan_id,
+                            blocked_by,
+                            reasons,
+                        },
+                        Err(err) => Wrote::Failed {
+                            what: format!("execute {plan_id}"),
+                            said: err.to_string(),
+                        },
+                    }
+                }
+                // Handled by the loop before they reach here; the arm exists
+                // because the match is over the whole type.
+                Command::Quit | Command::Refresh => return,
+            };
+            let _ = tx.send(AppEvent::Wrote(outcome));
+        });
+    }
+}
+
+#[cfg(not(feature = "operator"))]
+impl Writes {
+    /// Same signature, nothing to build. The default artifact has no writer to
+    /// point at an owner, whatever it is passed.
+    fn new(_base: &str, _posture: atlas::store::Posture, _tx: Tx) -> Result<Self> {
+        Ok(Self)
+    }
 }
 
 /// What this window may do to the desk, decided once and never re-read.
@@ -150,6 +269,7 @@ async fn run(
     store: &mut Store,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     poller: &PollerHandle,
+    writes: &Writes,
 ) -> Result<()> {
     // Effect state lives here rather than on the `Store`: the store is what the
     // owner said plus the diff of it, and a decaying animation stamp is neither.
@@ -198,11 +318,29 @@ async fn run(
         let now = Instant::now();
         let mut quit = false;
         if let Some(first) = next {
-            quit |= ingest(first, store, poller, &mut views, &mut fx, &mut toasts, now);
+            quit |= ingest(
+                first,
+                store,
+                poller,
+                writes,
+                &mut views,
+                &mut fx,
+                &mut toasts,
+                now,
+            );
         }
         // Drain-then-render: fifty quote events coalesce into one repaint.
         while let Ok(ev) = rx.try_recv() {
-            quit |= ingest(ev, store, poller, &mut views, &mut fx, &mut toasts, now);
+            quit |= ingest(
+                ev,
+                store,
+                poller,
+                writes,
+                &mut views,
+                &mut fx,
+                &mut toasts,
+                now,
+            );
         }
 
         // A decaying flash owes frames nothing else asked for: the 100 ms idle
@@ -261,15 +399,22 @@ fn wake(fx: &Fx, toasts: &toast::ToastQueue, now: Instant) -> Option<Duration> {
 /// The runtime is the only thing that acts: the shell decides what a keystroke
 /// *means* and hands back a `Command`, and nothing in `ui/` can reach the
 /// network or the process lifetime on its own.
+#[allow(clippy::too_many_arguments)]
 fn ingest(
     ev: AppEvent,
     store: &mut Store,
     poller: &PollerHandle,
+    writes: &Writes,
     views: &mut Views,
     fx: &mut Fx,
     toasts: &mut toast::ToastQueue,
     now: Instant,
 ) -> bool {
+    // Carried and unused in the default build: there is no `Command` variant
+    // for it to dispatch there. One loop shape rather than two, because a
+    // runtime that forked on a feature is a runtime only one leg ever runs.
+    #[cfg(not(feature = "operator"))]
+    let _ = writes;
     let mut quit = false;
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
@@ -280,6 +425,11 @@ fn ingest(
                 // a synchronous fetch in this loop froze the client for its
                 // duration.
                 Some(Command::Refresh) => poller.now(),
+                // The only place a keystroke reaches the network. A view
+                // decided what the key means and handed back a `Command`; the
+                // runtime is what acts on it.
+                #[cfg(feature = "operator")]
+                Some(cmd) => writes.dispatch(cmd),
                 None => {}
             }
             // A view switch is not a desk transition and so is not a `Trigger`:
@@ -289,6 +439,17 @@ fn ingest(
             if store.nav.view != before {
                 fx.on_view_switch();
             }
+        }
+    }
+    // Any write the owner *answered* moved the registry — a refusal included,
+    // because the gate invalidates the approval it declined
+    // (`execute_plan_with_approval`, `server.py:1876`). Only a request that
+    // never landed leaves the desk exactly as the last snapshot described it,
+    // so that is the one outcome that does not bring the next poll forward.
+    #[cfg(feature = "operator")]
+    if let AppEvent::Wrote(outcome) = &ev {
+        if !matches!(outcome, atlas::bus::Wrote::Failed { .. }) {
+            poller.now();
         }
     }
     // Before the fold, because the fold consumes the event. A toast is about the

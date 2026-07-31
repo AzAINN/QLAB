@@ -246,6 +246,8 @@ fn head(text: &str, width: usize) -> String {
 pub fn for_event(ev: &AppEvent) -> Option<Toast> {
     match ev {
         AppEvent::Sse(event) => from_stream(event),
+        #[cfg(feature = "operator")]
+        AppEvent::Wrote(outcome) => Some(from_write(outcome)),
         // The one HTTP outcome that is an event rather than a condition. The
         // chip says the owner is answering; this says what it answered with.
         AppEvent::Http(HttpResult::Malformed { url, error }) => Some(Toast::new(
@@ -254,6 +256,56 @@ pub fn for_event(ev: &AppEvent) -> Option<Toast> {
             format!("{} — from {url}", first_line(error)),
         )),
         _ => None,
+    }
+}
+
+/// What the owner said about a write this operator asked for.
+///
+/// Three outcomes and three different things to do about them, which is why the
+/// levels differ. A refusal is `Alarm`, not `Info`: the desk considered a fill
+/// and declined it, and a box that read like a receipt would tell an operator a
+/// trade was booked when it was not. That is the failure this whole path exists
+/// to prevent, and the colour is where an operator actually meets it.
+///
+/// The booked case deliberately words itself *exactly* as the stream's own
+/// `plan_executed` toast. Both arrive — the write returns and the owner
+/// publishes — and the queue drops an identical toast that is already up, so one
+/// fill is one box rather than two saying the same thing in different words.
+#[cfg(feature = "operator")]
+fn from_write(outcome: &crate::bus::Wrote) -> Toast {
+    use crate::bus::Wrote;
+    match outcome {
+        Wrote::Executed { plan_id } => Toast::new(
+            Level::Info,
+            "plan executed",
+            format!("plan {plan_id} booked a paper fill"),
+        ),
+        Wrote::Refused {
+            blocked_by,
+            reasons,
+            ..
+        } => Toast::new(
+            Level::Alarm,
+            "fill refused",
+            // The gate's own word plus its first reason. `Execution::read`
+            // guarantees the list is never empty, because a refusal an operator
+            // cannot read is not actionable.
+            match reasons.first() {
+                Some(why) => format!("{blocked_by}: {why}"),
+                None => format!("the desk blocked this fill ({blocked_by})"),
+            },
+        ),
+        Wrote::Decided {
+            approval_id,
+            decision,
+        } => Toast::new(
+            Level::Info,
+            &format!("approval {decision}"),
+            format!("{approval_id} is on the record as {decision}"),
+        ),
+        Wrote::Failed { what, said } => {
+            Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
+        }
     }
 }
 

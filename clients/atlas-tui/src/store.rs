@@ -9,10 +9,10 @@
 use crate::bus::{AppEvent, Channel, HttpResult, SseEvent};
 use crate::format::text;
 use crate::glyph::Mood;
-use crate::model::{Asset, RegimePanel, Snapshot};
+use crate::model::{Approval, Asset, Plan, RegimePanel, Snapshot};
 use crate::net::http;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// The idle heartbeat. Three indicators on screen claim the client is alive —
@@ -58,6 +58,11 @@ pub enum Trigger {
     PlanExecuted,
     QuoteTick(String),
     ReadChanged,
+    /// One durable audit event arrived on the stream, keyed by its event id so
+    /// the row it landed on is the row that lights. Only the stream fires this:
+    /// the same events also ride in every snapshot, and seeding a ring from a
+    /// poll would flash thirty rows that have been on the record for hours.
+    AuditEvent(String),
 }
 
 /// The seven views, in nav-rail order.
@@ -174,6 +179,35 @@ pub struct Malformed {
 /// owner from growing the store by a decode message every three seconds.
 const MALFORMED_ERROR_MAX: usize = 200;
 
+/// How many audit events this client keeps.
+///
+/// Bounded because the bus is not. A governed desk writes an event per
+/// approval, phase, verdict, fill and halt, and a client left up overnight
+/// would otherwise hold every one of them for a pane that can draw thirty. One
+/// hundred is a comfortable multiple of what AUDIT shows at any terminal height
+/// this workstation supports, so the ring never drops a row still on screen.
+///
+/// The ring is *not* a second account of the audit log — the registry is, and
+/// `/api/events` serves it. This is the recent window a live pane renders.
+pub const EVENTS_RING: usize = 100;
+
+/// One row of the durable audit bus, from either feed.
+///
+/// The snapshot and the stream carry the same events in different shapes
+/// (`model::Event` and `bus::SseEvent`), and a pane that read both would have
+/// two orderings and two dedup rules. They are normalised here instead, keyed
+/// by the owner's own `event_id` — which is the registry's primary key, and
+/// therefore the only thing that can say two arrivals are one event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuditEvent {
+    /// `None` for a frame the owner published without one. Such a row still
+    /// renders — it happened — but it can never be deduplicated against.
+    pub id: Option<String>,
+    pub ts: Option<String>,
+    pub kind: String,
+    pub payload: Value,
+}
+
 /// One price the quote stream reported, stamped with when this client saw it.
 ///
 /// Held beside the snapshot and never merged into it. The periodic `/api/tui`
@@ -277,6 +311,26 @@ impl Posture {
             Posture::Operator => "OPERATOR",
         }
     }
+
+    /// Whether this window's keys can change the desk.
+    ///
+    /// The question every surface actually asks, and the reason it is asked of
+    /// the *posture* rather than of `cfg!(feature = "operator")`. The feature
+    /// says what the binary is capable of; the flag says whether the human
+    /// armed it. A pane that keyed its hints or its branches off the feature
+    /// alone would offer the execute key in a featured binary started without
+    /// `--operator` — which is precisely the window the status line is
+    /// promising reads GLASS.
+    ///
+    /// In the default build this is `false` for the only value that exists, so
+    /// every branch behind it is dead there and the compiler removes it.
+    pub fn writes(self) -> bool {
+        match self {
+            Posture::Glass => false,
+            #[cfg(feature = "operator")]
+            Posture::Operator => true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -328,6 +382,24 @@ pub struct Store {
     /// dropping events at all. Task 16 gives it the toast; until then the status
     /// line is the only thing that can say it happened.
     pub stream_malformed_count: u32,
+    /// The recent audit bus, oldest first, bounded at `EVENTS_RING`.
+    ///
+    /// Private so there is one reader (`audit_events`) and one writer
+    /// (`record_audit`): the ordering and the dedup rule are the whole value of
+    /// this field, and a pane that pushed to it directly would be free to
+    /// disagree with both.
+    events_ring: VecDeque<AuditEvent>,
+    /// What the desk refused to book, by plan id.
+    ///
+    /// Held because a refusal is not visible anywhere else: the owner declines
+    /// with HTTP 200 and writes no plan-state change, so the next snapshot
+    /// looks exactly like the one before it. Without this the card an operator
+    /// just pressed `x` on would go back to offering the key, silently.
+    ///
+    /// Cleared for a plan the moment that plan books, so a card can never carry
+    /// a stale refusal beside a fill.
+    #[cfg(feature = "operator")]
+    pub refusals: HashMap<String, String>,
     /// The animation beat, counted rather than read from a clock. Every frame
     /// the shell draws is a pure function of the store, so the phase an
     /// automaton is at has to be state — a renderer that called `Instant::now`
@@ -360,6 +432,9 @@ impl Store {
             posture: Posture::Glass,
             quote_overlay: HashMap::new(),
             stream_malformed_count: 0,
+            events_ring: VecDeque::new(),
+            #[cfg(feature = "operator")]
+            refusals: HashMap::new(),
             tick: 0,
             dirty: false,
         }
@@ -402,8 +477,103 @@ impl Store {
                     self.dirty = true;
                 }
             }
+            // The store records only the half a surface has to keep showing:
+            // what the desk refused. The toast for every outcome is the
+            // runtime's (`toast::for_event`), because a box that disappears
+            // after four seconds is not something the owner said.
+            #[cfg(feature = "operator")]
+            AppEvent::Wrote(outcome) => {
+                use crate::bus::Wrote;
+                match outcome {
+                    Wrote::Refused {
+                        plan_id,
+                        blocked_by,
+                        ..
+                    } => {
+                        self.refusals.insert(plan_id, blocked_by);
+                    }
+                    Wrote::Executed { plan_id } => {
+                        self.refusals.remove(&plan_id);
+                    }
+                    Wrote::Decided { .. } | Wrote::Failed { .. } => {}
+                }
+                self.dirty = true;
+            }
         }
         Vec::new()
+    }
+
+    /// The recent audit bus, **newest first** — the order a log is read in.
+    pub fn audit_events(&self) -> impl DoubleEndedIterator<Item = &AuditEvent> {
+        self.events_ring.iter().rev()
+    }
+
+    /// Every approval the owner is currently serving.
+    ///
+    /// The owner sends both actionable statuses: `pending`, which approve and
+    /// reject bind to, and `approved`-unconsumed, which is what the execute
+    /// gate consumes. A surface that filtered to one of them here would be
+    /// deciding which key an operator is allowed to see.
+    pub fn approvals(&self) -> &[Approval] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.approvals.as_slice())
+            .unwrap_or_default()
+    }
+
+    pub fn plans(&self) -> &[Plan] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.plans.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// The approval that could authorise booking `plan_id`, if the owner is
+    /// serving one.
+    ///
+    /// `approved` and unconsumed, which is exactly the gate's own precondition
+    /// (`check_approval_for_execution`). This client does not re-check the
+    /// expiry or the book revision: those are the owner's, they change under
+    /// this client between polls, and a second copy of the gate here would
+    /// drift from the one that actually decides.
+    pub fn covering_approval(&self, plan_id: &str) -> Option<&Approval> {
+        self.approvals().iter().find(|a| {
+            a.plan_id.as_deref() == Some(plan_id)
+                && a.status.as_deref() == Some("approved")
+                && a.consumed_at.is_none()
+        })
+    }
+
+    /// Any approval bound to this plan, whatever its state — what a card says
+    /// when it cannot offer the key.
+    pub fn approval_for(&self, plan_id: &str) -> Option<&Approval> {
+        self.approvals()
+            .iter()
+            .find(|a| a.plan_id.as_deref() == Some(plan_id))
+    }
+
+    /// Record one audit row, and say whether it was new.
+    ///
+    /// Deduplicated on the owner's `event_id` because both feeds carry the same
+    /// events: the stream delivers one and then nudges the poller, so the very
+    /// next snapshot contains it again. A ring that took both would show every
+    /// governance event twice, which reads as the desk having done it twice.
+    fn record_audit(&mut self, event: AuditEvent) -> bool {
+        if let Some(id) = event.id.as_deref() {
+            if self
+                .events_ring
+                .iter()
+                .any(|held| held.id.as_deref() == Some(id))
+            {
+                return false;
+            }
+        }
+        self.events_ring.push_back(event);
+        while self.events_ring.len() > EVENTS_RING {
+            self.events_ring.pop_front();
+        }
+        self.dirty = true;
+        true
     }
 
     /// Read the repaint flag and clear it in one move.
@@ -487,11 +657,15 @@ impl Store {
 
     /// Fold one stream frame in.
     ///
-    /// Only the two kinds something on screen renders. The durable audit kinds
-    /// already nudge the poller in `net::sse`, and the snapshot they bring
-    /// forward is the single account of what they did — holding a second copy
-    /// here would be a second source for the same fact. Tasks 14/18 give the
-    /// event list its own renderer.
+    /// Three lanes. A `quote` is a price and lands in the overlay; a
+    /// `stream.malformed` is a frame this client could not read and is counted;
+    /// everything else is a durable audit row and lands in the ring AUDIT
+    /// renders.
+    ///
+    /// The ring is not a second account of the desk. The events it holds still
+    /// nudge the poller (`net::sse::REFETCH_KINDS`), and the snapshot that
+    /// arrives is what says what the desk now *is* — this says what happened,
+    /// in the order it happened, which no aggregate can.
     fn apply_sse(&mut self, event: SseEvent, now: Instant) -> Vec<Trigger> {
         match event.kind.as_str() {
             "quote" => self.apply_quote(&event.payload, event.ts.as_deref(), now),
@@ -500,7 +674,22 @@ impl Store {
                 self.dirty = true;
                 Vec::new()
             }
-            _ => Vec::new(),
+            _ => {
+                let id = event.id.clone();
+                let landed = self.record_audit(AuditEvent {
+                    id: event.id,
+                    ts: event.ts,
+                    kind: event.kind,
+                    payload: event.payload,
+                });
+                // Only a row that is actually new lights up. A replay after a
+                // reconnect delivers events this client already holds, and
+                // flashing those would announce old news as it arrived.
+                match (landed, id) {
+                    (true, Some(id)) => vec![Trigger::AuditEvent(id)],
+                    _ => Vec::new(),
+                }
+            }
         }
     }
 
@@ -647,9 +836,57 @@ impl Store {
         if changed(prev.and_then(read_as_of), read_as_of(&next)) {
             out.push(Trigger::ReadChanged);
         }
-        // Tasks 18/19 emit the remaining variants — the approval, phase and
-        // plan diffs arrive with the views that render them. A trigger with no
-        // view to move is motion for its own sake, and would ship untestable.
+        // An approval id the last payload did not carry. Ids rather than a
+        // count: a queue that gained one and lost one is still a new decision
+        // waiting, and a status moving `pending` → `approved` keeps its id and
+        // is therefore not a new request.
+        //
+        // The first snapshot announces whatever it arrives holding, exactly as
+        // the halt does: the request was created before this client was
+        // looking, and a human decision waiting is not something to open
+        // quietly.
+        if next.approvals.iter().any(|a| {
+            let Some(id) = text(a.approval_id.as_ref()) else {
+                return false;
+            };
+            !prev.is_some_and(|p| {
+                p.approvals
+                    .iter()
+                    .any(|held| text(held.approval_id.as_ref()) == Some(id))
+            })
+        }) {
+            out.push(Trigger::ApprovalCreated);
+        }
+        // A plan that left the checked state for a booked one. The registry has
+        // no `executed` state — `qlab/trader/plan.py` walks a plan
+        // `checked` → `submitted` → `filled` → `reconciled`, all three inside
+        // one call — so the transition worth announcing is *into that set*,
+        // whichever member the poll happens to catch it at.
+        if next.plans.iter().any(|plan| {
+            let Some(id) = text(plan.plan_id.as_ref()) else {
+                return false;
+            };
+            booked(text(plan.state.as_ref()))
+                && !prev.is_some_and(|p| {
+                    p.plans.iter().any(|held| {
+                        text(held.plan_id.as_ref()) == Some(id) && booked(text(held.state.as_ref()))
+                    })
+                })
+        }) {
+            out.push(Trigger::PlanExecuted);
+        }
+        // The bus rows the payload carries, seeded silently: these are the same
+        // events the stream delivers, and the stream is what says one *just*
+        // arrived. Served oldest first (`registry.read_events`), which is the
+        // order the ring holds them in.
+        for event in &next.events {
+            self.record_audit(AuditEvent {
+                id: text(event.event_id.as_ref()).map(str::to_string),
+                ts: text(event.ts.as_ref()).map(str::to_string),
+                kind: text(event.kind.as_ref()).unwrap_or_default().to_string(),
+                payload: event.payload.clone().unwrap_or(Value::Null),
+            });
+        }
 
         self.snapshot = Some(next);
         self.last_snapshot_at = Some(now);
@@ -724,6 +961,19 @@ fn read_as_of(snap: &Snapshot) -> Option<&str> {
 
 fn drawdown_tier(snap: &Snapshot) -> Option<&str> {
     text(snap.stress.as_ref()?.drawdown_tier.as_ref())
+}
+
+/// Whether a plan state means the desk sent it to a broker.
+///
+/// `checked` is a plan that passed the referee and is waiting on a human;
+/// everything below is a plan that has been submitted. `qlab/trader/plan.py`
+/// writes all three inside one `execute_plan`, so a three-second poll can land
+/// on any of them and none is more "executed" than the others.
+pub fn booked(state: Option<&str>) -> bool {
+    matches!(
+        state,
+        Some("submitted") | Some("filled") | Some("reconciled")
+    )
 }
 
 /// The drawdown tiers in the owner's own order, worst last.
@@ -1460,11 +1710,15 @@ mod tests {
             "a dropped frame owes the operator a frame"
         );
 
-        // Everything else on the bus is Tasks 14/18's to render; counting it
-        // here would make the number mean nothing.
+        // Everything else on the bus is a durable audit row, which AUDIT
+        // renders. It owes a frame, but counting it here would make the number
+        // mean nothing.
         store.apply(sse("workflow_phase"), now);
         assert_eq!(store.stream_malformed_count, 2);
-        assert!(!store.take_dirty());
+        assert!(
+            store.take_dirty(),
+            "a new audit row owes the operator a frame"
+        );
     }
 
     #[test]
@@ -1518,6 +1772,194 @@ mod tests {
         // Wrapping in both directions: a wall would read as a hung client.
         assert_eq!(ViewId::Settings.next(), ViewId::Desk);
         assert_eq!(ViewId::Desk.prev(), ViewId::Settings);
+    }
+
+    /// One durable bus frame, as `net::sse` hands it over.
+    fn audit(kind: &str, id: &str) -> AppEvent {
+        AppEvent::Sse(SseEvent {
+            kind: kind.into(),
+            payload: json!({"plan_id": "pl-1"}),
+            ts: Some("2026-07-30T12:00:00+00:00".into()),
+            id: Some(id.into()),
+        })
+    }
+
+    #[test]
+    fn the_audit_ring_holds_the_stream_newest_first_and_flashes_what_arrived() {
+        let mut store = Store::default();
+        let now = Instant::now();
+        assert_eq!(store.audit_events().count(), 0);
+
+        assert_eq!(
+            store.apply(audit("approval_created", "e1"), now),
+            vec![Trigger::AuditEvent("e1".into())],
+            "the row that arrived is what lights, by the owner's own event id"
+        );
+        store.apply(audit("plan_executed", "e2"), now);
+
+        let kinds: Vec<&str> = store.audit_events().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["plan_executed", "approval_created"],
+            "a log is read newest first"
+        );
+    }
+
+    #[test]
+    fn one_event_delivered_twice_is_one_row_and_flashes_once() {
+        // Every durable kind nudges the poller, so the snapshot that arrives
+        // carries the event the stream just delivered. A ring that took both
+        // would show every governance event twice — which reads as the desk
+        // having done it twice.
+        let mut store = Store::default();
+        let now = Instant::now();
+        store.apply(audit("approval_created", "e1"), now);
+        store.take_dirty();
+
+        assert_eq!(
+            store.apply(audit("approval_created", "e1"), now),
+            vec![],
+            "a replayed event is not news and must not flash"
+        );
+        assert!(!store.take_dirty(), "and owes no frame");
+        assert_eq!(store.audit_events().count(), 1);
+
+        // The same event arriving in a poll is also the same event.
+        store.apply(
+            snap(json!({"events": [
+                {"event_id": "e1", "ts": "2026-07-30T12:00:00+00:00",
+                 "kind": "approval_created", "payload": {}},
+                {"event_id": "e2", "ts": "2026-07-30T12:00:01+00:00",
+                 "kind": "plan_executed", "payload": {}}
+            ]})),
+            now,
+        );
+        let ids: Vec<Option<&str>> = store.audit_events().map(|e| e.id.as_deref()).collect();
+        assert_eq!(ids, vec![Some("e2"), Some("e1")]);
+    }
+
+    #[test]
+    fn a_snapshot_seeds_the_ring_without_announcing_events_that_are_hours_old() {
+        // The bus rows a poll carries are history: flashing them would light
+        // thirty rows every time a client opened, which teaches an operator
+        // that a lit row means nothing.
+        let mut store = Store::default();
+        let triggers = store.apply(
+            snap(json!({"events": [
+                {"event_id": "e1", "ts": "t0", "kind": "halt", "payload": {}}
+            ]})),
+            Instant::now(),
+        );
+        assert!(!triggers.iter().any(|t| matches!(t, Trigger::AuditEvent(_))));
+        assert_eq!(store.audit_events().count(), 1);
+    }
+
+    #[test]
+    fn the_ring_is_bounded_and_drops_the_oldest_rather_than_growing() {
+        // The bus is unbounded and this client is not. A ring that grew would
+        // hold every event of a week-long session for a pane that shows thirty.
+        let mut store = Store::default();
+        let now = Instant::now();
+        for i in 0..(EVENTS_RING + 25) {
+            store.apply(audit("workflow_phase", &format!("e{i}")), now);
+        }
+        assert_eq!(store.audit_events().count(), EVENTS_RING);
+        let newest = store.audit_events().next().unwrap().id.clone();
+        assert_eq!(newest.as_deref(), Some("e124"));
+        let oldest = store.audit_events().last().unwrap().id.clone();
+        assert_eq!(oldest.as_deref(), Some("e25"), "the oldest rows left");
+    }
+
+    #[test]
+    fn a_new_approval_announces_itself_and_a_status_change_is_not_a_new_one() {
+        let queue = |rows: serde_json::Value| snap(json!({"approvals": rows}));
+        let mut store = Store::default();
+        // Opening onto a decision already waiting still announces it, exactly
+        // as the halt does: the request was made before this client existed.
+        assert!(store
+            .apply(
+                queue(json!([{"approval_id": "a1", "status": "pending"}])),
+                Instant::now()
+            )
+            .contains(&Trigger::ApprovalCreated));
+        // The same queue again is not news.
+        assert!(!store
+            .apply(
+                queue(json!([{"approval_id": "a1", "status": "pending"}])),
+                Instant::now()
+            )
+            .contains(&Trigger::ApprovalCreated));
+        // A human decision keeps the id, so it is not a new request.
+        assert!(!store
+            .apply(
+                queue(json!([{"approval_id": "a1", "status": "approved"}])),
+                Instant::now()
+            )
+            .contains(&Trigger::ApprovalCreated));
+        assert!(store
+            .apply(
+                queue(json!([{"approval_id": "a1", "status": "approved"},
+                             {"approval_id": "a2", "status": "pending"}])),
+                Instant::now()
+            )
+            .contains(&Trigger::ApprovalCreated));
+    }
+
+    #[test]
+    fn a_plan_that_reaches_the_broker_announces_itself_once() {
+        // The registry has no `executed` state: `qlab/trader/plan.py` walks a
+        // plan checked → submitted → filled → reconciled inside one call, so a
+        // three-second poll can catch it at any of the three.
+        let ledger = |state: &str| snap(json!({"plans": [{"plan_id": "p1", "state": state}]}));
+        let mut store = Store::default();
+        assert!(!store
+            .apply(ledger("checked"), Instant::now())
+            .contains(&Trigger::PlanExecuted));
+        assert!(store
+            .apply(ledger("reconciled"), Instant::now())
+            .contains(&Trigger::PlanExecuted));
+        assert!(
+            !store
+                .apply(ledger("reconciled"), Instant::now())
+                .contains(&Trigger::PlanExecuted),
+            "a plan that is still booked did not book again"
+        );
+    }
+
+    #[test]
+    fn the_approval_a_fill_can_bind_to_is_approved_and_unspent_and_names_this_plan() {
+        // The owner's own precondition, and nothing more: this client does not
+        // re-check the expiry or the book revision, because those are the
+        // gate's and a second copy here would drift from the one that decides.
+        let mut store = Store::default();
+        store.apply(
+            snap(json!({"approvals": [
+                {"approval_id": "a1", "plan_id": "p1", "status": "pending"},
+                {"approval_id": "a2", "plan_id": "p2", "status": "approved"},
+                {"approval_id": "a3", "plan_id": "p3", "status": "approved",
+                 "consumed_at": "2026-07-30T12:00:00+00:00"},
+                {"approval_id": "a4", "plan_id": "p4", "status": "rejected"}
+            ]})),
+            Instant::now(),
+        );
+        assert_eq!(
+            store
+                .covering_approval("p2")
+                .and_then(|a| a.approval_id.clone()),
+            Some("a2".to_string())
+        );
+        for plan in ["p1", "p3", "p4", "p5"] {
+            assert!(
+                store.covering_approval(plan).is_none(),
+                "{plan} must not be executable"
+            );
+        }
+        // The looser lookup still finds them, which is what a card says "why
+        // not" from.
+        assert_eq!(
+            store.approval_for("p1").and_then(|a| a.status.clone()),
+            Some("pending".to_string())
+        );
     }
 
     #[test]

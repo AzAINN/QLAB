@@ -30,10 +30,12 @@
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::{FlashKey, FlashTracker};
-use crate::model::{EquityPoint, LivePortfolio, Metrics, Performance, Position};
-use crate::store::Store;
+use crate::model::{EquityPoint, LivePortfolio, Metrics, Performance, Plan, Position};
+use crate::store::{self, Store};
 use crate::theme::theme;
 use crate::ui::views::View;
+#[cfg(feature = "operator")]
+use crate::ui::widgets::confirm;
 // The ribbon is one panel — one rule under a band of four cells — so it takes
 // `panel_block` and heads its cells with `label` rather than `panel_header`:
 // four amber bars across one band would read as four panels.
@@ -131,22 +133,44 @@ pub struct BookView {
     /// records the same number, which is what keeps a repaint from moving the
     /// cursor.
     page_rows: Cell<usize>,
+    /// Which plan card `x` is aimed at.
+    ///
+    /// Only in the operator build: a glass window has no key that acts on a
+    /// card, and a cursor an operator can move but never use would say the
+    /// binary can do something it cannot.
+    #[cfg(feature = "operator")]
+    plan: usize,
+    /// The execute question, while it is up.
+    #[cfg(feature = "operator")]
+    confirm: confirm::Host,
 }
 
 impl View for BookView {
     fn draw(&self, f: &mut Frame, area: Rect, store: &Store, fx: &FlashTracker, now: Instant) {
         let rows = Layout::vertical([Constraint::Length(RIBBON_H), Constraint::Min(0)]).split(area);
         draw_ribbon(f, rows[0], store);
-        // The band's height is arithmetic rather than a constraint, so the
-        // blotter keeps its floor and the footer is what shrinks. Handed to the
-        // solver as two constraints, a short pane resolves in the solver's
-        // favour and not the desk's: the footer would survive by pushing the
-        // book itself off the screen, which is a trade-off nobody chose.
-        let bottom = BOTTOM_H.min(rows[1].height.saturating_sub(BLOTTER_H));
-        let under =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(bottom)]).split(rows[1]);
+        // The band heights are arithmetic rather than constraints, so the
+        // blotter keeps its floor and the bands are what shrink. Handed to the
+        // solver as constraints, a short pane resolves in the solver's favour
+        // and not the desk's: the footer would survive by pushing the book
+        // itself off the screen, which is a trade-off nobody chose.
+        //
+        // The plans band goes first out of what is left over, and the footer
+        // second. A plan waiting on a human outranks an equity curve: the curve
+        // is context, and the card is the only place a pending trade is visible
+        // at all.
+        let spare = rows[1].height.saturating_sub(BLOTTER_H);
+        let plans = PLANS_H.min(spare);
+        let bottom = BOTTOM_H.min(spare - plans);
+        let under = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(plans),
+            Constraint::Length(bottom),
+        ])
+        .split(rows[1]);
         self.draw_blotter(f, under[0], store, fx, now);
-        self.draw_footer(f, under[1], store);
+        self.draw_plans(f, under[1], store);
+        self.draw_footer(f, under[2], store);
     }
 
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
@@ -155,6 +179,26 @@ impl View for BookView {
         // rather than dividing by zero. In the runtime the loop draws first.
         let page = self.page_rows.get().max(1);
         match k.code {
+            // The plan cursor is its own key rather than the arrows, which the
+            // blotter owns: BOOK has two lists and one cursor concept, and
+            // stealing Up/Down for the cards would take the book's own scroll
+            // away from the pane that is twenty rows tall.
+            #[cfg(feature = "operator")]
+            KeyCode::Char('n') if store.posture.writes() => {
+                let cards = plan_cards(store).len();
+                self.plan = if cards == 0 {
+                    0
+                } else {
+                    (self.plan + 1) % cards
+                };
+            }
+            // The one key on this workstation that can move money, and it opens
+            // a question rather than sending anything. What it may open is
+            // narrow by construction: `Modal::for_plan` refuses unless the
+            // approval names this exact plan and carries the hash the referee's
+            // PASS was bound to.
+            #[cfg(feature = "operator")]
+            KeyCode::Char('x') if store.posture.writes() => self.ask_to_execute(store),
             // Cycling the column resets the scroll and the cursor: after a
             // re-sort, row 4 is a different position, and carrying the index
             // would leave the marker on a row the operator did not choose.
@@ -177,6 +221,16 @@ impl View for BookView {
             _ => return None,
         }
         None
+    }
+
+    #[cfg(feature = "operator")]
+    fn confirm(&self) -> Option<&confirm::Host> {
+        Some(&self.confirm)
+    }
+
+    #[cfg(feature = "operator")]
+    fn confirm_mut(&mut self) -> Option<&mut confirm::Host> {
+        Some(&mut self.confirm)
     }
 }
 
@@ -1281,6 +1335,286 @@ impl Period {
             Some(marks) => &series[series.len().saturating_sub(marks)..],
             None => series,
         }
+    }
+}
+
+// -- the plan ledger --------------------------------------------------------
+
+/// The plans band: a header and three cards.
+///
+/// Three because that is what the desk actually holds — the registry supersedes
+/// a plan when a newer one is checked, so the fourth card down is history — and
+/// because a taller band comes out of the blotter, which is the pane an operator
+/// spends the day in.
+const PLANS_H: u16 = 5;
+
+/// Under this the card cannot state a plan id, its state, its turnover and a
+/// reason at all, and a card that dropped the reason is a card that silently
+/// offers nothing.
+///
+/// The identifying columns take 50 of it; what is left is the reason, which is
+/// the part that gives on a narrow terminal. At the workstation's baseline this
+/// pane is 77 columns and every reason the client can write fits whole.
+const PLANS_W: u16 = 58;
+
+/// How many cards the band draws. The header takes the first of `PLANS_H`, and
+/// `panel_block` takes the last for its rule.
+const PLAN_CARDS: usize = PLANS_H as usize - 2;
+
+/// What a plan card can say about executing.
+///
+/// The whole reason this is a type: "cannot execute" has half a dozen different
+/// reasons and they are not interchangeable. `awaiting approval` means make one;
+/// `approval rejected` means a human already said no; `refused: approval` means
+/// the gate was asked and declined. A card that reduced all of them to a missing
+/// key would leave an operator pressing `x` at a plan that will never book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CardState {
+    /// The approval covering it is approved and unspent — the only shape the
+    /// owner's gate will accept. Operator builds offer the key here.
+    Executable,
+    /// The desk was asked and said no, with the gate's own word for why.
+    ///
+    /// Gated with the key that can ask. A glass window never sends an
+    /// execution, so it can never have been refused one — the variant is absent
+    /// from that build rather than merely unreachable in it, the same shape as
+    /// `Posture::Operator`.
+    #[cfg(feature = "operator")]
+    Refused(String),
+    /// It already went to the broker.
+    Booked,
+    /// It cannot execute, and this is the reason in the desk's own terms.
+    Blocked(String),
+}
+
+impl CardState {
+    fn label(&self) -> String {
+        match self {
+            CardState::Executable => "ready to execute".into(),
+            #[cfg(feature = "operator")]
+            CardState::Refused(by) => format!("refused: {by}"),
+            CardState::Booked => "booked".into(),
+            CardState::Blocked(why) => why.clone(),
+        }
+    }
+
+    fn tone(&self) -> Color {
+        let t = theme();
+        match self {
+            CardState::Executable => t.warning,
+            // As prominent as an error, and never in the colour a fill is drawn
+            // in: a refusal that read like success is the single worst thing
+            // this surface could say.
+            #[cfg(feature = "operator")]
+            CardState::Refused(_) => t.negative,
+            CardState::Booked => t.positive,
+            CardState::Blocked(_) => t.text_dim,
+        }
+    }
+}
+
+/// What one plan's card says, from the plan, the approval that covers it, and
+/// anything the desk has already refused.
+///
+/// The order is the order the facts outrank each other. A booked plan is over,
+/// whatever its approval now says. A refusal this client was told about is
+/// newer than any snapshot, because the gate writes no plan-state change when
+/// it declines — the next poll looks exactly like the last one.
+fn card_state(store: &Store, plan: &Plan) -> CardState {
+    let Some(plan_id) = format::text(plan.plan_id.as_ref()) else {
+        return CardState::Blocked("plan has no id".into());
+    };
+    if store::booked(format::text(plan.state.as_ref())) {
+        return CardState::Booked;
+    }
+    #[cfg(feature = "operator")]
+    if let Some(blocked_by) = store.refusals.get(plan_id) {
+        return CardState::Refused(blocked_by.clone());
+    }
+    if store.covering_approval(plan_id).is_some() {
+        return CardState::Executable;
+    }
+    // A plan the registry has moved past cannot be brought back by approving
+    // it, so "awaiting approval" would be a remedy that does not exist. The
+    // state column beside this says which one it is.
+    if format::text(plan.state.as_ref()) != Some("checked") {
+        return CardState::Blocked("not a checked plan".into());
+    }
+    match store.approval_for(plan_id) {
+        None => CardState::Blocked("awaiting approval".into()),
+        Some(approval) => {
+            let status = format::text(approval.status.as_ref()).unwrap_or("unstated");
+            // A challenged approval is back at `pending` with a digest on it,
+            // which is a different sentence: someone asked the desk a question
+            // about this trade and it has not been answered.
+            if status == "pending" && approval.challenge_digest.is_some() {
+                CardState::Blocked("approval pending challenge".into())
+            } else {
+                CardState::Blocked(format!("approval {status}"))
+            }
+        }
+    }
+}
+
+/// The plans the band draws: the newest, in the owner's own order.
+///
+/// The owner serves `plans` newest first and every other list in this client
+/// takes the payload's order rather than re-sorting it — a client that imposed
+/// its own order would be a second opinion about which plan is current.
+fn plan_cards(store: &Store) -> &[Plan] {
+    let plans = store.plans();
+    &plans[..plans.len().min(PLAN_CARDS)]
+}
+
+impl BookView {
+    /// Put the execute question up for the selected card.
+    ///
+    /// Three gates before the box exists, and none of them is this view's
+    /// judgment: the card must be executable (an approved, unspent approval
+    /// covering exactly this plan), and `Modal::for_plan` must be able to bind
+    /// the hash the referee passed. A plan that fails either gets no modal at
+    /// all — a confirmation ritual armed against a request the owner would
+    /// refuse teaches an operator that typing the characters means nothing.
+    #[cfg(feature = "operator")]
+    fn ask_to_execute(&mut self, store: &Store) {
+        let cards = plan_cards(store);
+        let Some(plan) = cards.get(self.plan.min(cards.len().saturating_sub(1))) else {
+            return;
+        };
+        if card_state(store, plan) != CardState::Executable {
+            return;
+        }
+        let Some(plan_id) = format::text(plan.plan_id.as_ref()) else {
+            return;
+        };
+        let Some(approval) = store.covering_approval(plan_id) else {
+            return;
+        };
+        if let Some(modal) = confirm::Modal::for_plan(plan, approval) {
+            self.confirm.open(modal, confirm::Pending::Execute);
+        }
+    }
+
+    /// The plan ledger: what the desk has proposed, and what each one is waiting
+    /// on.
+    fn draw_plans(&self, f: &mut Frame, area: Rect, store: &Store) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        if area.width < PLANS_W {
+            refuse(
+                f,
+                area,
+                format!(
+                    "plan cards need {PLANS_W} columns to state a plan id, its state \
+                     and why it can or cannot execute — this pane has {}",
+                    area.width
+                ),
+            );
+            return;
+        }
+        let block = panel_block();
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        // The header states this window's posture, read off the store rather
+        // than off `cfg!(feature = "operator")`. The feature says what the
+        // binary can do; the flag says whether the human armed it, and a
+        // featured build started without `--operator` must offer no key — its
+        // status line says GLASS, and the two may not disagree.
+        let keys = vec![Span::styled(
+            if store.posture.writes() {
+                "n next  x execute"
+            } else {
+                "view-only"
+            },
+            Style::default().fg(theme().text_dim),
+        )];
+        let mut lines = vec![header_keys("plans", keys, inner.width)];
+
+        let cards = plan_cards(store);
+        if cards.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "no plan on the ledger — the desk has proposed nothing",
+                Style::default().fg(theme().text_dim),
+            )));
+        }
+        for (i, plan) in cards.iter().enumerate() {
+            // A cursor only means something where a key can act on it. An
+            // unarmed window draws the same cards with nothing selected.
+            #[cfg(feature = "operator")]
+            let selected = store.posture.writes() && i == self.plan.min(cards.len() - 1);
+            #[cfg(not(feature = "operator"))]
+            let selected = {
+                let _ = i;
+                false
+            };
+            lines.push(plan_card(store, plan, selected));
+        }
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+/// One card: the marker, the plan, its state, its turnover, when it was
+/// proposed, and what it is waiting on.
+fn plan_card(store: &Store, plan: &Plan, selected: bool) -> Line<'static> {
+    let t = theme();
+    let state = card_state(store, plan);
+    let turnover = plan
+        .pre_trade
+        .as_ref()
+        .and_then(|pre| pre.get("turnover"))
+        .and_then(|v| v.as_f64());
+    Line::from(vec![
+        Span::styled(
+            if selected { "▌" } else { " " },
+            Style::default().fg(t.accent),
+        ),
+        // An eleven-character prefix, as AUDIT shows an approval id. It is far
+        // past what distinguishes two plans on any desk, the confirm box names
+        // the record in full, and the five columns it gives back are what let
+        // the longest reason — `approval pending challenge` — fit whole rather
+        // than clipping to `approval pending chal`.
+        Span::styled(
+            format!("{:<12}", or_dash(plan.plan_id.as_ref(), 11)),
+            Style::default().fg(t.text_primary),
+        ),
+        Span::styled(
+            format!("{:<11}", or_dash(plan.state.as_ref(), 10)),
+            Style::default().fg(t.text_secondary),
+        ),
+        Span::styled(
+            match turnover {
+                Some(value) => format!("turnover {:>6}  ", format::pct1(value)),
+                None => format!("turnover {MISSING:>6}  "),
+            },
+            Style::default().fg(t.text_secondary),
+        ),
+        Span::styled(
+            format!(
+                "{:<9}",
+                crate::ui::views::audit::clock(plan.created_at.as_ref())
+                    .unwrap_or_else(|| MISSING.to_string())
+            ),
+            Style::default().fg(t.text_tertiary),
+        ),
+        Span::styled(
+            state.label(),
+            Style::default()
+                .fg(state.tone())
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+/// The head of an owner string, or `--` when it said nothing.
+fn or_dash(value: Option<&String>, width: usize) -> String {
+    match format::text(value) {
+        Some(text) => match text.char_indices().nth(width) {
+            Some((cut, _)) => text[..cut].to_string(),
+            None => text.to_string(),
+        },
+        None => MISSING.to_string(),
     }
 }
 

@@ -679,12 +679,13 @@ fn sorting_by_symbol_is_alphabetical_and_the_rest_are_biggest_first() {
 
 /// The frame height at which the blotter gets exactly five rows for positions.
 ///
-/// The tape and the status line take one each, the ribbon four, the footer ten,
-/// and the blotter spends two of what is left on its panel header and its
-/// column header. Spelled once here because Task 13's footer moved every one of
-/// these numbers, and a page size hard-coded in six tests is six places to
-/// re-derive it the next time a band changes height.
-const PAGE_5: u16 = 23;
+/// The tape and the status line take one each, the ribbon four, the plans band
+/// five, the footer ten, and the blotter spends two of what is left on its panel
+/// header and its column header. Spelled once here because Task 13's footer and
+/// Task 18's plan cards each moved every one of these numbers, and a page size
+/// hard-coded in six tests is six places to re-derive it the next time a band
+/// changes height.
+const PAGE_5: u16 = 28;
 
 #[test]
 fn the_pager_appears_only_when_the_rows_outrun_the_rows_they_were_given() {
@@ -1274,5 +1275,348 @@ fn a_narrow_terminal_still_renders_the_book_without_panicking() {
         (86, 9),
     ] {
         let _ = client.frame(w, h);
+    }
+}
+
+// -- the plan ledger --------------------------------------------------------
+
+/// A book with one checked plan and the approval state a test wants for it.
+fn ledger(plan_state: &str, approvals: &str) -> Client {
+    book_from(&format!(
+        r#"{{"live_portfolio": {{"equity": 1.0, "positions": []}},
+             "plans": [{{"plan_id": "9661b0e88b4a669e", "state": "{plan_state}",
+                         "created_at": "2026-07-30T18:12:18+00:00",
+                         "pre_trade": {{"turnover": 0.42, "n_legs": 2}}}}],
+             "approvals": [{approvals}]}}"#
+    ))
+}
+
+/// The approval the owner serves once a human has authorised the fixture plan.
+const APPROVED: &str = r#"{"approval_id": "1a2b3c4d5e6f7081", "plan_id": "9661b0e88b4a669e",
+                           "status": "approved", "targets_hash": "c4d5e6f708192a3b",
+                           "broker": "simulated_paper"}"#;
+
+#[test]
+fn a_plan_card_states_the_plan_its_state_its_turnover_and_when_it_was_proposed() {
+    let frame = ledger("checked", "").frame(120, 36);
+    let card = line_with(&frame, "9661b0e88b4");
+    assert!(card.contains("checked"), "{card}");
+    assert!(card.contains("42.0%"), "{card}");
+    assert!(card.contains("18:12:18"), "{card}");
+}
+
+#[test]
+fn a_card_with_no_approval_says_what_it_is_waiting_for() {
+    // Not a missing key. "Awaiting approval" is a remedy an operator can act
+    // on; an execute hint that does nothing is one they press twice and then
+    // distrust.
+    let frame = ledger("checked", "").frame(120, 36);
+    let card = line_with(&frame, "9661b0e88b4");
+    assert!(card.contains("awaiting approval"), "{card}");
+    assert!(!card.contains("execute"), "{card}");
+}
+
+#[test]
+fn a_card_reads_its_reason_off_the_approvals_actual_status() {
+    // Every status the owner's transition table can produce is a different
+    // sentence about what to do next, and the card says which one it is.
+    for (approval, expected) in [
+        (
+            r#"{"approval_id": "a1", "plan_id": "9661b0e88b4a669e", "status": "pending"}"#,
+            "approval pending",
+        ),
+        (
+            r#"{"approval_id": "a1", "plan_id": "9661b0e88b4a669e", "status": "pending",
+                "challenge_digest": "0f1e2d3c"}"#,
+            "approval pending challenge",
+        ),
+        (
+            r#"{"approval_id": "a1", "plan_id": "9661b0e88b4a669e", "status": "rejected"}"#,
+            "approval rejected",
+        ),
+        (
+            r#"{"approval_id": "a1", "plan_id": "9661b0e88b4a669e", "status": "expired"}"#,
+            "approval expired",
+        ),
+    ] {
+        let frame = ledger("checked", approval).frame(120, 36);
+        let card = line_with(&frame, "9661b0e88b4");
+        assert!(card.contains(expected), "wanted {expected:?} in: {card}");
+    }
+}
+
+#[test]
+fn a_plan_the_registry_has_moved_past_cannot_be_fixed_by_approving_it() {
+    // "Awaiting approval" on a superseded plan is a remedy that does not exist:
+    // making one would not help, and the operator would go and make one.
+    let frame = ledger("superseded", "").frame(120, 36);
+    let card = line_with(&frame, "9661b0e88b4");
+    assert!(card.contains("not a checked plan"), "{card}");
+}
+
+#[test]
+fn a_booked_plan_says_so_whatever_its_approval_now_reads() {
+    // The approval is consumed by the fill, so the card must not fall through
+    // to "awaiting approval" the moment the plan actually executes.
+    let frame = ledger("reconciled", "").frame(120, 36);
+    let card = line_with(&frame, "9661b0e88b4");
+    assert!(card.contains("booked"), "{card}");
+}
+
+#[test]
+fn an_unarmed_window_shows_the_cards_and_offers_no_key() {
+    let frame = ledger("checked", APPROVED).frame(120, 36);
+    let header = line_with(&frame, "PLANS");
+    assert!(header.contains("view-only"), "{header}");
+    assert!(!header.contains("x execute"), "{header}");
+    // The card is still drawn — a glass window watches the same desk.
+    assert!(line_with(&frame, "9661b0e88b4").contains("ready to execute"));
+}
+
+#[test]
+fn a_ledger_with_nothing_on_it_says_so() {
+    let client = book_from(r#"{"live_portfolio": {"equity": 1.0}, "plans": []}"#);
+    assert!(
+        content(&client.frame(120, 36)).contains("no plan on the ledger"),
+        "{}",
+        content(&client.frame(120, 36))
+    );
+}
+
+#[cfg(feature = "operator")]
+mod armed {
+    use super::*;
+    use atlas::bus::Wrote;
+    use atlas::cmd::Command;
+    use atlas::store::Posture;
+    use atlas::ui::widgets::toast::{self, Level};
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn armed(plan_state: &str, approvals: &str) -> Client {
+        let mut client = super::ledger(plan_state, approvals);
+        client.store.posture = Posture::Operator;
+        client
+    }
+
+    fn press(client: &mut Client, code: KeyCode) -> Option<Command> {
+        atlas::ui::shell::on_key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        )
+    }
+
+    #[test]
+    fn an_armed_window_offers_the_execute_key_on_a_covered_plan() {
+        let frame = armed("checked", APPROVED).frame(120, 36);
+        let header = line_with(&frame, "PLANS");
+        assert!(header.contains("x execute"), "{header}");
+        assert!(
+            line_with(&frame, "9661b0e88b4").contains("ready to execute"),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn the_execute_key_opens_the_hash_bound_box_and_sends_nothing_yet() {
+        let mut client = armed("checked", APPROVED);
+        assert_eq!(press(&mut client, KeyCode::Char('x')), None);
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("EXECUTE PLAN"), "{frame}");
+        // The challenge is the tail of the *owner's* targets_hash, shown only
+        // here — a replay captured against another plan produces the wrong six.
+        assert!(frame.contains("type 192a3b"), "{frame}");
+        // And the facts come from the plan's own pre_trade, which is what the
+        // owner's gate checks.
+        assert!(line_with(&frame, "legs").contains('2'), "{frame}");
+    }
+
+    #[test]
+    fn only_an_approved_unspent_approval_opens_the_box() {
+        // Every other state the owner can serve. A modal armed against a
+        // request the gate would refuse teaches an operator that typing the
+        // six characters means the desk checked something.
+        for approval in [
+            "",
+            r#"{"approval_id": "a1", "plan_id": "9661b0e88b4a669e", "status": "pending",
+                "targets_hash": "c4d5e6f708192a3b"}"#,
+            r#"{"approval_id": "a1", "plan_id": "9661b0e88b4a669e", "status": "rejected",
+                "targets_hash": "c4d5e6f708192a3b"}"#,
+            r#"{"approval_id": "a1", "plan_id": "9661b0e88b4a669e", "status": "approved",
+                "targets_hash": "c4d5e6f708192a3b",
+                "consumed_at": "2026-07-30T18:20:00+00:00"}"#,
+            r#"{"approval_id": "a1", "plan_id": "0000000000000000", "status": "approved",
+                "targets_hash": "c4d5e6f708192a3b"}"#,
+        ] {
+            let mut client = armed("checked", approval);
+            assert_eq!(press(&mut client, KeyCode::Char('x')), None);
+            assert!(
+                !client.frame(120, 36).contains("EXECUTE PLAN"),
+                "a box opened for {approval}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_confirmed_box_yields_exactly_one_execution_command() {
+        let mut client = armed("checked", APPROVED);
+        press(&mut client, KeyCode::Char('x'));
+        for c in "192a3b".chars() {
+            press(&mut client, KeyCode::Char(c));
+        }
+        let cmd = press(&mut client, KeyCode::Enter).expect("the challenge arms it");
+        match cmd {
+            Command::Execute(token) => {
+                assert_eq!(token.plan_id(), "9661b0e88b4a669e");
+                assert_eq!(token.approval_id(), "1a2b3c4d5e6f7081");
+                assert_eq!(token.targets_hash(), "c4d5e6f708192a3b");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The consent was spent by that answer: the box is gone and a second
+        // Enter cannot book the same human decision again.
+        assert!(press(&mut client, KeyCode::Enter).is_none());
+        assert!(!client.frame(120, 36).contains("EXECUTE PLAN"));
+    }
+
+    #[test]
+    fn a_booked_fill_is_a_positive_toast_and_brings_the_next_poll_forward() {
+        // The wording matches the stream's own `plan_executed` toast on
+        // purpose: both arrive, and the queue drops an identical box that is
+        // already up, so one fill is one box.
+        let executed = toast::for_event(&atlas::bus::AppEvent::Wrote(Wrote::Executed {
+            plan_id: "9661b0e88b4a669e".into(),
+        }))
+        .expect("a booked fill is a moment");
+        assert_eq!(executed.level, Level::Info);
+        assert!(
+            executed.message.contains("9661b0e88b4a669e"),
+            "{executed:?}"
+        );
+        let from_stream = toast::for_event(&atlas::bus::AppEvent::Sse(SseEvent {
+            kind: "plan_executed".into(),
+            payload: serde_json::json!({"plan_id": "9661b0e88b4a669e"}),
+            ts: None,
+            id: None,
+        }))
+        .unwrap();
+        assert_eq!(
+            executed, from_stream,
+            "two boxes for one fill: the queue can only collapse identical toasts"
+        );
+    }
+
+    #[test]
+    fn a_refused_fill_is_as_loud_as_an_error_and_lands_on_the_card() {
+        // The rule this whole path exists for. The gate declines with HTTP 200,
+        // so a refusal that read like a receipt would tell an operator a trade
+        // was booked when the desk declined it.
+        let refusal = Wrote::Refused {
+            plan_id: "9661b0e88b4a669e".into(),
+            blocked_by: "approval".into(),
+            reasons: vec!["approval has expired".into()],
+        };
+        let toast = toast::for_event(&atlas::bus::AppEvent::Wrote(refusal.clone()))
+            .expect("a refusal is a moment");
+        assert_eq!(toast.level, Level::Alarm, "a refusal is never Info");
+        assert!(toast.message.contains("approval"), "{toast:?}");
+        assert!(toast.message.contains("has expired"), "{toast:?}");
+
+        // And the card says it, because nothing in the next snapshot will: the
+        // gate writes no plan-state change when it refuses.
+        let mut client = armed("checked", APPROVED);
+        client
+            .store
+            .apply(atlas::bus::AppEvent::Wrote(refusal), client.now);
+        let frame = client.frame(120, 36);
+        let card = line_with(&frame, "9661b0e88b4");
+        assert!(card.contains("refused: approval"), "{card}");
+        assert!(
+            !card.contains("ready to execute"),
+            "a refused card still offered the key: {card}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_drawn_in_the_colour_of_an_error_and_never_of_a_fill() {
+        let mut client = armed("checked", APPROVED);
+        client.store.apply(
+            atlas::bus::AppEvent::Wrote(Wrote::Refused {
+                plan_id: "9661b0e88b4a669e".into(),
+                blocked_by: "mandate_violation".into(),
+                reasons: vec!["position cap breached".into()],
+            }),
+            client.now,
+        );
+        let buf = client.buffer(120, 36);
+        let style = body_style_of(&buf, "refused: mandate_violation");
+        assert_eq!(style.fg, Some(Theme::truecolor().negative));
+        assert_ne!(style.fg, Some(Theme::truecolor().positive));
+    }
+
+    #[test]
+    fn a_write_that_never_landed_is_an_error_and_not_a_refusal() {
+        // Three outcomes, three sentences. "The owner did not answer" and "the
+        // desk said no" have completely different remedies.
+        let failed = toast::for_event(&atlas::bus::AppEvent::Wrote(Wrote::Failed {
+            what: "execute 9661b0e88b4a669e".into(),
+            said: "the owner did not answer: connection refused".into(),
+        }))
+        .expect("a failed write is a moment");
+        assert_eq!(failed.level, Level::Alarm);
+        assert_eq!(failed.title, "write failed");
+        assert!(failed.message.contains("connection refused"), "{failed:?}");
+    }
+
+    #[test]
+    fn a_booked_fill_clears_a_refusal_the_same_plan_carried() {
+        // A card must never show a stale refusal beside a fill.
+        let mut client = armed("checked", APPROVED);
+        for outcome in [
+            Wrote::Refused {
+                plan_id: "9661b0e88b4a669e".into(),
+                blocked_by: "approval".into(),
+                reasons: vec!["expired".into()],
+            },
+            Wrote::Executed {
+                plan_id: "9661b0e88b4a669e".into(),
+            },
+        ] {
+            client
+                .store
+                .apply(atlas::bus::AppEvent::Wrote(outcome), client.now);
+        }
+        let frame = client.frame(120, 36);
+        let card = line_with(&frame, "9661b0e88b4");
+        assert!(!card.contains("refused"), "{card}");
+    }
+
+    #[test]
+    fn the_cursor_walks_the_cards_and_x_acts_on_the_one_it_is_on() {
+        let mut client = Client::new({
+            let mut store = super::store_from(
+                r#"{"live_portfolio": {"equity": 1.0},
+                    "plans": [
+                      {"plan_id": "aaaaaaaaaaaaaaaa", "state": "superseded"},
+                      {"plan_id": "9661b0e88b4a669e", "state": "checked",
+                       "pre_trade": {"turnover": 0.42, "n_legs": 2}}],
+                    "approvals": [{"approval_id": "1a2b3c4d5e6f7081",
+                                   "plan_id": "9661b0e88b4a669e", "status": "approved",
+                                   "targets_hash": "c4d5e6f708192a3b"}]}"#,
+            );
+            store.posture = Posture::Operator;
+            store
+        });
+        client.press(KeyCode::Char('3'));
+        // The cursor opens on the newest card, which here cannot execute.
+        assert_eq!(press(&mut client, KeyCode::Char('x')), None);
+        assert!(!client.frame(120, 36).contains("EXECUTE PLAN"));
+
+        press(&mut client, KeyCode::Char('n'));
+        assert_eq!(press(&mut client, KeyCode::Char('x')), None);
+        assert!(
+            client.frame(120, 36).contains("EXECUTE PLAN"),
+            "n did not move the cursor onto the executable card"
+        );
     }
 }

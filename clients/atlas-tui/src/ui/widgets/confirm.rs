@@ -30,11 +30,13 @@
 //! would reject — after asking a human to vouch for it.
 //!
 //! Nothing here performs IO or holds a client. It renders, it reads keystrokes,
-//! and it mints a `ConfirmToken`. Task 18's approvals and plans views own it.
+//! and it mints a `ConfirmToken`. The BOOK and AUDIT views own one `Host` each.
 
+use crate::cmd::Command;
 use crate::model::{Approval, Plan};
 use crate::theme::theme;
 use crate::ui::widgets::panel_header;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -386,6 +388,103 @@ impl Modal {
     }
 }
 
+/// What the runtime is asked to do once the human has typed the challenge.
+///
+/// Carried beside the modal rather than encoded in it, because two of the three
+/// bind no plan: `Modal::action` mints nothing, so without this the shell would
+/// know a human had confirmed *something* and not which approval it was about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    Approve(String),
+    Reject(String),
+    /// The plan case. The command's payload is the token the modal mints, so
+    /// there is nothing to carry here — the binding is inside the modal.
+    Execute,
+}
+
+/// One view's modal slot: at most one question on screen, and the keystrokes
+/// that answer it.
+///
+/// A view owns this rather than the shell, because the view is what knows which
+/// approval or plan the operator was looking at when they pressed the key. The
+/// shell still routes *every* keystroke here first while a question is up, and
+/// draws it over the whole frame — a modal confined to a view's own rect would
+/// let `3` walk away from an unanswered question about an order.
+///
+/// The host is what makes the consent single-use in practice: answering takes
+/// the modal out, so there is no armed box left for a second Enter to fire.
+#[derive(Debug, Default)]
+pub struct Host {
+    open: Option<(Modal, Pending)>,
+}
+
+impl Host {
+    /// Put a question up. A second `open` while one is showing is refused
+    /// rather than stacked: two order confirmations on screen at once is a
+    /// human answering the one they can see and arming the one they cannot.
+    pub fn open(&mut self, modal: Modal, pending: Pending) {
+        if self.open.is_none() {
+            self.open = Some((modal, pending));
+        }
+    }
+
+    /// The question on screen, for the shell to draw and a test to read.
+    pub fn showing(&self) -> Option<&Modal> {
+        self.open.as_ref().map(|(modal, _)| modal)
+    }
+
+    /// One keystroke into the box.
+    ///
+    /// `Esc` abandons, `Enter` answers once armed, everything printable types.
+    /// An unarmed `Enter` leaves the box up rather than closing it: a human who
+    /// mistyped the challenge has to see that they did.
+    pub fn on_key(&mut self, k: KeyEvent) -> Option<Command> {
+        self.open.as_ref()?;
+        match k.code {
+            KeyCode::Esc => {
+                self.open = None;
+                None
+            }
+            KeyCode::Enter => {
+                if !self.open.as_ref().is_some_and(|(modal, _)| modal.armed()) {
+                    return None;
+                }
+                // Taken, not borrowed: the consent is spent by this answer, and
+                // a modal left in the slot is a second Enter away from a second
+                // command carrying the same human decision.
+                let (mut modal, pending) = self.open.take()?;
+                match pending {
+                    // `token()` is the mint *and* the spend. `None` here means
+                    // the modal could not bind the plan after all, which is a
+                    // refusal to execute rather than a fill with no consent.
+                    Pending::Execute => modal.token().map(Command::Execute),
+                    Pending::Approve(id) => Some(Command::Approve(id)),
+                    Pending::Reject(id) => Some(Command::Reject(id)),
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some((modal, _)) = self.open.as_mut() {
+                    modal.backspace();
+                }
+                None
+            }
+            KeyCode::Char(c) => {
+                if let Some((modal, _)) = self.open.as_mut() {
+                    modal.push(c);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    pub fn draw(&self, f: &mut Frame, area: Rect) {
+        if let Some(modal) = self.showing() {
+            modal.draw(f, area);
+        }
+    }
+}
+
 /// The modal's rect, centred and never larger than the frame.
 ///
 /// Clamped rather than assumed: a 50×12 box drawn into a 40-column terminal
@@ -450,6 +549,95 @@ mod tests {
         }
         assert!(modal.armed());
         assert!(modal.token().is_none());
+    }
+
+    #[test]
+    fn a_host_answers_once_and_the_second_enter_has_nothing_to_send() {
+        // The consent is spent by the answer, not by the token: a modal left in
+        // the slot is one Enter away from a second command carrying the same
+        // human decision.
+        let (plan, approval) = plan_and_approval();
+        let mut host = Host::default();
+        host.open(Modal::for_plan(&plan, &approval).unwrap(), Pending::Execute);
+        for c in "192a3b".chars() {
+            host.on_key(key(KeyCode::Char(c)));
+        }
+        assert!(matches!(
+            host.on_key(key(KeyCode::Enter)),
+            Some(Command::Execute(_))
+        ));
+        assert!(host.showing().is_none(), "answering closes the box");
+        assert!(host.on_key(key(KeyCode::Enter)).is_none());
+    }
+
+    #[test]
+    fn an_unarmed_enter_leaves_the_question_up() {
+        // A human who mistyped the challenge has to see that they did, rather
+        // than have the box vanish and wonder what it did.
+        let mut host = Host::default();
+        host.open(Modal::action("HALT", vec![]), Pending::Approve("a1".into()));
+        assert!(host.on_key(key(KeyCode::Enter)).is_none());
+        assert!(host.showing().is_some());
+
+        for c in "CONFIRX".chars() {
+            host.on_key(key(KeyCode::Char(c)));
+        }
+        assert!(host.on_key(key(KeyCode::Enter)).is_none());
+        host.on_key(key(KeyCode::Backspace));
+        host.on_key(key(KeyCode::Char('M')));
+        assert_eq!(
+            host.on_key(key(KeyCode::Enter)),
+            Some(Command::Approve("a1".into()))
+        );
+    }
+
+    #[test]
+    fn escape_abandons_and_decides_nothing() {
+        let mut host = Host::default();
+        host.open(Modal::action("HALT", vec![]), Pending::Reject("a1".into()));
+        for c in "CONFIRM".chars() {
+            host.on_key(key(KeyCode::Char(c)));
+        }
+        assert!(host.on_key(key(KeyCode::Esc)).is_none());
+        assert!(host.showing().is_none());
+    }
+
+    #[test]
+    fn a_second_question_cannot_stack_over_one_already_on_screen() {
+        // Two order confirmations at once is a human answering the one they can
+        // see and arming the one they cannot.
+        let mut host = Host::default();
+        host.open(
+            Modal::action("FIRST", vec![]),
+            Pending::Approve("a1".into()),
+        );
+        host.open(
+            Modal::action("SECOND", vec![]),
+            Pending::Reject("a2".into()),
+        );
+        for c in "CONFIRM".chars() {
+            host.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            host.on_key(key(KeyCode::Enter)),
+            Some(Command::Approve("a1".into())),
+            "the box on screen is the one that was answered"
+        );
+    }
+
+    #[test]
+    fn a_host_with_nothing_up_claims_no_keys() {
+        // The shell routes every keystroke here first while a question is up;
+        // an empty host that swallowed them would freeze the workstation.
+        let mut host = Host::default();
+        for code in [KeyCode::Enter, KeyCode::Esc, KeyCode::Char('q')] {
+            assert!(host.on_key(key(code)).is_none());
+        }
+        assert!(host.showing().is_none());
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
 
     #[test]

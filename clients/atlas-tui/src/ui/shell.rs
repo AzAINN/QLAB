@@ -63,8 +63,10 @@ const GLYPH_H: u16 = glyph::H as u16 + 1;
 /// amber pulse should cross, which is the quiet end nearest the badge. It is not
 /// a layout constraint either: `draw_status` packs the line itself.
 ///
-/// Task 18 replaces it with the approvals chip's own rect, at which point the
-/// pulse lands on the thing it is about rather than on the neighbourhood.
+/// Still the neighbourhood rather than one chip's own rect. Narrowing it needs
+/// the status line to carry an approvals chip to aim at, and this line has no
+/// room for one until the layout modes land — a pulse aimed at a rect nothing
+/// draws into would be an effect over empty cells.
 const CHIPS_W: u16 = 40;
 
 /// One frame.
@@ -123,6 +125,15 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
 
     draw_status(f, rows[2], store, t, stale);
 
+    // Last, and over the whole frame rather than the content rect: a question
+    // about an order is not part of the view that asked it, and a box confined
+    // to one pane would leave a live desk repainting three times a second
+    // inside the border a human is reading before they commit.
+    #[cfg(feature = "operator")]
+    if let Some(host) = views.confirm(store.nav.view) {
+        host.draw(f, area);
+    }
+
     fx.rects.frame.set(area);
     fx.rects.content.set(content);
     fx.rects.chips.set(chips(rows[2]));
@@ -158,6 +169,16 @@ fn stale_for(store: &Store, now: Instant) -> Option<Duration> {
 /// The arrow keys are deliberately *not* claimed here: they mean "move the
 /// cursor in whatever I am looking at", which only the active view can answer.
 pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
+    // Before everything, including `q` and the digits. A modal is a blocking
+    // question, and a global key that walked away from it would leave a human
+    // having half-answered a question about an order — worse, `3` and `q` are
+    // both characters the challenge field has to be able to accept.
+    #[cfg(feature = "operator")]
+    if let Some(host) = views.confirm_mut(store.nav.view) {
+        if host.showing().is_some() {
+            return host.on_key(key);
+        }
+    }
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Command::Quit),
         // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at

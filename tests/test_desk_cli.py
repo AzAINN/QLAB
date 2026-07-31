@@ -219,10 +219,19 @@ def test_a_persisted_live_mode_without_credentials_asks_again(monkeypatch):
 
 
 def _drive_cmd_tui(monkeypatch, argv, *, owner_running):
-    """Run `qlab tui` with everything outside the CLI stubbed out.
+    """Run `qlab tui --classic` with everything outside the CLI stubbed out.
 
     Returns what each stub was handed: the owner's argv, the client's calls and
     the keywords the Textual app was constructed with.
+
+    `--classic` is appended rather than left to the caller because the default
+    client is `os.execvpe`'d: without it, a test that reaches the end of
+    `_cmd_tui` replaces the pytest process with the Atlas workstation and the
+    whole run disappears mid-file. The exec is stubbed to fail loudly below, so
+    that mistake shows up as one red test instead.
+
+    What these tests are about — the owner spawn, the desk mode reaching it,
+    and what the client is constructed with — is shared by both clients.
     """
     from qlab.autopilot import cli
     from qlab.tui import app as tui_app
@@ -285,7 +294,10 @@ def _drive_cmd_tui(monkeypatch, argv, *, owner_running):
     monkeypatch.setattr(cli.subprocess, "Popen", FakeOwner)
     monkeypatch.setattr(tui_client, "ApiClient", FakeClient)
     monkeypatch.setattr(tui_app, "QlabTui", FakeApp)
-    assert cli.main(argv) == 0
+    monkeypatch.setattr(
+        cli.os, "execvpe",
+        lambda *_args: pytest.fail("--classic must not exec the workstation"))
+    assert cli.main([*argv, "--classic"]) == 0
     return record
 
 

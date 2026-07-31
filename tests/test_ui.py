@@ -479,7 +479,13 @@ def test_owner_stderr_drain_survives_a_chatty_child():
 
 
 def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
-    """A bound port is not enough: the owner may still be opening its state."""
+    """A bound port is not enough: the owner may still be opening its state.
+
+    Driven through ``--classic``, which is the flag that keeps the Textual
+    client during the soak. The owner spawn and readiness wait below are shared
+    by both paths and unchanged by the cutover; this is the leg that ends in a
+    ``QlabTui``.
+    """
     from types import SimpleNamespace
 
     import qlab.autopilot.cli as cli_module
@@ -551,10 +557,163 @@ def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
         online=False,
         refresh=0.0,
         claude="off",
+        classic=True,
+        operator=False,
     ))
 
     assert result == 0
     assert calls == {"probe": 2, "system": 1, "run": 1}
+
+
+def _tui_args(**overrides):
+    """The namespace ``qlab tui`` builds, with the defaults its parser sets."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**{
+        "port": 8765, "online": False, "refresh": 2.0, "claude": "offer",
+        "classic": False, "operator": False, **overrides,
+    })
+
+
+def _attached_owner(monkeypatch, cli_module):
+    """Pretend a compatible owner is already listening, so the launcher's spawn
+    and readiness logic is out of the way and only the client choice is left."""
+    import qlab.tui.client as client_module
+
+    class OpenPort:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect_ex(self, _address):
+            return 0
+
+    class Client:
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def get(self, path, **_params):
+            assert path == "/api/system"
+            return {"mode": "offline"}
+
+    monkeypatch.setattr(cli_module.socket, "socket", OpenPort)
+    monkeypatch.setattr(client_module, "ApiClient", Client)
+    monkeypatch.setattr(
+        cli_module.subprocess, "Popen",
+        lambda *_a, **_k: pytest.fail("an owner is already up; nothing may spawn"))
+
+
+def test_tui_launches_the_ratatui_workstation_and_tells_it_the_port(
+        monkeypatch, tmp_path):
+    """The default client is the Rust workstation, exec'd in place.
+
+    In place, not spawned: the launcher has nothing left to do once the owner is
+    up, and a Python process parked on top of the client would be one more thing
+    between an operator's Ctrl-C and the terminal being restored.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    _attached_owner(monkeypatch, cli_module)
+    binary = tmp_path / "atlas"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("QLAB_ATLAS_BIN", str(binary))
+
+    seen = {}
+
+    def fake_exec(path, argv, env):
+        seen.update(path=path, argv=argv, env=env)
+        raise SystemExit(0)   # execvpe never returns; neither does this
+
+    monkeypatch.setattr(cli_module.os, "execvpe", fake_exec)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(port=8899))
+
+    assert exit_info.value.code == 0
+    assert seen["path"] == str(binary)
+    assert seen["argv"] == [str(binary)]
+    # The one thing the client cannot discover for itself: which owner to talk
+    # to. It never opens the registry, so a wrong port is a blank desk.
+    assert seen["env"]["QLAB_UI_PORT"] == "8899"
+
+
+def test_tui_operator_flag_reaches_the_workstation(monkeypatch, tmp_path):
+    """--operator is a passthrough, not a second authority.
+
+    The launcher does not decide what the client may do; it forwards the word
+    and the binary decides whether it was built with anything behind it.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    _attached_owner(monkeypatch, cli_module)
+    binary = tmp_path / "atlas"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("QLAB_ATLAS_BIN", str(binary))
+
+    seen = {}
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda path, argv, env: seen.update(argv=argv) or (_ for _ in ()).throw(SystemExit(0)))
+
+    with pytest.raises(SystemExit):
+        cli_module._cmd_tui(_tui_args(operator=True))
+    assert seen["argv"] == [str(binary), "--operator"]
+
+
+def test_tui_without_a_built_workstation_says_how_to_build_it(monkeypatch, tmp_path):
+    """Fail loud. A missing binary must never fall back to the Textual client.
+
+    Silently running a different client would make --classic unfalsifiable as a
+    soak valve: an operator soaking the Rust workstation would have been on the
+    Textual one the whole week and had no way to tell.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    _attached_owner(monkeypatch, cli_module)
+    monkeypatch.setenv("QLAB_ATLAS_BIN", str(tmp_path / "not-built"))
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("a missing binary must not be exec'd"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args())
+    message = str(exit_info.value)
+    assert "cargo build --release" in message
+    assert "--classic" in message
+
+
+def test_tui_classic_runs_the_textual_client_against_the_same_owner(monkeypatch):
+    """The soak valve: one flag, no revert."""
+    import qlab.autopilot.cli as cli_module
+    import qlab.tui.app as app_module
+
+    _attached_owner(monkeypatch, cli_module)
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("--classic must not exec the workstation"))
+
+    started = {}
+
+    class Tui:
+        def __init__(self, _client, **kwargs):
+            started.update(kwargs)
+
+        def run(self):
+            started["ran"] = True
+
+    monkeypatch.setattr(app_module, "QlabTui", Tui)
+    assert cli_module._cmd_tui(_tui_args(classic=True, refresh=0.0)) == 0
+    assert started["ran"] is True
+    # Attached rather than owned: the Textual client only terminates a server it
+    # started itself.
+    assert started["owned_server"] is None
 
 
 def test_model_invocations_route(session):

@@ -163,11 +163,14 @@ impl Execution {
 ///
 /// Constructed by the composition root when `--operator` is passed, and reached
 /// only from there: `tests/operator_gate.rs` asserts that nothing under `ui/`
-/// names this type. Task 18 gives the approvals and plans views their key
-/// branches, which return `Command`s for the runtime to dispatch here; until
-/// then the gate tests are the only callers, which is deliberate — a key path
-/// wired to a view that does not exist yet would be the reachable-code-with-no-
-/// caller shape invariant 10 exists to catch.
+/// names this type. AUDIT's `a`/`R` and BOOK's `x` return `Command`s that
+/// `main::Writes` dispatches here.
+///
+/// Three of the methods below have a key path; the Atlas and desk verbs do not
+/// yet, and the surfaces that press them are Tasks 19 and 21. They are the
+/// reachable-code-with-no-caller shape invariant 10 names, held deliberately
+/// because the routes were pinned against the owner's dispatch table in one
+/// pass — but they are on that list until a view calls them.
 pub struct WriteClient {
     base: String,
     client: reqwest::Client,

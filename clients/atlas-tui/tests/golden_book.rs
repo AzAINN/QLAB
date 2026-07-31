@@ -1569,6 +1569,35 @@ mod armed {
     }
 
     #[test]
+    fn a_refused_card_can_still_ask_the_desk_again() {
+        // The refusal is the last thing the desk *said*, not a state it is in:
+        // `data_revalidation` recovers when the data plane does, and a mandate
+        // violation leaves the approval untouched. Gating the key on the held
+        // refusal made the card a dead end whose only exit was booking the plan
+        // — which the card no longer offered. The owner is the authority on
+        // whether it will book, and the red label is what stops a blind retry.
+        let mut client = armed("checked", APPROVED);
+        client.store.apply(
+            atlas::bus::AppEvent::Wrote(Wrote::Refused {
+                plan_id: "9661b0e88b4a669e".into(),
+                blocked_by: "data_revalidation".into(),
+                reasons: vec!["the desk blocked this fill".into()],
+            }),
+            client.now,
+        );
+        let frame = client.frame(120, 36);
+        assert!(
+            line_with(&frame, "9661b0e88b4").contains("refused: data_revalidation"),
+            "{frame}"
+        );
+        assert_eq!(press(&mut client, KeyCode::Char('x')), None);
+        assert!(
+            client.frame(120, 36).contains("EXECUTE PLAN"),
+            "a refused card must still be able to re-ask a governed gate"
+        );
+    }
+
+    #[test]
     fn a_booked_fill_clears_a_refusal_the_same_plan_carried() {
         // A card must never show a stale refusal beside a fill.
         let mut client = armed("checked", APPROVED);

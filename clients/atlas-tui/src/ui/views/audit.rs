@@ -207,9 +207,7 @@ impl AuditView {
         };
         let mut lines = vec![head("APPROVALS", keys, inner.width)];
 
-        // One row for the header; whatever is left is the queue. The cursor is
-        // clamped to the *queue*, not to what fits, so a decision scrolled off
-        // a short pane is still reachable by walking down to it.
+        // One row for the header; whatever is left is the queue.
         let room = inner.height.saturating_sub(1) as usize;
         if rows.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -217,20 +215,32 @@ impl AuditView {
                 Style::default().fg(theme().text_dim),
             )));
         }
-        for (i, approval) in rows.iter().take(room).enumerate() {
+        // The window follows the cursor. The cursor is clamped to the whole
+        // queue rather than to what fits, so on a pane shorter than the queue a
+        // fixed top would leave the marker off screen and `a`/`R` acting on a
+        // row nobody can see.
+        let cursor = self.cursor(rows.len());
+        let top = cursor.saturating_sub(room.saturating_sub(1));
+        for (i, approval) in rows.iter().enumerate().skip(top).take(room) {
             // A cursor only means something where a key can act on it.
-            let selected = store.posture.writes() && i == self.cursor(rows.len());
-            lines.push(approval_row(approval, selected));
+            let selected = store.posture.writes() && i == cursor;
+            lines.push(approval_row(approval, selected, inner.width));
         }
         f.render_widget(Paragraph::new(lines), inner);
     }
 }
 
 /// One approval: the marker, its id, the plan it binds, its status, its expiry.
-fn approval_row(approval: &Approval, selected: bool) -> Line<'static> {
+///
+/// The expiry goes whole or not at all. Between the pane's refusal floor and its
+/// design width the row would otherwise be clipped by the `Paragraph`, and the
+/// column that loses its tail is the clock — leaving `19:1` where an operator
+/// reads the deadline of the decision they are about to make. A dropped chip
+/// beats a truncated digit, exactly as the BOOK ribbon's sub-line does it.
+fn approval_row(approval: &Approval, selected: bool, width: u16) -> Line<'static> {
     let t = theme();
     let status = format::text(approval.status.as_ref()).unwrap_or(MISSING);
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             if selected { "▌" } else { " " },
             Style::default().fg(t.accent),
@@ -249,11 +259,14 @@ fn approval_row(approval: &Approval, selected: bool) -> Line<'static> {
                 .fg(status_tone(status))
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
+    ];
+    if width >= APPROVALS_W {
+        spans.push(Span::styled(
             clock(approval.expires_at.as_ref()).unwrap_or_else(|| MISSING.to_string()),
             Style::default().fg(t.text_tertiary),
-        ),
-    ])
+        ));
+    }
+    Line::from(spans)
 }
 
 /// What each approval status means, in colour.

@@ -629,9 +629,9 @@ impl Fx {
                     fx::fade_from_fg(t.negative_dim, (RESTORE, Interpolation::CubicOut)),
                 );
             }
-            // Not emitted yet — Task 18 diffs the approvals queue. The rule is
-            // here so the match stays exhaustive and the arm is one line of
-            // wiring rather than a design decision on that task's critical path.
+            // Fired when the snapshot carries an approval id the last one did
+            // not (`Store::apply_snapshot`), which is a human decision arriving
+            // at the queue.
             Trigger::ApprovalCreated => {
                 self.panes.add_unique_effect(
                     FxKey::Toast,
@@ -650,6 +650,7 @@ impl Fx {
             // Not emitted yet — Task 19 diffs the workflow phase. Shares
             // `Toast` with the approval on purpose: one chip region, one pulse,
             // and the newer piece of governance news is the one to show.
+            // Invariant 10 is owed a caller here, and Task 19 is where it lands.
             Trigger::PhaseAdvanced => {
                 self.panes.add_unique_effect(
                     FxKey::Toast,
@@ -659,7 +660,8 @@ impl Fx {
                     ),
                 );
             }
-            // Not emitted yet — Task 18 diffs the plan ledger.
+            // Fired when a plan leaves `checked` for a state the broker has
+            // seen (`Store::apply_snapshot`).
             Trigger::PlanExecuted => {
                 self.panes.add_unique_effect(
                     FxKey::PlanCard,

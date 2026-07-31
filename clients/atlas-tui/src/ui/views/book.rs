@@ -1431,7 +1431,7 @@ fn card_state(store: &Store, plan: &Plan) -> CardState {
     if let Some(blocked_by) = store.refusals.get(plan_id) {
         return CardState::Refused(blocked_by.clone());
     }
-    if store.covering_approval(plan_id).is_some() {
+    if executable(store, plan) {
         return CardState::Executable;
     }
     // A plan the registry has moved past cannot be brought back by approving
@@ -1456,6 +1456,29 @@ fn card_state(store: &Store, plan: &Plan) -> CardState {
     }
 }
 
+/// Whether the owner's gate would accept an execution of this plan today.
+///
+/// The gate's own precondition and nothing else: not already booked, still the
+/// checked plan, and covered by an approved, unspent approval.
+///
+/// Deliberately blind to a refusal this client is holding. A refusal is the last
+/// thing the desk *said*, not a state the desk is in, and two of the shapes it
+/// comes in clear themselves without touching the registry —
+/// `data_revalidation` recovers when the data plane does, and a mandate
+/// violation leaves the approval untouched. Gating the key on the held refusal
+/// made the card a dead end: the only exit was booking the plan, which the card
+/// no longer offered. Re-asking a governed gate is the correct remedy, and the
+/// owner is the authority on whether it will book — the card still says
+/// `refused: …` in red beside the key, so nobody presses it unaware.
+fn executable(store: &Store, plan: &Plan) -> bool {
+    let Some(plan_id) = format::text(plan.plan_id.as_ref()) else {
+        return false;
+    };
+    !store::booked(format::text(plan.state.as_ref()))
+        && format::text(plan.state.as_ref()) == Some("checked")
+        && store.covering_approval(plan_id).is_some()
+}
+
 /// The plans the band draws: the newest, in the owner's own order.
 ///
 /// The owner serves `plans` newest first and every other list in this client
@@ -1469,19 +1492,19 @@ fn plan_cards(store: &Store) -> &[Plan] {
 impl BookView {
     /// Put the execute question up for the selected card.
     ///
-    /// Three gates before the box exists, and none of them is this view's
-    /// judgment: the card must be executable (an approved, unspent approval
-    /// covering exactly this plan), and `Modal::for_plan` must be able to bind
-    /// the hash the referee passed. A plan that fails either gets no modal at
-    /// all — a confirmation ritual armed against a request the owner would
-    /// refuse teaches an operator that typing the characters means nothing.
+    /// Two gates before the box exists, and neither is this view's judgment:
+    /// the owner's gate must accept the plan today (`executable`), and
+    /// `Modal::for_plan` must be able to bind the hash the referee passed. A
+    /// plan that fails either gets no modal at all — a confirmation ritual
+    /// armed against a request the owner would refuse teaches an operator that
+    /// typing the characters means nothing.
     #[cfg(feature = "operator")]
     fn ask_to_execute(&mut self, store: &Store) {
         let cards = plan_cards(store);
         let Some(plan) = cards.get(self.plan.min(cards.len().saturating_sub(1))) else {
             return;
         };
-        if card_state(store, plan) != CardState::Executable {
+        if !executable(store, plan) {
             return;
         }
         let Some(plan_id) = format::text(plan.plan_id.as_ref()) else {

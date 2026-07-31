@@ -441,16 +441,17 @@ fn ingest(
             }
         }
     }
-    // Any write the owner *answered* moved the registry — a refusal included,
-    // because the gate invalidates the approval it declined
-    // (`execute_plan_with_approval`, `server.py:1876`). Only a request that
-    // never landed leaves the desk exactly as the last snapshot described it,
-    // so that is the one outcome that does not bring the next poll forward.
+    // Every write outcome brings the next poll forward, the failures included.
+    // A refusal moved the registry — the gate invalidates the approval it
+    // declined (`execute_plan_with_approval`, `server.py:1876`) — and a
+    // *failure* is the outcome where the desk's state is least knowable: the
+    // eight-second write timeout is shared with the poller precisely because a
+    // request that gave up may still be booking, so the snapshot on screen is
+    // then both stale and the one an operator is about to press `x` against
+    // again. Suppressing the refetch there kept the least trustworthy frame.
     #[cfg(feature = "operator")]
-    if let AppEvent::Wrote(outcome) = &ev {
-        if !matches!(outcome, atlas::bus::Wrote::Failed { .. }) {
-            poller.now();
-        }
+    if matches!(ev, AppEvent::Wrote(_)) {
+        poller.now();
     }
     // Before the fold, because the fold consumes the event. A toast is about the
     // event itself rather than about the state it leaves behind — an approval

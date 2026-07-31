@@ -175,6 +175,51 @@ fn a_stream_with_nothing_on_it_says_so() {
 }
 
 #[test]
+fn a_narrow_queue_drops_the_expiry_whole_rather_than_half_a_clock() {
+    // `19:1` is worse than no expiry at all, because it still looks like a
+    // time — and it is the deadline of the decision an operator is about to
+    // make. Between the pane's floor and its design width the row drops the
+    // whole column instead.
+    let client = audit_from(
+        r#"{"approvals": [{"approval_id": "aaaa111122223333", "plan_id": "pppp1111",
+             "status": "pending", "expires_at": "2026-07-30T19:12:18+00:00"}]}"#,
+    );
+    let wide = client.frame(120, 36);
+    assert!(line_with(&wide, "aaaa1111222").contains("19:12:18"));
+    // 112 is the pane's refusal floor and 116 is where it reaches its design
+    // width; in between is exactly the band the `Paragraph` used to clip.
+    for width in 112u16..116 {
+        let narrow = client.frame(width, 36);
+        let row = line_with(&narrow, "aaaa1111222");
+        assert!(
+            row.contains("19:12:18") || !row.contains("19:"),
+            "half a clock survived at {width}: {row}"
+        );
+        assert!(row.contains("pending"), "{row}");
+    }
+}
+
+#[test]
+fn the_queue_scrolls_so_the_cursor_is_never_off_screen() {
+    // The cursor is clamped to the whole queue, not to what fits. A fixed top
+    // would leave `a`/`R` acting on a row nobody can see.
+    let rows: Vec<String> = (0..12)
+        .map(|i| {
+            format!(
+                r#"{{"approval_id": "ap{i:02}00000000", "plan_id": "pl{i:02}", "status": "pending"}}"#
+            )
+        })
+        .collect();
+    let mut client = audit_from(&format!(r#"{{"approvals": [{}]}}"#, rows.join(",")));
+    for _ in 0..11 {
+        client.press(KeyCode::Down);
+    }
+    // Shown as an eleven-character prefix, like every other id in this pane.
+    let short = content(&client.frame(120, 14));
+    assert!(short.contains("ap110000000"), "{short}");
+}
+
+#[test]
 fn a_pane_too_narrow_for_two_columns_says_what_it_would_take() {
     // A truncated approval id is not an approval id, and an operator about to
     // decide has to be able to read which record it is.

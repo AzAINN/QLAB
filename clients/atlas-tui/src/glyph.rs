@@ -106,7 +106,7 @@ pub fn frame(mood: Mood, tick: u64) -> Vec<String> {
         Mood::Alarmed => {
             // A hard flat bar that blinks. Deliberately unlike the others: a
             // halted desk should not look like a working one at a glance.
-            if tick % 2 == 0 {
+            if tick.is_multiple_of(2) {
                 for x in 0..subw {
                     mark(&mut dots, x, (subh / 2) as isize, subw, subh);
                     mark(&mut dots, x, (subh / 2) as isize - 1, subw, subh);

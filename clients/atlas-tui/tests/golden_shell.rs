@@ -270,6 +270,87 @@ fn numbers_that_stopped_refreshing_say_so_rather_than_passing_as_current() {
 }
 
 #[test]
+fn the_status_line_states_which_desk_the_mode_switched_to() {
+    // The render gap `/mode` left behind: the line could switch the desk and
+    // nothing on screen said what it had switched to. The chip is the owner's
+    // own `label` — never composed here from the two words that were sent,
+    // because the owner is the authority on what the pair is called.
+    let frame = frame_to_string(&fixture_store(), 120, 36);
+    assert!(line_with(&frame, "GLASS").contains("SYNTHETIC"), "{frame}");
+
+    let live = store_from(
+        r#"{"desk_mode": {"data": "live", "book": "alpaca",
+             "label": "LIVE · ALPACA BOOK", "offline": false,
+             "credentials": "ALPACA_API_KEY_ID (paper)", "credentials_ok": true}}"#,
+    );
+    let frame = frame_to_string(&live, 120, 36);
+    assert!(
+        line_with(&frame, "GLASS").contains("LIVE · ALPACA BOOK"),
+        "{frame}"
+    );
+}
+
+#[test]
+fn a_desk_mode_the_owner_did_not_name_is_no_chip_at_all() {
+    // `Some("")` is absent everywhere in this client, and an empty chip on the
+    // status line would read as a desk pointed at nothing.
+    for json in [
+        r#"{"portfolio": {"equity": 1.0}}"#,
+        r#"{"desk_mode": {}}"#,
+        r#"{"desk_mode": {"label": ""}}"#,
+    ] {
+        let frame = frame_to_string(&store_from(json), 120, 36);
+        let status = line_with(&frame, "GLASS");
+        // What is left is the run of chips with nothing extra between the base
+        // address and the atlas posture.
+        assert!(status.contains("OWNER"), "{status}");
+        assert!(!status.contains("SYNTHETIC"), "{json}: {status}");
+    }
+}
+
+#[test]
+fn a_real_book_this_desk_cannot_log_into_is_warned_about_on_the_line() {
+    // The "succeeded and did nothing" shape, on the surface an operator glances
+    // at rather than in a toast they may have missed: the desk is pointed at a
+    // book that can place real orders and the owner has no login for it.
+    let t = Theme::truecolor();
+    let tone = |json: &str| {
+        let store = store_from(json);
+        let frame = frame_to_string(&store, 120, 36);
+        // The last row of the frame is the status line.
+        let styles = row_styles(&store, &Fx::default(), 120, 36, Instant::now(), 35);
+        let row: String = styles.iter().map(|(s, _)| s.as_str()).collect();
+        let at = row.find("ALPACA").unwrap_or_else(|| panic!("{frame}"));
+        styles[at].1.fg.unwrap()
+    };
+    let broken = tone(
+        r#"{"desk_mode": {"data": "live", "book": "alpaca", "label": "LIVE · ALPACA BOOK",
+             "credentials": "no ALPACA_API_KEY_ID in the environment", "credentials_ok": false}}"#,
+    );
+    let working = tone(
+        r#"{"desk_mode": {"data": "live", "book": "alpaca", "label": "LIVE · ALPACA BOOK",
+             "credentials": "ALPACA_API_KEY_ID (paper)", "credentials_ok": true}}"#,
+    );
+    assert_eq!(broken, t.warning);
+    assert_eq!(working, t.text_secondary);
+
+    // Silence is not a working login. The owner always sends the flag, so its
+    // absence is a contract this client cannot read — and about the book that
+    // can place real orders, unreadable must not render as fine.
+    let quiet =
+        tone(r#"{"desk_mode": {"data": "live", "book": "alpaca", "label": "LIVE · ALPACA BOOK"}}"#);
+    assert_eq!(quiet, t.warning);
+
+    // The simulated book has no login to be broken, so it is never warned about
+    // however loudly the credential source is failing.
+    let sim = tone(
+        r#"{"desk_mode": {"data": "live", "book": "simulated", "label": "LIVE · SIM ALPACA",
+             "credentials": "no ALPACA_API_KEY_ID in the environment", "credentials_ok": false}}"#,
+    );
+    assert_eq!(sim, t.text_secondary);
+}
+
+#[test]
 fn the_status_line_says_which_owner_it_is_looking_at_and_drops_it_before_a_chip() {
     // An operator with two desks up — or one owner on a port they did not
     // choose — otherwise reads a chip run that names no host and has to guess

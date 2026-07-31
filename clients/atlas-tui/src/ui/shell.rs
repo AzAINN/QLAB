@@ -780,6 +780,12 @@ fn draw_status(
             Style::default().fg(t.negative).add_modifier(Modifier::BOLD),
         ));
     }
+    // What the desk is pointed at, before what Atlas is doing with it: the two
+    // read left to right as "this book, that manager". Without it `/mode` could
+    // switch the desk and nothing on screen said what it had switched to.
+    if let Some(mode) = desk_mode_chip(store, t) {
+        right.push(mode);
+    }
     right.extend([
         Span::styled(
             format!("{posture}  "),
@@ -830,6 +836,35 @@ fn draw_status(
     spans.push(Span::raw(" ".repeat(slack)));
     spans.append(&mut right);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Which desk this is, in the owner's own words — or nothing.
+///
+/// The label is the owner's `desk_mode.label`, never composed here from the two
+/// words `/mode` sent: the owner is the authority on what a pair is called, and
+/// a client that spelled it itself would report a switch the owner may have
+/// refused. `Some("")` is absent, as everywhere in this client — an empty chip
+/// would read as a desk pointed at nothing.
+///
+/// Amber when the book that can place real orders has no working login behind
+/// it. That is the "succeeded and did nothing" shape: the desk is pointed at a
+/// venue it cannot reach, and the toast that said so at the moment of the switch
+/// is gone by the next glance. Absence of the flag is warned about rather than
+/// assumed fine — the owner always sends it, so silence is a contract this
+/// client cannot read, and about a real book unreadable may not render as clean.
+fn desk_mode_chip(store: &Store, t: &Theme) -> Option<Span<'static>> {
+    let mode = store.desk_mode()?;
+    let label = format::text(mode.label.as_ref())?;
+    if mode.book.as_deref() == Some("alpaca") && mode.credentials_ok != Some(true) {
+        return Some(Span::styled(
+            format!("{label}  "),
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        ));
+    }
+    Some(Span::styled(
+        format!("{label}  "),
+        Style::default().fg(t.text_secondary),
+    ))
 }
 
 /// What one feed's chip can say.

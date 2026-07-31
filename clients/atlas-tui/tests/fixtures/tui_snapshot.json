@@ -1,5 +1,6 @@
 {
-  "desk_mode": {"mode": "demo", "book": "simulated_paper", "live_capable": false},
+  "desk_mode": {"data": "synthetic", "book": "simulated", "label": "SYNTHETIC", "offline": true,
+                "credentials": "no ALPACA_API_KEY_ID in the environment or .env", "credentials_ok": false},
   "portfolio": {
     "broker": "simulated_paper",
     "cash": 6.821210263296962e-13,
@@ -210,5 +211,73 @@
      "payload": {"approval_id": "5a101fb351d746da", "plan_id": "a06ecb5aef417e17"}},
     {"event_id": "93c6afc5e71345e2", "ts": "2026-07-30T18:12:18.773652+00:00", "kind": "approval_created",
      "payload": {"approval_id": "1a2b3c4d5e6f7081", "plan_id": "9661b0e88b4a669e"}}
+  ],
+  "policy": {
+    "id": "hrp", "label": "Hierarchical risk parity", "arm_id": "B2", "objective": "hrp",
+    "solver": "hrp", "algorithm_id": "hrp",
+    "rationale": "Current evidence favors the robust HRP benchmark out of sample; MVSK remains a falsifiable research arm.",
+    "constraints": {"long_only": true, "budget": 1.0, "min_weight": 0.0, "max_weight": 0.4}
+  },
+  "system": {
+    "mode": "paper", "offline": true, "claude_available": true,
+    "mcp_configured": true, "mcp_servers": ["qlab-operator"], "mcp_config_error": "",
+    "mcp_proxy_available": true, "governed_available": true,
+    "governed_authority": "propose_only", "claude_role": "workforce_orchestrator",
+    "workforce_available": true,
+    "governed_lock_reason": "agent authority is intentionally propose-only; paper execution requires explicit human confirmation",
+    "data_source": "synthetic", "data_age_days": 0,
+    "autopilot": {"last_run_at": "2026-07-30T18:12:09.864336+00:00", "triggers_fired": 0}
+  },
+  "leaderboard": [
+    {"arm_id": "B2", "name": "HRP", "champion": true, "benchmark": false,
+     "sharpe": 0.8412, "ann_return": 0.0714, "max_drawdown": -0.1132, "cvar_95": -0.0189,
+     "deflated_sharpe": 0.61},
+    {"arm_id": "B1", "name": "Equal weight", "champion": false, "benchmark": true,
+     "sharpe": 0.7735, "ann_return": 0.0682, "max_drawdown": -0.1264, "cvar_95": -0.0203,
+     "deflated_sharpe": 0.54},
+    {"arm_id": "A3", "name": "MVSK", "champion": false, "benchmark": false,
+     "sharpe": -0.1204, "ann_return": -0.0091, "max_drawdown": -0.2417, "cvar_95": -0.0311,
+     "deflated_sharpe": 0.0},
+    {"arm_id": "A2", "name": "Scenario CVaR", "champion": false, "benchmark": false,
+     "sharpe": null, "ann_return": null, "max_drawdown": null, "cvar_95": null,
+     "deflated_sharpe": null}
+  ],
+  "runs": [
+    {"run_id": "805e0729cf5a4d19", "kind": "ablation", "created_at": "2026-07-30T17:58:41.102934+00:00"},
+    {"run_id": "ece2abcefa1b4c07", "kind": "prediction", "created_at": "2026-07-30T16:41:12.884301+00:00"},
+    {"run_id": "3f2a91cc70de4b88", "kind": "backtest", "created_at": "2026-07-29T22:03:55.410772+00:00"}
+  ],
+  "algorithms": [
+    {"id": "equal_weight", "label": "Equal weight", "category": "benchmark", "stage": "operational",
+     "objective_forms": ["equal_weight"], "solver": null, "agent_tool": "backtest.run",
+     "description": "Deterministic 1/N benchmark with no estimated parameters.",
+     "requires": null, "prepared_objective": false, "agent_usable": true},
+    {"id": "hrp", "label": "Hierarchical risk parity", "category": "allocation", "stage": "operational",
+     "objective_forms": ["min_variance"], "solver": "hrp", "agent_tool": "algorithms.solve",
+     "description": "Correlation clustering followed by recursive risk allocation.",
+     "requires": null, "prepared_objective": true, "agent_usable": true},
+    {"id": "scenario_cvar", "label": "Scenario CVaR", "category": "optimization", "stage": "operational",
+     "objective_forms": ["scenario_cvar"], "solver": "cvar_lp", "agent_tool": "backtest.run",
+     "description": "Rockafellar-Uryasev linear program over the historical scenario panel.",
+     "requires": null, "prepared_objective": false, "agent_usable": true},
+    {"id": "mvsk_multistart", "label": "MVSK multistart", "category": "optimization", "stage": "research",
+     "objective_forms": ["mvsk"], "solver": "classical_multistart", "agent_tool": null,
+     "description": "Higher-moment hypothesis arm; retained for honest ablation, not deployment.",
+     "requires": null, "prepared_objective": true, "agent_usable": false},
+    {"id": "vol_prediction_ridge", "label": "Realized-volatility ridge baseline", "category": "prediction",
+     "stage": "research", "objective_forms": ["risk_forecast"], "solver": null,
+     "agent_tool": "research.predict_vol",
+     "description": "Purged walk-forward baseline for next-21-day equal-weight portfolio realized volatility.",
+     "requires": null, "prepared_objective": false, "agent_usable": false},
+    {"id": "qaoa_selection", "label": "QAOA selection QUBO", "category": "quantum", "stage": "offline",
+     "objective_forms": ["selection_qubo"], "solver": "qaoa", "agent_tool": null,
+     "description": "Aer-only research implementation retained for isolated experiments, not runtime use.",
+     "requires": "qlab[offline-quantum]", "prepared_objective": false, "agent_usable": false}
+  ],
+  "agents": [
+    {"name": "moments-analyst", "description": "Chooses the estimation window, shrinkage intensity, and regime call.",
+     "authority": "RESEARCH", "state": "idle", "tools": ["mcp__qlab__moments_estimate"]},
+    {"name": "referee", "description": "The approval gate. Read-only.",
+     "authority": "VETO", "state": "idle", "tools": ["mcp__qlab__registry_log_verdict"]}
   ]
 }

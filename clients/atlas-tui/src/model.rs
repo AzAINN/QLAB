@@ -35,6 +35,10 @@ where
 /// One `/api/tui` response.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Snapshot {
+    /// What the desk is pointed at. Absent means the owner did not say, which
+    /// is not the same as a synthetic desk — nothing here defaults.
+    #[serde(default)]
+    pub desk_mode: Option<DeskMode>,
     #[serde(default)]
     pub portfolio: Option<Portfolio>,
     #[serde(default)]
@@ -65,11 +69,148 @@ pub struct Snapshot {
     pub atlas_read: Option<AtlasRead>,
     #[serde(default, deserialize_with = "null_or_default")]
     pub events: Vec<Event>,
-    /// The dozen sections nothing renders yet (`agents`, `runs`, `news`,
-    /// `policy`, `leaderboard`, …). Kept whole so a new view is a struct, not a
+    /// The allocation policy the paper book is run under, with the mandate's
+    /// constraints attached by the owner.
+    #[serde(default)]
+    pub policy: Option<Policy>,
+    /// Health and authority facts — the quiet half of SETTINGS.
+    #[serde(default)]
+    pub system: Option<System>,
+    /// The newest ablation, ranked. Empty is a desk that has not run one, which
+    /// is a different fact from a desk whose arms all scored zero.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub leaderboard: Vec<LeaderboardRow>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub runs: Vec<Run>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub algorithms: Vec<Algorithm>,
+    /// The sections nothing renders yet (`agents`, `news`, `atlas_tasks`,
+    /// `equilibrium_returns`, …). Kept whole so a new view is a struct, not a
     /// re-capture of the payload.
     #[serde(flatten)]
     pub extra: Value,
+}
+
+// -- what the desk is pointed at -------------------------------------------
+
+/// The chosen data lane and book, as `desk_mode_payload` serves them.
+///
+/// The credential pair travels together because neither half means anything
+/// alone: a description with no verdict is a sentence nobody can act on, and a
+/// verdict with no description cannot say what is wrong. Absence of
+/// `credentials_ok` is *not* a working login — the owner always sends the flag,
+/// so silence is a contract this client cannot read, and silence about the book
+/// that can place real orders is the one answer that must not pass as clean.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeskMode {
+    pub data: Option<String>,
+    pub book: Option<String>,
+    /// The owner's own words for the pair. Never composed here: the client does
+    /// not re-spell a label the owner is the authority on.
+    pub label: Option<String>,
+    pub offline: Option<bool>,
+    pub credentials: Option<String>,
+    pub credentials_ok: Option<bool>,
+}
+
+// -- the policy and its limits ---------------------------------------------
+
+/// `allocation_policy()`: the operational policy plus the mandate's constraints.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Policy {
+    pub id: Option<String>,
+    pub label: Option<String>,
+    pub arm_id: Option<String>,
+    pub objective: Option<String>,
+    pub solver: Option<String>,
+    pub algorithm_id: Option<String>,
+    pub rationale: Option<String>,
+    pub constraints: Option<Constraints>,
+}
+
+/// The four limits every paper solve is held to. Each is optional for the
+/// reason every scalar here is: a `max_weight` defaulted to `0.0` would render
+/// a mandate that forbids holding anything.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Constraints {
+    pub long_only: Option<bool>,
+    pub budget: Option<f64>,
+    pub min_weight: Option<f64>,
+    pub max_weight: Option<f64>,
+}
+
+// -- provenance and authority ----------------------------------------------
+
+/// `system_status()`. Only the fields a surface renders; the row also carries
+/// `claude_role`, `governed_lock_reason` and the autopilot block, which SETTINGS
+/// does not draw.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct System {
+    pub mode: Option<String>,
+    pub offline: Option<bool>,
+    pub claude_available: Option<bool>,
+    pub mcp_configured: Option<bool>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub mcp_servers: Vec<String>,
+    /// A config file that exists and does not parse is not the same fact as no
+    /// file: the owner reports the parse error here rather than as absence.
+    pub mcp_config_error: Option<String>,
+    pub mcp_proxy_available: Option<bool>,
+    pub governed_available: Option<bool>,
+    pub governed_authority: Option<String>,
+    pub workforce_available: Option<bool>,
+    /// Cache-only provenance: what the last cached panel came from, and how old
+    /// it is. Never a network fetch from a status poll.
+    pub data_source: Option<String>,
+    pub data_age_days: Option<i64>,
+}
+
+// -- research --------------------------------------------------------------
+
+/// One ranked ablation arm. The five metrics are the owner's `OVERLAY_METRICS`,
+/// in its reading order — one definition, two surfaces.
+///
+/// Every metric is optional because an arm the ablation could not score keeps
+/// its row: the owner sorts those last rather than dropping them, and a zero
+/// where a measurement is missing is a claim nobody made.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LeaderboardRow {
+    pub arm_id: Option<String>,
+    pub name: Option<String>,
+    /// The arm the mandate's `operational_policy` currently names.
+    pub champion: Option<bool>,
+    pub benchmark: Option<bool>,
+    pub sharpe: Option<f64>,
+    pub ann_return: Option<f64>,
+    pub max_drawdown: Option<f64>,
+    pub cvar_95: Option<f64>,
+    pub deflated_sharpe: Option<f64>,
+}
+
+/// One row of the `runs` table, newest first as the owner serves it. The row
+/// also carries `spec`, which is a whole research payload — thousands of
+/// characters no list can hold, and re-decoded on every three-second poll.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Run {
+    pub run_id: Option<String>,
+    pub kind: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// One catalog entry. `stage` is the boundary `algorithms.solve` enforces in
+/// code — research and offline entries are visible and not agent-runnable — so
+/// it is the field this client draws, not a decoration on the id.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Algorithm {
+    pub id: Option<String>,
+    pub label: Option<String>,
+    pub category: Option<String>,
+    pub stage: Option<String>,
+    pub solver: Option<String>,
+    pub agent_tool: Option<String>,
+    /// What an offline entry needs installed before it can run at all.
+    pub requires: Option<String>,
+    pub agent_usable: Option<bool>,
 }
 
 // -- book ------------------------------------------------------------------

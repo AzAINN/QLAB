@@ -1,6 +1,5 @@
 ---
 source: tests/command_line.rs
-assertion_line: 417
 expression: "frame_to_string(&client.store, 120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
@@ -38,4 +37,4 @@ expression: "frame_to_string(&client.store, 120, 36)"
 "        │read c60c46006d926733                                                        │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
 "        │window 45fbb3f32be5bef9        ─────────────────────── ──────────────────────│ WATCHING                        "
 " /view /ticker /plan /mode                                                                                              "
-" /▏   http://127.0.0.1:8765                                                      ● SSE  ● OWNER  propose·auto  OPERATOR "
+" /▏   http://127.0.0.1:8765                                           ● SSE  ● OWNER  SYNTHETIC  propose·auto  OPERATOR "

@@ -10,7 +10,10 @@ use crate::bus::{AppEvent, Channel, HttpResult, SseEvent};
 use crate::cmd::CmdLine;
 use crate::format::text;
 use crate::glyph::Mood;
-use crate::model::{Approval, Asset, Coordinator, Plan, RegimePanel, Snapshot, Template, Workflow};
+use crate::model::{
+    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, Plan, Policy, RegimePanel,
+    Run, Snapshot, System, Template, Workflow,
+};
 use crate::net::http;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -612,6 +615,53 @@ impl Store {
     /// The registered templates, in the owner's own order.
     pub fn templates(&self) -> &[Template] {
         &self.templates
+    }
+
+    /// What the desk is pointed at, if the owner said.
+    ///
+    /// One reader for a fact two surfaces draw — the status line's chip and the
+    /// SETTINGS card — so they cannot disagree about which desk this is.
+    pub fn desk_mode(&self) -> Option<&DeskMode> {
+        self.snapshot.as_ref()?.desk_mode.as_ref()
+    }
+
+    /// The allocation policy the paper book is run under.
+    pub fn policy(&self) -> Option<&Policy> {
+        self.snapshot.as_ref()?.policy.as_ref()
+    }
+
+    /// Health and authority facts, as the owner reports them.
+    pub fn system(&self) -> Option<&System> {
+        self.snapshot.as_ref()?.system.as_ref()
+    }
+
+    /// The newest ablation, ranked by Sharpe as the owner ranked it.
+    ///
+    /// The owner's order is kept rather than re-sorted here: arms it could not
+    /// score sort last instead of claiming a rank, and a client that sorted
+    /// again would have to invent a rule for the absent ones.
+    pub fn leaderboard(&self) -> &[LeaderboardRow] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.leaderboard.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// The research run ledger, newest first.
+    pub fn runs(&self) -> &[Run] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.runs.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// The algorithm catalog, in the owner's own order — which is the catalog's
+    /// declaration order, not a ranking.
+    pub fn algorithms(&self) -> &[Algorithm] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.algorithms.as_slice())
+            .unwrap_or_default()
     }
 
     /// The approval that could authorise booking `plan_id`, if the owner is

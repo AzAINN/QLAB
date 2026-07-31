@@ -179,13 +179,25 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
             return host.on_key(key);
         }
     }
+    // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at all —
+    // and the reflex every operator has has to work. Above the typing check
+    // rather than inside the match below it, because this is the one key that
+    // must reach the runtime even while a field owns the keyboard: a text field
+    // that swallowed it would leave the operator's only exit reflex dead in a
+    // fullscreen client.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(Command::Quit);
+    }
+    // A view with a text field open owns every printable key, including the ones
+    // claimed below. The shell claims `q`, `r` and the digits so that no view
+    // can take a binding the whole workstation depends on; a goal being typed
+    // into WORKFORCE's picker is the one case where that has to yield, or the
+    // word "requote" would refresh the desk, jump to BOOK, and quit.
+    if views.typing(store.nav.view) {
+        return views.on_key(store.nav.view, key, store);
+    }
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Command::Quit),
-        // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at
-        // all — and the reflex every operator has has to work.
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Some(Command::Quit);
-        }
         KeyCode::Char('r') => return Some(Command::Refresh),
         KeyCode::Char(c) if c.is_ascii_digit() => {
             if let Some(view) = ViewId::from_digit(c) {

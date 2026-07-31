@@ -21,6 +21,7 @@ pub mod audit;
 pub mod book;
 pub mod desk;
 pub mod markets;
+pub mod workforce;
 
 use crate::cmd::Command;
 use crate::fx::FlashTracker;
@@ -69,6 +70,28 @@ pub trait View {
     fn confirm_mut(&mut self) -> Option<&mut confirm::Host> {
         None
     }
+
+    /// Whether this view is holding a text field open, and therefore owns every
+    /// keystroke — including the ones the shell claims for the whole
+    /// workstation.
+    ///
+    /// The shell claims `q`, `r` and the digits precisely so no view can take a
+    /// binding the workstation depends on. A field an operator is typing a
+    /// sentence into is the one case where that rule has to yield: a goal
+    /// containing "requote" would otherwise refresh the desk, jump to BOOK and
+    /// quit before its third character.
+    ///
+    /// Narrow on purpose. It is a claim about *right now*, not about the view —
+    /// a surface that answered `true` because it merely has a field would cost
+    /// the workstation its navigation permanently. Ctrl-C is exempt in the
+    /// shell, because the reflex every operator has must work even here.
+    ///
+    /// Ungated by feature, because the shell that asks is: in the default build
+    /// there is no `Command` a field could produce, so every implementation
+    /// returns `false` and the branch is dead.
+    fn typing(&self) -> bool {
+        false
+    }
 }
 
 /// The seven views, alive for the life of the process.
@@ -77,7 +100,7 @@ pub struct Views {
     markets: markets::MarketsView,
     book: book::BookView,
     research: Unbuilt,
-    workforce: Unbuilt,
+    workforce: workforce::WorkforceView,
     audit: audit::AuditView,
     settings: Unbuilt,
 }
@@ -95,7 +118,7 @@ impl Views {
             markets: markets::MarketsView::default(),
             book: book::BookView::default(),
             research: Unbuilt(ViewId::Research),
-            workforce: Unbuilt(ViewId::Workforce),
+            workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
             settings: Unbuilt(ViewId::Settings),
         }
@@ -129,6 +152,13 @@ impl Views {
 
     pub fn on_key(&mut self, id: ViewId, k: KeyEvent, store: &mut Store) -> Option<Command> {
         self.at_mut(id).on_key(k, store)
+    }
+
+    /// Whether the active view is holding a text field open. Routed through the
+    /// registry for the same reason `confirm` is: the shell has one question to
+    /// ask, and cannot ask it of the wrong surface.
+    pub fn typing(&self, id: ViewId) -> bool {
+        self.at(id).typing()
     }
 
     fn at(&self, id: ViewId) -> &dyn View {
@@ -171,6 +201,8 @@ fn owner_task(id: ViewId) -> u8 {
         ViewId::Markets => 9,
         ViewId::Book => 11,
         ViewId::Research => 21,
+        // WORKFORCE is built; this arm stays because `owner_task` is total over
+        // `ViewId` and the map is what a half-built branch is read through.
         ViewId::Workforce => 19,
         // AUDIT is built; this arm stays because `owner_task` is total over
         // `ViewId` and the map is what a half-built branch is read through.

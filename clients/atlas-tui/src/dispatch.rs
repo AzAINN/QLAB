@@ -163,6 +163,49 @@ mod armed {
                     },
                 }
             }
+            // Neither of the two below is a governance decision, so neither
+            // reports one. What they *do* report is the owner's own answer
+            // about whether the request could go anywhere: a message queued for
+            // a coordinator that is not running, and a workflow registered but
+            // not yet driven, are both requests that "succeeded" and did
+            // nothing — the exact shape this client refuses to render as a
+            // receipt.
+            Command::Message(text) => match client.atlas_message(&text).await {
+                Ok(said) => Wrote::Asked {
+                    note: said
+                        .get("note")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("the desk has the message")
+                        .to_string(),
+                },
+                Err(err) => Wrote::Failed {
+                    what: "ask the desk".to_string(),
+                    said: err.to_string(),
+                },
+            },
+            Command::StartWorkflow { template, goal } => {
+                match client.start_workflow(&template, &goal).await {
+                    // The owner answers with the workflow row it created, so
+                    // the id here is the registry's own — which is what lets an
+                    // operator find the pipeline this key started rather than
+                    // guessing at the newest one. A 200 without it is a broken
+                    // contract and says so rather than inventing a handle.
+                    Ok(said) => match said.get("workflow_id").and_then(|v| v.as_str()) {
+                        Some(id) if !id.is_empty() => Wrote::Started {
+                            template,
+                            workflow_id: id.to_string(),
+                        },
+                        _ => Wrote::Failed {
+                            what: format!("start {template}"),
+                            said: format!("the owner answered without a workflow_id: {said}"),
+                        },
+                    },
+                    Err(err) => Wrote::Failed {
+                        what: format!("start {template}"),
+                        said: err.to_string(),
+                    },
+                }
+            }
             Command::Quit | Command::Refresh => return None,
         })
     }

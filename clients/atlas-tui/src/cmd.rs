@@ -36,6 +36,29 @@ pub enum Command {
     /// key handler that never put the box on screen.
     #[cfg(feature = "operator")]
     Execute(ConfirmToken),
+    /// Put a question to the desk manager.
+    ///
+    /// The one write verb on this workstation with no confirmation ritual in
+    /// front of it, and deliberately so: it grants no authority. The owner
+    /// records the message and answers only through the coordinator, so the
+    /// worst a stray keystroke can do here is add a line to the audit log —
+    /// where a confirmation box would instead teach an operator that the ritual
+    /// is chrome, which is exactly what must not happen before the boxes that
+    /// do guard a fill.
+    #[cfg(feature = "operator")]
+    Message(String),
+    /// Start one registered workflow template against a goal.
+    ///
+    /// Two strings the operator chose from what the owner served — the template
+    /// out of `/api/atlas/templates`, the goal typed into the picker. Neither
+    /// carries authority either: the owner refuses a plan-creating template
+    /// below `propose`, and a plan a run does produce still needs a persisted
+    /// human approval before anything books.
+    #[cfg(feature = "operator")]
+    StartWorkflow {
+        template: String,
+        goal: String,
+    },
 }
 
 /// Hand-written rather than derived, and neither `Eq` nor `Clone`.
@@ -57,6 +80,19 @@ impl PartialEq for Command {
             (Command::Reject(a), Command::Reject(b)) => a == b,
             #[cfg(feature = "operator")]
             (Command::Execute(_), Command::Execute(_)) => false,
+            #[cfg(feature = "operator")]
+            (Command::Message(a), Command::Message(b)) => a == b,
+            #[cfg(feature = "operator")]
+            (
+                Command::StartWorkflow {
+                    template: a,
+                    goal: x,
+                },
+                Command::StartWorkflow {
+                    template: b,
+                    goal: y,
+                },
+            ) => a == b && x == y,
             _ => false,
         }
     }

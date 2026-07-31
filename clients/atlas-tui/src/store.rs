@@ -509,7 +509,16 @@ impl Store {
                     Wrote::Executed { plan_id } => {
                         self.refusals.remove(&plan_id);
                     }
-                    Wrote::Decided { .. } | Wrote::Failed { .. } => {}
+                    // Nothing for the store to hold. A decision, a question, a
+                    // workflow handle and a failed request all leave their
+                    // trace in the owner's own record, which the next poll
+                    // brings back — unlike a refusal, which the owner declines
+                    // with a 200 and no state change, and which would otherwise
+                    // be visible nowhere at all.
+                    Wrote::Decided { .. }
+                    | Wrote::Asked { .. }
+                    | Wrote::Started { .. }
+                    | Wrote::Failed { .. } => {}
                 }
                 self.dirty = true;
             }

@@ -303,6 +303,32 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
             &format!("approval {decision}"),
             format!("{approval_id} is on the record as {decision}"),
         ),
+        // The owner's own sentence, not a receipt of this client's own making.
+        // `atlas_message` answers 200 whether or not a coordinator exists to
+        // read the question — "coordinator unavailable; Atlas is degraded and
+        // cannot answer" is a 200 — so a box saying "sent" would report a
+        // question as asked of something that cannot hear it. `Warn` for that
+        // case, because it is a degraded desk and not a delivery.
+        Wrote::Asked { note } => Toast::new(
+            if note.contains("unavailable") {
+                Level::Warn
+            } else {
+                Level::Info
+            },
+            "desk asked",
+            note.clone(),
+        ),
+        Wrote::Started {
+            template,
+            workflow_id,
+        } => Toast::new(
+            Level::Info,
+            "workflow started",
+            // "registered", not "running": registering a workflow is not
+            // driving it, and only the coordinator's own `driving` flag says
+            // the phases are advancing. The pipeline pane shows which it is.
+            format!("{template} registered as {workflow_id}"),
+        ),
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

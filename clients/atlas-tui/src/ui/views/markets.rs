@@ -366,7 +366,20 @@ fn draw_hero(
     // client that filled the name in from a table of its own would be asserting
     // an instrument identity the owner never stated.
     f.render_widget(Paragraph::new(panel_header(asset.ticker)), rows[0]);
-    braille_chart::draw(f, rows[1], asset.history, crosshair);
+    braille_chart::draw(
+        f,
+        rows[1],
+        braille_chart::Chart {
+            name: "price chart",
+            series: asset.history,
+            crosshair,
+            // A quote, spelled as the grid beside it spells one. The chart's
+            // gutter width follows from this, which is what lets the same
+            // widget carry BOOK's `$10,012.40` equity scale without either
+            // surface clipping the other's numbers.
+            label: format::price,
+        },
+    );
 }
 
 /// The sector strip: one heat cell per SPDR proxy the snapshot actually carried.

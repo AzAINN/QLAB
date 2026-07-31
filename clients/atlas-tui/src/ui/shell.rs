@@ -194,6 +194,9 @@ fn stale_for(store: &Store, now: Instant) -> Option<Duration> {
 ///
 /// The arrow keys are deliberately *not* claimed here: they mean "move the
 /// cursor in whatever I am looking at", which only the active view can answer.
+// Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+// this function to check it. That module's header lists what the check
+// cannot see — including why a comment in here may not spell a key variant.
 pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
     // Before everything, including `q` and the digits. A modal is a blocking
     // question, and a global key that walked away from it would leave a human

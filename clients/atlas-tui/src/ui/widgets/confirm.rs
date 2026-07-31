@@ -438,6 +438,9 @@ impl Host {
     /// `Esc` abandons, `Enter` answers once armed, everything printable types.
     /// An unarmed `Enter` leaves the box up rather than closing it: a human who
     /// mistyped the challenge has to see that they did.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
     pub fn on_key(&mut self, k: KeyEvent) -> Option<Command> {
         self.open.as_ref()?;
         match k.code {

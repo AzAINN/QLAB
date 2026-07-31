@@ -236,6 +236,9 @@ impl View for MarketsView {
         draw_sectors(f, rows[1], store);
     }
 
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         let facts = store.asset_facts();
         let selected = self.row(facts.len());

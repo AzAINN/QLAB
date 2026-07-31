@@ -608,6 +608,9 @@ impl CmdLine {
     /// ones the shell claims for the whole workstation — `q` and the digits are
     /// characters a symbol needs. Ctrl-C is exempt above this, in the shell,
     /// because the reflex every operator has must work even here.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
     pub fn edit(&mut self, k: KeyEvent) -> Edit {
         match k.code {
             KeyCode::Esc => return Edit::Close,

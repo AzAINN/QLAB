@@ -43,6 +43,9 @@ const MIN_H: u16 = 8;
 /// `rows` is what the frame would draw, so the scroll cannot run past the end
 /// of the list. It is clamped again at draw time against the height actually
 /// allocated — the key handler is never told a geometry.
+// Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+// this function to check it. That module's header lists what the check
+// cannot see — including why a comment in here may not spell a key variant.
 pub fn on_key(k: KeyEvent, top: &mut usize, rows: usize) -> bool {
     match k.code {
         // `?` closes as well as opens: the key an operator pressed to get here

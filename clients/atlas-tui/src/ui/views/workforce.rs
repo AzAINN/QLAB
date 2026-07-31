@@ -228,6 +228,9 @@ impl WorkforceView {
     /// The order is load-bearing: an open picker outranks a focused input row,
     /// which outranks the two keys that open them. A field that shared the
     /// alphabet with its own shortcuts would make `i` untypeable inside a goal.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
     fn keys(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         if !store.posture.writes() {
             // Same rule as AUDIT's arrows: a key with no visible effect reads as
@@ -259,6 +262,9 @@ impl WorkforceView {
 
     /// The input row's keys. Enter sends, Esc abandons, and nothing else leaves
     /// this pane.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
     fn ask_key(&mut self, k: KeyEvent) -> Option<Command> {
         let typed = self.ask.as_mut()?;
         match k.code {
@@ -286,6 +292,9 @@ impl WorkforceView {
 
     /// The picker's keys: a cursor over the owner's templates, a goal field,
     /// and the one key that starts a run.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
     fn picker_key(&mut self, k: KeyEvent, store: &Store) -> Option<Command> {
         let rows = store.templates().len();
         let picker = self.picker.as_mut()?;

@@ -45,6 +45,13 @@
 //!    never-IO grep puts on `cmd.rs`, and for the same reason: a pin that
 //!    could be talked out of a match is a pin that can be talked out of a
 //!    match. `markets.rs` learned this one the hard way.
+//! 6. **Depth.** Narrowing from a file to a function opened an escape the old
+//!    file-wide scrape did not have: a sibling function that binds a key and is
+//!    *called* from the routing function is a live binding the section's own
+//!    body never mentions. One level of local calls is followed for exactly
+//!    that reason — a helper two hops down is still invisible, and closing that
+//!    is a call graph rather than a keymap check. Anything reachable from a
+//!    router but further than one call away needs a section of its own.
 
 use crate::store::{Posture, ViewId};
 
@@ -427,34 +434,34 @@ pub fn bindings(posture: Posture) -> impl Iterator<Item = &'static Binding> {
 mod tests {
     use super::*;
 
-    /// One routing function's source, found by (file, anchor, name).
+    /// One router file's source, with its test module cut off.
     ///
-    /// The test module is cut off first, deliberately: `confirm.rs`'s own tests
-    /// press `KeyCode::Char('q')` to prove the box swallows it, and a scrape
-    /// that counted it would demand a help row for a key nothing binds. The cut
-    /// is at the test *module* rather than at the first `#[cfg(test)]`, because
-    /// several views carry test-only accessors above their routing — cutting
-    /// there read `markets.rs` as a view with no keys at all, and the check
-    /// passed for exactly the wrong reason.
-    ///
-    /// Panics rather than returning empty when the function cannot be found:
-    /// an empty region matches an empty expectation, which is how a pin of this
-    /// shape dies quietly.
-    fn body_of(file: &str, anchor: &str, name: &str) -> String {
+    /// The cut is deliberate: `confirm.rs`'s own tests press `KeyCode::Char('q')`
+    /// to prove the box swallows it, and a scrape that counted it would demand a
+    /// help row for a key nothing binds. It is at the test *module* rather than
+    /// at the first `#[cfg(test)]`, because several views carry test-only
+    /// accessors above their routing — cutting there read `markets.rs` as a view
+    /// with no keys at all, and the check passed for exactly the wrong reason.
+    fn routing_source(file: &str) -> String {
         let path = format!("{}/src/{file}", env!("CARGO_MANIFEST_DIR"));
         let whole = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let src = match whole.find("#[cfg(test)]\nmod tests") {
-            Some(at) => &whole[..at],
-            None => &whole[..],
-        };
+        match whole.find("#[cfg(test)]\nmod tests") {
+            Some(at) => whole[..at].to_string(),
+            None => whole,
+        }
+    }
+
+    /// One function's body, as source text, or `None` when the file has no such
+    /// function with a body.
+    ///
+    /// `None` rather than a panic, because the call-following below asks this
+    /// about every identifier it sees and most of them are methods on other
+    /// types. The *section* lookups panic on `None` themselves: an empty region
+    /// matches an empty expectation, which is how a pin of this shape dies.
+    fn body_of(src: &str, anchor: &str, name: &str) -> Option<String> {
         let src = match anchor.is_empty() {
             true => src,
-            false => {
-                let at = src
-                    .find(anchor)
-                    .unwrap_or_else(|| panic!("{file}: no anchor {anchor:?}"));
-                &src[at..]
-            }
+            false => &src[src.find(anchor)?..],
         };
         let needle = format!("fn {name}(");
         let mut from = 0;
@@ -475,24 +482,49 @@ mod tests {
                             '}' => {
                                 depth -= 1;
                                 if depth == 0 {
-                                    return rest[o..=i].to_string();
+                                    return Some(rest[o..=i].to_string());
                                 }
                             }
                             _ => {}
                         }
                     }
-                    panic!("{file}: fn {name} has no balanced body");
+                    panic!("fn {name} has no balanced body");
                 }
                 _ => from += at + needle.len(),
             }
         }
-        panic!(
-            "{file}: no fn {name} with a body{}",
-            match anchor.is_empty() {
-                true => String::new(),
-                false => format!(" after {anchor:?}"),
+        None
+    }
+
+    /// Every identifier called as a function inside `body`, in order.
+    ///
+    /// Path-qualified calls (`help::on_key`, `Picker::default`) are left out:
+    /// they name something in another module, and resolving them against
+    /// *this* file would follow whatever happened to share the name. Method
+    /// calls on `self` are exactly what has to be followed, so a leading `.` is
+    /// kept.
+    fn local_calls(body: &str) -> Vec<String> {
+        let chars: Vec<char> = mask_literals(body).chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if !(chars[i].is_alphabetic() || chars[i] == '_') {
+                i += 1;
+                continue;
             }
-        );
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            if chars.get(i) != Some(&'(') {
+                continue;
+            }
+            let qualified = start >= 2 && chars[start - 1] == ':' && chars[start - 2] == ':';
+            if !qualified {
+                out.push(chars[start..i].iter().collect());
+            }
+        }
+        out
     }
 
     /// The same text with the *contents* of string and character literals
@@ -554,14 +586,52 @@ mod tests {
             .find(|&end| chars.get(end) == Some(&'\''))
     }
 
-    /// Every `KeyCode::…` token in one routing function, **with repeats**.
+    /// The whole scrape, over source text: find the routing function, follow one
+    /// level of the local functions it calls, and count every `KeyCode::…` token
+    /// in what that covers.
     ///
-    /// A multiset, sorted. Collapsing repeats is what let a second `Char(c)`
-    /// arm — a live binding with a different guard and no help row — pass
-    /// unnoticed; see this module's own header.
-    fn codes_in(source: Source) -> Vec<String> {
-        let (file, anchor, name) = source.region();
-        let src = body_of(file, anchor, name);
+    /// `siblings` are the functions in this file that belong to *other* sections
+    /// — WORKFORCE's question row and its picker are each other's — and are not
+    /// followed: a section that swallowed another section's keys would describe
+    /// one field with rows about the other, which is the split this check exists
+    /// to keep.
+    ///
+    /// One level, not a call graph. Two hops deep is a keymap check that has
+    /// become a compiler, and the depth is weakness 6 in this module's list.
+    ///
+    /// Every step is here rather than split across the file lookup, so a
+    /// `dedup()` cannot be slipped into a wrapper the fixture tests do not
+    /// exercise.
+    fn codes_in_src(src: &str, anchor: &str, name: &str, siblings: &[&str]) -> Vec<String> {
+        let body = body_of(src, anchor, name)
+            .unwrap_or_else(|| panic!("no fn {name} with a body{}", suffix(anchor)));
+        let mut text = body.clone();
+        for callee in local_calls(&body) {
+            if callee == name || siblings.contains(&callee.as_str()) {
+                continue;
+            }
+            if let Some(more) = body_of(src, "", &callee) {
+                text.push_str(&more);
+            }
+        }
+        let mut found = scrape(&text);
+        found.sort();
+        found
+    }
+
+    fn suffix(anchor: &str) -> String {
+        match anchor.is_empty() {
+            true => String::new(),
+            false => format!(" after {anchor:?}"),
+        }
+    }
+
+    /// Every `KeyCode::…` token in some source text, **with repeats**.
+    ///
+    /// A multiset. Collapsing repeats is what let a second `Char(c)` arm — a
+    /// live binding with a different guard and no help row — pass unnoticed;
+    /// see this module's own header.
+    fn scrape(src: &str) -> Vec<String> {
         let mut found = Vec::new();
         let bytes: Vec<char> = src.chars().collect();
         let needle: Vec<char> = "KeyCode::".chars().collect();
@@ -605,8 +675,22 @@ mod tests {
             }
             i = j.max(i + 1);
         }
-        found.sort();
         found
+    }
+
+    /// One section's codes, read off the tree.
+    ///
+    /// A file read and the sibling lookup, and nothing else: every decision the
+    /// check makes lives in `codes_in_src`, which the fixtures below exercise
+    /// directly.
+    fn codes_in(source: Source) -> Vec<String> {
+        let (file, anchor, name) = source.region();
+        let siblings: Vec<&str> = Source::ALL
+            .iter()
+            .filter(|other| **other != source && other.region().0 == file)
+            .map(|other| other.region().2)
+            .collect();
+        codes_in_src(&routing_source(file), anchor, name, &siblings)
     }
 
     fn declared(source: Source) -> Vec<String> {
@@ -643,20 +727,83 @@ mod tests {
         }
     }
 
+    /// A router with the reviewer's binding in it: two `Char(c)` arms told
+    /// apart only by their guards, which is how every text field on this client
+    /// routes.
+    const TWO_GUARDED_ARMS: &str = r#"
+        fn route(k: KeyEvent) -> Option<Command> {
+            match k.code {
+                KeyCode::Char(c) if c.is_ascii_digit() => jump(c),
+                KeyCode::Char(c) if c.is_ascii_uppercase() => return None,
+                KeyCode::Tab => next(),
+                _ => {}
+            }
+            None
+        }
+    "#;
+
+    /// A router that leaves the function the section points at.
+    const CALLS_A_SIBLING: &str = r#"
+        fn route(k: KeyEvent) -> Option<Command> {
+            match k.code {
+                KeyCode::Tab => next(),
+                _ => self.sneaky(k),
+            }
+            None
+        }
+        fn sneaky(&mut self, k: KeyEvent) -> Option<Command> {
+            if k.code == KeyCode::Char('Z') {
+                return None;
+            }
+            None
+        }
+    "#;
+
     #[test]
-    fn a_second_arm_on_a_bound_code_is_a_binding_the_help_does_not_have() {
-        // The mutation this check was rebuilt for, without planting it in the
-        // router: `KeyCode::Char(c) if c.is_ascii_uppercase() => return None`
-        // beside the digit arm swallows every capital letter workstation-wide,
-        // and `Char(c)` is already in the shell's codes. A set comparison stays
-        // green. A multiset cannot.
-        let mut mutated = codes_in(Source::Shell);
-        mutated.push("Char(c)".to_string());
-        mutated.sort();
-        assert_ne!(
-            mutated,
-            declared(Source::Shell),
-            "a duplicate code is invisible to this comparison — the hole is open again"
+    fn the_scrape_keeps_a_repeat_rather_than_collapsing_it() {
+        // The property the whole comparison rests on, asserted on the scrape
+        // itself rather than on a duplicate the test appends. Appending one
+        // demonstrates that a multiset differs from a set; it does not defend
+        // the scrape, and a `dedup()` put back into the pipeline left the old
+        // version of this test green.
+        assert_eq!(
+            codes_in_src(TWO_GUARDED_ARMS, "", "route", &[]),
+            vec![
+                "Char(c)".to_string(),
+                "Char(c)".to_string(),
+                "Tab".to_string()
+            ],
+            "a repeated code was collapsed — the reviewer's binding is invisible again"
+        );
+    }
+
+    #[test]
+    fn the_scrape_follows_a_router_into_the_helper_it_calls() {
+        // Narrowing from a file to a function opened this: a sibling that binds
+        // a key and is called from the routing function is a live binding with
+        // no help row, and the section's own body never mentions it. One level
+        // is followed — see weakness 6 for what two would be.
+        assert_eq!(
+            codes_in_src(CALLS_A_SIBLING, "", "route", &[]),
+            vec!["Char('Z')".to_string(), "Tab".to_string()],
+            "a binding one call away from the router is invisible"
+        );
+        // Unless the sibling is another section's router, which owns its own
+        // keys and its own rows.
+        assert_eq!(
+            codes_in_src(CALLS_A_SIBLING, "", "route", &["sneaky"]),
+            vec!["Tab".to_string()],
+        );
+    }
+
+    #[test]
+    fn the_two_workforce_fields_are_read_apart_and_not_through_each_other() {
+        // The live case of the rule above: `keys` calls both fields, and each is
+        // its own section. A `keys` section that followed them would carry the
+        // union of three routers and describe none of them.
+        assert_eq!(
+            codes_in(Source::View(ViewId::Workforce)),
+            vec!["Char('S')".to_string(), "Char('i')".to_string()]
         );
     }
 

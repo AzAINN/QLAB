@@ -191,6 +191,9 @@ impl View for BookView {
         self.draw_footer(f, under[2], store);
     }
 
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         let rows = row_count(store);
         // At least one, so a key pressed before the first frame moves by a row

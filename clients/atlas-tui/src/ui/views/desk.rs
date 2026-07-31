@@ -158,22 +158,26 @@ fn draw_read(
         );
         return;
     }
-    // The note about the dropped tiles is layout chrome, not read: it sits on
-    // the last row and the read wraps above it, so a long read never pushes the
-    // explanation off the frame.
-    let (body_area, note_area) = match dropped_grid {
-        Some(_) if area.height > 1 => (
+    // What stands in for the dropped tiles is layout chrome, not read: it sits
+    // on the last rows and the read wraps above it, so a long read never pushes
+    // the explanation — or the equity — off the frame.
+    let stand_in = dropped_grid
+        .map(|grid_w| dropped_note(store, grid_w, area))
+        .unwrap_or_default();
+    let note_h = (stand_in.len() as u16).min(area.height.saturating_sub(1));
+    let (body_area, note_area) = match note_h {
+        0 => (area, None),
+        h => (
             Rect {
-                height: area.height - 1,
+                height: area.height - h,
                 ..area
             },
             Some(Rect {
-                y: area.y + area.height - 1,
-                height: 1,
+                y: area.y + area.height - h,
+                height: h,
                 ..area
             }),
         ),
-        _ => (area, None),
     };
 
     // The header carries the read's date and the footer its hashes, and neither
@@ -204,20 +208,53 @@ fn draw_read(
         );
     }
 
-    if let (Some(note), Some(grid_w)) = (note_area, dropped_grid) {
-        let t = theme();
-        // The shortfall, not the grid's width: an operator resizing a terminal
-        // needs to know how many columns to add, and the tiles' own width is
-        // not that number once the read is already holding some of them.
-        let short = (grid_w + READ_W).saturating_sub(area.width);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("▸ the tiles need {short} more columns"),
-                Style::default().fg(t.text_dim),
-            ))),
-            note,
-        );
+    if let Some(note) = note_area {
+        f.render_widget(Paragraph::new(stand_in), note);
     }
+}
+
+/// What stands in for the grid the frame was too narrow to carry.
+///
+/// The equity leads it, and gets a row of its own. Dropping the grid dropped the
+/// book's value with it, so at 90×24 — the size a second terminal beside an
+/// editor actually opens at — DESK showed no equity at all. Every other tile has
+/// a home on BOOK or MKTS; this number's only other home is the hero that was
+/// just dropped. The glyphs need forty cells, so this is the same figure at the
+/// size the room allows, which is the fallback `draw_hero` already takes one
+/// pane over.
+///
+/// A row each rather than one shared row, because at the width that drops the
+/// grid the two do not fit side by side — and shortening the note into
+/// `▸ +22 cols` would make the one actionable sentence on the view the one an
+/// operator has to decode.
+fn dropped_note(store: &Store, grid_w: u16, area: Rect) -> Vec<Line<'static>> {
+    let t = theme();
+    let mut out = Vec::new();
+    if let Some(equity) = store
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.live_portfolio.as_ref())
+        .and_then(|p| p.equity)
+    {
+        out.push(Line::from(vec![
+            Span::styled("EQUITY ", Style::default().fg(t.text_secondary)),
+            Span::styled(
+                format::money(equity),
+                Style::default()
+                    .fg(t.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    // The shortfall, not the grid's width: an operator resizing a terminal
+    // needs to know how many columns to add, and the tiles' own width is not
+    // that number once the read is already holding some of them.
+    let short = (grid_w + READ_W).saturating_sub(area.width);
+    out.push(Line::from(Span::styled(
+        format!("▸ the tiles need {short} more columns"),
+        Style::default().fg(t.text_dim),
+    )));
+    out
 }
 
 /// Everything under the header, wrapped to `w` and ready to be revealed.
@@ -340,21 +377,28 @@ fn news_section(out: &mut Vec<Line<'static>>, read: &AtlasRead, w: usize) {
             )));
         }
     }
-    out.push(Line::from(vec![
-        Span::styled(
-            // `risk_off` is the owner's spelling, not a word: the underscore is
-            // a key separator and reads as one on screen.
-            format::upper(tone).replace('_', " "),
-            Style::default()
-                .fg(tone_colour(tone))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" · ", Style::default().fg(t.text_dim)),
-        Span::styled(
-            format::or_missing(read.news_source.as_ref()).to_string(),
-            Style::default().fg(t.text_secondary),
-        ),
-    ]));
+    // The tone/source row is a summary *of a window*. With no window — the FEED
+    // UNAVAILABLE case, which is the whole reason this section can be reached
+    // with nothing in it — it renders `-- · --` under a red headline, which
+    // reads as a window that was read and had nothing to say. Those are opposite
+    // facts, and the loud one is already on screen.
+    if tone.is_some() || !headlines.is_empty() {
+        out.push(Line::from(vec![
+            Span::styled(
+                // `risk_off` is the owner's spelling, not a word: the underscore
+                // is a key separator and reads as one on screen.
+                format::upper(tone).replace('_', " "),
+                Style::default()
+                    .fg(tone_colour(tone))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · ", Style::default().fg(t.text_dim)),
+            Span::styled(
+                format::or_missing(read.news_source.as_ref()).to_string(),
+                Style::default().fg(t.text_secondary),
+            ),
+        ]));
+    }
     for headline in headlines.iter().take(4) {
         let Some(title) = text(headline.headline.as_ref()) else {
             continue;

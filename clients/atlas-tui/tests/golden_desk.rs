@@ -169,6 +169,58 @@ fn the_read_carries_every_part_of_atlass_judgment() {
 }
 
 #[test]
+fn a_broken_news_feed_says_so_and_does_not_summarise_a_window_it_never_read() {
+    // An absent window and a broken feed are opposite facts about the same
+    // silence, and only one of them is worth fixing — so the failure is loud.
+    // What must not follow it is `-- · --`, which reads as a window that *was*
+    // read and had nothing in it: the tone/source row is a summary of a window,
+    // and with no window there is nothing for it to summarise.
+    // Agreement and state are filled in so the read's own `WORD · WORD` header
+    // cannot be mistaken for the row this test is about — with both absent it
+    // renders `-- · --` too, three lines above.
+    let broken = content(
+        &desk_from(
+            r#"{"atlas_read": {"as_of": "2026-07-30", "agreement": "aligned",
+                 "quantitative_state": "calm",
+                 "news_error": "alpaca returned 401 for the news window"}}"#,
+        )
+        .frame(120, 36),
+    );
+    assert!(broken.contains("FEED UNAVAILABLE"), "{broken}");
+    assert!(broken.contains("returned 401"), "the reason:\n{broken}");
+    assert!(
+        !broken.contains("-- · --"),
+        "a window that was never read got summarised anyway:\n{broken}"
+    );
+
+    // And a window that really was read still gets its row.
+    let read = content(&desk_from(DESK).frame(120, 36));
+    assert!(line_with(&read, "RISK OFF").contains("alpaca"), "{read}");
+}
+
+#[test]
+fn the_narrow_frame_keeps_the_equity_the_dropped_grid_was_carrying() {
+    // Dropping the tile grid dropped the book's value with it, so at the
+    // workstation's other baseline DESK showed no equity at all. Every other
+    // tile has a home on BOOK or MKTS; this number's only other home is the
+    // hero that was just dropped.
+    let narrow = content(&desk_from(DESK).frame(90, 24));
+    assert!(
+        line_with(&narrow, "EQUITY").contains("$10,000.00"),
+        "{narrow}"
+    );
+    // The advice about the window survives beside it, on a row of its own —
+    // at this width the two do not fit side by side.
+    assert!(narrow.contains("▸ the tiles need"), "{narrow}");
+
+    // Wide enough for the grid, and the hero owns the figure again — a second
+    // copy on the read's last row would be the same number twice.
+    let wide = content(&desk_from(DESK).frame(120, 36));
+    assert!(!wide.contains("EQUITY $"), "{wide}");
+    assert!(!wide.contains("▸ the tiles need"), "{wide}");
+}
+
+#[test]
 fn the_read_types_itself_in_top_to_bottom() {
     // The signature motion. Time is data: the fraction on screen is computed
     // from the two instants handed in, so a mid-reveal frame is exact rather

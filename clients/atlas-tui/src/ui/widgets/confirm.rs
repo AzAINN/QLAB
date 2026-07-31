@@ -115,6 +115,10 @@ enum Binding {
     /// may do should never be one key away, but there is nothing to bind to and
     /// so nothing it can mint.
     Action,
+    /// The consent has been spent by the confirmation it authorised. Terminal:
+    /// nothing moves a modal out of this state, so retyping the challenge does
+    /// not re-arm it.
+    Spent,
     /// One checked plan, through the approval that covers it.
     Plan {
         plan_id: String,
@@ -124,7 +128,12 @@ enum Binding {
 }
 
 /// A centred, blocking question.
-#[derive(Debug, Clone)]
+///
+/// Deliberately not `Clone`. Single use has to sit on the *consent*, not merely
+/// on the token it mints: a clonable modal could be duplicated while armed and
+/// each copy asked for a confirmation, which is the same "one human decision,
+/// many bookings" hole as a re-mintable token wearing a different hat.
+#[derive(Debug)]
 pub struct Modal {
     title: String,
     facts: Vec<(String, String)>,
@@ -174,16 +183,21 @@ impl Modal {
             ("plan".into(), plan_id.to_string()),
             ("targets hash".into(), hash.to_string()),
         ];
-        // Read off the owner's own numbers, never recomputed. A client that
-        // derived turnover from the weights would be showing the human a second
-        // opinion at the very moment they are being asked to trust the first.
+        // Every fact comes from the record the owner's gate will actually read,
+        // never recomputed and never from whichever record happens to have the
+        // field.
         //
-        // The approval's summary wins over the plan's `pre_trade` where both
-        // exist, and they can disagree — the test fixture's do. The approval is
-        // the record the owner will actually check the fill against, so it is
-        // the one the human must be shown; agreeing with the plan instead would
-        // put a number on screen that no gate downstream is bound to.
-        if let Some(pre) = approval.summary.as_ref().or(plan.pre_trade.as_ref()) {
+        // Legs and turnover come from the *plan's* `pre_trade`, because that is
+        // what execution checks: `execute_plan_with_approval` takes
+        // `expected_legs` from `stored["pre_trade"]["n_legs"]`
+        // (`server.py:1895`) and refuses the plan outright if the persisted legs
+        // disagree. The approval's `summary` is a different number written at a
+        // different moment, and the two can diverge — in the test fixture the
+        // summary says 7 legs on a plan that has 2. Showing the summary asked a
+        // human to vouch for a seven-leg trade the desk would evaluate as two,
+        // which is the same class of error as an unbound hash: a confirmation
+        // given against numbers nothing downstream is holding to.
+        if let Some(pre) = plan.pre_trade.as_ref() {
             if let Some(turnover) = pre.get("turnover").and_then(|v| v.as_f64()) {
                 facts.push(("turnover".into(), format!("{:.1}%", turnover * 100.0)));
             }
@@ -191,8 +205,16 @@ impl Modal {
                 facts.push(("legs".into(), legs.to_string()));
             }
         }
+        // What the approval genuinely owns: the hash above, the book it binds,
+        // and its own state. Status is worth the row — an approval that is still
+        // `pending` cannot authorise a fill, and an operator who can see that
+        // before typing six characters is spared a refusal they could have
+        // predicted.
         if let Some(broker) = approval.broker.as_deref() {
             facts.push(("book".into(), broker.to_string()));
+        }
+        if let Some(status) = approval.status.as_deref() {
+            facts.push(("approval".into(), status.to_string()));
         }
 
         Some(Modal {
@@ -230,6 +252,15 @@ impl Modal {
         &self.typed
     }
 
+    /// The label/value rows the box states, in order.
+    ///
+    /// Public so a test can pin *which record each number came from* rather than
+    /// only that the box rendered something — the leg count read off the wrong
+    /// record still drew a perfectly good-looking modal.
+    pub fn facts(&self) -> &[(String, String)] {
+        &self.facts
+    }
+
     /// Whether the challenge has been met exactly.
     ///
     /// Case-sensitive and whole-string. A case-insensitive compare would halve
@@ -252,26 +283,48 @@ impl Modal {
         self.typed.pop();
     }
 
-    /// The capability, if a human has met the challenge for a plan.
+    /// The capability, if a human has met the challenge for a plan — **once**.
+    ///
+    /// Takes `&mut self` and moves the binding out, so minting *spends the
+    /// consent*. A second call returns `None`, and no amount of retyping brings
+    /// it back: the state it leaves behind is terminal.
+    ///
+    /// This is stricter than it looks, and the strictness is the point. With
+    /// `&self` the loop
+    ///
+    /// ```ignore
+    /// loop { client.execute_plan(modal.token().unwrap()).await; }
+    /// ```
+    ///
+    /// compiled — one human confirmation authorising an unbounded number of
+    /// bookings. Making the *token* single-use did not close that, because the
+    /// modal simply minted another; the consent is what has to be consumed.
+    ///
+    /// A failed or refused execution therefore cannot be retried by re-firing
+    /// the same modal, which is correct for an order path: after an ambiguous
+    /// failure the operator re-reads the desk and confirms again against what it
+    /// says now, rather than replaying a decision made against a stale screen.
     ///
     /// `None` for an action modal even when armed: there is no plan for a token
     /// to bind, and a token that bound nothing would be a key to the execution
     /// path handed out by a mode change.
-    pub fn token(&self) -> Option<ConfirmToken> {
+    pub fn token(&mut self) -> Option<ConfirmToken> {
         if !self.armed() {
             return None;
         }
-        match &self.binding {
-            Binding::Action => None,
+        match std::mem::replace(&mut self.binding, Binding::Spent) {
             Binding::Plan {
                 plan_id,
                 approval_id,
                 targets_hash,
             } => Some(ConfirmToken {
-                plan_id: plan_id.clone(),
-                approval_id: approval_id.clone(),
-                targets_hash: targets_hash.clone(),
+                plan_id,
+                approval_id,
+                targets_hash,
             }),
+            // An action modal is spent by the same call, so a confirmed mode
+            // change cannot be replayed either. It never had a token to give.
+            Binding::Action | Binding::Spent => None,
         }
     }
 

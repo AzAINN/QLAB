@@ -14,11 +14,20 @@
 //! carry a human's decision to it and report back what it said. There is no
 //! order construction here, no plan building, no retry that could book twice.
 //!
-//! **The owner's refusals are the message.** A non-2xx is an error carrying the
-//! owner's own words, never a swallowed failure and never a default. "execution
-//! requires an approval_id", "approval is 'expired', not pending" — those are
-//! the sentences that tell an operator what to do next, and a client that
-//! reduced them to "request failed" would leave them pressing the same key.
+//! **The owner's refusals are the message, and a refusal is not an error.** A
+//! non-2xx is an error carrying the owner's own words, never a swallowed failure
+//! — "approval is 'expired', not pending" is the sentence that tells an operator
+//! what to do next, and reducing it to "request failed" leaves them pressing the
+//! same key.
+//!
+//! But the *execution gate does not refuse with a status code*. It answers
+//! **HTTP 200** with `{"executed": false, …}`: an expired approval, a book that
+//! moved, a failed data revalidation, and a mandate violation are all 200s
+//! (`server.py:1879`, `:1888`, `:1909`, returned by the handler at `:2629`).
+//! That is correct of the owner — the request was well-formed and the desk
+//! answered it — and it means a client that keys success off the status code
+//! reports every governance refusal as a booked fill. So `execute_plan` returns
+//! three outcomes, not two, and the caller must handle all three.
 //!
 //! **`execute_plan` cannot be called without going through the modal.** It takes
 //! a `ConfirmToken`, which only `ui::widgets::confirm` can mint and only after a
@@ -67,6 +76,85 @@ impl std::fmt::Display for WriteError {
 impl std::error::Error for WriteError {}
 
 type Wrote = Result<Value, WriteError>;
+
+/// What became of a confirmed plan. Three outcomes, and the caller must face all
+/// three — which is the whole reason this is a type and not a `bool`.
+///
+/// `Refused` is neither an error nor a success. The desk answered, the answer is
+/// legitimate and considered, and the answer is no. Folding it into `Err` would
+/// lump a governance decision in with a broken socket; folding it into `Ok`
+/// — which is what this client did before — tells an operator a trade was booked
+/// when the gate declined it.
+#[derive(Debug)]
+pub enum Execution {
+    /// The owner booked it. Carries the body: fills, ids, whatever it reported.
+    Executed(Value),
+    /// The owner declined to book it, and said why.
+    Refused {
+        /// `approval`, `data_revalidation`, or `mandate_violation`.
+        blocked_by: String,
+        /// Never empty — a refusal an operator cannot read is not actionable.
+        reasons: Vec<String>,
+    },
+}
+
+impl Execution {
+    /// Read one 200 body from `/api/plans/execute`.
+    ///
+    /// The owner has four shapes here and they are not uniform: three refusals
+    /// carry `blocked_by`, but the mandate violation (`server.py:1909`) carries
+    /// only `mandate_violation`, and its reason lives in that key rather than in
+    /// `reasons`. Keying on `blocked_by` alone would fall through to "executed"
+    /// on precisely the refusal that means the plan broke the mandate.
+    fn read(body: Value) -> Result<Execution, WriteError> {
+        match body.get("executed").and_then(Value::as_bool) {
+            Some(true) => Ok(Execution::Executed(body)),
+            Some(false) => {
+                if let Some(violation) = body.get("mandate_violation").and_then(Value::as_str) {
+                    return Ok(Execution::Refused {
+                        blocked_by: "mandate_violation".into(),
+                        reasons: vec![violation.to_string()],
+                    });
+                }
+                let blocked_by = body
+                    .get("blocked_by")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unstated")
+                    .to_string();
+                let mut reasons: Vec<String> = body
+                    .get("reasons")
+                    .and_then(Value::as_array)
+                    .map(|rs| {
+                        rs.iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if reasons.is_empty() {
+                    // `data_revalidation` refuses with a `data_health` object and
+                    // no `reasons` list. An operator handed "refused" and nothing
+                    // else cannot act, so the gate's own word for it is the
+                    // reason of last resort — never an empty vec.
+                    reasons.push(match body.get("data_health") {
+                        Some(health) => format!("the desk blocked this fill: {health}"),
+                        None => format!("the desk blocked this fill ({blocked_by})"),
+                    });
+                }
+                Ok(Execution::Refused {
+                    blocked_by,
+                    reasons,
+                })
+            }
+            // Fail loud. The owner always sets `executed` on this route, so a
+            // body without it is a broken contract — and both guesses are
+            // indefensible: one invents a fill, the other hides one.
+            None => Err(WriteError::Unreadable(format!(
+                "the owner answered 200 for an execution without saying whether it executed: {body}"
+            ))),
+        }
+    }
+}
 
 /// The operator's end of the owner API.
 ///
@@ -148,7 +236,9 @@ impl WriteClient {
     /// self-attestation any local process could send. The persisted approval is
     /// what authorises the fill; the boolean only records that a human was the
     /// one who asked.
-    pub async fn execute_plan(&self, token: ConfirmToken) -> Wrote {
+    ///
+    /// Returns three outcomes. A 200 is *not* a fill: see [`Execution`].
+    pub async fn execute_plan(&self, token: ConfirmToken) -> Result<Execution, WriteError> {
         // The one action in this crate that moves money, on the record before it
         // is attempted. The owner writes the authoritative audit event, but that
         // only exists if the request arrived — a request that timed out or was
@@ -161,15 +251,42 @@ impl WriteClient {
             owner = %self.base,
             "human-confirmed plan execution requested"
         );
-        self.post(
-            "/api/plans/execute",
-            json!({
-                "plan_id": token.plan_id(),
-                "approval_id": token.approval_id(),
-                "human_confirmed": true,
-            }),
-        )
-        .await
+        let outcome = self
+            .post(
+                "/api/plans/execute",
+                json!({
+                    "plan_id": token.plan_id(),
+                    "approval_id": token.approval_id(),
+                    "human_confirmed": true,
+                }),
+            )
+            .await
+            .and_then(Execution::read);
+
+        // The other half of the pair. A log that records the asking and never
+        // the answer leaves every audit trail ending at "requested", which reads
+        // as an attempt of unknown outcome — the one thing an execution record
+        // may not be. All three outcomes land here, refusals included.
+        match &outcome {
+            Ok(Execution::Executed(_)) => {
+                tracing::warn!(plan = token.plan_id(), "the owner booked the plan")
+            }
+            Ok(Execution::Refused {
+                blocked_by,
+                reasons,
+            }) => tracing::warn!(
+                plan = token.plan_id(),
+                blocked_by,
+                reasons = reasons.join("; "),
+                "the desk refused the fill"
+            ),
+            Err(err) => tracing::error!(
+                plan = token.plan_id(),
+                error = %err,
+                "the execution request failed; the fill's state is unknown"
+            ),
+        }
+        outcome
     }
 
     // -- Atlas ------------------------------------------------------------

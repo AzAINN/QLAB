@@ -66,14 +66,33 @@ fn the_write_half_is_gated_the_way_the_compiler_reads_it() {
 
 #[test]
 fn no_write_call_site_exists_outside_the_gated_module() {
-    // The artifact claim, structurally. `reqwest`'s POST builder is the only way
-    // this crate can mutate the desk, and it may appear in exactly one file —
-    // the one the feature gate can remove. A second call site anywhere else
-    // would survive into the default build.
+    // The artifact claim, structurally. Every way `reqwest` can be asked to
+    // mutate something, not just the one this crate happens to use today: a
+    // `.put(` or a `.request(Method::DELETE, …)` added to a view would be just
+    // as reachable in the default build, and pinning only `.post(` would have
+    // watched the wrong door. Each verb may appear in exactly one file — the one
+    // the feature gate can remove.
+    for verb in [
+        r"\.post(",
+        r"\.put(",
+        r"\.patch(",
+        r"\.delete(",
+        r"\.request(",
+        "Method::",
+    ] {
+        let found = files_mentioning(verb);
+        assert!(
+            found.is_empty() || found == vec!["net/write.rs".to_string()],
+            "`{verb}` may only appear in the gated write module, found: {found:?}"
+        );
+    }
+    // And the one this crate does use must really be there, or the loop above is
+    // asserting nothing: a grep that cannot read the tree returns no matches,
+    // which would otherwise read as a clean crate.
     assert_eq!(
         files_mentioning(r"\.post("),
         vec!["net/write.rs".to_string()],
-        "the only POST call site in the crate is the gated write module"
+        "the POST call site is in the gated write module"
     );
 }
 
@@ -84,7 +103,12 @@ fn no_view_or_widget_can_reach_the_writer() {
     // composition root in between, which is the arrangement the confirm modal
     // exists to prevent. The modal itself is in `ui/` and knows nothing about
     // HTTP: it mints a token, and a token is not a request.
-    let reachers = files_mentioning("WriteClient");
+    // Both the type's name and the module path that reaches it: `use
+    // crate::net::write::*` or a fully-qualified call would import the writer
+    // without ever spelling `WriteClient`, and the name check alone would miss
+    // it entirely.
+    let mut reachers = files_mentioning("WriteClient");
+    reachers.extend(files_mentioning("net::write"));
     let escaped: Vec<&String> = reachers.iter().filter(|f| f.starts_with("ui/")).collect();
     assert!(
         escaped.is_empty(),
@@ -135,7 +159,7 @@ mod glass {
 #[cfg(feature = "operator")]
 mod operator {
     use atlas::model::Snapshot;
-    use atlas::net::write::WriteClient;
+    use atlas::net::write::{Execution, WriteClient};
     use atlas::store::Posture;
     use atlas::ui::widgets::confirm::Modal;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -329,6 +353,71 @@ mod operator {
     }
 
     #[test]
+    fn one_accepted_modal_yields_exactly_one_confirmation() {
+        // Single use has to sit on the *consent*, not on the token. `token()`
+        // minting on `&self` meant `loop { c.execute_plan(m.token().unwrap()) }`
+        // compiled: the human confirmed once and the client could book any
+        // number of times. Minting now spends the modal, so a second attempt
+        // gets nothing to send.
+        let (plan, approval) = checked_plan();
+        let mut modal = Modal::for_plan(&plan, &approval).unwrap();
+        for c in "192a3b".chars() {
+            modal.push(c);
+        }
+        assert!(
+            modal.token().is_some(),
+            "the first mint is the confirmation"
+        );
+        assert!(
+            modal.token().is_none(),
+            "a spent modal must not mint a second confirmation"
+        );
+        // And it stays spent: retyping the challenge into a modal whose consent
+        // was already used must not re-arm it.
+        modal.backspace();
+        modal.push('b');
+        assert!(modal.token().is_none(), "a spent modal cannot be re-armed");
+    }
+
+    #[test]
+    fn the_modal_shows_the_leg_count_the_owners_gate_will_check() {
+        // The owner's `execute_plan_with_approval` takes `expected_legs` from
+        // `stored["pre_trade"]["n_legs"]` (`server.py:1895`) and refuses the
+        // plan if the persisted legs disagree. The approval's `summary` is a
+        // different number written at a different time — in this fixture it says
+        // 7 while the plan really has 2 — so showing the summary asked a human
+        // to vouch for a seven-leg trade that the gate would evaluate as two.
+        // The box must state what the gate will check.
+        let (plan, approval) = checked_plan();
+        assert_eq!(
+            approval.summary.as_ref().unwrap()["n_legs"],
+            serde_json::json!(7),
+            "fixture guard: the approval summary must disagree, or this proves nothing"
+        );
+        assert_eq!(
+            plan.pre_trade.as_ref().unwrap()["n_legs"],
+            serde_json::json!(2)
+        );
+
+        let modal = Modal::for_plan(&plan, &approval).unwrap();
+        let shown = modal.facts();
+        let legs = shown
+            .iter()
+            .find(|(label, _)| label == "legs")
+            .map(|(_, value)| value.clone());
+        assert_eq!(legs, Some("2".to_string()), "shown facts: {shown:?}");
+
+        // The hash still comes from the approval — that is the fact the approval
+        // genuinely owns, and the one the referee's PASS is bound to.
+        let hash = shown.iter().find(|(label, _)| label == "targets hash");
+        assert_eq!(
+            hash.map(|(_, v)| v.as_str()),
+            Some("c4d5e6f708192a3b"),
+            "shown facts: {shown:?}"
+        );
+    }
+
+    #[test]
     fn an_approval_for_another_plan_cannot_be_used_to_confirm_this_one() {
         // The join is the governance-critical half. Binding the modal to an
         // approval that covers a *different* plan would show six characters that
@@ -443,9 +532,10 @@ mod operator {
         }
         let token = modal.token().unwrap();
 
-        let owner = spawn_owner(200, r#"{"executed": true}"#);
+        let owner = spawn_owner(200, r#"{"executed": true, "filled": 2}"#);
         let client = WriteClient::new(&owner.base).unwrap();
-        client.execute_plan(token).await.unwrap();
+        let outcome = client.execute_plan(token).await.unwrap();
+        assert!(matches!(outcome, Execution::Executed(_)), "{outcome:?}");
 
         let seen = owner.only();
         assert_eq!(seen.method, "POST");
@@ -454,6 +544,96 @@ mod operator {
         assert_eq!(body["human_confirmed"], serde_json::json!(true));
         assert_eq!(body["plan_id"], serde_json::json!("9661b0e88b4a669e"));
         assert_eq!(body["approval_id"], serde_json::json!("1a2b3c4d5e6f7081"));
+    }
+
+    /// An armed token, for the outcome tests below.
+    fn armed_token() -> atlas::ui::widgets::confirm::ConfirmToken {
+        let (plan, approval) = checked_plan();
+        let mut modal = Modal::for_plan(&plan, &approval).unwrap();
+        for c in "192a3b".chars() {
+            modal.push(c);
+        }
+        modal.token().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_refused_fill_is_not_reported_as_a_booked_one() {
+        // The bug this pins: the execution gate declines with **HTTP 200** and
+        // `executed: false` — `server.py:2629` returns `200, result` whatever
+        // the result, and the handler comment at :2613 says so. A client that
+        // only errored on non-2xx therefore reported every governance refusal
+        // as a successful fill, which is the single worst thing this surface
+        // could tell an operator.
+        //
+        // Refusal is a third outcome: not an `Err` (the desk answered, and the
+        // answer is legitimate) and emphatically not an `Ok(Executed)`.
+        let owner = spawn_owner(
+            200,
+            r#"{"executed": false, "blocked_by": "approval",
+                "reasons": ["approval has expired", "book moved since approval (revision mismatch)"]}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match client.execute_plan(armed_token()).await.unwrap() {
+            Execution::Refused {
+                blocked_by,
+                reasons,
+            } => {
+                assert_eq!(blocked_by, "approval");
+                assert_eq!(reasons.len(), 2);
+                assert!(reasons[0].contains("expired"), "{reasons:?}");
+            }
+            other => panic!("a refused fill must not read as booked: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_shape_the_gate_declines_with_is_a_refusal_and_none_is_a_fill() {
+        // Four `executed: false` shapes exist in `server.py`, and one of them
+        // carries **no** `blocked_by` at all (`:1909`, the mandate violation).
+        // A client that keyed on that field alone would fall through to
+        // "success" on exactly the refusal that means the plan broke the
+        // mandate.
+        let cases: Vec<(&'static str, &str)> = vec![
+            (
+                r#"{"executed": false, "blocked_by": "approval", "reasons": ["no approval record"]}"#,
+                "approval",
+            ),
+            (
+                r#"{"executed": false, "blocked_by": "data_revalidation", "data_health": {"blocked": true}}"#,
+                "data_revalidation",
+            ),
+            (
+                r#"{"executed": false, "mandate_violation": "position cap breached"}"#,
+                "mandate_violation",
+            ),
+        ];
+        for (body, want) in cases {
+            let owner = spawn_owner(200, body);
+            let client = WriteClient::new(&owner.base).unwrap();
+            match client.execute_plan(armed_token()).await.unwrap() {
+                Execution::Refused {
+                    blocked_by,
+                    reasons,
+                } => {
+                    assert_eq!(blocked_by, want, "{body}");
+                    // Never silently empty: an operator told "refused" with no
+                    // reason cannot act, and the mandate shape's reason is in a
+                    // different key than the approval shape's.
+                    assert!(!reasons.is_empty(), "a refusal must say why: {body}");
+                }
+                other => panic!("{body} must be a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_say_whether_it_executed_is_refused_not_assumed() {
+        // The owner always sets `executed` on this route. A 200 without it is a
+        // broken contract, and guessing either way is indefensible — one guess
+        // invents a fill, the other hides one.
+        let owner = spawn_owner(200, r#"{"approval_id": "1a2b3c4d5e6f7081"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(client.execute_plan(armed_token()).await.is_err());
     }
 
     #[tokio::test]
@@ -532,20 +712,19 @@ mod operator {
     }
 
     #[tokio::test]
-    async fn a_refusal_is_reported_with_the_owners_own_words() {
-        // Fail loud. The owner's refusals are the governance messages — "human_
-        // confirmed=true is required", "approval is 'expired', not pending" — and
-        // a client that swallowed them into a bare error would leave the operator
-        // pressing the same key against a gate that already explained itself.
-        let owner = spawn_owner(
-            400,
-            r#"{"error": "execution requires an approval_id: a bare human_confirmed flag cannot book a trade"}"#,
-        );
+    async fn a_non_2xx_is_reported_with_the_owners_own_words() {
+        // A real 400 from a route that really returns one: `decide_approval`
+        // raises `PermissionError("approval is 'rejected', not pending")`, which
+        // the dispatcher turns into a 400. The previous version of this test
+        // fired execute-gate text at `approve()` — a refusal that route cannot
+        // produce — which made the suite look like it covered the execution gate
+        // while the gate's actual 200-shaped refusals went unchecked.
+        let owner = spawn_owner(400, r#"{"error": "approval is 'rejected', not pending"}"#);
         let client = WriteClient::new(&owner.base).unwrap();
         let err = client.approve("1a2b3c4d5e6f7081").await.unwrap_err();
         let said = err.to_string();
         assert!(said.contains("400"), "{said}");
-        assert!(said.contains("cannot book a trade"), "{said}");
+        assert!(said.contains("not pending"), "{said}");
     }
 
     #[tokio::test]

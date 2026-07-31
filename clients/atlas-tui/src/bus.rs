@@ -1,5 +1,5 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
-use crate::model::{RegimePanel, Snapshot};
+use crate::model::{RegimePanel, Snapshot, Template};
 
 pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
@@ -7,6 +7,11 @@ pub enum AppEvent {
     Tick,
     Snapshot(Box<Snapshot>),
     RegimePanel(RegimePanel),
+    /// The workflow templates the owner is registered to start.
+    ///
+    /// Its own event rather than a field folded into the snapshot, because it
+    /// comes off its own endpoint on its own cadence — see `model::Templates`.
+    Templates(Vec<Template>),
     Sse(SseEvent),
     Http(HttpResult),
     ConnUp(Channel),
@@ -45,6 +50,20 @@ pub enum Wrote {
     Decided {
         approval_id: String,
         decision: &'static str,
+    },
+    /// A question reached the desk manager. It authorises nothing — the owner
+    /// records the message and answers only through the coordinator.
+    ///
+    /// `note` is the owner's own sentence about whether an answer is even
+    /// possible ("coordinator unavailable; Atlas is degraded and cannot
+    /// answer"). Dropping it would let a client report a question as delivered
+    /// to something that cannot hear it.
+    Asked { note: String },
+    /// A governed workforce run was registered. `workflow_id` is the owner's,
+    /// so the row that appears in the pipeline pane is the one this key started.
+    Started {
+        template: String,
+        workflow_id: String,
     },
     /// The request itself failed: no owner, a timeout, a non-2xx. `said` is the
     /// owner's words verbatim when there were any.

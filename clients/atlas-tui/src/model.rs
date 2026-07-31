@@ -445,6 +445,43 @@ pub struct WorkflowStep {
     pub updated_at: Option<String>,
 }
 
+// -- /api/atlas/templates --------------------------------------------------
+
+/// The registered workflow templates, from the owner's own registry.
+///
+/// Its own endpoint rather than a section of `/api/tui`: the snapshot carries
+/// what the desk *is*, and the template set is what the desk can be *asked for*
+/// — it changes when the owner is deployed, not when the market moves. The
+/// poller fetches it on a cadence of its own for that reason.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Templates {
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub templates: Vec<Template>,
+}
+
+/// One template Atlas — or a human — may start.
+///
+/// `phases` is the graph the template *declares*. It is not necessarily the
+/// graph a workflow started over HTTP runs: `/api/workflows/start` refuses to
+/// read phases from a network caller at all ("letting a network caller shape
+/// the phase graph would let it drop a gate phase"), so the owner runs its
+/// standard graph for anything started from here. Kept because it is what the
+/// owner said, and shown as a declaration rather than as a promise.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Template {
+    pub template_id: Option<String>,
+    pub purpose: Option<String>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub phases: Vec<String>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub requires: Vec<String>,
+    /// The authority boundary: a template that would create a paper plan is
+    /// refused below `propose` mode. The owner decides; the picker only says so.
+    pub creates_plan: Option<bool>,
+    pub needs_coordinator: Option<bool>,
+    pub notes: Option<String>,
+}
+
 // -- Atlas -----------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Deserialize)]

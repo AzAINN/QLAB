@@ -9,7 +9,7 @@
 use crate::bus::{AppEvent, Channel, HttpResult, SseEvent};
 use crate::format::text;
 use crate::glyph::Mood;
-use crate::model::{Approval, Asset, Plan, RegimePanel, Snapshot};
+use crate::model::{Approval, Asset, Coordinator, Plan, RegimePanel, Snapshot, Template, Workflow};
 use crate::net::http;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -337,6 +337,12 @@ impl Posture {
 pub struct Store {
     pub snapshot: Option<Snapshot>,
     pub regime_panel: Option<RegimePanel>,
+    /// What the owner is registered to start, from `/api/atlas/templates`.
+    ///
+    /// Private with one reader for the reason `events_ring` is: the picker must
+    /// not be able to grow a template the owner never registered, and a public
+    /// `Vec` is a field anything could push to.
+    templates: Vec<Template>,
     pub nav: Nav,
     pub conn: Conn,
     /// How old the numbers on screen may get before the frame says so.
@@ -423,6 +429,7 @@ impl Store {
         Self {
             snapshot: None,
             regime_panel: None,
+            templates: Vec::new(),
             nav: Nav::default(),
             conn: Conn::default(),
             stale_after,
@@ -450,6 +457,13 @@ impl Store {
             AppEvent::Snapshot(snap) => return self.apply_snapshot(*snap, now),
             AppEvent::RegimePanel(panel) => {
                 self.regime_panel = Some(panel);
+                self.dirty = true;
+            }
+            // Replaced wholesale rather than merged: the owner's registry is
+            // the whole set, and a template it stopped serving is one a picker
+            // must stop offering.
+            AppEvent::Templates(templates) => {
+                self.templates = templates;
                 self.dirty = true;
             }
             // A keystroke may move a selection and a resize moves everything;
@@ -526,6 +540,34 @@ impl Store {
             .as_ref()
             .map(|s| s.plans.as_slice())
             .unwrap_or_default()
+    }
+
+    /// The workflows the owner is serving — the ten most recent, newest first.
+    pub fn workflows(&self) -> &[Workflow] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.workflows.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// What the owner's coordinator is doing, if it said.
+    ///
+    /// Registering a workflow is not running it — `driving` is the only
+    /// evidence that phases are actually advancing — so a pane that showed a
+    /// pipeline without this would render a parked run and a working one
+    /// identically.
+    pub fn coordinator(&self) -> Option<&Coordinator> {
+        self.snapshot
+            .as_ref()?
+            .atlas_heartbeat
+            .as_ref()?
+            .coordinator
+            .as_ref()
+    }
+
+    /// The registered templates, in the owner's own order.
+    pub fn templates(&self) -> &[Template] {
+        &self.templates
     }
 
     /// The approval that could authorise booking `plan_id`, if the owner is
@@ -875,6 +917,12 @@ impl Store {
         }) {
             out.push(Trigger::PlanExecuted);
         }
+        // A phase of a workflow this client was already watching changed state.
+        // Only workflows on *both* payloads count — see `phase_advanced` — which
+        // is also what keeps the first snapshot quiet.
+        if prev.is_some_and(|held| phase_advanced(held, &next)) {
+            out.push(Trigger::PhaseAdvanced);
+        }
         // The bus rows the payload carries, seeded silently: these are the same
         // events the stream delivers, and the stream is what says one *just*
         // arrived. Served oldest first (`registry.read_events`), which is the
@@ -974,6 +1022,56 @@ pub fn booked(state: Option<&str>) -> bool {
         state,
         Some("submitted") | Some("filled") | Some("reconciled")
     )
+}
+
+/// Whether any workflow **both** payloads carry has a step in a different state.
+///
+/// Three rules, and each of them is a thing that would otherwise fire wrongly.
+///
+/// *Only workflows on both sides.* A workflow the last payload did not carry is
+/// a **start**, not an advance — and registering a workflow is not running it,
+/// so a run whose phases are all still `queued` would announce progress it has
+/// not made. It is also what keeps the first snapshot quiet without a special
+/// case: diffed against nothing, every workflow is new. `workflow_started` on
+/// the stream is what says one began.
+///
+/// *Keyed on `step_id`, not on `current_phase`.* Concurrent phases finish out of
+/// seq order — the registry says so in `update_workflow_phase` — so the workflow
+/// row's `current_phase` can stand still while a step underneath it completes.
+///
+/// *Any change of state, in either direction.* `working` → `interrupted` moved
+/// the pipeline exactly as much as `working` → `done` did, and a pane that
+/// animated only forward progress would be silent on the transition an operator
+/// most needs to see.
+fn phase_advanced(prev: &Snapshot, next: &Snapshot) -> bool {
+    next.workflows.iter().any(|now| {
+        let Some(id) = text(now.workflow_id.as_ref()) else {
+            return false;
+        };
+        let Some(was) = prev
+            .workflows
+            .iter()
+            .find(|held| text(held.workflow_id.as_ref()) == Some(id))
+        else {
+            return false;
+        };
+        now.steps.iter().any(|step| {
+            let Some(step_id) = text(step.step_id.as_ref()) else {
+                return false;
+            };
+            match was
+                .steps
+                .iter()
+                .find(|held| text(held.step_id.as_ref()) == Some(step_id))
+            {
+                Some(held) => text(held.status.as_ref()) != text(step.status.as_ref()),
+                // A step a known workflow did not have before. Phases are
+                // written when the workflow is created, so this is a graph that
+                // grew under the operator — which is news whatever caused it.
+                None => true,
+            }
+        })
+    })
 }
 
 /// The drawdown tiers in the owner's own order, worst last.
@@ -1960,6 +2058,127 @@ mod tests {
             store.approval_for("p1").and_then(|a| a.status.clone()),
             Some("pending".to_string())
         );
+    }
+
+    /// One workflow carrying `steps`, as the owner serves it.
+    fn flow(id: &str, steps: serde_json::Value) -> serde_json::Value {
+        json!({"workflow_id": id, "status": "running", "steps": steps})
+    }
+
+    fn step(phase: &str, status: &str) -> serde_json::Value {
+        json!({"step_id": format!("wf1:{phase}"), "phase": phase, "status": status})
+    }
+
+    #[test]
+    fn a_step_that_changed_state_is_a_phase_advance_and_a_republished_one_is_not() {
+        let mut store = Store::default();
+        let queued = || {
+            snap(json!({"workflows": [flow(
+                "wf1",
+                json!([step("analyst", "done"), step("challenger", "queued")]),
+            )]}))
+        };
+        // The first snapshot is diffed against nothing, so every workflow on it
+        // is new. Announcing a phase advance there would fire on whatever the
+        // desk happened to be doing before this client existed.
+        assert!(!store
+            .apply(queued(), Instant::now())
+            .contains(&Trigger::PhaseAdvanced));
+        assert!(
+            !store
+                .apply(queued(), Instant::now())
+                .contains(&Trigger::PhaseAdvanced),
+            "the same steps republished are not an advance"
+        );
+        assert!(store
+            .apply(
+                snap(json!({"workflows": [flow(
+                    "wf1",
+                    json!([step("analyst", "done"), step("challenger", "working")]),
+                )]})),
+                Instant::now()
+            )
+            .contains(&Trigger::PhaseAdvanced));
+    }
+
+    #[test]
+    fn a_workflow_this_client_has_not_seen_before_is_a_start_and_not_an_advance() {
+        // Registering a workflow is not running it, and `workflow_started` is
+        // the stream's own event for the first half. A diff that fired here
+        // would announce a phase advance for a run whose phases are all still
+        // queued — including on every reconnect that widens the ten-row window.
+        let mut store = Store::default();
+        store.apply(
+            snap(json!({"workflows": [flow("wf1", json!([step("analyst", "done")]))]})),
+            Instant::now(),
+        );
+        assert!(!store
+            .apply(
+                snap(json!({"workflows": [
+                    flow("wf1", json!([step("analyst", "done")])),
+                    flow("wf2", json!([step("analyst", "queued")]))
+                ]})),
+                Instant::now()
+            )
+            .contains(&Trigger::PhaseAdvanced));
+    }
+
+    #[test]
+    fn an_interruption_is_a_phase_advance_because_the_pipeline_has_to_redraw() {
+        // "Advance" is the name of the transition, not a direction: a step that
+        // went `working` → `interrupted` moved, and the pane that draws it has
+        // to say so as loudly as a completion does.
+        let mut store = Store::default();
+        store.apply(
+            snap(json!({"workflows": [flow("wf1", json!([step("analyst", "working")]))]})),
+            Instant::now(),
+        );
+        assert!(store
+            .apply(
+                snap(json!({"workflows": [flow(
+                    "wf1",
+                    json!([step("analyst", "interrupted")])
+                )]})),
+                Instant::now()
+            )
+            .contains(&Trigger::PhaseAdvanced));
+    }
+
+    #[test]
+    fn a_workflow_with_no_id_cannot_be_diffed_against_anything() {
+        // `Some("")` is absent here as everywhere else, so an unidentified row
+        // can neither match a previous one nor fire on its own.
+        let mut store = Store::default();
+        let anonymous = || {
+            snap(json!({"workflows": [
+                {"status": "running", "steps": [step("analyst", "queued")]}
+            ]}))
+        };
+        store.apply(anonymous(), Instant::now());
+        assert!(!store
+            .apply(anonymous(), Instant::now())
+            .contains(&Trigger::PhaseAdvanced));
+    }
+
+    #[test]
+    fn the_templates_poll_lands_beside_the_snapshot_rather_than_inside_it() {
+        // Its own endpoint on its own cadence, exactly like the regime panel: a
+        // client that had to wait for both would render an empty picker for the
+        // whole first minute after startup.
+        let mut store = Store::default();
+        assert!(store.templates().is_empty());
+        let templates: Vec<crate::model::Template> = serde_json::from_value(json!([
+            {"template_id": "regime_review", "purpose": "Re-read the regime panel.",
+             "phases": ["analyst", "referee"], "creates_plan": false}
+        ]))
+        .unwrap();
+        apply(&mut store, AppEvent::Templates(templates));
+        assert_eq!(store.templates().len(), 1);
+        assert_eq!(
+            store.templates()[0].template_id.as_deref(),
+            Some("regime_review")
+        );
+        assert!(store.take_dirty(), "a picker that grew owes a frame");
     }
 
     #[test]

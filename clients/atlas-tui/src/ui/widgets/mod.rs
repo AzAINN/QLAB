@@ -8,8 +8,10 @@ pub mod braille_chart;
 // the declaration are pinned verbatim by `tests/operator_gate.rs`.
 #[cfg(feature = "operator")]
 pub mod confirm;
+pub mod event_row;
 pub mod heat_cell;
 mod panel_header;
+pub mod pipeline;
 pub mod pulse;
 mod refusal;
 pub mod table_cell;

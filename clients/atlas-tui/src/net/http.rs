@@ -11,7 +11,7 @@
 //! the frame loop for the length of a request.
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
-use crate::model::{RegimePanel, Snapshot};
+use crate::model::{RegimePanel, Snapshot, Templates};
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -33,6 +33,14 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// The regime panel is a diagnostic over one snapshot, not the desk itself: it
 /// moves when a detector run does, which is far slower than the tape.
 pub const REGIME_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The registered workflow templates change when the owner is *deployed*, not
+/// when the desk moves — `qlab/operator/templates.py` is a module-level table —
+/// so this is the slowest beat on the boundary. It exists at all rather than
+/// being fetched once because an operator restarts the owner under a running
+/// client, and a picker that had cached the old set would offer a template the
+/// owner no longer registers.
+pub const TEMPLATE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often a client with no owner asks again. Faster than the poll cadence
 /// because the operator is usually starting the owner while watching this.
@@ -163,6 +171,10 @@ async fn poll_loop(
     // the desk would be worse than having only one.
     let snapshot_url = format!("{base}/api/tui?offline={lane}");
     let regime_url = format!("{base}/api/regime/panel?offline={lane}");
+    // No `offline` lane: the template registry is a table in the owner's own
+    // module, identical in both lanes, and a query parameter the route does not
+    // read would be this client claiming a distinction the owner does not make.
+    let templates_url = format!("{base}/api/atlas/templates");
 
     // Two facts, not one. `up` is what the chips read — a payload this client
     // could actually use — and `reachable` is what the socket said.
@@ -175,8 +187,9 @@ async fn poll_loop(
     // it serves — the frame already says loudly that it cannot.
     let mut up: Option<bool> = None;
     let mut reachable: Option<bool> = None;
-    // Due immediately, then on its own slow beat.
+    // Due immediately, then on their own slow beats.
     let mut regime_due = Instant::now();
+    let mut templates_due = Instant::now();
 
     loop {
         // The readiness gate, only while the owner is not known to be answering.
@@ -243,6 +256,27 @@ async fn poll_loop(
                     // snapshot that decides that is still arriving.
                     Fetched::Failed(error) => {
                         tracing::warn!(%error, "regime panel poll failed")
+                    }
+                }
+            }
+
+            if up == Some(true) && Instant::now() >= templates_due {
+                templates_due = Instant::now() + TEMPLATE_INTERVAL;
+                match fetch::<Templates>(&client, &templates_url).await {
+                    Fetched::Decoded(payload) => emit(&tx, AppEvent::Templates(payload.templates))?,
+                    Fetched::Malformed(error) => emit(
+                        &tx,
+                        AppEvent::Http(HttpResult::Malformed {
+                            url: templates_url.clone(),
+                            error,
+                        }),
+                    )?,
+                    // The template set is what the desk can be *asked* for, not
+                    // what it is: a failure here must not tell the operator the
+                    // owner went away when the snapshot that decides that is
+                    // still arriving. Same reasoning as the panel above.
+                    Fetched::Failed(error) => {
+                        tracing::warn!(%error, "workflow template poll failed")
                     }
                 }
             }

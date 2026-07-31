@@ -26,14 +26,15 @@
 //! line, and a pane offering `a` there would contradict it.
 
 use crate::cmd::Command;
-use crate::format::{self, MISSING};
-use crate::fx::{FlashKey, FlashTracker};
+use crate::format::{self, clock, MISSING};
+use crate::fx::FlashTracker;
 use crate::model::Approval;
-use crate::store::{AuditEvent, Store};
+use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
 #[cfg(feature = "operator")]
 use crate::ui::widgets::confirm::{self, Modal, Pending};
+use crate::ui::widgets::event_row::{self, short};
 use crate::ui::widgets::{panel_block, panel_header, refuse};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -63,11 +64,6 @@ const APPROVALS_MIN: u16 = 40;
 /// The stream's floor: a clock, a kind, and a space between them. Under this
 /// there is no row left to shorten.
 const STREAM_MIN: u16 = 28;
-
-/// The kind column. `workflow_interrupted` is the owner's longest at twenty;
-/// this holds every other kind whole and takes two characters off that one,
-/// which costs less than the subject the width would otherwise come out of.
-const KIND_W: usize = 18;
 
 /// Where the operator is looking in the approvals list. Never what the desk
 /// says — that is the `Store`'s.
@@ -306,7 +302,7 @@ fn draw_stream(f: &mut Frame, area: Rect, store: &Store, fx: &FlashTracker, now:
     let room = inner.height.saturating_sub(1) as usize;
     let mut drawn = 0usize;
     for event in store.audit_events().take(room) {
-        lines.push(event_row(event, fx, now, inner.width));
+        lines.push(event_row::row(event, fx, now, inner.width));
         drawn += 1;
     }
     if drawn == 0 {
@@ -316,72 +312,6 @@ fn draw_stream(f: &mut Frame, area: Rect, store: &Store, fx: &FlashTracker, now:
         )));
     }
     f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// One bus row: when, what kind, and what it was about.
-///
-/// The flash is per row, keyed by the owner's own event id, so the event that
-/// just arrived lights and the log under it does not. A pane-wide effect would
-/// animate the whole record every time anything happened on the desk.
-fn event_row(event: &AuditEvent, fx: &FlashTracker, now: Instant, width: u16) -> Line<'static> {
-    let t = theme();
-    let base = Style::default().fg(kind_tone(&event.kind));
-    let lit = match event.id.as_deref() {
-        Some(id) => fx.style_for(&FlashKey::audit(id), now, base),
-        None => base,
-    };
-    let stamp = clock(event.ts.as_ref()).unwrap_or_else(|| MISSING.to_string());
-    // The subject is what gives when the pane is narrow: the clock and the kind
-    // are what make a row findable, and at the workstation's baseline width the
-    // two panes together leave only a few characters for it. It grows back as
-    // the terminal does.
-    let subject = subject(event);
-    let room = (width as usize).saturating_sub(stamp.chars().count() + KIND_W + 2);
-    Line::from(vec![
-        Span::styled(format!("{stamp} "), Style::default().fg(t.text_tertiary)),
-        Span::styled(format!("{:<KIND_W$} ", head_of(&event.kind, KIND_W)), lit),
-        Span::styled(
-            head_of(&subject, room),
-            Style::default().fg(t.text_secondary),
-        ),
-    ])
-}
-
-/// What a bus row is about, from the payload the owner actually writes.
-///
-/// The ids in that order because that is the order an operator looks for them:
-/// a plan is what a fill or an approval is *about*, and the approval id is the
-/// record. Anything else falls back to the whole payload rather than to nothing
-/// — an unrecognised event on a governed bus is exactly the one worth reading.
-fn subject(event: &AuditEvent) -> String {
-    for key in ["plan_id", "approval_id", "workflow_id", "decision_id"] {
-        if let Some(value) = event.payload.get(key).and_then(|v| v.as_str()) {
-            if !value.is_empty() {
-                return value.to_string();
-            }
-        }
-    }
-    match &event.payload {
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-/// The tone one event kind carries.
-///
-/// Prefix matching rather than an exhaustive table: the owner adds bus kinds
-/// (there are already twenty), and a client that coloured only the ones it knew
-/// would silently render a new governance event as chrome.
-fn kind_tone(kind: &str) -> Color {
-    let t = theme();
-    match kind {
-        "halt" | "approval_rejected" | "approval_invalidated" => t.negative,
-        "plan_executed" | "approval_approved" | "resume" => t.positive,
-        "approval_created" | "approval_challenged" | "approval_expired" => t.warning,
-        _ if kind.starts_with("workflow") => t.accent,
-        _ if kind.starts_with("approval") => t.warning,
-        _ => t.text_secondary,
-    }
 }
 
 /// A panel header with its keys pushed to the far side of the pane.
@@ -398,49 +328,9 @@ fn head(title: &str, keys: &str, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
-/// `HH:MM:SS` out of an ISO stamp, or absent.
-///
-/// A slice of the owner's own string rather than a parse: the registry writes
-/// ISO-8601 with a fixed offset, the client renders wall-clock time as the owner
-/// stated it, and a timezone conversion here would be this client inventing a
-/// clock the audit log does not have.
-pub fn clock(stamp: Option<&String>) -> Option<String> {
-    let text = format::text(stamp)?;
-    let time: String = text.chars().skip(11).take(8).collect();
-    (time.chars().count() == 8).then_some(time)
-}
-
-/// The head of an id, so a column of them lines up. `--` when there is none.
-fn short(value: Option<&String>, width: usize) -> String {
-    match format::text(value) {
-        Some(text) => head_of(text, width),
-        None => MISSING.to_string(),
-    }
-}
-
-fn head_of(text: &str, width: usize) -> String {
-    match text.char_indices().nth(width) {
-        Some((cut, _)) => text[..cut].to_string(),
-        None => text.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_clock_is_the_owners_own_wall_time_and_never_a_conversion() {
-        assert_eq!(
-            clock(Some(&"2026-07-30T18:12:18.773652+00:00".to_string())),
-            Some("18:12:18".to_string())
-        );
-        // Absent, empty and malformed are all absent — a half-read stamp is
-        // worse than none, because it looks like a time.
-        assert_eq!(clock(None), None);
-        assert_eq!(clock(Some(&String::new())), None);
-        assert_eq!(clock(Some(&"2026-07-30".to_string())), None);
-    }
 
     #[test]
     fn every_status_the_owner_can_serve_has_a_tone_and_pending_is_the_loud_one() {
@@ -455,48 +345,5 @@ mod tests {
         assert_eq!(status_tone("consumed"), t.text_dim);
         assert_eq!(status_tone("expired"), t.text_dim);
         assert_eq!(status_tone("something-new"), t.text_dim);
-    }
-
-    #[test]
-    fn a_kind_the_client_has_never_seen_still_gets_a_tone_from_its_family() {
-        let t = theme();
-        assert_eq!(kind_tone("workflow_reassigned"), t.accent);
-        assert_eq!(kind_tone("approval_deferred"), t.warning);
-        assert_eq!(kind_tone("plan_executed"), t.positive);
-        assert_eq!(kind_tone("halt"), t.negative);
-        assert_eq!(kind_tone("something_else"), t.text_secondary);
-    }
-
-    #[test]
-    fn a_row_says_what_it_was_about_and_falls_back_to_the_payload() {
-        let event = |payload: serde_json::Value| AuditEvent {
-            id: Some("e1".into()),
-            ts: None,
-            kind: "k".into(),
-            payload,
-        };
-        assert_eq!(
-            subject(&event(
-                serde_json::json!({"approval_id": "ap", "plan_id": "pl"})
-            )),
-            "pl",
-            "the plan is what a governance event is about"
-        );
-        assert_eq!(
-            subject(&event(serde_json::json!({"approval_id": "ap"}))),
-            "ap"
-        );
-        // An unrecognised shape is the row most worth reading, so it is shown
-        // whole rather than blanked.
-        assert_eq!(
-            subject(&event(serde_json::json!({"reason": "kill switch"}))),
-            r#"{"reason":"kill switch"}"#
-        );
-        assert_eq!(subject(&event(serde_json::Value::Null)), "");
-        // `Some("")` is absent here as everywhere else in this client.
-        assert_eq!(
-            subject(&event(serde_json::json!({"plan_id": ""}))),
-            "{\"plan_id\":\"\"}"
-        );
     }
 }

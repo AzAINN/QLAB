@@ -1616,8 +1616,7 @@ fn plan_card(store: &Store, plan: &Plan, selected: bool) -> Line<'static> {
         Span::styled(
             format!(
                 "{:<9}",
-                crate::ui::views::audit::clock(plan.created_at.as_ref())
-                    .unwrap_or_else(|| MISSING.to_string())
+                format::clock(plan.created_at.as_ref()).unwrap_or_else(|| MISSING.to_string())
             ),
             Style::default().fg(t.text_tertiary),
         ),

@@ -274,6 +274,102 @@ pub fn age(elapsed: std::time::Duration) -> String {
     }
 }
 
+// -- the owner's clock -----------------------------------------------------
+//
+// This client has no wall clock in its render path — see `store::Store` on time
+// as data — so anything it says about *when* has to come from stamps the owner
+// wrote. Both helpers below read the owner's own ISO-8601 text and never
+// convert it: the registry writes UTC with a fixed offset
+// (`qlab/state/registry.py::_now`), a surface renders the time the owner
+// stated, and a timezone conversion here would be this client inventing a clock
+// the audit log does not have.
+
+/// `HH:MM:SS` out of an ISO stamp, or absent.
+///
+/// A slice of the owner's string rather than a parse: the four surfaces that
+/// print a registry timestamp must agree to the character, and a half-read
+/// stamp is worse than none because it still looks like a time.
+///
+/// Promoted here from `views::audit` once BOOK and WORKFORCE wanted it too —
+/// three copies of "which characters of an ISO stamp are the clock" is three
+/// chances for one of them to slip a digit.
+pub fn clock(stamp: Option<&String>) -> Option<String> {
+    let text = text(stamp)?;
+    let time: String = text.chars().skip(11).take(8).collect();
+    (time.chars().count() == 8).then_some(time)
+}
+
+/// How long the owner's own two stamps are apart, at [`age`]'s coarseness.
+///
+/// **Not "how long ago".** There is no `now` in this expression: both ends are
+/// stamps the owner wrote, so what this measures is the span the owner has
+/// actually recorded — for a finished workflow its whole run, and for a live one
+/// the time from its start to the last thing it did. A client that subtracted a
+/// stamp from its own clock would be asserting agreement between two machines'
+/// clocks *and* reading the time inside a renderer, and would drift silently on
+/// both counts.
+///
+/// `None` unless both stamps parse **and carry the same offset**: two stamps in
+/// different zones are not a duration this client may guess at. A `to` before
+/// `from` is likewise refused rather than rendered as zero — a negative span is
+/// a broken contract, and `0s` would hide it.
+pub fn span(from: Option<&String>, to: Option<&String>) -> Option<String> {
+    let (from, to) = (text(from)?, text(to)?);
+    if offset_of(from) != offset_of(to) {
+        return None;
+    }
+    let elapsed = civil_secs(to)?.checked_sub(civil_secs(from)?)?;
+    (elapsed >= 0).then(|| age(std::time::Duration::from_secs(elapsed as u64)))
+}
+
+/// The zone suffix of an ISO stamp — `+00:00`, `Z`, or nothing at all.
+///
+/// Searched from the seconds field onward, because the date's own separators are
+/// `-` too and a naive search would call `2026-07-30` an offset.
+fn offset_of(stamp: &str) -> &str {
+    match stamp
+        .char_indices()
+        .find(|(i, c)| *i >= 19 && matches!(c, '+' | '-' | 'Z' | 'z'))
+    {
+        Some((at, _)) => &stamp[at..],
+        None => "",
+    }
+}
+
+/// Seconds since the civil epoch, from the date and time fields of an ISO stamp.
+///
+/// Fixed offsets rather than a parser: the owner writes exactly
+/// `YYYY-MM-DDTHH:MM:SS[.ffffff][±HH:MM]`, and anything that does not have
+/// digits in those positions is refused rather than guessed at.
+fn civil_secs(stamp: &str) -> Option<i64> {
+    let at = |from: usize, len: usize| -> Option<i64> {
+        let field: String = stamp.chars().skip(from).take(len).collect();
+        (field.chars().count() == len && field.chars().all(|c| c.is_ascii_digit()))
+            .then(|| field.parse().ok())
+            .flatten()
+    };
+    let (y, m, d) = (at(0, 4)?, at(5, 2)?, at(8, 2)?);
+    let (h, min, s) = (at(11, 2)?, at(14, 2)?, at(17, 2)?);
+    Some(days_from_civil(y, m, d)? * 86_400 + h * 3_600 + min * 60 + s)
+}
+
+/// Days since 1970-01-01, by Howard Hinnant's civil-calendar algorithm.
+///
+/// Proleptic Gregorian and exact for every date the registry can write, which is
+/// what a duration between two stamps needs — an approximation of a month would
+/// put a run that crossed a month boundary hours out.
+fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = y - i64::from(m <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
 /// A quote. Two decimals above a dollar, four below it — sub-dollar instruments
 /// carry their information in the third and fourth places, and truncating there
 /// makes distinct prices look identical.
@@ -321,6 +417,97 @@ fn group(digits: &str) -> String {
         out.push_str(frac);
     }
     out
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    fn at(stamp: &str) -> Option<String> {
+        clock(Some(&stamp.to_string()))
+    }
+
+    fn between(from: &str, to: &str) -> Option<String> {
+        span(Some(&from.to_string()), Some(&to.to_string()))
+    }
+
+    #[test]
+    fn a_clock_is_the_owners_own_wall_time_and_never_a_conversion() {
+        assert_eq!(
+            at("2026-07-30T18:12:18.773652+00:00"),
+            Some("18:12:18".to_string())
+        );
+        // Absent, empty and malformed are all absent — a half-read stamp is
+        // worse than none, because it looks like a time.
+        assert_eq!(clock(None), None);
+        assert_eq!(clock(Some(&String::new())), None);
+        assert_eq!(at("2026-07-30"), None);
+    }
+
+    #[test]
+    fn a_span_is_the_distance_between_two_stamps_the_owner_wrote() {
+        assert_eq!(
+            between(
+                "2026-07-30T15:29:22.831208+00:00",
+                "2026-07-30T15:58:50.091972+00:00"
+            ),
+            Some("29m".to_string())
+        );
+        assert_eq!(
+            between("2026-07-30T15:29:22+00:00", "2026-07-30T15:29:59+00:00"),
+            Some("37s".to_string())
+        );
+        assert_eq!(
+            between("2026-07-30T09:00:00+00:00", "2026-07-30T15:29:22+00:00"),
+            Some("6h".to_string())
+        );
+    }
+
+    #[test]
+    fn a_span_crossing_a_month_or_a_leap_day_is_exact_rather_than_approximated() {
+        // The whole reason this is a civil-calendar conversion and not
+        // arithmetic on the fields: a run that crossed midnight on the last of
+        // the month would otherwise come out negative or wildly long.
+        assert_eq!(
+            between("2026-07-31T23:30:00+00:00", "2026-08-01T00:30:00+00:00"),
+            Some("1h".to_string())
+        );
+        assert_eq!(
+            between("2024-02-28T12:00:00+00:00", "2024-03-01T12:00:00+00:00"),
+            Some("48h".to_string()),
+            "2024 is a leap year, so that is two days and not three"
+        );
+        assert_eq!(
+            between("2023-02-28T12:00:00+00:00", "2023-03-01T12:00:00+00:00"),
+            Some("24h".to_string())
+        );
+    }
+
+    #[test]
+    fn a_span_this_client_cannot_be_sure_of_is_absent_rather_than_guessed() {
+        // Different zones are not a duration — the client would be inventing
+        // agreement between two clocks it cannot see.
+        assert_eq!(
+            between("2026-07-30T15:00:00+00:00", "2026-07-30T16:00:00+02:00"),
+            None
+        );
+        // A `to` before a `from` is a broken contract, and `0s` would hide it.
+        assert_eq!(
+            between("2026-07-30T16:00:00+00:00", "2026-07-30T15:00:00+00:00"),
+            None
+        );
+        // Absent, empty and unparseable, as everywhere else in this client.
+        assert_eq!(
+            span(None, Some(&"2026-07-30T15:00:00+00:00".to_string())),
+            None
+        );
+        assert_eq!(span(Some(&String::new()), Some(&String::new())), None);
+        assert_eq!(between("2026-07-30", "2026-07-30"), None);
+        assert_eq!(
+            between("not-a-stamp-at-all-x", "not-a-stamp-at-all-y"),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

@@ -68,7 +68,7 @@ fn the_ribbon_states_the_book_the_owner_marked_to_the_tape() {
         line_with(&content, "$10,000.00").contains("+$0.00"),
         "the P&L hero sits beside the equity:\n{content}"
     );
-    assert!(content.contains("2 pos"), "the position count:\n{content}");
+    assert!(content.contains("3 pos"), "the position count:\n{content}");
     assert!(content.contains("cash $0.00"), "the cash split:\n{content}");
     // The window's own change, and what the window is made of.
     assert!(content.contains("5 marks"), "{content}");
@@ -609,8 +609,13 @@ fn the_blotter_sorts_on_the_number_and_never_on_the_string() {
 
 #[test]
 fn the_default_sort_is_the_heaviest_position_first() {
-    // What an operator asks the blotter first: where is the money.
-    assert_eq!(blotter_symbols(&book(), 120, 36), vec!["BNDW", "ACWI"]);
+    // What an operator asks the blotter first: where is the money. `DUST` is
+    // the fixture's dust holding at a tenth of a percent — last by weight, and
+    // there for the reason `the_fixtures_dust_holding_is_neither` states.
+    assert_eq!(
+        blotter_symbols(&book(), 120, 36),
+        vec!["BNDW", "ACWI", "DUST"]
+    );
 }
 
 #[test]
@@ -916,6 +921,56 @@ fn a_debt_of_nothing_is_not_drawn_as_a_loss_on_either_surface() {
         cell_style_on(&buf, "REAL  -2.0%", "REAL").fg,
         Some(t.negative_dim),
         "the tile left the negative ramp"
+    );
+}
+
+#[test]
+fn the_fixtures_dust_holding_is_neither_a_gain_nor_a_loss_on_any_surface() {
+    // The tripwire, and the reason the shared fixture carries a `DUST` row at
+    // all. The test above builds its own book, so it only ever catches the
+    // class on the two surfaces it happens to name; the captured payload every
+    // other golden reads carried no magnitude below its own printed precision,
+    // which is exactly why a threshold on the raw double could be added to a
+    // *new* surface with every golden still green.
+    //
+    // The fixture's row is `-1e-13` in both fields — the residue a
+    // fully-invested paper book actually carries. Every surface that draws it
+    // must round it away in the digits *and* in the colour beside them.
+    let t = Theme::truecolor();
+    let buf = book().buffer(120, 36);
+
+    // The blotter's paired money cells.
+    assert_eq!(
+        cell_style_on(&buf, "DUST", "+$0.00").fg,
+        Some(t.text_primary),
+        "a debt of nothing drew as a direction"
+    );
+    assert_eq!(
+        cell_style_on(&buf, "DUST", "+0.00%").fg,
+        Some(t.text_primary)
+    );
+    // The holdings rail's tile, at its own one-decimal precision.
+    let tile = cell_style_on(&buf, "DUST  +0.0%", "DUST");
+    assert_eq!(tile.fg, Some(t.text_primary), "the tile shaded a nothing");
+    assert_eq!(tile.bg, Some(t.bg_base));
+    // And the movers footer, which the dust row is now the bottom of: a book
+    // whose worst name did not move gets the flat glyph and the flat tone, not
+    // a red ▼ over `+0.0%`.
+    assert_eq!(
+        cell_style_on(&buf, "worst DUST", "·").fg,
+        Some(t.text_primary),
+        "the worst mover claimed a direction it does not have"
+    );
+    assert_eq!(
+        cell_style_on(&buf, "worst DUST", "+0.0%").fg,
+        Some(t.text_primary)
+    );
+
+    // The ribbon counts it as neither, which is what keeps the two panes from
+    // saying different things about one row.
+    assert!(
+        content(&book().frame(120, 36)).contains("▲0 ▼0"),
+        "the dust row was counted as a gainer or a loser"
     );
 }
 

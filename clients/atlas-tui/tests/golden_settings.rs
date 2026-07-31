@@ -165,7 +165,12 @@ fn the_universe_is_the_symbols_this_desk_is_actually_watching() {
     let body = content(&frame);
     assert!(body.contains("ACWI"), "{body}");
     assert!(body.contains("BNDW"), "{body}");
-    assert!(line_with(&frame, "watching").contains("6"), "{frame}");
+    // Five polled assets plus the two names the book holds outside them —
+    // `BNDW` and the fixture's dust holding. A row that counted only the polled
+    // universe would leave a held position off the list of what this desk is
+    // watching.
+    assert!(body.contains("DUST"), "{body}");
+    assert!(line_with(&frame, "watching").contains("7"), "{frame}");
 }
 
 #[test]

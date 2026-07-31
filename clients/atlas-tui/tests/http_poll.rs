@@ -161,6 +161,54 @@ async fn drain(rx: &mut Rx, want: usize, budget: Duration) -> Vec<Seen> {
     out
 }
 
+/// How long a predicate drain waits before it calls the poller hung.
+///
+/// A deadlock guard rather than a measurement, so it is set absurdly wide: no
+/// assertion is made *about* this number, and a run that reaches it has found a
+/// poller that stopped rather than a machine that was slow.
+const CEILING: Duration = Duration::from_secs(30);
+
+/// How often a predicate drain re-reads a fact the bus does not announce.
+///
+/// The owner records a request before it writes the response, so the fact and
+/// the event that follows it are not simultaneous. Waking on this tick as well
+/// as on events means the condition is seen even when the event that would have
+/// carried it never arrives.
+const RECHECK: Duration = Duration::from_millis(25);
+
+/// Drain until `settled` — a fact about the *owner*, not about any one event —
+/// holds, or the ceiling runs out.
+///
+/// The predicate replaces a fixed-budget drain, and the difference is the whole
+/// point: a budget has to be wide enough for the slowest machine and is still a
+/// coin toss on a loaded one (`POLL_INTERVAL + 1.5 s` against a 3 s cadence,
+/// observed to fail about one run in six). Waiting on the condition itself takes
+/// as long as the machine needs and stops the instant it holds — slower where it
+/// has to be, and faster than the budget everywhere else.
+async fn drain_until_owner(
+    rx: &mut Rx,
+    settled: impl Fn() -> bool,
+    ceiling: Duration,
+) -> Vec<Seen> {
+    let deadline = tokio::time::Instant::now() + ceiling;
+    let mut out = Vec::new();
+    while !settled() {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return out;
+        }
+        match tokio::time::timeout(left.min(RECHECK), rx.recv()).await {
+            Ok(Some(ev)) => out.push(seen(&ev)),
+            // The bus closed: nothing further can arrive, so the condition can
+            // no longer become true and waiting out the ceiling proves nothing.
+            Ok(None) => return out,
+            // The recheck tick, not the ceiling — the loop condition decides.
+            Err(_) => {}
+        }
+    }
+    out
+}
+
 /// Drain until an event `stop` accepts arrives, returning everything seen on the
 /// way. A predicate rather than a sentinel value: `Malformed` carries a url, and
 /// comparing against a placeholder one silently never matches — which reads as a
@@ -284,35 +332,38 @@ async fn an_owner_answering_with_garbage_is_polled_at_the_desks_cadence_not_the_
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let _poller = spawn_poller(owner.base.clone(), true, tx);
 
-    // Past one whole poll interval and past two of the retry interval, which is
-    // what makes the two cadences tell each other apart. The slack is wide
-    // because the second poll has to *land* inside it, and a margin that only
-    // holds on an idle machine is a flake waiting for a busy one.
-    let budget = POLL_INTERVAL + Duration::from_millis(1_500);
-    let seen = drain(&mut rx, 99, budget).await;
+    // Wait for the *second* desk poll rather than for a stretch of wall time
+    // long enough to contain one. The window is then exactly as wide as this
+    // machine needed, and on a machine that needed longer it is wider — where a
+    // fixed `POLL_INTERVAL + 1.5 s` budget was a 1.5 s margin over a 3 s cadence
+    // and failed about one run in six under load.
+    let seen = drain_until_owner(&mut rx, || owner.asked_for("/api/tui").len() >= 2, CEILING).await;
+    assert!(
+        owner.asked_for("/api/tui").len() >= 2,
+        "the desk's own cadence never ran a second time inside {CEILING:?}: {:?}",
+        owner.targets()
+    );
     assert!(
         seen.iter().any(|s| matches!(s, Seen::Malformed(_))),
         "the decode failure still has to reach the bus: {seen:?}"
     );
+    // The pin. The window just waited out holds two desk polls, so it is at
+    // least one `POLL_INTERVAL` wide — and the retry is the tighter loop, so a
+    // client that had gone back to the retry cadence would have probed again
+    // inside it. One probe is the whole finding.
     assert_eq!(
         owner.asked_for("/readyz").len(),
         1,
         "an owner that answered is not asked to prove it again every cycle: {:?}",
         owner.targets()
     );
-    assert!(
-        owner.asked_for("/api/tui").len() >= 2,
-        "the desk's own cadence still has to run: {:?}",
-        owner.targets()
-    );
-    // What makes the counts above discriminate: the retry is the tighter loop,
-    // and the budget covers a second probe under it as well as a second poll
-    // under the desk's cadence. Without both, this passes on the bug it is about.
+    // What makes that count discriminate, stated rather than assumed: without
+    // this the window a second poll defines could be narrower than a retry, and
+    // the assertion above would pass on the bug it is about.
     assert!(
         READY_RETRY < POLL_INTERVAL,
         "the retry is not the tight loop"
     );
-    assert!(READY_RETRY < budget && POLL_INTERVAL < budget);
 }
 
 #[tokio::test]

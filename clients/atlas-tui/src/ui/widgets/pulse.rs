@@ -198,6 +198,8 @@ fn stress_section(store: &Store, tween: &Tween, now: Instant) -> Section {
     let mut head = vec![panel_header("pulse")];
     let gauge = match desk_stress(regime, store.regime_panel.as_ref()) {
         Some(score) => {
+            // `band` rounds to the `{score:.0}` the label prints below, so the
+            // figure and the word are one decision — see `as_printed`.
             let (word, tone) = band(score);
             // The bar eases toward the reading; the number and the band word do
             // not. A needle sliding is the desk moving, but a printed 62 that
@@ -460,17 +462,39 @@ fn desk_stress(regime: Option<&Regime>, panel: Option<&RegimePanel>) -> Option<f
     Some(score.clamp(0.0, 100.0))
 }
 
-/// The band a score sits in. Every edge is closed at the top, so a desk at
-/// exactly 80 reads CALM rather than SERENE.
+/// The band a score sits in, at the precision the gauge *prints* the score.
+///
+/// Every edge is closed at the top, so a desk at exactly 80 reads CALM rather
+/// than SERENE. That only means anything if the 80 the table is read with is the
+/// 80 on screen: this took the raw score while the label beside it printed
+/// `{score:.0}`, so a desk at 80.2 rendered "80 SERENE" — the number and the
+/// word disagreeing about one reading. The same class `format::negative_at`
+/// closes for the sign of a change, one precision over.
+///
+/// Rounding here rather than at the call site is what keeps it from becoming two
+/// decisions again: there is no way to ask for the band of a score without
+/// asking at the precision it is shown at.
 fn band(score: f64) -> (&'static str, Color) {
     let t = theme();
-    match score {
+    match as_printed(score) {
         s if s <= 20.0 => ("STRESSED", t.negative),
         s if s <= 40.0 => ("TENSE", t.warning),
         s if s <= 60.0 => ("NEUTRAL", t.warning),
         s if s <= 80.0 => ("CALM", t.positive),
         _ => ("SERENE", t.positive),
     }
+}
+
+/// A score as the gauge prints it — `{score:.0}` — read back as a number.
+///
+/// Through the formatter rather than `f64::round`, because those two do not
+/// agree: `{:.0}` rounds a tie to even and `round` rounds it away from zero, so
+/// 80.5 prints `80` and rounds to `81`. A second rounding is a second answer,
+/// which is the bug this closes rather than a smaller version of it. The parse
+/// cannot fail on anything the formatter wrote; the fallback is the raw score
+/// rather than a panic, because a gauge is not worth a crash.
+fn as_printed(score: f64) -> f64 {
+    format!("{score:.0}").parse().unwrap_or(score)
 }
 
 /// How many assets rose and how many fell. Flat is neither: a day that did not
@@ -747,17 +771,55 @@ mod tests {
     fn the_bands_are_closed_at_their_upper_edge() {
         // Every edge is `≤`, so a score sitting exactly on one belongs to the
         // band below it. Off by one here and a desk at 80 reads SERENE.
+        //
+        // The table is whole numbers on both sides of each edge because whole
+        // numbers are the only scores the gauge can print: the band is read off
+        // `{score:.0}`, so the first score past 80 that reads SERENE is 81 and
+        // not 80.1. See the test below for that half.
         let t = theme();
         assert_eq!(band(0.0), ("STRESSED", t.negative));
         assert_eq!(band(20.0), ("STRESSED", t.negative));
-        assert_eq!(band(20.1), ("TENSE", t.warning));
+        assert_eq!(band(21.0), ("TENSE", t.warning));
         assert_eq!(band(40.0), ("TENSE", t.warning));
-        assert_eq!(band(40.1), ("NEUTRAL", t.warning));
+        assert_eq!(band(41.0), ("NEUTRAL", t.warning));
         assert_eq!(band(60.0), ("NEUTRAL", t.warning));
-        assert_eq!(band(60.1), ("CALM", t.positive));
+        assert_eq!(band(61.0), ("CALM", t.positive));
         assert_eq!(band(80.0), ("CALM", t.positive));
-        assert_eq!(band(80.1), ("SERENE", t.positive));
+        assert_eq!(band(81.0), ("SERENE", t.positive));
         assert_eq!(band(100.0), ("SERENE", t.positive));
+    }
+
+    #[test]
+    fn the_band_word_is_the_word_for_the_number_printed_beside_it() {
+        // The live instance of the class this branch has closed three times: a
+        // threshold read off the raw double beside a figure printed at a
+        // coarser precision. `band` took the score and the label printed
+        // `{score:.0}`, so a desk at 80.2 rendered "80 SERENE" against a band
+        // table that calls 80 CALM — the number and the word beside it
+        // disagreeing about one reading.
+        let t = theme();
+        for score in [79.5, 79.6, 80.0, 80.2, 80.4, 80.5] {
+            assert_eq!(format!("{score:.0}"), "80", "the premise: {score}");
+            assert_eq!(band(score), ("CALM", t.positive), "{score}");
+        }
+        for score in [80.6, 80.9, 81.0, 81.4] {
+            assert_eq!(format!("{score:.0}"), "81", "the premise: {score}");
+            assert_eq!(band(score), ("SERENE", t.positive), "{score}");
+        }
+
+        // And the rule behind those two, across the whole scale: whatever the
+        // gauge prints, the word beside it is that printed number's word. A
+        // sweep rather than the edges alone, because the edges are only where
+        // it happens to be visible.
+        for tenth in 0..=1_000 {
+            let score = f64::from(tenth) / 10.0;
+            let printed: f64 = format!("{score:.0}").parse().unwrap();
+            assert_eq!(
+                band(score),
+                band(printed),
+                "{score} prints {printed} and bands as something else"
+            );
+        }
     }
 
     #[test]

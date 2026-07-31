@@ -35,7 +35,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tracing_subscriber::EnvFilter;
 
@@ -203,7 +203,7 @@ async fn run(
 /// they are not effects, and the queue is state the effect module has no reason
 /// to hold. `or_else` is the whole arbitration because every effect cadence is
 /// at least as fast as the toast's — see `toast::FRAME`.
-fn wake(fx: &Fx, toasts: &toast::ToastQueue, now: Instant) -> Option<std::time::Duration> {
+fn wake(fx: &Fx, toasts: &toast::ToastQueue, now: Instant) -> Option<Duration> {
     fx.budget(now).or_else(|| toasts.budget(now))
 }
 

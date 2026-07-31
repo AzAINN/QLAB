@@ -749,6 +749,49 @@ fn a_toast_sits_top_right_under_the_tape_and_leaves_when_it_expires() {
 }
 
 #[test]
+fn a_halted_desk_reddens_the_toasts_over_it_too() {
+    // The overlay's place in the composition, pinned rather than only commented:
+    // after the shell, so a toast is over the frame rather than in it; *before*
+    // the effect pass, so a halted desk's breath crosses the boxes as well. A
+    // toast that stayed clean while everything under it reddened would read as
+    // another client's window sitting on top of this one.
+    let store = fixture_store();
+    let now = store.last_snapshot_at.unwrap();
+    let toasts = toast_queue(now);
+    let mut fx = Fx::default();
+    fx.rects.frame.set(Rect::new(0, 0, 120, 36));
+    fx.on_trigger(&atlas::store::Trigger::Halted, now, false);
+
+    let paint = |fx: &mut Fx, tint: bool| {
+        let views = Views::new();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+        term.draw(|f| {
+            atlas::ui::shell::draw(f, &store, &views, fx, now);
+            let area = f.area();
+            toasts.draw(f, area, now);
+            if tint {
+                fx.process(Duration::from_millis(700), f.buffer_mut(), area);
+            }
+        })
+        .unwrap();
+        term.backend().buffer().clone()
+    };
+
+    let clean = paint(&mut Fx::default(), false);
+    let halted = paint(&mut fx, true);
+    // A cell inside the top box, well away from the desk under it.
+    let inside = (100u16, 2u16);
+    assert!(
+        !clean[inside].symbol().trim().is_empty(),
+        "the probe is not inside a rendered toast"
+    );
+    assert_ne!(
+        halted[inside].fg, clean[inside].fg,
+        "the halt breath did not reach the toast drawn over the desk"
+    );
+}
+
+#[test]
 fn a_terminal_too_small_for_a_box_draws_no_box_rather_than_a_hole() {
     // The allocated-rect rule this workstation holds everywhere: a bordered box
     // in a handful of columns is two rules and no message, which reads as a

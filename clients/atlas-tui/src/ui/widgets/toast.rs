@@ -67,7 +67,7 @@ pub enum Level {
 }
 
 impl Level {
-    pub fn tone(self) -> Color {
+    fn tone(self) -> Color {
         let t = theme();
         match self {
             Level::Info => t.accent,

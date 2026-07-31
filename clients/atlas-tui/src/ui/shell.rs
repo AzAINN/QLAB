@@ -55,13 +55,16 @@ const LABEL_W: usize = 11;
 const READ_H: u16 = 6;
 /// The glyph and the mood word under it.
 const GLYPH_H: u16 = glyph::H as u16 + 1;
-/// The status line's chip run. Every chip `draw_status` renders is
-/// right-aligned, and this is how many columns they occupy at their loudest —
-/// stream warning, staleness, malformed, posture and the GLASS badge.
+/// The right-hand end of the status line, as a target for the effect pass.
 ///
-/// A rect for the effect pass to aim at, not a layout constraint: `draw_status`
-/// packs the line itself. Task 18 replaces it with the approvals chip's own
-/// rect, at which point the amber pulse lands on the thing it is about.
+/// Deliberately *not* the width of everything the chips can say — at their
+/// loudest, with both drop counters, a stream warning, staleness, MALFORMED and
+/// the posture, the run is comfortably past seventy cells. This is the region an
+/// amber pulse should cross, which is the quiet end nearest the badge. It is not
+/// a layout constraint either: `draw_status` packs the line itself.
+///
+/// Task 18 replaces it with the approvals chip's own rect, at which point the
+/// pulse lands on the thing it is about rather than on the neighbourhood.
 const CHIPS_W: u16 = 40;
 
 /// One frame.

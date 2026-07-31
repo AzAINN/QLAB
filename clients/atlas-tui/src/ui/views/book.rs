@@ -2080,6 +2080,75 @@ fn mover(role: &str, row: &BlotterRow<'_>) -> Line<'static> {
 mod tests {
     use super::*;
 
+    /// A desk holding `n` plans, newest first, with readable ids.
+    fn store_with_plans(n: usize) -> Store {
+        let plans: Vec<String> = (0..n)
+            .map(|i| format!(r#"{{"plan_id": "plan{i:04}", "state": "checked"}}"#))
+            .collect();
+        let mut store = Store::default();
+        store.apply(
+            crate::bus::AppEvent::Snapshot(Box::new(
+                serde_json::from_str(&format!(r#"{{"plans": [{}]}}"#, plans.join(","))).unwrap(),
+            )),
+            std::time::Instant::now(),
+        );
+        store
+    }
+
+    #[test]
+    fn the_plan_cursor_answers_all_three_ways_the_band_can_leave_a_plan() {
+        // Three outcomes and three different sentences upstream. The one that
+        // matters is the middle: a plan the desk holds and this band does not
+        // draw is the ledger's own open item, and a caller that could not tell
+        // it from "no such plan" would have to guess which to say.
+        let store = store_with_plans(5);
+        let mut view = BookView::default();
+        assert_eq!(view.select_plan("plan0001", &store), PlanAt::Card(1));
+        assert_eq!(
+            view.select_plan("plan0004", &store),
+            PlanAt::Beyond {
+                at: 4,
+                cards: PLAN_CARDS
+            }
+        );
+        assert_eq!(view.select_plan("nothing", &store), PlanAt::NotHeld);
+        // A plan below the band leaves the cursor where the last real card put
+        // it, rather than silently aiming at whatever is at that index.
+        #[cfg(feature = "operator")]
+        assert_eq!(view.plan, 1);
+    }
+
+    #[test]
+    fn a_named_symbol_lands_on_the_row_the_current_sort_actually_drew() {
+        // The index is into the sorted rows, not the payload's. Sorted by
+        // symbol, `AAA` is first however the owner sent it — a cursor set from
+        // the payload order would mark whichever position happened to be there.
+        let mut store = Store::default();
+        store.apply(
+            crate::bus::AppEvent::Snapshot(Box::new(
+                serde_json::from_str(
+                    r#"{"live_portfolio": {"positions": [
+                        {"ticker": "ZZZ", "weight": 3.0},
+                        {"ticker": "AAA", "weight": 2.0},
+                        {"ticker": "MMM", "weight": 1.0}]}}"#,
+                )
+                .unwrap(),
+            )),
+            std::time::Instant::now(),
+        );
+        let mut view = BookView {
+            sort: Sort::Symbol,
+            ..Default::default()
+        };
+        assert!(view.select_ticker("MMM", &store));
+        assert_eq!(view.selected, 1, "the cursor read the payload's order");
+        assert!(
+            !view.select_ticker("QQQ", &store),
+            "a phantom row was found"
+        );
+        assert_eq!(view.selected, 1, "a miss moved the cursor anyway");
+    }
+
     #[test]
     fn the_gainers_and_losers_count_only_positions_that_moved() {
         let positions: Vec<Position> = serde_json::from_str(

@@ -308,10 +308,11 @@ impl Tween {
 /// Load-bearing, and the reason this constant exists at all. `should_render`
 /// renders unconditionally while effects are active, but nothing woke the loop
 /// to act on it: the idle heartbeat is 100 ms and the animation beat 120 ms, so
-/// the fastest an "active" effect could be sampled was roughly eight times a
-/// second. The read's 600 ms reveal typed itself in in five visible chunks. The
-/// loop waits with this as a timeout instead of blocking on the channel while
-/// anything is moving, and blocks again the moment nothing is.
+/// an "active" effect was sampled at whatever rate the owner's feeds happened to
+/// deliver. Measured against a live owner, the read's 600 ms reveal arrived in
+/// 11 repaints of up to 96 characters each; with this it arrives in about 30 of
+/// 5–29. The loop waits with this as a timeout instead of blocking on the
+/// channel while anything is moving, and blocks again the moment nothing is.
 pub const FX_FRAME: Duration = Duration::from_millis(FX_FRAME_MS);
 const FX_FRAME_MS: u64 = 16;
 
@@ -336,7 +337,7 @@ pub const FULL_FRAME: Duration = Duration::from_millis(2 * FX_FRAME_MS);
 /// this can only mean the loop was idle — and an effect registered in the very
 /// iteration that ended the idle has not been playing for the length of it.
 /// Unclamped, a coalesce fired by a keystroke 120 ms after the last heartbeat
-/// frame would open a third of the way through itself, and the transition an
+/// frame would open 40% of the way through itself, and the transition an
 /// operator sees would be the tail of one.
 ///
 /// The trade is deliberate: under a terminal so slow that frames are genuinely
@@ -366,9 +367,10 @@ const READ_WASH: u32 = 400;
 /// restore fade under `Halt`, and a second view switch restarts the coalesce
 /// instead of racing the first one. Two desk events share a key only when they
 /// share a region and the later one genuinely supersedes the earlier.
+///
 /// `Default` is derived only because `EffectManager<K>`'s own derived `Default`
-/// demands `K: Default` — a quirk of the derive, not a decision. Nothing reads
-/// the default key, and no rule may come to depend on which variant it is.
+/// demands `K: Default` — a quirk of that derive, not a decision here. Nothing
+/// reads the default key, and no rule may come to depend on which variant it is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FxKey {
     /// The content rect materialising after a nav change.

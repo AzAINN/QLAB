@@ -456,7 +456,7 @@ fn the_pnl_and_its_percent_are_one_colour_decision_and_not_two() {
 
 #[test]
 fn a_position_that_has_not_moved_is_neither_a_gain_nor_a_loss() {
-    // `Theme::change` paints zero green, which is right for a single hero
+    // `format::change_tone` paints zero green, which is right for a single hero
     // number and wrong for a column of them: a paper book that opened flat
     // renders as ten green rows, a claim that the desk made money on all ten.
     // The book is up overall so the ribbon's own `+$5.00` cannot be mistaken
@@ -944,7 +944,7 @@ fn the_rail_shades_every_holding_by_the_open_pnl_it_carries() {
         cell_style_on(&buf, "DOWN  -3.4%", "DOWN").fg,
         Some(t.negative_dim)
     );
-    // Flat is neither. `Theme::change` paints zero green, which would make a
+    // Flat is neither. `format::change_tone` paints zero green, which would make a
     // paper book that opened flat a rail of green tiles.
     let even = cell_style_on(&buf, "EVEN  +0.0%", "EVEN");
     assert_eq!(even.fg, Some(t.text_primary));

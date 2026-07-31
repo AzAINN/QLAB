@@ -111,8 +111,10 @@ pub fn tape(
         let tone = if stale {
             t.text_tertiary
         } else {
+            // At the precision `arrow_pct` prints, which is two decimals of a
+            // percent — otherwise `-0.00001` gets a `▲` in red.
             view.change_1d
-                .map(|c| t.change(c))
+                .map(|c| format::change_tone(c * 100.0, 2))
                 .unwrap_or(t.text_secondary)
         };
 

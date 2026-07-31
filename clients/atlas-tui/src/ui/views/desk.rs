@@ -763,10 +763,11 @@ fn alerts_body(store: &Store, width: u16) -> Vec<Line<'static>> {
             format::opt_pct(stress.leverage_headroom),
             // Absent is neither over nor under the limit, so it takes neither
             // colour: a grey `--` is the only honest rendering of a headroom
-            // nobody computed.
+            // nobody computed. The rest is decided at the one decimal of a
+            // percent this view prints, or a headroom of -2.2e-16 — what a
+            // fully invested paper book actually carries — draws `0.0%` in red.
             match stress.leverage_headroom {
-                Some(h) if negative_at_1dp(h) => t.negative,
-                Some(_) => t.positive,
+                Some(h) => format::change_tone(h * 100.0, 1),
                 None => t.text_secondary,
             },
         ),
@@ -869,10 +870,7 @@ fn replay_body(store: &Store, width: u16) -> Vec<Line<'static>> {
             Some(ret) => out.push(kv(
                 window,
                 format::signed_pct1(ret),
-                match negative_at_1dp(ret) {
-                    true => t.negative,
-                    false => t.positive,
-                },
+                format::change_tone(ret * 100.0, 1),
             )),
             None => {
                 out.push(kv(window, MISSING.to_string(), t.text_secondary));
@@ -1151,18 +1149,6 @@ fn clip(text: &str, max: usize) -> String {
 }
 
 // -- tones -----------------------------------------------------------------
-
-/// Whether a fraction is still negative once printed at one decimal of a
-/// percent — the precision every number on this view is rendered to.
-///
-/// `Theme::change` takes the sign off the raw double, so a leverage headroom of
-/// -2.2e-16 (what a fully invested paper book actually carries) draws `0.0%` in
-/// red: the colour contradicting the digits beside it. `format` already takes
-/// its sign off the *rounded* value for exactly this reason; this is that rule
-/// where a colour is chosen rather than a string.
-fn negative_at_1dp(fraction: f64) -> bool {
-    fraction.is_finite() && (fraction * 1000.0).round() < 0.0
-}
 
 /// How much of the read to believe, in three bands. Ported from the Textual
 /// client's conviction chip so the two surfaces band the same number the same

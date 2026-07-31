@@ -339,9 +339,13 @@ fn draw_grid(
     );
 }
 
+/// The tone for a column rendered through `opt_pct` — one decimal of a percent,
+/// which is the precision the colour has to be decided at.
 fn tone_of(value: Option<f64>) -> Style {
     let t = theme();
-    Style::default().fg(value.map(|v| t.change(v)).unwrap_or(t.text_secondary))
+    Style::default().fg(value
+        .map(|v| format::change_tone(v * 100.0, 1))
+        .unwrap_or(t.text_secondary))
 }
 
 /// The selected asset, charted.

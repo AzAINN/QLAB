@@ -517,6 +517,41 @@ fn a_quote_tick_flashes_the_price_cell_and_the_flash_decays_out() {
 }
 
 #[test]
+fn a_change_that_rounds_away_is_not_painted_as_a_loss_on_the_tape() {
+    // The finding, on the surface it was found on: the tape's arrow came off the
+    // rounded value and its colour off the raw one, so a change of -1e-5 rendered
+    // `▲0.00%` in red. One rounding now decides both.
+    let t = Theme::truecolor();
+    let mut store = fixture_store();
+    let now = store.last_snapshot_at.unwrap();
+    store.apply(
+        quote(serde_json::json!([{"ticker": "SPY", "price": 729.46, "change_1d": -0.00001}])),
+        now,
+    );
+
+    let tape = row_styles(&store, &Fx::default(), 120, 36, now, 0);
+    let row: String = tape.iter().map(|(symbol, _)| symbol.as_str()).collect();
+    assert!(
+        row.contains("▲0.00%"),
+        "the glyph reads the rounded value: {row}"
+    );
+    assert!(
+        !row.contains("▼0.00%"),
+        "and nothing else on the tape rounded the other way: {row}"
+    );
+    let arrows: Vec<_> = tape
+        .iter()
+        .filter(|(symbol, _)| symbol == "▲")
+        .filter_map(|(_, style)| style.fg)
+        .collect();
+    assert!(!arrows.is_empty(), "the quote never reached the tape");
+    assert!(
+        arrows.iter().all(|fg| *fg == t.positive),
+        "a ▲ was painted in the colour of a fall: {arrows:?}"
+    );
+}
+
+#[test]
 fn the_tape_moves_one_cell_per_beat() {
     // The ticker is one of the three indicators that claim this client is
     // alive. A row that does not move while ticks arrive is the exact shape a

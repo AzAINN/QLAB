@@ -334,12 +334,12 @@ fn mover(role: &str, view: AssetView<'_>) -> Line<'static> {
     // `movers` only ever hands back rows that carry a change.
     let change = view.change_1d.unwrap_or_default();
     let text = format::signed_pct(change);
-    // The glyph reads the *rendered* number: `signed_pct` takes its sign from
-    // the rounded value, and a ▼ over `+0.00%` is a row contradicting itself.
-    let (arrow, tone) = if text.starts_with('-') {
-        ("▼", t.negative)
-    } else {
-        ("▲", t.positive)
+    // Glyph and colour from one rounding, at the two decimals of a percent
+    // `signed_pct` prints — a ▼ over `+0.00%`, or a red `▲`, is a row
+    // contradicting itself.
+    let (arrow, tone) = match format::negative_at(change * 100.0, 2) {
+        true => ("▼", t.negative),
+        false => ("▲", t.positive),
     };
     Line::from(vec![
         Span::styled(format!(" {arrow} "), Style::default().fg(tone)),

@@ -398,7 +398,10 @@ fn draw_pnl(f: &mut Frame, area: Rect, book: Option<&LivePortfolio>) {
             label(CELL_LABELS[1]),
             hero(
                 or_missing(pnl.map(format::signed_money)),
-                pnl.map(|v| t.change(v)).unwrap_or(t.text_secondary),
+                // At the two decimals `signed_money` prints: a cash P&L of
+                // -1e-13 renders `+$0.00` and must not be red beside it.
+                pnl.map(|v| format::change_tone(v, 2))
+                    .unwrap_or(t.text_secondary),
             ),
             // A single space between the chips rather than the value cell's
             // ` · `: at the baseline width this cell is fifteen columns, and the
@@ -442,7 +445,10 @@ fn draw_window(f: &mut Frame, area: Rect, performance: Option<&Performance>) {
             label(CELL_LABELS[2]),
             hero(
                 or_missing(change.map(format::signed_pct)),
-                change.map(|v| t.change(v)).unwrap_or(t.text_secondary),
+                // At the two decimals of a percent `signed_pct` prints.
+                change
+                    .map(|v| format::change_tone(v * 100.0, 2))
+                    .unwrap_or(t.text_secondary),
             ),
             Line::from(Span::styled(
                 format!("{} marks", or_missing(marks.map(|n| n.to_string()))),
@@ -1000,7 +1006,7 @@ impl BookView {
         // make money", so both take their tone from the P&L itself — a percent
         // coloured off its own sign would be a second axis that can disagree
         // with the first, and a green `+1.20%` beside a red `-$4.00` is a row
-        // that says both. Flat is neither: `Theme::change` paints zero green,
+        // that says both. Flat is neither: `format::change_tone` paints zero green,
         // which is right for the ribbon's single hero and wrong for a column of
         // them, since a paper book that opened flat would render as ten green
         // rows — a claim the desk made money on all ten.
@@ -1533,7 +1539,7 @@ fn weight_step(weight: f64) -> u8 {
 
 fn pnl_shade(pct: f64) -> Style {
     let t = theme();
-    // Flat is neither, exactly as the blotter's paired P&L columns: `Theme::change`
+    // Flat is neither, exactly as the blotter's paired P&L columns: `format::change_tone`
     // paints zero green, which is right for one hero number and wrong for a grid
     // of them — a paper book that opened flat would render as a rail of green
     // tiles, a claim the desk made money on every name it holds.
@@ -1601,13 +1607,13 @@ fn mover(role: &str, row: &BlotterRow<'_>) -> Line<'static> {
     // `movers` only ever hands back rows that carry a percentage.
     let pct = row.pnl_pct.unwrap_or_default();
     let text = format::signed_pct1(pct);
-    // The glyph reads the *rendered* number, not the raw one: `signed_pct1`
-    // takes its sign from the rounded value, and a ▼ over `+0.0%` is a row
+    // Glyph and colour from one rounding, at the single decimal of a percent
+    // `signed_pct1` prints — a ▼ over `+0.0%`, or a red `▲`, is a row
     // contradicting itself. Flat gets neither arrow — a ▲ over a book that did
     // not move is a rise the desk did not make.
     let (arrow, tone) = if pct == 0.0 {
         ("·", t.text_primary)
-    } else if text.starts_with('-') {
+    } else if format::negative_at(pct * 100.0, 1) {
         ("▼", t.negative)
     } else {
         ("▲", t.positive)
@@ -1948,7 +1954,7 @@ mod tests {
 
     #[test]
     fn a_position_that_has_not_moved_is_neither_a_gain_nor_a_loss_on_the_rail() {
-        // The blotter's rule, one pane over: `Theme::change` paints zero green,
+        // The blotter's rule, one pane over: `format::change_tone` paints zero green,
         // and a paper book that opened flat would render as a rail of green
         // tiles — a claim the desk made money on every name it holds.
         let t = theme();

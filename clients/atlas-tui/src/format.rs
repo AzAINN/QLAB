@@ -62,7 +62,7 @@ pub fn money(value: f64) -> String {
 }
 
 /// Currency that always states its sign — P&L, flows, anything where `+` is
-/// information rather than noise. Zero reads `+`, matching `Theme::change`.
+/// information rather than noise. Zero reads `+`, matching `change_tone`.
 pub fn signed_money(value: f64) -> String {
     let Some((negative, digits)) = fixed(value, 2) else {
         return MISSING.to_string();
@@ -91,7 +91,7 @@ pub fn compact_money(value: f64) -> String {
 /// `compact_money` that always states its sign — a P&L column, where `+` is
 /// information rather than noise, and where a nine-figure winner still has to
 /// fit the cell the column was sized for. Zero reads `+`, matching
-/// `signed_money` and `Theme::change`.
+/// `signed_money` and `change_tone`.
 ///
 /// Nine characters through `±$999.99B`, which is the range `compact_money`
 /// bands into; past it both spellings grow, for the reason that function
@@ -183,6 +183,39 @@ pub fn compact_volume(shares: i64) -> String {
     format!("{sign}{value:.2}{suffix}")
 }
 
+/// Whether a number still reads negative once rounded to the `dp` decimals it is
+/// **printed** at.
+///
+/// The one rule behind both halves of a change on screen. `fixed` already takes
+/// the digits' sign from the rounded value, so `-0.00001` prints `0.00%`; every
+/// arrow and every colour beside it read the raw double, so the same number
+/// rendered `▲0.00%` in red — a glyph and a shade contradicting each other about
+/// one figure, which is the kind of thing an operator learns to distrust the
+/// whole surface over.
+///
+/// Callers pass the value *and the precision they are formatting with*, which is
+/// what keeps the two in step. The percent helpers all print `fraction * 100`,
+/// so a percent call site passes that — the same expression the formatter beside
+/// it uses internally.
+pub fn negative_at(printed: f64, dp: usize) -> bool {
+    matches!(fixed(printed, dp), Some((true, _)))
+}
+
+/// The colour of a change, decided at the precision it is printed to.
+///
+/// Replaces `Theme::change`, which read the raw double. Absent — anything that
+/// is not finite — is neither a rise nor a fall, and takes the tone for "the
+/// owner declined to say" rather than the green that `>= 0.0` would have given
+/// it. Zero is positive by contract, unchanged: flat is not a loss.
+pub fn change_tone(printed: f64, dp: usize) -> Color {
+    let t = theme();
+    match fixed(printed, dp) {
+        Some((true, _)) => t.negative,
+        Some((false, _)) => t.positive,
+        None => t.text_secondary,
+    }
+}
+
 /// A change as arrow-plus-magnitude, with the colour that goes with it. The
 /// number is absolute: the glyph is the sign, and printing both reads as a
 /// double negative.
@@ -191,8 +224,8 @@ pub fn arrow_chg(value: f64) -> (String, Color) {
     if !value.is_finite() {
         return (MISSING.to_string(), t.text_secondary);
     }
-    let arrow = if value >= 0.0 { "▲" } else { "▼" };
-    (format!("{arrow} {:.2}", value.abs()), t.change(value))
+    let arrow = if negative_at(value, 2) { "▼" } else { "▲" };
+    (format!("{arrow} {:.2}", value.abs()), change_tone(value, 2))
 }
 
 /// A change as arrow-plus-percent, tight enough for the ticker: `▲1.34%`.
@@ -285,7 +318,7 @@ mod tests {
     fn arrow_pct_carries_the_sign_in_the_glyph_and_stays_tight() {
         assert_eq!(arrow_pct(-0.013394), "▼1.34%");
         assert_eq!(arrow_pct(0.0042), "▲0.42%");
-        // A minus that rounds away is not a loss, matching `Theme::change`.
+        // A minus that rounds away is not a loss, matching `change_tone`.
         assert_eq!(arrow_pct(-0.00001), "▲0.00%");
         assert_eq!(arrow_pct(f64::NAN), MISSING);
     }
@@ -393,6 +426,69 @@ mod tests {
     fn a_rounded_away_minus_does_not_survive_as_a_sign() {
         assert_eq!(money(-0.001), "$0.00");
         assert_eq!(signed_pct(-0.00001), "+0.00%");
+    }
+
+    #[test]
+    fn the_glyph_and_the_colour_are_decided_at_the_precision_the_number_prints_at() {
+        let t = theme();
+        // The bug, from both sides of zero: a magnitude that rounds away is not
+        // a direction, and a colour that says otherwise contradicts the digits
+        // it is painting. `Theme::change` read the raw double and got this
+        // wrong on four surfaces at once.
+        for tiny in [-1e-13, -0.004, -0.0049999] {
+            assert!(!negative_at(tiny, 2), "{tiny}");
+            assert_eq!(change_tone(tiny, 2), t.positive, "{tiny}");
+        }
+        // The other side of the same boundary: a magnitude that survives the
+        // rounding still reads as the loss it is.
+        for real in [-0.005, -0.006, -1.0] {
+            assert!(negative_at(real, 2), "{real}");
+            assert_eq!(change_tone(real, 2), t.negative, "{real}");
+        }
+        // Positive is positive at every size, and zero is positive by contract:
+        // flat is not a loss, and the reference desk paints it green.
+        for up in [0.0, 1e-13, 0.005, 1.0] {
+            assert!(!negative_at(up, 2));
+            assert_eq!(change_tone(up, 2), t.positive, "{up}");
+        }
+
+        // The precision is the caller's, because it is the one they print at.
+        assert!(!negative_at(-0.04, 1), "-0.04 prints 0.0");
+        assert!(negative_at(-0.05, 1));
+        assert!(
+            negative_at(-0.04, 2),
+            "and at two decimals it is a loss again"
+        );
+
+        // Absent is neither a rise nor a fall.
+        assert_eq!(change_tone(f64::NAN, 2), t.text_secondary);
+        assert_eq!(change_tone(f64::INFINITY, 2), t.text_secondary);
+        assert!(!negative_at(f64::NAN, 2));
+    }
+
+    #[test]
+    fn the_arrow_and_its_colour_never_disagree() {
+        // `arrow_chg` had the glyph off the rounded value and the colour off the
+        // raw one, so this rendered a green-shaped `▲` in red.
+        let (text, tone) = arrow_chg(-0.001);
+        assert_eq!(text, "▲ 0.00");
+        assert_eq!(tone, theme().positive);
+
+        let (text, tone) = arrow_chg(-0.006);
+        assert_eq!(text, "▼ 0.01");
+        assert_eq!(tone, theme().negative);
+
+        // And the whole vocabulary agrees about one number: the glyph the
+        // percent helper prints and the colour beside it come off one rounding.
+        for value in [-1e-9, -0.004999, 0.0, 0.004999, 12.5, -12.5] {
+            let printed = arrow_pct(value / 100.0);
+            let tone = change_tone(value, 2);
+            assert_eq!(
+                printed.starts_with('▼'),
+                tone == theme().negative,
+                "{value} printed {printed} in a colour that disagrees"
+            );
+        }
     }
 
     #[test]

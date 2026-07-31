@@ -120,16 +120,9 @@ impl Theme {
         }
     }
 
-    /// The colour of a change. Zero counts as positive — flat is not a loss,
-    /// and the reference desk paints it green. Callers pass finite numbers:
-    /// absent data becomes `format::MISSING` before it ever reaches a colour.
-    pub fn change(&self, v: f64) -> Color {
-        if v >= 0.0 {
-            self.positive
-        } else {
-            self.negative
-        }
-    }
+    // `change(v)` used to live here and took its sign off the raw double, which
+    // is how `-0.00001` came to render `▲0.00%` in red on four surfaces at once.
+    // The rule belongs where the rounding does: `format::change_tone`.
 
     #[cfg(test)]
     fn all_colors(&self) -> Vec<Color> {
@@ -213,16 +206,6 @@ fn truecolor_from(colorterm: Option<&str>, term: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn zero_change_is_positive_by_contract() {
-        assert_eq!(theme().change(0.0), theme().positive);
-    }
-
-    #[test]
-    fn a_loss_colours_negative() {
-        assert_eq!(theme().change(-0.0001), theme().negative);
-    }
 
     #[test]
     fn the_truecolor_theme_is_rgb_and_the_fallback_is_indexed() {

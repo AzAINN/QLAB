@@ -228,7 +228,11 @@ mod operator {
     /// `http_poll.rs` gives: the thing worth pinning is that the bytes an owner
     /// would actually dispatch on are the bytes this client writes. A faked
     /// `reqwest` layer would pin the fake.
-    fn spawn_owner(status: u16, body: &'static str) -> Owner {
+    /// `body` is taken by value rather than as `&'static str`: the desk-mode
+    /// answers below vary one field at a time, and a canned owner that could
+    /// only serve a literal would have each of those spelled out in full.
+    fn spawn_owner(status: u16, body: impl Into<String>) -> Owner {
+        let body = body.into();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1047,6 +1051,221 @@ mod operator {
                 refetches(&AppEvent::Wrote(outcome.clone())),
                 "{outcome:?} must bring the next poll forward"
             );
+        }
+    }
+
+    // -- the desk mode's answer -------------------------------------------
+    //
+    // The request half of `/mode` is pinned above with every other verb. This
+    // is what the owner says *back*, which is where the two ways this command
+    // can mislead an operator live: a switch reported off a body that never
+    // named the desk, and a real book accepted with a login that does not work.
+
+    /// The owner's own answer shape (`desk_mode_payload`), with the parts a
+    /// test varies spelled out.
+    fn desk_mode_body(label: &str, credentials: &str) -> String {
+        format!(
+            r#"{{"data": "live", "book": "alpaca", "label": "{label}",
+                 "offline": false, {credentials}}}"#
+        )
+    }
+
+    fn point_at(book: &str) -> Command {
+        Command::DeskMode {
+            data: "live".into(),
+            book: book.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_desk_mode_reports_the_owners_own_label_and_reaches_the_screen() {
+        // The label is the sentence the *owner* makes of the pair. This client
+        // composing one out of the two words it just sent would be a receipt of
+        // its own making — the same shape as reporting a 200-with-`executed:
+        // false` as a fill, one authority down.
+        let owner = spawn_owner(
+            200,
+            r#"{"data": "live", "book": "simulated", "label": "LIVE · SIM BOOK",
+                "offline": false, "credentials_ok": true, "credentials": "none needed"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let outcome = perform(&client, point_at("simulated")).await;
+        assert_eq!(
+            outcome,
+            Some(Wrote::Pointed {
+                label: "LIVE · SIM BOOK".into(),
+                warning: None,
+            })
+        );
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/desk_mode");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({"data": "live", "book": "simulated"})
+        );
+
+        // And it reaches the operator, in the owner's words. A `Wrote` variant
+        // with no toast arm is a write nobody is told about.
+        let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.unwrap()))
+            .expect("a desk mode change owes the operator a box");
+        assert_eq!(toast.level, atlas::ui::widgets::toast::Level::Info);
+        assert!(toast.message.contains("LIVE · SIM BOOK"), "{toast:?}");
+    }
+
+    #[tokio::test]
+    async fn a_desk_mode_the_owner_did_not_name_is_a_failure() {
+        // `desk_mode_payload` always carries a label. A 200 without one is a
+        // broken contract, and the precedent is `StartWorkflow`: a handle the
+        // owner did not hand back is not invented either.
+        for body in [
+            r#"{"data": "live", "book": "alpaca", "offline": false}"#,
+            r#"{"data": "live", "book": "alpaca", "label": "", "offline": false}"#,
+        ] {
+            let owner = spawn_owner(200, body);
+            let client = WriteClient::new(&owner.base).unwrap();
+            match perform(&client, point_at("alpaca")).await {
+                Some(Wrote::Failed { what, said }) => {
+                    assert!(what.contains("alpaca"), "{what}");
+                    assert!(said.contains("without a label"), "{said}");
+                }
+                other => panic!("an unlabelled 200 must not read as a switch: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_real_book_the_owner_cannot_reach_warns_instead_of_reading_as_a_switch() {
+        // A 200 that changed the desk and cannot trade it. Reporting that as a
+        // clean switch is the "succeeded and did nothing" shape this client
+        // refuses everywhere else.
+        let owner = spawn_owner(
+            200,
+            desk_mode_body(
+                "LIVE · ALPACA BOOK",
+                r#""credentials_ok": false, "credentials": "ALPACA_API_KEY_ID is not set""#,
+            ),
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let outcome = perform(&client, point_at("alpaca")).await;
+        match &outcome {
+            Some(Wrote::Pointed { label, warning }) => {
+                assert_eq!(label, "LIVE · ALPACA BOOK");
+                assert_eq!(warning.as_deref(), Some("ALPACA_API_KEY_ID is not set"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.unwrap()))
+            .expect("a box");
+        assert_eq!(
+            toast.level,
+            atlas::ui::widgets::toast::Level::Warn,
+            "a book that cannot trade must not be drawn as a clean switch"
+        );
+        assert!(toast.message.contains("ALPACA_API_KEY_ID"), "{toast:?}");
+    }
+
+    #[tokio::test]
+    async fn the_credential_warning_speaks_only_about_the_book_that_can_trade() {
+        // The simulated book needs no login, so a warning beside it would train
+        // an operator to read past the one that matters.
+        let owner = spawn_owner(
+            200,
+            r#"{"data": "synthetic", "book": "simulated", "label": "SYNTHETIC",
+                "offline": true, "credentials_ok": false, "credentials": "no credentials"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(
+                &client,
+                Command::DeskMode {
+                    data: "synthetic".into(),
+                    book: "simulated".into()
+                }
+            )
+            .await,
+            Some(Wrote::Pointed {
+                label: "SYNTHETIC".into(),
+                warning: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_working_alpaca_login_is_not_warned_about() {
+        let owner = spawn_owner(
+            200,
+            desk_mode_body(
+                "LIVE · ALPACA BOOK",
+                r#""credentials_ok": true, "credentials": "paper key ending 4f21""#,
+            ),
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, point_at("alpaca")).await,
+            Some(Wrote::Pointed {
+                label: "LIVE · ALPACA BOOK".into(),
+                warning: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_owner_that_will_not_say_is_warned_about_rather_than_assumed_fine() {
+        // Two shapes of silence: the flag absent, and a description absent
+        // behind a false flag. Neither may pass as a working login on the book
+        // that can place real orders — invariant 4, refuse loudly.
+        let quiet = spawn_owner(
+            200,
+            r#"{"data": "live", "book": "alpaca", "label": "LIVE · ALPACA BOOK",
+                "offline": false}"#,
+        );
+        let client = WriteClient::new(&quiet.base).unwrap();
+        match perform(&client, point_at("alpaca")).await {
+            Some(Wrote::Pointed { warning, .. }) => {
+                assert!(warning.unwrap().contains("did not say"));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let vague = spawn_owner(
+            200,
+            desk_mode_body("LIVE · ALPACA BOOK", r#""credentials_ok": false"#),
+        );
+        let client = WriteClient::new(&vague.base).unwrap();
+        match perform(&client, point_at("alpaca")).await {
+            Some(Wrote::Pointed { warning, .. }) => {
+                assert!(warning.unwrap().contains("no usable Alpaca credentials"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pair_the_owner_forbids_comes_back_in_its_own_words() {
+        // `DeskMode.__post_init__` refuses synthetic data on the Alpaca book.
+        // This client does not re-check that rule — a second copy would drift
+        // from the one that decides — so the owner's 400 is what an operator
+        // reads, verbatim.
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "synthetic data cannot trade the Alpaca book"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(
+            &client,
+            Command::DeskMode {
+                data: "synthetic".into(),
+                book: "alpaca".into(),
+            },
+        )
+        .await
+        {
+            Some(Wrote::Failed { what, said }) => {
+                assert!(what.contains("synthetic"), "{what}");
+                assert!(said.contains("cannot trade the Alpaca book"), "{said}");
+            }
+            other => panic!("a refused pair must not read as a switch: {other:?}"),
         }
     }
 

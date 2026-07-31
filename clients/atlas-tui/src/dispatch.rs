@@ -241,16 +241,27 @@ mod armed {
     /// beside it would train an operator to read past the one that matters. The
     /// owner sets `credentials_ok` false both when there is no login and when
     /// there is an unusable one, and `credentials` is its description of which.
+    ///
+    /// An owner that does not say at all is warned about rather than assumed
+    /// fine. `desk_mode_payload` always carries the flag, so its absence is a
+    /// contract this client cannot read — and silence about the book that can
+    /// place real orders is the one answer that must not pass as a clean
+    /// switch. Invariant 4: refuse loudly rather than degrade quietly.
     fn credential_warning(said: &serde_json::Value, book: &str) -> Option<String> {
-        if book != "alpaca" || said.get("credentials_ok")?.as_bool()? {
+        if book != "alpaca" {
             return None;
         }
-        Some(
-            said.get("credentials")
-                .and_then(|v| v.as_str())
-                .unwrap_or("the owner reports no usable Alpaca credentials")
-                .to_string(),
-        )
+        match said.get("credentials_ok").and_then(|v| v.as_bool()) {
+            Some(true) => None,
+            Some(false) => Some(
+                said.get("credentials")
+                    .and_then(|v| v.as_str())
+                    .filter(|said| !said.is_empty())
+                    .unwrap_or("the owner reports no usable Alpaca credentials")
+                    .to_string(),
+            ),
+            None => Some("the owner did not say whether the Alpaca credentials work".to_string()),
+        }
     }
 }
 

@@ -1853,6 +1853,56 @@ def test_resetting_the_simulated_book_spares_the_alpaca_history(session):
             session.registry.equity_marks(book="alpaca_paper")] == [98_000.0]
 
 
+def test_the_tui_snapshot_serves_the_approval_an_execution_can_bind_to(session):
+    # The execute gate consumes an APPROVED, unconsumed approval — a pending one
+    # authorises nothing. The snapshot used to carry only the pending queue, so
+    # a client polling /api/tui could never see the record a legal execution
+    # binds to, and the operator surface had no way to offer the key.
+    pending_plan = _checked_plan(session)
+    approved_plan = _checked_plan(session, tilt=0.02)
+    spent_plan = _checked_plan(session, tilt=0.04)
+
+    approved = _approve(session, approved_plan)
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": pending_plan, "offline": True})
+    pending = created["approval_id"]
+    spent = _approve(session, spent_plan)
+    handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": spent_plan, "human_confirmed": True,
+         "approval_id": spent})
+    assert session.registry.get_approval_request(spent)["status"] == "consumed"
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    served = {a["approval_id"]: a["status"] for a in snap["approvals"]}
+    assert served.get(pending) == "pending"
+    assert served.get(approved) == "approved"
+    # Spent, rejected and expired records are history, not a decision queue: an
+    # approval a client could act on is exactly one of these two statuses.
+    assert spent not in served
+    assert set(served.values()) == {"pending", "approved"}
+    # Newest first, as every other list in the payload is served.
+    stamps = [a["created_at"] for a in snap["approvals"]]
+    assert stamps == sorted(stamps, reverse=True)
+
+
+def test_the_snapshot_approval_cap_cannot_be_starved_by_one_status(session):
+    # The cap is per status rather than shared. One busy queue must never crowd
+    # the other out — a desk with eleven pending requests would otherwise stop
+    # showing the one approval that can actually be executed.
+    approved = _approve(session, _checked_plan(session))
+    for i in range(1, 13):
+        handle_api(
+            session, "POST", "/api/approvals", {},
+            {"plan_id": _checked_plan(session, tilt=0.001 * i), "offline": True})
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    served = [(a["approval_id"], a["status"]) for a in snap["approvals"]]
+    assert (approved, "approved") in served
+    assert sum(1 for _, status in served if status == "pending") == 10
+
+
 def test_a_consumed_approval_cannot_be_revived_and_spent_again(session):
     # The challenge route wrote "pending" over whatever status it found, so a
     # spent approval could be re-opened, re-approved, and used to authorise a

@@ -116,6 +116,9 @@ _STREAM_LOCK_WAIT_SECONDS = 2.0
 _VALUATION_TTL_SECONDS = 15.0
 
 _MARKET_EVENT_LIMIT = 500
+# How many approvals of *each* actionable status ride in one /api/tui payload.
+# Per status, not shared — see `UISession.actionable_approvals`.
+_SNAPSHOT_APPROVALS = 10
 _STREAM_PAGE_CEILING = 5000
 _QUOTE_REFRESH_TTL_SECONDS = 30.0
 _QUOTE_MIN_INTERVAL_SECONDS = 5.0
@@ -1811,6 +1814,34 @@ class UISession:
         self.registry.expire_due_approvals(self._now_iso())
         return {"approvals": self.registry.list_approval_requests(50, status)}
 
+    def actionable_approvals(self, limit: int = _SNAPSHOT_APPROVALS) -> list[dict]:
+        """The approvals a client can still act on: pending, and approved-unspent.
+
+        Both statuses, because they answer different keys. A *pending* request
+        is what approve/reject bind to; an *approved, unconsumed* one is what
+        the execute gate consumes (``execute_plan_with_approval``). A snapshot
+        carrying only the pending queue could never show a client the record a
+        legal execution binds to — the approval would be invisible from the
+        moment it became usable.
+
+        The cap is per status rather than shared. ``list_approval_requests``
+        filters one status at a time, and merging the two under a single limit
+        would let a busy pending queue crowd out the one approval that can
+        actually be executed.
+
+        ``consumed_at`` is filtered rather than inferred. The transition table
+        already implies it — consumption moves the row to ``consumed`` — but
+        this list is read as "what the gate would accept", and it should state
+        that precondition rather than rely on a second table to imply it.
+        """
+        rows = self.registry.list_approval_requests(limit, "pending")
+        rows += [row for row
+                 in self.registry.list_approval_requests(limit, "approved")
+                 if not row.get("consumed_at")]
+        # Newest first across both, as every other list in the payload is.
+        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        return rows
+
     def get_approval(self, approval_id: str) -> dict:
         self.registry.expire_due_approvals(self._now_iso())
         approval = self.registry.get_approval_request(approval_id)
@@ -2069,7 +2100,7 @@ class UISession:
             },
             "news": self.news_payload(offline),
             "atlas_tasks": self.registry.list_atlas_tasks(10),
-            "approvals": self.registry.list_approval_requests(10, "pending"),
+            "approvals": self.actionable_approvals(),
             "quotes": self.quotes(),
             "agents": self.agents(),
             "decisions": decisions,

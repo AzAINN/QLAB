@@ -750,6 +750,18 @@ def _records(value: Any) -> list[dict[str, Any]]:
     return [row for row in value if isinstance(row, dict)]
 
 
+def _pending_approvals(value: Any) -> list[dict[str, Any]]:
+    """The rows of ``snapshot["approvals"]`` still waiting on a human.
+
+    The owner's snapshot serves both actionable statuses — pending, and
+    approved-but-unspent, which is what an execution binds to. Every surface
+    below counts and lists the *decision queue*, so it filters rather than
+    taking the list whole: an approved row rendered under "PENDING APPROVALS"
+    would invite a second decision on something already decided.
+    """
+    return [row for row in _records(value) if row.get("status") == "pending"]
+
+
 def _finite_number(value: Any) -> float | None:
     """JSON numbers are displayable; missing, boolean, and non-finite values are not."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -2848,7 +2860,7 @@ class QlabTui(App[None]):
         mode = str(atlas.get("mode", "—"))
         state = str(atlas.get("state", "—"))
         state_tone = _ATLAS_STATE_TONES.get(state, TEXT_HI)
-        approvals = _records(self.snapshot.get("approvals"))
+        approvals = _pending_approvals(self.snapshot.get("approvals"))
         tasks = _records(self.snapshot.get("atlas_tasks"))
         active = [t for t in tasks if t.get("status") in ("queued", "running")]
         lines = _key_number_markup(
@@ -2935,7 +2947,7 @@ class QlabTui(App[None]):
         mode = str(atlas.get("mode", "—"))
         state = str(atlas.get("state", "—"))
         state_tone = _ATLAS_STATE_TONES.get(state, TEXT_HI)
-        approvals = _records(self.snapshot.get("approvals"))
+        approvals = _pending_approvals(self.snapshot.get("approvals"))
         tasks = _records(self.snapshot.get("atlas_tasks"))
         active = [t for t in tasks if t.get("status") in ("queued", "running")]
         pairs = [
@@ -4371,7 +4383,8 @@ class QlabTui(App[None]):
         atlas_token = (
             f"ATLAS {str(atlas.get('mode', '—')).upper()}/"
             f"{str(atlas.get('state', '—')).upper()}" if atlas else "ATLAS —")
-        approvals = (self.snapshot.get("approvals") or []) if self.snapshot else []
+        approvals = _pending_approvals(
+            self.snapshot.get("approvals") if self.snapshot else None)
         return [
             ("quote feed", feed_token),
             ("mcp proxy", mcp),

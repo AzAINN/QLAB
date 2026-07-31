@@ -343,6 +343,15 @@ fn the_full_frame_lane_steps_at_half_the_rate_the_panes_do_without_strobing() {
         painted(),
         "a frame the lane owed nothing on showed the desk unhalted"
     );
+    // The mirror of it, and the half the strobe bug would also have shown: a
+    // frame the lane *did* advance on has to be tinted too. Both are measured
+    // against a fresh buffer, because the tint accumulating in a reused one is
+    // what let the original strobe pass every test in this file.
+    assert_ne!(
+        advances,
+        painted(),
+        "a frame the lane advanced on showed the desk unhalted"
+    );
     assert_ne!(
         owes_nothing, advances,
         "the breath never advanced at all — a cap is not a mute"

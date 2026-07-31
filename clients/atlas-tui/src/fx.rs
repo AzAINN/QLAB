@@ -1153,10 +1153,13 @@ mod tests {
 
     #[test]
     fn the_halt_cadence_is_pinned_to_the_two_facts_it_was_chosen_from() {
-        // Never slower than the heartbeat: a client repainting under 10 fps
-        // during an incident is the one moment an operator would read a live
-        // desk as a hung one. At equality it costs no extra wakes at all.
-        assert!(HALT_FRAME <= crate::store::IDLE_FRAME);
+        // *Equal* to the heartbeat, not merely no slower than it. Both halves
+        // of the choice this constant documents need the equality: slower and
+        // a client repainting under 10 fps during an incident reads as a hung
+        // one, faster and a halt costs wakes a quiet desk does not — which is
+        // the whole reason the halt has a cadence of its own. `<=` let the
+        // second half drift away silently, and a mutation to 50 ms passed it.
+        assert_eq!(HALT_FRAME, crate::store::IDLE_FRAME);
         assert!(
             FULL_FRAME < HALT_FRAME,
             "the cheap lane must be the slow one"

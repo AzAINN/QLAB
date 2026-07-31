@@ -2118,6 +2118,33 @@ mod tests {
     }
 
     #[test]
+    fn a_tile_shades_nothing_the_owner_did_not_measure() {
+        // `NaN > 0.0` is false, so a percentage nobody computed took the
+        // *negative* ramp and rendered `--` on a red background — a loss the
+        // desk never had, in the half of the cell a reader trusts before the
+        // text. Unreachable from the owner's JSON, which cannot carry a NaN;
+        // reachable from arithmetic this client may grow later.
+        let t = theme();
+        let row = BlotterRow {
+            ticker: Some("SPY"),
+            qty: None,
+            last: None,
+            avg: None,
+            weight: Some(f64::NAN),
+            value: None,
+            pnl: None,
+            pnl_pct: Some(f64::NAN),
+            history: None,
+        };
+        let unmeasured = Style::default().fg(t.text_secondary);
+        for mode in [Heat::Pnl, Heat::Weight] {
+            let tile = heat_tile(&row, mode);
+            assert!(tile.content.contains(MISSING), "{mode:?}: {tile:?}");
+            assert_eq!(tile.style, unmeasured, "{mode:?} shaded an absent number");
+        }
+    }
+
+    #[test]
     fn the_ribbon_floor_is_the_narrowest_pane_where_every_cell_clears() {
         // The constant against the solver that produces it. Spelled as
         // `max(min / ratio)` the floor is 75, one column from where the refusal

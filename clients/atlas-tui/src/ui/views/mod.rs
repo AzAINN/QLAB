@@ -73,7 +73,7 @@ impl Views {
         Self {
             desk: desk::DeskView,
             markets: markets::MarketsView::default(),
-            book: book::BookView,
+            book: book::BookView::default(),
             research: Unbuilt(ViewId::Research),
             workforce: Unbuilt(ViewId::Workforce),
             audit: Unbuilt(ViewId::Audit),
@@ -250,6 +250,56 @@ mod tests {
             2,
             "the selection did not survive a view switch"
         );
+    }
+
+    #[test]
+    fn the_blotters_sort_and_page_survive_a_switch_away_and_back() {
+        // The same regression as the markets cursor, on the two things BOOK
+        // retains. A registry that rebuilt the view would hand back a blotter
+        // sorted by weight at page one, silently discarding the column the
+        // operator chose and the page they scrolled to.
+        let mut store = store_with_a_book(40);
+        let mut views = Views::new();
+
+        // The draw is what tells the blotter how many rows a page holds, so it
+        // comes before the page turn exactly as the runtime's loop does it.
+        store.nav.view = ViewId::Book;
+        draw_once(&views, &store);
+        views.on_key(ViewId::Book, key(KeyCode::Char('s')), &mut store);
+        views.on_key(ViewId::Book, key(KeyCode::Char(']')), &mut store);
+        let chosen = (views.book.sort(), views.book.top());
+        assert_ne!(chosen.0, book::Sort::default(), "the sort key did not move");
+        assert!(chosen.1 > 0, "the page did not turn");
+
+        store.nav.view = ViewId::Markets;
+        views.on_key(ViewId::Markets, key(KeyCode::Down), &mut store);
+        draw_once(&views, &store);
+        store.nav.view = ViewId::Book;
+        draw_once(&views, &store);
+        assert_eq!(
+            (views.book.sort(), views.book.top()),
+            chosen,
+            "the blotter lost its sort or its page across a view switch"
+        );
+    }
+
+    /// A store carrying a live book of `n` positions and no market assets.
+    fn store_with_a_book(n: usize) -> Store {
+        let positions: Vec<String> = (0..n)
+            .map(|i| format!(r#"{{"ticker": "P{i:02}", "weight": {}}}"#, (n - i) as f64))
+            .collect();
+        let mut store = Store::default();
+        store.apply(
+            AppEvent::Snapshot(Box::new(
+                serde_json::from_str(&format!(
+                    r#"{{"live_portfolio": {{"positions": [{}]}}}}"#,
+                    positions.join(",")
+                ))
+                .unwrap(),
+            )),
+            Instant::now(),
+        );
+        store
     }
 
     #[test]

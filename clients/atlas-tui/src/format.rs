@@ -82,11 +82,35 @@ pub fn signed_money(value: f64) -> String {
 /// `B` is the top band, as in `compact_volume`: a larger figure renders as
 /// thousands of `B` rather than inventing a unit.
 pub fn compact_money(value: f64) -> String {
+    match compact(value) {
+        Some((negative, digits)) => format!("{}{digits}", if negative { "-" } else { "" }),
+        None => MISSING.to_string(),
+    }
+}
+
+/// `compact_money` that always states its sign — a P&L column, where `+` is
+/// information rather than noise, and where a nine-figure winner still has to
+/// fit the cell the column was sized for. Zero reads `+`, matching
+/// `signed_money` and `Theme::change`.
+///
+/// Nine characters through `±$999.99B`, which is the range `compact_money`
+/// bands into; past it both spellings grow, for the reason that function
+/// documents — `B` is the top band and a larger figure renders as thousands of
+/// `B` rather than inventing a unit.
+pub fn signed_compact_money(value: f64) -> String {
+    match compact(value) {
+        Some((negative, digits)) => format!("{}{digits}", if negative { "-" } else { "+" }),
+        None => MISSING.to_string(),
+    }
+}
+
+/// Whether the *rounded* value is negative, and its banded magnitude with the
+/// `$` and the unit suffix — everything but the sign, which the two callers
+/// spell differently.
+fn compact(value: f64) -> Option<(bool, String)> {
     // The sign comes off the *rounded* value, so a cash balance of -1e-13 — what
     // a fully-invested paper book actually carries — is not drawn as a debt.
-    let Some((negative, _)) = fixed(value, 2) else {
-        return MISSING.to_string();
-    };
+    let (negative, _) = fixed(value, 2)?;
     let mut magnitude = value.abs();
     let mut suffix = "";
     // Banded on the rounded value: 999_999 would otherwise print `1000.00K`, a
@@ -98,7 +122,7 @@ pub fn compact_money(value: f64) -> String {
         magnitude /= 1000.0;
         suffix = next;
     }
-    format!("{}${magnitude:.2}{suffix}", if negative { "-" } else { "" })
+    Some((negative, format!("${magnitude:.2}{suffix}")))
 }
 
 /// A fraction as a signed percentage: `0.0123` → `+1.23%`.
@@ -274,6 +298,41 @@ mod tests {
                 compact_money(value).chars().count() <= 9,
                 "{value} rendered {}",
                 compact_money(value)
+            );
+        }
+    }
+
+    #[test]
+    fn signed_compact_money_states_its_sign_and_stays_inside_a_column() {
+        // The blotter's `P&L` column is sized once for the widest thing it can
+        // hold, and `signed_money` is unbounded: `+$1,234,567.89` is thirteen
+        // cells and clips to `+$1,234,5`, a number wrong by a factor of a
+        // hundred. This is that column's spelling of the same fact.
+        assert_eq!(signed_compact_money(1_234.56), "+$1.23K");
+        assert_eq!(signed_compact_money(-1_234.56), "-$1.23K");
+        assert_eq!(signed_compact_money(0.0), "+$0.00");
+        assert_eq!(signed_compact_money(628.33), "+$628.33");
+        assert_eq!(signed_compact_money(f64::NAN), MISSING);
+        // A minus that rounds away is not a loss, exactly as elsewhere.
+        assert_eq!(signed_compact_money(-1e-13), "+$0.00");
+        // The property the column is sized on: nine characters across the range
+        // the bands cover, sign included. Past `±$999.99B` this grows by the
+        // one character `compact_money` grows by, which is the ceiling that
+        // function documents rather than a second rule.
+        assert_eq!(signed_compact_money(999.99e9), "+$999.99B");
+        assert_eq!(signed_compact_money(1e12), "+$1000.00B");
+        for value in [0.0, 999.99, 1e4, 4.2e6, -7.7e9, 999.99e9, -1e-9] {
+            assert!(
+                signed_compact_money(value).chars().count() <= 9,
+                "{value} rendered {}",
+                signed_compact_money(value)
+            );
+        }
+        // The unsigned spelling is the same number without the leading `+`.
+        for value in [0.0, 628.33, 1_234.56, 4.2e6] {
+            assert_eq!(
+                signed_compact_money(value),
+                format!("+{}", compact_money(value))
             );
         }
     }

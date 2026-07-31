@@ -2,11 +2,11 @@
 //!
 //! The ribbon is the workstation's single account of its headline KPIs: what the
 //! book is worth, what it is up or down, what the window did, and how it is
-//! positioned. Everything the plan hangs under it — the blotter (Task 12), the
-//! allocation heatmap and the equity chart (Task 13) — reads positions and
-//! series, never these aggregates. One panel repeating the equity is a second
-//! account of it, and two accounts of one number is how a desk ends up trusting
-//! neither.
+//! positioned. Everything under it — the blotter here, the allocation heatmap
+//! and the equity chart (Task 13) — reads positions and series, never these
+//! aggregates. One panel repeating the equity is a second account of it, and two
+//! accounts of one number is how a desk ends up trusting neither. The blotter
+//! carries no equity, no cash and no total P&L for exactly that reason.
 //!
 //! Every number comes from `live_portfolio` (the mark-to-market view) and
 //! `performance` (the realized-metrics bundle). The registry's own `portfolio`
@@ -22,7 +22,7 @@
 
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
-use crate::fx::FlashTracker;
+use crate::fx::{FlashKey, FlashTracker};
 use crate::model::{LivePortfolio, Metrics, Performance, Position};
 use crate::store::Store;
 use crate::theme::theme;
@@ -30,15 +30,19 @@ use crate::ui::views::View;
 // The ribbon is one panel — one rule under a band of four cells — so it takes
 // `panel_block` and heads its cells with `label` rather than `panel_header`:
 // four amber bars across one band would read as four panels.
-use crate::ui::widgets::panel_block;
-use crossterm::event::KeyEvent;
+use crate::ui::widgets::table_cell::{cell, LEFT, RIGHT};
+use crate::ui::widgets::tristate_spark::{self, SPARK_W};
+use crate::ui::widgets::{panel_block, panel_header, refuse};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Paragraph, Row, Table, Wrap},
     Frame,
 };
+use std::cell::Cell;
+use std::cmp::Ordering;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
@@ -85,17 +89,132 @@ const CHIP_LABEL_W: usize = 6;
 /// it would cost a digit off a percentage.
 const RIBBON_W: u16 = 74;
 
-pub struct BookView;
+/// The rows Task 13's panels are held out of the blotter's share.
+///
+/// Two rather than none, because "nothing here yet" and "this pane failed to
+/// draw" have to stay distinguishable while this branch is half-built.
+const REST_H: u16 = 2;
+
+/// Where the operator is looking in the blotter. Never what the desk says —
+/// that is the `Store`'s, and a view that held a copy would be a second account
+/// of it.
+#[derive(Default)]
+pub struct BookView {
+    sort: Sort,
+    /// The first blotter row on screen, as an index into the *sorted* rows.
+    ///
+    /// The scroll position is kept as a row and not as a page number: a stored
+    /// page multiplied by a page size that just changed lands the operator
+    /// somewhere they never scrolled to, while a row index survives the resize
+    /// and the page it falls on is recomputed from it.
+    top: usize,
+    selected: usize,
+    /// How many rows the last frame actually gave the blotter's body.
+    ///
+    /// A `Cell` because the page size is an *allocation* and only the draw
+    /// knows it, while `on_key` is where a page turn happens. It records
+    /// geometry, never anything the operator set — drawing the same frame twice
+    /// records the same number, which is what keeps a repaint from moving the
+    /// cursor.
+    page_rows: Cell<usize>,
+}
 
 impl View for BookView {
-    fn draw(&self, f: &mut Frame, area: Rect, store: &Store, _fx: &FlashTracker, _now: Instant) {
+    fn draw(&self, f: &mut Frame, area: Rect, store: &Store, fx: &FlashTracker, now: Instant) {
         let rows = Layout::vertical([Constraint::Length(RIBBON_H), Constraint::Min(0)]).split(area);
         draw_ribbon(f, rows[0], store);
-        draw_rest(f, rows[1]);
+        let under =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(REST_H)]).split(rows[1]);
+        self.draw_blotter(f, under[0], store, fx, now);
+        draw_rest(f, under[1]);
     }
 
-    fn on_key(&mut self, _k: KeyEvent, _store: &mut Store) -> Option<Command> {
+    fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
+        let rows = row_count(store);
+        // At least one, so a key pressed before the first frame moves by a row
+        // rather than dividing by zero. In the runtime the loop draws first.
+        let page = self.page_rows.get().max(1);
+        match k.code {
+            // Cycling the column resets the scroll and the cursor: after a
+            // re-sort, row 4 is a different position, and carrying the index
+            // would leave the marker on a row the operator did not choose.
+            KeyCode::Char('s') => {
+                self.sort = self.sort.next();
+                self.top = 0;
+                self.selected = 0;
+            }
+            KeyCode::Char(']') => self.page_to(self.top + page, rows, page),
+            KeyCode::Char('[') => self.page_to(self.top.saturating_sub(page), rows, page),
+            // Both ends are walls, not wraps, exactly as the markets grid: an
+            // operator holding an arrow must land on the first or last row,
+            // never at the other end of a book they did not scroll to.
+            KeyCode::Up => self.select(self.cursor(rows).saturating_sub(1), page),
+            KeyCode::Down => self.select((self.cursor(rows) + 1).min(rows.saturating_sub(1)), page),
+            _ => return None,
+        }
         None
+    }
+}
+
+impl BookView {
+    /// The cursor, clamped to the book actually on screen.
+    ///
+    /// The book can shrink between the keystroke that moved the cursor and the
+    /// frame that draws it — the owner closing a position does exactly that —
+    /// and an index past the end must render the last row rather than panic.
+    fn cursor(&self, rows: usize) -> usize {
+        self.selected.min(rows.saturating_sub(1))
+    }
+
+    /// The first visible row: the scroll, clamped to the last page's own first
+    /// row.
+    ///
+    /// The last page start rather than `rows - 1`, because the owner closing
+    /// positions under the cursor must leave the remaining book on screen — a
+    /// clamp to the last *row* would answer a shrunk book with one row and the
+    /// rest of the pane blank. It is also what keeps a preserved top honest
+    /// after a resize: a top inside the book is never past this bound unless the
+    /// page grew, and then it is the page it grew into.
+    fn scroll(&self, rows: usize, page: usize) -> usize {
+        let page = page.max(1);
+        self.top.min(rows.saturating_sub(1) / page * page)
+    }
+
+    /// Move the cursor, dragging the page along only as far as it has to come.
+    fn select(&mut self, row: usize, page: usize) {
+        self.selected = row;
+        if row < self.top {
+            self.top = row;
+        } else if row >= self.top + page {
+            self.top = row + 1 - page;
+        }
+    }
+
+    /// Turn to the page starting at `top`, and put the cursor on its first row.
+    ///
+    /// Clamped to the last page's own first row, and never backwards: after a
+    /// resize the scroll can sit past that boundary (the top row is preserved,
+    /// the page boundaries are not), and a forward key that moved the operator
+    /// up the book would be worse than one that did nothing.
+    fn page_to(&mut self, top: usize, rows: usize, page: usize) {
+        let last = rows.saturating_sub(1) / page * page;
+        self.top = top.min(last.max(self.top));
+        self.selected = self.top;
+    }
+
+    /// Which sort column is live, for the registry's own tests.
+    ///
+    /// `cfg(test)` rather than a plain accessor: the draw path reads these off
+    /// `self`, and a second reader in the runtime would be a copy of the cursor
+    /// that could disagree with the one on screen.
+    #[cfg(test)]
+    pub(crate) fn sort(&self) -> Sort {
+        self.sort
+    }
+
+    #[cfg(test)]
+    pub(crate) fn top(&self) -> usize {
+        self.top
     }
 }
 
@@ -467,6 +586,547 @@ fn return_on_cost(book: &LivePortfolio) -> Option<f64> {
     (cost > 0.0).then(|| pnl / cost)
 }
 
+// -- the blotter -----------------------------------------------------------
+
+/// The nine columns: title, the cells each needs at its widest rendering, and
+/// whether its contents are pushed right.
+///
+/// Nine of the reference blotter's eleven. `COST BASIS` and `CHG%` are not
+/// here because the owner's `Position` carries neither (`model::Position`): a
+/// cost basis is `qty × avg_price`, a number this client would be *computing*
+/// and then stating under the owner's name, and a day change on a position is a
+/// market fact the position row has no field for at all. `AVG` and `TREND` sit
+/// in their places, and both are things the owner did send.
+///
+/// The widths are the widest *shape*, not today's numbers. `SYMBOL` is seven —
+/// a cursor marker and a six-cell ticker, six being what the header itself
+/// needs plus the sort glyph. `MKTVAL` and `P&L` are nine because that is what
+/// `compact_money` and `signed_compact_money` are bounded at, and the whole
+/// reason those two exist rather than `money`: an unbounded figure in a sized
+/// column is a number that is wrong rather than one that is coarse.
+///
+/// Right for every number, because a column of numbers only reads as a column
+/// when the decimal points line up; left for `SYMBOL`, which is a name.
+const BLOTTER_COLS: [(&str, u16, bool); 9] = [
+    ("SYMBOL", 7, LEFT),
+    ("QTY", 7, RIGHT),
+    ("LAST", 7, RIGHT),
+    ("AVG", 7, RIGHT),
+    ("WT%", 6, RIGHT),
+    ("MKTVAL", 9, RIGHT),
+    ("P&L", 9, RIGHT),
+    ("P&L%", 7, RIGHT),
+    ("TREND", SPARK_W as u16, RIGHT),
+];
+
+/// The blotter's floor, derived from the columns so the two cannot drift.
+const BLOTTER_W: u16 = blotter_w();
+
+const fn blotter_w() -> u16 {
+    // Every column plus the cell of spacing that follows it, minus the one
+    // after the last. The cursor marker takes no column of its own: it rides
+    // inside `SYMBOL`, which is what buys the ninth column its width back.
+    let mut w = 0;
+    let mut i = 0;
+    while i < BLOTTER_COLS.len() {
+        w += BLOTTER_COLS[i].1 + 1;
+        i += 1;
+    }
+    w - 1
+}
+
+/// The pane a view is handed at the workstation's baseline width: 120 cells,
+/// less both rails and the rule the content column reserves.
+const BASELINE_PANE: u16 = 120 - crate::ui::shell::NAV_W - crate::ui::shell::PULSE_W - 1;
+
+/// The floor has to fit the frame the workstation is designed for, or the
+/// blotter refuses to draw on every terminal anyone actually opens it on.
+///
+/// Asserted at compile time rather than in a test: this is a fact about whether
+/// the view can exist at all, and it should fail `cargo build` rather than one
+/// test somebody could mark ignored.
+const _: () = assert!(BLOTTER_W <= BASELINE_PANE);
+
+/// The panel header (which carries the pager), the column header, and one row.
+///
+/// A blotter with no room for a row is two headers over nothing, which reads as
+/// a book holding no positions — the one thing this pane must not say when what
+/// is actually short is the terminal.
+const BLOTTER_H: u16 = 3;
+
+/// Which column the rows are ordered by.
+///
+/// A subset of the nine rather than all of them: these are the five an operator
+/// re-sorts a blotter to answer — where is the money, what is winning, what is
+/// losing, and where is a name I know. `QTY`, `LAST` and `AVG` order a book by
+/// nothing anyone asks about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sort {
+    #[default]
+    Weight,
+    MktVal,
+    Pnl,
+    PnlPct,
+    Symbol,
+}
+
+impl Sort {
+    /// The cycle `s` walks, in the order it walks it.
+    const ALL: [Sort; 5] = [
+        Sort::Weight,
+        Sort::MktVal,
+        Sort::Pnl,
+        Sort::PnlPct,
+        Sort::Symbol,
+    ];
+
+    fn next(self) -> Sort {
+        let at = Sort::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Sort::ALL[(at + 1) % Sort::ALL.len()]
+    }
+
+    /// The column this sort heads, as an index into `BLOTTER_COLS`.
+    fn column(self) -> usize {
+        match self {
+            Sort::Symbol => 0,
+            Sort::Weight => 4,
+            Sort::MktVal => 5,
+            Sort::Pnl => 6,
+            Sort::PnlPct => 7,
+        }
+    }
+
+    /// Direction is fixed per column rather than toggled: `s` is one key, and a
+    /// second key for the direction is a control nobody asked for. Money sorts
+    /// biggest-first because that is the question — *where is the exposure* —
+    /// and a name sorts A-to-Z because that is how a name is looked up.
+    fn descending(self) -> bool {
+        self != Sort::Symbol
+    }
+}
+
+/// One rendered position: the numbers to sort on, kept beside nothing at all.
+///
+/// The display strings are built at render time *from* these, never parsed back
+/// out of them. A blotter that sorted its own text puts `$2.50M` under
+/// `$999.00K`, which is the ordering an operator would act on last.
+struct BlotterRow<'a> {
+    /// `None` is a position the owner sent with no ticker — a broken contract,
+    /// and still a row: dropping it would leave the blotter's count disagreeing
+    /// with the ribbon's `N pos`, which is the sort of gap nobody reconciles.
+    ticker: Option<&'a str>,
+    qty: Option<f64>,
+    last: Option<f64>,
+    avg: Option<f64>,
+    weight: Option<f64>,
+    value: Option<f64>,
+    pnl: Option<f64>,
+    pnl_pct: Option<f64>,
+    /// The asset's closes, or `None` for a ticker the market section does not
+    /// carry at all. The two are different facts; see `tristate_spark`.
+    history: Option<&'a [f64]>,
+}
+
+impl BlotterRow<'_> {
+    fn key(&self, sort: Sort) -> Option<f64> {
+        match sort {
+            Sort::Weight => self.weight,
+            Sort::MktVal => self.value,
+            Sort::Pnl => self.pnl,
+            Sort::PnlPct => self.pnl_pct,
+            // Not a number, and never compared as one.
+            Sort::Symbol => None,
+        }
+    }
+}
+
+/// Every position the live book carries, resolved against what the desk knows.
+///
+/// The live book rather than the registry's, for the same reason the ribbon
+/// reads it: the two are different views of one desk, and their disagreement is
+/// a reconciliation finding rather than a display choice.
+fn blotter_rows(store: &Store) -> Vec<BlotterRow<'_>> {
+    let facts = store.asset_facts();
+    let positions = store
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.live_portfolio.as_ref())
+        .map(|b| b.positions.as_slice())
+        .unwrap_or_default();
+
+    positions
+        .iter()
+        .map(|p| {
+            let ticker = format::text(p.ticker.as_ref());
+            // `asset_view` is the only reader of a price in this client — a row
+            // that read `position.price` would render the poll's number and
+            // silently lose every quote that arrived since. The position's own
+            // mark answers only when the market section does not carry the
+            // ticker: that is a book held outside the polled universe, where the
+            // overlay has nothing to be fresher *than*, and a `--` beside a
+            // stated market value would read as a value with no price.
+            let quoted = ticker.and_then(|t| store.asset_view(t).price);
+            BlotterRow {
+                ticker,
+                qty: p.qty,
+                last: quoted.or(p.price),
+                avg: p.avg_price,
+                weight: p.weight,
+                value: p.value,
+                pnl: p.unrealized_pnl,
+                pnl_pct: p.unrealized_pnl_pct,
+                history: ticker
+                    .and_then(|t| facts.iter().find(|a| a.ticker == t).map(|a| a.history)),
+            }
+        })
+        .collect()
+}
+
+/// How many rows the blotter would draw.
+///
+/// The count without the order: a key path that sorted the whole book to ask
+/// how long it is would do a frame's work for a number `len` already has. One
+/// row per position by construction — including the one the owner sent with no
+/// ticker — so this and `blotter_rows` cannot disagree.
+fn row_count(store: &Store) -> usize {
+    store
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.live_portfolio.as_ref())
+        .map_or(0, |b| b.positions.len())
+}
+
+/// The rows in the order `sort` asks for.
+///
+/// `sort_by` is stable, and that is load-bearing rather than incidental: a book
+/// the owner sent at one weight must keep the owner's order, or the blotter
+/// reshuffles itself on a repaint. A value the owner did not send sorts last
+/// whichever way the column runs — absent is not zero, and a `--` at the head of
+/// a heaviest-first list is the one row an operator would read as the answer.
+fn sorted<'a>(mut rows: Vec<BlotterRow<'a>>, sort: Sort) -> Vec<BlotterRow<'a>> {
+    if sort == Sort::Symbol {
+        rows.sort_by(|a, b| match (a.ticker, b.ticker) {
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        });
+        return rows;
+    }
+    let descending = sort.descending();
+    rows.sort_by(|a, b| match (a.key(sort), b.key(sort)) {
+        (Some(a), Some(b)) => {
+            let order = a.partial_cmp(&b).unwrap_or(Ordering::Equal);
+            if descending {
+                order.reverse()
+            } else {
+                order
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
+    rows
+}
+
+impl BookView {
+    /// The blotter: a panel header, the grid, and the pager under it.
+    fn draw_blotter(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        store: &Store,
+        fx: &FlashTracker,
+        now: Instant,
+    ) {
+        if area.height < BLOTTER_H {
+            refuse(
+                f,
+                area,
+                format!(
+                    "positions blotter needs {BLOTTER_H} rows for its headers and a \
+                     position — this pane has {}, make the terminal taller",
+                    area.height
+                ),
+            );
+            return;
+        }
+        // Below the floor `Table` shrinks its columns underneath the widths
+        // every cell was held to, and a right-aligned cell then loses its
+        // *leading* characters — the sign first. `head` cannot see it: it is
+        // spent against the declared width, and the allocation is what shrank.
+        // So the blotter refuses rather than drawing numbers that are wrong.
+        if area.width < BLOTTER_W {
+            refuse(
+                f,
+                area,
+                format!(
+                    "positions blotter needs {BLOTTER_W} columns for its nine — this pane has \
+                     {}, widen the terminal",
+                    area.width
+                ),
+            );
+            return;
+        }
+
+        let rows = Layout::vertical([
+            Constraint::Length(1), // the panel header, and the pager on its far side
+            Constraint::Min(0),    // the column header and the rows under it
+        ])
+        .split(area);
+
+        // The allocation, not the pane it came from: sized off the frame the
+        // page would be eleven rows too long and the pager would claim there
+        // was only one. The pager rides on the header row rather than taking a
+        // footer of its own for the same reason — a footer's row would have to
+        // be reserved whether or not the pager used it, which makes the page
+        // size depend on whether the pager was drawn, which depends on the page
+        // size.
+        let page = rows[1].height.saturating_sub(1) as usize;
+        self.page_rows.set(page);
+
+        // Built from the store each frame rather than cached: a cached list is
+        // a second account of the book, and it would go stale between the poll
+        // that closed a position and the frame that still drew it.
+        let all = sorted(blotter_rows(store), self.sort);
+        let top = self.scroll(all.len(), page);
+        draw_header(f, rows[0], top, page, all.len());
+        if all.is_empty() {
+            // Which kind of nothing it is. An owner that sent no live book at
+            // all and a book that genuinely holds nothing are different facts,
+            // and one sentence for both would hide a broken poll.
+            let said = match store
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.live_portfolio.as_ref())
+            {
+                Some(_) => "the live book holds no positions",
+                None => "no live book in the last snapshot",
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    said,
+                    Style::default().fg(theme().text_tertiary),
+                ))),
+                rows[1],
+            );
+            return;
+        }
+
+        let cursor = self.cursor(all.len());
+        let table = Table::new(
+            all[top..(top + page).min(all.len())]
+                .iter()
+                .enumerate()
+                .map(|(i, row)| self.draw_row(row, top + i == cursor, fx, now)),
+            BLOTTER_COLS.map(|(_, w, _)| Constraint::Length(w)),
+        )
+        .header(self.header())
+        .column_spacing(1);
+        f.render_widget(table, rows[1]);
+    }
+
+    /// The column header, with the sort glyph on the column that is live.
+    ///
+    /// A grid that reorders itself with nothing on screen saying why is a grid
+    /// an operator stops trusting. The glyphs are `▴`/`▾` rather than the
+    /// `▲`/`▼` the change columns use: a sort direction and a price direction
+    /// are different claims and must not share a mark.
+    fn header(&self) -> Row<'static> {
+        let live = self.sort.column();
+        let arrow = if self.sort.descending() { "▾" } else { "▴" };
+        Row::new(
+            BLOTTER_COLS
+                .iter()
+                .enumerate()
+                .map(|(i, (name, width, right))| {
+                    let title = if i == live {
+                        format!("{name}{arrow}")
+                    } else {
+                        name.to_string()
+                    };
+                    cell(title, Style::default(), *right, *width)
+                })
+                .collect::<Vec<_>>(),
+        )
+        .style(Style::default().fg(theme().text_secondary))
+    }
+
+    /// One position.
+    fn draw_row(
+        &self,
+        row: &BlotterRow<'_>,
+        selected: bool,
+        fx: &FlashTracker,
+        now: Instant,
+    ) -> Row<'static> {
+        let t = theme();
+        // One decision, one input. Both money cells answer "did this position
+        // make money", so both take their tone from the P&L itself — a percent
+        // coloured off its own sign would be a second axis that can disagree
+        // with the first, and a green `+1.20%` beside a red `-$4.00` is a row
+        // that says both. Flat is neither: `Theme::change` paints zero green,
+        // which is right for the ribbon's single hero and wrong for a column of
+        // them, since a paper book that opened flat would render as ten green
+        // rows — a claim the desk made money on all ten.
+        let pnl_tone = match row.pnl {
+            Some(v) if v > 0.0 => t.positive,
+            Some(v) if v < 0.0 => t.negative,
+            Some(_) => t.text_primary,
+            None => t.text_secondary,
+        };
+        let (trend, trend_style) = tristate_spark::tristate(row.history);
+        let marker = if selected { "▌" } else { " " };
+
+        // In `BLOTTER_COLS` order and zipped with it below, so a cell and the
+        // column it is held to cannot drift apart.
+        let cells: [(String, Style); BLOTTER_COLS.len()] = [
+            (
+                format!("{marker}{}", row.ticker.unwrap_or(MISSING)),
+                Style::default().fg(t.cyan).add_modifier(Modifier::BOLD),
+            ),
+            (
+                row.qty.map(qty).unwrap_or_else(|| MISSING.to_string()),
+                Style::default().fg(t.text_secondary),
+            ),
+            (
+                row.last
+                    .map(format::price)
+                    .unwrap_or_else(|| MISSING.to_string()),
+                match row.ticker {
+                    // The same key the tape lights, because it is the same
+                    // fact: one quote moves the price wherever it is drawn.
+                    Some(ticker) => fx.style_for(
+                        &FlashKey::price(ticker),
+                        now,
+                        Style::default().fg(t.text_primary),
+                    ),
+                    None => Style::default().fg(t.text_primary),
+                },
+            ),
+            (
+                row.avg
+                    .map(format::price)
+                    .unwrap_or_else(|| MISSING.to_string()),
+                Style::default().fg(t.text_secondary),
+            ),
+            (
+                format::opt_pct(row.weight),
+                Style::default().fg(t.text_secondary),
+            ),
+            (
+                row.value
+                    .map(format::compact_money)
+                    .unwrap_or_else(|| MISSING.to_string()),
+                // Amber: the market value is what every other cell on the row
+                // is a fact about, the same spend the ribbon makes on equity.
+                Style::default().fg(t.warning),
+            ),
+            (
+                row.pnl
+                    .map(format::signed_compact_money)
+                    .unwrap_or_else(|| MISSING.to_string()),
+                Style::default().fg(pnl_tone),
+            ),
+            (
+                row.pnl_pct
+                    .map(format::signed_pct)
+                    .unwrap_or_else(|| MISSING.to_string()),
+                Style::default().fg(pnl_tone),
+            ),
+            (trend, trend_style),
+        ];
+
+        let row = Row::new(
+            cells
+                .into_iter()
+                .zip(BLOTTER_COLS)
+                .map(|((text, style), (_, width, right))| cell(text, style, right, width))
+                .collect::<Vec<_>>(),
+        );
+        if selected {
+            // A marker *and* a shade: on a 256-colour terminal the shade alone
+            // is one step of a ramp, which is not an answer to "which row".
+            row.style(Style::default().bg(t.bg_hover))
+        } else {
+            row
+        }
+    }
+}
+
+/// The panel header, with the keys that drive the grid pushed to its far side.
+///
+/// `« ‹ 2/3 › »` says which page the *top row* falls on rather than claiming the
+/// screen holds exactly that page: the scroll position is a row, so a resize
+/// keeps the operator where they were and cannot also keep the page boundaries.
+/// The arrows dim at the ends, so "there is nothing further" is visible without
+/// pressing the key to find out — and the pager is absent entirely when the
+/// whole book is on screen, because a `1/1` is a control that does nothing.
+///
+/// `s sort` stays whatever the length of the book: an operator who cannot see
+/// that the column order is theirs to change will read the default as the only
+/// order there is.
+fn draw_header(f: &mut Frame, area: Rect, top: usize, page: usize, rows: usize) {
+    let t = theme();
+    let dim = Style::default().fg(t.text_dim);
+    let pages = rows.div_ceil(page.max(1));
+    // A book with nothing in it gets no keys at all: a control offered over an
+    // empty grid is one an operator presses to find out it does nothing.
+    let mut keys = if rows == 0 {
+        Vec::new()
+    } else {
+        vec![Span::styled("s sort", dim)]
+    };
+    if pages > 1 {
+        let at = top / page.max(1);
+        let back = if top > 0 {
+            t.text_secondary
+        } else {
+            t.text_dim
+        };
+        let on = if at + 1 < pages {
+            t.text_secondary
+        } else {
+            t.text_dim
+        };
+        keys.extend([
+            Span::styled(" · [ ] page  ", dim),
+            Span::styled("« ‹ ", Style::default().fg(back)),
+            Span::styled(
+                format!("{}/{pages}", at + 1),
+                Style::default().fg(t.text_primary),
+            ),
+            Span::styled(" › »", Style::default().fg(on)),
+        ]);
+    }
+
+    let title = panel_header("positions");
+    let gap = (area.width as usize)
+        .saturating_sub(title.width() + keys.iter().map(|s| s.content.width()).sum::<usize>());
+    let mut spans = title.spans;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.extend(keys);
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Share counts as a desk states them: whole where they are whole, two decimals
+/// where the owner's optimizer produced a fraction of a share.
+///
+/// Not a fixed two everywhere: a book of round lots would then read `100.00`,
+/// which is precision the number does not carry and two cells of a column that
+/// has none to spare.
+fn qty(value: f64) -> String {
+    if !value.is_finite() {
+        return MISSING.to_string();
+    }
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
 /// What the rest of the view is, while it is not built yet.
 ///
 /// Named rather than left empty: for as long as this branch is half-built,
@@ -479,26 +1139,10 @@ fn draw_rest(f: &mut Frame, area: Rect) {
         Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
-                "positions blotter — Task 12 · allocation heatmap and equity chart — Task 13",
+                "allocation heatmap and equity chart — Task 13",
                 Style::default().fg(theme().text_dim),
             )),
         ])
-        .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-/// A ribbon refusing to draw, and saying what it would take.
-///
-/// Wrapped, because a pane too narrow to hold the numbers is also too narrow to
-/// hold the sentence about them, and a remedy cut off mid-word is one an
-/// operator cannot act on.
-fn refuse(f: &mut Frame, area: Rect, message: String) {
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            message,
-            Style::default().fg(theme().text_dim),
-        )))
         .wrap(Wrap { trim: true }),
         area,
     );
@@ -612,6 +1256,196 @@ mod tests {
         assert_eq!(ratio(0.2688), "0.27");
         assert_eq!(ratio(-1.2345), "-1.23");
         assert_eq!(ratio(f64::NAN), MISSING);
+    }
+
+    /// A row carrying only what the sort reads. The display side is pinned by
+    /// the rendered frames in `tests/golden_book.rs`; these are about order.
+    fn row(ticker: &str, key: Option<f64>) -> BlotterRow<'_> {
+        BlotterRow {
+            ticker: (!ticker.is_empty()).then_some(ticker),
+            qty: None,
+            last: None,
+            avg: None,
+            weight: key,
+            value: key,
+            pnl: key,
+            pnl_pct: key,
+            history: None,
+        }
+    }
+
+    fn order<'a>(rows: Vec<BlotterRow<'a>>, sort: Sort) -> Vec<&'a str> {
+        sorted(rows, sort)
+            .iter()
+            .map(|r| r.ticker.unwrap_or(MISSING))
+            .collect()
+    }
+
+    #[test]
+    fn a_money_sort_is_biggest_first_and_a_name_sort_is_a_to_z() {
+        let rows = || {
+            vec![
+                row("MID", Some(500.0)),
+                row("BIG", Some(2_500_000.0)),
+                row("SMALL", Some(1.0)),
+            ]
+        };
+        for sort in [Sort::Weight, Sort::MktVal, Sort::Pnl, Sort::PnlPct] {
+            assert_eq!(order(rows(), sort), vec!["BIG", "MID", "SMALL"], "{sort:?}");
+        }
+        assert_eq!(order(rows(), Sort::Symbol), vec!["BIG", "MID", "SMALL"]);
+        // …and A-to-Z is really the name, not the money it happens to track.
+        assert_eq!(
+            order(
+                vec![row("ZZZ", Some(9.0)), row("AAA", Some(1.0))],
+                Sort::Symbol
+            ),
+            vec!["AAA", "ZZZ"]
+        );
+    }
+
+    #[test]
+    fn a_number_the_owner_did_not_send_sorts_last_and_never_first() {
+        // Absent is not zero and it is not the biggest either: a `--` at the
+        // head of a heaviest-first list is the row an operator reads as the
+        // answer to "where is the exposure".
+        for sort in [Sort::Weight, Sort::MktVal, Sort::Pnl, Sort::PnlPct] {
+            let rows = vec![
+                row("NONE", None),
+                row("SOME", Some(1.0)),
+                row("ALSO", Some(2.0)),
+            ];
+            assert_eq!(*order(rows, sort).last().unwrap(), "NONE", "{sort:?}");
+        }
+        // What "absent" means under a name sort is an absent *name* — the
+        // position the owner sent with no ticker, which is still a row.
+        assert_eq!(
+            order(
+                vec![row("", Some(9.0)), row("ZZZ", Some(1.0)), row("AAA", None)],
+                Sort::Symbol
+            ),
+            vec!["AAA", "ZZZ", MISSING]
+        );
+    }
+
+    #[test]
+    fn a_sort_is_stable_so_the_owners_order_survives_a_tie() {
+        // Unstable, a book the owner sent at one weight reshuffles on every
+        // repaint — a blotter that will not hold still.
+        let tied = || {
+            vec![
+                row("D", Some(1.0)),
+                row("C", Some(1.0)),
+                row("B", Some(1.0)),
+                row("A", Some(1.0)),
+            ]
+        };
+        assert_eq!(order(tied(), Sort::Weight), vec!["D", "C", "B", "A"]);
+        assert_eq!(order(tied(), Sort::MktVal), vec!["D", "C", "B", "A"]);
+    }
+
+    #[test]
+    fn the_sort_cycle_visits_every_column_once_and_comes_back() {
+        let mut seen = vec![Sort::default()];
+        let mut at = Sort::default();
+        for _ in 0..Sort::ALL.len() {
+            at = at.next();
+            if at != Sort::default() {
+                seen.push(at);
+            }
+        }
+        assert_eq!(at, Sort::default(), "the cycle does not close");
+        assert_eq!(seen, Sort::ALL.to_vec());
+        // Every column the cycle names is a column that exists, and no two
+        // sorts head the same one.
+        let mut columns: Vec<usize> = Sort::ALL.iter().map(|s| s.column()).collect();
+        columns.sort_unstable();
+        columns.dedup();
+        assert_eq!(columns.len(), Sort::ALL.len());
+        assert!(columns.iter().all(|c| *c < BLOTTER_COLS.len()));
+    }
+
+    #[test]
+    fn a_share_count_is_whole_where_it_is_whole() {
+        // Two decimals everywhere would read `100.00` for a round lot —
+        // precision the number does not carry, in a column with none to spare.
+        assert_eq!(qty(100.0), "100");
+        assert_eq!(qty(59.18910760019987), "59.19");
+        assert_eq!(qty(4.121014846223033), "4.12");
+        assert_eq!(qty(-3.0), "-3");
+        assert_eq!(qty(f64::NAN), MISSING);
+    }
+
+    #[test]
+    fn every_column_is_wide_enough_for_its_own_header_and_sort_glyph() {
+        // A column narrower than its title renders `MKTVA`, and a truncated
+        // header is a column an operator has to guess at — the sort glyph
+        // included, since it lands inside the same cell.
+        for sort in Sort::ALL {
+            let (name, width, _) = BLOTTER_COLS[sort.column()];
+            assert!(
+                name.chars().count() < width as usize,
+                "{name} is {width} wide and its sort glyph does not fit"
+            );
+        }
+        for (name, width, _) in BLOTTER_COLS {
+            assert!(
+                name.chars().count() <= width as usize,
+                "{name} does not fit its own column"
+            );
+        }
+    }
+
+    #[test]
+    fn the_blotter_floor_is_the_columns_own_arithmetic() {
+        // The guard and the column widths are one fact. Spelled twice, a column
+        // widened for a longer ticker would silently start truncating.
+        let columns: u16 = BLOTTER_COLS.iter().map(|(_, w, _)| w).sum();
+        assert_eq!(BLOTTER_W, columns + BLOTTER_COLS.len() as u16 - 1);
+    }
+
+    #[test]
+    fn the_scroll_holds_the_top_row_and_stops_at_the_last_pages_first() {
+        let at = |top: usize, rows: usize, page: usize| {
+            let view = BookView {
+                top,
+                ..BookView::default()
+            };
+            view.scroll(rows, page)
+        };
+        // Twelve rows, five a page: the pages start at 0, 5 and 10.
+        assert_eq!(at(0, 12, 5), 0);
+        assert_eq!(at(10, 12, 5), 10);
+        assert_eq!(at(11, 12, 5), 10, "the scroll ran past the last page");
+        // The owner closes ten positions under the cursor. Clamped to the last
+        // *row* this would answer with one row and a blank pane.
+        assert_eq!(at(10, 2, 5), 0);
+        // A preserved top after a resize is left where it was.
+        assert_eq!(at(5, 12, 10), 5);
+        // Nothing at all cannot scroll anywhere.
+        assert_eq!(at(3, 0, 5), 0);
+    }
+
+    #[test]
+    fn a_page_turn_lands_on_a_page_and_never_walks_backwards() {
+        let turn = |top: usize, to: usize, rows: usize, page: usize| {
+            let mut view = BookView {
+                top,
+                ..BookView::default()
+            };
+            view.page_to(to, rows, page);
+            (view.top, view.selected)
+        };
+        // Forward through twelve rows at five a page, and a wall at the end.
+        assert_eq!(turn(0, 5, 12, 5), (5, 5));
+        assert_eq!(turn(5, 10, 12, 5), (10, 10));
+        assert_eq!(turn(10, 15, 12, 5), (10, 10), "the last page wrapped");
+        // Back, and a wall at the start.
+        assert_eq!(turn(10, 5, 12, 5), (5, 5));
+        assert_eq!(turn(0, 0, 12, 5), (0, 0));
+        // The case a resize creates: a top past the last page's first row. A
+        // forward key must not answer by moving the operator *up* the book.
+        assert_eq!(turn(11, 21, 12, 10), (11, 11));
     }
 
     #[test]

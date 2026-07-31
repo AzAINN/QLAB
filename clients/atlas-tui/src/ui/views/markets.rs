@@ -17,7 +17,7 @@ use crate::theme::theme;
 use crate::ui::views::View;
 use crate::ui::widgets::table_cell::{cell, LEFT, RIGHT};
 use crate::ui::widgets::tristate_spark::{self, SPARK_W};
-use crate::ui::widgets::{braille_chart, panel_block, panel_header, refuse};
+use crate::ui::widgets::{braille_chart, heat_cell, panel_block, panel_header, refuse};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -442,16 +442,8 @@ fn draw_sectors(f: &mut Frame, area: Rect, store: &Store) {
     f.render_widget(Paragraph::new(lines), rows[1]);
 }
 
-/// The quantized heat ramp.
-///
-/// Inline here until Task 13 lifts it into a shared `heat_cell` widget — the
-/// book and research grids want the same six steps and the same two-token
-/// spend, and three copies of this arithmetic is how the three of them end up
-/// disagreeing about what a 2% move looks like.
-///
-/// A cell grid has no alpha, so "six alpha steps" is spent as three levels of
-/// the depth ramp and then the semantic pair itself — the same technique
-/// `fx::style_for` uses to fade a flash without a fade.
+/// One sector cell's style: the semantic pair the direction picks, at the step
+/// the magnitude lands on.
 fn heat_style(change: f64) -> Style {
     let t = theme();
     let (dim, bright) = if change >= 0.0 {
@@ -459,15 +451,7 @@ fn heat_style(change: f64) -> Style {
     } else {
         (t.negative_dim, t.negative)
     };
-    let base = Style::default();
-    match heat_step(change * 100.0) {
-        1 => base.bg(t.bg_base).fg(dim),
-        2 => base.bg(t.bg_raised).fg(dim),
-        3 => base.bg(t.bg_hover).fg(bright),
-        4 => base.bg(dim).fg(t.text_primary),
-        5 => base.bg(dim).fg(t.text_primary).add_modifier(Modifier::BOLD),
-        _ => base.bg(bright).fg(t.bg_base).add_modifier(Modifier::BOLD),
-    }
+    heat_cell::style(heat_step(change * 100.0), dim, bright)
 }
 
 /// Which of the six steps a move of `change_pct` percent lands on.
@@ -475,10 +459,12 @@ fn heat_style(change: f64) -> Style {
 /// Magnitude only: brightness says *how much* and the positive/negative token
 /// pair says which way. A ramp that folded the sign in would make a 2% fall
 /// dimmer than a 2% rise for no reason an operator could name.
+///
+/// The bands stay here rather than in `heat_cell` because they are a fact about
+/// sectors — 2% is a large day for a sector and a rounding error for a
+/// position's P&L — while the quantization and the spend are shared.
 fn heat_step(change_pct: f64) -> u8 {
-    let magnitude = change_pct.abs();
-    let crossed = HEAT_EDGES.iter().filter(|edge| magnitude >= **edge).count();
-    (1 + crossed).min(6) as u8
+    heat_cell::step_at(change_pct.abs(), &HEAT_EDGES)
 }
 
 #[cfg(test)]

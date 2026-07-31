@@ -109,10 +109,28 @@ fn no_view_or_widget_can_reach_the_writer() {
     // it entirely.
     let mut reachers = files_mentioning("WriteClient");
     reachers.extend(files_mentioning("net::write"));
+    // `dispatch::Writes` is the third door, and it opened after this pin was
+    // written: lifting the dispatch seam out of `main.rs` made `Writes` a public
+    // library type, so a view could now hold the thing that *drives* the writer
+    // without ever naming the writer. It carries a client and dispatches
+    // arbitrary `Command`s, which is the same authority one layer up.
+    // Both spellings, for the reason the writer needs both: a glob import would
+    // bring the type in without the module path ever appearing.
+    reachers.extend(files_mentioning("dispatch::Writes"));
+    reachers.extend(files_mentioning(r"\bWrites\b"));
     let escaped: Vec<&String> = reachers.iter().filter(|f| f.starts_with("ui/")).collect();
     assert!(
         escaped.is_empty(),
-        "nothing under ui/ may name the writer, found: {escaped:?}"
+        "nothing under ui/ may name the writer or its dispatcher, found: {escaped:?}"
+    );
+    // And the search really ran. A grep that cannot read the tree returns no
+    // matches, which would read as a clean crate — the same reasoning the
+    // `.post(` pin above states, and the reason this one is asserted at all:
+    // `Writes` became a public library type when the dispatch seam was lifted
+    // out of the binary, so there is now a door here to watch.
+    assert!(
+        reachers.iter().any(|f| f == "main.rs"),
+        "the writer-grep found nothing at all: {reachers:?}"
     );
 }
 
@@ -836,6 +854,94 @@ mod operator {
     }
 
     #[tokio::test]
+    async fn a_question_carries_the_owners_own_answer_about_whether_it_can_be_heard() {
+        // `atlas_message` answers **200** whether or not a coordinator exists to
+        // read the question — "coordinator unavailable; Atlas is degraded and
+        // cannot answer" is a 200 with `received: true`. A seam that reported
+        // the status code would tell an operator their question was asked of
+        // something that cannot hear it, which is the same class of failure as
+        // reading a 200-shaped execution refusal as a fill.
+        let owner = spawn_owner(
+            200,
+            r#"{"received": true, "coordinator_available": false,
+                "note": "coordinator unavailable; Atlas is degraded and cannot answer"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::Message("why are we flat?".into())).await {
+            Some(Wrote::Asked { note }) => assert!(note.contains("degraded"), "{note}"),
+            other => panic!("a question must carry the owner's note: {other:?}"),
+        }
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/atlas/message");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({"text": "why are we flat?"})
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_a_run_names_the_template_and_reports_the_owners_own_handle() {
+        let owner = spawn_owner(
+            200,
+            r#"{"workflow_id": "805e0729cfec4d67", "kind": "regime_review", "status": "running"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(
+                &client,
+                Command::StartWorkflow {
+                    template: "regime_review".into(),
+                    goal: "check the drift".into(),
+                }
+            )
+            .await,
+            Some(Wrote::Started {
+                template: "regime_review".into(),
+                workflow_id: "805e0729cfec4d67".into(),
+            })
+        );
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/workflows/start");
+        // `kind` and `goal` only. The owner reads `as_of`, `universe` and
+        // `offline` too and defaults all three, and it refuses to take a phase
+        // graph from a network caller at all — sending less is the narrower
+        // surface, and the picker says so on screen.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({"kind": "regime_review", "goal": "check the drift"})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_start_the_owner_did_not_hand_back_a_handle_for_is_a_failure() {
+        // The owner answers with the workflow row it created. A 200 without a
+        // `workflow_id` is a broken contract, and inventing a handle would put
+        // a run on screen that an operator could never find in the registry —
+        // the owner's own dispatch path refuses the same shape for the same
+        // reason ("returning a handle with workflow_id=None is how a failed
+        // dispatch used to be recorded as a completed task").
+        let owner = spawn_owner(200, r#"{"status": "running"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(
+            &client,
+            Command::StartWorkflow {
+                template: "regime_review".into(),
+                goal: "check the drift".into(),
+            },
+        )
+        .await
+        {
+            Some(Wrote::Failed { what, said }) => {
+                assert!(what.contains("regime_review"), "{what}");
+                assert!(said.contains("without a workflow_id"), "{said}");
+            }
+            other => panic!("a start with no handle must not read as started: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn the_two_commands_the_runtime_handles_itself_send_nothing() {
         // A stray `Quit` reaching the writer must not put a meaningless row on
         // the bus — every `Wrote` raises a toast and refetches the desk.
@@ -908,6 +1014,17 @@ mod operator {
             Wrote::Failed {
                 what: "execute p1".into(),
                 said: "the owner did not answer".into(),
+            },
+            // Both of the workforce verbs move the registry too: a message is
+            // recorded as an audit event, and a start writes a workflow and its
+            // whole phase graph. A frame that waited out the poll interval
+            // would show neither, which reads as a key that did nothing.
+            Wrote::Asked {
+                note: "queued for the interpreting agent".into(),
+            },
+            Wrote::Started {
+                template: "regime_review".into(),
+                workflow_id: "805e0729cfec4d67".into(),
             },
         ] {
             assert!(

@@ -163,7 +163,7 @@ impl View for WorkforceView {
     fn typing(&self) -> bool {
         #[cfg(feature = "operator")]
         {
-            return self.ask.is_some() || self.picker.is_some();
+            self.ask.is_some() || self.picker.is_some()
         }
         #[cfg(not(feature = "operator"))]
         false
@@ -572,7 +572,12 @@ impl WorkforceView {
                     Style::default().fg(t.warning),
                 ),
                 Span::styled(
-                    clip(purpose, inner.width as usize - 28),
+                    // Saturating, not `-`: the view's own floor keeps this
+                    // above zero today with nine cells to spare, but an
+                    // arithmetic underflow in a render path is a panic behind
+                    // the alternate screen, which is the one failure mode a
+                    // fullscreen client cannot report.
+                    clip(purpose, (inner.width as usize).saturating_sub(28)),
                     Style::default().fg(t.text_secondary),
                 ),
             ]));
@@ -610,7 +615,7 @@ impl WorkforceView {
 #[cfg(feature = "operator")]
 fn centred(area: Rect) -> Rect {
     let w = area.width.saturating_sub(4).max(1);
-    let h = area.height.saturating_sub(4).max(1).min(16);
+    let h = area.height.saturating_sub(4).clamp(1, 16);
     Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -700,7 +705,7 @@ mod tests {
     fn clipping_counts_cells_and_not_bytes() {
         // A goal an agent wrote can carry anything. Slicing on bytes panics on
         // a character boundary, which is a crash in the render path.
-        assert_eq!(clip("ré­gime review of the desk", 8), "ré­gime…");
+        assert_eq!(clip("régime review of the desk", 7), "régime…");
         assert_eq!(clip("→→→→→→→→→→", 4), "→→→…");
         assert_eq!(clip("", 4), "");
         assert_eq!(clip("anything", 0), "");

@@ -154,6 +154,67 @@ fn every_trigger_variant_reaches_the_rule_that_moves_it() {
 }
 
 #[test]
+fn a_phase_advancing_on_the_desk_reaches_the_effect_that_moves_for_it() {
+    // Invariant 10, at the arm that shipped without a caller. `PhaseAdvanced`
+    // had a rule from Task 15 and nothing that could emit it, which is
+    // indistinguishable from having no rule at all. This drives the *whole*
+    // path — two snapshots through `Store::apply`, its triggers into `Fx` — so
+    // a diff that stopped emitting would fail here rather than in a unit test
+    // that constructs the trigger by hand.
+    use atlas::bus::AppEvent;
+    use atlas::model::Snapshot;
+    use atlas::store::Store;
+
+    let flow = |status: &str| {
+        AppEvent::Snapshot(Box::new(
+            serde_json::from_value::<Snapshot>(serde_json::json!({"workflows": [{
+                "workflow_id": "wf1", "status": "running",
+                "steps": [{"step_id": "wf1:referee", "phase": "referee", "status": status}]}]}))
+            .unwrap(),
+        ))
+    };
+
+    let now = Instant::now();
+    let mut store = Store::default();
+    let mut fx = staged();
+    assert!(
+        !store
+            .apply(flow("queued"), now)
+            .contains(&Trigger::PhaseAdvanced),
+        "the first snapshot is diffed against nothing"
+    );
+
+    let triggers = store.apply(flow("working"), now);
+    assert!(
+        triggers.contains(&Trigger::PhaseAdvanced),
+        "the diff stopped emitting the trigger its rule is written for"
+    );
+    for trigger in &triggers {
+        fx.on_trigger(trigger, now, false);
+    }
+    let after = now + FLASH.max(REVEAL) + Duration::from_millis(1);
+    assert!(
+        fx.active(after),
+        "a phase advance moved nothing on screen at all"
+    );
+
+    // And it lands on the chip run, which is where Task 15 aimed it: a phase
+    // advancing is governance news whichever view is up, so it must be visible
+    // from DESK and BOOK too — not only from the pane that draws pipelines.
+    let mut buf = painted();
+    let before = buf.clone();
+    fx.process(FX_FRAME, &mut buf, FRAME);
+    let chips = Rect::new(80, 35, 40, 1);
+    assert!(
+        chips
+            .rows()
+            .flat_map(|row| row.columns())
+            .any(|c| buf[(c.x, c.y)] != before[(c.x, c.y)]),
+        "the phase pulse never reached the chip run"
+    );
+}
+
+#[test]
 fn a_quote_still_moves_the_only_lane_that_should_move_it() {
     // The other half of the arm above: `QuoteTick` has no tachyonfx rule, which
     // must not be confused with having no motion at all.

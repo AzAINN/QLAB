@@ -514,6 +514,21 @@ mod armed {
     }
 
     #[test]
+    fn the_picker_draws_at_every_width_the_view_itself_admits() {
+        // An arithmetic underflow in a render path is a panic behind the
+        // alternate screen, which is the one failure a fullscreen client cannot
+        // report. The box is drawn over the view's own area, so its floor is
+        // the view's — swept from the refusal threshold upward.
+        let mut client = desk();
+        press(&mut client, KeyCode::Char('S'));
+        for width in 44u16..130 {
+            for height in [8u16, 16, 36] {
+                let _ = client.frame(width, height);
+            }
+        }
+    }
+
+    #[test]
     fn a_picker_with_no_templates_says_so_rather_than_starting_nothing() {
         // The templates poll runs on a sixty-second beat, so an empty list is a
         // real state a client opens in — and Enter there must not send a

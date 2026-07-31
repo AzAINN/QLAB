@@ -11,6 +11,12 @@
 //! how the book replays through three crises, and how far its weights sit from
 //! their targets.
 //!
+//! The grid is two columns by four rows rather than the plan's 2×3, and the
+//! shape is forced by two of the tiles: `$10,000.00` in quadrant glyphs is forty
+//! cells, and a weight bar in eleven is a bar nobody can read. So the hero and
+//! the allocation strip span both columns and the four label/value tiles pair up
+//! between them — six tiles, in the rows their contents can actually occupy.
+//!
 //! A changed `atlas_read.as_of` types the read back in over 600 ms. The reveal
 //! is a substring render, not an effect: `FlashTracker::revealed` turns two
 //! instants into a fraction and this slices the body to it, top to bottom, so a
@@ -64,8 +70,10 @@ use unicode_width::UnicodeWidthStr;
 /// smear the ledger's Task 13 finding names.
 const READ_W: u16 = 24;
 
-/// One tile column: a nine-cell label and the widest value beside it
-/// (`-100.0% / 100.0%`), plus the space between them.
+/// One tile column: the label column and the widest value any tile puts beside
+/// it — `10.1% / 30.0%`, the stressed vol against its limit. A pair of
+/// three-figure percentages would run past this and clip; the owner's vols and
+/// limits are fractions of one, so the widest *real* row is the one measured.
 const TILE_W: u16 = 22;
 
 /// The tile grid: two columns and the cell between them.

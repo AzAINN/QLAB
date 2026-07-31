@@ -141,10 +141,21 @@ pub struct Nav {
 
 /// What this client can currently see. Both start down: a surface that assumes
 /// its feeds are up renders stale numbers as current for one poll interval.
+///
+/// The counts are what a dot cannot say. A feed that has dropped eleven times in
+/// a minute and is up *right now* renders exactly like one that has been up all
+/// morning, and those are very different desks to be reading numbers off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Conn {
     pub owner: bool,
     pub stream: bool,
+    /// How many times each feed has gone away since this client opened.
+    ///
+    /// Drops rather than reconnects, because a drop is the event that actually
+    /// happened: the feed that went away and has not come back yet is still
+    /// counted, where a reconnect count would silently stop at the last repair.
+    pub owner_drops: u32,
+    pub stream_drops: u32,
 }
 
 /// A payload the owner served and the model could not read.
@@ -550,11 +561,16 @@ impl Store {
     }
 
     fn set_conn(&mut self, channel: Channel, up: bool) {
-        let slot = match channel {
-            Channel::Owner => &mut self.conn.owner,
-            Channel::Stream => &mut self.conn.stream,
+        let (slot, drops) = match channel {
+            Channel::Owner => (&mut self.conn.owner, &mut self.conn.owner_drops),
+            Channel::Stream => (&mut self.conn.stream, &mut self.conn.stream_drops),
         };
         if *slot != up {
+            // Counted on the edge down, so a flapping feed is counted once per
+            // outage rather than once per poll that found it gone.
+            if !up {
+                *drops = drops.saturating_add(1);
+            }
             *slot = up;
             self.dirty = true;
         }

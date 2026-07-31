@@ -14,10 +14,11 @@ use atlas::theme::Theme;
 use atlas::ui::shell::{NAV_W, PULSE_W};
 use atlas::ui::views::Views;
 use atlas::ui::widgets::pulse;
+use atlas::ui::widgets::toast::{self, ToastQueue};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use harness::{
     body_style_of, fixture_store, fixture_store_with_panel, frame_to_string, frame_to_string_at,
-    frame_to_string_fx, line_with, row_styles, Client,
+    frame_to_string_fx, frame_with_toasts, line_with, row_styles, Client,
 };
 use ratatui::layout::Rect;
 use std::time::{Duration, Instant};
@@ -461,7 +462,12 @@ fn a_stream_dropping_frames_says_so_beside_the_chip() {
     let now = store.last_snapshot_at.unwrap();
     store.apply(AppEvent::ConnUp(Channel::Stream), now);
     let clean = frame_to_string_at(&store, 120, 36, now);
-    assert!(!clean.contains("STREAM"), "{clean}");
+    assert!(!clean.contains('⚠'), "{clean}");
+    assert_eq!(
+        line_with(&clean, "GLASS").matches("SSE").count(),
+        1,
+        "a healthy stream is one chip:\n{clean}"
+    );
 
     for _ in 0..3 {
         store.apply(
@@ -476,11 +482,168 @@ fn a_stream_dropping_frames_says_so_beside_the_chip() {
     }
     let frame = frame_to_string_at(&store, 120, 36, now);
     let status = line_with(&frame, "GLASS");
-    assert!(status.contains("STREAM ⚠ 3"), "{status}");
-    assert!(
-        status.contains("SSE"),
-        "beside the chip, not instead: {status}"
+    // One feed, one name. The count used to be headed `STREAM` beside a chip
+    // headed `SSE`, which is two feeds as far as a reader is concerned.
+    assert!(status.contains("SSE ⚠ 3"), "{status}");
+    assert!(!status.contains("STREAM"), "{status}");
+
+    // And the dot goes with it: a subscription that is open and losing rows is
+    // degraded, which is neither of the two colours a bool can carry.
+    let t = Theme::truecolor();
+    let dots: Vec<_> = row_styles(&store, &Fx::default(), 120, 36, now, 35)
+        .into_iter()
+        .filter(|(symbol, _)| symbol == "●")
+        .map(|(_, style)| style.fg)
+        .collect();
+    assert_eq!(
+        dots,
+        vec![Some(t.warning), Some(t.positive)],
+        "the SSE dot stayed green over a stream that is dropping frames"
     );
+}
+
+#[test]
+fn an_owner_answering_with_something_unreadable_is_degraded_not_up() {
+    // The affirmative falsehood Task 6 named, now in the dot as well as the
+    // panel: the owner is reachable, so red is wrong, and green says the desk
+    // on screen is current when nothing on it is.
+    let t = Theme::truecolor();
+    let store = malformed_store(true);
+    let now = store.last_snapshot_at.unwrap();
+    let owner = row_styles(&store, &Fx::default(), 120, 36, now, 35)
+        .into_iter()
+        .filter(|(symbol, _)| symbol == "●")
+        .map(|(_, style)| style.fg)
+        .next_back()
+        .expect("the owner chip is the second dot on the line");
+    assert_eq!(owner, Some(t.warning));
+}
+
+#[test]
+fn a_feed_that_keeps_going_away_says_how_often_rather_than_only_that_it_is_back() {
+    // A dot has one bit. A feed that has dropped eleven times in a minute and is
+    // up right now renders exactly like one that has been up all morning, and
+    // those are very different desks to be reading numbers off.
+    let mut store = fixture_store();
+    let now = store.last_snapshot_at.unwrap();
+    assert!(
+        !frame_to_string_at(&store, 120, 36, now).contains('↻'),
+        "a feed that has never dropped carries no counter"
+    );
+
+    for _ in 0..2 {
+        store.apply(AppEvent::ConnDown(Channel::Owner), now);
+        store.apply(AppEvent::ConnUp(Channel::Owner), now);
+    }
+    store.apply(AppEvent::ConnUp(Channel::Stream), now);
+    store.apply(AppEvent::ConnDown(Channel::Stream), now);
+
+    let frame = frame_to_string_at(&store, 120, 36, now);
+    let status = line_with(&frame, "GLASS");
+    assert!(status.contains("SSE ↻1"), "{status}");
+    assert!(status.contains("OWNER ↻2"), "{status}");
+    assert_eq!(
+        store.conn.owner_drops, 2,
+        "one count per outage, not one per poll that found it gone"
+    );
+}
+
+// -- toasts ----------------------------------------------------------------
+
+fn toast_queue(now: Instant) -> ToastQueue {
+    let mut toasts = ToastQueue::default();
+    for (kind, payload) in [
+        ("halt", serde_json::json!({"by": "tool"})),
+        (
+            "approval_created",
+            serde_json::json!({"approval_id": "ap-1", "plan_id": "pl-42"}),
+        ),
+        ("stream.malformed", serde_json::json!({"raw": "{oops"})),
+    ] {
+        let ev = AppEvent::Sse(SseEvent {
+            kind: kind.into(),
+            payload,
+            ts: None,
+            id: None,
+        });
+        toasts.push(toast::for_event(&ev).expect(kind), now);
+    }
+    toasts
+}
+
+#[test]
+fn the_toast_stack_renders_over_the_desk_at_120x36() {
+    let store = fixture_store();
+    let now = store.last_snapshot_at.unwrap();
+    insta::assert_snapshot!(frame_with_toasts(
+        &store,
+        &toast_queue(now),
+        120,
+        36,
+        now + Duration::from_millis(1_500)
+    ));
+}
+
+#[test]
+fn a_toast_sits_top_right_under_the_tape_and_leaves_when_it_expires() {
+    let store = fixture_store();
+    let now = store.last_snapshot_at.unwrap();
+    let toasts = toast_queue(now);
+
+    let frame = frame_with_toasts(&store, &toasts, 120, 36, now + Duration::from_secs(1));
+    // The tape is one of the three indicators claiming this client is alive, so
+    // nothing may sit on it.
+    assert_eq!(
+        frame_to_string_at(&store, 120, 36, now).lines().next(),
+        frame.lines().next(),
+        "a toast covered the ticker tape"
+    );
+    let boxed = line_with(&frame, "STREAM FRAME DROPPED");
+    assert!(boxed.contains("● STREAM FRAME DROPPED"), "{boxed}");
+    assert!(boxed.contains("1s"), "the box says how old it is: {boxed}");
+    // The backend's `Display` quotes each row, so the frame's last cell is the
+    // character before the closing quote.
+    assert!(
+        boxed.trim_end().ends_with("│\""),
+        "the box is right-aligned against the frame edge: {boxed:?}"
+    );
+    // Newest first: the dropped frame was pushed last.
+    assert!(
+        frame
+            .lines()
+            .position(|l| l.contains("STREAM FRAME DROPPED"))
+            < frame.lines().position(|l| l.contains("DESK HALTED")),
+        "{frame}"
+    );
+
+    // And they go. A box that never leaves is a chip, which is a claim about a
+    // condition rather than about a moment.
+    let after = frame_with_toasts(&store, &toasts, 120, 36, now + Duration::from_secs(4));
+    assert!(!after.contains("DESK HALTED"), "{after}");
+    assert_eq!(
+        after,
+        frame_to_string_at(&store, 120, 36, now + Duration::from_secs(4)),
+        "an expired stack has to leave the frame exactly as it found it"
+    );
+}
+
+#[test]
+fn a_terminal_too_small_for_a_box_draws_no_box_rather_than_a_hole() {
+    // The allocated-rect rule this workstation holds everywhere: a bordered box
+    // in a handful of columns is two rules and no message, which reads as a
+    // rendering fault rather than as news.
+    let store = fixture_store();
+    let now = store.last_snapshot_at.unwrap();
+    let toasts = toast_queue(now);
+    for (w, h) in [(19u16, 24u16), (120, 3), (1, 1), (40, 4)] {
+        let bare = frame_to_string_at(&store, w, h, now);
+        let over = frame_with_toasts(&store, &toasts, w, h, now);
+        if w < 20 || h < 5 {
+            assert_eq!(over, bare, "{w}x{h} drew a box it had no room for");
+        } else {
+            assert_ne!(over, bare, "{w}x{h} had room and drew nothing");
+        }
+    }
 }
 
 /// A desk whose posterior and whose panel tell the same story.

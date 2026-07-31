@@ -408,24 +408,42 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Optio
         " /command …",
         Style::default().fg(t.text_tertiary),
     )];
-    let mut right = vec![
-        dot(store.conn.stream, t),
-        Span::styled("SSE  ", Style::default().fg(t.text_secondary)),
-    ];
-    // Beside the stream chip, for the same reason STALE sits beside OWNER: a
-    // green dot says the subscription is open, which is a different claim from
-    // "every event it delivered was readable". Task 16 gives this a toast; the
-    // count is what keeps a dropping stream from being invisible until then.
+    // A green dot says the subscription is open, which is a different claim from
+    // "every event it delivered was readable" — so a stream that is dropping
+    // frames is degraded rather than up, and the count says how badly.
+    let mut right = chip(
+        "SSE",
+        match (store.conn.stream, store.stream_malformed_count) {
+            (false, _) => Health::Down,
+            (true, 0) => Health::Up,
+            (true, _) => Health::Degraded,
+        },
+        store.conn.stream_drops,
+        t,
+    );
+    // Beside the chip rather than instead of it, for the same reason STALE sits
+    // beside OWNER: two claims, and the dot only ever spoke to the first. Named
+    // `SSE` because the chip it sits beside is — one feed with two names on one
+    // line is a second feed as far as a reader is concerned.
     if store.stream_malformed_count > 0 {
         right.push(Span::styled(
-            format!("STREAM ⚠ {}  ", store.stream_malformed_count),
+            format!("SSE ⚠ {}  ", store.stream_malformed_count),
             Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
         ));
     }
-    right.extend([
-        dot(store.conn.owner, t),
-        Span::styled("OWNER  ", Style::default().fg(t.text_secondary)),
-    ]);
+    // An owner serving a payload this client cannot read is answering, so "down"
+    // is wrong and green is worse — it is the affirmative falsehood the
+    // malformed panel exists to correct, and the dot has to agree with it.
+    right.extend(chip(
+        "OWNER",
+        match (store.conn.owner, store.malformed.is_some()) {
+            (false, _) => Health::Down,
+            (true, true) => Health::Degraded,
+            (true, false) => Health::Up,
+        },
+        store.conn.owner_drops,
+        t,
+    ));
     // Beside the chip, not instead of it: a reachable owner and current numbers
     // are two claims, and the red dot only ever spoke to the first.
     if let Some(age) = stale {
@@ -467,11 +485,41 @@ fn draw_status(f: &mut Frame, area: Rect, store: &Store, t: &Theme, stale: Optio
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn dot(up: bool, t: &Theme) -> Span<'static> {
-    Span::styled(
-        "● ",
-        Style::default().fg(if up { t.positive } else { t.negative }),
-    )
+/// What one feed's chip can say.
+///
+/// Three states rather than two. A feed that is answering and handing this
+/// client something it cannot use is neither up nor down, and painting it green
+/// is exactly the affirmative falsehood the malformed panel was added to
+/// correct — the dot has to be able to agree with the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Health {
+    Up,
+    Degraded,
+    Down,
+}
+
+/// One connection chip: the dot, the feed's name, and how often it has gone away.
+///
+/// The drop count only appears once there is one. A chip carrying `↻0` on every
+/// frame would train an operator to read past the whole run.
+fn chip(label: &str, health: Health, drops: u32, t: &Theme) -> Vec<Span<'static>> {
+    let tone = match health {
+        Health::Up => t.positive,
+        Health::Degraded => t.warning,
+        Health::Down => t.negative,
+    };
+    let mut out = vec![
+        Span::styled("● ", Style::default().fg(tone)),
+        Span::styled(label.to_string(), Style::default().fg(t.text_secondary)),
+    ];
+    if drops > 0 {
+        out.push(Span::styled(
+            format!(" ↻{drops}"),
+            Style::default().fg(t.text_tertiary),
+        ));
+    }
+    out.push(Span::raw("  "));
+    out
 }
 
 /// A titled panel: header line, body, and the rule the block reserves.

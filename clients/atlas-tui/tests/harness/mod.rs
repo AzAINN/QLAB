@@ -15,6 +15,7 @@ use atlas::fx::Fx;
 use atlas::model::Snapshot;
 use atlas::store::Store;
 use atlas::ui::views::Views;
+use atlas::ui::widgets::toast::ToastQueue;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::style::Style;
@@ -197,6 +198,32 @@ pub fn frame_to_string_fx(store: &Store, fx: &Fx, w: u16, h: u16, now: Instant) 
     let mut term = ratatui::Terminal::new(backend).unwrap();
     term.draw(|f| atlas::ui::shell::draw(f, store, &views, fx, now))
         .unwrap();
+    format!("{}", term.backend())
+}
+
+/// One frame with the toast overlay over it, composed the way the runtime
+/// composes them.
+///
+/// The effect pass the runtime runs *after* both is deliberately absent, for the
+/// reason `frame_to_string_fx` states: a golden that could catch a half-finished
+/// effect would be blessed away on the first frame that sampled one.
+pub fn frame_with_toasts(
+    store: &Store,
+    toasts: &ToastQueue,
+    w: u16,
+    h: u16,
+    now: Instant,
+) -> String {
+    let views = Views::new();
+    let fx = Fx::default();
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut term = ratatui::Terminal::new(backend).unwrap();
+    term.draw(|f| {
+        atlas::ui::shell::draw(f, store, &views, &fx, now);
+        let area = f.area();
+        toasts.draw(f, area, now);
+    })
+    .unwrap();
     format!("{}", term.backend())
 }
 

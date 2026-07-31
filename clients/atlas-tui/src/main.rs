@@ -20,7 +20,7 @@ use atlas::net::http::{self, PollerHandle};
 use atlas::net::sse;
 use atlas::store::{should_render, Store, TICK};
 use atlas::ui::views::Views;
-use atlas::ui::widgets::pulse;
+use atlas::ui::widgets::{pulse, toast};
 use atlas::{theme, ui};
 use color_eyre::eyre::Result;
 use crossterm::{
@@ -103,6 +103,9 @@ async fn run(
     // Keeping it out is what lets a golden frame be a pure function of the store
     // and an instant.
     let mut fx = Fx::default();
+    // Beside `Fx` for the same reason: what the owner said is the store's, and a
+    // box that disappears after four seconds is not something the owner said.
+    let mut toasts = toast::ToastQueue::default();
     // The views, built once. Built per keystroke and per frame — which is what
     // this replaced — every selection and crosshair an operator moved was
     // dropped before the frame that would have drawn it.
@@ -113,7 +116,7 @@ async fn run(
     // of rects, so the rules of the opening snapshot have somewhere to aim.
     let mut last_frame = Instant::now();
     terminal.draw(|f| ui::shell::draw(f, store, &views, &fx, last_frame))?;
-    let mut budget = fx.budget(last_frame);
+    let mut budget = wake(&fx, &toasts, last_frame);
 
     loop {
         // Two waits, and which one is used is the whole difference between an
@@ -142,17 +145,24 @@ async fn run(
         let now = Instant::now();
         let mut quit = false;
         if let Some(first) = next {
-            quit |= ingest(first, store, poller, &mut views, &mut fx, now);
+            quit |= ingest(first, store, poller, &mut views, &mut fx, &mut toasts, now);
         }
         // Drain-then-render: fifty quote events coalesce into one repaint.
         while let Ok(ev) = rx.try_recv() {
-            quit |= ingest(ev, store, poller, &mut views, &mut fx, now);
+            quit |= ingest(ev, store, poller, &mut views, &mut fx, &mut toasts, now);
         }
 
         // A decaying flash owes frames nothing else asked for: the 100 ms idle
         // heartbeat would sample a 200 ms step visibly late, and a desk with no
-        // other news would freeze the row mid-flash.
-        if should_render(store.take_dirty(), fx.active(now), last_frame, now) {
+        // other news would freeze the row mid-flash. A visible toast rides the
+        // same path: its age counts up and it has to disappear on time, and
+        // nothing else on a quiet desk would ask for the frame that does it.
+        if should_render(
+            store.take_dirty(),
+            fx.active(now) || toasts.active(now),
+            last_frame,
+            now,
+        ) {
             // Effects are driven by elapsed time rather than by a stamp, and the
             // elapsed they get is the gap between the frames they were actually
             // drawn into — not the wall clock, which would advance through the
@@ -160,21 +170,37 @@ async fn run(
             let elapsed = now.saturating_duration_since(last_frame);
             terminal.draw(|f| {
                 ui::shell::draw(f, store, &views, &fx, now);
+                // Between the shell and the effects on purpose. After the shell,
+                // because a toast is over the frame rather than in it; before
+                // the effect pass, so a halted desk's red breath crosses the
+                // boxes too — a toast that stayed clean while everything under
+                // it reddened would read as belonging to a different client.
+                let area = f.area();
+                toasts.draw(f, area, now);
                 // After every widget, over the painted buffer. Deliberately not
                 // inside `shell::draw`: a golden frame calls `draw` and never
                 // this, so no snapshot can capture a half-finished effect.
-                let area = f.area();
                 fx.process(elapsed, f.buffer_mut(), area);
             })?;
             last_frame = now;
         }
         // Decided after the frame, from the state the frame left behind: an
         // effect that just finished must let the loop go back to blocking.
-        budget = fx.budget(now);
+        budget = wake(&fx, &toasts, now);
         if quit {
             return Ok(());
         }
     }
+}
+
+/// How long the loop may sleep, across every lane that owes a frame.
+///
+/// The toasts are their own lane rather than a fourth flag inside `Fx::budget`:
+/// they are not effects, and the queue is state the effect module has no reason
+/// to hold. `or_else` is the whole arbitration because every effect cadence is
+/// at least as fast as the toast's — see `toast::FRAME`.
+fn wake(fx: &Fx, toasts: &toast::ToastQueue, now: Instant) -> Option<std::time::Duration> {
+    fx.budget(now).or_else(|| toasts.budget(now))
 }
 
 /// Fold one event into the store. Returns whether it quits.
@@ -188,6 +214,7 @@ fn ingest(
     poller: &PollerHandle,
     views: &mut Views,
     fx: &mut Fx,
+    toasts: &mut toast::ToastQueue,
     now: Instant,
 ) -> bool {
     let mut quit = false;
@@ -210,6 +237,12 @@ fn ingest(
                 fx.on_view_switch();
             }
         }
+    }
+    // Before the fold, because the fold consumes the event. A toast is about the
+    // event itself rather than about the state it leaves behind — an approval
+    // that arrived and was consumed inside one drain still happened.
+    if let Some(toast) = toast::for_event(&ev) {
+        toasts.push(toast, now);
     }
     // Read before the fold, because the fold is what sets it. The first
     // snapshot is diffed against nothing and therefore announces the state it

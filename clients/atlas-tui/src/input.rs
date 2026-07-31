@@ -122,9 +122,13 @@ impl Source {
     /// at all, and reading only the routing function also keeps a `KeyCode`
     /// mentioned anywhere else in the file out of the comparison.
     ///
-    /// The anchor is for the one case where the name is not unique: `views/mod.rs`
-    /// carries the trait's declaration, the registry's dispatcher, and the
-    /// `Unbuilt` view that actually answers for RSCH and SETT.
+    /// The anchor is for the case where the name is not unique in a file — two
+    /// `impl`s of `on_key`, or a trait declaration above the impl that answers.
+    /// No section needs one today (`views/mod.rs`'s placeholder view was the
+    /// last, and every view is built now), which is why
+    /// [`tests::the_anchor_picks_the_impl_it_names_and_not_the_one_above_it`]
+    /// exists: an unexercised branch of this scanner is one that would be
+    /// discovered broken by the next file that needs it.
     ///
     /// Data rather than a comment, because it is what the equivalence check
     /// reads — and hand-maintained, which is weakness 3 in this module's own
@@ -144,14 +148,12 @@ impl Source {
             Source::WorkforceAsk => ("ui/views/workforce.rs", "", "ask_key"),
             Source::WorkforcePicker => ("ui/views/workforce.rs", "", "picker_key"),
             Source::View(ViewId::Audit) => ("ui/views/audit.rs", "", "on_key"),
-            // RSCH is still `Unbuilt`, which declines every key.
-            Source::View(ViewId::Research) => {
-                ("ui/views/mod.rs", "impl View for Unbuilt", "on_key")
-            }
-            // SETT is built and binds nothing: everything on it is read-only
-            // and nothing scrolls, so a key pressed there belongs to whoever
-            // claims it next. The check reads the real router either way, which
-            // is what would catch a cursor added without a help row.
+            // RSCH and SETT bind nothing: everything on them is read-only and
+            // nothing scrolls, so a key pressed there belongs to whoever claims
+            // it next. Pointed at their own routers rather than at a shared
+            // placeholder, which is what would catch a cursor added to one of
+            // them without a help row.
+            Source::View(ViewId::Research) => ("ui/views/research.rs", "", "on_key"),
             Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "on_key"),
             Source::Confirm => ("ui/widgets/confirm.rs", "", "on_key"),
         }
@@ -763,6 +765,50 @@ mod tests {
             None
         }
     "#;
+
+    /// One name, two impls, and a trait declaration above both — the shape the
+    /// anchor exists for.
+    const TWO_IMPLS: &str = r#"
+        trait View {
+            fn route(k: KeyEvent) -> Option<Command>;
+        }
+        impl View for First {
+            fn route(k: KeyEvent) -> Option<Command> {
+                match k.code {
+                    KeyCode::Tab => next(),
+                    _ => {}
+                }
+                None
+            }
+        }
+        impl View for Second {
+            fn route(k: KeyEvent) -> Option<Command> {
+                match k.code {
+                    KeyCode::Esc => close(),
+                    _ => {}
+                }
+                None
+            }
+        }
+    "#;
+
+    #[test]
+    fn the_anchor_picks_the_impl_it_names_and_not_the_one_above_it() {
+        // No section needs an anchor today, so without this the branch would sit
+        // unexercised until the next file with two same-named routers — and be
+        // discovered broken there, in a check whose whole value is that it
+        // cannot be discovered broken.
+        assert_eq!(
+            codes_in_src(TWO_IMPLS, "impl View for Second", "route", &[]),
+            vec!["Esc".to_string()]
+        );
+        // And with no anchor it reads the first one with a body, stepping over
+        // the trait's body-less declaration rather than panicking on it.
+        assert_eq!(
+            codes_in_src(TWO_IMPLS, "", "route", &[]),
+            vec!["Tab".to_string()]
+        );
+    }
 
     #[test]
     fn the_scrape_keeps_a_repeat_rather_than_collapsing_it() {

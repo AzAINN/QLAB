@@ -21,24 +21,17 @@ pub mod audit;
 pub mod book;
 pub mod desk;
 pub mod markets;
+pub mod research;
 pub mod settings;
 pub mod workforce;
 
 use crate::cmd::Command;
 use crate::fx::FlashTracker;
 use crate::store::{Store, ViewId};
-use crate::theme::theme;
 #[cfg(feature = "operator")]
 use crate::ui::widgets::confirm;
-use crate::ui::widgets::{panel_block, panel_header};
 use crossterm::event::KeyEvent;
-use ratatui::{
-    layout::{Constraint, Layout, Rect},
-    style::Style,
-    text::{Line, Span},
-    widgets::Paragraph,
-    Frame,
-};
+use ratatui::{layout::Rect, Frame};
 use std::time::Instant;
 
 pub trait View {
@@ -112,7 +105,7 @@ pub struct Views {
     desk: desk::DeskView,
     markets: markets::MarketsView,
     book: book::BookView,
-    research: Unbuilt,
+    research: research::ResearchView,
     workforce: workforce::WorkforceView,
     audit: audit::AuditView,
     settings: settings::SettingsView,
@@ -130,7 +123,7 @@ impl Views {
             desk: desk::DeskView,
             markets: markets::MarketsView::default(),
             book: book::BookView::default(),
-            research: Unbuilt(ViewId::Research),
+            research: research::ResearchView,
             workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
             settings: settings::SettingsView,
@@ -216,55 +209,6 @@ impl Views {
             ViewId::Audit => &mut self.audit,
             ViewId::Settings => &mut self.settings,
         }
-    }
-}
-
-/// A view the shell can already reach and the plan has not built yet.
-///
-/// It names the task that fills it rather than rendering an empty pane: during
-/// the weeks this branch is half-built, "nothing here yet" and "this broke"
-/// have to be distinguishable at a glance.
-struct Unbuilt(ViewId);
-
-/// Which plan task builds a view. Here rather than on `ViewId` because the
-/// store has no business knowing what the plan calls the work.
-fn owner_task(id: ViewId) -> u8 {
-    match id {
-        ViewId::Desk => 14,
-        ViewId::Markets => 9,
-        ViewId::Book => 11,
-        ViewId::Research => 21,
-        // WORKFORCE is built; this arm stays because `owner_task` is total over
-        // `ViewId` and the map is what a half-built branch is read through.
-        ViewId::Workforce => 19,
-        // AUDIT is built; this arm stays because `owner_task` is total over
-        // `ViewId` and the map is what a half-built branch is read through.
-        ViewId::Audit => 18,
-        ViewId::Settings => 21,
-    }
-}
-
-impl View for Unbuilt {
-    fn draw(&self, f: &mut Frame, area: Rect, _store: &Store, _fx: &FlashTracker, _now: Instant) {
-        // Header, note, rule — the same three rows a tile occupies. Given the
-        // whole area the rule would land at the foot of the frame, a hundred
-        // cells away from the title it belongs to.
-        let head = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area)[0];
-        let block = panel_block();
-        let inner = block.inner(head);
-        f.render_widget(block, head);
-        let body = vec![
-            panel_header(self.0.label()),
-            Line::from(Span::styled(
-                format!("this view lands in Task {}", owner_task(self.0)),
-                Style::default().fg(theme().text_secondary),
-            )),
-        ];
-        f.render_widget(Paragraph::new(body), inner);
-    }
-
-    fn on_key(&mut self, _k: KeyEvent, _store: &mut Store) -> Option<Command> {
-        None
     }
 }
 

@@ -300,16 +300,33 @@ async fn subscribe(
         ]);
     }
 
+    // Every failure below reports through `mark`, which writes the reason once
+    // per outage rather than once per retry. This loop reconnects every two
+    // seconds forever against a dead owner, and a line per attempt buried what
+    // actually broke under an hour of identical sentences.
     let resp = match request.send().await {
         Ok(resp) => resp,
         Err(err) => {
-            tracing::warn!(why = %because(&err), "owner stream is unreachable");
-            return mark(tx, Channel::Stream, up, false);
+            return mark(
+                tx,
+                Channel::Stream,
+                up,
+                false,
+                &format!("unreachable: {}", because(&err)),
+            );
         }
     };
     if !resp.status().is_success() {
-        tracing::warn!(status = resp.status().as_u16(), "owner refused the stream");
-        return mark(tx, Channel::Stream, up, false);
+        return mark(
+            tx,
+            Channel::Stream,
+            up,
+            false,
+            &format!(
+                "the owner refused the stream with {}",
+                resp.status().as_u16()
+            ),
+        );
     }
     // An answer is not a stream. An owner serving something else on this route
     // would otherwise hold a green STREAM chip over a subscription that can
@@ -321,19 +338,28 @@ async fn subscribe(
         .unwrap_or_default()
         .to_string();
     if !content_type.starts_with("text/event-stream") {
-        tracing::warn!(%content_type, "owner answered the stream route with something else");
-        return mark(tx, Channel::Stream, up, false);
+        return mark(
+            tx,
+            Channel::Stream,
+            up,
+            false,
+            &format!("the owner answered the stream route with {content_type}"),
+        );
     }
 
-    mark(tx, Channel::Stream, up, true)?;
+    mark(tx, Channel::Stream, up, true, "")?;
     let mut body = resp.bytes_stream();
+    // Why this subscription ended, for the one line `mark` writes about it. A
+    // body that simply runs out is the owner closing the stream, which is a
+    // different thing from a read deadline or a dropped socket.
+    let mut ended = "the owner closed the stream".to_string();
     while let Some(chunk) = body.next().await {
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(err) => {
                 // A read deadline or a dropped socket. Both mean the same thing
                 // to the desk, and both are resumable from the cursor.
-                tracing::warn!(why = %because(&err), "owner stream ended");
+                ended = because(&err);
                 break;
             }
         };
@@ -347,7 +373,7 @@ async fn subscribe(
             emit(tx, AppEvent::Sse(event))?;
         }
     }
-    mark(tx, Channel::Stream, up, false)
+    mark(tx, Channel::Stream, up, false, &ended)
 }
 
 fn build_client() -> reqwest::Result<reqwest::Client> {

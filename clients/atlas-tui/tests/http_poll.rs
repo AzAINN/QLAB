@@ -7,7 +7,7 @@
 //! everything else.
 
 use atlas::bus::{AppEvent, Channel, HttpResult, Rx};
-use atlas::net::http::{spawn_poller, Refetch, POLL_INTERVAL};
+use atlas::net::http::{spawn_poller, Refetch, POLL_INTERVAL, READY_RETRY};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
@@ -264,6 +264,53 @@ async fn a_payload_the_model_cannot_read_fails_loud_and_never_marks_the_owner_up
         !seen.contains(&Seen::Snapshot),
         "nothing decoded, so nothing may render: {seen:?}"
     );
+}
+
+#[tokio::test]
+async fn an_owner_answering_with_garbage_is_polled_at_the_desks_cadence_not_the_retrys() {
+    // Reachable and readable are two facts and were one field. An owner serving
+    // a payload the model cannot read left it unset, so every cycle paid a
+    // readiness probe *and* a full `/api/tui` at the two-second retry cadence —
+    // three times the request rate of a healthy desk, aimed at the owner that is
+    // already struggling. The pin is the probe count: a reachable owner is not
+    // asked to prove it again.
+    let owner = spawn_owner(vec![
+        ready(),
+        (
+            "/api/tui",
+            r#"{"live_portfolio": {"equity": "a lot, honestly"}}"#.to_string(),
+        ),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _poller = spawn_poller(owner.base.clone(), true, tx);
+
+    // Past one whole poll interval, and past two of the retry interval — which
+    // is what makes the two cadences tell each other apart here.
+    let budget = POLL_INTERVAL + Duration::from_millis(600);
+    let seen = drain(&mut rx, 99, budget).await;
+    assert!(
+        seen.iter().any(|s| matches!(s, Seen::Malformed(_))),
+        "the decode failure still has to reach the bus: {seen:?}"
+    );
+    assert_eq!(
+        owner.asked_for("/readyz").len(),
+        1,
+        "an owner that answered is not asked to prove it again every cycle: {:?}",
+        owner.targets()
+    );
+    assert!(
+        owner.asked_for("/api/tui").len() >= 2,
+        "the desk's own cadence still has to run: {:?}",
+        owner.targets()
+    );
+    // What makes the counts above discriminate: the retry is the tighter loop,
+    // and the budget covers a second probe under it as well as a second poll
+    // under the desk's cadence. Without both, this passes on the bug it is about.
+    assert!(
+        READY_RETRY < POLL_INTERVAL,
+        "the retry is not the tight loop"
+    );
+    assert!(READY_RETRY < budget && POLL_INTERVAL < budget);
 }
 
 #[tokio::test]

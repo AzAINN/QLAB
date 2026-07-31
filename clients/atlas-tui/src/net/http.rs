@@ -36,7 +36,11 @@ pub const REGIME_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How often a client with no owner asks again. Faster than the poll cadence
 /// because the operator is usually starting the owner while watching this.
-const READY_RETRY: Duration = Duration::from_secs(2);
+///
+/// Public beside `POLL_INTERVAL` because the gap between the two is what the
+/// `reachable` split is measured by: a test that restated either number would be
+/// free to disagree with the poller about which loop it was watching.
+pub const READY_RETRY: Duration = Duration::from_secs(2);
 
 /// Grace on top of the missed polls, so a request that merely ran long is not
 /// reported as a stopped feed.
@@ -152,6 +156,7 @@ async fn poll_loop(
             return emit(&tx, AppEvent::ConnDown(Channel::Owner));
         }
     };
+
     let base = base.trim_end_matches('/').to_string();
     let lane = if offline { 1 } else { 0 };
     // The same endpoint the Textual client reads: two clients disagreeing about
@@ -159,19 +164,32 @@ async fn poll_loop(
     let snapshot_url = format!("{base}/api/tui?offline={lane}");
     let regime_url = format!("{base}/api/regime/panel?offline={lane}");
 
+    // Two facts, not one. `up` is what the chips read — a payload this client
+    // could actually use — and `reachable` is what the socket said.
+    //
+    // They were one field, and an owner serving a payload the model cannot read
+    // left it unset: every cycle then paid a readiness probe *and* a full
+    // `/api/tui` at the retry cadence, three times the request rate of a healthy
+    // desk, aimed at the owner that is already struggling. A reachable owner
+    // polls at the desk's own cadence whether or not this client can read what
+    // it serves — the frame already says loudly that it cannot.
     let mut up: Option<bool> = None;
+    let mut reachable: Option<bool> = None;
     // Due immediately, then on its own slow beat.
     let mut regime_due = Instant::now();
 
     loop {
         // The readiness gate, only while the owner is not known to be answering.
         // A desk that is up does not need a second request per poll to prove it.
-        let ready = up == Some(true) || {
+        let ready = reachable == Some(true) || {
             match probe(&client, &base).await {
-                Readiness::Ready => true,
+                Readiness::Ready => {
+                    reachable = Some(true);
+                    true
+                }
                 Readiness::Unreachable(why) => {
-                    tracing::warn!(%why, "owner is not reachable");
-                    mark(&tx, Channel::Owner, &mut up, false)?;
+                    reachable = Some(false);
+                    mark(&tx, Channel::Owner, &mut up, false, &why)?;
                     false
                 }
             }
@@ -185,11 +203,13 @@ async fn poll_loop(
                 // "waiting for the first snapshot" for as long as it stayed
                 // broken, with the reason visible only in the log.
                 Fetched::Decoded(snapshot) => {
-                    mark(&tx, Channel::Owner, &mut up, true)?;
+                    mark(&tx, Channel::Owner, &mut up, true, "")?;
                     emit(&tx, AppEvent::Snapshot(Box::new(snapshot)))?;
                 }
                 // Fail loud, and on screen. A payload the model cannot read is a
-                // broken contract with the owner, never a frame to skip.
+                // broken contract with the owner, never a frame to skip — and
+                // the owner *answered*, so `reachable` stands and the cadence
+                // stays the desk's.
                 Fetched::Malformed(error) => emit(
                     &tx,
                     AppEvent::Http(HttpResult::Malformed {
@@ -199,11 +219,11 @@ async fn poll_loop(
                 )?,
                 Fetched::Failed(error) => {
                     // The reason goes to the log rather than to the screen: the
-                    // status chip says the owner is down and the content area
-                    // names the remedy, but "connection refused" versus "404" is
-                    // a distinction Task 16's toasts will carry.
-                    tracing::warn!(%error, "owner poll failed");
-                    mark(&tx, Channel::Owner, &mut up, false)?;
+                    // status chip says the owner is down, the content area names
+                    // the remedy, and the toast carries the distinction between
+                    // "connection refused" and "404".
+                    reachable = Some(false);
+                    mark(&tx, Channel::Owner, &mut up, false, &error)?;
                 }
             }
 
@@ -228,11 +248,11 @@ async fn poll_loop(
             }
         }
 
-        // An owner this client cannot read is not up, so a malformed payload
-        // retries at the readiness cadence rather than the desk's — the operator
-        // is looking at a broken frame either way, and the sooner it recovers the
-        // sooner the accusation on screen is retired.
-        let delay = if up == Some(true) {
+        // Keyed on reachability, not readability. The retry cadence exists for an
+        // owner that is not there yet — the operator is usually starting one
+        // while watching this — and an owner that is answering is not that,
+        // whatever it is answering with.
+        let delay = if reachable == Some(true) {
             POLL_INTERVAL
         } else {
             READY_RETRY

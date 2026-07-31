@@ -21,7 +21,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Cell, Paragraph, Row, Table, TableState},
+    widgets::{Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 use std::time::Instant;
@@ -167,6 +167,25 @@ impl View for MarketsView {
         // The cell of spacing is not decoration: at the floor the two panes abut,
         // and the hero's gutter label lands against the `TGT` column as
         // `6.3%156.36` — two numbers an operator has to parse apart.
+        //
+        // Below the floor `Min` yields: ratatui shrinks the columns underneath
+        // the widths every cell was held to, and a right-aligned cell loses its
+        // *leading* characters — the arrow first, then the sign, then the
+        // leading digit. `head` cannot see that, because it is spent against the
+        // declared width and the allocation is what actually shrank. So the pane
+        // refuses rather than drawing numbers that are wrong.
+        if main.width < GRID_W {
+            refuse(
+                f,
+                main,
+                format!(
+                    "markets grid needs {GRID_W} columns to render its numbers — this pane has {}, widen the terminal",
+                    main.width
+                ),
+            );
+            draw_sectors(f, rows[1], store);
+            return;
+        }
         let cols = Layout::horizontal([Constraint::Min(GRID_W), Constraint::Percentage(40)])
             .spacing(1)
             .split(main);
@@ -362,9 +381,12 @@ fn spark_cell(history: &[f64]) -> (String, Style) {
     if glyphs.is_empty() {
         return (MISSING.to_string(), Style::default().fg(t.text_tertiary));
     }
-    // Slope over the window, not the last tick: the cell's job is the shape of
-    // the tail, and its colour should answer the same question its bars do.
-    let rising = match (history.first(), history.last()) {
+    // Slope over the window the cell actually draws — the same slice `spark`
+    // quantized, not the whole series. The reference desk colours a sparkline by
+    // its own visible direction, and it has to: a tail climbing out of a crash
+    // painted red says the bars on screen are falling, which they are not.
+    let window = tail(history, SPARK_W);
+    let rising = match (window.first(), window.last()) {
         (Some(first), Some(last)) => last >= first,
         _ => true,
     };
@@ -441,13 +463,13 @@ fn draw_sectors(f: &mut Frame, area: Rect, store: &Store) {
 
     if cells.is_empty() {
         // Fail loud. An empty strip reads as "every sector is flat", which is a
-        // statement about the market that nobody made.
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "sector map needs the extended universe — qlab prewarm --universe candidates",
-                Style::default().fg(t.text_dim),
-            ))),
+        // statement about the market that nobody made. Through `refuse` like the
+        // other two, because a remedy clipped to `qlab prewar` is a remedy an
+        // operator cannot run.
+        refuse(
+            f,
             rows[1],
+            "sector map needs the extended universe — qlab prewarm --universe candidates".to_string(),
         );
         return;
     }
@@ -457,7 +479,44 @@ fn draw_sectors(f: &mut Frame, area: Rect, store: &Store) {
         .chunks(per_row)
         .map(|chunk| Line::from(chunk.to_vec()))
         .collect();
+
+    // The same sub-floor class as the grid: a `Paragraph` taller than its area
+    // is clipped silently, and a sector map missing its last row is a map that
+    // says a sector did not move. It says how wide it needs to be instead.
+    if lines.len() > rows[1].height as usize {
+        let needed = cells.len().div_ceil(rows[1].height.max(1) as usize) as u16 * HEAT_W;
+        refuse(
+            f,
+            rows[1],
+            format!(
+                "sector map needs {needed} columns for {} sectors — this strip has {}, widen the terminal",
+                cells.len(),
+                rows[1].width
+            ),
+        );
+        return;
+    }
     f.render_widget(Paragraph::new(lines), rows[1]);
+}
+
+/// A pane refusing to draw, and saying what it would take.
+///
+/// One shape for all three refusals on this view — no sectors prewarmed, a grid
+/// under its floor, a strip under its own — because they are one statement:
+/// what is missing, then the remedy. Wrapped, since a pane too narrow to hold
+/// the numbers is also too narrow to hold the sentence about them, and a remedy
+/// clipped to `qlab prewar` cannot be run. Silence, a clipped pane and a
+/// half-drawn grid are the three renderings an operator cannot tell from a
+/// working desk.
+fn refuse(f: &mut Frame, area: Rect, message: String) {
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            message,
+            Style::default().fg(theme().text_dim),
+        )))
+        .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 /// The quantized heat ramp.
@@ -499,6 +558,15 @@ fn heat_step(change_pct: f64) -> u8 {
     (1 + crossed).min(6) as u8
 }
 
+/// The window a spark is drawn from: the last `width` closes, or all of them.
+///
+/// One definition, because the glyphs and the colour must be reading the same
+/// slice. Two spellings of "the tail" is how the bars came to say one thing and
+/// the colour another.
+fn tail(history: &[f64], width: usize) -> &[f64] {
+    &history[history.len().saturating_sub(width)..]
+}
+
 /// The last `width` closes, quantized into the eight block glyphs.
 ///
 /// Scaled to the window rather than the whole series: the cell's job is the
@@ -509,7 +577,7 @@ fn spark(history: &[f64], width: usize) -> String {
     if history.is_empty() || width == 0 {
         return String::new();
     }
-    let tail = &history[history.len().saturating_sub(width)..];
+    let tail = tail(history, width);
     let lo = tail.iter().copied().fold(f64::INFINITY, f64::min);
     let hi = tail.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let span = hi - lo;
@@ -553,6 +621,26 @@ mod tests {
         // The window is the recent shape, so an old outlier must not flatten
         // every bar the operator is actually looking at.
         assert_eq!(spark(&[100.0, 1.0, 2.0, 3.0], 3), "▁▅█");
+    }
+
+    #[test]
+    fn the_spark_takes_its_colour_from_the_window_it_draws() {
+        // The bars are the window, so the colour has to be the window's. Read
+        // off the whole series instead, a tail climbing out of a crash paints
+        // red — the cell then says the eight bars on screen are falling while
+        // they visibly rise, which is the one thing a sparkline must not do.
+        let crashed_then_climbing = [100.0, 50.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let (glyphs, style) = spark_cell(&crashed_then_climbing);
+        assert_eq!(glyphs, "▁▂▃▄▅▆▇█", "the window is the last eight closes");
+        assert_eq!(
+            style.fg,
+            Some(theme().positive),
+            "a rising window painted as a fall"
+        );
+
+        // The mirror, so this cannot be satisfied by colouring everything green.
+        let rallied_then_sliding = [1.0, 2.0, 100.0, 99.0, 98.0, 97.0, 96.0, 95.0, 94.0, 93.0];
+        assert_eq!(spark_cell(&rallied_then_sliding).1.fg, Some(theme().negative));
     }
 
     #[test]

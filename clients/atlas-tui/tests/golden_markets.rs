@@ -139,6 +139,15 @@ fn a_desk_with_no_sector_etfs_says_what_to_prewarm_instead_of_nothing() {
         line_with(&frame, "sector map needs").contains("qlab prewarm --universe candidates"),
         "the remedy has to be nameable, not implied:\n{frame}"
     );
+
+    // And it survives a narrow desk, because that is where it is most likely to
+    // be read: unwrapped, this line is cut to `qlab prewar` at 95 columns — a
+    // command an operator cannot run and might not notice is incomplete.
+    let narrow = client.frame(95, 26);
+    assert!(
+        narrow.contains("candidates"),
+        "the remedy was clipped rather than wrapped:\n{narrow}"
+    );
 }
 
 #[test]
@@ -297,12 +306,132 @@ fn a_quote_reaches_the_grid_without_a_new_snapshot() {
 }
 
 #[test]
+fn a_terminal_below_the_grids_floor_refuses_rather_than_drawing_wrong_numbers() {
+    // The guard `head` cannot be: it is spent against each column's *declared*
+    // width, and below the floor `Constraint::Min` yields and ratatui shrinks
+    // the allocation underneath it. A right-aligned cell then loses its leading
+    // characters — the arrow, then the sign, then the leading digit — so at 90
+    // columns a -10.1% fall would draw as a gain. The pane says so instead.
+    let mut client = markets();
+    client.keys(&[KeyCode::Down, KeyCode::Right, KeyCode::Right]);
+    let body = body(&client.frame(90, 30));
+    // Read off the body rather than one line: the refusal is longer than the
+    // pane that could not hold the grid, so it wraps — which is the whole
+    // reason it is a wrapped `Paragraph` and not a `Line`.
+    assert!(body.contains("markets grid needs 55 columns"), "{body}");
+    assert!(
+        body.contains("widen the terminal"),
+        "the remedy has to be nameable, not implied:\n{body}"
+    );
+    // And not one digit-bearing row of the grid survives beside the refusal: a
+    // half-drawn grid is exactly the reading the refusal exists to prevent.
+    assert!(
+        !body.contains('▼') && !body.contains('▲'),
+        "a CHG% cell survived below the floor:\n{body}"
+    );
+    for number in ["152.47", "729.46", "661.73", "-10.1", "6.3%"] {
+        assert!(!body.contains(number), "{number} survived below the floor:\n{body}");
+    }
+    // The crosshair chip goes with the chart it labelled.
+    assert!(!body.contains('$'), "{body}");
+}
+
+#[test]
 fn a_narrow_terminal_still_renders_the_grid_without_panicking() {
     let mut client = markets();
     client.keys(&[KeyCode::Down, KeyCode::Right, KeyCode::Right]);
     for (w, h) in [(40u16, 12u16), (20, 8), (80, 10), (200, 60), (1, 1), (34, 3)] {
         let _ = client.frame(w, h);
     }
+}
+
+#[test]
+fn a_strip_too_narrow_for_its_sectors_says_so_rather_than_clipping_one_away() {
+    // The same sub-floor class as the grid, one pane down. A `Paragraph` taller
+    // than its area is clipped without complaint, and a sector missing from the
+    // map reads as a sector that did not move.
+    let mut client = Client::new(store_from(
+        r#"{"market": {"assets": [
+             {"ticker": "XLK",  "price": 285.24, "change_1d": -0.0208},
+             {"ticker": "XLV",  "price": 140.11, "change_1d": 0.0031},
+             {"ticker": "XLF",  "price": 52.40,  "change_1d": 0.0124},
+             {"ticker": "XLE",  "price": 91.02,  "change_1d": -0.0077},
+             {"ticker": "XLY",  "price": 220.30, "change_1d": -0.0154},
+             {"ticker": "XLI",  "price": 155.68, "change_1d": 0.0042},
+             {"ticker": "XLB",  "price": 88.19,  "change_1d": -0.0033},
+             {"ticker": "XLU",  "price": 84.55,  "change_1d": 0.0066},
+             {"ticker": "XLRE", "price": 41.27,  "change_1d": -0.0044},
+             {"ticker": "XLC",  "price": 118.90, "change_1d": -0.0189},
+             {"ticker": "XLP",  "price": 79.31,  "change_1d": 0.0017},
+             {"ticker": "SOXX", "price": 312.66, "change_1d": -0.0295}
+           ]}}"#,
+    ));
+    client.press(KeyCode::Char('2'));
+
+    // Every cell rendered, and only the strip renders a signed percent — the
+    // grid spells the same move as `▼ 2.08` under a `CHG%` header.
+    let labels = [
+        "XLK  -2.08%",
+        "XLV  +0.31%",
+        "XLF  +1.24%",
+        "XLE  -0.77%",
+        "XLY  -1.54%",
+        "XLI  +0.42%",
+        "XLB  -0.33%",
+        "XLU  +0.66%",
+        "XLRE -0.44%",
+        "XLC  -1.89%",
+        "XLP  +0.17%",
+        "SOXX -2.95%",
+    ];
+
+    // Twelve cells over two rows is six to a row, and six cells is 72 columns.
+    // This strip has 66 — wide enough for the grid above it, so the refusal is
+    // the strip's own rather than a consequence of the grid's.
+    let narrow = body(&client.frame(109, 30));
+    assert!(narrow.contains("sector map needs 72 columns"), "{narrow}");
+    assert!(narrow.contains("widen the terminal"), "{narrow}");
+    assert!(narrow.contains("SYMBOL"), "the grid still fits at 109:\n{narrow}");
+    for label in labels {
+        assert!(
+            !narrow.contains(label),
+            "{label} was drawn into a strip that cannot hold the map:\n{narrow}"
+        );
+    }
+
+    // Wide enough, and all twelve are on the map rather than the ten that fit.
+    let wide = body(&client.frame(160, 30));
+    for label in labels {
+        assert!(wide.contains(label), "{label} is missing from the map:\n{wide}");
+    }
+}
+
+#[test]
+fn a_number_wider_than_its_column_keeps_its_sign_and_loses_its_tail() {
+    // The clamp at its call site, not in isolation: `head` alone can pass every
+    // unit test while nothing calls it. Deleting it from `cell` has to fail
+    // *here*. A -12.5% short weight is six characters in the five-wide `WT`
+    // column, and ratatui right-aligns an overlong line by dropping its leading
+    // cells — so the unclamped rendering is `12.5%`, a short drawn as a long.
+    let mut client = Client::new(store_from(
+        r#"{"market": {"assets": [
+             {"ticker": "SPY", "price": 729.46, "change_1d": -0.015,
+              "history": [750.72, 729.46]}
+           ]},
+           "portfolio": {"weights": {"SPY": -0.125},
+                         "target_weights": {"SPY": -0.125}}}"#,
+    ));
+    client.press(KeyCode::Char('2'));
+    let body = body(&client.frame(120, 36));
+    let row = line_with(&body, "729.46");
+    assert!(
+        row.contains("-12.5"),
+        "the clamp is gone and the sign went with it: {row}"
+    );
+    assert!(
+        !row.contains("12.5%"),
+        "an overlong cell kept its tail and lost its head: {row}"
+    );
 }
 
 #[test]

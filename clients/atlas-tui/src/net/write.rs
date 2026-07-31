@@ -148,7 +148,19 @@ impl WriteClient {
     /// self-attestation any local process could send. The persisted approval is
     /// what authorises the fill; the boolean only records that a human was the
     /// one who asked.
-    pub async fn execute_plan(&self, token: &ConfirmToken) -> Wrote {
+    pub async fn execute_plan(&self, token: ConfirmToken) -> Wrote {
+        // The one action in this crate that moves money, on the record before it
+        // is attempted. The owner writes the authoritative audit event, but that
+        // only exists if the request arrived — a request that timed out or was
+        // aimed at the wrong port leaves no trace there, and this is then the
+        // only record that the operator asked at all.
+        tracing::warn!(
+            plan = token.plan_id(),
+            approval = token.approval_id(),
+            targets_hash = token.targets_hash(),
+            owner = %self.base,
+            "human-confirmed plan execution requested"
+        );
         self.post(
             "/api/plans/execute",
             json!({

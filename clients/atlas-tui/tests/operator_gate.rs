@@ -445,7 +445,7 @@ mod operator {
 
         let owner = spawn_owner(200, r#"{"executed": true}"#);
         let client = WriteClient::new(&owner.base).unwrap();
-        client.execute_plan(&token).await.unwrap();
+        client.execute_plan(token).await.unwrap();
 
         let seen = owner.only();
         assert_eq!(seen.method, "POST");

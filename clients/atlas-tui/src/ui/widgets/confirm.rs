@@ -75,7 +75,15 @@ const STATIC_CHALLENGE: &str = "CONFIRM";
 /// this whole chain exists to prevent — confirm the small plan, execute the
 /// large one — so the plan, the approval, and the hash travel together with the
 /// consent that was given for them.
-#[derive(Debug, Clone)]
+///
+/// Deliberately not `Clone`, and the writer takes it by value: a token is spent
+/// by the call it authorises, so it cannot be held and fired twice. The owner
+/// already refuses a second fill against a consumed approval — this is the
+/// client's half of the same rule, and it is what stops a retry loop around a
+/// timed-out request from booking the same plan again. A failed execution is
+/// something an operator re-reads the desk about, never something a caller
+/// quietly repeats.
+#[derive(Debug)]
 pub struct ConfirmToken {
     plan_id: String,
     approval_id: String,

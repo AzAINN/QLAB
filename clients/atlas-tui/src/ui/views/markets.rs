@@ -171,24 +171,34 @@ impl View for MarketsView {
         // Below the floor `Min` yields: ratatui shrinks the columns underneath
         // the widths every cell was held to, and a right-aligned cell loses its
         // *leading* characters — the arrow first, then the sign, then the
-        // leading digit. `head` cannot see that, because it is spent against the
-        // declared width and the allocation is what actually shrank. So the pane
-        // refuses rather than drawing numbers that are wrong.
-        if main.width < GRID_W {
+        // leading digit, then a spark bar off the head of a window whose colour
+        // is still computed from all eight values. `head` cannot see any of it,
+        // because it is spent against the declared width and the allocation is
+        // what actually shrank. So the grid refuses rather than drawing numbers
+        // that are wrong.
+        let cols = Layout::horizontal([Constraint::Min(GRID_W), Constraint::Percentage(40)])
+            .spacing(1)
+            .split(main);
+
+        // Split first, then guard the *allocation*. The pane is not the grid —
+        // the cell of spacing above sits between them — so a guard on `main`
+        // admits a grid one cell short of its own floor, and one cell is a spark
+        // bar or an arrow. Comparing what the layout actually handed over is
+        // what keeps the threshold from drifting the next time the split gains
+        // a constraint; spelling it as `GRID_W + 1` would encode the spacing a
+        // second place and go stale exactly the same way.
+        if cols[0].width < GRID_W {
             refuse(
                 f,
                 main,
                 format!(
                     "markets grid needs {GRID_W} columns to render its numbers — this pane has {}, widen the terminal",
-                    main.width
+                    cols[0].width
                 ),
             );
             draw_sectors(f, rows[1], store);
             return;
         }
-        let cols = Layout::horizontal([Constraint::Min(GRID_W), Constraint::Percentage(40)])
-            .spacing(1)
-            .split(main);
 
         let facts = store.asset_facts();
         let selected = self.row(facts.len());

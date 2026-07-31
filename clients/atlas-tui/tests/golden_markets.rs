@@ -337,6 +337,36 @@ fn a_terminal_below_the_grids_floor_refuses_rather_than_drawing_wrong_numbers() 
 }
 
 #[test]
+fn the_floor_is_the_grids_allocation_and_not_the_pane_it_was_split_from() {
+    // One cell, and it is the whole finding: the pane is not the grid — the cell
+    // of spacing that keeps the hero's gutter off `TGT` sits between them — so a
+    // guard on the pane admits a grid one short of its own floor. At 98 columns
+    // the pane is exactly `GRID_W` and the grid is `GRID_W - 1`, which drops the
+    // leading bar off an eight-value spark whose colour is still computed from
+    // all eight. A cell that draws seven bars and colours nine is the same
+    // silently-wrong-number class the refusal exists for, one column narrower.
+    let client = markets();
+
+    // 99: the grid gets its floor exactly, and the spark is all eight bars.
+    let admitted = body(&client.frame(99, 30));
+    assert!(
+        line_with(&admitted, "152.47").contains("▅██▄▄▅▅▁"),
+        "the spark lost a bar off its head at the boundary:\n{admitted}"
+    );
+
+    // 98: one cell less, and the pane says so instead of drawing seven bars.
+    let refused = body(&client.frame(98, 30));
+    assert!(
+        refused.contains("markets grid needs 55 columns"),
+        "a pane at exactly GRID_W admitted a grid one cell short:\n{refused}"
+    );
+    assert!(
+        !refused.contains("152.47") && !refused.contains("██▄▄▅▅▁"),
+        "a truncated grid row survived one cell under the floor:\n{refused}"
+    );
+}
+
+#[test]
 fn a_narrow_terminal_still_renders_the_grid_without_panicking() {
     let mut client = markets();
     client.keys(&[KeyCode::Down, KeyCode::Right, KeyCode::Right]);

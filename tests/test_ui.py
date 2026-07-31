@@ -479,7 +479,13 @@ def test_owner_stderr_drain_survives_a_chatty_child():
 
 
 def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
-    """A bound port is not enough: the owner may still be opening its state."""
+    """A bound port is not enough: the owner may still be opening its state.
+
+    Driven through ``--classic``, which is the flag that keeps the Textual
+    client during the soak. The owner spawn and readiness wait below are shared
+    by both paths and unchanged by the cutover; this is the leg that ends in a
+    ``QlabTui``.
+    """
     from types import SimpleNamespace
 
     import qlab.autopilot.cli as cli_module
@@ -551,10 +557,215 @@ def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
         online=False,
         refresh=0.0,
         claude="off",
+        classic=True,
+        operator=False,
     ))
 
     assert result == 0
     assert calls == {"probe": 2, "system": 1, "run": 1}
+
+
+def _tui_args(**overrides):
+    """The namespace ``qlab tui`` builds, with the defaults its parser sets."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**{
+        "port": 8765, "online": False, "refresh": 2.0, "claude": "offer",
+        "classic": False, "operator": False, **overrides,
+    })
+
+
+def _attached_owner(monkeypatch, cli_module):
+    """Pretend a compatible owner is already listening, so the launcher's spawn
+    and readiness logic is out of the way and only the client choice is left."""
+    import qlab.tui.client as client_module
+
+    class OpenPort:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect_ex(self, _address):
+            return 0
+
+    class Client:
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def get(self, path, **_params):
+            assert path == "/api/system"
+            return {"mode": "offline"}
+
+    monkeypatch.setattr(cli_module.socket, "socket", OpenPort)
+    monkeypatch.setattr(client_module, "ApiClient", Client)
+    monkeypatch.setattr(
+        cli_module.subprocess, "Popen",
+        lambda *_a, **_k: pytest.fail("an owner is already up; nothing may spawn"))
+
+
+def test_tui_launches_the_ratatui_workstation_and_tells_it_the_port(
+        monkeypatch, tmp_path):
+    """The default client is the Rust workstation, exec'd in place.
+
+    In place, not spawned: the launcher has nothing left to do once the owner is
+    up, and a Python process parked on top of the client would be one more thing
+    between an operator's Ctrl-C and the terminal being restored.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    _attached_owner(monkeypatch, cli_module)
+    binary = tmp_path / "atlas"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("QLAB_ATLAS_BIN", str(binary))
+
+    seen = {}
+
+    def fake_exec(path, argv, env):
+        seen.update(path=path, argv=argv, env=env)
+        raise SystemExit(0)   # execvpe never returns; neither does this
+
+    monkeypatch.setattr(cli_module.os, "execvpe", fake_exec)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(port=8899))
+
+    assert exit_info.value.code == 0
+    assert seen["path"] == str(binary)
+    assert seen["argv"] == [str(binary)]
+    # The one thing the client cannot discover for itself: which owner to talk
+    # to. It never opens the registry, so a wrong port is a blank desk.
+    assert seen["env"]["QLAB_UI_PORT"] == "8899"
+
+
+def test_tui_operator_flag_reaches_the_workstation(monkeypatch, tmp_path):
+    """--operator is a passthrough, not a second authority.
+
+    The launcher does not decide what the client may do; it forwards the word
+    and the binary decides whether it was built with anything behind it.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    _attached_owner(monkeypatch, cli_module)
+    binary = tmp_path / "atlas"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("QLAB_ATLAS_BIN", str(binary))
+
+    seen = {}
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda path, argv, env: seen.update(argv=argv) or (_ for _ in ()).throw(SystemExit(0)))
+
+    with pytest.raises(SystemExit):
+        cli_module._cmd_tui(_tui_args(operator=True))
+    assert seen["argv"] == [str(binary), "--operator"]
+
+
+def test_tui_without_a_built_workstation_says_how_to_build_it(monkeypatch, tmp_path):
+    """Fail loud. A missing binary must never fall back to the Textual client.
+
+    Silently running a different client would make --classic unfalsifiable as a
+    soak valve: an operator soaking the Rust workstation would have been on the
+    Textual one the whole week and had no way to tell.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    _attached_owner(monkeypatch, cli_module)
+    monkeypatch.setenv("QLAB_ATLAS_BIN", str(tmp_path / "not-built"))
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("a missing binary must not be exec'd"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args())
+    message = str(exit_info.value)
+    assert "cargo build --release" in message
+    assert "--classic" in message
+
+
+def test_tui_classic_without_textual_names_the_extra_to_install(monkeypatch):
+    """The rollback valve may not fail obscurely.
+
+    An operator reaching for --classic is already having a bad day; a bare
+    `ModuleNotFoundError: textual` names no remedy. The Textual import moved
+    into the branch so the default path does not pay for it, and this is what
+    keeps that move from having cost the message.
+    """
+    import sys
+
+    import qlab.autopilot.cli as cli_module
+
+    _attached_owner(monkeypatch, cli_module)
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("--classic must not exec the workstation"))
+    # A `None` entry is how the import system is told a module is unavailable;
+    # `from qlab.tui.app import QlabTui` then raises ImportError.
+    monkeypatch.setitem(sys.modules, "qlab.tui.app", None)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(classic=True))
+    message = str(exit_info.value)
+    assert "TUI extra is not installed" in message
+    assert "pip install -e '.[operator]'" in message
+
+
+def test_tui_refuses_classic_and_operator_together(monkeypatch):
+    """--operator is a word only the Ratatui client understands.
+
+    Dropping it silently would leave an operator believing they had asked for
+    something. The Textual client has no posture to arm — it is the complete
+    surface and already reaches the confirm gate.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    # Refused on the arguments alone: nothing is spawned, probed or exec'd, so
+    # the refusal cannot depend on a desk being there.
+    monkeypatch.setattr(
+        cli_module.subprocess, "Popen",
+        lambda *_a, **_k: pytest.fail("a refused invocation must not spawn"))
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("a refused invocation must not exec"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(classic=True, operator=True))
+    message = str(exit_info.value)
+    assert "--operator" in message and "--classic" in message
+    assert "no operator posture" in message
+
+
+def test_tui_classic_runs_the_textual_client_against_the_same_owner(monkeypatch):
+    """The soak valve: one flag, no revert."""
+    import qlab.autopilot.cli as cli_module
+    import qlab.tui.app as app_module
+
+    _attached_owner(monkeypatch, cli_module)
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("--classic must not exec the workstation"))
+
+    started = {}
+
+    class Tui:
+        def __init__(self, _client, **kwargs):
+            started.update(kwargs)
+
+        def run(self):
+            started["ran"] = True
+
+    monkeypatch.setattr(app_module, "QlabTui", Tui)
+    assert cli_module._cmd_tui(_tui_args(classic=True, refresh=0.0)) == 0
+    assert started["ran"] is True
+    # Attached rather than owned: the Textual client only terminates a server it
+    # started itself.
+    assert started["owned_server"] is None
 
 
 def test_model_invocations_route(session):
@@ -1853,6 +2064,56 @@ def test_resetting_the_simulated_book_spares_the_alpaca_history(session):
             session.registry.equity_marks(book="alpaca_paper")] == [98_000.0]
 
 
+def test_the_tui_snapshot_serves_the_approval_an_execution_can_bind_to(session):
+    # The execute gate consumes an APPROVED, unconsumed approval — a pending one
+    # authorises nothing. The snapshot used to carry only the pending queue, so
+    # a client polling /api/tui could never see the record a legal execution
+    # binds to, and the operator surface had no way to offer the key.
+    pending_plan = _checked_plan(session)
+    approved_plan = _checked_plan(session, tilt=0.02)
+    spent_plan = _checked_plan(session, tilt=0.04)
+
+    approved = _approve(session, approved_plan)
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": pending_plan, "offline": True})
+    pending = created["approval_id"]
+    spent = _approve(session, spent_plan)
+    handle_api(
+        session, "POST", "/api/plans/execute", {},
+        {"offline": True, "plan_id": spent_plan, "human_confirmed": True,
+         "approval_id": spent})
+    assert session.registry.get_approval_request(spent)["status"] == "consumed"
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    served = {a["approval_id"]: a["status"] for a in snap["approvals"]}
+    assert served.get(pending) == "pending"
+    assert served.get(approved) == "approved"
+    # Spent, rejected and expired records are history, not a decision queue: an
+    # approval a client could act on is exactly one of these two statuses.
+    assert spent not in served
+    assert set(served.values()) == {"pending", "approved"}
+    # Newest first, as every other list in the payload is served.
+    stamps = [a["created_at"] for a in snap["approvals"]]
+    assert stamps == sorted(stamps, reverse=True)
+
+
+def test_the_snapshot_approval_cap_cannot_be_starved_by_one_status(session):
+    # The cap is per status rather than shared. One busy queue must never crowd
+    # the other out — a desk with eleven pending requests would otherwise stop
+    # showing the one approval that can actually be executed.
+    approved = _approve(session, _checked_plan(session))
+    for i in range(1, 13):
+        handle_api(
+            session, "POST", "/api/approvals", {},
+            {"plan_id": _checked_plan(session, tilt=0.001 * i), "offline": True})
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    served = [(a["approval_id"], a["status"]) for a in snap["approvals"]]
+    assert (approved, "approved") in served
+    assert sum(1 for _, status in served if status == "pending") == 10
+
+
 def test_a_consumed_approval_cannot_be_revived_and_spent_again(session):
     # The challenge route wrote "pending" over whatever status it found, so a
     # spent approval could be re-opened, re-approved, and used to authorise a
@@ -2803,3 +3064,86 @@ def test_a_failed_recompose_zeroes_the_signals_rather_than_carrying_them(session
     assert qual["sufficient"] is False
     assert all(s["value"] is None for s in qual["signals"])
     assert all(s["state"] == "no_window" for s in qual["signals"])
+
+
+# --- the reasoner's surface ---------------------------------------------------
+
+
+def test_the_gate_input_stays_narrow(session):
+    """`atlas_facts` feeds `check_startable`, the authority gate.
+
+    A gate whose input is narrow, boolean and stable is auditable; one reading a
+    large free-form context is not. Enriching this surface — the obvious move
+    when Atlas starts reasoning — would quietly put the gate in the same
+    epistemic class as the thing it exists to constrain. The reasoning surface
+    is `atlas_context`; this one is pinned deliberately.
+    """
+    facts = session.atlas_facts(True)
+    assert set(facts) == {
+        "universe", "data", "portfolio", "regime", "open_workflows",
+        "pending_approvals", "order_anomaly", "news_window_sufficient",
+        "news_window_items",
+    }
+    # Scalars and small records only — nothing a reasoner would need, and
+    # nothing whose meaning depends on reading prose.
+    assert isinstance(facts["regime"]["flip"], bool)
+    assert isinstance(facts["news_window_items"], int)
+
+
+def test_atlas_context_carries_content_the_gate_facts_do_not(session):
+    """A boolean cannot be reasoned about. This is the whole point of the split."""
+    session.fetch_desk_news(True)
+    ctx = session.atlas_context(True)
+
+    readings = ctx["regime_panel"]["readings"]
+    assert len(readings) == 5
+    # Each indicator explains itself: state plus its own trailing threshold,
+    # percentile and the sentence saying what the number means.
+    for reading in readings:
+        assert reading["reasoning"]
+        assert reading["state"] in {"calm", "stress"}
+        assert reading["threshold"] is not None
+
+    # The six unsigned news properties, each with its own reason.
+    assert len(ctx["qualitative_signals"]["signals"]) == 6
+    assert ctx["news"]["headlines"]
+    assert "coverage" in ctx["news"]
+
+    # The gate's own view is carried verbatim, so the reasoner can see exactly
+    # what the deterministic layer will permit rather than guessing.
+    assert ctx["gate_facts"] == session.atlas_facts(True)
+
+
+def test_atlas_context_shows_what_the_gate_would_refuse(session):
+    """The reasoner must argue within its authority, not propose refused work."""
+    facts = session.atlas_facts(True)
+    facts["regime"]["flip"] = True
+    session.atlas.observe(facts, trading_date="2026-07-31")
+    session.atlas.set_mode("observe")
+
+    startable = session.atlas_context(True)["startable"]
+    assert startable and all(not s["startable"] for s in startable)
+    assert all(s["reason"] for s in startable)
+
+
+def test_the_absent_risk_profile_is_named_not_omitted(session):
+    # Omitting it would let a reasoner assume a default it was never given.
+    assert session.atlas_context(True)["mandate"]["risk_profile"] is None
+
+
+def test_atlas_context_survives_a_broken_regime_panel(session):
+    """A broken panel is a fact about the desk, not a reason to have no context."""
+    def boom(_offline):
+        raise RuntimeError("panel unavailable")
+
+    session.regime_panel = boom
+    ctx = session.atlas_context(True)
+    assert ctx["regime_panel"]["readings"] == []
+    assert "panel unavailable" in ctx["regime_panel"].get("error", "")
+    # Everything else still composes.
+    assert ctx["gate_facts"] and "news" in ctx
+
+
+def test_atlas_context_route_is_reachable(session):
+    status, ctx = handle_api(session, "GET", "/api/atlas/context", {}, {})
+    assert status == 200 and "regime_panel" in ctx

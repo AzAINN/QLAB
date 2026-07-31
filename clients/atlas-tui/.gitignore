@@ -1,1 +1,8 @@
 /target
+# The default tracing sink is `atlas.log` in the working directory, which is
+# this one whenever the client is run with `cargo run`.
+/atlas.log
+# The tape in `demo/` is the artifact; the recording it produces is not. A GIF
+# carries a particular afternoon's live numbers and cannot be regenerated from
+# this repo, which makes it a worse record than the file that produces it.
+/demo/*.gif

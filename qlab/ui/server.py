@@ -27,6 +27,7 @@ POST /api/debates/<id>/adjudicate  close a debate (human act; no agent may)
 GET  /api/models/invocations   model tier/route audit records
 GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
 GET  /api/news                   the news window, its coverage, and provenance
+GET  /api/atlas/context          the rich surface a reasoning Atlas forms a view from
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
 POST /api/atlas/escalate         open a bounded debate on a material disagreement
 GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
@@ -116,6 +117,9 @@ _STREAM_LOCK_WAIT_SECONDS = 2.0
 _VALUATION_TTL_SECONDS = 15.0
 
 _MARKET_EVENT_LIMIT = 500
+# How many approvals of *each* actionable status ride in one /api/tui payload.
+# Per status, not shared — see `UISession.actionable_approvals`.
+_SNAPSHOT_APPROVALS = 10
 _STREAM_PAGE_CEILING = 5000
 _QUOTE_REFRESH_TTL_SECONDS = 30.0
 _QUOTE_MIN_INTERVAL_SECONDS = 5.0
@@ -1146,8 +1150,117 @@ class UISession:
         return {"as_of": as_of, "fingerprint": fingerprint, "decisions": rows}
 
     # -- Atlas desk manager -------------------------------------------
+    def atlas_context(self, offline: bool) -> dict:
+        """The rich, abstract surface a reasoning Atlas forms a view from.
+
+        Deliberately NOT `atlas_facts`. That surface feeds `check_startable`,
+        the authority gate, and a gate whose input is narrow, boolean and stable
+        is auditable — one reading a large free-form context is not. Widening it
+        would quietly move the gate into the same epistemic class as the thing
+        it exists to constrain. So there are two surfaces: the gate keeps its
+        nine booleans, the reasoner gets everything.
+
+        What distinguishes this from `atlas_facts` is *content*. `regime.flip`
+        is a boolean; a reasoner cannot form a view about a boolean. Here the
+        five indicators arrive with their own thresholds, percentiles and
+        one-line reasoning, the six qualitative signals arrive with theirs, and
+        past decisions arrive with what actually happened. Nothing here is
+        summarised down to a verdict, because summarising to a verdict is the
+        judgment the reasoner is supposed to be doing.
+        """
+        facts = self.atlas_facts(offline)
+        read = self.desk_read(offline)
+        try:
+            panel = self.regime_panel(offline)
+        except Exception as exc:      # a broken panel is a fact, not a crash
+            panel = {"error": str(exc)[:200], "readings": []}
+
+        decisions = []
+        for row in self.registry.recent_decisions(limit=8):
+            decision_id = row.get("decision_id")
+            lesson = self.registry.get_lesson(decision_id) if decision_id else None
+            decisions.append({
+                "decision_id": decision_id,
+                "as_of": str(row.get("as_of") or ""),
+                "kind": row.get("kind"),
+                "rationale": str(row.get("rationale") or "")[:300],
+                # The reflection loop resolves outcomes on its own horizon, so
+                # this is often absent. Absent means unresolved, never neutral.
+                "outcome": (lesson or {}).get("summary") if lesson else None,
+            })
+
+        news = self.news_payload(offline)
+        return {
+            "as_of": self._now_iso(),
+            # The gate's own view, carried verbatim so the reasoner can see
+            # exactly what the deterministic layer will and will not permit.
+            "gate_facts": facts,
+            "mandate": {
+                "universe": list(self.mandate.universe_whitelist),
+                "max_weight_per_asset": self.mandate.max_weight_per_asset,
+                "max_turnover_per_rebalance":
+                    self.mandate.max_turnover_per_rebalance,
+                "operational_policy": self.mandate.operational_policy,
+                # Placeholder until the risk profile object exists. Named rather
+                # than omitted so its absence is visible to the reasoner instead
+                # of being mistaken for a default it can assume.
+                "risk_profile": None,
+            },
+            # Five indicators, each with its own trailing threshold and the
+            # sentence explaining what its number means.
+            "regime_panel": {
+                # Carried through: a panel that failed and a panel that read
+                # nothing are different facts, and an empty `readings` list
+                # alone would render the first as the second.
+                "error": panel.get("error"),
+                "robust_state": panel.get("robust_state"),
+                "agreement": panel.get("agreement_count"),
+                "disagreement": panel.get("disagreement_count"),
+                "readings": [
+                    {
+                        "indicator": r.get("indicator_id"),
+                        "state": r.get("state"),
+                        "signal": r.get("signal"),
+                        "threshold": r.get("threshold"),
+                        "percentile": r.get("percentile"),
+                        "reasoning": r.get("reasoning"),
+                        "quality_flags": r.get("quality_flags") or [],
+                    }
+                    for r in (panel.get("readings") or [])
+                ],
+            },
+            # Unsigned by construction: these are properties of the record, and
+            # turning them into a view is the reasoner's job, not theirs.
+            "qualitative_signals": read.get("qualitative_signals") or {},
+            "news": {
+                "provider": news.get("provider"),
+                "error": news.get("error"),
+                "counts": news.get("counts"),
+                "coverage": news.get("coverage"),
+                "uncovered": news.get("uncovered"),
+                "headlines": [
+                    {"headline": i.get("headline"), "scope": i.get("scope"),
+                     "tickers": i.get("tickers"), "source": i.get("source"),
+                     "published": i.get("published")}
+                    for i in (news.get("items") or [])[:20]
+                ],
+            },
+            "supported_claims": read.get("supported_claims") or [],
+            "tensions": read.get("tensions") or [],
+            "recent_decisions": decisions,
+            # What the gate would allow right now, with its refusal reasons —
+            # so the reasoner argues within its authority rather than proposing
+            # work that will simply be refused.
+            "startable": self.atlas.startable_tasks(facts),
+        }
+
     def atlas_facts(self, offline: bool) -> dict:
-        """Assemble the deterministic owner facts Atlas observes (no LLM)."""
+        """Assemble the deterministic owner facts Atlas observes (no LLM).
+
+        Deliberately narrow. This is `check_startable`'s input — the authority
+        gate — so it stays booleans and counts. The reasoning surface is
+        `atlas_context`; do not enrich this one.
+        """
         port = self.portfolio(offline)
         health = self.data_health(offline)
         weights = port.get("weights", {}) or {}
@@ -1811,6 +1924,34 @@ class UISession:
         self.registry.expire_due_approvals(self._now_iso())
         return {"approvals": self.registry.list_approval_requests(50, status)}
 
+    def actionable_approvals(self, limit: int = _SNAPSHOT_APPROVALS) -> list[dict]:
+        """The approvals a client can still act on: pending, and approved-unspent.
+
+        Both statuses, because they answer different keys. A *pending* request
+        is what approve/reject bind to; an *approved, unconsumed* one is what
+        the execute gate consumes (``execute_plan_with_approval``). A snapshot
+        carrying only the pending queue could never show a client the record a
+        legal execution binds to — the approval would be invisible from the
+        moment it became usable.
+
+        The cap is per status rather than shared. ``list_approval_requests``
+        filters one status at a time, and merging the two under a single limit
+        would let a busy pending queue crowd out the one approval that can
+        actually be executed.
+
+        ``consumed_at`` is filtered rather than inferred. The transition table
+        already implies it — consumption moves the row to ``consumed`` — but
+        this list is read as "what the gate would accept", and it should state
+        that precondition rather than rely on a second table to imply it.
+        """
+        rows = self.registry.list_approval_requests(limit, "pending")
+        rows += [row for row
+                 in self.registry.list_approval_requests(limit, "approved")
+                 if not row.get("consumed_at")]
+        # Newest first across both, as every other list in the payload is.
+        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        return rows
+
     def get_approval(self, approval_id: str) -> dict:
         self.registry.expire_due_approvals(self._now_iso())
         approval = self.registry.get_approval_request(approval_id)
@@ -2069,7 +2210,7 @@ class UISession:
             },
             "news": self.news_payload(offline),
             "atlas_tasks": self.registry.list_atlas_tasks(10),
-            "approvals": self.registry.list_approval_requests(10, "pending"),
+            "approvals": self.actionable_approvals(),
             "quotes": self.quotes(),
             "agents": self.agents(),
             "decisions": decisions,
@@ -2442,6 +2583,10 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/news":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.news_payload(offline)
+
+    if method == "GET" and path == "/api/atlas/context":
+        offline = _qbool(query, "offline", session.offline_default)
+        return 200, session.atlas_context(offline)
 
     if method == "GET" and path == "/api/atlas/read":
         # refresh=1 recomposes here; the HTTP handler intercepts that case

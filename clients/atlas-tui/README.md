@@ -1,13 +1,13 @@
 # atlas-tui
 
 A Ratatui client for the qlab owner runtime. Atlas-first: the desk manager and
-its reasoning own the frame, and the book supports it — rather than Atlas being
-one rail beside eight peer views.
+its read are on screen in every view, in a rail that never goes away — rather
+than being one tab among peers that an operator has to remember to open.
 
 ```bash
 cargo run                 # synthetic lane, against the owner on QLAB_UI_PORT
 cargo run -- --live       # live data lane
-cargo test                # 22 tests, no owner required
+cargo test                # fully offline: committed fixtures, no owner required
 ```
 
 ## What it is
@@ -49,9 +49,21 @@ only by rasterising SVG. If the goal ever becomes genuinely fluid graphics, the
 answer is a GPU surface or a web client, not a faster TUI framework — and
 pretending otherwise would just produce a worse Textual.
 
+## The shell
+
+One frame is five regions: a ticker row, an eight-cell nav rail, the active
+view, the pulse rail, and a status line that always states the posture
+(`GLASS` — this binary holds no writer). Keys `1`–`7` and `Tab`/`BackTab`
+switch views, `r` jumps the poll queue, `q` quits.
+
+`shell::draw` is a pure function of the store — no clock read, no socket, no
+client — so `tests/golden_shell.rs` pins the whole frame as text through a
+`TestBackend`. Every view task adds its golden beside it.
+
 ## What is not here yet
 
-The first slice covers the owner client, readiness, the Atlas-first layout, one
-live view, and the glyph. Not yet ported: the market chart, the book detail, the
-workforce flowchart, the audit trail, Settings, and the command palette. The
-Textual client remains the complete surface.
+Of the seven views only DESK has content, and its tiles are placeholders; the
+rest name the task that builds them. Not yet here: the market chart, the book
+detail, the workforce flowchart, the audit trail, Settings, live quotes, the
+effect manager, and the command line. The Textual client remains the complete
+surface.

@@ -318,10 +318,54 @@ class _OwnerStderrTail:
         return "\n".join(self._lines).strip()
 
 
+_ATLAS_RELATIVE = ("clients", "atlas-tui", "target", "release", "atlas")
+
+
+def _atlas_binary() -> str:
+    """Where the Ratatui workstation lives, in the order the desk resolves it.
+
+    An explicit override first (``QLAB_ATLAS_BIN``), then whatever is on PATH —
+    a ``cargo install``ed build, or a packaged one — and only then this
+    checkout's own release binary. A developer's rebuild should win over a
+    stale installed copy only when they say so, which is what the override is.
+    """
+    import shutil
+
+    override = os.environ.get("QLAB_ATLAS_BIN", "").strip()
+    if override:
+        return override
+    installed = shutil.which("atlas")
+    if installed:
+        return installed
+    return str(workspace_root().joinpath(*_ATLAS_RELATIVE))
+
+
 def _cmd_tui(args) -> int:
-    """Launch the Textual client and, when needed, its owner API process."""
+    """Launch the terminal workstation and, when needed, its owner API process.
+
+    Two clients over one owner. The default is the Ratatui workstation in
+    ``clients/atlas-tui``; ``--classic`` keeps the Textual client, which is the
+    soak valve — a week of real desk use can find a parity gap while rolling
+    back is one flag rather than a revert.
+
+    The owner spawn and readiness wait below are shared by both, deliberately:
+    which client is drawn must not change what starts the desk, or a difference
+    between the two would be a difference in the runtime rather than in the
+    screen.
+    """
+    classic = bool(getattr(args, "classic", False))
+    if classic and getattr(args, "operator", False):
+        # Loud, not silent. `--operator` is a word only the Ratatui client
+        # understands, and the Textual client has no posture to arm — it is the
+        # complete surface and already reaches the confirm gate. Dropping the
+        # flag would leave an operator believing they had asked for something.
+        raise SystemExit(
+            "--operator is a Ratatui-workstation flag and --classic is the "
+            "Textual client, which has no operator posture to arm.\n"
+            "    qlab tui --operator     the armed workstation\n"
+            "    qlab tui --classic      the Textual client (already complete)"
+        )
     try:
-        from qlab.tui.app import QlabTui
         from qlab.tui.client import ApiClient
     except ImportError as exc:
         raise SystemExit(
@@ -435,15 +479,72 @@ def _cmd_tui(args) -> int:
                 f"the qlab runtime already on port {args.port} would not accept "
                 f"the requested desk mode ({mode.label}): {exc}") from exc
 
-    QlabTui(
-        client,
-        offline=offline,
-        refresh_interval=args.refresh,
-        owned_server=owner,
-        claude_start=args.claude,
-        desk_mode=mode,
-    ).run()
-    return 0
+    if classic:
+        # Imported here rather than beside `ApiClient` above, so the default
+        # path never pays for Textual — and wrapped, because the rollback valve
+        # is exactly the thing that must not fail obscurely. An operator
+        # reaching for `--classic` is already having a bad day; a bare
+        # `ModuleNotFoundError: textual` names no remedy.
+        try:
+            from qlab.tui.app import QlabTui
+        except ImportError as exc:
+            raise SystemExit(
+                "The TUI extra is not installed. Run:\n"
+                "    pip install -e '.[operator]'\n"
+                f"(original error: {exc})"
+            ) from exc
+
+        QlabTui(
+            client,
+            offline=offline,
+            refresh_interval=args.refresh,
+            owned_server=owner,
+            claude_start=args.claude,
+            desk_mode=mode,
+        ).run()
+        return 0
+
+    binary = _atlas_binary()
+    # `isfile` as well as `access`: X_OK is true of every directory, so a path
+    # that resolved to `clients/atlas-tui/target/release/` — an interrupted
+    # build leaves exactly that — would pass the check and fail at exec, after
+    # the owner had already been started.
+    if not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
+        # Fail loud, and never fall back to the Textual client. Silently running
+        # a different client would make `--classic` unfalsifiable as a soak
+        # valve: an operator soaking the workstation would have spent the week
+        # on the other one with no way to tell.
+        raise SystemExit(
+            f"the Atlas workstation is not built at {binary}\n"
+            "    cd clients/atlas-tui && cargo build --release\n"
+            "or run the Textual client instead:  qlab tui --classic\n"
+            "($QLAB_ATLAS_BIN overrides where this looks.)"
+        )
+    argv = [binary]
+    if getattr(args, "operator", False):
+        # A passthrough, not a second authority: this launcher does not decide
+        # what the client may do, and a binary built without the feature refuses
+        # the flag itself.
+        argv.append("--operator")
+    if owner is not None:
+        # `execvpe` replaces this process, so nothing is left to terminate the
+        # owner when the client quits — say so rather than leaving an operator
+        # to discover a runtime they did not know was still up. It is also what
+        # the next `qlab tui` attaches to.
+        print(
+            f"The qlab runtime on port {args.port} keeps running after the "
+            "workstation exits; the next `qlab tui` attaches to it.",
+            flush=True,
+        )
+    # In place rather than as a child: the launcher has nothing left to do, and
+    # a Python process parked on top of a fullscreen client is one more thing
+    # between an operator's Ctrl-C and the terminal being restored.
+    #
+    # `_publish_owner_port` already put the port in this environment; passing it
+    # explicitly is what makes the handover a statement rather than an
+    # inheritance nobody can see.
+    os.execvpe(binary, argv, dict(os.environ, QLAB_UI_PORT=str(args.port)))
+    raise SystemExit(f"could not exec the Atlas workstation at {binary}")
 
 
 def _cmd_prewarm(args) -> int:
@@ -562,6 +663,23 @@ def build_parser() -> argparse.ArgumentParser:
         help=("Claude workforce startup: show readiness without prompting (offer), "
               "launch automatically (auto), or keep it off until requested (off)"),
     )
+    # The soak valve. Both clients read the same owner over HTTP, so this
+    # changes which screen is drawn and nothing about what is running.
+    tui.add_argument(
+        "--classic", action="store_true",
+        help="use the Textual client instead of the Ratatui workstation")
+    # Passthrough. The word reaches the workstation and that is all this
+    # launcher does with it.
+    #
+    # A binary built without the feature does *not* refuse it: the flag parses,
+    # the posture compiles to Glass, and the window is read-only with nothing to
+    # arm. That is safe by construction rather than by check — there is no write
+    # path in the artifact — and the mitigation for the operator who expected
+    # otherwise is the GLASS chip the status line carries on every frame.
+    tui.add_argument(
+        "--operator", action="store_true",
+        help="arm the workstation's write affordances (Ratatui client only; a "
+             "binary built without the feature stays GLASS and says so)")
     tui.set_defaults(func=_cmd_tui)
 
     from qlab.desk_cli import register_subcommands

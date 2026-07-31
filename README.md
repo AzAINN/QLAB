@@ -23,9 +23,24 @@ python -m pip install -e ".[operator]"
 qlab tui
 ```
 
+`qlab tui` starts the owner runtime and opens the **Atlas workstation** — the
+Rust/Ratatui client in `clients/atlas-tui`, seven views on `1`–`7`: Desk,
+Markets, Book, Research, Workforce, Audit, Settings. Build it once with
+`cd clients/atlas-tui && cargo build --release`; the launcher refuses rather
+than falling back if it is not there.
+
+```bash
+qlab tui --classic    # the Textual client, against the same owner
+```
+
+`--classic` is the soak valve while the Ratatui workstation is being lived
+with — both clients read the same `/api/tui` over HTTP, so it changes which
+screen is drawn and nothing about what is running. The Textual client's views
+are `1`–`9`: Atlas, Dashboard, Market, Workforce, Research, Book, Audit,
+Reference, Settings.
+
 The desk opens on synthetic data with a simulated book, so it runs with no
-account at all. Views are `1`–`9`: Atlas, Dashboard, Market, Workforce,
-Research, Book, Audit, Reference, Settings.
+account at all.
 
 To use real prices and, separately, your real Alpaca paper book:
 
@@ -94,13 +109,15 @@ broken sweep, not a strong result.
 
 | Surface | What it is |
 |---|---|
-| `qlab tui` | Textual workstation — the complete surface, and the only one that can confirm a trade |
+| `qlab tui` | the Atlas workstation (`clients/atlas-tui`) — Ratatui, read-only by construction ([README](clients/atlas-tui/README.md)) |
+| `qlab tui --classic` | Textual workstation — the complete surface, and the only one that can confirm a trade |
 | `qlab ui` | same owner runtime, local web client |
-| `clients/atlas-tui` | Ratatui client, Atlas-first, read-only by construction ([README](clients/atlas-tui/README.md)) |
 | `qlab desk` / `qlab workforce` / `qlab events` | one-shot CLI verbs over the owner's HTTP and event stream |
 
-`atlas-tui` runs *alongside* the Textual TUI — both read the same `/api/tui`, so
-there is no cutover and no window where the desk has two faces that disagree.
+Both workstations read the same `/api/tui`, so there is no window where the desk
+has two faces that disagree. The Textual client stays reachable behind
+`--classic` until the Ratatui one has been soaked on a real desk; confirming a
+paper trade still lives there.
 
 ## Commands
 

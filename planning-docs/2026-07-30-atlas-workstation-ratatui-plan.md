@@ -196,7 +196,7 @@ POST (operator posture only, each behind a modal): `/api/approvals/<id>/…` app
 **Interfaces:**
 - Produces: module tree; `bus::AppEvent` enum exactly as in Part III; `cargo test` green.
 
-- [ ] **Step 1:** Add dependencies with `cargo add ratatui crossterm --features crossterm/event-stream` etc. per Part II table (use `cargo add` for each; do NOT hand-pin patch versions).
+- [ ] **Step 1:** Add dependencies with `cargo add ratatui crossterm --features crossterm/event-stream` etc. per Part II table (use `cargo add` for each; do NOT hand-pin patch versions). **Resolve the ratatui/tachyonfx version pair here**: `cargo add tachyonfx` decides — if the current tachyonfx requires ratatui 0.30, upgrade ratatui in the same commit (0.30 breaking changes that touch this plan: `TestBackend` errors become `Infallible`, `Buffer::filled` takes `Cell` by value). Also add `tracing` + `tracing-subscriber` (env-filter) + `tracing-appender`: a fullscreen TUI cannot println — warnings and up go to a log file (`ATLAS_LOG` path override; `-v` raises verbosity), and errors additionally surface as toasts once Task 16 lands.
 - [ ] **Step 2:** Create every module file containing only its doc comment (one line: the responsibility from the module map) and, in `bus.rs`, the full `AppEvent` enum + `pub type Tx = tokio::sync::mpsc::UnboundedSender<AppEvent>;`.
 - [ ] **Step 3:** `cargo build && cargo test` — existing tests still pass (existing `app.rs`/`client.rs`/`ui.rs` untouched).
 - [ ] **Step 4:** Commit: `feat(atlas): scaffold module tree and event bus for the workstation rewrite`
@@ -286,22 +286,29 @@ fn snapshot_fixture_deserializes_and_regime_is_nested_under_market() {
 **Interfaces:**
 - Consumes: `AppEvent` (Task 1), `Snapshot` (Task 3).
 - Produces: `Store { pub snapshot: Option<Snapshot>, pub regime_panel: Option<RegimePanel>, pub nav: Nav, pub conn: Conn, dirty: bool }` with `apply(&mut self, ev: AppEvent) -> Vec<Trigger>` returning motion triggers (empty until Task 15; the enum exists now: `Trigger { RegimeChanged, DrawdownTierWorse, Halted, Resumed, ApprovalCreated, PhaseAdvanced, PlanExecuted, QuoteTick(String), ReadChanged }`). `Nav { view: ViewId, focus: Focus }`, `ViewId` = the 7 views.
-- Produces: `main.rs` run loop: crossterm raw mode + alternate screen, EventStream forwarded to bus, 120 ms `Tick` interval, `should_render(&store, fx_active, last_frame) -> bool` implementing the Part III pacing rule as a **pure function**.
+- Produces: `main.rs` run loop: crossterm raw mode + alternate screen, EventStream forwarded to bus, 120 ms `Tick` interval, `should_render(dirty, fx_active, last_frame, now) -> bool` implementing the Part III pacing rule as a **pure function** — the clock enters as the `now` argument, never read inside.
 
 - [ ] **Step 1:** Failing test for pacing (pure function — no terminal needed):
 
 ```rust
+// The clock is an argument (global time-as-data constraint): the 3-arg form
+// that computed elapsed() internally raced the scheduler — the exact flake
+// class this plan exists to kill.
 #[test]
 fn renders_on_dirty_or_fx_or_idle_heartbeat() {
     let t0 = Instant::now();
-    assert!(should_render(true,  false, t0));              // dirty
-    assert!(should_render(false, true,  t0));              // effects running
-    assert!(!should_render(false, false, Instant::now())); // idle, frame fresh
-    assert!(should_render(false, false, t0 - Duration::from_millis(150))); // heartbeat
+    let now = t0 + Duration::from_millis(50);
+    assert!(should_render(true,  false, t0, now));  // dirty
+    assert!(should_render(false, true,  t0, now));  // effects running
+    assert!(!should_render(false, false, t0, now)); // idle, frame fresh (50ms < 100ms)
+    assert!(should_render(false, false, t0, t0 + Duration::from_millis(150))); // heartbeat
 }
 ```
 
-- [ ] **Step 2:** Implement store + loop; `color_eyre::install()` with a panic hook that leaves the terminal restored (crossterm `disable_raw_mode` + `LeaveAlternateScreen` in the hook — a panicked TUI must not wedge the shell).
+- [ ] **Step 2:** Implement store + loop with three robustness rules baked in:
+  - **Drain-then-render**: the loop drains *every* pending `AppEvent` (`try_recv` until empty) before drawing at most one frame — a burst of 50 SSE quote events coalesces into one repaint instead of 50. This is the client-side analogue of the reference terminal's `coalesce_within_ms` bus policy.
+  - **RAII `TerminalGuard`**: raw-mode/alternate-screen teardown lives in `Drop`, *and* in the color-eyre panic hook, *and* on `tokio::signal` SIGINT/SIGTERM — three exits, one restore path; a dead TUI must never wedge the shell.
+  - `tracing_subscriber` initialized before the terminal is entered (Task 1's file appender), so early failures are diagnosable.
 - [ ] **Step 3:** `cargo test` → PASS; manual smoke: `cargo run` against a running owner shows the old single screen still (shell swap is Task 5).
 - [ ] **Step 4:** Commit: `feat(atlas): tokio event bus, store with trigger diffing, adaptive render pacing`
 
@@ -461,10 +468,11 @@ pub fn frame_to_string(store: &Store, w: u16, h: u16) -> String {
 - Test: `tests/fx_rules.rs`
 
 **Interfaces:**
-- Consumes: `Trigger` diffs (Task 4), tachyonfx — **first step: pull current API via context7** (`query-docs` tachyonfx: effect construction, `EffectRenderer`/render-effect call, `Duration` type) and adjust names below to what the docs say.
-- Produces: `EffectManager { active: Vec<(Effect, Rect)> }` with `on_trigger(t: &Trigger, layout: &ShellRects)` mapping per the Part I vocabulary table — e.g. `Trigger::RegimeChanged → fx::sweep_in(Motion::LeftToRight, 10, 0, theme().accent, 800ms)` over the regime strip rect; `Halted → fx::repeating(fx::hsl_shift(...))` full-frame until `Resumed`; view switch → `fx::coalesce(300ms)` over the content rect. `process(frame, elapsed)` runs after `shell::draw`; `is_active()` feeds `should_render`.
-- Produces: rule coverage test — every `Trigger` variant maps to at least one effect (exhaustive `match`, compile-time), and `EffectManager` drains completed effects (assert empty after advancing a mocked clock past the longest duration).
-- [ ] Steps: context7 doc pull → failing rules test → implement → tmux QA: toggle desk mode / start a workflow against a live owner and watch sweeps → commit `feat(atlas): tachyonfx motion vocabulary wired to store diffs`.
+- Consumes: `Trigger` diffs (Task 4). API verified against tachyonfx docs 2026-07-30: the crate **ships its own `EffectManager<K>`** — do not hand-roll one. Effects are stateful, created once, applied after widgets render, via `manager.process_effects(elapsed.into(), frame.buffer_mut(), area)`. Keyed adds replace: `add_unique_effect(key, fx)` cancels the previous effect under that key — which is exactly the HALT lifecycle (a `Resumed` trigger replaces the repeating HALT effect under `FxKey::Halt` with a short restore fade).
+- Produces: `FxKey { ViewSwitch, Regime, Halt, Read, PlanCard, Toast }` and `fx::rules(t: &Trigger, rects: &ShellRects, mgr: &mut EffectManager<FxKey>)` mapping per the Part I vocabulary table — e.g. `Trigger::RegimeChanged → fx::sequence(&[fx::sweep_in(..), fx::fade_from_fg(..)])` over the regime strip rect with `(800, Interpolation::CubicInOut)`; view switch → `fx::coalesce(300)` keyed `ViewSwitch` over the content rect; `ReadChanged` → the Task 14 typewriter (hand-rolled slice reveal — not a tachyonfx effect — so DESK owns it; the rule here only fires a subtle `fade_from_fg` behind it). `mgr.is_running()`-equivalent (check the crate's method name at implementation) feeds `should_render`; per-pane effects tick at 60 fps, the full-frame HALT effect at 30 (Part I cap).
+- Produces: easing for *values* (the gauge needle tween, Part I): `fx::ease_out_cubic(t: f32) -> f32` hand-rolled in `fx.rs` — tachyonfx `Interpolation` eases *effects*, not app values; the gauge stores `(prev, target, started_at)` and renders the eased blend.
+- Produces: rule coverage test — every `Trigger` variant maps to at least one rule arm (exhaustive `match`, compile-time); a mocked-clock test drives `process_effects` past the longest duration and asserts the manager reports idle.
+- [ ] Steps: failing rules test → implement → tmux QA: toggle desk mode / start a workflow against a live owner and watch sweeps → commit `feat(atlas): tachyonfx motion vocabulary wired to store diffs`.
 
 ### Task 16: Toasts and connection chips
 
@@ -519,7 +527,9 @@ pub fn frame_to_string(store: &Store, w: u16, h: u16) -> String {
 - Test: in-module parser table tests
 
 **Interfaces:**
-- Produces: pure parser `parse(buf: &str) -> CmdState` where `CmdState = Picker(Vec<Scope>) | Scoped(Scope, query) | Verb(cmd, args) | Empty` — mode **derived from the text** (`/` opens picker; accepting a scope rewrites the buffer to e.g. `/ticker `; backspacing past the space reverts to picker). Scopes: `/view <name>`, `/ticker <SYM>` (selects in markets/blotter), `/plan <id>`, `/mode <desk-mode>` (operator), `/halt` `/resume` (operator, still modal-gated). Bare uppercase token ≤ 6 chars parses as `Ticker(sym)` (function-code grammar). Suggestions render in a one-line strip above the input; Enter dispatches `Command` to the store/router — parser never executes.
+- Produces: pure parser `parse(buf: &str) -> CmdState` where `CmdState = Picker(Vec<Scope>) | Scoped(Scope, query) | Verb(cmd, args) | Empty` — mode **derived from the text** (`/` opens picker; accepting a scope rewrites the buffer to e.g. `/ticker `; backspacing past the space reverts to picker). Scopes: `/view <name>`, `/ticker <SYM>` (selects in markets/blotter), `/plan <id>`, `/mode <desk-mode>` (operator), `/halt` `/resume` (operator, still modal-gated). Bare uppercase token ≤ 6 chars parses as `Ticker(sym)` (function-code grammar). Suggestions render in a one-line strip above the input; Enter dispatches `Command` to the store/router — parser never executes. The input widget is **hand-rolled** (buffer + cursor + in-memory `↑/↓` history, ~60 lines) rather than tui-textarea: the parser *is* the input model — text-derived mode needs raw buffer access on every keystroke, which a rich editor widget hides.
+- Produces: **help overlay** — `?` opens a modal listing every binding, generated from `input::KEYMAP: &[(key, context, action)]`, the same static table the router matches on. One source of truth: a binding cannot exist without appearing in help (test: router arms count == KEYMAP rows).
+- Architecture invariant, enforced here and retroactively checked: **views never perform IO** — `View::on_key` returns `Option<Command>`; only the runtime dispatches Commands to the poller/WriteClient. `grep -rn "reqwest\|WriteClient" src/ui/` must return nothing (add as a test alongside the no-hardcoded-color grep).
 - [ ] Steps: table-driven parser tests (12 cases incl. revert-on-backspace) failing → implement → golden of picker open → commit `feat(atlas): slash-scoped command line with text-derived mode`.
 
 ### Task 21: Settings + research views, cutover behind a `--classic` soak valve
@@ -577,6 +587,20 @@ A second adversarial pass over v1 changed the plan in ten places. Recorded here 
 8. **Catalog parity (Task 21).** v1 dropped the Textual reference view silently; the algorithm catalog (with stage chips) now lands in RESEARCH so nothing disappears unannounced at cutover.
 9. **Soak valve (Tasks 21/22).** Hard-deleting `qlab/tui/` in the cutover commit made rollback a revert. Split: cutover with `--classic` fallback, deletion only after a week of real use — parity gaps become tasks, not incidents.
 10. **Flight-recorder replay (Task 23, stretch).** Routing everything through `AppEvent` makes replaying the durable audit bus through the same store/fx pipeline nearly free — a governance-native feature no reference terminal has: watch yesterday's HALT animate exactly as it happened.
+
+## Deep-review addendum (v3 — architecture hardening after doc verification)
+
+A third pass, this time against live documentation (context7: tachyonfx, ratatui 0.29/0.30; the official async-template Action pattern), changed:
+
+1. **tachyonfx ships `EffectManager<K>`** — the hand-rolled manager in v1/v2's Task 15 was reinventing the crate. Keyed `add_unique_effect` (same key replaces) is precisely the HALT lifecycle. Verified call: `process_effects(elapsed.into(), frame.buffer_mut(), area)` after widgets render.
+2. **Version-pair resolution moved into Task 1.** ratatui 0.30 is out (breaking: `TestBackend` → `Infallible` errors, `Buffer::filled` by value); `cargo add tachyonfx` decides the pair, and an upgrade happens in the scaffold commit, not mid-project.
+3. **Drain-then-render** in the main loop — all pending events coalesce into one frame; the client-side analogue of the bus `coalesce_within_ms` policy. Without it, an SSE burst renders N times.
+4. **Three-exit terminal restore** — RAII `Drop` guard + panic hook + SIGINT/SIGTERM handler share one restore path. A crashed TUI that wedges the shell erodes trust faster than any missing feature.
+5. **`tracing` to a file from before terminal entry** — a fullscreen app can't println; without a log file, every field report becomes "it went black."
+6. **Hand-rolled command input over tui-textarea** — reversal of an earlier instinct, with the reason recorded: text-derived mode needs the raw buffer on every keystroke; the parser is the input model.
+7. **Help overlay from the keymap table** — `?` renders the same static table the router matches on; a binding cannot exist without documentation (arms count == rows test).
+8. **Views-never-do-IO invariant** made greppable: `on_key` returns `Command`s; only the runtime dispatches. Enforced by a test, like the no-hardcoded-color rule.
+9. Deferred as flagged polish, not scope: OSC52 yank (`y` copies plan id/hash — works over ssh), odometer-style rolling digits on the equity hero (gimmick risk — build only if the desk feels static after Phase 5).
 
 ## Self-review notes
 

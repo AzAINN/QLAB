@@ -147,6 +147,26 @@ impl MarketsView {
         true
     }
 
+    /// Move the crosshair one bar, or plant it at the edge it was reached from.
+    ///
+    /// `bars` is how long the selected asset's series is. Zero is nothing to
+    /// point at: a crosshair over an empty series would draw a rule and a chip
+    /// for a price the owner never sent.
+    fn step_crosshair(&mut self, forward: bool, bars: usize) {
+        if bars == 0 {
+            return;
+        }
+        let last = bars - 1;
+        self.crosshair = Some(match (self.crosshair, forward) {
+            // Whichever direction the operator reached for is the edge they
+            // meant to start from.
+            (None, true) => 0,
+            (None, false) => last,
+            (Some(i), true) => (i + 1).min(last),
+            (Some(i), false) => i.saturating_sub(1),
+        });
+    }
+
     fn select(&mut self, row: usize) {
         if self.selected != row {
             // Index 3 of one asset's history is a different point from index 3
@@ -219,29 +239,20 @@ impl View for MarketsView {
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         let facts = store.asset_facts();
         let selected = self.row(facts.len());
+        let bars = facts.get(selected).map_or(0, |a| a.history.len());
         match k.code {
             // Both ends are walls, not wraps: an operator holding an arrow must
             // land on the first or last row, never at the other end of a
             // universe they did not scroll to.
             KeyCode::Up => self.select(selected.saturating_sub(1)),
             KeyCode::Down => self.select((selected + 1).min(facts.len().saturating_sub(1))),
-            KeyCode::Left | KeyCode::Right => {
-                let len = facts.get(selected).map_or(0, |a| a.history.len());
-                // Nothing to point at: a crosshair over an empty series would
-                // draw a rule and a chip for a price the owner never sent.
-                if len > 0 {
-                    let last = len - 1;
-                    let forward = k.code == KeyCode::Right;
-                    self.crosshair = Some(match (self.crosshair, forward) {
-                        // Whichever direction the operator reached for is the
-                        // edge they meant to start from.
-                        (None, true) => 0,
-                        (None, false) => last,
-                        (Some(i), true) => (i + 1).min(last),
-                        (Some(i), false) => i.saturating_sub(1),
-                    });
-                }
-            }
+            // Two arms rather than one arm that re-reads `k.code` for the
+            // direction. The direction is what the *pattern* already said, and
+            // asking again spelled the right-arrow variant twice in one router
+            // — which the keymap equivalence has to count as two bindings,
+            // because it cannot tell a pattern from a comparison.
+            KeyCode::Left => self.step_crosshair(false, bars),
+            KeyCode::Right => self.step_crosshair(true, bars),
             _ => {}
         }
         None

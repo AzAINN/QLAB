@@ -11,10 +11,40 @@
 //! themselves. Matching on it directly would mean a `&'static str` in the key
 //! path and a lookup that can miss, where today the match arms are compiled
 //! patterns; what the table buys instead is that the two cannot drift, checked
-//! mechanically at every `cargo test`. The disclosure that goes with it: the
-//! check compares `KeyCode` spellings, so a binding that differs only by a
-//! modifier (Ctrl-C is the one) is matched by its bare code — the modifier
-//! lives in `key`, which is what a human reads, not in the comparison.
+//! mechanically at every `cargo test`.
+//!
+//! The check is a **multiset** over one *function* per section, not a set over
+//! a whole file. Both halves were bought with a hole. A set collapses repeats,
+//! so adding `Char(c) if c.is_ascii_uppercase()` beside the digit arm — a live
+//! binding that swallows every capital letter, with no help row — left every
+//! test green, because `Char(c)` was already in the set. Guard-differentiated
+//! `Char(c)` is how every text field on this client routes, so that is the next
+//! binding rather than a corner case. And counting per *file* cannot separate
+//! WORKFORCE's question row from its picker, which are two routers with two key
+//! sets in one file: the file's `Char(c)`×2 would have to be one row or two,
+//! and either way one of the two fields is described by a row about the other.
+//!
+//! What the check still cannot see, in full:
+//!
+//! 1. **Modifiers.** It compares `KeyCode` spellings, so Ctrl-C is matched by
+//!    its bare `Char('c')`. The modifier lives in `key`, which is what a human
+//!    reads, not in the comparison.
+//! 2. **Guard text.** Two arms with the same code and different guards are two
+//!    occurrences and need two rows, which is the hole above closed — but which
+//!    row describes which guard is not checked. A row can still say the wrong
+//!    condition about the right key.
+//! 3. **Where a region is.** `Source::region` is hand-maintained: a section
+//!    pointed at a function that does not route would check nothing. The
+//!    positive controls below are what keep that from being silent.
+//! 4. **Literal braces.** The region scanner understands string and character
+//!    literals well enough for this crate; a stranger one could still confuse
+//!    its brace balance, and it panics rather than guessing.
+//! 5. **Comments count.** The scrape is a plain text search over the routing
+//!    function, so a comment inside one may not spell a `KeyCode::` variant —
+//!    it reads as a binding and demands a row. The same constraint the
+//!    never-IO grep puts on `cmd.rs`, and for the same reason: a pin that
+//!    could be talked out of a match is a pin that can be talked out of a
+//!    match. `markets.rs` learned this one the hard way.
 
 use crate::store::{Posture, ViewId};
 
@@ -30,6 +60,16 @@ pub enum Source {
     Help,
     /// One view's keys, while that view is on screen.
     View(ViewId),
+    /// WORKFORCE's question row, while it has the keyboard.
+    ///
+    /// Its own section rather than part of `View(Workforce)`, because it is its
+    /// own router: `ask_key` and `picker_key` bind the same codes to different
+    /// things, and one section over both would describe one field with a row
+    /// about the other. Splitting them is also what lets the equivalence count
+    /// occurrences instead of collapsing them.
+    WorkforceAsk,
+    /// WORKFORCE's template picker, while it is open.
+    WorkforcePicker,
     /// The confirmation box, which outranks everything but Ctrl-C.
     Confirm,
 }
@@ -38,7 +78,7 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 11] = [
+    pub const ALL: [Source; 13] = [
         Source::Shell,
         Source::Command,
         Source::Help,
@@ -47,6 +87,8 @@ impl Source {
         Source::View(ViewId::Book),
         Source::View(ViewId::Research),
         Source::View(ViewId::Workforce),
+        Source::WorkforceAsk,
+        Source::WorkforcePicker,
         Source::View(ViewId::Audit),
         Source::View(ViewId::Settings),
         Source::Confirm,
@@ -59,28 +101,47 @@ impl Source {
             Source::Command => "the command line",
             Source::Help => "this overlay",
             Source::View(id) => id.label(),
+            Source::WorkforceAsk => "WORK · the question row",
+            Source::WorkforcePicker => "WORK · the template picker",
             Source::Confirm => "a confirmation box",
         }
     }
 
-    /// The file whose `match` arms this section describes, relative to `src`.
+    /// The exact routing function this section describes: a file relative to
+    /// `src`, an anchor to find it after, and the function's name.
+    ///
+    /// A *function*, not a file. Two routers in one file (WORKFORCE's question
+    /// row and its picker) have to be counted apart or neither can be counted
+    /// at all, and reading only the routing function also keeps a `KeyCode`
+    /// mentioned anywhere else in the file out of the comparison.
+    ///
+    /// The anchor is for the one case where the name is not unique: `views/mod.rs`
+    /// carries the trait's declaration, the registry's dispatcher, and the
+    /// `Unbuilt` view that actually answers for RSCH and SETT.
     ///
     /// Data rather than a comment, because it is what the equivalence check
-    /// reads: a section pointed at the wrong file would check nothing and pass.
-    /// The two unbuilt views point at the registry that answers for them.
-    pub fn file(self) -> &'static str {
+    /// reads — and hand-maintained, which is weakness 3 in this module's own
+    /// list: a section pointed at a function that does not route would check
+    /// nothing and pass.
+    pub fn region(self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Source::Shell => "ui/shell.rs",
-            Source::Command => "cmd.rs",
-            Source::Help => "ui/widgets/help.rs",
-            Source::View(ViewId::Desk) => "ui/views/desk.rs",
-            Source::View(ViewId::Markets) => "ui/views/markets.rs",
-            Source::View(ViewId::Book) => "ui/views/book.rs",
-            Source::View(ViewId::Workforce) => "ui/views/workforce.rs",
-            Source::View(ViewId::Audit) => "ui/views/audit.rs",
+            Source::Shell => ("ui/shell.rs", "", "on_key"),
+            Source::Command => ("cmd.rs", "", "edit"),
+            Source::Help => ("ui/widgets/help.rs", "", "on_key"),
+            Source::View(ViewId::Desk) => ("ui/views/desk.rs", "", "on_key"),
+            Source::View(ViewId::Markets) => ("ui/views/markets.rs", "", "on_key"),
+            Source::View(ViewId::Book) => ("ui/views/book.rs", "", "on_key"),
+            // `View::on_key` here only forwards; `keys` is the router, and the
+            // two fields under it are the sections below.
+            Source::View(ViewId::Workforce) => ("ui/views/workforce.rs", "", "keys"),
+            Source::WorkforceAsk => ("ui/views/workforce.rs", "", "ask_key"),
+            Source::WorkforcePicker => ("ui/views/workforce.rs", "", "picker_key"),
+            Source::View(ViewId::Audit) => ("ui/views/audit.rs", "", "on_key"),
             // RSCH and SETT are `Unbuilt`, which declines every key.
-            Source::View(ViewId::Research) | Source::View(ViewId::Settings) => "ui/views/mod.rs",
-            Source::Confirm => "ui/widgets/confirm.rs",
+            Source::View(ViewId::Research) | Source::View(ViewId::Settings) => {
+                ("ui/views/mod.rs", "impl View for Unbuilt", "on_key")
+            }
+            Source::Confirm => ("ui/widgets/confirm.rs", "", "on_key"),
         }
     }
 }
@@ -272,42 +333,48 @@ pub const KEYMAP: &[Binding] = &[
         Source::View(ViewId::Workforce),
         "start a governed workflow",
     ),
+    // -- WORK, the question row -------------------------------------------
     w(
         "Char(c)",
         "any key",
-        Source::View(ViewId::Workforce),
-        "types into the question or the goal",
+        Source::WorkforceAsk,
+        "types the question",
     ),
     w(
         "Backspace",
         "Backspace",
-        Source::View(ViewId::Workforce),
+        Source::WorkforceAsk,
         "deletes a character",
     ),
     w(
-        "Up",
-        "↑",
-        Source::View(ViewId::Workforce),
-        "the template above, in the picker",
+        "Enter",
+        "Enter",
+        Source::WorkforceAsk,
+        "puts the question to the desk — an empty one is not sent",
+    ),
+    w("Esc", "Esc", Source::WorkforceAsk, "abandons the question"),
+    // -- WORK, the template picker ----------------------------------------
+    w("Up", "↑", Source::WorkforcePicker, "the template above"),
+    w("Down", "↓", Source::WorkforcePicker, "the template below"),
+    w(
+        "Char(c)",
+        "any key",
+        Source::WorkforcePicker,
+        "types the goal the run is for",
     ),
     w(
-        "Down",
-        "↓",
-        Source::View(ViewId::Workforce),
-        "the template below",
+        "Backspace",
+        "Backspace",
+        Source::WorkforcePicker,
+        "deletes a character",
     ),
     w(
         "Enter",
         "Enter",
-        Source::View(ViewId::Workforce),
-        "send the question, or start the run",
+        Source::WorkforcePicker,
+        "starts the run — an empty goal keeps the box up",
     ),
-    w(
-        "Esc",
-        "Esc",
-        Source::View(ViewId::Workforce),
-        "abandon the question or the picker",
-    ),
+    w("Esc", "Esc", Source::WorkforcePicker, "abandons the picker"),
     // -- AUDIT ------------------------------------------------------------
     w("Up", "↑", Source::View(ViewId::Audit), "the approval above"),
     w(
@@ -359,25 +426,143 @@ pub fn bindings(posture: Posture) -> impl Iterator<Item = &'static Binding> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
-    /// Every `KeyCode::…` token in one source file, up to its test module.
+    /// One routing function's source, found by (file, anchor, name).
     ///
-    /// The tests are cut off deliberately: `confirm.rs`'s own tests press
-    /// `KeyCode::Char('q')` to prove the box swallows it, and a scrape that
-    /// counted that would demand a help row for a key nothing binds. The cut is
-    /// at the test *module* rather than at the first `#[cfg(test)]`, because
+    /// The test module is cut off first, deliberately: `confirm.rs`'s own tests
+    /// press `KeyCode::Char('q')` to prove the box swallows it, and a scrape
+    /// that counted it would demand a help row for a key nothing binds. The cut
+    /// is at the test *module* rather than at the first `#[cfg(test)]`, because
     /// several views carry test-only accessors above their routing — cutting
     /// there read `markets.rs` as a view with no keys at all, and the check
     /// passed for exactly the wrong reason.
-    fn codes_in(file: &str) -> BTreeSet<String> {
+    ///
+    /// Panics rather than returning empty when the function cannot be found:
+    /// an empty region matches an empty expectation, which is how a pin of this
+    /// shape dies quietly.
+    fn body_of(file: &str, anchor: &str, name: &str) -> String {
         let path = format!("{}/src/{file}", env!("CARGO_MANIFEST_DIR"));
-        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let src = match src.find("#[cfg(test)]\nmod tests") {
-            Some(at) => &src[..at],
-            None => &src[..],
+        let whole = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let src = match whole.find("#[cfg(test)]\nmod tests") {
+            Some(at) => &whole[..at],
+            None => &whole[..],
         };
-        let mut found = BTreeSet::new();
+        let src = match anchor.is_empty() {
+            true => src,
+            false => {
+                let at = src
+                    .find(anchor)
+                    .unwrap_or_else(|| panic!("{file}: no anchor {anchor:?}"));
+                &src[at..]
+            }
+        };
+        let needle = format!("fn {name}(");
+        let mut from = 0;
+        while let Some(at) = src[from..].find(&needle) {
+            let rest = &src[from + at..];
+            let masked = mask_literals(rest);
+            let open = masked.find('{');
+            let semi = masked.find(';');
+            match (open, semi) {
+                // A trait's declaration has no body. `views/mod.rs` carries one
+                // above the impl that actually answers.
+                (Some(o), Some(s)) if s < o => from += at + needle.len(),
+                (Some(o), _) => {
+                    let mut depth = 0usize;
+                    for (i, ch) in masked.char_indices().skip_while(|(i, _)| *i < o) {
+                        match ch {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return rest[o..=i].to_string();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    panic!("{file}: fn {name} has no balanced body");
+                }
+                _ => from += at + needle.len(),
+            }
+        }
+        panic!(
+            "{file}: no fn {name} with a body{}",
+            match anchor.is_empty() {
+                true => String::new(),
+                false => format!(" after {anchor:?}"),
+            }
+        );
+    }
+
+    /// The same text with the *contents* of string and character literals
+    /// blanked, byte for byte, so brace balancing cannot be fooled by `'{'`.
+    ///
+    /// Byte-for-byte because the offsets it yields are used to slice the
+    /// original. Lifetimes (`&'a str`) are deliberately not treated as
+    /// character literals — only `'x'` and `'\x'` are, which is what the router
+    /// files actually contain.
+    fn mask_literals(src: &str) -> String {
+        let chars: Vec<char> = src.chars().collect();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        // Each branch owns its own cursor: a shared `i += 1` at the foot lost
+        // the closing quote of every string, which is one byte and therefore
+        // every offset after it.
+        while i < chars.len() {
+            match chars[i] {
+                '"' => {
+                    out.push('"');
+                    i += 1;
+                    while i < chars.len() && chars[i] != '"' {
+                        if chars[i] == '\\' && i + 1 < chars.len() {
+                            out.push(' ');
+                            i += 1;
+                        }
+                        out.push_str(&" ".repeat(chars[i].len_utf8()));
+                        i += 1;
+                    }
+                    if i < chars.len() {
+                        out.push('"');
+                        i += 1;
+                    }
+                }
+                // `'x'` or `'\x'`, and nothing longer — a lifetime has no
+                // closing quote and must be left alone.
+                '\'' if closes_char_literal(&chars, i).is_some() => {
+                    let end = closes_char_literal(&chars, i).unwrap();
+                    out.push('\'');
+                    for c in &chars[i + 1..end] {
+                        out.push_str(&" ".repeat(c.len_utf8()));
+                    }
+                    out.push('\'');
+                    i = end + 1;
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Where a character literal starting at `at` closes, if it does.
+    fn closes_char_literal(chars: &[char], at: usize) -> Option<usize> {
+        [at + 2, at + 3]
+            .into_iter()
+            .find(|&end| chars.get(end) == Some(&'\''))
+    }
+
+    /// Every `KeyCode::…` token in one routing function, **with repeats**.
+    ///
+    /// A multiset, sorted. Collapsing repeats is what let a second `Char(c)`
+    /// arm — a live binding with a different guard and no help row — pass
+    /// unnoticed; see this module's own header.
+    fn codes_in(source: Source) -> Vec<String> {
+        let (file, anchor, name) = source.region();
+        let src = body_of(file, anchor, name);
+        let mut found = Vec::new();
         let bytes: Vec<char> = src.chars().collect();
         let needle: Vec<char> = "KeyCode::".chars().collect();
         let mut i = 0;
@@ -416,19 +601,22 @@ mod tests {
                 );
             }
             if !token.is_empty() {
-                found.insert(token);
+                found.push(token);
             }
             i = j.max(i + 1);
         }
+        found.sort();
         found
     }
 
-    fn declared(source: Source) -> BTreeSet<String> {
-        KEYMAP
+    fn declared(source: Source) -> Vec<String> {
+        let mut rows: Vec<String> = KEYMAP
             .iter()
             .filter(|binding| binding.source == source)
             .map(|binding| binding.code.to_string())
-            .collect()
+            .collect();
+        rows.sort();
+        rows
     }
 
     #[test]
@@ -438,18 +626,38 @@ mod tests {
         // binding nobody can discover, and a row here with no arm would put a
         // key in the help that does nothing when pressed.
         //
-        // Bidirectional and per-source, so a row filed under the wrong section
-        // fails too — a `Char('x')` moved from BOOK to MKTS is a different
-        // sentence in the overlay and would otherwise pass on totals.
+        // Bidirectional, per-section, and by *count*. Per-section so a row filed
+        // under the wrong one fails too — a `Char('x')` moved from BOOK to MKTS
+        // is a different sentence in the overlay and would pass on totals. By
+        // count because a second arm on a code that is already bound is the
+        // likely next binding on this client: every text field routes through a
+        // guarded `Char(c)`, and a set says the table already covers it.
         for source in Source::ALL {
+            let (file, _, name) = source.region();
             assert_eq!(
-                codes_in(source.file()),
+                codes_in(source),
                 declared(source),
-                "{} ({}) and its help rows disagree",
+                "{} ({file}::{name}) and its help rows disagree",
                 source.label(),
-                source.file()
             );
         }
+    }
+
+    #[test]
+    fn a_second_arm_on_a_bound_code_is_a_binding_the_help_does_not_have() {
+        // The mutation this check was rebuilt for, without planting it in the
+        // router: `KeyCode::Char(c) if c.is_ascii_uppercase() => return None`
+        // beside the digit arm swallows every capital letter workstation-wide,
+        // and `Char(c)` is already in the shell's codes. A set comparison stays
+        // green. A multiset cannot.
+        let mut mutated = codes_in(Source::Shell);
+        mutated.push("Char(c)".to_string());
+        mutated.sort();
+        assert_ne!(
+            mutated,
+            declared(Source::Shell),
+            "a duplicate code is invisible to this comparison — the hole is open again"
+        );
     }
 
     #[test]
@@ -458,25 +666,64 @@ mod tests {
         // accessors above their `on_key`, so cutting at the first occurrence
         // read the whole of MKTS as a view with no keys — an empty set that
         // matched an empty expectation and proved nothing.
-        let markets = codes_in("ui/views/markets.rs");
+        let markets = codes_in(Source::View(ViewId::Markets));
         assert!(
-            markets.contains("Up") && markets.contains("Left"),
+            markets.contains(&"Up".to_string()) && markets.contains(&"Left".to_string()),
             "{markets:?}"
         );
         // And the tests below really are excluded: `confirm.rs` presses `q` at
         // the box to prove it is swallowed, and nothing binds `q` there.
-        assert!(!codes_in("ui/widgets/confirm.rs").contains("Char('q')"));
+        assert!(!codes_in(Source::Confirm).contains(&"Char('q')".to_string()));
     }
 
     #[test]
-    fn the_scrape_can_actually_read_the_tree() {
-        // A scanner that found nothing would make the test above pass for every
-        // section with no rows, which is exactly how a grep-shaped pin dies
+    fn the_scrape_reads_one_routing_function_and_not_its_neighbours() {
+        // A scanner that found nothing would make the check above pass for every
+        // section with no rows, which is exactly how a pin of this shape dies
         // quietly. Two known tokens, one plain and one with a payload.
-        let shell = codes_in("ui/shell.rs");
-        assert!(shell.contains("Tab"), "{shell:?}");
-        assert!(shell.contains("Char('q')"), "{shell:?}");
+        let shell = codes_in(Source::Shell);
+        assert!(shell.contains(&"Tab".to_string()), "{shell:?}");
+        assert!(shell.contains(&"Char('q')".to_string()), "{shell:?}");
         assert!(!KEYMAP.is_empty());
+
+        // And the split is real rather than two labels over one file: the
+        // question row binds Enter and no arrows, the picker binds both, and
+        // the keys that *open* them are in neither.
+        let ask = codes_in(Source::WorkforceAsk);
+        let picker = codes_in(Source::WorkforcePicker);
+        let work = codes_in(Source::View(ViewId::Workforce));
+        assert!(
+            ask.contains(&"Enter".to_string()) && !ask.contains(&"Up".to_string()),
+            "{ask:?}"
+        );
+        assert!(picker.contains(&"Up".to_string()), "{picker:?}");
+        assert_eq!(work, vec!["Char('S')".to_string(), "Char('i')".to_string()]);
+
+        // A view that binds nothing reads as nothing, not as unreadable.
+        assert!(codes_in(Source::View(ViewId::Desk)).is_empty());
+        assert!(codes_in(Source::View(ViewId::Research)).is_empty());
+    }
+
+    #[test]
+    fn the_region_scanner_is_not_fooled_by_a_brace_in_a_literal() {
+        // The scanner balances braces to find a function body, so a `'{'` in a
+        // match arm would end it early and silently shorten a section. Nothing
+        // in the routers spells one today; this is what keeps that from being
+        // load-bearing.
+        let src = "fn f() { match c { '{' => \"}}\", _ => {} } }";
+        let masked = mask_literals(src);
+        // Byte for byte, because the offsets it yields slice the original.
+        assert_eq!(masked.len(), src.len(), "{masked}");
+        // Three code braces of each: the one in the character literal and the
+        // two in the string are gone, which is what stops a body ending at the
+        // first `'}'` an arm happens to match on.
+        assert_eq!(masked.matches('{').count(), 3, "{masked}");
+        assert_eq!(masked.matches('}').count(), 3, "{masked}");
+        // A lifetime is not a character literal and must survive untouched.
+        assert_eq!(
+            mask_literals("Vec<Span<'static>> {}"),
+            "Vec<Span<'static>> {}"
+        );
     }
 
     #[test]

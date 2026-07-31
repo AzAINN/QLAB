@@ -521,3 +521,68 @@ def test_retired_standalone_module_mains_delegate_to_guarded_server(
     importlib.import_module(f"qlab.mcp.{module_name}").main()
 
     assert called == [True]
+
+
+def test_predictor_board_is_owner_only_and_fully_allowlisted():
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+    from qlab.state.registry import Registry
+    from qlab.tui.claude import _LAB_TOOL_BASES, _PROXY_TOOLS, _claude_tool
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    base = "research.predictor_board"
+    assert base in OWNER_LAB_TOOLS
+    assert base in _LAB_TOOL_BASES
+    assert _claude_tool(base) in _PROXY_TOOLS
+
+    reg = Registry(":memory:")
+    agent_app = StubApp()
+    register_lab_tools(agent_app, LabState(offline=True, registry=reg))
+    # Research-stage executable: absent from every agent-facing surface.
+    assert base not in agent_app.names
+
+    owner_app = StubApp()
+    register_lab_tools(
+        owner_app, LabState(offline=True, registry=reg), owner_only=True)
+    assert base in owner_app.names
+    reg.close()
+
+
+def test_predictor_board_logs_one_dsr_exempt_run_and_no_backtest():
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+    from qlab.state.registry import Registry
+
+    reg = Registry(":memory:")
+    owner_app = StubApp()
+    register_lab_tools(
+        owner_app, LabState(offline=True, registry=reg), owner_only=True)
+    result = owner_app.tools["research.predictor_board"](
+        as_of="2022-06-30", universe="core", lookback_days=420)
+
+    board = result["board"]
+    assert board["baseline"] == "ridge:none"
+    assert [entry["model_id"] for entry in board["models"]] == board["ranking"]
+    assert board["champion"] is None or board["champion"] in board["ranking"]
+
+    runs = reg.list_runs(limit=5)
+    assert runs and runs[0]["kind"] == "predictor_board"
+    spec = runs[0]["spec"]
+    assert spec["dsr_trial_counted"] is False
+    assert spec["source"] == "synthetic"
+    assert spec["board"]["admission"] == board["admission"]
+
+    report = reg.report(result["run_id"])
+    assert report["backtests"] == []
+    assert report["solutions"] == []
+    reg.close()
+
+
+def test_predictor_board_catalog_entry_is_research_only():
+    from qlab.algorithms import get_algorithm
+
+    spec = get_algorithm("predictor_board")
+    assert spec.category == "prediction"
+    assert spec.stage == "research"
+    assert spec.agent_tool == "research.predictor_board"
+    assert spec.agent_usable is False

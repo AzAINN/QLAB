@@ -957,6 +957,63 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         # through the one-writer owner and its role-scoped stateless proxy.
         app.tool(name="research.predict_vol")(research_predict_vol)
 
+    # -- paired predictor board (rescue paths for the augmented lane) -------
+    def research_predictor_board(
+        as_of: str,
+        universe: str = "core",
+        lookback_days: int = 756,
+    ) -> dict:
+        """Run the paired predictor board: baseline vs group-wise and kernels."""
+        from qlab.research.board import run_predictor_board
+
+        st.budget.charge("research.predictor_board")
+        if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
+            raise TypeError("lookback_days must be an integer")
+        if lookback_days < 300:
+            raise ValueError(
+                "research.predictor_board requires at least 300 return "
+                "observations for lagged features and purged walk-forward folds"
+            )
+
+        d = check_as_of(as_of)
+        tickers = load_universe().tickers(universe)
+        snapshot = market.snapshot(
+            tickers,
+            d,
+            lookback_days=lookback_days + 1,
+            offline=st.offline,
+            seed=st.seed,
+        )
+        panel = snapshot.log_returns().dropna(how="any")
+        board = run_predictor_board(panel)
+        caveats = [
+            "risk prediction only",
+            "research stage",
+            "ranking is (-mean_ic, ic_std, model_id); the champion is the "
+            "first admitted model, not a promoted one",
+        ]
+        run_spec = {
+            "algorithm_id": "predictor_board",
+            "as_of": str(d),
+            "universe": universe,
+            "tickers": tickers,
+            "lookback_days": lookback_days,
+            "source": snapshot.source,
+            "snapshot_id": snapshot.content_hash(),
+            "board": board,
+            "dsr_trial_counted": False,
+            "caveats": caveats,
+        }
+        run_id = st.registry.log_run("predictor_board", run_spec)
+        # Board validation writes neither a solution nor a backtest row, so
+        # the DSR trial universe is unchanged.
+        return {"run_id": run_id, "board": board, "caveats": caveats}
+
+    if owner_only:
+        # Same boundary as research.predict_vol: a research-stage executable
+        # mounts on the one-writer owner only, never on agent-facing surfaces.
+        app.tool(name="research.predictor_board")(research_predictor_board)
+
     # -- equilibrium expected returns --------------------------------------
     @app.tool(name="research.equilibrium_returns")
     def research_equilibrium_returns(

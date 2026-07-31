@@ -175,6 +175,7 @@ OWNER_LAB_TOOLS = frozenset({
     "research.apply_views",
     "research.equilibrium_returns",
     "research.predict_vol",
+    "research.predictor_board",
     "research.window_evidence",
     "registry.list_runs",
     "registry.report",

@@ -200,6 +200,19 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "lookback_days": lookback_days,
         })
 
+    @app.tool(name="research_predictor_board")
+    def research_predictor_board(
+        as_of: str,
+        universe: str = "core",
+        lookback_days: int = 756,
+    ) -> dict:
+        """Run the owner-held paired predictor board (baseline vs rescues)."""
+        return lab("research.predictor_board", {
+            "as_of": as_of,
+            "universe": universe,
+            "lookback_days": lookback_days,
+        })
+
     @app.tool(name="research_window_evidence")
     def research_window_evidence(
         as_of: str,

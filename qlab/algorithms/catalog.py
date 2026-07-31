@@ -109,6 +109,15 @@ _ALGORITHMS = (
         "admission gate; it never estimates returns or enters paper execution.",
     ),
     AlgorithmSpec(
+        "predictor_board", "Paired predictor board",
+        "prediction", "research", ("risk_forecast",), None,
+        "research.predictor_board",
+        "Champion/challenger evaluation of the augmented lane's rescue paths "
+        "(group-wise ridge, closed-form quantum kernels) against the admitted "
+        "ridge baseline on shared purged folds. Paired by construction; the "
+        "champion is the first admitted model, never a promotion.",
+    ),
+    AlgorithmSpec(
         "meta_labeling_scaffold", "Meta-labeling scaffold",
         "prediction", "research", ("meta_labeling",), None, None,
         "labeling + sizing scaffold for the future prediction lane; no signal, "

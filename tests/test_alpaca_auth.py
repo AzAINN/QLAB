@@ -361,6 +361,18 @@ def test_the_desk_takes_a_login_and_the_resolver_reads_it_back(
     assert status == 400
     assert "ALPACA_API_KEY" in refused["error"]
 
+    # Half a pair is the same refusal in a write context, and it must point the
+    # operator the way a writer needs to go — the resolver's own message tells
+    # a *reader* to set the missing variable, which is the opposite.
+    monkeypatch.delenv("ALPACA_API_SECRET")
+    status, half = _post(desk, "/api/alpaca/credentials",
+                         {"api_key": _KEY, "api_secret": _SECRET})
+    assert status == 400
+    assert "unset both first" in half["error"]
+    # "or neither…" is the resolver's own sentence, which is right at read time
+    # and points the wrong way here. Its direction must not leak into a write.
+    assert "or neither" not in half["error"]
+
 
 def test_an_obviously_wrong_login_is_refused_and_nothing_is_written(
         desk, tmp_path, monkeypatch):
@@ -429,8 +441,11 @@ def test_a_login_alpaca_will_not_take_is_a_result_not_an_error(
     assert (status, broken["ok"]) == (200, False)
     assert "paper-only" in broken["reason"]
 
+    # replace: the profile just written is a browser login, and trading it for
+    # a key pair is the one thing this route will not do unasked.
     assert _post(desk, "/api/alpaca/credentials",
-                 {"api_key": _KEY, "api_secret": _SECRET})[0] == 200
+                 {"api_key": _KEY, "api_secret": _SECRET,
+                  "replace": True})[0] == 200
     # The shipped deadline is the contract; the cases below shorten it so the
     # suite does not wait on it.
     assert alpaca_auth.PROBE_TIMEOUT_S == 10.0
@@ -454,6 +469,77 @@ def test_a_login_alpaca_will_not_take_is_a_result_not_an_error(
         status, silent = _post(desk, "/api/alpaca/test", {})
     assert (status, silent["ok"]) == (200, False)
     assert "did not answer" in silent["reason"]
+
+
+def test_a_browser_login_is_never_traded_for_a_key_pair_unasked(desk, tmp_path):
+    # `alpaca profile login` writes a token that cannot be recovered without
+    # logging in again, so overwriting it is data loss, not a preference.
+    config = tmp_path / "alpaca"
+    _write_profile(config, body=(
+        "access_token: tok-abcdefghijklmnopqrstuvwxyz012345\n"
+        "refresh_token: ref-abcdefghijklmnopqrstuvwxyz01234\n"
+        "endpoint: https://api.alpaca.markets\n"))
+    profile = config / "profiles" / "paper.yaml"
+    before = profile.read_text(encoding="utf-8")
+
+    status, refused = _post(desk, "/api/alpaca/credentials",
+                            {"api_key": _KEY, "api_secret": _SECRET})
+    assert status == 400
+    assert "replace" in refused["error"] and "refresh token" in refused["error"]
+    assert profile.read_text(encoding="utf-8") == before   # nothing touched
+
+    # Consent, and only consent, gets past it — and takes the dead token out
+    # rather than leaving an unused credential at rest.
+    status, payload = _post(desk, "/api/alpaca/credentials",
+                            {"api_key": _KEY, "api_secret": _SECRET,
+                             "replace": True})
+    assert (status, payload["credentials_ok"]) == (200, True)
+    creds = resolve_alpaca_credentials()
+    assert (creds.kind, creds.api_key) == ("api_key", _KEY)
+    assert "access_token" not in profile.read_text(encoding="utf-8")
+    # A key the CLI owns and this module has never heard of survives the write.
+    assert "endpoint" in profile.read_text(encoding="utf-8")
+
+    # An ordinary re-login needs no consent, and still preserves the rest.
+    status, _ = _post(desk, "/api/alpaca/credentials",
+                      {"api_key": _KEY, "api_secret": _SECRET[:-1] + "Z"})
+    assert status == 200
+    stored = profile.read_text(encoding="utf-8")
+    assert "endpoint" in stored and stored.rstrip().endswith("Z")
+
+    # A profile nothing can parse is the same question — what would be lost is
+    # unknown — and the same way past it. A refusal with no way forward would
+    # leave one corrupt file blocking every future login.
+    profile.write_text("{{{ not yaml\n", encoding="utf-8")
+    status, unreadable = _post(desk, "/api/alpaca/credentials",
+                               {"api_key": _KEY, "api_secret": _SECRET})
+    assert status == 400 and "replace" in unreadable["error"]
+    assert _post(desk, "/api/alpaca/credentials",
+                 {"api_key": _KEY, "api_secret": _SECRET,
+                  "replace": True})[0] == 200
+
+    # "yes" is not consent: only a real boolean is.
+    status, wrong = _post(desk, "/api/alpaca/credentials",
+                          {"api_key": _KEY, "api_secret": _SECRET,
+                           "replace": "yes"})
+    assert (status, wrong["error"]) == (400, "replace must be true or false")
+
+
+def test_a_credential_that_cannot_be_sent_as_a_header_never_reaches_a_500(
+        desk, tmp_path):
+    # A profile written by hand (or by an older CLI) can hold a value with a
+    # line break in it. http.client refuses such a header by raising a
+    # ValueError that QUOTES it, which is neither a network outcome nor
+    # programmer error — it went out as a 500 body with the secret in it.
+    poisoned = "qlabPOISON\nsecret0123456789abcdefghijkl"
+    _write_profile(tmp_path / "alpaca", body=(
+        f"api_key: {_KEY}\nsecret_key: {json.dumps(poisoned)}\n"))
+
+    status, out = _post(desk, "/api/alpaca/test", {})
+    assert (status, out["ok"]) == (200, False)
+    assert "header" in out["reason"]
+    blob = json.dumps(out)
+    assert poisoned not in blob and "qlabPOISON" not in blob
 
 
 def test_the_audit_row_carries_no_key_material(desk):

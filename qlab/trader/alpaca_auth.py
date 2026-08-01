@@ -51,6 +51,11 @@ _HEAD_CHARS = 240
 _MAX_BODY_BYTES = 1 << 20
 _USERINFO = re.compile(r"[^\s/@]+@")
 
+# What may be sent as an HTTP header value: printable ASCII, nothing else.
+# See ``_header_safe`` — the two ways http.client refuses a header both quote
+# the value they refused, so the check has to happen where the value is held.
+_HEADER_SAFE = re.compile(r"^[\x20-\x7e]+$")
+
 
 class AlpacaAuthError(RuntimeError):
     """A credential source exists but is unusable. Never raised for absence."""
@@ -241,15 +246,24 @@ def _ensure_private_dir(path: Path) -> None:
             "to write a credential where others can read it")
 
 
-def write_credentials(api_key: str, api_secret: str) -> None:
+def write_credentials(api_key: str, api_secret: str,
+                      *, replace: bool = False) -> None:
     """Store an API key pair as the profile ``resolve_alpaca_credentials`` reads.
 
     The active profile, not a private one of qlab's own: that path is the one
     thing the resolver looks at, so writing anywhere else would mean also
     rewriting ``config.yaml``'s ``default_profile`` — a second file, owned by
-    the CLI. This overwrites the same profile ``alpaca profile login``
-    overwrites, and marks it ``live: false`` because a key pair typed into a
-    paper-only desk is a paper credential by declaration.
+    the CLI. This writes the same profile ``alpaca profile login`` writes, and
+    marks it ``live: false`` because a key pair typed into a paper-only desk is
+    a paper credential by declaration.
+
+    ``replace`` is the operator's consent to destroy a login that is already
+    there. Without it a browser-authorized profile is never overwritten — its
+    ``access_token`` and ``refresh_token`` cannot be recovered without logging
+    in again, so silently trading them for a pasted key pair is a data loss the
+    desk has no business performing on its own. The guard lives here rather
+    than at the route because every future caller would otherwise have to
+    re-acquire it.
 
     Refuses rather than writes when the result would be ignored or unsafe: env
     credentials outrank every profile, a directory that cannot be made private
@@ -268,15 +282,18 @@ def write_credentials(api_key: str, api_secret: str) -> None:
             "that does not look like an Alpaca API secret (about 40 letters, "
             "digits and +/= characters); nothing was written")
 
-    # A half-set env pair is already a refusal; a full one silently wins over
-    # anything written here, so a login typed at the desk would be stored and
-    # then never used. Both are the same failure — say so before touching disk.
-    refuse_partial_env_credentials()
-    if os.environ.get("ALPACA_API_KEY", "").strip():
+    # Either half is disqualifying: a full env pair silently wins over anything
+    # written here, and a half pair makes resolution refuse outright — so a
+    # login stored now would never be used either way. Said in the *write*
+    # direction deliberately: `refuse_partial_env_credentials` tells a reader
+    # to set the missing variable, which is the right advice when resolving and
+    # exactly the wrong advice to give someone storing a profile.
+    if (os.environ.get("ALPACA_API_KEY", "").strip()
+            or os.environ.get("ALPACA_API_SECRET", "").strip()):
         raise AlpacaAuthError(
-            "ALPACA_API_KEY and ALPACA_API_SECRET are set in this desk's "
+            "ALPACA_API_KEY / ALPACA_API_SECRET are set in this desk's "
             "environment and take precedence over any profile, so a login "
-            "stored here would never be used; unset them first")
+            "stored here would never be used; unset both first")
 
     config_dir = _config_dir()
     name = _active_profile_name(config_dir)
@@ -284,12 +301,47 @@ def write_credentials(api_key: str, api_secret: str) -> None:
     _ensure_private_dir(profiles)
     path = profiles / f"{name}.yaml"
 
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = _load_yaml_mapping(path)
+        except AlpacaAuthError:
+            # Unreadable is treated exactly like a browser login: there may be
+            # a credential in there that the operator wants back, and the same
+            # explicit consent is the way past it. Refusing outright would
+            # leave a desk with one corrupt profile unable to store a login at
+            # all — a refusal with no way forward is not a refusal, it is a
+            # dead end.
+            if not replace:
+                raise AlpacaAuthError(
+                    f"{path} could not be read, so what a login stored here "
+                    "would overwrite is unknown; send replace:true to "
+                    "overwrite it anyway") from None
+            existing = {}
+    if not replace and existing.get("access_token") and not existing.get("api_key"):
+        raise AlpacaAuthError(
+            f"profile {name!r} holds a browser login (`alpaca profile login`); "
+            "storing a key pair would discard its access token and refresh "
+            "token, which cannot be recovered without logging in again. Send "
+            "replace:true to do it anyway")
+
+    # Merged, not rewritten: the CLI owns this file too and puts keys in it
+    # that this module has never heard of (endpoint, scopes, output). Dropping
+    # them because we do not read them would break the operator's `alpaca` CLI
+    # as a side effect of storing a login in qlab.
+    merged = dict(existing)
+    if replace:
+        # An authorized replacement takes the old login *out*: leaving a dead
+        # access_token on disk keeps a credential at rest that nothing uses.
+        merged.pop("access_token", None)
+        merged.pop("refresh_token", None)
+    merged.update({"api_key": key, "secret_key": secret, "live": False})
+
     # Dumped rather than formatted: a secret containing ":" or starting with a
     # YAML sigil has to come back out of the file byte-identical, and the
     # dumper is what knows when to quote.
     document = yaml.safe_dump(
-        {"api_key": key, "secret_key": secret, "live": False},
-        sort_keys=True, default_flow_style=False)
+        merged, sort_keys=True, default_flow_style=False)
 
     # Written to a temp file in the same directory and moved into place, so the
     # destination is never an existing file whose looser mode we would inherit
@@ -388,14 +440,41 @@ class ProbeResult:
                 "currency": self.currency}
 
 
+def _header_safe(value: str, label: str) -> str:
+    """A credential that can be sent as a header, or a refusal that never quotes it.
+
+    ``http.client.putheader`` refuses a value containing a line break and then
+    encodes what is left as latin-1 — and **both** refusals put the value in
+    the exception: ``ValueError("Invalid header value %r")`` and
+    ``UnicodeEncodeError``, whose ``object`` is the whole header. Both are
+    ``ValueError``s, which this module reserves for programmer error, so
+    neither was caught by the probe and both reached do_POST's blanket
+    ``500 {"error": repr(exc)}`` with the secret inside it.
+
+    Checked here, before the socket, because this is the module that holds the
+    value: the only thing said out loud is which field was unusable. Printable
+    ASCII is the whole permitted set — Alpaca key ids, secrets and OAuth
+    bearer tokens are all base64-ish by construction, so anything else is a
+    damaged credential source rather than an exotic valid one.
+    """
+    if not _HEADER_SAFE.match(value):
+        raise AlpacaAuthError(
+            f"the resolved {label} contains characters that cannot be sent in "
+            "an HTTP header (a line break, a tab, or a non-ASCII character) — "
+            "the credential source needs fixing, not the desk")
+    return value
+
+
 def _auth_headers(creds: AlpacaCredentials) -> dict[str, str]:
     if creds.kind == "oauth":
         # The browser-login credential, which is the one this module prefers;
         # a desk that could only test pasted keys would be unable to test the
         # login it recommends.
-        return {"Authorization": f"Bearer {creds.oauth_token}"}
-    return {"APCA-API-KEY-ID": creds.api_key or "",
-            "APCA-API-SECRET-KEY": creds.secret_key or ""}
+        return {"Authorization":
+                f"Bearer {_header_safe(creds.oauth_token or '', 'OAuth token')}"}
+    return {"APCA-API-KEY-ID": _header_safe(creds.api_key or "", "API key"),
+            "APCA-API-SECRET-KEY": _header_safe(
+                creds.secret_key or "", "API secret")}
 
 
 def _mask_account(number: str) -> str:
@@ -418,9 +497,18 @@ def probe_credentials(creds: AlpacaCredentials | None) -> ProbeResult:
     elif not (creds.api_key and creds.secret_key):
         raise ValueError("api_key credentials carry no key pair")
 
+    try:
+        headers = _auth_headers(creds)
+    except AlpacaAuthError as exc:
+        # A credential this module cannot even send is a result, like absence
+        # or a rejection — the operator asked "does my login work?" and the
+        # answer is no, with a sentence. Caught here and nowhere wider: the
+        # ValueErrors above are programmer error and must still escape.
+        return ProbeResult(False, str(exc))
+
     request = urllib.request.Request(
         ALPACA_PAPER_API.rstrip("/") + _ACCOUNT_PATH,
-        headers=_auth_headers(creds), method="GET")
+        headers=headers, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT_S) as response:
             raw = response.read(_MAX_BODY_BYTES + 1)

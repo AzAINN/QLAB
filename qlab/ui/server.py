@@ -746,12 +746,15 @@ class UISession:
             "credentials_ok": ok,
         }
 
-    def set_alpaca_credentials(self, api_key: object, api_secret: object) -> dict:
+    def set_alpaca_credentials(self, api_key: object, api_secret: object,
+                               *, replace: bool = False) -> dict:
         """Store a login the operator typed, and report what the desk can see.
 
         The write itself belongs to ``alpaca_auth`` and stays there: it is the
         single secrets authority, so no surface — this one included — learns
-        what a profile looks like or what mode it needs.
+        what a profile looks like, what mode it needs, or when overwriting one
+        would destroy something. ``replace`` is carried through unread: this
+        method decides nothing about it.
 
         The book is NOT switched. Mode is explicit-never-inferred
         (``desk_mode.py``), so a login makes LIVE·ALPACA *choosable* and
@@ -760,7 +763,7 @@ class UISession:
         """
         from qlab.trader.alpaca_auth import write_credentials
 
-        write_credentials(api_key, api_secret)
+        write_credentials(api_key, api_secret, replace=replace)
         # Names nothing else. An event row replays forever, so neither the key,
         # nor the secret, nor a mask of either, nor the path they went to
         # belongs on the bus — "a login was stored, from the desk" is the whole
@@ -3122,9 +3125,14 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "POST" and path == "/api/alpaca/credentials":
         from qlab.trader.alpaca_auth import AlpacaAuthError
 
+        # Destroying an existing login takes an explicit true, so a client that
+        # sends "yes" or 1 is refused rather than read as consent.
+        replace = body.get("replace", False)
+        if not isinstance(replace, bool):
+            return 400, {"error": "replace must be true or false"}
         try:
             return 200, session.set_alpaca_credentials(
-                body.get("api_key"), body.get("api_secret"))
+                body.get("api_key"), body.get("api_secret"), replace=replace)
         except AlpacaAuthError as exc:
             # The module's own sentence, which never quotes what was typed.
             return 400, {"error": str(exc)}

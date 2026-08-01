@@ -2098,6 +2098,68 @@ def test_research_view_renders_latest_prediction_admission_with_tone():
     asyncio.run(run())
 
 
+def test_research_view_renders_the_predictor_board():
+    from qlab.tui.app import QlabTui
+    from qlab.tui.design.markup import DOWN, UP
+
+    async def run():
+        app = QlabTui(StubClient(), refresh_interval=0, claude_start="off",
+                      desk_mode=_SYNTH)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.2)
+            app.snapshot["runs"] = []
+            app._render_research()
+            summary = str(app.query_one("#research-summary").content)
+            assert "predictor board — never run" in summary
+
+            app.snapshot["runs"] = [{
+                "run_id": "board-new",
+                "kind": "predictor_board",
+                "created_at": "2026-07-31T12:00:00+00:00",
+                "spec": {
+                    "board": {
+                        "baseline": "ridge:none",
+                        "champion": "kernel:zz",
+                        "admitted_any": True,
+                        "models": [
+                            {"model_id": "kernel:zz", "mean_ic": 0.0913,
+                             "usable": True,
+                             "delta_mean_ic_vs_baseline": 0.031},
+                            {"model_id": "ridge:none", "mean_ic": 0.0601,
+                             "usable": True,
+                             "delta_mean_ic_vs_baseline": 0.0},
+                        ],
+                    },
+                },
+            }]
+            app._render_research()
+            summary = str(app.query_one("#research-summary").content)
+            headline = "predictor board — champion kernel:zz"
+            assert f"[{UP}]{headline}[/]" in summary
+            assert "Δ +0.031" in summary
+
+            board = app.snapshot["runs"][0]["spec"]["board"]
+            board["champion"] = None
+            board["admitted_any"] = False
+            app._render_research()
+            summary = str(app.query_one("#research-summary").content)
+            assert f"[{DOWN}]predictor board — no admitted model[/]" in summary
+
+            # A run row whose spec cannot be read is a different fact from a
+            # board that never ran, and must say so.
+            app.snapshot["runs"] = [{
+                "run_id": "board-bad",
+                "kind": "predictor_board",
+                "created_at": "2026-07-31T12:00:00+00:00",
+                "spec": "corrupt",
+            }]
+            app._render_research()
+            summary = str(app.query_one("#research-summary").content)
+            assert "predictor board — unreadable spec" in summary
+
+    asyncio.run(run())
+
+
 def test_research_leaderboard_shows_method_names_not_codes():
     from qlab.tui.app import QlabTui
 

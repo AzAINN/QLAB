@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from qlab.algorithms import get_algorithm
 from qlab.research.prediction import (
@@ -103,3 +104,66 @@ def test_prediction_catalog_entry_is_research_only() -> None:
     assert spec.objective_forms == ("risk_forecast",)
     assert spec.agent_tool == "research.predict_vol"
     assert spec.agent_usable is False
+
+
+def test_groupwise_ridge_with_equal_alphas_is_plain_ridge() -> None:
+    from qlab.research.prediction import _groupwise_ridge_predict, _ridge_predict
+
+    rng = np.random.default_rng(21)
+    train_x = rng.normal(size=(80, 6))
+    train_y = rng.normal(size=80)
+    test_x = rng.normal(size=(20, 6))
+
+    for alpha in (0.1, 1.0, 10.0):
+        np.testing.assert_allclose(
+            _groupwise_ridge_predict(
+                train_x, train_y, test_x, alpha, alpha, n_raw=4
+            ),
+            _ridge_predict(train_x, train_y, test_x, alpha),
+            atol=1e-10,
+        )
+
+
+def test_groupwise_penalty_actually_differs_by_group() -> None:
+    from qlab.research.prediction import _groupwise_ridge_predict, _ridge_predict
+
+    rng = np.random.default_rng(22)
+    train_x = rng.normal(size=(80, 6))
+    train_y = train_x @ rng.normal(size=6) + 0.1 * rng.normal(size=80)
+    test_x = rng.normal(size=(20, 6))
+
+    grouped = _groupwise_ridge_predict(
+        train_x, train_y, test_x, 0.1, 10.0, n_raw=3
+    )
+    for alpha in (0.1, 10.0):
+        plain = _ridge_predict(train_x, train_y, test_x, alpha)
+        assert not np.allclose(grouped, plain, atol=1e-8)
+
+
+def test_groupwise_alpha_search_is_deterministic_and_on_the_grid() -> None:
+    from qlab.research.prediction import _choose_groupwise_alphas
+
+    rng = np.random.default_rng(23)
+    train_x = rng.normal(size=(400, 6))
+    train_y = train_x[:, 0] * 0.5 + rng.normal(size=400)
+    alphas = (0.1, 1.0, 10.0)
+
+    first = _choose_groupwise_alphas(train_x, train_y, alphas, n_raw=3)
+    second = _choose_groupwise_alphas(train_x, train_y, alphas, n_raw=3)
+
+    assert first == second
+    assert first in [(a, b) for a in alphas for b in alphas]
+
+
+def test_groupwise_ridge_refuses_a_bad_group_split() -> None:
+    from qlab.research.prediction import _groupwise_ridge_predict
+
+    rng = np.random.default_rng(24)
+    train_x = rng.normal(size=(30, 4))
+    train_y = rng.normal(size=30)
+    test_x = rng.normal(size=(5, 4))
+
+    with pytest.raises(ValueError, match="n_raw"):
+        _groupwise_ridge_predict(train_x, train_y, test_x, 1.0, 1.0, n_raw=0)
+    with pytest.raises(ValueError, match="n_raw"):
+        _groupwise_ridge_predict(train_x, train_y, test_x, 1.0, 1.0, n_raw=5)

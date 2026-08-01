@@ -175,6 +175,7 @@ OWNER_LAB_TOOLS = frozenset({
     "research.apply_views",
     "research.equilibrium_returns",
     "research.predict_vol",
+    "research.predictor_board",
     "research.window_evidence",
     "registry.list_runs",
     "registry.report",
@@ -1154,6 +1155,80 @@ class UISession:
         return {"as_of": as_of, "fingerprint": fingerprint, "decisions": rows}
 
     # -- Atlas desk manager -------------------------------------------
+    def predictor_board_summary(self) -> dict:
+        """The newest persisted predictor board, summarised for the reasoner.
+
+        Absence is named: a desk that never ran the board, and a desk whose
+        newest board row cannot be read, are different facts and render as
+        different statuses. Nothing here is a judgment — ``age_days`` is a
+        number, and whether it is too old is the reasoner's call.
+        """
+        row = next(
+            (
+                r
+                for r in self.registry.list_runs(limit=100)
+                if r.get("kind") == "predictor_board"
+            ),
+            None,
+        )
+        if row is None:
+            return {"status": "never_ran"}
+        spec = row.get("spec")
+        board = spec.get("board") if isinstance(spec, dict) else None
+        models = board.get("models") if isinstance(board, dict) else None
+        if not isinstance(models, list):
+            return {"status": "unreadable", "run_id": row.get("run_id")}
+
+        by_id = {
+            entry.get("model_id"): entry
+            for entry in models
+            if isinstance(entry, dict)
+        }
+        baseline = by_id.get(board.get("baseline"))
+        champion = by_id.get(board.get("champion"))
+        deltas = [
+            entry.get("delta_mean_ic_vs_baseline")
+            for entry in by_id.values()
+            if entry.get("model_id") != board.get("baseline")
+            and isinstance(
+                entry.get("delta_mean_ic_vs_baseline"), (int, float)
+            )
+        ]
+
+        from datetime import date
+
+        age_days = None
+        try:
+            age_days = (
+                date.today() - date.fromisoformat(str(spec.get("as_of")))
+            ).days
+        except (TypeError, ValueError):
+            pass
+
+        def _metrics(entry: dict | None) -> dict | None:
+            if not isinstance(entry, dict):
+                return None
+            return {
+                "model_id": entry.get("model_id"),
+                "mean_ic": entry.get("mean_ic"),
+                "ic_stability": entry.get("ic_stability"),
+                "usable": entry.get("usable"),
+                "paired_t_vs_baseline": entry.get("paired_t_vs_baseline"),
+            }
+
+        return {
+            "status": "ok",
+            "run_id": row.get("run_id"),
+            "as_of": spec.get("as_of"),
+            "source": spec.get("source"),
+            "age_days": age_days,
+            "admitted_any": bool(board.get("admitted_any")),
+            "champion": _metrics(champion),
+            "baseline": _metrics(baseline),
+            "best_delta_vs_baseline": max(deltas, default=None),
+            "ranking": board.get("ranking"),
+        }
+
     def atlas_context(self, offline: bool) -> dict:
         """The rich, abstract surface a reasoning Atlas forms a view from.
 
@@ -1255,6 +1330,10 @@ class UISession:
             # check_startable's input and must never learn about the archive.
             "archive": self.archive_summary(),
             "recent_decisions": decisions,
+            # Forward-looking research evidence. Advisory by construction:
+            # the gate never reads it, and a champion here is an admitted
+            # model, never a promoted one.
+            "predictors": self.predictor_board_summary(),
             # What the gate would allow right now, with its refusal reasons —
             # so the reasoner argues within its authority rather than proposing
             # work that will simply be refused.

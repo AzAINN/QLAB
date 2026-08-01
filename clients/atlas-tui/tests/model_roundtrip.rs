@@ -156,10 +156,20 @@ fn the_research_sections_decode_with_the_columns_that_view_renders() {
     assert!(stages.contains(&"research"));
     assert!(stages.contains(&"offline"));
 
-    // The run ledger.
-    assert_eq!(s.runs.len(), 3);
-    assert_eq!(s.runs[0].kind.as_deref(), Some("ablation"));
+    // The run ledger, newest first: the predictor board leads it.
+    assert_eq!(s.runs.len(), 4);
+    assert_eq!(s.runs[0].kind.as_deref(), Some("predictor_board"));
+    assert_eq!(s.runs[1].kind.as_deref(), Some("ablation"));
     assert!(s.runs[0].created_at.is_some());
+
+    // The board decodes with the fields its readout renders, and an
+    // unadmitted board carries `champion: null` rather than dropping the key.
+    let board = s.runs[0].spec.as_ref().unwrap().board.as_ref().unwrap();
+    assert_eq!(board.baseline.as_deref(), Some("ridge:none"));
+    assert_eq!(board.champion, None);
+    assert_eq!(board.admitted_any, Some(false));
+    assert_eq!(board.models.len(), 3);
+    assert_eq!(board.models[1].delta_mean_ic_vs_baseline, Some(-0.023));
 }
 
 #[test]

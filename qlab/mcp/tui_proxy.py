@@ -200,6 +200,36 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "lookback_days": lookback_days,
         })
 
+    @app.tool(name="research_predictor_board")
+    def research_predictor_board(
+        as_of: str,
+        universe: str = "core",
+        lookback_days: int = 756,
+        models: list[str] | None = None,
+        alphas: list[float] | None = None,
+        map_weights: list[float] | None = None,
+        n_splits: int | None = None,
+    ) -> dict:
+        """Run the owner-held paired predictor board (baseline vs rescues).
+
+        Search knobs are optional; the owner validates them and records the
+        search in the run, so a tuned board is reproducible from its own row.
+        """
+        args: dict = {
+            "as_of": as_of,
+            "universe": universe,
+            "lookback_days": lookback_days,
+        }
+        for key, value in (
+            ("models", models),
+            ("alphas", alphas),
+            ("map_weights", map_weights),
+            ("n_splits", n_splits),
+        ):
+            if value is not None:
+                args[key] = value
+        return lab("research.predictor_board", args)
+
     @app.tool(name="research_window_evidence")
     def research_window_evidence(
         as_of: str,

@@ -18,6 +18,10 @@ note - for Azain to keep track and jot things down
 * port more of the surface into `atlas-tui` (market chart, book, audit trail)
 * explain *why* MVSK loses before adding solver complexity: lambda sweeps,
   estimator sensitivity
-* if the ML lane is revived: group-wise ridge penalties or a kernel form — the
-  diagnosed failure is variance inflation, so more data will not fix it
+* the ML lane was revived and measured (2026-07-31): group-wise ridge and the
+  closed-form kernels stop the augmentation from *hurting* (explicit ZZ was
+  0/12 wins, t −4.53; kernel ZZ is 7/12, t −0.56) but produce no edge over the
+  ridge baseline. The predictor board (`research.predictor_board`) keeps the
+  paired comparison honest and is Atlas-readable; next candidates, if any:
+  story-backed feature pairs, not more data
 * emit real `.bob/custom_modes.yaml` from `agents/`

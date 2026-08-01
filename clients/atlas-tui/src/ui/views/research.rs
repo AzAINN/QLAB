@@ -101,7 +101,7 @@ impl View for ResearchView {
         // every cell was held to, and a right-aligned cell loses its *leading*
         // characters — the sign first. A return of `-11.3%` drawn as `11.3%` is
         // a loss rendered as a gain, so the pane refuses instead.
-        if area.width < BOARD_W || area.height < BOTTOM_MIN + 5 {
+        if area.width < BOARD_W || area.height < BOTTOM_MIN + 6 {
             refuse(
                 f,
                 area,
@@ -119,22 +119,24 @@ impl View for ResearchView {
         // deployment, so it is the one that should get the spare rows.
         let arms = store.leaderboard().len().max(1) as u16;
         let board = (arms + 3).min(area.height.saturating_sub(BOTTOM_MIN + 1));
-        // The forecast readout leads, on one row of its own. It is the only
-        // admission verdict on this view — whether the desk may use the vol
-        // forecast at all — and everything below it is evidence.
+        // Two admission readouts lead, one row each: whether the desk may use
+        // the vol forecast, and which model — if any — leads the paired
+        // predictor board. Everything below them is evidence.
         let rows = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(board),
             Constraint::Min(0),
         ])
         .split(area);
         draw_forecast(f, rows[0], store);
-        draw_board(f, rows[1], store);
+        draw_predictors(f, rows[1], store);
+        draw_board(f, rows[2], store);
 
-        let left = RUNS_W.min(rows[2].width.saturating_sub(CATALOG_MIN + 1));
+        let left = RUNS_W.min(rows[3].width.saturating_sub(CATALOG_MIN + 1));
         let cols = Layout::horizontal([Constraint::Length(left), Constraint::Min(0)])
             .spacing(1)
-            .split(rows[2]);
+            .split(rows[3]);
         draw_runs(f, cols[0], store);
         draw_catalog(f, cols[1], store);
     }
@@ -242,6 +244,112 @@ fn draw_forecast(f: &mut Frame, area: Rect, store: &Store) {
             .add_modifier(Modifier::BOLD),
     ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The predictor board, on one row: which model leads the paired evaluation
+/// of the augmented lane's rescue paths, by how much, and against what.
+///
+/// The champion is the owner's own call — the first *admitted* model in its
+/// ranking — so this readout repeats it rather than re-deriving it. Three
+/// states, same as the forecast: never ran, ran-but-unreadable, and a value.
+/// "No admitted model" is the board's honest empty answer, not a failure.
+fn draw_predictors(f: &mut Frame, area: Rect, store: &Store) {
+    let t = theme();
+    let label = Span::styled(" predictors    ", Style::default().fg(t.text_secondary));
+    let Some(run) = store
+        .runs()
+        .iter()
+        .find(|run| run.kind.as_deref() == Some("predictor_board"))
+    else {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                label,
+                Span::styled(
+                    "no predictor board run yet",
+                    Style::default().fg(t.text_dim),
+                ),
+            ])),
+            area,
+        );
+        return;
+    };
+    let Some(board) = run.spec.as_ref().and_then(|spec| spec.board.as_ref()) else {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                label,
+                Span::styled(
+                    format!(
+                        "run {} carries no readable board",
+                        format::text(run.run_id.as_ref()).unwrap_or(MISSING)
+                    ),
+                    Style::default().fg(t.warning),
+                ),
+            ])),
+            area,
+        );
+        return;
+    };
+
+    let baseline = format::text(board.baseline.as_ref()).unwrap_or(MISSING);
+    let mut spans = vec![label];
+    match board.champion.as_deref() {
+        Some(champion) => {
+            let delta = board
+                .models
+                .iter()
+                .find(|model| model.model_id.as_deref() == Some(champion))
+                .and_then(|model| model.delta_mean_ic_vs_baseline);
+            spans.push(Span::styled(
+                "champion ",
+                Style::default().fg(t.text_tertiary),
+            ));
+            spans.push(Span::styled(
+                champion.to_string(),
+                Style::default()
+                    .fg(t.positive)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                "  Δ IC ",
+                Style::default().fg(t.text_tertiary),
+            ));
+            spans.push(match delta {
+                Some(delta) => Span::styled(
+                    signed3(delta),
+                    Style::default().fg(format::change_tone(delta, 3)),
+                ),
+                None => Span::styled(
+                    MISSING.to_string(),
+                    Style::default().fg(t.text_tertiary),
+                ),
+            });
+        }
+        None => {
+            spans.push(Span::styled(
+                "no admitted model",
+                Style::default()
+                    .fg(t.negative)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    spans.push(Span::styled(
+        format!("  vs {baseline}"),
+        Style::default().fg(t.text_dim),
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A three-decimal delta with an explicit sign, signed by what is printed.
+///
+/// The `+` matters: this cell is an edge over the baseline, and `0.031` next
+/// to `vs ridge:none` does not say which side of the baseline it sits on.
+fn signed3(value: f64) -> String {
+    let printed = decimals(value, 3);
+    match printed.starts_with('-') || !value.is_finite() {
+        true => printed,
+        false => format!("+{printed}"),
+    }
 }
 
 /// Whether the desk may use this forecast.

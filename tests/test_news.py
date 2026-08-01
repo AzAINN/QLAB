@@ -281,10 +281,33 @@ def test_the_desk_window_asks_for_an_instant_not_a_calendar_date():
     published after as_of, so the desk's own news window structurally could not
     contain today's news. Measured at 24 hours of exclusion.
     """
-    import inspect
+    from datetime import datetime, timezone
 
+    from qlab.state.registry import Registry
     from qlab.ui.server import UISession
 
-    source = inspect.getsource(UISession.fetch_desk_news)
-    assert "date.today()" not in source
-    assert "datetime.now(timezone.utc)" in source
+    seen = {}
+
+    def capture(as_of, universe, **kw):
+        seen["as_of"] = as_of
+        return []
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    try:
+        import qlab.news.feed as feed
+
+        original = feed.fetch_news
+        feed.fetch_news = capture
+        try:
+            session.fetch_desk_news(True)
+        finally:
+            feed.fetch_news = original
+    finally:
+        session.registry.close()
+
+    as_of = seen["as_of"]
+    # An instant, not a date: a bare date resolves to midnight and the feed
+    # drops everything published after it.
+    assert isinstance(as_of, datetime)
+    now = datetime.now(timezone.utc)
+    assert (now - as_of).total_seconds() < 60

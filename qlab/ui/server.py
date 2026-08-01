@@ -234,8 +234,14 @@ class UISession:
         self._last_quote_signature: tuple[tuple[str, float, float], ...] | None = None
         self._regime_hmm_cache: dict[str, dict[str, object]] = {}
         # The live market stream is attached only under an operational policy
-        # (a real Alpaca feed); it stays None for demo/offline runtimes.
+        # (a real Alpaca feed); it stays None for demo/offline runtimes. The
+        # transport is injected by serve(): a bare session — every test, every
+        # tool — can flip desk modes without ever opening a websocket.
         self.market_stream = None
+        self.market_stream_reason = "no live market stream (demo/offline runtime)"
+        self._stream_runner = None
+        self._stream_stop: threading.Event | None = None
+        self._stream_lock = threading.Lock()
         self._last_poll_mark = 0.0
         self._last_workflow_reap = 0.0
         # Atlas's composed qualitative read, refreshed by the heartbeat.
@@ -660,7 +666,87 @@ class UISession:
         # very next poll rather than after the TTL.
         self.invalidate_valuation()
         save_desk_mode(mode)
+        self.retune_market_stream()
         return mode
+
+    # -- live quote stream ---------------------------------------------------
+    def attach_market_stream_runner(self, runner) -> None:
+        """serve() hands the transport in; a bare session never opens a socket.
+
+        ``runner`` is called on its own thread with keyword arguments
+        ``supervisor, key, secret, stop_event`` and is expected to block until
+        the stop event is set (the shape of ``run_alpaca_market_stream``).
+        """
+        self._stream_runner = runner
+        self.retune_market_stream()
+
+    def retune_market_stream(self) -> None:
+        """Start or stop the live quote stream to match the desk mode.
+
+        Refusals are named, never silent: a live desk that cannot stream says
+        which credential is missing rather than reporting the demo runtime's
+        reason (invariant 4).
+        """
+        from qlab.data.stream import build_alpaca_market_stream
+        from qlab.trader import alpaca_auth
+
+        with self._stream_lock:
+            if self._stream_stop is not None:
+                self._stream_stop.set()
+                self._stream_stop = None
+            self.market_stream = None
+            if self.desk_mode.offline:
+                self.market_stream_reason = (
+                    "no live market stream (demo/offline runtime)")
+                return
+            if self._stream_runner is None:
+                self.market_stream_reason = (
+                    "no live market stream (this runtime attaches none)")
+                return
+            try:
+                creds = alpaca_auth.resolve_alpaca_credentials()
+            except alpaca_auth.AlpacaAuthError as exc:
+                self.market_stream_reason = f"no live market stream: {exc}"
+                return
+            if creds is None or not (creds.api_key and creds.secret_key):
+                self.market_stream_reason = (
+                    "no live market stream: live desk mode needs Alpaca API "
+                    "keys — set ALPACA_API_KEY/ALPACA_API_SECRET or store "
+                    "keys with `alpaca profile login`")
+                return
+            supervisor = build_alpaca_market_stream(
+                list(self.mandate.universe_whitelist),
+                os.environ.get("ALPACA_FEED", "").strip() or "iex",
+                on_event=self._publish_stream_event)
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._stream_runner, name="qlab-market-stream",
+                kwargs={"supervisor": supervisor, "key": creds.api_key,
+                        "secret": creds.secret_key, "stop_event": stop},
+                daemon=True)
+            self._stream_stop = stop
+            self.market_stream = supervisor
+            self.market_stream_reason = ""
+            thread.start()
+
+    def stop_market_stream(self) -> None:
+        with self._stream_lock:
+            if self._stream_stop is not None:
+                self._stream_stop.set()
+                self._stream_stop = None
+            self.market_stream = None
+
+    def _publish_stream_event(self, payload: dict) -> None:
+        # The supervisor's transitions (never per-tick quotes) onto the SSE
+        # bus, in the shape every other market event already has.
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": "market_stream",
+            "payload": payload,
+        }
+        with self._market_lock:
+            self._market_events.append(event)
 
     def desk_mode_payload(self) -> dict:
         from qlab.trader.alpaca_auth import (
@@ -1101,7 +1187,8 @@ class UISession:
         wanted = symbols or self.mandate.universe_whitelist
         if stream is None:
             return {"live_stream": False,
-                    "reason": "no live market stream (demo/offline runtime)",
+                    "reason": self.market_stream_reason
+                    or "no live market stream (demo/offline runtime)",
                     "quotes": {}, "health": None}
         snap = stream.snapshot()
         health = stream.health()
@@ -3550,6 +3637,14 @@ def _start_atlas_heartbeat(session: UISession, *, offline: bool,
     return heartbeat
 
 
+def _alpaca_stream_runner(*, supervisor, key, secret, stop_event) -> None:
+    """The real transport: blocks on Alpaca's websocket until stopped."""
+    from qlab.data.stream import run_alpaca_market_stream
+
+    run_alpaca_market_stream(
+        supervisor, key=key, secret=secret, stop_event=stop_event)
+
+
 def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
           desk_mode: DeskMode | None = None) -> None:
     """Start the UI server (blocking). Ctrl-C to stop.
@@ -3573,6 +3668,9 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
         session.port = int(port)
         market_stop, market_thread = _start_market_topics(session)
         _start_atlas_heartbeat(session, offline=offline)
+        # The transport, injected here and nowhere else: only the serving
+        # runtime may open a websocket, and only a live desk mode will.
+        session.attach_market_stream_runner(_alpaca_stream_runner)
     except Exception:
         httpd.server_close()
         raise
@@ -3602,4 +3700,7 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
                 try:
                     _stop_market_topics(market_stop, market_thread)
                 finally:
-                    httpd.server_close()
+                    try:
+                        session.stop_market_stream()
+                    finally:
+                        httpd.server_close()

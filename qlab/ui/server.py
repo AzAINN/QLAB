@@ -2006,14 +2006,15 @@ class UISession:
                 if self._driver is None:
                     self._driver = self._build_driver()
         self._driver.fast = self.fast_mode
+        self._driver.workforce = self.llm_config.workforce
         return self._driver
 
     def _build_driver(self):
         """Construct the driver. Called once, under `_driver_lock`.
 
-        `fast` is deliberately not passed here: the property re-reads it on each
-        access so a Settings toggle lands on the next dispatch rather than the
-        next owner restart.
+        `fast` and `workforce` are deliberately not passed here: the property
+        re-reads them on each access so a Settings change lands on the next
+        dispatch rather than the next owner restart.
         """
         from qlab.operator.coordinator import CoordinatorDriver
         from qlab.paths import workspace_root

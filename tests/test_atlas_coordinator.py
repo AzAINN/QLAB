@@ -153,6 +153,23 @@ def test_a_session_that_refuses_to_start_surfaces_its_own_error():
     assert driver.busy is False
 
 
+def test_a_workforce_backend_with_no_role_harness_is_refused_by_name():
+    # The picker accepts a non-claude workforce (it is persisted config), and
+    # nothing yet knows how to run the five roles on one. Offered, not hidden —
+    # and refused with the reason rather than silently downgraded to claude.
+    from qlab.core.llm_config import SurfaceModel
+
+    driver = _driver(workforce=SurfaceModel("ollama", "granite3.3:8b"))
+    ok, reason = driver.available()
+    assert ok is False
+    assert reason == ("the Ollama role harness is not built — "
+                      "workforce runs on claude")
+    assert driver.drive("wf-1", "goal")["driving"] is False
+    assert FakeSession.instances == []      # nothing was spawned to find out
+    # The desk as it is keeps working.
+    assert _driver(workforce=SurfaceModel("claude", "inherit")).available()[0]
+
+
 def test_a_raising_factory_is_reported_not_propagated():
     def boom(*a, **kw):
         raise RuntimeError("no tempdir")

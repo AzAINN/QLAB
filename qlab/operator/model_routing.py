@@ -10,12 +10,20 @@ Two rules the plan is explicit about (§9.6):
 * **Every resolution is auditable.** Which tier was requested, which model
   served it, whether a fallback was used and why — recorded per invocation, so
   a phase that ran on a degraded model cannot quietly be read as a clean PASS.
+
+A route now carries a *backend* as well as a model, because the provider is a
+deployment detail for the same reason the model is (``llm_backends``' opening
+paragraph). It is the same rule with one exception written into the code:
+REQUIRED_CLAUDE_ROLES never leave the Claude backend, whatever the operator
+configured.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from qlab.core.llm_config import SurfaceModel
 
 DEEP = "deep"
 QUICK = "quick"
@@ -47,6 +55,21 @@ TIER_MODEL: dict[str, str] = {
 # role could not run on its tier, the phase is degraded, not PASS.
 REQUIRED_DEEP_ROLES = frozenset({"referee"})
 
+# The backend a route runs on unless the operator configured another one, and
+# the roles that stay on it regardless. REQUIRED_DEEP_ROLES' argument, applied
+# one level up: the approval gate must never run on an experimental backend,
+# because a PASS that means "passed on whatever provider was being tried this
+# week" is not a gate. Configuring the workforce is a deployment choice; this
+# is the one role where it is not the operator's to make.
+CLAUDE_BACKEND = "claude"
+REQUIRED_CLAUDE_ROLES = frozenset({"referee"})
+
+# The process name recorded for a backend — what actually ran the role, which
+# is not the same question as which model answered. "claude_cli" predates the
+# backend dimension and is kept so old invocation rows and new ones stay one
+# series; every other backend records under its registry name.
+BACKEND_PROCESS: dict[str, str] = {CLAUDE_BACKEND: "claude_cli"}
+
 # Fast mode: run the judgment roles on the quick model too, so a whole review
 # finishes in the time the deep tier alone would take. It is a speed/quality
 # trade the operator makes explicitly, and it is bounded — REQUIRED_DEEP_ROLES
@@ -69,14 +92,16 @@ class RouteDecision:
     role: str
     requested_tier: str
     resolved_model: str
-    source: str                 # "agent_override" | "tier" | "unknown_role"
+    # "agent_override" | "tier" | "unknown_role" | "workforce_config"
+    source: str
+    backend: str = CLAUDE_BACKEND
     fallback_reason: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "role": self.role, "requested_tier": self.requested_tier,
             "resolved_model": self.resolved_model, "source": self.source,
-            "fallback_reason": self.fallback_reason,
+            "backend": self.backend, "fallback_reason": self.fallback_reason,
         }
 
 
@@ -85,10 +110,63 @@ def tier_for(role: str) -> str:
     return ROLE_TIER.get(role, NONE)
 
 
+def _unknown_role_reason(role: str) -> str | None:
+    """The fallback note for a role no tier map knows, or None.
+
+    Read on both routes: whether an unregistered role is flagged is a fact
+    about the role, and letting it depend on the configured backend would hide
+    a caller's typo on exactly the desks that are experimenting.
+    """
+    return None if role in ROLE_TIER else f"role {role!r} has no configured tier"
+
+
+def pinned_to_claude_reason(role: str, backend: str) -> str:
+    """Why ``role`` did not follow the configured backend. Audit-facing."""
+    return (f"{role} is pinned to claude; the configured {backend} backend "
+            "does not serve the approval gate")
+
+
 def resolve_route(role: str, *, source_model: str | None = None,
                   tier_model: dict[str, str] | None = None,
-                  fast: bool = False) -> RouteDecision:
-    """Resolve which model serves ``role``.
+                  fast: bool = False,
+                  workforce: SurfaceModel | None = None) -> RouteDecision:
+    """Resolve which backend and model serve ``role``.
+
+    ``workforce`` is the operator's configured surface (``llm_config``). A role
+    outside REQUIRED_CLAUDE_ROLES follows it wholesale — backend *and* model,
+    because an agent file's ``model:`` is a Claude tier alias that no other
+    provider can serve, so a route that mixed the two would name a model the
+    backend does not have.
+
+    A pinned role does not follow it at all: it resolves exactly as it does on
+    an unconfigured desk, and the decision says the pin fired. That is the same
+    mechanism fast mode uses for REQUIRED_DEEP_ROLES — the exemption is
+    recorded, never silent, so an audit shows what the config asked for.
+
+    With no configured backend (or a Claude one), this is today's routing
+    unchanged: the model still comes from the tier, because ``inherit`` already
+    follows the operator's own session.
+    """
+    backend = workforce.backend if workforce is not None else CLAUDE_BACKEND
+    if backend != CLAUDE_BACKEND and role not in REQUIRED_CLAUDE_ROLES:
+        return RouteDecision(role=role, requested_tier=tier_for(role),
+                             resolved_model=workforce.model, backend=backend,
+                             source="workforce_config",
+                             fallback_reason=_unknown_role_reason(role))
+    decision = _claude_route(role, source_model=source_model,
+                             tier_model=tier_model, fast=fast)
+    if backend == CLAUDE_BACKEND:
+        return decision
+    pinned = pinned_to_claude_reason(role, backend)
+    return replace(decision, fallback_reason=(
+        f"{decision.fallback_reason}; {pinned}" if decision.fallback_reason
+        else pinned))
+
+
+def _claude_route(role: str, *, source_model: str | None,
+                  tier_model: dict[str, str] | None,
+                  fast: bool) -> RouteDecision:
+    """Tier resolution on the Claude backend — the desk's default provider.
 
     A concrete ``model:`` in the agent source always wins (an explicit operator
     override); otherwise the role's tier is resolved through ``tier_model``.
@@ -114,13 +192,13 @@ def resolve_route(role: str, *, source_model: str | None = None,
         return RouteDecision(role=role, requested_tier=NONE,
                              resolved_model=models.get(NONE, "inherit"),
                              source="unknown_role",
-                             fallback_reason=f"role {role!r} has no configured tier")
+                             fallback_reason=_unknown_role_reason(role))
     return RouteDecision(role=role, requested_tier=tier,
                          resolved_model=models[tier], source="tier")
 
 
 def record_invocation(registry, decision: RouteDecision, *,
-                      status: str = "ok", backend: str = "claude_cli",
+                      status: str = "ok", backend: str | None = None,
                       latency_ms: float | None = None,
                       tokens: int | None = None,
                       invocation_id: str | None = None) -> str:
@@ -128,10 +206,12 @@ def record_invocation(registry, decision: RouteDecision, *,
 
     The registry is the single writer; this only assembles the record.
 
-    ``backend`` names the process that served the role, not the model — a
-    second coordinator (``bob_shell``) would pass its own value here so a phase
-    cannot be read as clean without knowing what actually ran it.
+    ``backend`` names the process that served the role, not the model. It
+    defaults to the one the route resolved, so a row cannot claim a provider
+    the decision never chose; a caller with a different process to name (a
+    second coordinator, ``bob_shell``) passes its own value.
     """
+    backend = backend or BACKEND_PROCESS.get(decision.backend, decision.backend)
     invocation_id = invocation_id or uuid.uuid4().hex[:16]
     registry.record_model_invocation({
         "invocation_id": invocation_id,

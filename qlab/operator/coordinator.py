@@ -37,6 +37,9 @@ import threading
 from pathlib import Path
 from typing import Callable
 
+from qlab.core.llm_config import SurfaceModel
+from qlab.operator.model_routing import CLAUDE_BACKEND
+
 # The event kinds worth putting on the audit bus. A coordinator emits far more
 # than a reader needs; recording every token would bury the desk's own events.
 _RECORDED_KINDS = ("text", "tool", "agent", "error", "session", "result")
@@ -49,6 +52,20 @@ def drive_enabled() -> bool:
     module exists to fix, so opting *out* is the deliberate act.
     """
     return os.environ.get("QLAB_ATLAS_DRIVE", "1") != "0"
+
+
+def no_role_harness_reason(backend: str) -> str:
+    """Why a configured workforce backend cannot drive a governed run yet.
+
+    The picker accepts any backend the desk can reach, and running the five
+    governed roles on one is a separate build: the coordinator this driver
+    spawns is the Claude CLI, and nothing else speaks its role protocol. Chosen
+    but unrunnable is therefore an ordinary state, and it is refused by name
+    rather than silently downgraded to claude — a run that quietly ignored the
+    operator's choice is exactly the inference this whole feature refuses.
+    """
+    return (f"the {backend.capitalize()} role harness is not built — "
+            "workforce runs on claude")
 
 
 def resume_prompt(workflow_id: str, goal: str) -> str:
@@ -77,6 +94,7 @@ class CoordinatorDriver:
         record_event: Callable[[str, dict], object] | None = None,
         offline: bool = True,
         fast: bool | None = None,
+        workforce: SurfaceModel | None = None,
         session_factory: Callable[..., object] | None = None,
     ):
         self.runtime_url = runtime_url
@@ -86,6 +104,9 @@ class CoordinatorDriver:
         # None defers to the operator's configured setting at spawn time, so a
         # toggle takes effect on the next run without rebuilding the driver.
         self.fast = fast
+        # The configured workforce surface, re-read like `fast`. None means the
+        # desk as it has always been: the Claude coordinator.
+        self.workforce = workforce
         # Injected in tests so the whole driver is exercisable without a real
         # Claude on PATH. Production passes nothing and gets the real session.
         self._session_factory = session_factory
@@ -114,9 +135,17 @@ class CoordinatorDriver:
 
         Returns the reason alongside the verdict because every caller needs to
         show it: a silent False is what made the old behaviour unreadable.
+
+        Ordered by how durable each refusal is, so the reason shown is the one
+        still true after the operator has fixed the others: shutdown is
+        terminal, a workforce backend with no harness survives every toggle,
+        install and wait below it.
         """
         if self._closed:
             return False, "the owner is shutting down"
+        backend = self.workforce.backend if self.workforce else CLAUDE_BACKEND
+        if backend != CLAUDE_BACKEND:
+            return False, no_role_harness_reason(backend)
         if not drive_enabled():
             return False, "owner-driven coordination is off (QLAB_ATLAS_DRIVE=0)"
         if self.busy:

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import pytest
 
+from qlab.core.llm_config import SurfaceModel
 from qlab.operator.model_routing import (
     DEEP,
     NONE,
     QUICK,
+    REQUIRED_CLAUDE_ROLES,
     ROLE_TIER,
+    TIER_MODEL,
     degrades_result,
     record_invocation,
     resolve_route,
@@ -124,3 +127,67 @@ def test_required_deep_role_on_a_fallback_degrades_the_result():
     assert degrades_result("referee", degraded) is True
     # A mechanical role is not subject to the deep requirement.
     assert degrades_result("reporter", resolve_route("reporter")) is False
+
+
+# ---------------------------------------------------------------------------
+# the backend dimension: which provider serves the route
+# ---------------------------------------------------------------------------
+
+def test_the_approval_gate_never_moves_to_a_configured_backend():
+    # The operator may point the workforce at any backend the desk offers. The
+    # gate is the one role that does not follow, because a PASS must not mean
+    # "passed on whatever was being tried out that week".
+    workforce = SurfaceModel("ollama", "granite3.3:8b")
+    for role in REQUIRED_CLAUDE_ROLES:
+        pinned = resolve_route(role, workforce=workforce)
+        assert pinned.backend == "claude"
+        assert pinned.resolved_model == TIER_MODEL[DEEP]
+        # Audit-visible, the same mechanism fast mode uses for its exemption.
+        assert "pinned to claude" in (pinned.fallback_reason or "")
+        assert "ollama" in pinned.fallback_reason
+    # The pin outranks every other input, including an agent-file override and
+    # fast mode (whose own exemption still has to be readable alongside it).
+    fast = resolve_route("referee", workforce=workforce, fast=True)
+    assert fast.backend == "claude" and fast.resolved_model == TIER_MODEL[DEEP]
+    assert "required-deep" in fast.fallback_reason
+    override = resolve_route("referee", workforce=workforce, source_model="opus")
+    assert override.backend == "claude" and override.resolved_model == "opus"
+
+
+def test_a_role_that_is_not_pinned_runs_on_the_configured_backend(reg):
+    decision = resolve_route("moments-analyst",
+                             workforce=SurfaceModel("ollama", "granite3.3:8b"))
+    assert decision.backend == "ollama"
+    assert decision.resolved_model == "granite3.3:8b"
+    assert decision.source == "workforce_config"
+    # Swapping the provider changes no authority: the role still asks for the
+    # tier it was configured with.
+    assert decision.requested_tier == DEEP
+
+    # Whether a role is registered is a fact about the role, not about the
+    # provider serving it: a typo stays visible on an experimenting desk.
+    unknown = resolve_route("mystery-role",
+                            workforce=SurfaceModel("ollama", "granite3.3:8b"))
+    assert unknown.backend == "ollama"
+    assert "no configured tier" in unknown.fallback_reason
+
+    record_invocation(reg, decision)
+    record_invocation(reg, resolve_route("reporter"))
+    # The row names the process that served the role. The claude backend keeps
+    # the process name the older rows already carry.
+    assert {row["backend"] for row in reg.list_model_invocations()} == {
+        "ollama", "claude_cli"}
+
+
+def test_no_configured_backend_is_todays_routing_unchanged():
+    for role in (*ROLE_TIER, "mystery-role"):
+        for fast in (False, True):
+            today = resolve_route(role, fast=fast)
+            assert today.backend == "claude"
+            assert resolve_route(role, fast=fast, workforce=None) == today
+            # A claude workforce is the desk as it already is. Its model is the
+            # CLI alias `inherit` already follows, so tier routing still owns
+            # the model — the surface only decides the provider.
+            assert resolve_route(
+                role, fast=fast,
+                workforce=SurfaceModel("claude", "inherit")) == today

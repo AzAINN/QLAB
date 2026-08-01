@@ -23,9 +23,10 @@ No model SDK is added for this: Ollama is plain HTTP over stdlib ``urllib``
 (``httpx`` is the TUI *client's* dependency, and the owner stays lean), and
 Claude is the CLI the repo already resolves in one place.
 
-Nothing imports this module yet — task A2 wires it into ``llm_config`` state and
-the owner routes. It is scaffolding only because A2 lands next; a seam with no
-call site is a bug the moment that stops being true (invariant 10).
+The owner is the only caller: ``UISession.llm_backends_catalog`` probes every
+entry in ``BACKENDS`` for ``/api/llm/backends``, and ``set_llm_config`` refuses
+a choice this module reports as unavailable. Availability is asked there and
+nowhere else, so a second opinion about whether a daemon is up cannot exist.
 """
 
 from __future__ import annotations
@@ -111,7 +112,14 @@ def _safe_url(url: str) -> str:
     the credential, and the host is the only part an operator needs to act on.
     """
     split = urllib.parse.urlsplit(url)
-    if not split.netloc or "@" not in split.netloc:
+    if not split.netloc:
+        # A schemeless URL is an ordinary config typo, and urlsplit finds no
+        # authority in one: `desk:token@10.0.0.5:11434` parses as scheme
+        # `desk` with the userinfo left in `path`, so the strip below never
+        # ran and the token printed verbatim. Same rule, applied to the raw
+        # string: keep the host, drop everything before the last `@`.
+        return url.rsplit("@", 1)[-1] if "@" in url else url
+    if "@" not in split.netloc:
         return url
     # rsplit: a password may itself contain "@".
     host = split.netloc.rsplit("@", 1)[-1]

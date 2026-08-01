@@ -14,6 +14,8 @@ GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
 GET  /api/desk_mode            the chosen data source and book + credential status
 POST /api/desk_mode            choose the data source and the book
+GET  /api/llm/backends         model backends, availability, and what they serve
+POST /api/llm                  point one surface (reasoner|workforce) at a model
 GET  /api/data/health          data-policy provenance, freshness, eligibility
 GET  /api/data/permit/current  the latest recorded data permit for a purpose
 GET  /api/quotes               latest cached quotes + live market-stream health
@@ -93,6 +95,7 @@ from urllib.parse import parse_qs, urlparse
 
 from qlab.core.desk_mode import (
     DEFAULT_DESK_MODE, DeskMode, load_desk_mode, save_desk_mode)
+from qlab.core.llm_config import SurfaceModel, save_llm_config, startup_llm_config
 from qlab.core.types import _jsonable
 from qlab.paths import workspace_root
 
@@ -115,6 +118,13 @@ _STREAM_LOCK_WAIT_SECONDS = 2.0
 # changes when this desk trades. Any mutation drops the cache, so a fill shows
 # up at once rather than up to this long later.
 _VALUATION_TTL_SECONDS = 15.0
+# How long a backend availability probe may be reused. Probing Ollama costs a
+# round trip per backend, and a picker that re-reads on every keystroke (or a
+# client that asked on every /api/tui poll) would turn an idle settings panel
+# into a steady load on the daemon. Five seconds is short enough that an
+# `ollama pull` finishing is visible almost at once, and long enough that a
+# burst of clicks costs one probe.
+_LLM_CATALOG_TTL_SECONDS = 5.0
 
 _MARKET_EVENT_LIMIT = 500
 # How many approvals of *each* actionable status ride in one /api/tui payload.
@@ -269,6 +279,16 @@ class UISession:
         # Seeded from the same env var ClaudeSession reads, so one switch
         # governs both an owner-driven coordinator and a hand-started one.
         self.fast_mode = os.environ.get("QLAB_LLM_FAST", "0") == "1"
+        # Which model answers for which surface. The persisted choice wins over
+        # the environment, which only seeds a desk that has never chosen.
+        self.llm_config = startup_llm_config()
+        # (monotonic stamp, payload) for the backend availability probe. The
+        # owner is threaded and the heartbeat is a second writer of shared
+        # state, so this cache takes a lock like every other mutable field here
+        # (invariant 9) — an unguarded one hands two callers two readings and
+        # makes "when was this probed" unanswerable.
+        self._llm_catalog: tuple[float, dict] | None = None
+        self._llm_catalog_lock = threading.Lock()
         self._driver = None
         # The owner is a ThreadingHTTPServer and the heartbeat is another
         # thread. Without this, a lazy build races and hands out one driver per
@@ -674,6 +694,142 @@ class UISession:
             "offline": self.desk_mode.offline,
             "credentials": description,
             "credentials_ok": ok,
+        }
+
+    # -- model routing ------------------------------------------------------
+    def llm_backends_catalog(self, refresh: bool = False) -> dict:
+        """Every backend, whether it can serve now, and what it serves.
+
+        Does network I/O: callers must NOT hold the owner dispatch lock (the
+        same rule that keeps the news fetch off `/api/tui`). The HTTP handler
+        runs this route outside the lock for exactly that reason.
+
+        `available()` and `models()` raise when a backend is present but
+        answers wrongly — a misconfiguration the operator has to see. It
+        belongs in the entry's own reason, not in a 500 on the one route the
+        picker needs to render itself.
+        """
+        with self._llm_catalog_lock:
+            cached = self._llm_catalog
+        if not refresh and cached is not None:
+            stamped, payload = cached
+            if time.monotonic() - stamped < _LLM_CATALOG_TTL_SECONDS:
+                return payload
+        payload = self._probe_llm_backends()
+        with self._llm_catalog_lock:
+            self._llm_catalog = (time.monotonic(), payload)
+        return payload
+
+    def _probe_llm_backends(self) -> dict:
+        """The uncached probe. Deliberately outside `_llm_catalog_lock`.
+
+        Two concurrent callers may both probe; that costs a duplicate round
+        trip and nothing else. Holding the lock across the network instead
+        would serialize every reader behind a daemon that can take
+        `PROBE_TIMEOUT_S` to answer.
+        """
+        from qlab.operator.llm_backends import (
+            BACKENDS, LlmBackendError, build_backend)
+
+        entries = []
+        for name in sorted(BACKENDS):
+            try:
+                backend = build_backend(name)
+                available, reason = backend.available()
+                # A backend that cannot serve reports no models anyway, so
+                # asking is a second round trip for a known empty list.
+                models = list(backend.models()) if available else []
+            except LlmBackendError as exc:
+                entries.append({"name": name, "available": False,
+                                "reason": str(exc), "models": []})
+                continue
+            entries.append({"name": name, "available": bool(available),
+                            "reason": str(reason), "models": models})
+        return {"backends": entries, "probed_at": self._now_iso()}
+
+    def set_llm_config(self, surface: str, backend: str, model: str,
+                       enabled: bool | None = None) -> dict:
+        """Point one surface at one model, or refuse and say why.
+
+        The owner is the single validator. A client may offer whatever it
+        likes — a stale catalog, a hand-typed model name — and the refusal
+        carries the catalog's own sentence rather than a second opinion
+        composed here, so "why can't I pick this" has one answer.
+
+        Validation reads the catalog, which the picker has just fetched to
+        render itself, so this normally lands on the warm cache rather than
+        probing again.
+        """
+        from qlab.core.llm_config import SURFACES
+
+        if surface not in SURFACES:
+            raise ValueError(
+                f"unknown model surface {surface!r}; the desk has "
+                f"{' and '.join(SURFACES)}")
+        if enabled is not None and surface != "reasoner":
+            # The workforce is what the desk already is. Accepting a switch
+            # here and dropping it would report a change that never happened.
+            raise ValueError(
+                "only the reasoner surface can be switched on or off")
+        catalog = self.llm_backends_catalog()
+        entries = {entry["name"]: entry for entry in catalog["backends"]}
+        entry = entries.get(backend)
+        if entry is None:
+            raise ValueError(
+                f"unknown LLM backend {backend!r}; this desk serves "
+                f"{', '.join(sorted(entries)) or 'no backend at all'}")
+        if not entry["available"]:
+            raise ValueError(entry["reason"])
+        if model not in entry["models"]:
+            raise ValueError(
+                f"the {backend} backend cannot serve {model!r} right now; "
+                f"it serves {', '.join(entry['models'])}")
+
+        self.llm_config = self.llm_config.with_surface(
+            surface, SurfaceModel(backend, model), enabled)
+        save_llm_config(self.llm_config)
+        self.registry.record_event(
+            "llm.config_changed",
+            # Names only: a backend's URL may carry a credential, and the
+            # audit bus is exactly where that must never land.
+            {"surface": surface, "backend": backend, "model": model,
+             "enabled": enabled})
+        return {
+            "surface": surface,
+            **self.llm_config.to_dict(),
+            "effect": (
+                f"the reasoner is chosen but off; enable it to route Atlas's "
+                f"own questions to {backend} {model}"
+                if surface == "reasoner" and not self.llm_config.reasoner_enabled
+                else f"Atlas reasons with {backend} {model}"
+                if surface == "reasoner"
+                else f"the workforce roles run on {backend} {model}"),
+        }
+
+    def llm_payload(self) -> dict:
+        """The config plus the LAST availability reading — never a probe.
+
+        `tui_snapshot` runs under the owner dispatch lock and the TUI polls it
+        every two seconds; probing here would block every other request on a
+        daemon that may be a network hop away. The picker's own route is the
+        only prober, so this reports what was last seen and when, and says so
+        plainly when nothing has been probed yet.
+        """
+        with self._llm_catalog_lock:
+            cached = self._llm_catalog
+        payload = self.llm_config.to_dict()
+        if cached is None:
+            return {**payload, "availability": None, "probed_at": None}
+        _, catalog = cached
+        return {
+            **payload,
+            # The catalog minus the model lists: an Ollama host can hold
+            # dozens, and this rides in a payload polled every two seconds.
+            "availability": [
+                {"name": entry["name"], "available": entry["available"],
+                 "reason": entry["reason"]}
+                for entry in catalog["backends"]],
+            "probed_at": catalog["probed_at"],
         }
 
     # -- realized performance ----------------------------------------------
@@ -2192,6 +2348,7 @@ class UISession:
         self.registry.expire_due_approvals(self._now_iso())
         return {
             "desk_mode": self.desk_mode_payload(),
+            "llm": self.llm_payload(),
             "portfolio": portfolio,
             "live_portfolio": self.live_portfolio(offline),
             "market": market_snapshot,
@@ -2525,6 +2682,23 @@ def handle_api(session: UISession, method: str, path: str,
             return 400, {"error": str(exc)}
         session.set_desk_mode(mode)
         return 200, session.desk_mode_payload()
+
+    if method == "GET" and path == "/api/llm/backends":
+        # Network I/O. do_GET runs this one outside the dispatch lock; nothing
+        # here touches the registry, so it does not need it.
+        return 200, session.llm_backends_catalog(
+            refresh=_qbool(query, "refresh", False))
+
+    if method == "POST" and path == "/api/llm":
+        enabled = body.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            return 400, {"error": "enabled must be true or false"}
+        try:
+            return 200, session.set_llm_config(
+                str(body.get("surface") or ""), str(body.get("backend") or ""),
+                str(body.get("model") or ""), enabled)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
 
     if method == "GET" and path == "/api/data/health":
         offline = _qbool(query, "offline", session.offline_default)
@@ -3029,6 +3203,13 @@ class _Handler(BaseHTTPRequestHandler):
                             prefetched_news=prefetched_news,
                         )
                     status = 200
+                elif parsed.path == "/api/llm/backends":
+                    # Probing a backend is network I/O, and this route reads no
+                    # registry state at all, so it takes no dispatch lock —
+                    # otherwise a settings panel opened against an unreachable
+                    # daemon would freeze the whole desk for the probe timeout.
+                    status, obj = handle_api(
+                        self.session, "GET", parsed.path, query, {})
                 else:
                     with _LOCK:
                         status, obj = handle_api(

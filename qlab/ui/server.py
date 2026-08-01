@@ -1407,7 +1407,11 @@ class UISession:
         from qlab.news.feed import fetch_news
 
         universe = self.mandate.universe_whitelist
-        as_of = date.today().isoformat()
+        # An instant, not a calendar date. `date.today().isoformat()` is read by
+        # the feed as local-midnight-labelled-UTC, and fetch_news drops anything
+        # published after as_of — so the desk's window structurally excluded
+        # every story filed so far today. Measured: a full 24 hours.
+        as_of = datetime.now(timezone.utc)
         provider_name = self.news_provider_for(offline)
         try:
             # Passed explicitly rather than letting the feed re-resolve from the

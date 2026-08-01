@@ -170,7 +170,12 @@ def ground(items, *, as_of: str, provider: str,
         published = str(getattr(item, "published", ""))
         # Point-in-time: a record published at or after the decision instant is
         # the query's own future and must never enter the window.
-        if published and published >= as_of and not published.startswith(as_of[:10]):
+        # No same-day exemption. `published.startswith(as_of[:10])` let anything
+        # sharing the calendar date through, so an item published at 23:59
+        # entered a window whose as_of was 12:00 — a twelve-hour look-ahead.
+        # Invisible while compose_desk_read passes "now", and fatal the moment
+        # anything replays an intraday point in time against the archive.
+        if published and published >= as_of:
             dropped_future += 1
             continue
         tickers = tuple(getattr(item, "tickers", ()) or ())

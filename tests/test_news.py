@@ -250,3 +250,41 @@ def test_every_whitelisted_ticker_has_a_synthetic_template():
     templates = load_news_sources()["synthetic"]
     missing = [t for t in load_mandate().universe_whitelist if t not in templates]
     assert not missing, f"whitelisted tickers with no synthetic news: {missing}"
+
+
+def test_the_point_in_time_boundary_has_no_same_day_exemption():
+    """`published.startswith(as_of[:10])` let the whole calendar day through.
+
+    An item filed at 23:59 entered a window whose as_of was 12:00 — a twelve-hour
+    look-ahead. Invisible while the only caller passes "now", and fatal the
+    moment anything replays an intraday point in time against the archive.
+    """
+    from qlab.news.feed import NewsItem
+    from qlab.news.grounding import ground
+
+    late = NewsItem(source="wire", published="2026-07-31T23:59:00+00:00",
+                    headline="filed late", summary="s", url="u",
+                    tickers=("SPY",), provider="alpaca")
+    early = NewsItem(source="wire", published="2026-07-31T09:00:00+00:00",
+                     headline="filed early", summary="s", url="u",
+                     tickers=("SPY",), provider="alpaca")
+    window = ground([late, early], as_of="2026-07-31T12:00:00+00:00",
+                    provider="alpaca", universe=["SPY"])
+    kept = [i.headline for i in window.items]
+    assert kept == ["filed early"]
+
+
+def test_the_desk_window_asks_for_an_instant_not_a_calendar_date():
+    """`date.today().isoformat()` excluded every story filed so far today.
+
+    The feed reads a bare date as local-midnight-labelled-UTC and drops anything
+    published after as_of, so the desk's own news window structurally could not
+    contain today's news. Measured at 24 hours of exclusion.
+    """
+    import inspect
+
+    from qlab.ui.server import UISession
+
+    source = inspect.getsource(UISession.fetch_desk_news)
+    assert "date.today()" not in source
+    assert "datetime.now(timezone.utc)" in source

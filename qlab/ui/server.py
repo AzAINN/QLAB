@@ -1643,12 +1643,43 @@ class UISession:
         if not self.llm_config.reasoner_enabled:
             return {}
         facts = self.atlas_facts(offline)
-        pending = self.atlas.pending_judgments(
-            facts, trading_date=date.today().isoformat())
-        request = {"facts": facts, "triggers": pending}
-        if pending:
-            request["context"] = self.atlas_context(offline, facts=facts)
+        # The facts are in the request before anything that can fail, and they
+        # stay there on every path out. `atlas_facts` has already CONSUMED this
+        # tick's regime flip by the time the composition below runs, so a
+        # failure that dropped them would hand `observe` a second assembly
+        # reporting `flip: False` — the desk quietly missing the very change it
+        # was about to reason about. Losing the judgment is acceptable; losing
+        # the flip is not.
+        request: dict = {"facts": facts, "triggers": []}
+        try:
+            pending = self.atlas.pending_judgments(
+                facts, trading_date=date.today().isoformat())
+            if pending:
+                # Composing the context costs a regime panel, a desk read and a
+                # news payload — every one of them a surface with its own way
+                # of failing, none of them the reasoner's fault, and all of them
+                # running before the deterministic observe on this path.
+                request["context"] = self.atlas_context(offline, facts=facts)
+                request["triggers"] = pending
+        except Exception as exc:
+            self.note_reasoner_fallback(
+                None, f"the desk could not be composed for the reasoner: {exc!r}")
         return request
+
+    def note_reasoner_fallback(self, trigger: str | None, reason: str) -> None:
+        """Record one reason the table stood in for the reasoner.
+
+        Takes NO lock, deliberately, because its callers hold different ones.
+        ``atlas_judge`` runs outside the dispatch lock and takes ``_LOCK``
+        around its whole batch; ``atlas_judgment_request`` and the heartbeat's
+        guard run *inside* it, where a second acquire would deadlock — ``_LOCK``
+        is a plain ``threading.Lock``. Putting the acquire in here would be the
+        kind of convenience that hangs the owner.
+        """
+        choice = self.llm_config.reasoner
+        self.registry.record_event("reasoner.fallback", {
+            "trigger": trigger, "backend": choice.backend,
+            "model": choice.model, "reason": self._bounded(reason, 500)})
 
     def atlas_judge(self, request: dict) -> dict:
         """Ask the reasoner which template fits each pending trigger.
@@ -1713,16 +1744,20 @@ class UISession:
                         note=lambda why, kind=trig.kind: notes.append((kind, why)))
                     if picked is not None:
                         chosen[trig.kind] = picked
+                for trig in triggers[_REASONER_MAX_PER_TICK:]:
+                    # The cap was the last exemption that took the table's
+                    # answer without saying so. Every other fallback on this
+                    # path is on the bus; a budget is not a reason to be the
+                    # one that is not.
+                    notes.append((trig.kind, "past this tick's reasoner budget "
+                                             f"of {_REASONER_MAX_PER_TICK}"))
         except Exception as exc:
             notes.append((None, f"the reasoner could not be asked: {exc!r}"))
 
         if notes:
             with _LOCK:
                 for trigger_kind, why in notes:
-                    self.registry.record_event("reasoner.fallback", {
-                        "trigger": trigger_kind, "backend": choice.backend,
-                        "model": choice.model,
-                        "reason": self._bounded(why, 500)})
+                    self.note_reasoner_fallback(trigger_kind, why)
         return chosen
 
     def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:

@@ -194,8 +194,26 @@ def build_owner_tick(session, lock, *, offline: bool,
             # Empty unless the reasoner flag is on, and a session that predates
             # the method (a test stub) is the same as the flag being off.
             request_judgments = getattr(session, "atlas_judgment_request", None)
-            request = (request_judgments(offline)
-                       if callable(request_judgments) else {})
+            try:
+                request = (request_judgments(offline)
+                           if callable(request_judgments) else {})
+            except Exception as exc:
+                # The same rule as the desk read a few lines above — "a read
+                # failure must not stop the supervisor from observing" — now
+                # that the reasoner's path reaches those same reads by another
+                # door. Nothing gathered here is worth a tick: the observe
+                # below is the deterministic half, and it is what keeps the
+                # drawdown tiers and the approval expiry moving. The composer
+                # guards itself and records the reason; this is the net under
+                # it, for the failure that is not on any list yet.
+                request = {}
+                note = getattr(session, "note_reasoner_fallback", None)
+                if callable(note):
+                    try:
+                        note(None, f"the reasoner's tick could not be "
+                                   f"prepared: {exc!r}")
+                    except Exception:
+                        pass  # a recorder that throws must not do what it guards
             if not request:
                 return observe()
 

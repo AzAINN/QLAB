@@ -1196,23 +1196,44 @@ def test_a_reply_outside_the_startable_set_is_discarded_and_the_table_stands(
 
 def test_a_backend_that_fails_mid_observe_leaves_the_deterministic_path_whole(
         owner, monkeypatch):
-    """A reasoner that cannot answer degrades the desk to the table, never stops it."""
+    """A reasoner that cannot answer degrades the desk to the table, never stops it.
+
+    Driven with four pending triggers rather than one, which makes it the
+    stronger version of its own claim and also exercises the per-tick budget:
+    two are asked and fail, and the two past the cap take the table's answer as
+    well. Both exemptions are recorded — a budget is not a reason to be the one
+    fallback that says nothing.
+    """
     from qlab.operator.llm_backends import LlmBackendError
+    from qlab.operator.templates import TRIGGER_TEMPLATE
+    from qlab.ui.server import _REASONER_MAX_PER_TICK
 
     up = _fake("up", served=("m-1",),
                fails=LlmBackendError("ollama did not answer within 45s"))
     _install(monkeypatch, up=up)
     owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
-    _pin_facts(owner, monkeypatch, _canned_facts())
+    _pin_facts(owner, monkeypatch, _canned_facts(
+        startup=True, portfolio={"equity": 10000.0, "drawdown": 0.2,
+                                 "drawdown_tier": "warning", "halted": False,
+                                 "gross_exposure": 1.0, "drift": 0.9}))
 
     result = _tick(owner)
 
     assert result["state"] in ("observing", "coordinating")
-    flip, = [task for task in _tasks(owner)
-             if task["trigger_kind"] == "regime_flip"]
-    assert flip["template_id"] == "regime_review"
-    fallback, = _events(owner, "reasoner.fallback")
-    assert "45s" in fallback["payload"]["reason"]
+    chosen = {task["trigger_kind"]: task["template_id"] for task in _tasks(owner)}
+    assert len(chosen) > _REASONER_MAX_PER_TICK, "the cap was never reached"
+    for kind, template_id in chosen.items():
+        assert template_id == TRIGGER_TEMPLATE.get(kind), kind
+    assert {row["payload"]["source"] for row in _events(owner, "atlas_task")} == {
+        "lookup"}
+
+    reasons = [event["payload"]["reason"]
+               for event in _events(owner, "reasoner.fallback")]
+    asked = [why for why in reasons if "45s" in why]
+    capped = [why for why in reasons if "reasoner budget" in why]
+    assert len(asked) == _REASONER_MAX_PER_TICK
+    # Nothing fell back silently: every trigger is on the bus with its reason.
+    assert len(asked) + len(capped) == len(chosen)
 
 
 def test_a_divergent_choice_is_recorded_so_the_two_paths_can_be_compared(
@@ -1305,3 +1326,39 @@ def test_a_backend_that_explodes_while_being_probed_still_leaves_a_whole_tick(
     assert flip["template_id"] == "regime_review"
     fallback, = _events(owner, "reasoner.fallback")
     assert "segfaulted" in fallback["payload"]["reason"]
+
+
+def test_a_broken_desk_composition_cannot_take_the_deterministic_tick_down(
+        owner, monkeypatch):
+    """Composing the reasoner's context is not allowed to cost the desk a tick.
+
+    The context is a rich read — desk_read, the news payload, past decisions,
+    the startable set — and it is assembled BEFORE the deterministic observe on
+    a tick where the flag is on. Every one of those is a surface that can fail
+    for reasons that have nothing to do with the reasoner, and the tick that
+    follows is what keeps the drawdown tiers and the approval expiry moving.
+    The same function already guards `refresh_desk_read` for exactly this
+    reason; the reasoner's path reaches the same read again by another door.
+    """
+    up = _fake("up", served=("m-1",), said=_reply("news_read"))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    _pin_facts(owner, monkeypatch, _canned_facts())
+
+    def came_apart(offline):
+        raise RuntimeError("the news payload came apart")
+
+    monkeypatch.setattr(owner, "news_payload", came_apart)
+
+    result = _tick(owner)
+
+    assert result["state"] in ("observing", "coordinating")
+    flip, = [task for task in _tasks(owner)
+             if task["trigger_kind"] == "regime_flip"]
+    assert flip["template_id"] == "regime_review"
+    row, = [e["payload"] for e in _events(owner, "atlas_task")
+            if e["payload"]["trigger"] == "regime_flip"]
+    assert row["source"] == "lookup"
+    fallback, = _events(owner, "reasoner.fallback")
+    assert "came apart" in fallback["payload"]["reason"]
+    assert up.calls == [], "a desk that could not be composed was asked anyway"

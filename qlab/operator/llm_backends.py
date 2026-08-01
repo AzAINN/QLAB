@@ -34,6 +34,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import subprocess
 import tempfile
 import urllib.error
@@ -96,10 +97,47 @@ class LlmBackend(Protocol):
         """
 
 
+# A credential shape: a run of characters ending in "@", which is what
+# userinfo looks like wherever it appears — in a URL this module built, in a
+# URL an exception quoted back at it, or in a body a daemon echoed.
+_USERINFO = re.compile(r"[^\s/@]+@")
+
+
+def _redact(text: str) -> str:
+    """Anything shaped like userinfo, removed.
+
+    Deliberately over-broad. It cannot know whether ``a@b`` is a credential or
+    an ordinary address, and the two costs are not symmetric: an over-redacted
+    error message is mildly less useful, while an under-redacted one puts a
+    token in a UI, an event row and a checked-in golden at once. So the rule is
+    the shape, not the provenance — anything that *looks* like userinfo goes,
+    and an email address in a model's answer will be redacted too. That is the
+    accepted trade, not an oversight.
+    """
+    return _USERINFO.sub("…@", text)
+
+
 def _head(raw: bytes | str) -> str:
-    """A bounded, single-line excerpt of something a backend said back."""
+    """A bounded, single-line, REDACTED excerpt of what a backend said back.
+
+    The module's one gate for foreign text, and it is a gate in two senses:
+    nothing arbitrary reaches an operator-facing message longer than
+    ``_HEAD_CHARS``, and nothing reaches one carrying userinfo. Both live here
+    rather than at the call sites for the same reason — there are six call
+    sites and every future one gets the guarantee by construction. A fourth
+    URL-shaped leak got in exactly because one new call site interpolated an
+    exception it had reasoned about individually (``InvalidURL`` quotes the URL
+    it rejected, userinfo included), which is the argument against ever
+    deciding this per call site again.
+
+    ``_safe_url`` is the matching gate for the *configured* URL. Between them,
+    the two cover every string this module says out loud.
+    """
     text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-    text = " ".join(text.split())
+    # Collapse first: a control character is whitespace to `split()`, so the
+    # redaction below scans exactly the string that will be shown, and a
+    # credential broken by one cannot slip past on a technicality.
+    text = _redact(" ".join(text.split()))
     if len(text) > _HEAD_CHARS:
         return text[:_HEAD_CHARS] + "…"
     return text
@@ -222,6 +260,14 @@ class OllamaBackend:
         # ValueError one frame earlier, out of the constructor itself.
         try:
             split = urllib.parse.urlsplit(self.base_url)
+            # Asking for the port IS the check: `.port` is parsed lazily and
+            # raises on a non-numeric (`:11434junk`) or out-of-range
+            # (`:99999999999`) one. Asking here moves both shapes to the same
+            # answer as every other bad URL — before the socket, where the
+            # advice can name the URL. Left to the socket, the overflow shape
+            # surfaced as an OSError and drew "start it with `ollama serve`",
+            # which is the wrong instruction for a daemon that is fine.
+            _ = split.port
             usable = split.scheme in ("http", "https") and bool(split.netloc)
         except ValueError:
             usable = False

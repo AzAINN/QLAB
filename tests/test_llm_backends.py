@@ -308,12 +308,30 @@ def test_the_default_body_ceiling_is_real_and_not_only_patchable(ollama):
     assert "refusing to buffer" in str(exc.value)
 
 
-def test_ollama_body_head_is_bounded(ollama):
+def test_ollama_body_head_is_bounded_and_redacted(ollama):
+    """`_head` is the module's one gate for foreign text, in both senses.
+
+    Bounding was always its job. Redaction moved here after a fourth URL-shaped
+    leak got in through a new call site that interpolated an exception it had
+    reasoned about individually — `InvalidURL` quotes the URL it rejected,
+    userinfo included. Six call sites decide nothing about credentials now; the
+    gate does, so a seventh cannot get it wrong.
+    """
     ollama.routes["/api/tags"] = (200, "text/plain", "x" * 5000)
     backend = OllamaBackend(base_url=ollama.url)
     with pytest.raises(LlmBackendError) as exc:
         backend.available()
     assert len(str(exc.value)) < 600
+
+    # Whatever a daemon echoes back, userinfo does not survive the gate — and
+    # a control character cannot smuggle it past, because the collapse to one
+    # line happens before the scan.
+    assert backends._redact("http://desk:s3cr3t@host:11434") == (
+        "http://…@host:11434")
+    assert "s3cr3t" not in backends._head("at desk:s3cr3t@127.0.0.1\x0b done")
+    # Over-redaction is the accepted trade, stated so a future reader does not
+    # "fix" it: the shape is what is refused, never the provenance.
+    assert backends._head("mail ops@qlab.dev") == "mail …@qlab.dev"
 
 
 # -- ollama: completion ------------------------------------------------------

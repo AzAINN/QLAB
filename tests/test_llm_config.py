@@ -753,61 +753,49 @@ def test_a_schemeless_url_never_prints_its_userinfo():
     assert bare.models() == []
 
 
-def test_the_catalog_route_survives_a_url_that_cannot_be_parsed_at_all(
-        owner, monkeypatch):
-    """`http://[::1` — an unclosed IPv6 literal — 500'd the picker's own route.
+@pytest.mark.parametrize("bad_url, shape", [
+    ("desk:s3cr3t@10.0.0.5:11434", "schemeless"),
+    ("http://desk:s3cr3t@[::1", "unparseable IPv6 literal"),
+    ("http://desk:s3cr3t@[::1]:11434junk", "non-numeric port"),
+    ("http://desk:s3cr3t@127.0.0.1\x0b:11434", "control character in the host"),
+    ("http://desk:s3cr3t@127.0.0.1:99999999999", "out-of-range port"),
+])
+def test_the_catalog_route_survives_the_whole_hostile_url_family(
+        owner, monkeypatch, bad_url, shape):
+    """One bad `QLAB_OLLAMA_URL` must never 500 the route, leak, or misdirect.
 
-    The missing-scheme fix was not the whole class. urlsplit *raises* on some
-    strings rather than parsing them oddly, and it raised one frame earlier
-    than the guard: inside `OllamaBackend.__init__`, so the ValueError escaped
-    `_probe_llm_backends`'s LlmBackendError-only except clause and the route
-    that renders the settings panel answered 500 to a config typo.
+    Five shapes, found one at a time across three review rounds, each failing at
+    a different depth: two are parsed oddly, one raises in `urlsplit`, one
+    raises in `http.client` at connect time, and one only fails at the socket.
+    Catching them individually is what kept producing a next one, so the
+    properties are asserted over the family rather than the instance.
 
-    Driven through the route with the real backend registry, because that is
-    where it broke — a constructor-level unit test would not have caught the
-    frame it escaped from.
-    """
-    from qlab.operator.llm_backends import OllamaBackend
-    from qlab.ui.server import handle_api
+    The three properties, together, are the whole contract of this route:
 
-    monkeypatch.setenv("QLAB_OLLAMA_URL", "http://[::1")
-    status, payload = handle_api(owner, "GET", "/api/llm/backends", {}, {})
-
-    assert status == 200
-    entry, = [e for e in payload["backends"] if e["name"] == "ollama"]
-    assert entry["available"] is False
-    assert entry["models"] == []
-    assert "not a URL" in entry["reason"]
-    # And a URL nobody could parse is the moment least is known about what it
-    # holds, so the reason redacts hardest rather than echoing it.
-    hidden = OllamaBackend("http://desk:s3cr3t@[::1")
-    assert "s3cr3t" not in hidden.available()[1]
-
-
-def test_the_catalog_route_survives_a_url_that_parses_and_still_cannot_be_used(
-        owner, monkeypatch):
-    """`http://[::1]:11434junk` parses cleanly and is still unusable.
-
-    Scheme and authority are both present, so the not-a-URL guard passes it and
-    the failure moves to connect time: `http.client.InvalidURL`, an
-    HTTPException, which is not an OSError and so fell through `_request`'s
-    absence clause to 500 the catalog route — the third shape of the same bug,
-    and the reason this one is pinned at the route rather than the constructor.
+    * **200** — the picker must be able to render itself and show the operator
+      what is wrong. A 500 hides the config error behind a broken settings
+      panel, which is the one place it could have been fixed.
+    * **no secret** — `s3cr3t` must not appear anywhere in the payload. It
+      escaped once through an exception that quoted the URL back at us, so this
+      checks the serialized whole and not a single field.
+    * **no `ollama serve`** — every one of these is a broken URL, not a stopped
+      daemon, and telling an operator to restart a healthy service is advice
+      that costs them the actual answer.
     """
     import json
 
     from qlab.ui.server import handle_api
 
-    monkeypatch.setenv("QLAB_OLLAMA_URL", "http://desk:s3cr3t@[::1]:11434junk")
+    monkeypatch.setenv("QLAB_OLLAMA_URL", bad_url)
     status, payload = handle_api(owner, "GET", "/api/llm/backends", {}, {})
 
-    assert status == 200
+    assert status == 200, f"{shape} 500'd the picker's own route"
     entry, = [e for e in payload["backends"] if e["name"] == "ollama"]
     assert entry["available"] is False
     assert entry["models"] == []
-    # Not "start it with `ollama serve`": nothing is wrong with the daemon.
-    assert "cannot be reached" in entry["reason"]
-    assert "s3cr3t" not in json.dumps(payload)
+    assert "s3cr3t" not in json.dumps(payload), f"{shape} leaked the userinfo"
+    assert "ollama serve" not in entry["reason"], (
+        f"{shape} is a URL fault; restarting the daemon fixes nothing")
 
 
 # ---------------------------------------------------------------------------

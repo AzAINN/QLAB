@@ -708,11 +708,21 @@ class UISession:
             except alpaca_auth.AlpacaAuthError as exc:
                 self.market_stream_reason = f"no live market stream: {exc}"
                 return
-            if creds is None or not (creds.api_key and creds.secret_key):
+            if creds is None:
                 self.market_stream_reason = (
                     "no live market stream: live desk mode needs Alpaca API "
                     "keys — set ALPACA_API_KEY/ALPACA_API_SECRET or store "
                     "keys with `alpaca profile login`")
+                return
+            if not (creds.api_key and creds.secret_key):
+                # A browser login authorizes the trading API but the data
+                # websocket authenticates with an API key pair only; saying
+                # "log in again" here would send the operator in a loop.
+                self.market_stream_reason = (
+                    f"no live market stream: profile {creds.profile_name!r} "
+                    "is a browser login and the data websocket needs an API "
+                    "key pair — put paper keys in ALPACA_API_KEY/"
+                    "ALPACA_API_SECRET")
                 return
             supervisor = build_alpaca_market_stream(
                 list(self.mandate.universe_whitelist),

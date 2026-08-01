@@ -303,6 +303,29 @@ def test_live_mode_without_credentials_names_the_gap(session, monkeypatch):
     assert "ALPACA_API_KEY" in out["reason"]
 
 
+def test_an_oauth_profile_is_named_not_prescribed_again(session, monkeypatch):
+    # An operator with a browser-login profile has already done `alpaca profile
+    # login`; telling them to do it again is a loop. The refusal must say the
+    # data websocket needs an API key pair and that the profile cannot carry it.
+    from qlab.core.desk_mode import DeskMode
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials",
+        lambda: AlpacaCredentials(
+            kind="oauth", api_key=None, secret_key=None,
+            oauth_token="t", profile_name="paper", source="profile"))
+    session.attach_market_stream_runner(
+        lambda **kw: pytest.fail("an oauth token cannot open the websocket"))
+    session.set_desk_mode(DeskMode("live", "simulated"))
+
+    assert session.market_stream is None
+    _, out = handle_api(session, "GET", "/api/quotes", {}, {})
+    assert "browser login" in out["reason"]
+    assert "ALPACA_API_KEY" in out["reason"]
+    assert "profile login" not in out["reason"]
+
+
 def test_regime_panel_endpoint_is_a_diagnostic_not_a_signal(session):
     status, panel = handle_api(session, "GET", "/api/regime/panel",
                                {"offline": ["1"]}, {})

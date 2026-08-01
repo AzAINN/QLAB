@@ -179,7 +179,7 @@
   },
   "atlas_heartbeat": {
     "running": true, "interval_s": 30.0, "ticks": 72, "errors": 0, "last_tick_at": 1034246.190896333,
-    "last_error": "", "last_error_at": "", "last_state": "observing", "autonomous": true,
+    "last_error": "", "last_error_at": null, "last_state": "observing", "autonomous": true,
     "coordinator": {"driving": false, "workflow_id": "", "can_drive": true, "reason": ""},
     "fast": false
   },

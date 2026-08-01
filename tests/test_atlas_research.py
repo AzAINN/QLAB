@@ -361,6 +361,24 @@ def test_a_failing_heartbeat_reports_why_instead_of_looking_healthy():
     assert status["last_error_at"]
 
 
+def test_the_error_timestamp_is_a_clock_reading_never_a_string():
+    # `last_error_at` was born as "" and became `clock()` on the first failing
+    # tick. A field that changes JSON type mid-run poisons the whole snapshot
+    # for a typed client: one tick error and every subsequent /api/tui poll
+    # failed to parse until the owner restarted. A timestamp is a number or
+    # None — in every state, including "no error yet".
+    from qlab.operator.heartbeat import AtlasHeartbeat
+
+    def always_fails():
+        raise RuntimeError("desk read is unreachable")
+
+    beat = AtlasHeartbeat(always_fails, interval_s=0.01,
+                          clock=lambda: 80444.857107791)
+    assert beat.status()["last_error_at"] is None
+    beat.tick_once()
+    assert beat.status()["last_error_at"] == 80444.857107791
+
+
 def test_a_failed_recompose_stops_the_stale_window_gating_a_news_template():
     # The heartbeat swallows a read failure so the supervisor keeps observing.
     # It used to leave the previous tick's window cached, and `atlas_facts`

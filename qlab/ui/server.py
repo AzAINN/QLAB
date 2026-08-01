@@ -1597,7 +1597,10 @@ class UISession:
             configured, why = provider.configured()
             if not configured:
                 raise model_catalog.ProviderError(why)
-        except model_catalog.ModelError as exc:
+        # Both, because they are SIBLINGS under RuntimeError rather than
+        # parent and child — catching ModelError alone let an unconfigured
+        # provider escape as a 500.
+        except (model_catalog.ModelError, model_catalog.ProviderError) as exc:
             # Named, never substituted: an answer served by a model the operator
             # did not choose is worse than no answer.
             self.registry.record_event("atlas_reason_refused", {

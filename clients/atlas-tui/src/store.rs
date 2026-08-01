@@ -1514,6 +1514,25 @@ mod tests {
     }
 
     #[test]
+    fn an_errored_heartbeat_still_decodes() {
+        // `last_error_at` is a monotonic clock reading, like `last_tick_at`.
+        // Every payload QA ever captured predated the first real tick error,
+        // so the field shipped typed from its empty-string sentinel — and the
+        // first float the owner served bricked every poll after it.
+        let mut store = Store::default();
+        apply(
+            &mut store,
+            snap(json!({
+                "atlas_heartbeat": {
+                    "errors": 1,
+                    "last_error": "RuntimeError('desk read is unreachable')",
+                    "last_error_at": 80444.857107791
+                }
+            })),
+        );
+    }
+
+    #[test]
     fn the_default_desk_takes_its_staleness_threshold_from_the_poll_cadence() {
         // A derived `Default` would hand out `Duration::ZERO` here and mark
         // every frame ever drawn as stale — the failure mode this field's whole

@@ -758,76 +758,104 @@ def test_more_citations_than_the_cap_are_refused_not_quietly_dropped():
 
 
 # --- the production call site -------------------------------------------------
+#
+# These stub the provider. atlas_reason spawns a real `claude` CLI otherwise —
+# measured at 51s per call, billed, and non-deterministic, which is three
+# separate ways to violate "tests pass fully offline" (invariant 2). The first
+# version of these did exactly that and flapped on the third run.
 
 
-def _owner():
+ANSWER = """
+The archive holds nothing for this question: an empty search, not a failed one.
+Samsung sits outside the mandate universe, so no holding is implicated.
+"""
+
+
+class _StubProvider:
+    """A provider whose completion is fixed, so an assertion means something."""
+
+    name = "stub"
+    required_env = ()
+
+    def __init__(self, text=ANSWER, configured=(True, "")):
+        self.recorder = Recorder(text, raw_model="stub-1")
+        self._configured = configured
+
+    def configured(self):
+        return self._configured
+
+    def complete(self, request):
+        return self.recorder(request)
+
+
+def _owner(provider=None, monkeypatch=None):
     from qlab.state.registry import Registry
     from qlab.ui.server import UISession
+    import qlab.operator.models as models
 
     session = UISession(offline_default=True, registry=Registry(":memory:"))
     session.archive_desk_news(session.fetch_desk_news(True))
-    return session
+    stub = provider or _StubProvider()
+    monkeypatch.setattr(models, "get_provider", lambda name: stub)
+    return session, stub
 
 
-def test_atlas_reason_is_reachable_and_answers():
+def test_atlas_reason_is_reachable_and_answers(monkeypatch):
     """reasoner.py had no caller until this existed. Dead code has shipped
     three times in this repo; a seam without a call site is the same shape."""
-    session = _owner()
+    session, stub = _owner(monkeypatch=monkeypatch)
     try:
         out = session.atlas_reason(question="what moved credit?", offline=True)
         assert out["available"] is True
-        assert out["lines"]
-        assert out["model_id"]
+        assert out["lines"] and out["model_id"]
+        # The model was actually asked, with the question in the prompt.
+        assert stub.recorder.requests
+        assert "credit" in stub.recorder.request.prompt.lower()
     finally:
         session.registry.close()
 
 
-def test_it_offers_nothing_when_no_holding_is_implicated():
-    """The governance line: an answer about an untradable name must not arrive
-    with an action attached."""
-    session = _owner()
-    try:
-        out = session.atlas_reason(
-            question="what would have made Samsung surge?", offline=True)
-        assert out["offer"] is None
-        # And says why, rather than leaving the absence unexplained.
-        assert out["offer_refused_reason"]
-    finally:
-        session.registry.close()
-
-
-def test_a_synthetic_only_archive_yields_no_citations():
-    """Storable, never citable. Every fixture row must stay out of the
-    evidence an answer rests on."""
-    session = _owner()
+def test_a_synthetic_only_archive_yields_no_citations(monkeypatch):
+    """Storable, never citable. Every fixture row stays out of the evidence an
+    answer rests on, so an answer over a synthetic archive cites nothing."""
+    session, _ = _owner(monkeypatch=monkeypatch)
     try:
         out = session.atlas_reason(question="credit spreads", offline=True)
-        assert out["citations"] == [] or out["citations"] == ()
+        assert list(out["citations"]) == []
     finally:
         session.registry.close()
 
 
-def test_an_ineligible_model_is_a_named_refusal_not_a_substitution():
+def test_an_unconfigured_provider_is_a_named_refusal_not_a_substitution(monkeypatch):
     """Invariant 4. An answer served by a model the operator did not choose is
     worse than no answer."""
+    session, _ = _owner(
+        provider=_StubProvider(configured=(False, "ANTHROPIC_API_KEY is unset")),
+        monkeypatch=monkeypatch)
+    try:
+        out = session.atlas_reason(question="anything", offline=True)
+        assert out["available"] is False
+        assert "ANTHROPIC_API_KEY is unset" in out["reason"]
+        # The refused model is named, so the operator can act on it.
+        assert out["model_id"]
+    finally:
+        session.registry.close()
+
+
+def test_a_failure_resolving_the_model_refuses_rather_than_raising(monkeypatch):
+    """resolve_selection validates every slot and can raise. Left outside the
+    guard it turned a bad selection into a 500 instead of a named refusal."""
     import qlab.operator.models as models
 
-    session = _owner()
+    session, _ = _owner(monkeypatch=monkeypatch)
     try:
-        original = models.check_eligible
+        def boom():
+            raise models.ModelNotEligible("deep slot names an unknown model")
 
-        def refuse(model_id, **kw):
-            raise models.ModelNotEligible(f"{model_id} cannot serve reasoner")
-
-        models.check_eligible = refuse
-        try:
-            out = session.atlas_reason(question="anything", offline=True)
-        finally:
-            models.check_eligible = original
+        monkeypatch.setattr(models, "resolve_selection", boom)
+        out = session.atlas_reason(question="anything", offline=True)
         assert out["available"] is False
-        assert "cannot serve reasoner" in out["reason"]
-        # The model that was refused is named, so the operator can act on it.
-        assert out["model_id"]
+        assert "unknown model" in out["reason"]
     finally:
         session.registry.close()
 

@@ -44,7 +44,10 @@ class AtlasHeartbeat:
         self._ticks = 0
         self._errors = 0
         self._last_error = ""
-        self._last_error_at = ""
+        # None, not "": the client types this field off the wire shape, and a
+        # sentinel of a different JSON type than the value poisons the whole
+        # snapshot on the first failing tick.
+        self._last_error_at: float | None = None
         self._last_tick_at: float | None = None
         self._last_result: dict | None = None
         self._lock = threading.RLock()

@@ -540,3 +540,102 @@ def test_relevance_report_refuses_inconsistent_aggregates():
         _report(matched_total=-1)
     with pytest.raises(ArchiveRejected):
         _report(page=("not a mapping",))
+
+
+# --- owner integration --------------------------------------------------------
+
+
+def _session():
+    from qlab.state.registry import Registry
+    from qlab.ui.server import UISession
+
+    return UISession(offline_default=True, registry=Registry(":memory:"))
+
+
+def test_the_window_is_archived_and_re_archiving_does_not_duplicate():
+    session = _session()
+    try:
+        window = session.fetch_desk_news(True)
+        first = session.archive_desk_news(window)
+        assert first["inserted"] == len(window["items"]) > 0
+        # The same window arrives every 30s; identity is content_hash, so a
+        # replay updates last_seen rather than growing the archive.
+        again = session.archive_desk_news(window)
+        assert again["inserted"] == 0
+        assert again["total_rows"] == first["total_rows"]
+    finally:
+        session.registry.close()
+
+
+def test_a_synthetic_row_is_stored_but_never_returned_as_evidence():
+    """Storable, never citable. A deterministic fixture appearing as a footnote
+    in an answer about a real trade is the failure the desk labels
+    'synthetic (demo)' everywhere else to prevent."""
+    session = _session()
+    try:
+        session.archive_desk_news(session.fetch_desk_news(True))
+        stats = session.archive_summary()
+        assert stats["rows"] > 0 and stats["synthetic_rows"] == stats["rows"]
+
+        from qlab.news.archive import canonical_timestamp
+        from datetime import datetime, timezone
+
+        as_of = canonical_timestamp(datetime.now(timezone.utc))
+        assert session.registry.search_news(as_of=as_of) == []
+        assert session.registry.search_news(as_of=as_of, include_synthetic=True)
+    finally:
+        session.registry.close()
+
+
+def test_a_citation_of_a_synthetic_row_is_refused():
+    import pytest
+
+    session = _session()
+    try:
+        session.archive_desk_news(session.fetch_desk_news(True))
+        row = session.registry.con.execute(
+            "SELECT item_hash FROM news_items LIMIT 1").fetchone()
+        with pytest.raises(ValueError, match="synthetic"):
+            session.registry.record_news_citation(
+                row[0], cited_by_kind="decision", cited_by_id="d1")
+        # And a kind naming no table is refused before the row is even checked.
+        with pytest.raises(ValueError, match="names no table"):
+            session.registry.record_news_citation(
+                row[0], cited_by_kind="atlas_view", cited_by_id="v1")
+    finally:
+        session.registry.close()
+
+
+def test_the_reasoner_surface_learns_about_the_archive_and_the_gate_does_not():
+    """atlas_facts feeds check_startable. The archive must never become an
+    input to the authority gate."""
+    session = _session()
+    try:
+        session.archive_desk_news(session.fetch_desk_news(True))
+        assert "archive" in session.atlas_context(True)
+        assert "archive" not in session.atlas_facts(True)
+    finally:
+        session.registry.close()
+
+
+def test_search_refuses_an_empty_query_rather_than_returning_everything():
+    from qlab.ui.server import handle_api
+
+    session = _session()
+    try:
+        status, out = handle_api(session, "GET", "/api/news/search", {"q": [""]}, {})
+        assert status == 400 and "empty query" in out["error"]
+    finally:
+        session.registry.close()
+
+
+def test_an_empty_archive_reports_no_span_rather_than_a_fake_one():
+    session = _session()
+    try:
+        stats = session.archive_summary()
+        assert stats["rows"] == 0
+        # None, not "" — an empty string would sort and compare as if the
+        # archive had a beginning.
+        assert stats["begins"] is None and stats["newest_published"] is None
+    finally:
+        session.registry.close()

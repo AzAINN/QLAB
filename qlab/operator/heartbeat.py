@@ -152,6 +152,17 @@ def build_owner_tick(session, lock, *, offline: bool,
                         offline,
                         prefetched_news=prefetched_news,
                     )
+                    # Inside the lock the compose already holds, and guarded
+                    # separately: an archive fault is worth an event, but it
+                    # must not reach mark_desk_read_stale and make a healthy
+                    # window look stale.
+                    archive = getattr(session, "archive_desk_news", None)
+                    if callable(archive):
+                        try:
+                            archive(prefetched_news)
+                        except Exception as exc:
+                            session.registry.record_event(
+                                "news_archive_failed", {"error": str(exc)[:400]})
             except Exception as exc:
                 # A read failure must not stop the supervisor from observing —
                 # but the cached read must not keep passing as current either,

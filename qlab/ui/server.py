@@ -275,6 +275,10 @@ class UISession:
         # caller — each with its own lock and its own session slot, which is
         # exactly the "one coordinator at a time" guarantee gone.
         self._driver_lock = threading.Lock()
+        # Threaded owner: the TTL cache is read from handler threads and
+        # invalidated from the heartbeat thread (invariant 9).
+        self._archive_lock = threading.Lock()
+        self._archive_stats_cache = None
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -1247,6 +1251,9 @@ class UISession:
             },
             "supported_claims": read.get("supported_claims") or [],
             "tensions": read.get("tensions") or [],
+            # Additive on the REASONER's surface only. atlas_facts is
+            # check_startable's input and must never learn about the archive.
+            "archive": self.archive_summary(),
             "recent_decisions": decisions,
             # What the gate would allow right now, with its refusal reasons —
             # so the reasoner argues within its authority rather than proposing
@@ -1443,6 +1450,87 @@ class UISession:
         with self._news_lock:
             self._desk_news = window
         return window
+
+    def archive_desk_news(self, window: dict) -> dict:
+        """Persist one fetched window. Callers must already hold the lock.
+
+        The window is a PARAMETER, never ``self._desk_news``. On a threaded
+        owner, reading the shared attribute loses a window: the heartbeat
+        fetches W1 and publishes it, a refresh handler fetches W2 and publishes
+        over it, then the heartbeat archives what it finds — W2 — and W1 is gone
+        from the wire forever.
+
+        Deliberately NOT called from ``compose_desk_read``. That has four
+        callers and one of them, ``refresh_desk_read``, is documented as the
+        entry point for callers that do NOT hold the dispatch lock — burying a
+        registry write inside it would create a lock-free writer by
+        construction.
+        """
+        from qlab.news.archive import build_archive_batch, canonical_timestamp
+
+        items = list((window or {}).get("items") or [])
+        provider = str((window or {}).get("provider_name") or "synthetic")
+        now = canonical_timestamp(datetime.now(timezone.utc))
+        batch = build_archive_batch(
+            items, provider=provider, offline=bool(self.offline_default),
+            as_of=now, lookback_hours=48,
+            universe=list(self.mandate.universe_whitelist), first_seen=now,
+            error=(window or {}).get("error"))
+        result = self.registry.record_news_items(batch)
+        # The event carries what distinguishes "the desk was not watching" from
+        # "the wire was quiet" — a coverage gap the row count alone cannot show.
+        self.registry.record_event("news_archive", {
+            "provider": provider, "returned": batch.returned,
+            "inserted": result["inserted"], "updated": result["updated"],
+            "window_fingerprint": batch.window_fingerprint,
+            "error": batch.error,
+        })
+        self._archive_stats_cache = None
+        return result
+
+    def archive_summary(self) -> dict:
+        """Archive size and span, TTL-cached.
+
+        min/max over unindexed VARCHAR columns, and atlas_context is served
+        under the dispatch lock on every poll — uncached this would put a full
+        scan on the path every client waits behind.
+        """
+        with self._archive_lock:
+            cached = self._archive_stats_cache
+            if cached is not None and (time.monotonic() - cached[0]) < 30.0:
+                return dict(cached[1])
+            stats = self.registry.archive_stats()
+            self._archive_stats_cache = (time.monotonic(), stats)
+            return dict(stats)
+
+    def news_search(self, *, question: str, offline: bool, limit: int = 25) -> dict:
+        """Point-in-time search over the archive, with its own limits stated.
+
+        Carries no `offer` field. Computing one forces atlas_facts, which runs
+        the portfolio, data health and several registry queries under the same
+        non-reentrant lock this is already served from.
+        """
+        from qlab.news.archive import canonical_timestamp, normalise_terms
+
+        as_of = canonical_timestamp(datetime.now(timezone.utc))
+        terms = normalise_terms(question)
+        universe = list(self.mandate.universe_whitelist)
+        tickers = [t for t in universe if t.lower() in {x.lower() for x in terms}]
+        rows = self.registry.search_news(
+            as_of=as_of, terms=terms, limit=limit)
+        total = self.registry.count_news_matches(as_of=as_of, terms=terms)
+        return {
+            "as_of": as_of,
+            "question": question,
+            "terms": list(terms),
+            "matched_total": total,
+            "returned": len(rows),
+            "items": rows,
+            "universe_terms": tickers,
+            # Absence stated: an empty archive and a query that matched nothing
+            # are different facts and a bare zero conflates them.
+            "archive": self.archive_summary(),
+        }
 
     def news_payload(self, offline: bool) -> dict:
         """The news window as a client renders it: stories, coverage, provenance.
@@ -2583,6 +2671,13 @@ def handle_api(session: UISession, method: str, path: str,
         # unattended run read as "Claude is a black box doing nothing".
         status["coordinator"] = session.coordinator_status()
         return 200, status
+
+    if method == "GET" and path == "/api/news/search":
+        question = str((query.get("q") or [""])[0])
+        if not question.strip():
+            return 400, {"error": "q is required; an empty query is not a search"}
+        offline = _qbool(query, "offline", session.offline_default)
+        return 200, session.news_search(question=question, offline=offline)
 
     if method == "GET" and path == "/api/news":
         offline = _qbool(query, "offline", session.offline_default)

@@ -15,7 +15,7 @@ GET  /api/system               runtime health and authority state
 GET  /api/desk_mode            the chosen data source and book + credential status
 POST /api/desk_mode            choose the data source and the book
 GET  /api/llm/backends         model backends, availability, and what they serve
-POST /api/llm                  point one surface (reasoner|workforce) at a model
+POST /api/llm                  point a surface at a model, or switch the reasoner
 GET  /api/data/health          data-policy provenance, freshness, eligibility
 GET  /api/data/permit/current  the latest recorded data permit for a purpose
 GET  /api/quotes               latest cached quotes + live market-stream health
@@ -747,18 +747,46 @@ class UISession:
                             "reason": str(reason), "models": models})
         return {"backends": entries, "probed_at": self._now_iso()}
 
-    def set_llm_config(self, surface: str, backend: str, model: str,
+    def _refuse_unservable(self, choice: SurfaceModel) -> None:
+        """Raise unless the live catalog says this choice can serve right now.
+
+        The refusal carries the catalog's own sentence rather than a second
+        opinion composed here, so "why can't I pick this" has one answer.
+        Reads the catalog the picker has just fetched to render itself, so it
+        normally lands on the warm cache rather than probing again.
+        """
+        entries = {entry["name"]: entry
+                   for entry in self.llm_backends_catalog()["backends"]}
+        entry = entries.get(choice.backend)
+        if entry is None:
+            raise ValueError(
+                f"unknown LLM backend {choice.backend!r}; this desk serves "
+                f"{', '.join(sorted(entries)) or 'no backend at all'}")
+        if not entry["available"]:
+            raise ValueError(entry["reason"])
+        if choice.model not in entry["models"]:
+            raise ValueError(
+                f"the {choice.backend} backend cannot serve {choice.model!r} "
+                f"right now; it serves {', '.join(entry['models'])}")
+
+    def set_llm_config(self, surface: str, backend: str | None = None,
+                       model: str | None = None,
                        enabled: bool | None = None) -> dict:
-        """Point one surface at one model, or refuse and say why.
+        """Point one surface at a model, switch the reasoner, or refuse and say why.
 
-        The owner is the single validator. A client may offer whatever it
-        likes — a stale catalog, a hand-typed model name — and the refusal
-        carries the catalog's own sentence rather than a second opinion
-        composed here, so "why can't I pick this" has one answer.
+        The owner is the single validator: a client may offer whatever it likes
+        — a stale catalog, a hand-typed model name — and this is where it is
+        checked.
 
-        Validation reads the catalog, which the picker has just fetched to
-        render itself, so this normally lands on the warm cache rather than
-        probing again.
+        Availability is checked only when the choice moves TOWARD being used:
+        a pair that actually changes, into a surface that will be on. An
+        off-switch that required the daemon to be reachable stranded an
+        operator whose Ollama had just died with a reasoner they could not turn
+        off — the gate blocked the one action that fixed the situation, and
+        guarded a surface on its way to being unused.
+
+        `backend`/`model` are optional together: sending neither leaves the
+        pair alone, which is what makes `{surface, enabled}` a usable switch.
         """
         from qlab.core.llm_config import SURFACES
 
@@ -771,39 +799,47 @@ class UISession:
             # here and dropping it would report a change that never happened.
             raise ValueError(
                 "only the reasoner surface can be switched on or off")
-        catalog = self.llm_backends_catalog()
-        entries = {entry["name"]: entry for entry in catalog["backends"]}
-        entry = entries.get(backend)
-        if entry is None:
+        if (backend is None) != (model is None):
             raise ValueError(
-                f"unknown LLM backend {backend!r}; this desk serves "
-                f"{', '.join(sorted(entries)) or 'no backend at all'}")
-        if not entry["available"]:
-            raise ValueError(entry["reason"])
-        if model not in entry["models"]:
+                "a model choice needs both a backend and a model; send both, "
+                "or send enabled alone to switch the reasoner")
+        if backend is None and enabled is None:
             raise ValueError(
-                f"the {backend} backend cannot serve {model!r} right now; "
-                f"it serves {', '.join(entry['models'])}")
+                "nothing to change: send a backend and a model, or enabled")
 
-        self.llm_config = self.llm_config.with_surface(
-            surface, SurfaceModel(backend, model), enabled)
-        save_llm_config(self.llm_config)
+        current = getattr(self.llm_config, surface)
+        chosen = current if backend is None else SurfaceModel(backend, model)
+        # Only the reasoner has an off state; the workforce IS the desk, so a
+        # workforce choice is always one that will be used.
+        in_use = True if surface != "reasoner" else (
+            self.llm_config.reasoner_enabled if enabled is None
+            else bool(enabled))
+        if chosen != current and in_use:
+            self._refuse_unservable(chosen)
+
+        updated = self.llm_config.with_surface(surface, chosen, enabled)
+        # Disk before memory: a write that fails must not leave the desk
+        # running on a choice that will not survive a restart, and must not
+        # announce one either.
+        save_llm_config(updated)
+        self.llm_config = updated
         self.registry.record_event(
             "llm.config_changed",
             # Names only: a backend's URL may carry a credential, and the
             # audit bus is exactly where that must never land.
-            {"surface": surface, "backend": backend, "model": model,
-             "enabled": enabled})
+            {"surface": surface, "backend": chosen.backend,
+             "model": chosen.model, "enabled": enabled})
         return {
             "surface": surface,
             **self.llm_config.to_dict(),
             "effect": (
                 f"the reasoner is chosen but off; enable it to route Atlas's "
-                f"own questions to {backend} {model}"
+                f"own questions to {chosen.backend} {chosen.model}"
                 if surface == "reasoner" and not self.llm_config.reasoner_enabled
-                else f"Atlas reasons with {backend} {model}"
+                else f"Atlas reasons with {chosen.backend} {chosen.model}"
                 if surface == "reasoner"
-                else f"the workforce roles run on {backend} {model}"),
+                else f"the workforce roles run on "
+                     f"{chosen.backend} {chosen.model}"),
         }
 
     def llm_payload(self) -> dict:
@@ -2693,10 +2729,16 @@ def handle_api(session: UISession, method: str, path: str,
         enabled = body.get("enabled")
         if enabled is not None and not isinstance(enabled, bool):
             return 400, {"error": "enabled must be true or false"}
+        # An absent backend/model means "leave the pair alone", which is what
+        # makes {surface, enabled} a switch. Absent is not the same as empty:
+        # an empty string is a choice of nothing and is refused below.
+        backend, model = body.get("backend"), body.get("model")
         try:
             return 200, session.set_llm_config(
-                str(body.get("surface") or ""), str(body.get("backend") or ""),
-                str(body.get("model") or ""), enabled)
+                str(body.get("surface") or ""),
+                None if backend is None else str(backend),
+                None if model is None else str(model),
+                enabled)
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
@@ -3403,6 +3445,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "request body must be a JSON object"})
             return
         try:
+            if (parsed.path == "/api/llm" and body.get("backend") is not None
+                    and body.get("enabled") is not False):
+                # Validating a new pair probes a backend. The GET catalog route
+                # avoids the dispatch lock entirely; this one needs it for the
+                # registry write, so the probe is warmed here instead — a cold
+                # cache plus an unreachable daemon would otherwise freeze every
+                # other request for the probe timeout. A disable is skipped
+                # because set_llm_config validates nothing for it, and an
+                # off-switch must not wait on the daemon that is probably the
+                # reason it was sent.
+                #
+                # This is a hint, not the check: set_llm_config re-reads the
+                # catalog and remains the authority. If the TTL lapses in
+                # between it probes again under the lock — slower, never a
+                # different answer, and the accepted trade for the same reason
+                # the GET route accepts serving a cached catalog at all.
+                self.session.llm_backends_catalog()
             with _LOCK:
                 status, obj = handle_api(self.session, "POST", parsed.path,
                                          parse_qs(parsed.query), body)

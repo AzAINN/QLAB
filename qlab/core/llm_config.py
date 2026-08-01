@@ -202,5 +202,14 @@ def startup_llm_config() -> LlmConfig:
     "ask the operator" state here, because unlike a book, an unchosen model
     routing has a correct answer (today's behaviour) that no one needs to
     confirm.
+
+    The environment is parsed FIRST and unconditionally, even though the file
+    beats it. Short-circuiting on the file would make a malformed
+    ``QLAB_LLM_*`` raise on a desk that has never chosen and be ignored
+    silently on every desk that has — loudness that depends on state, which is
+    the worse of the two behaviours applied exactly where an operator is least
+    likely to look. ``refuse_partial_env_credentials`` raises on a half-set
+    environment whether or not a profile exists on disk; same rule here.
     """
-    return load_llm_config() or env_llm_config() or DEFAULT_LLM_CONFIG
+    seeded = env_llm_config()
+    return load_llm_config() or seeded or DEFAULT_LLM_CONFIG

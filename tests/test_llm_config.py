@@ -449,6 +449,199 @@ def test_the_choice_route_refuses_a_non_boolean_enabled(owner, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# the gate must not block the way out
+# ---------------------------------------------------------------------------
+
+def test_the_reasoner_can_be_switched_off_while_the_daemon_is_down(owner, monkeypatch):
+    """Enabled on ollama, ollama dies, turn it off.
+
+    An off-switch that requires the thing to be reachable strands the operator
+    with a reasoner they cannot disable: the gate blocks the one action that
+    fixes the situation, and protects nothing, because the surface it guards is
+    on its way to being unused.
+    """
+    _install(monkeypatch, ollama=_fake("ollama", served=("granite3.3:8b",)))
+    owner.set_llm_config("reasoner", "ollama", "granite3.3:8b", enabled=True)
+    assert owner.llm_config.reasoner_enabled is True
+
+    # The daemon goes away, and the catalog is re-probed rather than cached.
+    _install(monkeypatch, ollama=_fake(
+        "ollama", ok=False, why="ollama is not running at 127.0.0.1:11434"))
+    monkeypatch.setattr("qlab.ui.server._LLM_CATALOG_TTL_SECONDS", 0.0)
+
+    payload = owner.set_llm_config("reasoner", "ollama", "granite3.3:8b",
+                                   enabled=False)
+    assert payload["reasoner_enabled"] is False
+    assert load_llm_config().reasoner_enabled is False
+    # Turning it off is not forgetting what it was pointed at.
+    assert owner.llm_config.reasoner == SurfaceModel("ollama", "granite3.3:8b")
+
+
+def test_disabling_asks_the_catalog_nothing_at_all(owner, monkeypatch):
+    up = _fake("up", served=("m-1",))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    # No TTL, so anything that consults the catalog has to probe for it and
+    # cannot pass on a cache warmed by the call above.
+    monkeypatch.setattr("qlab.ui.server._LLM_CATALOG_TTL_SECONDS", 0.0)
+    before = len(up.probes)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=False)
+    assert up.probes[before:] == []
+
+
+def test_changing_to_an_unavailable_backend_is_still_refused(owner, monkeypatch):
+    """The gate is skipped for a state that reduces use, never for a new choice."""
+    _install(monkeypatch, down=_fake("down", ok=False, why="down is not running"))
+    with pytest.raises(ValueError, match="down is not running"):
+        owner.set_llm_config("workforce", "down", "m-1")
+
+
+def test_the_enabled_only_form_switches_without_touching_the_pair(owner, monkeypatch):
+    """`{surface, enabled}` — the form an off-switch actually needs.
+
+    Without it the only way to reach the switch was to re-send the pair, which
+    is exactly the request the availability gate used to refuse.
+    """
+    from qlab.ui.server import handle_api
+
+    _install(monkeypatch, up=_fake("up", served=("m-1",)))
+    owner.set_llm_config("reasoner", "up", "m-1")
+
+    status, payload = handle_api(owner, "POST", "/api/llm", {},
+                                 {"surface": "reasoner", "enabled": True})
+    assert status == 200
+    assert payload["reasoner_enabled"] is True
+    assert payload["reasoner"] == {"backend": "up", "model": "m-1"}
+
+    status, payload = handle_api(owner, "POST", "/api/llm", {},
+                                 {"surface": "reasoner", "enabled": False})
+    assert status == 200
+    assert payload["reasoner_enabled"] is False
+    assert payload["reasoner"] == {"backend": "up", "model": "m-1"}
+
+
+def test_a_half_choice_or_an_empty_change_is_refused(owner, monkeypatch):
+    from qlab.ui.server import handle_api
+
+    _install(monkeypatch, up=_fake("up"))
+    status, out = handle_api(owner, "POST", "/api/llm", {},
+                             {"surface": "reasoner", "backend": "up"})
+    assert status == 400 and "both" in out["error"]
+    status, out = handle_api(owner, "POST", "/api/llm", {},
+                             {"surface": "reasoner"})
+    assert status == 400 and "nothing to change" in out["error"]
+
+
+def test_a_failed_write_never_leaves_memory_ahead_of_disk(owner, monkeypatch):
+    """A choice the desk cannot persist is a choice it must not act on."""
+    _install(monkeypatch, up=_fake("up", served=("m-1",)))
+
+    def refuse(_config):
+        raise OSError("read-only state directory")
+
+    monkeypatch.setattr("qlab.ui.server.save_llm_config", refuse)
+    with pytest.raises(OSError):
+        owner.set_llm_config("workforce", "up", "m-1")
+    assert owner.llm_config == DEFAULT_LLM_CONFIG
+    # Nothing was announced that did not happen.
+    assert not [event for event in owner.registry.read_events(20, None)
+                if event["kind"] == "llm.config_changed"]
+
+
+def test_the_choice_route_probes_outside_the_dispatch_lock(owner, monkeypatch):
+    """A cold cache plus an unreachable daemon must not freeze the desk.
+
+    The GET catalog route takes no dispatch lock at all; this one needs it for
+    the registry write, so the probe is warmed before the lock is taken. The
+    backend records whether the lock was held while it was asked — the only
+    way to see the ordering from outside.
+    """
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    import qlab.ui.server as server_module
+
+    held: list[bool] = []
+
+    class Watching(_FakeBackend):
+        name = "up"
+        probes: list[str] = []
+        served = ("m-1",)
+
+        def available(self):
+            held.append(server_module._LOCK.locked())
+            return super().available()
+
+    _install(monkeypatch, up=Watching)
+    handler = type("H", (server_module._Handler,), {"session": owner})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        body = json.dumps({"surface": "workforce", "backend": "up",
+                           "model": "m-1"}).encode()
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/llm", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        response = urllib.request.urlopen(request, timeout=10)
+        payload = json.loads(response.read())
+        response.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert payload["workforce"] == {"backend": "up", "model": "m-1"}
+    assert held and not any(held)
+
+
+# ---------------------------------------------------------------------------
+# the environment is validated on every desk, not only a virgin one
+# ---------------------------------------------------------------------------
+
+def test_a_malformed_env_is_refused_even_on_a_desk_that_has_already_chosen(
+        tmp_path, monkeypatch):
+    """Loudness that depends on state is a silent lie on every settled desk.
+
+    `refuse_partial_env_credentials` raises on a half-set environment whether
+    or not a profile exists on disk. A model routing var is no different: a
+    typo that is ignored because someone once used the picker is a desk running
+    on a model its operator did not name.
+    """
+    monkeypatch.setenv("QLAB_STATE_DIR", str(tmp_path))
+    save_llm_config(LlmConfig(reasoner=SurfaceModel("claude", "opus"),
+                              workforce=SurfaceModel("claude", "haiku")))
+    monkeypatch.setenv("QLAB_LLM_WORKFORCE", "not-a-pair")
+    with pytest.raises(ValueError, match="QLAB_LLM_WORKFORCE"):
+        startup_llm_config()
+
+
+def test_a_valid_env_still_loses_to_a_valid_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("QLAB_STATE_DIR", str(tmp_path))
+    save_llm_config(LlmConfig(reasoner=SurfaceModel("claude", "opus"),
+                              workforce=SurfaceModel("claude", "haiku")))
+    monkeypatch.setenv("QLAB_LLM_WORKFORCE", "ollama:granite3.3:8b")
+    assert startup_llm_config().workforce == SurfaceModel("claude", "haiku")
+
+
+def test_the_owner_refuses_to_start_on_a_malformed_env(tmp_path, monkeypatch):
+    """The seam where it bites: the owner `qlab tui` and `qlab ui` construct."""
+    monkeypatch.setenv("QLAB_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("QLAB_LLM_REASONER", "wormhole:m-1")
+
+    from qlab.ui.server import UISession
+
+    registry = Registry(":memory:")
+    try:
+        with pytest.raises(ValueError, match="QLAB_LLM_REASONER"):
+            UISession(offline_default=True, registry=registry)
+    finally:
+        registry.close()
+
+
+# ---------------------------------------------------------------------------
 # A1 residual: a schemeless URL is still a credential carrier
 # ---------------------------------------------------------------------------
 

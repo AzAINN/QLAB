@@ -778,12 +778,15 @@ class UISession:
         — a stale catalog, a hand-typed model name — and this is where it is
         checked.
 
-        Availability is checked only when the choice moves TOWARD being used:
-        a pair that actually changes, into a surface that will be on. An
-        off-switch that required the daemon to be reachable stranded an
-        operator whose Ollama had just died with a reasoner they could not turn
-        off — the gate blocked the one action that fixed the situation, and
-        guarded a surface on its way to being unused.
+        Turning a surface ON validates the pair it turns on; turning it OFF
+        validates nothing; changing an enabled surface's pair validates the new
+        pair. An off-switch that required the daemon to be reachable stranded
+        an operator whose Ollama had just died with a reasoner they could not
+        turn off — the gate blocked the one action that fixed the situation,
+        and guarded a surface on its way to being unused. Watching pair changes
+        alone was the mirror mistake: choosing while off and enabling
+        afterwards changes one thing at a time and slipped an unservable pair
+        onto a live surface.
 
         `backend`/`model` are optional together: sending neither leaves the
         pair alone, which is what makes `{surface, enabled}` a usable switch.
@@ -811,10 +814,12 @@ class UISession:
         chosen = current if backend is None else SurfaceModel(backend, model)
         # Only the reasoner has an off state; the workforce IS the desk, so a
         # workforce choice is always one that will be used.
-        in_use = True if surface != "reasoner" else (
-            self.llm_config.reasoner_enabled if enabled is None
-            else bool(enabled))
-        if chosen != current and in_use:
+        was_in_use = surface != "reasoner" or self.llm_config.reasoner_enabled
+        in_use = was_in_use if enabled is None else bool(enabled)
+        # Turning a surface ON validates the pair it turns on; turning it OFF
+        # validates nothing; changing an enabled surface's pair validates the
+        # new pair.
+        if in_use and (chosen != current or not was_in_use):
             self._refuse_unservable(chosen)
 
         updated = self.llm_config.with_surface(surface, chosen, enabled)
@@ -3445,16 +3450,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "request body must be a JSON object"})
             return
         try:
-            if (parsed.path == "/api/llm" and body.get("backend") is not None
-                    and body.get("enabled") is not False):
-                # Validating a new pair probes a backend. The GET catalog route
-                # avoids the dispatch lock entirely; this one needs it for the
-                # registry write, so the probe is warmed here instead — a cold
-                # cache plus an unreachable daemon would otherwise freeze every
-                # other request for the probe timeout. A disable is skipped
-                # because set_llm_config validates nothing for it, and an
-                # off-switch must not wait on the daemon that is probably the
-                # reason it was sent.
+            if parsed.path == "/api/llm" and (
+                    body.get("enabled") is True
+                    or (body.get("backend") is not None
+                        and body.get("enabled") is not False)):
+                # Validation probes a backend, and both a new pair and an
+                # enable are validated. The GET catalog route avoids the
+                # dispatch lock entirely; this one needs it for the registry
+                # write, so the probe is warmed here instead — a cold cache
+                # plus an unreachable daemon would otherwise freeze every other
+                # request for the probe timeout. A disable is skipped because
+                # set_llm_config validates nothing for it, and an off-switch
+                # must not wait on the daemon that is probably the reason it
+                # was sent.
                 #
                 # This is a hint, not the check: set_llm_config re-reads the
                 # catalog and remains the authority. If the TTL lapses in

@@ -476,6 +476,13 @@ def test_the_reasoner_can_be_switched_off_while_the_daemon_is_down(owner, monkey
     # Turning it off is not forgetting what it was pointed at.
     assert owner.llm_config.reasoner == SurfaceModel("ollama", "granite3.3:8b")
 
+    # A pair change may ride along with the way out — nothing about it is asked
+    # while the surface is off, and the enable step is where it is asked.
+    owner.set_llm_config("reasoner", "ollama", "granite3.3:2b", enabled=False)
+    assert owner.llm_config.reasoner == SurfaceModel("ollama", "granite3.3:2b")
+    with pytest.raises(ValueError, match="not running"):
+        owner.set_llm_config("reasoner", enabled=True)
+
 
 def test_disabling_asks_the_catalog_nothing_at_all(owner, monkeypatch):
     up = _fake("up", served=("m-1",))
@@ -487,6 +494,31 @@ def test_disabling_asks_the_catalog_nothing_at_all(owner, monkeypatch):
     before = len(up.probes)
     owner.set_llm_config("reasoner", "up", "m-1", enabled=False)
     assert up.probes[before:] == []
+
+
+def test_choosing_a_pair_while_off_is_still_caught_when_it_is_switched_on(
+        owner, monkeypatch):
+    """The two-step bypass: choose while off (unvalidated), then enable.
+
+    Neither step changed both things at once, so a gate that only watched pair
+    changes let an unservable pair reach an on surface. Turning a surface ON
+    validates the pair it turns on, whether or not that pair is new.
+    """
+    _install(monkeypatch, down=_fake("down", ok=False, why="down is not running"))
+    # Step one is allowed: a surface that is off is not going to ask anything.
+    owner.set_llm_config("reasoner", "down", "m-1")
+    assert owner.llm_config.reasoner == SurfaceModel("down", "m-1")
+
+    # Step two is where it bites, with the catalog's own sentence.
+    with pytest.raises(ValueError, match="down is not running"):
+        owner.set_llm_config("reasoner", enabled=True)
+    assert owner.llm_config.reasoner_enabled is False
+
+
+def test_switching_on_an_available_pair_still_succeeds(owner, monkeypatch):
+    _install(monkeypatch, up=_fake("up", served=("m-1",)))
+    owner.set_llm_config("reasoner", "up", "m-1")
+    assert owner.set_llm_config("reasoner", enabled=True)["reasoner_enabled"] is True
 
 
 def test_changing_to_an_unavailable_backend_is_still_refused(owner, monkeypatch):
@@ -581,19 +613,32 @@ def test_the_choice_route_probes_outside_the_dispatch_lock(owner, monkeypatch):
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
-    try:
-        body = json.dumps({"surface": "workforce", "backend": "up",
-                           "model": "m-1"}).encode()
+
+    def post(body: dict) -> dict:
         request = urllib.request.Request(
-            f"http://127.0.0.1:{port}/api/llm", data=body,
+            f"http://127.0.0.1:{port}/api/llm", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         response = urllib.request.urlopen(request, timeout=10)
-        payload = json.loads(response.read())
-        response.close()
+        try:
+            return json.loads(response.read())
+        finally:
+            response.close()
+
+    try:
+        chosen = post({"surface": "workforce", "backend": "up", "model": "m-1"})
+        # An enable validates the pair it turns on, so it needs the warm cache
+        # for the same reason a pair change does.
+        owner.set_llm_config("reasoner", "up", "m-1")
+        # A cold cache is the whole concern: with one warm from the POST above
+        # the enable would validate without probing at all and prove nothing.
+        owner._llm_catalog = None
+        held.clear()
+        switched = post({"surface": "reasoner", "enabled": True})
     finally:
         httpd.shutdown()
         httpd.server_close()
-    assert payload["workforce"] == {"backend": "up", "model": "m-1"}
+    assert chosen["workforce"] == {"backend": "up", "model": "m-1"}
+    assert switched["reasoner_enabled"] is True
     assert held and not any(held)
 
 

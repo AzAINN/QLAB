@@ -118,7 +118,15 @@ def _safe_url(url: str) -> str:
     Stripping rather than masking is deliberate: a mask still shows the shape of
     the credential, and the host is the only part an operator needs to act on.
     """
-    split = urllib.parse.urlsplit(url)
+    try:
+        split = urllib.parse.urlsplit(url)
+    except ValueError:
+        # `http://[::1` — an unclosed IPv6 literal — is one of several strings
+        # urlsplit refuses to parse at all. Refusing to parse is exactly when
+        # this function knows least about what it is holding, so it redacts
+        # hardest: keep only what follows the last `@` and never echo a string
+        # whose structure we could not read.
+        return url.rsplit("@", 1)[-1]
     if not split.netloc:
         # A schemeless URL is an ordinary config typo, and urlsplit finds no
         # authority in one: `desk:token@10.0.0.5:11434` parses as scheme
@@ -207,12 +215,19 @@ class OllamaBackend:
         # turns a bad *scheme* into an OSError (absence), while a string with no
         # scheme at all fails in ``Request.__init__`` with a ValueError — which
         # is neither absence nor ``LlmBackendError`` and escaped the catalog's
-        # own except clause as a 500. One check, before the socket, for both.
-        split = urllib.parse.urlsplit(self.base_url)
+        # own except clause as a 500. One check, before the socket, for all of
+        # them — including the strings urlsplit will not parse at all
+        # (``http://[::1``, an unclosed IPv6 literal), which raised the same
+        # ValueError one frame earlier, out of the constructor itself.
+        try:
+            split = urllib.parse.urlsplit(self.base_url)
+            usable = split.scheme in ("http", "https") and bool(split.netloc)
+        except ValueError:
+            usable = False
         self._malformed: str | None = (
-            None if split.scheme in ("http", "https") and split.netloc
-            else (f"not a URL: {self.safe_url} — QLAB_OLLAMA_URL must carry a "
-                  f"scheme, e.g. {OLLAMA_DEFAULT_URL}"))
+            None if usable
+            else (f"not a URL: {self.safe_url} — QLAB_OLLAMA_URL must be a "
+                  f"parseable http(s) URL, e.g. {OLLAMA_DEFAULT_URL}"))
 
     # -- transport ----------------------------------------------------------
 

@@ -319,8 +319,12 @@ impl WriteClient {
     }
 
     /// Put a question to the desk. It grants no authority — the owner records
-    /// the message and answers only through the coordinator — which is why it
-    /// carries no confirmation.
+    /// the question, answers it through the configured reasoner, and puts that
+    /// answer back on the bus as a second `atlas_message` row, which the
+    /// console renders like any other. So the reply arrives through the event
+    /// stream, not through this response, and this call carries no
+    /// confirmation: the `note` it returns says only whether the desk could
+    /// answer at all.
     pub async fn atlas_message(&self, text: &str) -> Wrote {
         self.post("/api/atlas/message", json!({ "text": text }))
             .await

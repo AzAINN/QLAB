@@ -2116,6 +2116,19 @@ class UISession:
         return self.atlas.start_task(task_id, facts,
                                    runner=self.atlas_workflow_runner)
 
+    @staticmethod
+    def _bounded(text: str, limit: int) -> str:
+        """`text` capped at `limit`, saying so when the cap bites.
+
+        An audit row that silently ends mid-sentence reads as what was said.
+        The model receives the operator's question whole, so a row that cut it
+        without a mark would be a record disagreeing with the prompt it
+        produced, with nothing to show which one was short.
+        """
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]} …[truncated from {len(text)} chars]"
+
     def _record_atlas_reply(self, text: str, error: str | None = None) -> None:
         """Put the desk's own words on the bus as a second `atlas_message` row.
 
@@ -2125,9 +2138,10 @@ class UISession:
         arrives in front of the operator with no client change at all. A new
         kind would have been an answer nothing displays.
         """
-        payload = {"actor": "atlas", "text": text[:_ATLAS_REPLY_CHARS]}
+        payload = {"actor": "atlas",
+                   "text": self._bounded(text, _ATLAS_REPLY_CHARS)}
         if error is not None:
-            payload["error"] = error[:500]
+            payload["error"] = self._bounded(error, 500)
         self.registry.record_event("atlas_message", payload)
 
     def atlas_message(self, body: dict, offline: bool) -> dict:
@@ -2156,10 +2170,14 @@ class UISession:
             raise ValueError("message text is required")
         choice = self.llm_config.reasoner
 
-        # The question goes on the record before anything can fail.
+        # The question goes on the record before anything can fail. The model
+        # gets it whole; the row is bounded and says when it was cut, because a
+        # record that quietly disagrees with the prompt it produced is worse
+        # than a long one.
         with _LOCK:
             self.registry.record_event(
-                "atlas_message", {"actor": "operator", "text": text[:500]})
+                "atlas_message",
+                {"actor": "operator", "text": self._bounded(text, 500)})
 
         # Outside the lock: the catalog probes the network, and it is the one
         # place availability is asked, so the refusal carries the same sentence

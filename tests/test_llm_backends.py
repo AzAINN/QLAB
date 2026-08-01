@@ -552,3 +552,54 @@ def test_claude_launch_failure_is_a_backend_error(claude_on_path, monkeypatch):
     with pytest.raises(LlmBackendError) as exc:
         ClaudeCliBackend().complete(system="s", user="u", model="sonnet")
     assert "Exec format error" in str(exc.value)
+
+
+# -- the caller's deadline binds at the transport ----------------------------
+
+def test_the_ollama_transport_gets_the_callers_clamped_deadline(monkeypatch):
+    """`_deadline` is only real where a thread is actually pinned: the socket.
+
+    A regression returning the module ceiling and ignoring the caller left every
+    mocked-backend test green, because the promise the chat surface makes — 60s,
+    not the 300s batch default — is a promise about the *transport* argument.
+    Asserting it against a fake backend proves nothing about the wire.
+    """
+    seen: list[float] = []
+    body = json.dumps({"message": {"content": "flat"}}).encode()
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, _n=None):
+            return body
+
+    def fake_urlopen(request, timeout=None):
+        seen.append(timeout)
+        return _Response()
+
+    monkeypatch.setattr(backends.urllib.request, "urlopen", fake_urlopen)
+    backend = OllamaBackend(base_url="http://127.0.0.1:11434")
+
+    backend.complete(system="s", user="u", model="m", timeout=60)
+    backend.complete(system="s", user="u", model="m")
+    # A caller may lower the ceiling; it may never raise it.
+    backend.complete(system="s", user="u", model="m", timeout=10_000)
+    assert seen == [60.0, backends.COMPLETE_TIMEOUT_S,
+                    backends.COMPLETE_TIMEOUT_S]
+
+
+def test_the_claude_transport_gets_the_callers_clamped_deadline(claude_on_path,
+                                                                monkeypatch):
+    """The same promise, on the process the CLI runs in."""
+    calls = _stub_run(monkeypatch, stdout="ok")
+    backend = ClaudeCliBackend()
+
+    backend.complete(system="s", user="u", model="haiku", timeout=60)
+    backend.complete(system="s", user="u", model="haiku")
+    backend.complete(system="s", user="u", model="haiku", timeout=10_000)
+    assert [call["kwargs"]["timeout"] for call in calls] == [
+        60.0, backends.CLAUDE_TIMEOUT_S, backends.CLAUDE_TIMEOUT_S]

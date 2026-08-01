@@ -753,6 +753,37 @@ def test_a_schemeless_url_never_prints_its_userinfo():
     assert bare.models() == []
 
 
+def test_the_catalog_route_survives_a_url_that_cannot_be_parsed_at_all(
+        owner, monkeypatch):
+    """`http://[::1` — an unclosed IPv6 literal — 500'd the picker's own route.
+
+    The missing-scheme fix was not the whole class. urlsplit *raises* on some
+    strings rather than parsing them oddly, and it raised one frame earlier
+    than the guard: inside `OllamaBackend.__init__`, so the ValueError escaped
+    `_probe_llm_backends`'s LlmBackendError-only except clause and the route
+    that renders the settings panel answered 500 to a config typo.
+
+    Driven through the route with the real backend registry, because that is
+    where it broke — a constructor-level unit test would not have caught the
+    frame it escaped from.
+    """
+    from qlab.operator.llm_backends import OllamaBackend
+    from qlab.ui.server import handle_api
+
+    monkeypatch.setenv("QLAB_OLLAMA_URL", "http://[::1")
+    status, payload = handle_api(owner, "GET", "/api/llm/backends", {}, {})
+
+    assert status == 200
+    entry, = [e for e in payload["backends"] if e["name"] == "ollama"]
+    assert entry["available"] is False
+    assert entry["models"] == []
+    assert "not a URL" in entry["reason"]
+    # And a URL nobody could parse is the moment least is known about what it
+    # holds, so the reason redacts hardest rather than echoing it.
+    hidden = OllamaBackend("http://desk:s3cr3t@[::1")
+    assert "s3cr3t" not in hidden.available()[1]
+
+
 # ---------------------------------------------------------------------------
 # B1: the desk answers through the configured reasoner
 # ---------------------------------------------------------------------------
@@ -802,6 +833,16 @@ def test_the_desk_answers_through_the_configured_reasoner(owner, monkeypatch):
     assert call["max_tokens"] <= 700
     # A chat completion cannot ride the 300s default: the operator is waiting.
     assert call["timeout"] is not None and call["timeout"] <= 60
+
+    # A long question reaches the model whole, and the bounded audit row says
+    # it was cut rather than ending mid-sentence as though that were the ask.
+    long = "why are we flat? " + "x" * 900
+    _ask(owner, long)
+    assert long in up.calls[-1]["user"]
+    row = _messages(owner)[-2]["payload"]
+    assert row["actor"] == "operator"
+    assert row["text"].endswith(f"…[truncated from {len(long)} chars]")
+    assert row["text"].startswith("why are we flat? xxx")
 
 
 def test_the_reasoner_answers_whether_or_not_the_template_flag_is_on(

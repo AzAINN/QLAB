@@ -1,0 +1,1 @@
+One command starts the desk. This is the Atlas workstation — seven views: your desk, live markets, the paper book, research, the AI workforce, and a full audit trail. Everything you're seeing runs through one governed runtime. One process owns the data, and every screen is just a window onto it.

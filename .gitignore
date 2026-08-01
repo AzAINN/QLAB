@@ -37,3 +37,8 @@ codex-info-log/
 Thumbs.db
 .idea/
 .vscode/
+
+# generated voiceover audio
+media/voiceover/out/
+media/demo/*.mp4
+media/demo/*.gif

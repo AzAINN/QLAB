@@ -57,6 +57,8 @@ MODEL_IDS = (
     "kernel:zz",
 )
 BASELINE_MODEL_ID = "ridge:none"
+DEFAULT_ALPHAS = (0.1, 1.0, 10.0)
+DEFAULT_MAP_WEIGHTS = (0.25, 1.0, 4.0)
 
 
 def _validated_models(models) -> tuple[str, ...]:
@@ -237,8 +239,8 @@ def run_predictor_board(
     panel: pd.DataFrame,
     *,
     models=MODEL_IDS,
-    alphas=(0.1, 1.0, 10.0),
-    map_weights=(0.25, 1.0, 4.0),
+    alphas=DEFAULT_ALPHAS,
+    map_weights=DEFAULT_MAP_WEIGHTS,
     n_splits: int = _DEFAULT_FOLDS,
 ) -> dict:
     """Evaluate every requested model on one shared set of purged folds.
@@ -330,4 +332,12 @@ def run_predictor_board(
         },
         "dsr_note": "not counted toward the deflated-Sharpe trials",
         "kernels": list(KERNELS),
+        # A tuned run must be self-documenting: the grids that produced a
+        # number travel with the number, or two boards are incomparable.
+        "search": {
+            "models": list(model_ids),
+            "alphas": list(candidates),
+            "map_weights": list(weights),
+            "n_splits": int(n_splits),
+        },
     }

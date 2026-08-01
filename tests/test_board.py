@@ -163,6 +163,28 @@ def test_admission_and_ranking_are_propagated():
     }
 
 
+def test_the_board_records_its_own_search():
+    # A tuned run must be self-documenting: the grids that produced a number
+    # travel with the number, or two boards are silently incomparable.
+    board = run_predictor_board(
+        _persistent_vol_panel(),
+        models=("ridge:none", "kernel:zz"),
+        alphas=(0.5, 2.0),
+        map_weights=(0.5, 1.5),
+        n_splits=4,
+    )
+    assert board["search"] == {
+        "models": ["ridge:none", "kernel:zz"],
+        "alphas": [0.5, 2.0],
+        "map_weights": [0.5, 1.5],
+        "n_splits": 4,
+    }
+    for entry in board["models"]:
+        for fold in entry["per_fold"]:
+            if "alpha" in fold:
+                assert fold["alpha"] in (0.5, 2.0)
+
+
 def test_champion_is_none_when_nothing_admits():
     board = run_predictor_board(
         _noise_panel(),

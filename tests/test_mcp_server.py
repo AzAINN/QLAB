@@ -578,6 +578,62 @@ def test_predictor_board_logs_one_dsr_exempt_run_and_no_backtest():
     reg.close()
 
 
+def test_predictor_board_accepts_tuning_and_records_the_search():
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+    from qlab.state.registry import Registry
+
+    reg = Registry(":memory:")
+    owner_app = StubApp()
+    register_lab_tools(
+        owner_app, LabState(offline=True, registry=reg), owner_only=True)
+    result = owner_app.tools["research.predictor_board"](
+        as_of="2022-06-30",
+        universe="core",
+        lookback_days=420,
+        models=["ridge:none", "kernel:zz"],
+        alphas=[0.5, 2.0],
+        map_weights=[0.5],
+        n_splits=4,
+    )
+
+    search = result["board"]["search"]
+    assert search["models"] == ["ridge:none", "kernel:zz"]
+    assert search["alphas"] == [0.5, 2.0]
+    assert search["map_weights"] == [0.5]
+    assert search["n_splits"] == 4
+    # The persisted run carries the same record: a tuned run is reproducible
+    # from its own row, not from whoever remembers the call.
+    runs = reg.list_runs(limit=1)
+    assert runs[0]["spec"]["board"]["search"] == search
+    reg.close()
+
+
+def test_predictor_board_refuses_a_bad_grid_loudly():
+    import pytest as _pytest
+
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+    from qlab.state.registry import Registry
+
+    reg = Registry(":memory:")
+    owner_app = StubApp()
+    register_lab_tools(
+        owner_app, LabState(offline=True, registry=reg), owner_only=True)
+    board = owner_app.tools["research.predictor_board"]
+
+    with _pytest.raises(ValueError, match="alphas"):
+        board(as_of="2022-06-30", lookback_days=420, alphas=[-1.0])
+    with _pytest.raises(ValueError, match="baseline"):
+        board(as_of="2022-06-30", lookback_days=420, models=["kernel:zz"])
+    with _pytest.raises(ValueError, match="unknown model"):
+        board(as_of="2022-06-30", lookback_days=420,
+              models=["ridge:none", "forest:deep"])
+    # Nothing was logged for refused runs.
+    assert reg.list_runs(limit=5) == []
+    reg.close()
+
+
 def test_predictor_board_catalog_entry_is_research_only():
     from qlab.algorithms import get_algorithm
 

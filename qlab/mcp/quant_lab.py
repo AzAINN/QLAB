@@ -962,8 +962,18 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         as_of: str,
         universe: str = "core",
         lookback_days: int = 756,
+        models: list[str] | None = None,
+        alphas: list[float] | None = None,
+        map_weights: list[float] | None = None,
+        n_splits: int | None = None,
     ) -> dict:
-        """Run the paired predictor board: baseline vs group-wise and kernels."""
+        """Run the paired predictor board: baseline vs group-wise and kernels.
+
+        The search knobs are optional and validated by the board itself —
+        the baseline is always required, grids must be finite and positive —
+        and every run records exactly what was searched in ``board.search``,
+        so a tuned run stays reproducible from its own registry row.
+        """
         from qlab.research.board import run_predictor_board
 
         st.budget.charge("research.predictor_board")
@@ -985,7 +995,18 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
             seed=st.seed,
         )
         panel = snapshot.log_returns().dropna(how="any")
-        board = run_predictor_board(panel)
+        search = {
+            key: value
+            for key, value in (
+                ("models", tuple(models) if models is not None else None),
+                ("alphas", tuple(alphas) if alphas is not None else None),
+                ("map_weights",
+                 tuple(map_weights) if map_weights is not None else None),
+                ("n_splits", n_splits),
+            )
+            if value is not None
+        }
+        board = run_predictor_board(panel, **search)
         caveats = [
             "risk prediction only",
             "research stage",

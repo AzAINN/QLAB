@@ -130,8 +130,22 @@ def _head(raw: bytes | str) -> str:
     it rejected, userinfo included), which is the argument against ever
     deciding this per call site again.
 
-    ``_safe_url`` is the matching gate for the *configured* URL. Between them,
-    the two cover every string this module says out loud.
+    ``_safe_url`` is NOT a second gate, and an earlier version of this
+    docstring claiming the two "cover every string between them" was the false
+    half of the sentence that let shape six through. It is *best-effort
+    pre-redaction* of the configured URL — better placed, because it keeps the
+    host readable instead of collapsing it to ``…@host`` — and it decides per
+    parse branch, which is the kind of judgment that has now leaked twice.
+
+    So every message this module assembles is passed through here as well,
+    including ones already built from a ``_safe_url``'d string. Redaction is
+    idempotent on a clean string, so the cost is nothing. What that buys is
+    honestly partial and worth stating exactly: a ``_safe_url`` regression is
+    **narrowed** here, not erased — ``_USERINFO`` stops at ``/``, so
+    ``desk:s3c/r3t@host`` loses its ``r3t@`` tail and keeps ``desk:s3c``. Full
+    coverage of the URL is ``_safe_url``'s job; this is the floor under it, and
+    the route test asserts on the whole payload rather than on ``@`` alone
+    because of precisely that gap.
     """
     text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
     # Collapse first: a control character is whitespace to `split()`, so the
@@ -174,7 +188,17 @@ def _safe_url(url: str) -> str:
         # string: keep the host, drop everything before the last `@`.
         return url.rsplit("@", 1)[-1] if "@" in url else url
     if "@" not in split.netloc:
-        return url
+        # The parse says there is no userinfo; the raw string can still hold
+        # it. A "/" inside a password — ordinary in a base64 token —
+        # terminates the authority early, so `http://desk:s3c/r3t@host:11434`
+        # parses with netloc `desk:s3c` and the whole credential sitting in
+        # `path`, and returning `url` here handed it back verbatim.
+        #
+        # The rule this function obeys, in every branch: it never returns a
+        # string with `@`-prefixed userinfo in it, however the parse went.
+        # When the parse and the raw string disagree about whether there is
+        # any, the raw string wins, because it is what would be printed.
+        return url.rsplit("@", 1)[-1] if "@" in url else url
     # rsplit: a password may itself contain "@".
     host = split.netloc.rsplit("@", 1)[-1]
     return urllib.parse.urlunsplit(
@@ -273,15 +297,16 @@ class OllamaBackend:
             usable = False
         self._malformed: str | None = (
             None if usable
-            else (f"not a URL: {self.safe_url} — QLAB_OLLAMA_URL must be a "
-                  f"parseable http(s) URL, e.g. {OLLAMA_DEFAULT_URL}"))
+            else _head(f"not a URL: {self.safe_url} — QLAB_OLLAMA_URL must "
+                       f"be a parseable http(s) URL, e.g. "
+                       f"{OLLAMA_DEFAULT_URL}"))
 
     # -- transport ----------------------------------------------------------
 
     @property
     def _absent_reason(self) -> str:
-        return (f"ollama is not running at {self.safe_url} — "
-                "start it with `ollama serve`")
+        return _head(f"ollama is not running at {self.safe_url} — "
+                     "start it with `ollama serve`")
 
     def _request(self, path: str, *, payload: dict | None = None,
                  timeout: float) -> dict:
@@ -311,12 +336,12 @@ class OllamaBackend:
             except _Oversize as big:
                 detail = f"body refused, {big}"
             raise _HttpFault(
-                f"ollama answered {path} with HTTP {exc.code}: {detail}",
+                _head(f"ollama answered {path} with HTTP {exc.code}: {detail}"),
                 exc.code) from None
         except _Oversize as big:
-            raise LlmBackendError(
+            raise LlmBackendError(_head(
                 f"ollama answered {path} with {big} — refusing to buffer it; "
-                "that is not a model answer") from None
+                "that is not a model answer")) from None
         except http.client.HTTPException as exc:
             # A URL that parses and still cannot be used. `http://host:11434junk`
             # has a scheme and an authority, so the not-a-URL guard passes it,
@@ -329,30 +354,30 @@ class OllamaBackend:
             # wrong advice the schemeless case used to give. The exception text
             # is bounded and carries no URL of its own ("nonnumeric port:
             # '11434junk'"), so the safe form is the only address named.
-            raise LlmBackendError(
+            raise LlmBackendError(_head(
                 f"ollama cannot be reached at {self.safe_url}: "
-                f"{_head(str(exc))}") from None
+                f"{_head(str(exc))}")) from None
         except OSError:
             raise _Unreachable(self._absent_reason) from None
         try:
             decoded = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            raise LlmBackendError(
+            raise LlmBackendError(_head(
                 f"ollama answered {path} with a non-JSON body: {_head(raw)}"
-            ) from None
+            )) from None
         if not isinstance(decoded, dict):
-            raise LlmBackendError(
+            raise LlmBackendError(_head(
                 f"ollama answered {path} with {type(decoded).__name__}, "
-                "not an object")
+                "not an object"))
         return decoded
 
     def _pulled(self, timeout: float) -> list[str]:
         payload = self._request("/api/tags", timeout=timeout)
         entries = payload.get("models")
         if not isinstance(entries, list):
-            raise LlmBackendError(
+            raise LlmBackendError(_head(
                 "ollama answered /api/tags without a model list — "
-                f"something other than ollama is on {self.safe_url}")
+                f"something other than ollama is on {self.safe_url}"))
         names = []
         for entry in entries:
             name = entry.get("name") if isinstance(entry, dict) else None
@@ -375,10 +400,12 @@ class OllamaBackend:
             return False, str(exc)
         host = self.safe_url.split("//", 1)[-1]
         if not names:
-            return False, (f"ollama is running at {host} but no models are "
-                           "pulled — pull one with `ollama pull granite3.3:8b`")
+            return False, _head(
+                f"ollama is running at {host} but no models are pulled — "
+                "pull one with `ollama pull granite3.3:8b`")
         plural = "" if len(names) == 1 else "s"
-        return True, f"ollama at {host}, {len(names)} model{plural} pulled"
+        return True, _head(
+            f"ollama at {host}, {len(names)} model{plural} pulled")
 
     def models(self) -> list[str]:
         try:
@@ -409,16 +436,16 @@ class OllamaBackend:
             # The one actionable fault: the model simply is not on this host.
             # The operator gets the command, not a 404.
             if exc.status == 404:
-                raise LlmBackendError(
+                raise LlmBackendError(_head(
                     f"ollama has no model {model!r} at {self.safe_url} — "
-                    f"pull it with `ollama pull {model}`") from None
+                    f"pull it with `ollama pull {model}`")) from None
             raise
         message = response.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
-            raise LlmBackendError(
+            raise LlmBackendError(_head(
                 f"ollama answered /api/chat for {model!r} with no content: "
-                f"{_head(json.dumps(response))}")
+                f"{_head(json.dumps(response))}"))
         return content.strip()
 
 
@@ -454,10 +481,10 @@ class ClaudeCliBackend:
         try:
             executable = self._executable()
         except Exception as exc:      # pragma: no cover - import-time only
-            return False, f"claude support unavailable: {exc}"
+            return False, _head(f"claude support unavailable: {exc}")
         if not executable:
             return False, _NO_CLAUDE_REASON
-        return True, f"claude CLI at {executable}"
+        return True, _head(f"claude CLI at {executable}")
 
     def models(self) -> list[str]:
         ok, _ = self.available()
@@ -514,9 +541,9 @@ class ClaudeCliBackend:
         # so in a comment beats pretending it does. ``timeout`` does bind —
         # subprocess enforces it — so the two are not the same kind of promise.
         if model not in CLAUDE_MODELS:
-            raise LlmBackendError(
+            raise LlmBackendError(_head(
                 f"the claude backend cannot serve model {model!r}; "
-                f"it serves {', '.join(CLAUDE_MODELS)}")
+                f"it serves {', '.join(CLAUDE_MODELS)}"))
         executable = self._executable()
         if not executable:
             raise LlmBackendError(_NO_CLAUDE_REASON)
@@ -538,16 +565,17 @@ class ClaudeCliBackend:
                 f"the claude CLI did not answer within {deadline:.0f}s"
             ) from None
         except OSError as exc:
-            raise LlmBackendError(f"the claude CLI could not be run: {exc}") from None
-        if done.returncode != 0:
             raise LlmBackendError(
+                _head(f"the claude CLI could not be run: {exc}")) from None
+        if done.returncode != 0:
+            raise LlmBackendError(_head(
                 f"the claude CLI exited {done.returncode}: "
-                f"{_head(done.stderr or done.stdout or '')}")
+                f"{_head(done.stderr or done.stdout or '')}"))
         text = (done.stdout or "").strip()
         if not text:
-            raise LlmBackendError(
+            raise LlmBackendError(_head(
                 "the claude CLI exited 0 with no output: "
-                f"{_head(done.stderr or '')}")
+                f"{_head(done.stderr or '')}"))
         return text
 
 

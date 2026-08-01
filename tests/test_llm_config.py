@@ -759,18 +759,21 @@ def test_a_schemeless_url_never_prints_its_userinfo():
     ("http://desk:s3cr3t@[::1]:11434junk", "non-numeric port"),
     ("http://desk:s3cr3t@127.0.0.1\x0b:11434", "control character in the host"),
     ("http://desk:s3cr3t@127.0.0.1:99999999999", "out-of-range port"),
+    ("http://desk:s3c/r3t@127.0.0.1:11434", "slash inside the password"),
 ])
 def test_the_catalog_route_survives_the_whole_hostile_url_family(
         owner, monkeypatch, bad_url, shape):
     """One bad `QLAB_OLLAMA_URL` must never 500 the route, leak, or misdirect.
 
-    Five shapes, found one at a time across three review rounds, each failing at
-    a different depth: two are parsed oddly, one raises in `urlsplit`, one
+    Six shapes, found one at a time across four review rounds, each failing at a
+    different depth: three are parsed oddly, one raises in `urlsplit`, one
     raises in `http.client` at connect time, and one only fails at the socket.
     Catching them individually is what kept producing a next one, so the
-    properties are asserted over the family rather than the instance.
+    properties are asserted over the family rather than the instance — and the
+    last assertion is deliberately structural, so shape seven is covered before
+    anyone finds it.
 
-    The three properties, together, are the whole contract of this route:
+    The four properties, together, are the whole contract of this route:
 
     * **200** — the picker must be able to render itself and show the operator
       what is wrong. A 500 hides the config error behind a broken settings
@@ -781,6 +784,11 @@ def test_the_catalog_route_survives_the_whole_hostile_url_family(
     * **no `ollama serve`** — every one of these is a broken URL, not a stopped
       daemon, and telling an operator to restart a healthy service is advice
       that costs them the actual answer.
+    * **no bare `@`** — the structural one. Userinfo is the `@`-shaped thing,
+      and `_head` replaces every credential it removes with `…@`, so any `@`
+      not preceded by `…` is text that reached an operator without passing the
+      gate. This holds for a URL nobody has thought of yet, which the five
+      literal shapes above cannot say.
     """
     import json
 
@@ -793,9 +801,13 @@ def test_the_catalog_route_survives_the_whole_hostile_url_family(
     entry, = [e for e in payload["backends"] if e["name"] == "ollama"]
     assert entry["available"] is False
     assert entry["models"] == []
-    assert "s3cr3t" not in json.dumps(payload), f"{shape} leaked the userinfo"
+    assert "s3c" not in json.dumps(payload), f"{shape} leaked the userinfo"
     assert "ollama serve" not in entry["reason"], (
         f"{shape} is a URL fault; restarting the daemon fixes nothing")
+    reason = entry["reason"]
+    assert reason.count("@") == reason.count("…@"), (
+        f"{shape} served an un-redacted @ — something reached an operator "
+        f"without passing `_head`: {reason}")
 
 
 # ---------------------------------------------------------------------------

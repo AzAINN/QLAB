@@ -35,6 +35,7 @@ import os
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Protocol, runtime_checkable
 
@@ -50,6 +51,12 @@ CLAUDE_TIMEOUT_S = 600.0
 # Only ever applied to a *response* body or stderr — never to a request, which
 # is the side that could carry a credential.
 _HEAD_CHARS = 240
+
+# A body is bounded before it is read, not after. The excerpt below is capped,
+# but `read()` with no argument is not: a slow-drip endpoint that is not ollama
+# would stream into the owner's memory through a probe that has a time limit and
+# no size limit. Anything past this is not a model answer.
+_MAX_BODY_BYTES = 1 << 20
 
 
 class LlmBackendError(RuntimeError):
@@ -89,6 +96,46 @@ def _head(raw: bytes | str) -> str:
     return text
 
 
+def _safe_url(url: str) -> str:
+    """``url`` with any userinfo removed — scheme, host and port only.
+
+    A remote or proxied Ollama is a deployment this module explicitly invites,
+    and ``http://user:token@host:11434`` is how such a daemon is reached, so the
+    configured URL is a credential carrier. Every operator-facing string here
+    names the URL, A2 serves those strings on ``/api/llm/backends``, and Phase D
+    goldens them — an un-stripped URL would put a token in a UI, an event row
+    and a checked-in test fixture at once. Same rule as ``alpaca_auth``: the
+    secret never leaves in printable form.
+
+    Stripping rather than masking is deliberate: a mask still shows the shape of
+    the credential, and the host is the only part an operator needs to act on.
+    """
+    split = urllib.parse.urlsplit(url)
+    if not split.netloc or "@" not in split.netloc:
+        return url
+    # rsplit: a password may itself contain "@".
+    host = split.netloc.rsplit("@", 1)[-1]
+    return urllib.parse.urlunsplit(
+        (split.scheme, host, split.path, split.query, split.fragment))
+
+
+class _Oversize(Exception):
+    """Internal: a body larger than this module will buffer."""
+
+
+def _read_bounded(stream) -> bytes:
+    """Read a response body with a ceiling, detecting overflow rather than truncating.
+
+    One byte past the ceiling is requested so a body that exactly fills it is
+    still served; more than that is refused loudly instead of silently becoming
+    a truncated "answer".
+    """
+    raw = stream.read(_MAX_BODY_BYTES + 1)
+    if len(raw) > _MAX_BODY_BYTES:
+        raise _Oversize(f"more than {_MAX_BODY_BYTES} bytes")
+    return raw
+
+
 class _Unreachable(Exception):
     """Internal: nothing answered on the socket. Absence, never a fault."""
 
@@ -123,12 +170,16 @@ class OllamaBackend:
             resolved = (os.environ.get("QLAB_OLLAMA_URL", "").strip()
                         or OLLAMA_DEFAULT_URL)
         self.base_url = resolved.rstrip("/")
+        # Two URLs, deliberately: ``base_url`` is what we connect to and may
+        # carry userinfo; ``safe_url`` is the ONLY one this module is allowed to
+        # say out loud. Every operator-facing string below reads safe_url.
+        self.safe_url = _safe_url(self.base_url)
 
     # -- transport ----------------------------------------------------------
 
     @property
     def _absent_reason(self) -> str:
-        return (f"ollama is not running at {self.base_url} — "
+        return (f"ollama is not running at {self.safe_url} — "
                 "start it with `ollama serve`")
 
     def _request(self, path: str, *, payload: dict | None = None,
@@ -147,12 +198,19 @@ class OllamaBackend:
             method="POST" if body is not None else "GET")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read()
+                raw = _read_bounded(response)
         except urllib.error.HTTPError as exc:
-            detail = _head(exc.read() or b"")
+            try:
+                detail = _head(_read_bounded(exc) or b"")
+            except _Oversize as big:
+                detail = f"body refused, {big}"
             raise _HttpFault(
                 f"ollama answered {path} with HTTP {exc.code}: {detail}",
                 exc.code) from None
+        except _Oversize as big:
+            raise LlmBackendError(
+                f"ollama answered {path} with {big} — refusing to buffer it; "
+                "that is not a model answer") from None
         except OSError:
             raise _Unreachable(self._absent_reason) from None
         try:
@@ -173,7 +231,7 @@ class OllamaBackend:
         if not isinstance(entries, list):
             raise LlmBackendError(
                 "ollama answered /api/tags without a model list — "
-                f"something other than ollama is on {self.base_url}")
+                f"something other than ollama is on {self.safe_url}")
         names = []
         for entry in entries:
             name = entry.get("name") if isinstance(entry, dict) else None
@@ -194,7 +252,7 @@ class OllamaBackend:
             names = self._pulled(PROBE_TIMEOUT_S)
         except _Unreachable as exc:
             return False, str(exc)
-        host = self.base_url.split("//", 1)[-1]
+        host = self.safe_url.split("//", 1)[-1]
         if not names:
             return False, (f"ollama is running at {host} but no models are "
                            "pulled — pull one with `ollama pull granite3.3:8b`")
@@ -230,7 +288,7 @@ class OllamaBackend:
             # The operator gets the command, not a 404.
             if exc.status == 404:
                 raise LlmBackendError(
-                    f"ollama has no model {model!r} at {self.base_url} — "
+                    f"ollama has no model {model!r} at {self.safe_url} — "
                     f"pull it with `ollama pull {model}`") from None
             raise
         message = response.get("message")

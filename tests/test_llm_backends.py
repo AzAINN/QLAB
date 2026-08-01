@@ -182,6 +182,132 @@ def test_ollama_json_without_a_model_list_is_an_error(ollama):
     assert "/api/tags" in str(exc.value)
 
 
+def test_a_configured_url_never_leaks_its_credentials_to_an_operator(closed_port):
+    """A remote ollama is reached as http://user:token@host — the token is a
+    secret, and every reason string here is served on /api/llm/backends and
+    goldened by the Rust client. It may never carry one."""
+    secret = "s3cr3t-token"
+    host = f"127.0.0.1:{closed_port}"
+    backend = OllamaBackend(base_url=f"http://desk:{secret}@{host}")
+
+    ok, reason = backend.available()
+    assert ok is False
+    assert secret not in reason and "desk@" not in reason
+    # The host survives: it is the part an operator needs in order to act.
+    assert host in reason
+
+    assert backend.models() == []
+
+    with pytest.raises(LlmBackendError) as exc:
+        backend.complete(system="s", user="u", model="granite3.3:8b")
+    assert secret not in str(exc.value) and host in str(exc.value)
+
+    # The connect URL keeps its credentials; only what we say out loud is safe.
+    assert secret in backend.base_url
+    assert secret not in backend.safe_url
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("http://desk:s3cr3t-token@10.0.0.5:11434", "http://10.0.0.5:11434"),
+    ("http://token@10.0.0.5:11434", "http://10.0.0.5:11434"),
+    # A password may itself contain "@" — the last one separates userinfo.
+    ("https://u:p@ss@ollama.internal", "https://ollama.internal"),
+    ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+    ("http://127.0.0.1:11434/base", "http://127.0.0.1:11434/base"),
+])
+def test_safe_url_strips_userinfo_and_keeps_everything_else(raw, expected):
+    assert backends._safe_url(raw) == expected
+
+
+def test_every_daemon_message_names_the_safe_url_and_never_the_connect_url(ollama):
+    """No operator-facing string may be built from the URL we connect with.
+
+    Pinning the sentinel through every reachable-daemon message is what makes
+    this inversion-proof: a future message that reaches for ``base_url`` fails
+    here even when its own URL happens to be credential-free.
+    """
+    sentinel = "http://SAFE-SENTINEL:1234"
+    messages: list[str] = []
+
+    def probe(routes, then):
+        backend = OllamaBackend(base_url=ollama.url)
+        backend.safe_url = sentinel
+        ollama.routes.clear()
+        ollama.routes.update(routes)
+        return then(backend)
+
+    def reason_of(backend):
+        return backend.available()[1]
+
+    def error_of(backend):
+        with pytest.raises(LlmBackendError) as exc:
+            backend.complete(system="s", user="u", model="granite3.3:8b")
+        return str(exc.value)
+
+    # available: serving
+    messages.append(probe(
+        {"/api/tags": (200, "application/json", _TAGS_TWO)}, reason_of))
+    # available: running but empty
+    messages.append(probe(
+        {"/api/tags": (200, "application/json", _TAGS_NONE)}, reason_of))
+    # the unpulled-model pull command
+    messages.append(probe(
+        {"/api/chat": (404, "application/json", '{"error":"not found"}')},
+        error_of))
+
+    assert len(messages) == 3
+    for message in messages:
+        assert "SAFE-SENTINEL" in message, message
+        assert ollama.url not in message, message
+
+
+def test_the_not_ollama_message_also_names_the_safe_url_only(ollama):
+    ollama.routes["/api/tags"] = (200, "application/json", '{"ok": true}')
+    backend = OllamaBackend(base_url=ollama.url)
+    backend.safe_url = "http://SAFE-SENTINEL:1234"
+    with pytest.raises(LlmBackendError) as exc:
+        backend.available()
+    assert "SAFE-SENTINEL" in str(exc.value)
+    assert ollama.url not in str(exc.value)
+
+
+def test_an_oversized_body_is_refused_rather_than_buffered(ollama, monkeypatch):
+    # The head is bounded but the read was not: a slow-drip endpoint that is not
+    # ollama could stream into the owner's memory through a 2s probe.
+    monkeypatch.setattr(backends, "_MAX_BODY_BYTES", 512)
+    ollama.routes["/api/tags"] = (200, "application/json", "y" * 4096)
+    backend = OllamaBackend(base_url=ollama.url)
+    with pytest.raises(LlmBackendError) as exc:
+        backend.available()
+    assert "512" in str(exc.value) and "refusing to buffer" in str(exc.value)
+
+
+def test_an_oversized_error_body_is_refused_but_the_status_survives(ollama,
+                                                                    monkeypatch):
+    monkeypatch.setattr(backends, "_MAX_BODY_BYTES", 512)
+    ollama.routes["/api/tags"] = (503, "application/json", "y" * 4096)
+    backend = OllamaBackend(base_url=ollama.url)
+    with pytest.raises(LlmBackendError) as exc:
+        backend.available()
+    assert "503" in str(exc.value) and "body refused" in str(exc.value)
+
+
+def test_a_body_exactly_at_the_ceiling_is_still_served(ollama, monkeypatch):
+    payload = json.dumps({"models": [{"name": "a:1"}]})
+    monkeypatch.setattr(backends, "_MAX_BODY_BYTES", len(payload))
+    ollama.routes["/api/tags"] = (200, "application/json", payload)
+    assert OllamaBackend(base_url=ollama.url).models() == ["a:1"]
+
+
+def test_the_default_body_ceiling_is_real_and_not_only_patchable(ollama):
+    ollama.routes["/api/tags"] = (
+        200, "application/json", "y" * (backends._MAX_BODY_BYTES + 64))
+    backend = OllamaBackend(base_url=ollama.url)
+    with pytest.raises(LlmBackendError) as exc:
+        backend.available()
+    assert "refusing to buffer" in str(exc.value)
+
+
 def test_ollama_body_head_is_bounded(ollama):
     ollama.routes["/api/tags"] = (200, "text/plain", "x" * 5000)
     backend = OllamaBackend(base_url=ollama.url)

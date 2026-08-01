@@ -784,6 +784,32 @@ def test_the_catalog_route_survives_a_url_that_cannot_be_parsed_at_all(
     assert "s3cr3t" not in hidden.available()[1]
 
 
+def test_the_catalog_route_survives_a_url_that_parses_and_still_cannot_be_used(
+        owner, monkeypatch):
+    """`http://[::1]:11434junk` parses cleanly and is still unusable.
+
+    Scheme and authority are both present, so the not-a-URL guard passes it and
+    the failure moves to connect time: `http.client.InvalidURL`, an
+    HTTPException, which is not an OSError and so fell through `_request`'s
+    absence clause to 500 the catalog route — the third shape of the same bug,
+    and the reason this one is pinned at the route rather than the constructor.
+    """
+    import json
+
+    from qlab.ui.server import handle_api
+
+    monkeypatch.setenv("QLAB_OLLAMA_URL", "http://desk:s3cr3t@[::1]:11434junk")
+    status, payload = handle_api(owner, "GET", "/api/llm/backends", {}, {})
+
+    assert status == 200
+    entry, = [e for e in payload["backends"] if e["name"] == "ollama"]
+    assert entry["available"] is False
+    assert entry["models"] == []
+    # Not "start it with `ollama serve`": nothing is wrong with the daemon.
+    assert "cannot be reached" in entry["reason"]
+    assert "s3cr3t" not in json.dumps(payload)
+
+
 # ---------------------------------------------------------------------------
 # B1: the desk answers through the configured reasoner
 # ---------------------------------------------------------------------------
@@ -843,6 +869,13 @@ def test_the_desk_answers_through_the_configured_reasoner(owner, monkeypatch):
     assert row["actor"] == "operator"
     assert row["text"].endswith(f"…[truncated from {len(long)} chars]")
     assert row["text"].startswith("why are we flat? xxx")
+
+    # And the answer is cut the same way in both places it is shown: an HTTP
+    # caller and the bus must not see two different cuts, one of them silent.
+    up.said = "y" * 4500
+    _, big = _ask(owner)
+    assert big["reply"].endswith("…[truncated from 4500 chars]")
+    assert _messages(owner)[-1]["payload"]["text"] == big["reply"]
 
 
 def test_the_reasoner_answers_whether_or_not_the_template_flag_is_on(

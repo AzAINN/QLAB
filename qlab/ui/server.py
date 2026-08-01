@@ -2222,7 +2222,10 @@ class UISession:
             "answered": True,
             "backend": choice.backend,
             "model": choice.model,
-            "reply": reply[:_ATLAS_REPLY_CHARS],
+            # The same bound and the same marker as the row this mirrors: an
+            # HTTP caller and the bus must not be shown two different cuts of
+            # one answer, one of them silent.
+            "reply": self._bounded(reply, _ATLAS_REPLY_CHARS),
             "note": f"{choice.backend} {choice.model} answered on the console",
         }
 

@@ -31,6 +31,7 @@ nowhere else, so a second opinion about whether a daemon is up cannot exist.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
@@ -270,6 +271,21 @@ class OllamaBackend:
             raise LlmBackendError(
                 f"ollama answered {path} with {big} — refusing to buffer it; "
                 "that is not a model answer") from None
+        except http.client.HTTPException as exc:
+            # A URL that parses and still cannot be used. `http://host:11434junk`
+            # has a scheme and an authority, so the not-a-URL guard passes it,
+            # and urlopen rejects it only at connect time with InvalidURL — an
+            # HTTPException, which is NOT an OSError, so the absence clause
+            # below never saw it and it escaped the catalog as a 500.
+            #
+            # A fault rather than absence, deliberately: nothing is wrong with
+            # the daemon, and "start it with `ollama serve`" would be the same
+            # wrong advice the schemeless case used to give. The exception text
+            # is bounded and carries no URL of its own ("nonnumeric port:
+            # '11434junk'"), so the safe form is the only address named.
+            raise LlmBackendError(
+                f"ollama cannot be reached at {self.safe_url}: "
+                f"{_head(str(exc))}") from None
         except OSError:
             raise _Unreachable(self._absent_reason) from None
         try:

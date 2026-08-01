@@ -755,3 +755,88 @@ def test_more_citations_than_the_cap_are_refused_not_quietly_dropped():
     cites = ", ".join(f"h{i}" for i in range(MAX_CITATIONS + 2))
     with pytest.raises(ReasonerRefused, match="cap"):
         parse_view(f"A view.\nCITE: {cites}", evidence=ev)
+
+
+# --- the production call site -------------------------------------------------
+
+
+def _owner():
+    from qlab.state.registry import Registry
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    session.archive_desk_news(session.fetch_desk_news(True))
+    return session
+
+
+def test_atlas_reason_is_reachable_and_answers():
+    """reasoner.py had no caller until this existed. Dead code has shipped
+    three times in this repo; a seam without a call site is the same shape."""
+    session = _owner()
+    try:
+        out = session.atlas_reason(question="what moved credit?", offline=True)
+        assert out["available"] is True
+        assert out["lines"]
+        assert out["model_id"]
+    finally:
+        session.registry.close()
+
+
+def test_it_offers_nothing_when_no_holding_is_implicated():
+    """The governance line: an answer about an untradable name must not arrive
+    with an action attached."""
+    session = _owner()
+    try:
+        out = session.atlas_reason(
+            question="what would have made Samsung surge?", offline=True)
+        assert out["offer"] is None
+        # And says why, rather than leaving the absence unexplained.
+        assert out["offer_refused_reason"]
+    finally:
+        session.registry.close()
+
+
+def test_a_synthetic_only_archive_yields_no_citations():
+    """Storable, never citable. Every fixture row must stay out of the
+    evidence an answer rests on."""
+    session = _owner()
+    try:
+        out = session.atlas_reason(question="credit spreads", offline=True)
+        assert out["citations"] == [] or out["citations"] == ()
+    finally:
+        session.registry.close()
+
+
+def test_an_ineligible_model_is_a_named_refusal_not_a_substitution():
+    """Invariant 4. An answer served by a model the operator did not choose is
+    worse than no answer."""
+    import qlab.operator.models as models
+
+    session = _owner()
+    try:
+        original = models.check_eligible
+
+        def refuse(model_id, **kw):
+            raise models.ModelNotEligible(f"{model_id} cannot serve reasoner")
+
+        models.check_eligible = refuse
+        try:
+            out = session.atlas_reason(question="anything", offline=True)
+        finally:
+            models.check_eligible = original
+        assert out["available"] is False
+        assert "cannot serve reasoner" in out["reason"]
+        # The model that was refused is named, so the operator can act on it.
+        assert out["model_id"]
+    finally:
+        session.registry.close()
+
+
+def test_a_question_of_only_stopwords_has_no_terms():
+    """Every word became a candidate ticker, so an answer opened with 'WHAT is
+    not in the mandate universe' before saying anything useful."""
+    from qlab.news.archive import normalise_terms
+
+    assert normalise_terms("what would have made Samsung surge?") == ("samsung", "surge")
+    # No subject is not the same as matching nothing.
+    assert normalise_terms("what is the") == ()

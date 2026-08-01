@@ -25,9 +25,14 @@ qlab tui
 
 `qlab tui` starts the owner runtime and opens the **Atlas workstation** — the
 Rust/Ratatui client in `clients/atlas-tui`, seven views on `1`–`7`: Desk,
-Markets, Book, Research, Workforce, Audit, Settings. Build it once with
-`cd clients/atlas-tui && cargo build --release`; the launcher refuses rather
-than falling back if it is not there.
+Markets, Book, Research, Workforce, Audit, Settings. It needs Rust and a
+one-time build; the launcher refuses rather than falling back if the binary is
+not there.
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # skip if you have cargo
+cd clients/atlas-tui && cargo build --release
+```
 
 ```bash
 qlab tui --classic    # the Textual client, against the same owner

@@ -140,6 +140,21 @@ def macro_lane_supported(provider: str) -> bool:
     return str(provider or "").strip().lower() in MACRO_LANE_PROVIDERS
 
 
+# Question words and connectives. A natural-language question is mostly these,
+# and without stripping them every one becomes a "term" the relevance report
+# then reports as absent from the universe — "WHAT is not in the mandate
+# universe" ahead of the actual answer. They are also useless as search terms:
+# "what" matches most of the archive and narrows nothing.
+_STOPWORDS = frozenset({
+    "a", "об", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can",
+    "could", "did", "do", "does", "for", "from", "had", "has", "have", "how",
+    "in", "is", "it", "its", "made", "make", "may", "might", "of", "on", "or",
+    "should", "that", "the", "their", "then", "there", "these", "this", "to",
+    "was", "were", "what", "when", "where", "which", "who", "why", "will",
+    "with", "would", "you", "your",
+})
+
+
 def normalise_terms(query: str) -> tuple[str, ...]:
     """Split a query into the token form the search column holds.
 
@@ -150,9 +165,11 @@ def normalise_terms(query: str) -> tuple[str, ...]:
     seen: set[str] = set()
     out: list[str] = []
     for token in _TERM.findall(_strip_accents(str(query or "")).lower()):
-        if token and token not in seen:
+        if token and token not in seen and token not in _STOPWORDS:
             seen.add(token)
             out.append(token)
+    # If a question is nothing but stopwords there are no terms, which is
+    # honest: it is a query with no subject, not a query that matched nothing.
     return tuple(out)
 
 

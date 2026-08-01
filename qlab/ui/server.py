@@ -1532,6 +1532,98 @@ class UISession:
             "archive": self.archive_summary(),
         }
 
+    def atlas_reason(self, *, question: str | None, offline: bool,
+                     limit: int = 12) -> dict:
+        """The reasoner's ONLY production call site.
+
+        Everything that makes the answer trustworthy is resolved here, in
+        deterministic code, before the model is handed anything:
+
+        * the evidence is a point-in-time archive search, so the model cannot
+          cite a record the desk did not hold at the as-of it was given;
+        * the model is resolved through the catalog's eligibility check, so an
+          ineligible or unconfigured model is a loud refusal rather than a
+          silent substitution (invariant 4);
+        * any template the model proposes is passed to check_startable, which
+          is the same authority gate the heartbeat uses. The reasoner proposes;
+          the gate disposes, and its refusal reason is carried back verbatim
+          rather than being softened into silence.
+        """
+        from qlab.news.archive import canonical_timestamp, normalise_terms, relevance_report
+        from qlab.operator import models as model_catalog
+        from qlab.operator.reasoner import ArchiveEvidence, reason
+
+        now = canonical_timestamp(datetime.now(timezone.utc))
+        terms = normalise_terms(question or "")
+        universe = list(self.mandate.universe_whitelist)
+
+        page = self.registry.search_news(as_of=now, terms=terms, limit=limit)
+        matched = self.registry.count_news_matches(as_of=now, terms=terms)
+        with_synthetic = self.registry.count_news_matches(
+            as_of=now, terms=terms, include_synthetic=True)
+        single_secondary = sum(
+            1 for r in page if str(r.get("source_tier") or "") != "primary")
+        stats = self.archive_summary()
+
+        relevance = relevance_report(
+            terms=terms, universe=universe, matched_total=matched, page=page,
+            single_secondary_total=single_secondary,
+            # Stored but not citable. Reporting the count is what stops an
+            # empty result reading as "the wire was quiet".
+            synthetic_excluded=max(0, with_synthetic - matched),
+            newest_published=stats.get("newest_published"),
+            archive_begins=stats.get("begins"),
+            providers_in_window=sorted(
+                {str(r.get("provider") or "") for r in page}),
+            as_of=now, now=now)
+
+        evidence = ArchiveEvidence(
+            # .to_dict(), not the dataclass: ArchiveEvidence reads `relevance`
+            # as a mapping. The two modules were built in parallel against one
+            # spec and met here, which is where that mismatch surfaced.
+            items=tuple(page), matched_total=matched,
+            relevance=relevance.to_dict(),
+            as_of=now, as_of_source="now", archive_begins=stats.get("begins"))
+
+        # resolve_selection validates every slot, so it can raise too. Leaving
+        # it outside the guard turned a bad selection into a 500 rather than the
+        # named refusal this whole path exists to produce.
+        requested = "unresolved"
+        try:
+            selection = model_catalog.resolve_selection()
+            requested = selection.reasoner
+            spec = model_catalog.check_eligible(selection.reasoner, slot="reasoner")
+            provider = model_catalog.get_provider(spec.provider)
+            configured, why = provider.configured()
+            if not configured:
+                raise model_catalog.ProviderError(why)
+        except model_catalog.ModelError as exc:
+            # Named, never substituted: an answer served by a model the operator
+            # did not choose is worse than no answer.
+            self.registry.record_event("atlas_reason_refused", {
+                "model_id": requested, "reason": str(exc)[:400]})
+            return {"available": False, "model_id": requested,
+                    "reason": str(exc), "question": question}
+
+        facts = self.atlas_facts(offline)
+        view = reason(
+            context=self.atlas_context(offline), evidence=evidence,
+            question=question, mode=str(self.atlas.status().get("mode") or ""),
+            facts=facts, spec=spec, complete=provider.complete)
+
+        payload = view.to_dict() if hasattr(view, "to_dict") else dict(view.__dict__)
+        payload["available"] = True
+        self.registry.record_event("atlas_reasoned", {
+            "model_id": payload.get("model_id"),
+            "served_model": payload.get("served_model"),
+            "question": (question or "")[:300],
+            "citations": len(payload.get("citations") or []),
+            "offer": payload.get("offer"),
+            "offer_refused_reason": payload.get("offer_refused_reason"),
+            "matched_total": matched,
+        })
+        return payload
+
     def news_payload(self, offline: bool) -> dict:
         """The news window as a client renders it: stories, coverage, provenance.
 
@@ -2671,6 +2763,13 @@ def handle_api(session: UISession, method: str, path: str,
         # unattended run read as "Claude is a black box doing nothing".
         status["coordinator"] = session.coordinator_status()
         return 200, status
+
+    if method == "POST" and path == "/api/atlas/ask":
+        question = str(body.get("question") or "").strip()
+        if not question:
+            return 400, {"error": "question is required"}
+        offline = _flagbool(body.get("offline"), session.offline_default)
+        return 200, session.atlas_reason(question=question, offline=offline)
 
     if method == "GET" and path == "/api/news/search":
         question = str((query.get("q") or [""])[0])

@@ -54,11 +54,24 @@ _USERINFO = re.compile(r"[^\s/@]+@")
 # What may be sent as an HTTP header value: printable ASCII, nothing else.
 # See ``_header_safe`` — the two ways http.client refuses a header both quote
 # the value they refused, so the check has to happen where the value is held.
-_HEADER_SAFE = re.compile(r"^[\x20-\x7e]+$")
+# Matched with ``fullmatch``: ``$`` also matches *before* a trailing newline,
+# so ``^…$`` passed exactly the character this gate exists to refuse.
+_HEADER_SAFE = re.compile(r"[\x20-\x7e]+")
 
 
 class AlpacaAuthError(RuntimeError):
     """A credential source exists but is unusable. Never raised for absence."""
+
+
+class AlpacaConsentRequired(AlpacaAuthError):
+    """A write refused because it would destroy a credential already stored.
+
+    Its own class, not a sentence for a caller to sniff: a route turns this
+    into a machine-readable ``confirm`` key while the message stays purely the
+    human half — what would be lost. ``_HttpFault`` in ``llm_backends`` carries
+    its status the same way and for the same reason: a caller that treats one
+    refusal specially should read a type, not grep our own wording.
+    """
 
 
 @dataclass(frozen=True)
@@ -313,28 +326,36 @@ def write_credentials(api_key: str, api_secret: str,
             # all — a refusal with no way forward is not a refusal, it is a
             # dead end.
             if not replace:
-                raise AlpacaAuthError(
+                raise AlpacaConsentRequired(
                     f"{path} could not be read, so what a login stored here "
-                    "would overwrite is unknown; send replace:true to "
-                    "overwrite it anyway") from None
+                    "would overwrite is unknown") from None
             existing = {}
-    if not replace and existing.get("access_token") and not existing.get("api_key"):
-        raise AlpacaAuthError(
+    # "Holds a token", not "holds a token and no key pair". Every write here
+    # ends in an api_key profile and takes the tokens out (below), so a file
+    # carrying both shapes loses them too — and it was reaching that outcome
+    # without being asked, which is the case this refusal exists for.
+    if not replace and (existing.get("access_token")
+                        or existing.get("refresh_token")):
+        raise AlpacaConsentRequired(
             f"profile {name!r} holds a browser login (`alpaca profile login`); "
-            "storing a key pair would discard its access token and refresh "
-            "token, which cannot be recovered without logging in again. Send "
-            "replace:true to do it anyway")
+            "storing a key pair here discards its access token and refresh "
+            "token, and they cannot be recovered without logging in again")
 
     # Merged, not rewritten: the CLI owns this file too and puts keys in it
     # that this module has never heard of (endpoint, scopes, output). Dropping
     # them because we do not read them would break the operator's `alpaca` CLI
     # as a side effect of storing a login in qlab.
     merged = dict(existing)
-    if replace:
-        # An authorized replacement takes the old login *out*: leaving a dead
-        # access_token on disk keeps a credential at rest that nothing uses.
-        merged.pop("access_token", None)
-        merged.pop("refresh_token", None)
+    # The tokens go out with the login they belong to — keyed on what is being
+    # superseded, not on the flag. `resolve_alpaca_credentials` prefers the key
+    # pair in the same file, so a surviving token is a credential at rest that
+    # nothing will ever use: the refresh token in particular still mints new
+    # access tokens for anyone who reads the file. Leaving them behind is the
+    # dead-credential hazard the refusal above exists to prevent, so the
+    # cleanup has to be unconditional or the shape that skips the refusal
+    # skips the cleanup too.
+    merged.pop("access_token", None)
+    merged.pop("refresh_token", None)
     merged.update({"api_key": key, "secret_key": secret, "live": False})
 
     # Dumped rather than formatted: a secret containing ":" or starting with a
@@ -457,7 +478,7 @@ def _header_safe(value: str, label: str) -> str:
     bearer tokens are all base64-ish by construction, so anything else is a
     damaged credential source rather than an exotic valid one.
     """
-    if not _HEADER_SAFE.match(value):
+    if not _HEADER_SAFE.fullmatch(value):
         raise AlpacaAuthError(
             f"the resolved {label} contains characters that cannot be sent in "
             "an HTTP header (a line break, a tab, or a non-ASCII character) — "

@@ -485,7 +485,10 @@ def test_a_browser_login_is_never_traded_for_a_key_pair_unasked(desk, tmp_path):
     status, refused = _post(desk, "/api/alpaca/credentials",
                             {"api_key": _KEY, "api_secret": _SECRET})
     assert status == 400
-    assert "replace" in refused["error"] and "refresh token" in refused["error"]
+    # The sentence is the human half — what would be lost. How to proceed is a
+    # key the client can branch on, not wording it has to sniff.
+    assert "refresh token" in refused["error"]
+    assert refused["confirm"] == "replace"
     assert profile.read_text(encoding="utf-8") == before   # nothing touched
 
     # Consent, and only consent, gets past it — and takes the dead token out
@@ -496,9 +499,30 @@ def test_a_browser_login_is_never_traded_for_a_key_pair_unasked(desk, tmp_path):
     assert (status, payload["credentials_ok"]) == (200, True)
     creds = resolve_alpaca_credentials()
     assert (creds.kind, creds.api_key) == ("api_key", _KEY)
-    assert "access_token" not in profile.read_text(encoding="utf-8")
+    stored = profile.read_text(encoding="utf-8")
+    # Both tokens go, not just the one that is obviously a login: a surviving
+    # refresh_token still mints access tokens for anyone who reads the file,
+    # and nothing here would ever use it again.
+    assert "access_token" not in stored and "refresh_token" not in stored
     # A key the CLI owns and this module has never heard of survives the write.
-    assert "endpoint" in profile.read_text(encoding="utf-8")
+    assert "endpoint" in stored
+
+    # A profile carrying BOTH shapes is the same destruction — the key pair in
+    # it does not make the token expendable — so it takes the same consent.
+    profile.write_text(
+        f"api_key: {_KEY}\nsecret_key: {_SECRET}\n"
+        "access_token: tok-abcdefghijklmnopqrstuvwxyz012345\n"
+        "refresh_token: ref-abcdefghijklmnopqrstuvwxyz01234\n"
+        "endpoint: https://api.alpaca.markets\n", encoding="utf-8")
+    status, both = _post(desk, "/api/alpaca/credentials",
+                         {"api_key": _KEY, "api_secret": _SECRET})
+    assert (status, both["confirm"]) == (400, "replace")
+    assert "access_token" in profile.read_text(encoding="utf-8")
+    assert _post(desk, "/api/alpaca/credentials",
+                 {"api_key": _KEY, "api_secret": _SECRET,
+                  "replace": True})[0] == 200
+    stored = profile.read_text(encoding="utf-8")
+    assert "access_token" not in stored and "refresh_token" not in stored
 
     # An ordinary re-login needs no consent, and still preserves the rest.
     status, _ = _post(desk, "/api/alpaca/credentials",
@@ -513,16 +537,19 @@ def test_a_browser_login_is_never_traded_for_a_key_pair_unasked(desk, tmp_path):
     profile.write_text("{{{ not yaml\n", encoding="utf-8")
     status, unreadable = _post(desk, "/api/alpaca/credentials",
                                {"api_key": _KEY, "api_secret": _SECRET})
-    assert status == 400 and "replace" in unreadable["error"]
+    assert (status, unreadable["confirm"]) == (400, "replace")
     assert _post(desk, "/api/alpaca/credentials",
                  {"api_key": _KEY, "api_secret": _SECRET,
                   "replace": True})[0] == 200
 
-    # "yes" is not consent: only a real boolean is.
+    # "yes" is not consent: only a real boolean is. And a validation refusal
+    # carries no `confirm` — the sentence contains the word "replace", so a
+    # client sniffing for it would offer to confirm a body it should fix.
     status, wrong = _post(desk, "/api/alpaca/credentials",
                           {"api_key": _KEY, "api_secret": _SECRET,
                            "replace": "yes"})
     assert (status, wrong["error"]) == (400, "replace must be true or false")
+    assert "confirm" not in wrong
 
 
 def test_a_credential_that_cannot_be_sent_as_a_header_never_reaches_a_500(
@@ -540,6 +567,15 @@ def test_a_credential_that_cannot_be_sent_as_a_header_never_reaches_a_500(
     assert "header" in out["reason"]
     blob = json.dumps(out)
     assert poisoned not in blob and "qlabPOISON" not in blob
+
+    # A *trailing* newline is the same refusal by http.client and was the one
+    # shape the gate let through: `$` matches before it, so `^…$` called the
+    # value printable ASCII. Driven directly because every production producer
+    # of a credential strips — the gate's claim has to hold anyway, since it
+    # is what the next producer will be trusted against.
+    trailing = probe_credentials(AlpacaCredentials(
+        "oauth", None, None, "tok-abcdef0123456789\n", "paper", "profile"))
+    assert trailing.ok is False and "header" in trailing.reason
 
 
 def test_the_audit_row_carries_no_key_material(desk):

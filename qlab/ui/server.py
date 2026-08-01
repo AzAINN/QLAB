@@ -3123,7 +3123,7 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.desk_mode_payload()
 
     if method == "POST" and path == "/api/alpaca/credentials":
-        from qlab.trader.alpaca_auth import AlpacaAuthError
+        from qlab.trader.alpaca_auth import AlpacaAuthError, AlpacaConsentRequired
 
         # Destroying an existing login takes an explicit true, so a client that
         # sends "yes" or 1 is refused rather than read as consent.
@@ -3133,6 +3133,13 @@ def handle_api(session: UISession, method: str, path: str,
         try:
             return 200, session.set_alpaca_credentials(
                 body.get("api_key"), body.get("api_secret"), replace=replace)
+        except AlpacaConsentRequired as exc:
+            # The one refusal a client can act on: show the sentence, and
+            # re-POST with replace:true if the operator agrees. `confirm` is
+            # what makes that a check rather than a substring sniff — the
+            # message above says what would be lost and nothing about how,
+            # and the validation refusal below deliberately has no such key.
+            return 400, {"error": str(exc), "confirm": "replace"}
         except AlpacaAuthError as exc:
             # The module's own sentence, which never quotes what was typed.
             return 400, {"error": str(exc)}

@@ -753,7 +753,8 @@ pub struct AtlasHeartbeat {
     /// against the owner's own clock mean anything.
     pub last_tick_at: Option<f64>,
     pub last_error: Option<String>,
-    pub last_error_at: Option<String>,
+    /// Same clock as `last_tick_at`; absent until a tick has failed.
+    pub last_error_at: Option<f64>,
     pub last_state: Option<String>,
     pub autonomous: Option<bool>,
     pub coordinator: Option<Coordinator>,

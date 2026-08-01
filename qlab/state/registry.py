@@ -273,6 +273,50 @@ CREATE TABLE IF NOT EXISTS approval_requests (
 CREATE TABLE IF NOT EXISTS equity_marks (
     ts VARCHAR, source VARCHAR, book VARCHAR, equity DOUBLE, cash DOUBLE,
     PRIMARY KEY (ts, source, book));
+
+-- The news archive. Headlines were fetched, grounded, read and discarded, so
+-- "what did the record say about X" had nothing to answer from.
+--
+-- `body_text`, never `summary`: _rows json.loads any column literally named
+-- summary, so a body of '2024' would read back as the integer 2024.
+--
+-- Every timestamp is CHECKed against the canonical shape because every
+-- point-in-time read is a lexicographic string compare — one row stored as
+-- '2026-07-31T12:00:00Z' or with microseconds silently sorts wrong forever.
+--
+-- search_text is GENERATED here or never: DuckDB has no STORED generated
+-- columns and refuses ALTER TABLE ADD of a generated one, so it cannot be
+-- added later. strip_accents is what lets 'Nestle' match 'Nestlé'.
+CREATE TABLE IF NOT EXISTS news_items (
+    item_hash VARCHAR PRIMARY KEY,
+    published VARCHAR NOT NULL CHECK (published LIKE '____-__-__T__:__:__+00:00'),
+    first_seen VARCHAR NOT NULL CHECK (first_seen LIKE '____-__-__T__:__:__+00:00'),
+    last_seen VARCHAR NOT NULL CHECK (last_seen LIKE '____-__-__T__:__:__+00:00'),
+    seen_count BIGINT NOT NULL,
+    provider VARCHAR NOT NULL,
+    source VARCHAR NOT NULL,
+    source_tier VARCHAR NOT NULL,
+    headline VARCHAR NOT NULL,
+    body_text VARCHAR,
+    url VARCHAR,
+    synthetic BOOLEAN NOT NULL,
+    search_text VARCHAR GENERATED ALWAYS AS (
+        lower(strip_accents(headline || ' ' || coalesce(body_text, '')))) VIRTUAL);
+
+-- Insert-only union rather than a JSON column on news_items. content_hash does
+-- not cover tickers, and the mandate universe changes over time, so the same
+-- story re-fetched after a universe change maps to a different ticker set —
+-- last-write-wins would erase the earlier mapping.
+CREATE TABLE IF NOT EXISTS news_item_tickers (
+    item_hash VARCHAR, ticker VARCHAR, in_universe BOOLEAN,
+    PRIMARY KEY (item_hash, ticker));
+
+-- What cited what. cited_by_kind is deliberately restricted to tables that
+-- exist; a kind naming no table would leave cited_by_id resolving to nothing.
+CREATE TABLE IF NOT EXISTS news_citations (
+    item_hash VARCHAR, cited_by_kind VARCHAR, cited_by_id VARCHAR,
+    created_at VARCHAR,
+    PRIMARY KEY (item_hash, cited_by_kind, cited_by_id));
 """
 
 
@@ -311,6 +355,12 @@ class Registry:
             p.parent.mkdir(parents=True, exist_ok=True)
             self.path = str(p)
         self.con = duckdb.connect(self.path)
+        # Both default to TRUE. One stray PRAGMA inside the single-writer
+        # process would then download an extension over the network — a silent
+        # network fallback (invariant 4) that makes the offline suite pass on a
+        # warmed machine and fail on a clean one.
+        self.con.execute("SET autoinstall_known_extensions=false")
+        self.con.execute("SET autoload_known_extensions=false")
         self.con.execute(_SCHEMA)
         self.con.execute("ALTER TABLE backtests ADD COLUMN IF NOT EXISTS objective VARCHAR")
         # existing dev DBs may predate these columns; _SCHEMA alone won't add
@@ -1988,8 +2038,14 @@ class Registry:
     def record_model_invocation(self, record: dict) -> str:
         """Persist which tier was requested and which model actually served it."""
         iid = str(record["invocation_id"])
+        # Named columns, not positional. The repo's ALTER TABLE ADD COLUMN
+        # idiom (above) appends columns to existing databases, and a positional
+        # VALUES list would then write every field one column to the left with
+        # no error at all.
         self.con.execute(
-            "INSERT OR REPLACE INTO model_invocations VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO model_invocations (invocation_id, role, "
+            "requested_tier, resolved_model, backend, status, latency_ms, "
+            "tokens, fallback_reason, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             [iid, record.get("role"), record.get("requested_tier"),
              record.get("resolved_model"), record.get("backend"),
              record.get("status"), record.get("latency_ms"),
@@ -2092,6 +2148,156 @@ class Registry:
         for aid in ids:
             self.transition_approval(aid, "expired", decided_at=now_iso)
         return ids
+
+    # -- news archive ------------------------------------------------------
+
+    def record_news_items(self, batch) -> dict:
+        """Persist one archive batch. Runs under the owner's dispatch lock.
+
+        One multi-row INSERT rather than executemany: measured at 5.1ms for 100
+        rows against a 200k-row table versus 74-218ms row-by-row, and this is on
+        the lock every TUI poll waits behind.
+
+        ``seen_count`` counts archive passes that returned the item, and means
+        only that. A provider replaying identical text produces the identical
+        hash and altered text produces a new row, so the count cannot tell the
+        two apart and must not be read as a republication detector.
+        """
+        rows = list(getattr(batch, "rows", ()) or ())
+        edges = list(getattr(batch, "ticker_edges", ()) or ())
+        if not rows:
+            return {"inserted": 0, "updated": 0, "edges": 0,
+                    "total_rows": self._news_row_count()}
+        before = self._news_row_count()
+        placeholders = ",".join(["(?,?,?,?,?,?,?,?,?,?,?,?)"] * len(rows))
+        params: list = []
+        for row in rows:
+            params.extend([
+                row.item_hash, row.published, row.first_seen, row.last_seen,
+                row.seen_count, row.provider, row.source, row.source_tier,
+                row.headline, row.body_text, row.url, row.synthetic])
+        self.con.execute(
+            "INSERT INTO news_items (item_hash, published, first_seen, "
+            "last_seen, seen_count, provider, source, source_tier, headline, "
+            f"body_text, url, synthetic) VALUES {placeholders} "
+            "ON CONFLICT (item_hash) DO UPDATE SET "
+            "last_seen = excluded.last_seen, "
+            "seen_count = news_items.seen_count + 1",
+            params)
+        if edges:
+            edge_ph = ",".join(["(?,?,?)"] * len(edges))
+            edge_params: list = []
+            for edge in edges:
+                edge_params.extend([edge.item_hash, edge.ticker, edge.in_universe])
+            self.con.execute(
+                "INSERT INTO news_item_tickers (item_hash, ticker, in_universe) "
+                f"VALUES {edge_ph} ON CONFLICT DO NOTHING", edge_params)
+        after = self._news_row_count()
+        inserted = after - before
+        return {"inserted": inserted, "updated": len(rows) - inserted,
+                "edges": len(edges), "total_rows": after}
+
+    def _news_row_count(self) -> int:
+        return int(self.con.execute("SELECT count(*) FROM news_items").fetchone()[0])
+
+    def search_news(self, *, as_of: str, terms=(), tickers=(),
+                    knowledge_cutoff: str | None = None,
+                    since: str | None = None,
+                    include_synthetic: bool = False,
+                    limit: int = 25, offset: int = 0) -> list[dict]:
+        """Point-in-time search. ``as_of`` is REQUIRED and has no default.
+
+        Defaulting it to now would make every historical query silently a
+        present-tense one, which is the failure the whole archive exists to
+        avoid. Strict ``published <= as_of`` with no same-day exemption — the
+        grounding boundary had one and it leaked twelve hours.
+
+        Synthetic rows are stored but excluded by default: a deterministic
+        fixture must never be citable as evidence about a real trade.
+        """
+        if not as_of:
+            raise ValueError(
+                "search_news requires an explicit as_of; defaulting it to now "
+                "would make every historical query a present-tense one")
+        where = ["published <= ?"]
+        params: list = [as_of]
+        if knowledge_cutoff:
+            # When the desk LEARNED it, which differs from when it was
+            # published and is the honest bound for "what did we know then".
+            where.append("first_seen <= ?")
+            params.append(knowledge_cutoff)
+        if since:
+            where.append("published >= ?")
+            params.append(since)
+        if not include_synthetic:
+            where.append("NOT synthetic")
+        for term in terms:
+            where.append("contains(search_text, ?)")
+            params.append(str(term).lower())
+        if tickers:
+            marks = ",".join("?" * len(tickers))
+            where.append(
+                "item_hash IN (SELECT item_hash FROM news_item_tickers "
+                f"WHERE ticker IN ({marks}))")
+            params.extend(list(tickers))
+        params.extend([int(limit), int(offset)])
+        return self._rows(
+            "SELECT * FROM news_items WHERE " + " AND ".join(where)
+            + " ORDER BY published DESC, item_hash LIMIT ? OFFSET ?", params)
+
+    def count_news_matches(self, *, as_of: str, terms=(), tickers=(),
+                           include_synthetic: bool = False) -> int:
+        """The full match total, which the page length cannot stand in for.
+
+        Every ratio the relevance report computes is over the whole match set;
+        computing them from one page would make the answer depend on paging.
+        """
+        rows = self.search_news(as_of=as_of, terms=terms, tickers=tickers,
+                                include_synthetic=include_synthetic,
+                                limit=1_000_000, offset=0)
+        return len(rows)
+
+    def archive_stats(self) -> dict:
+        """Size and span of the archive. Cache this — min/max are unindexed."""
+        row = self.con.execute(
+            "SELECT count(*), min(published), max(published), "
+            "count(*) FILTER (WHERE synthetic) FROM news_items").fetchone()
+        total = int(row[0] or 0)
+        return {
+            "rows": total,
+            # None, not "" — an archive with no rows has no span, and an empty
+            # string would sort and compare as though it did.
+            "begins": row[1],
+            "newest_published": row[2],
+            "synthetic_rows": int(row[3] or 0),
+        }
+
+    def record_news_citation(self, item_hash: str, *, cited_by_kind: str,
+                             cited_by_id: str) -> None:
+        """Bind a stored record to the thing that cited it.
+
+        ``cited_by_kind`` is restricted to tables that exist. A kind naming no
+        table would leave cited_by_id resolving to nothing, which is a dangling
+        citation dressed as provenance. An Atlas view is recorded through
+        record_event, whose event_id does resolve.
+        """
+        allowed = {"decision", "workflow_step", "event"}
+        if cited_by_kind not in allowed:
+            raise ValueError(
+                f"cited_by_kind must be one of {sorted(allowed)}; "
+                f"{cited_by_kind!r} names no table a citation could resolve to")
+        row = self.con.execute(
+            "SELECT synthetic FROM news_items WHERE item_hash = ?",
+            [item_hash]).fetchone()
+        if row is None:
+            raise KeyError(f"unknown news item_hash {item_hash!r}")
+        if bool(row[0]):
+            raise ValueError(
+                f"news item {item_hash!r} is synthetic and may never be cited "
+                "as evidence")
+        self.con.execute(
+            "INSERT INTO news_citations VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
+            [item_hash, cited_by_kind, cited_by_id, _now()])
 
     def read_events(self, limit: int = 100, after: str | None = None) -> list[dict]:
         """Read an ordered event window for observer clients.

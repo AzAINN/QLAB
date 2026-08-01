@@ -340,6 +340,23 @@ def _atlas_binary() -> str:
     return str(workspace_root().joinpath(*_ATLAS_RELATIVE))
 
 
+def atlas_client_argv(binary: str, *, operator: bool, offline: bool) -> list[str]:
+    """The workstation's argv: the launcher forwards posture and data lane.
+
+    Passthroughs, not a second authority: this launcher does not decide what
+    the client may do — a binary built without the operator feature refuses
+    the flag itself, and the lane only chooses which view of the owner the
+    client polls. Dropping the lane here meant a live owner drawn by a client
+    that only ever asked for the offline view.
+    """
+    argv = [binary]
+    if operator:
+        argv.append("--operator")
+    if not offline:
+        argv.append("--live")
+    return argv
+
+
 def _cmd_tui(args) -> int:
     """Launch the terminal workstation and, when needed, its owner API process.
 
@@ -520,12 +537,8 @@ def _cmd_tui(args) -> int:
             "or run the Textual client instead:  qlab tui --classic\n"
             "($QLAB_ATLAS_BIN overrides where this looks.)"
         )
-    argv = [binary]
-    if getattr(args, "operator", False):
-        # A passthrough, not a second authority: this launcher does not decide
-        # what the client may do, and a binary built without the feature refuses
-        # the flag itself.
-        argv.append("--operator")
+    argv = atlas_client_argv(
+        binary, operator=getattr(args, "operator", False), offline=offline)
     if owner is not None:
         # `execvpe` replaces this process, so nothing is left to terminate the
         # owner when the client quits — say so rather than leaving an operator

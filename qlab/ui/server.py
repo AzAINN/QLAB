@@ -234,8 +234,14 @@ class UISession:
         self._last_quote_signature: tuple[tuple[str, float, float], ...] | None = None
         self._regime_hmm_cache: dict[str, dict[str, object]] = {}
         # The live market stream is attached only under an operational policy
-        # (a real Alpaca feed); it stays None for demo/offline runtimes.
+        # (a real Alpaca feed); it stays None for demo/offline runtimes. The
+        # transport is injected by serve(): a bare session — every test, every
+        # tool — can flip desk modes without ever opening a websocket.
         self.market_stream = None
+        self.market_stream_reason = "no live market stream (demo/offline runtime)"
+        self._stream_runner = None
+        self._stream_stop: threading.Event | None = None
+        self._stream_lock = threading.Lock()
         self._last_poll_mark = 0.0
         self._last_workflow_reap = 0.0
         # Atlas's composed qualitative read, refreshed by the heartbeat.
@@ -276,6 +282,10 @@ class UISession:
         # caller — each with its own lock and its own session slot, which is
         # exactly the "one coordinator at a time" guarantee gone.
         self._driver_lock = threading.Lock()
+        # Threaded owner: the TTL cache is read from handler threads and
+        # invalidated from the heartbeat thread (invariant 9).
+        self._archive_lock = threading.Lock()
+        self._archive_stats_cache = None
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -656,7 +666,97 @@ class UISession:
         # very next poll rather than after the TTL.
         self.invalidate_valuation()
         save_desk_mode(mode)
+        self.retune_market_stream()
         return mode
+
+    # -- live quote stream ---------------------------------------------------
+    def attach_market_stream_runner(self, runner) -> None:
+        """serve() hands the transport in; a bare session never opens a socket.
+
+        ``runner`` is called on its own thread with keyword arguments
+        ``supervisor, key, secret, stop_event`` and is expected to block until
+        the stop event is set (the shape of ``run_alpaca_market_stream``).
+        """
+        self._stream_runner = runner
+        self.retune_market_stream()
+
+    def retune_market_stream(self) -> None:
+        """Start or stop the live quote stream to match the desk mode.
+
+        Refusals are named, never silent: a live desk that cannot stream says
+        which credential is missing rather than reporting the demo runtime's
+        reason (invariant 4).
+        """
+        from qlab.data.stream import build_alpaca_market_stream
+        from qlab.trader import alpaca_auth
+
+        with self._stream_lock:
+            if self._stream_stop is not None:
+                self._stream_stop.set()
+                self._stream_stop = None
+            self.market_stream = None
+            if self.desk_mode.offline:
+                self.market_stream_reason = (
+                    "no live market stream (demo/offline runtime)")
+                return
+            if self._stream_runner is None:
+                self.market_stream_reason = (
+                    "no live market stream (this runtime attaches none)")
+                return
+            try:
+                creds = alpaca_auth.resolve_alpaca_credentials()
+            except alpaca_auth.AlpacaAuthError as exc:
+                self.market_stream_reason = f"no live market stream: {exc}"
+                return
+            if creds is None:
+                self.market_stream_reason = (
+                    "no live market stream: live desk mode needs Alpaca API "
+                    "keys — set ALPACA_API_KEY/ALPACA_API_SECRET or store "
+                    "keys with `alpaca profile login`")
+                return
+            if not (creds.api_key and creds.secret_key):
+                # A browser login authorizes the trading API but the data
+                # websocket authenticates with an API key pair only; saying
+                # "log in again" here would send the operator in a loop.
+                self.market_stream_reason = (
+                    f"no live market stream: profile {creds.profile_name!r} "
+                    "is a browser login and the data websocket needs an API "
+                    "key pair — put paper keys in ALPACA_API_KEY/"
+                    "ALPACA_API_SECRET")
+                return
+            supervisor = build_alpaca_market_stream(
+                list(self.mandate.universe_whitelist),
+                os.environ.get("ALPACA_FEED", "").strip() or "iex",
+                on_event=self._publish_stream_event)
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._stream_runner, name="qlab-market-stream",
+                kwargs={"supervisor": supervisor, "key": creds.api_key,
+                        "secret": creds.secret_key, "stop_event": stop},
+                daemon=True)
+            self._stream_stop = stop
+            self.market_stream = supervisor
+            self.market_stream_reason = ""
+            thread.start()
+
+    def stop_market_stream(self) -> None:
+        with self._stream_lock:
+            if self._stream_stop is not None:
+                self._stream_stop.set()
+                self._stream_stop = None
+            self.market_stream = None
+
+    def _publish_stream_event(self, payload: dict) -> None:
+        # The supervisor's transitions (never per-tick quotes) onto the SSE
+        # bus, in the shape every other market event already has.
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": "market_stream",
+            "payload": payload,
+        }
+        with self._market_lock:
+            self._market_events.append(event)
 
     def desk_mode_payload(self) -> dict:
         from qlab.trader.alpaca_auth import (
@@ -1097,7 +1197,8 @@ class UISession:
         wanted = symbols or self.mandate.universe_whitelist
         if stream is None:
             return {"live_stream": False,
-                    "reason": "no live market stream (demo/offline runtime)",
+                    "reason": self.market_stream_reason
+                    or "no live market stream (demo/offline runtime)",
                     "quotes": {}, "health": None}
         snap = stream.snapshot()
         health = stream.health()
@@ -1322,6 +1423,9 @@ class UISession:
             },
             "supported_claims": read.get("supported_claims") or [],
             "tensions": read.get("tensions") or [],
+            # Additive on the REASONER's surface only. atlas_facts is
+            # check_startable's input and must never learn about the archive.
+            "archive": self.archive_summary(),
             "recent_decisions": decisions,
             # Forward-looking research evidence. Advisory by construction:
             # the gate never reads it, and a champion here is an admitted
@@ -1486,7 +1590,11 @@ class UISession:
         from qlab.news.feed import fetch_news
 
         universe = self.mandate.universe_whitelist
-        as_of = date.today().isoformat()
+        # An instant, not a calendar date. `date.today().isoformat()` is read by
+        # the feed as local-midnight-labelled-UTC, and fetch_news drops anything
+        # published after as_of — so the desk's window structurally excluded
+        # every story filed so far today. Measured: a full 24 hours.
+        as_of = datetime.now(timezone.utc)
         provider_name = self.news_provider_for(offline)
         try:
             # Passed explicitly rather than letting the feed re-resolve from the
@@ -1518,6 +1626,182 @@ class UISession:
         with self._news_lock:
             self._desk_news = window
         return window
+
+    def archive_desk_news(self, window: dict) -> dict:
+        """Persist one fetched window. Callers must already hold the lock.
+
+        The window is a PARAMETER, never ``self._desk_news``. On a threaded
+        owner, reading the shared attribute loses a window: the heartbeat
+        fetches W1 and publishes it, a refresh handler fetches W2 and publishes
+        over it, then the heartbeat archives what it finds — W2 — and W1 is gone
+        from the wire forever.
+
+        Deliberately NOT called from ``compose_desk_read``. That has four
+        callers and one of them, ``refresh_desk_read``, is documented as the
+        entry point for callers that do NOT hold the dispatch lock — burying a
+        registry write inside it would create a lock-free writer by
+        construction.
+        """
+        from qlab.news.archive import build_archive_batch, canonical_timestamp
+
+        items = list((window or {}).get("items") or [])
+        provider = str((window or {}).get("provider_name") or "synthetic")
+        now = canonical_timestamp(datetime.now(timezone.utc))
+        batch = build_archive_batch(
+            items, provider=provider, offline=bool(self.offline_default),
+            as_of=now, lookback_hours=48,
+            universe=list(self.mandate.universe_whitelist), first_seen=now,
+            error=(window or {}).get("error"))
+        result = self.registry.record_news_items(batch)
+        # The event carries what distinguishes "the desk was not watching" from
+        # "the wire was quiet" — a coverage gap the row count alone cannot show.
+        self.registry.record_event("news_archive", {
+            "provider": provider, "returned": batch.returned,
+            "inserted": result["inserted"], "updated": result["updated"],
+            "window_fingerprint": batch.window_fingerprint,
+            "error": batch.error,
+        })
+        self._archive_stats_cache = None
+        return result
+
+    def archive_summary(self) -> dict:
+        """Archive size and span, TTL-cached.
+
+        min/max over unindexed VARCHAR columns, and atlas_context is served
+        under the dispatch lock on every poll — uncached this would put a full
+        scan on the path every client waits behind.
+        """
+        with self._archive_lock:
+            cached = self._archive_stats_cache
+            if cached is not None and (time.monotonic() - cached[0]) < 30.0:
+                return dict(cached[1])
+            stats = self.registry.archive_stats()
+            self._archive_stats_cache = (time.monotonic(), stats)
+            return dict(stats)
+
+    def news_search(self, *, question: str, offline: bool, limit: int = 25) -> dict:
+        """Point-in-time search over the archive, with its own limits stated.
+
+        Carries no `offer` field. Computing one forces atlas_facts, which runs
+        the portfolio, data health and several registry queries under the same
+        non-reentrant lock this is already served from.
+        """
+        from qlab.news.archive import canonical_timestamp, normalise_terms
+
+        as_of = canonical_timestamp(datetime.now(timezone.utc))
+        terms = normalise_terms(question)
+        universe = list(self.mandate.universe_whitelist)
+        tickers = [t for t in universe if t.lower() in {x.lower() for x in terms}]
+        rows = self.registry.search_news(
+            as_of=as_of, terms=terms, limit=limit)
+        total = self.registry.count_news_matches(as_of=as_of, terms=terms)
+        return {
+            "as_of": as_of,
+            "question": question,
+            "terms": list(terms),
+            "matched_total": total,
+            "returned": len(rows),
+            "items": rows,
+            "universe_terms": tickers,
+            # Absence stated: an empty archive and a query that matched nothing
+            # are different facts and a bare zero conflates them.
+            "archive": self.archive_summary(),
+        }
+
+    def atlas_reason(self, *, question: str | None, offline: bool,
+                     limit: int = 12) -> dict:
+        """The reasoner's ONLY production call site.
+
+        Everything that makes the answer trustworthy is resolved here, in
+        deterministic code, before the model is handed anything:
+
+        * the evidence is a point-in-time archive search, so the model cannot
+          cite a record the desk did not hold at the as-of it was given;
+        * the model is resolved through the catalog's eligibility check, so an
+          ineligible or unconfigured model is a loud refusal rather than a
+          silent substitution (invariant 4);
+        * any template the model proposes is passed to check_startable, which
+          is the same authority gate the heartbeat uses. The reasoner proposes;
+          the gate disposes, and its refusal reason is carried back verbatim
+          rather than being softened into silence.
+        """
+        from qlab.news.archive import canonical_timestamp, normalise_terms, relevance_report
+        from qlab.operator import models as model_catalog
+        from qlab.operator.reasoner import ArchiveEvidence, reason
+
+        now = canonical_timestamp(datetime.now(timezone.utc))
+        terms = normalise_terms(question or "")
+        universe = list(self.mandate.universe_whitelist)
+
+        page = self.registry.search_news(as_of=now, terms=terms, limit=limit)
+        matched = self.registry.count_news_matches(as_of=now, terms=terms)
+        with_synthetic = self.registry.count_news_matches(
+            as_of=now, terms=terms, include_synthetic=True)
+        single_secondary = sum(
+            1 for r in page if str(r.get("source_tier") or "") != "primary")
+        stats = self.archive_summary()
+
+        relevance = relevance_report(
+            terms=terms, universe=universe, matched_total=matched, page=page,
+            single_secondary_total=single_secondary,
+            # Stored but not citable. Reporting the count is what stops an
+            # empty result reading as "the wire was quiet".
+            synthetic_excluded=max(0, with_synthetic - matched),
+            newest_published=stats.get("newest_published"),
+            archive_begins=stats.get("begins"),
+            providers_in_window=sorted(
+                {str(r.get("provider") or "") for r in page}),
+            as_of=now, now=now)
+
+        evidence = ArchiveEvidence(
+            # .to_dict(), not the dataclass: ArchiveEvidence reads `relevance`
+            # as a mapping. The two modules were built in parallel against one
+            # spec and met here, which is where that mismatch surfaced.
+            items=tuple(page), matched_total=matched,
+            relevance=relevance.to_dict(),
+            as_of=now, as_of_source="now", archive_begins=stats.get("begins"))
+
+        # resolve_selection validates every slot, so it can raise too. Leaving
+        # it outside the guard turned a bad selection into a 500 rather than the
+        # named refusal this whole path exists to produce.
+        requested = "unresolved"
+        try:
+            selection = model_catalog.resolve_selection()
+            requested = selection.reasoner
+            spec = model_catalog.check_eligible(selection.reasoner, slot="reasoner")
+            provider = model_catalog.get_provider(spec.provider)
+            configured, why = provider.configured()
+            if not configured:
+                raise model_catalog.ProviderError(why)
+        # Both, because they are SIBLINGS under RuntimeError rather than
+        # parent and child — catching ModelError alone let an unconfigured
+        # provider escape as a 500.
+        except (model_catalog.ModelError, model_catalog.ProviderError) as exc:
+            # Named, never substituted: an answer served by a model the operator
+            # did not choose is worse than no answer.
+            self.registry.record_event("atlas_reason_refused", {
+                "model_id": requested, "reason": str(exc)[:400]})
+            return {"available": False, "model_id": requested,
+                    "reason": str(exc), "question": question}
+
+        facts = self.atlas_facts(offline)
+        view = reason(
+            context=self.atlas_context(offline), evidence=evidence,
+            question=question, mode=str(self.atlas.status().get("mode") or ""),
+            facts=facts, spec=spec, complete=provider.complete)
+
+        payload = view.to_dict() if hasattr(view, "to_dict") else dict(view.__dict__)
+        payload["available"] = True
+        self.registry.record_event("atlas_reasoned", {
+            "model_id": payload.get("model_id"),
+            "served_model": payload.get("served_model"),
+            "question": (question or "")[:300],
+            "citations": len(payload.get("citations") or []),
+            "offer": payload.get("offer"),
+            "offer_refused_reason": payload.get("offer_refused_reason"),
+            "matched_total": matched,
+        })
+        return payload
 
     def news_payload(self, offline: bool) -> dict:
         """The news window as a client renders it: stories, coverage, provenance.
@@ -2659,6 +2943,20 @@ def handle_api(session: UISession, method: str, path: str,
         status["coordinator"] = session.coordinator_status()
         return 200, status
 
+    if method == "POST" and path == "/api/atlas/ask":
+        question = str(body.get("question") or "").strip()
+        if not question:
+            return 400, {"error": "question is required"}
+        offline = _flagbool(body.get("offline"), session.offline_default)
+        return 200, session.atlas_reason(question=question, offline=offline)
+
+    if method == "GET" and path == "/api/news/search":
+        question = str((query.get("q") or [""])[0])
+        if not question.strip():
+            return 400, {"error": "q is required; an empty query is not a search"}
+        offline = _qbool(query, "offline", session.offline_default)
+        return 200, session.news_search(question=question, offline=offline)
+
     if method == "GET" and path == "/api/news":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.news_payload(offline)
@@ -3349,6 +3647,14 @@ def _start_atlas_heartbeat(session: UISession, *, offline: bool,
     return heartbeat
 
 
+def _alpaca_stream_runner(*, supervisor, key, secret, stop_event) -> None:
+    """The real transport: blocks on Alpaca's websocket until stopped."""
+    from qlab.data.stream import run_alpaca_market_stream
+
+    run_alpaca_market_stream(
+        supervisor, key=key, secret=secret, stop_event=stop_event)
+
+
 def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
           desk_mode: DeskMode | None = None) -> None:
     """Start the UI server (blocking). Ctrl-C to stop.
@@ -3372,6 +3678,9 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
         session.port = int(port)
         market_stop, market_thread = _start_market_topics(session)
         _start_atlas_heartbeat(session, offline=offline)
+        # The transport, injected here and nowhere else: only the serving
+        # runtime may open a websocket, and only a live desk mode will.
+        session.attach_market_stream_runner(_alpaca_stream_runner)
     except Exception:
         httpd.server_close()
         raise
@@ -3401,4 +3710,7 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
                 try:
                     _stop_market_topics(market_stop, market_thread)
                 finally:
-                    httpd.server_close()
+                    try:
+                        session.stop_market_stream()
+                    finally:
+                        httpd.server_close()

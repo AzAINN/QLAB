@@ -615,3 +615,17 @@ def test_check_targets_allows_liquidation_below_fully_invested():
     with pytest.raises(MandateViolation, match="fully-invested"):
         mandate.check_targets(liquidation)
     mandate.check_targets(liquidation, allow_liquidation=True)  # no raise
+
+
+def test_the_workstation_argv_carries_the_data_lane():
+    # The launcher resolves a desk mode either way; dropping the lane on the
+    # exec meant a live owner drawn by a client that only ever asked for the
+    # offline view.
+    from qlab.autopilot.cli import atlas_client_argv
+
+    assert atlas_client_argv("/x/atlas", operator=False, offline=True) == \
+        ["/x/atlas"]
+    assert atlas_client_argv("/x/atlas", operator=False, offline=False) == \
+        ["/x/atlas", "--live"]
+    assert atlas_client_argv("/x/atlas", operator=True, offline=False) == \
+        ["/x/atlas", "--operator", "--live"]

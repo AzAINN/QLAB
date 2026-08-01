@@ -529,7 +529,7 @@
   "errors": 0,
   "last_tick_at": 1034246.190896333,
   "last_error": "",
-  "last_error_at": "",
+  "last_error_at": null,
   "last_state": "observing",
   "autonomous": true,
   "coordinator": {

@@ -44,7 +44,10 @@ class AtlasHeartbeat:
         self._ticks = 0
         self._errors = 0
         self._last_error = ""
-        self._last_error_at = ""
+        # None, not "": the client types this field off the wire shape, and a
+        # sentinel of a different JSON type than the value poisons the whole
+        # snapshot on the first failing tick.
+        self._last_error_at: float | None = None
         self._last_tick_at: float | None = None
         self._last_result: dict | None = None
         self._lock = threading.RLock()
@@ -152,6 +155,17 @@ def build_owner_tick(session, lock, *, offline: bool,
                         offline,
                         prefetched_news=prefetched_news,
                     )
+                    # Inside the lock the compose already holds, and guarded
+                    # separately: an archive fault is worth an event, but it
+                    # must not reach mark_desk_read_stale and make a healthy
+                    # window look stale.
+                    archive = getattr(session, "archive_desk_news", None)
+                    if callable(archive):
+                        try:
+                            archive(prefetched_news)
+                        except Exception as exc:
+                            session.registry.record_event(
+                                "news_archive_failed", {"error": str(exc)[:400]})
             except Exception as exc:
                 # A read failure must not stop the supervisor from observing —
                 # but the cached read must not keep passing as current either,

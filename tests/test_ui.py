@@ -244,6 +244,88 @@ def test_data_health_withdraws_execution_when_quotes_stale(session):
     assert health["quote_health"]["fresh"] is False
 
 
+def test_a_live_desk_mode_attaches_the_market_stream(session, monkeypatch):
+    # The comment above `market_stream = None` promised an attachment "under an
+    # operational policy"; nothing ever performed it, so live desks priced off
+    # the daily bar path forever. The transport is injected: a bare session
+    # (every other test here) never opens a socket.
+    import threading
+
+    from qlab.core.desk_mode import DeskMode
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials",
+        lambda: AlpacaCredentials(
+            kind="api_key", api_key="k", secret_key="s",
+            oauth_token=None, profile_name=None, source="test"))
+
+    calls, ran = [], threading.Event()
+
+    def fake_runner(*, supervisor, key, secret, stop_event):
+        calls.append((supervisor, key, secret, stop_event))
+        ran.set()
+
+    session.attach_market_stream_runner(fake_runner)
+    # A runner alone attaches nothing: demo mode has no live feed to hold.
+    assert session.market_stream is None
+
+    session.set_desk_mode(DeskMode("live", "simulated"))
+    assert session.market_stream is not None
+    assert list(session.market_stream.symbols) == \
+        list(session.mandate.universe_whitelist)
+    assert ran.wait(2.0)
+    [(supervisor, key, secret, stop)] = calls
+    assert supervisor is session.market_stream
+    assert (key, secret) == ("k", "s")
+
+    session.set_desk_mode(DeskMode("synthetic", "simulated"))
+    # The switch tears the transport down, not just the handle.
+    assert session.market_stream is None
+    assert stop.is_set()
+
+
+def test_live_mode_without_credentials_names_the_gap(session, monkeypatch):
+    # Invariant 4: a live desk that cannot stream says which credential is
+    # missing, rather than reporting the demo runtime's reason.
+    from qlab.core.desk_mode import DeskMode
+
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: None)
+    session.attach_market_stream_runner(
+        lambda **kw: pytest.fail("the transport must not run without keys"))
+    session.set_desk_mode(DeskMode("live", "simulated"))
+
+    assert session.market_stream is None
+    status, out = handle_api(session, "GET", "/api/quotes", {}, {})
+    assert status == 200
+    assert out["live_stream"] is False
+    assert "ALPACA_API_KEY" in out["reason"]
+
+
+def test_an_oauth_profile_is_named_not_prescribed_again(session, monkeypatch):
+    # An operator with a browser-login profile has already done `alpaca profile
+    # login`; telling them to do it again is a loop. The refusal must say the
+    # data websocket needs an API key pair and that the profile cannot carry it.
+    from qlab.core.desk_mode import DeskMode
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials",
+        lambda: AlpacaCredentials(
+            kind="oauth", api_key=None, secret_key=None,
+            oauth_token="t", profile_name="paper", source="profile"))
+    session.attach_market_stream_runner(
+        lambda **kw: pytest.fail("an oauth token cannot open the websocket"))
+    session.set_desk_mode(DeskMode("live", "simulated"))
+
+    assert session.market_stream is None
+    _, out = handle_api(session, "GET", "/api/quotes", {}, {})
+    assert "browser login" in out["reason"]
+    assert "ALPACA_API_KEY" in out["reason"]
+    assert "profile login" not in out["reason"]
+
+
 def test_regime_panel_endpoint_is_a_diagnostic_not_a_signal(session):
     status, panel = handle_api(session, "GET", "/api/regime/panel",
                                {"offline": ["1"]}, {})

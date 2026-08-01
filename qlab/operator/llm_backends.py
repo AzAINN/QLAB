@@ -84,8 +84,15 @@ class LlmBackend(Protocol):
         """What this backend can serve RIGHT NOW — empty when it cannot."""
 
     def complete(self, system: str, user: str, model: str,
-                 max_tokens: int = 1024) -> str:
-        """One blocking, conclusions-only completion. Raises, never returns ''."""
+                 max_tokens: int = 1024, timeout: float | None = None) -> str:
+        """One blocking, conclusions-only completion. Raises, never returns ''.
+
+        ``timeout`` is the caller's own ceiling in seconds; ``None`` takes the
+        backend's default. A caller with a human waiting on the answer sets it
+        far below that default, and a backend clamps rather than trusts — a
+        request handler that inherited a batch deadline would hold a worker
+        thread for minutes on a question the operator gave up on.
+        """
 
 
 def _head(raw: bytes | str) -> str:
@@ -148,6 +155,18 @@ class _Unreachable(Exception):
     """Internal: nothing answered on the socket. Absence, never a fault."""
 
 
+def _deadline(asked: float | None, ceiling: float) -> float:
+    """The caller's timeout, never above the backend's own ceiling.
+
+    Clamped rather than trusted: a deadline is a promise about how long a
+    thread is held, and a backend that honoured an arbitrary caller value would
+    let one request pin an owner worker for as long as it liked.
+    """
+    if asked is None:
+        return ceiling
+    return min(float(asked), ceiling)
+
+
 class _HttpFault(LlmBackendError):
     """A backend answered with an error status. Carries it as data.
 
@@ -182,6 +201,18 @@ class OllamaBackend:
         # carry userinfo; ``safe_url`` is the ONLY one this module is allowed to
         # say out loud. Every operator-facing string below reads safe_url.
         self.safe_url = _safe_url(self.base_url)
+        # A config typo is not a stopped daemon, and saying "ollama is not
+        # running" about `10.0.0.5:11434` sends an operator to restart a service
+        # that was never addressed. Worse, the two failed differently: urlopen
+        # turns a bad *scheme* into an OSError (absence), while a string with no
+        # scheme at all fails in ``Request.__init__`` with a ValueError — which
+        # is neither absence nor ``LlmBackendError`` and escaped the catalog's
+        # own except clause as a 500. One check, before the socket, for both.
+        split = urllib.parse.urlsplit(self.base_url)
+        self._malformed: str | None = (
+            None if split.scheme in ("http", "https") and split.netloc
+            else (f"not a URL: {self.safe_url} — QLAB_OLLAMA_URL must carry a "
+                  f"scheme, e.g. {OLLAMA_DEFAULT_URL}"))
 
     # -- transport ----------------------------------------------------------
 
@@ -199,6 +230,11 @@ class OllamaBackend:
         ``URLError`` (refused, DNS) and a socket timeout are ``OSError``, so the
         single broad clause below is the absence case in full.
         """
+        if self._malformed is not None:
+            # Raised as absence so all three protocol methods report it in their
+            # own shape — (False, reason), [], and LlmBackendError — from one
+            # check, instead of each learning what a bad URL looks like.
+            raise _Unreachable(self._malformed)
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path, data=body,
@@ -274,7 +310,7 @@ class OllamaBackend:
             return []
 
     def complete(self, system: str, user: str, model: str,
-                 max_tokens: int = 1024) -> str:
+                 max_tokens: int = 1024, timeout: float | None = None) -> str:
         payload = {
             "model": model,
             "messages": [
@@ -287,8 +323,9 @@ class OllamaBackend:
             "options": {"num_predict": max_tokens},
         }
         try:
-            response = self._request("/api/chat", payload=payload,
-                                     timeout=COMPLETE_TIMEOUT_S)
+            response = self._request(
+                "/api/chat", payload=payload,
+                timeout=_deadline(timeout, COMPLETE_TIMEOUT_S))
         except _Unreachable as exc:
             raise LlmBackendError(str(exc)) from None
         except _HttpFault as exc:
@@ -361,6 +398,16 @@ class ClaudeCliBackend:
         ``--system-prompt`` replaces rather than appends (``--append-…``): the
         caller's prompt is the whole instruction, and Claude Code's coding-agent
         preamble would otherwise answer a desk question as an engineer.
+
+        ``--setting-sources project`` completes the isolation the throwaway cwd
+        only started. That cwd stops CLAUDE.md discovery and nothing else: the
+        operator's own ``~/.claude/settings.json`` — their hooks, their
+        permissions, their status line — still loaded, so a desk answer varied
+        with whose machine the owner ran on. Naming ``project`` alone drops the
+        user and local sources, and the project source resolves inside the empty
+        temp directory below, which has none. The flag is verified present in
+        ``claude --help``; an unknown flag would make the CLI exit non-zero and
+        every completion an ``LlmBackendError``.
         """
         argv = [
             executable,
@@ -369,6 +416,7 @@ class ClaudeCliBackend:
             "--system-prompt", system,
             "--strict-mcp-config",
             "--mcp-config", json.dumps({"mcpServers": {}}),
+            "--setting-sources", "project",
             "--tools", "",
             "--disable-slash-commands",
             "--no-chrome",
@@ -383,10 +431,11 @@ class ClaudeCliBackend:
         return argv
 
     def complete(self, system: str, user: str, model: str,
-                 max_tokens: int = 1024) -> str:
+                 max_tokens: int = 1024, timeout: float | None = None) -> str:
         # ``max_tokens`` has no CLI flag. It is part of the protocol so callers
         # can budget a backend that honours it; here it cannot bind, and saying
-        # so in a comment beats pretending it does.
+        # so in a comment beats pretending it does. ``timeout`` does bind —
+        # subprocess enforces it — so the two are not the same kind of promise.
         if model not in CLAUDE_MODELS:
             raise LlmBackendError(
                 f"the claude backend cannot serve model {model!r}; "
@@ -395,6 +444,7 @@ class ClaudeCliBackend:
         if not executable:
             raise LlmBackendError(_NO_CLAUDE_REASON)
         argv = self._argv(executable, system, user, model)
+        deadline = _deadline(timeout, CLAUDE_TIMEOUT_S)
         try:
             # A throwaway cwd: run from the checkout and the CLI would discover
             # the repo's CLAUDE.md and answer with the desk's build context
@@ -405,10 +455,10 @@ class ClaudeCliBackend:
                     # The CLI emits UTF-8; the OS locale would mojibake it and a
                     # stray byte would kill the read (claude.py:1022-1026).
                     encoding="utf-8", errors="replace",
-                    timeout=CLAUDE_TIMEOUT_S)
+                    timeout=deadline)
         except subprocess.TimeoutExpired:
             raise LlmBackendError(
-                f"the claude CLI did not answer within {CLAUDE_TIMEOUT_S:.0f}s"
+                f"the claude CLI did not answer within {deadline:.0f}s"
             ) from None
         except OSError as exc:
             raise LlmBackendError(f"the claude CLI could not be run: {exc}") from None

@@ -38,6 +38,11 @@ class _FakeBackend:
     # must turn into a reason rather than a 500.
     boom: Exception | None = None
     probes: list[str] = []
+    # What a completion answers, and the log of what it was asked. The chat
+    # surface is the first caller that wants words back rather than a reason.
+    said: str = "Flat because nothing cleared the gate; turbulence is the reason."
+    fails: Exception | None = None
+    calls: list[dict] = []
 
     def available(self) -> tuple[bool, str]:
         type(self).probes.append("available")
@@ -51,11 +56,19 @@ class _FakeBackend:
             raise self.boom
         return list(self.served)
 
+    def complete(self, system: str, user: str, model: str,
+                 max_tokens: int = 1024, timeout: float | None = None) -> str:
+        type(self).calls.append({"system": system, "user": user, "model": model,
+                                 "max_tokens": max_tokens, "timeout": timeout})
+        if self.fails is not None:
+            raise self.fails
+        return self.said
+
 
 def _fake(name: str, **attrs) -> type:
     """One fake backend class with its own probe log."""
     return type(f"Fake_{name}", (_FakeBackend,),
-                {"name": name, "probes": [], **attrs})
+                {"name": name, "probes": [], "calls": [], **attrs})
 
 
 @pytest.fixture
@@ -726,3 +739,201 @@ def test_a_schemeless_url_never_prints_its_userinfo():
     assert "s3cr3t" not in reason and "10.0.0.5:11434" in reason
     # The connect URL keeps what it needs to connect with.
     assert "s3cr3t" in backend.base_url
+    # ...and the sentence names the actual fault. "ollama is not running" sent
+    # an operator to restart a daemon that was never addressed.
+    assert "not a URL" in reason and "is not running" not in reason
+    assert backend.models() == []
+
+    # The form that did not merely mislead: with no scheme at all, urlopen
+    # never runs — `Request.__init__` raises ValueError, which is neither
+    # absence nor LlmBackendError, so it escaped the catalog's except clause
+    # and 500'd the one route the picker needs to render itself.
+    bare = OllamaBackend("10.0.0.5:11434")
+    assert bare.available() == (False, bare._malformed)
+    assert bare.models() == []
+
+
+# ---------------------------------------------------------------------------
+# B1: the desk answers through the configured reasoner
+# ---------------------------------------------------------------------------
+
+def _ask(owner, text: str = "why are we flat?") -> tuple[int, dict]:
+    from qlab.ui.server import handle_api
+
+    return handle_api(owner, "POST", "/api/atlas/message", {}, {"text": text})
+
+
+def _messages(owner) -> list[dict]:
+    return [event for event in owner.registry.read_events(50, None)
+            if event["kind"] == "atlas_message"]
+
+
+def test_the_desk_answers_through_the_configured_reasoner(owner, monkeypatch):
+    """The operator's question and the model's answer are two rows on one bus.
+
+    The reply rides the EXISTING `atlas_message` kind with the text under
+    `text`, because that is the key both clients already render — the Rust
+    console's `subject` and the Textual timeline. A new kind would have been an
+    answer no client shows.
+    """
+    up = _fake("up", served=("granite3.3:8b",),
+               said="Flat is the right call: turbulence is at its 92nd pctile.")
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "granite3.3:8b")
+
+    status, out = _ask(owner)
+    assert status == 200
+    assert out["answered"] is True
+    assert out["backend"] == "up" and out["model"] == "granite3.3:8b"
+    assert out["reply"].startswith("Flat is the right call")
+
+    asked, answered = _messages(owner)
+    assert asked["payload"]["actor"] == "operator"
+    assert asked["payload"]["text"] == "why are we flat?"
+    assert answered["payload"]["actor"] == "atlas"
+    assert answered["payload"]["text"] == out["reply"]
+    assert "error" not in answered["payload"]
+
+    # The desk's own state is the question's context, and the budget binds.
+    call, = up.calls
+    assert "never" in call["system"] and "execute" in call["system"]
+    assert "why are we flat?" in call["user"]
+    assert '"regime_panel"' in call["user"] and '"startable"' in call["user"]
+    assert call["max_tokens"] <= 700
+    # A chat completion cannot ride the 300s default: the operator is waiting.
+    assert call["timeout"] is not None and call["timeout"] <= 60
+
+
+def test_the_reasoner_answers_whether_or_not_the_template_flag_is_on(
+        owner, monkeypatch):
+    """`reasoner_enabled` gates template judgment, not the chat surface.
+
+    Two different questions share one config: which model answers the operator,
+    and whether Atlas's own template choice stops being a lookup table. Chatting
+    with the desk grants no authority, so it does not wait on that switch.
+    """
+    up = _fake("up", served=("m-1",))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1")
+    assert owner.llm_config.reasoner_enabled is False
+
+    status, out = _ask(owner)
+    assert status == 200 and out["answered"] is True and up.calls
+
+
+def test_an_unavailable_reasoner_refuses_with_the_catalogs_own_reason(
+        owner, monkeypatch):
+    """No model was asked, so no answer is invented — and the reason is the
+    catalog's own sentence rather than a second opinion composed here."""
+    up = _fake("up", served=("m-1",))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1")
+
+    down = _fake("up", ok=False,
+                 why="ollama is not running at 127.0.0.1:11434 — "
+                     "start it with `ollama serve`")
+    _install(monkeypatch, up=down)
+    monkeypatch.setattr("qlab.ui.server._LLM_CATALOG_TTL_SECONDS", 0.0)
+
+    status, out = _ask(owner)
+    assert status == 200
+    assert out["answered"] is False
+    assert "ollama serve" in out["note"]
+    # The Rust toast reads Warn out of this word; a degraded desk must not
+    # render as a receipt.
+    assert "unavailable" in out["note"]
+    assert "reply" not in out
+    # Nothing was asked of the backend, so nothing can have been fabricated.
+    assert down.calls == []
+    asked, refused = _messages(owner)
+    assert asked["payload"]["actor"] == "operator"
+    assert refused["payload"]["actor"] == "atlas"
+    assert "ollama serve" in refused["payload"]["error"]
+
+
+def test_a_backend_that_fails_mid_answer_is_recorded_not_raised(owner, monkeypatch):
+    """A chat failure is a desk event, never a 500 on the operator's question."""
+    from qlab.operator.llm_backends import LlmBackendError
+
+    up = _fake("up", served=("m-1",),
+               fails=LlmBackendError("ollama did not answer within 60s"))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1")
+
+    status, out = _ask(owner)
+    assert status == 200
+    assert out["answered"] is False
+    assert "unavailable" in out["note"] and "60s" in out["note"]
+    assert "reply" not in out
+    asked, refused = _messages(owner)
+    assert asked["payload"]["actor"] == "operator"
+    assert "60s" in refused["payload"]["error"]
+    # The refusal says the desk could not answer; it does not say anything
+    # about the market.
+    assert "60s" in refused["payload"]["text"]
+
+
+def test_the_completion_never_runs_under_the_dispatch_lock(owner, monkeypatch):
+    """A model call is the longest network wait the owner makes on request.
+
+    Under the dispatch lock a single question would freeze every other request
+    — the snapshot poll, the SSE poll, an approval — for up to the completion
+    timeout. The backend proves the ordering from outside: while it is
+    answering, another thread must be able to take the lock and let it go.
+    """
+    import json
+    import threading
+    import time
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    import qlab.ui.server as server_module
+
+    rival_took: list[bool] = []
+
+    class Watching(_FakeBackend):
+        name = "up"
+        probes: list[str] = []
+        calls: list[dict] = []
+        served = ("m-1",)
+
+        def complete(self, *args, **kwargs):
+            took = threading.Event()
+
+            def rival() -> None:
+                if server_module._LOCK.acquire(timeout=3.0):
+                    took.set()
+                    server_module._LOCK.release()
+
+            thread = threading.Thread(target=rival)
+            thread.start()
+            time.sleep(0.1)
+            thread.join(timeout=5.0)
+            rival_took.append(took.is_set())
+            return super().complete(*args, **kwargs)
+
+    _install(monkeypatch, up=Watching)
+    owner.set_llm_config("reasoner", "up", "m-1")
+
+    handler = type("H", (server_module._Handler,), {"session": owner})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/atlas/message",
+            data=json.dumps({"text": "why are we flat?"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        response = urllib.request.urlopen(request, timeout=20)
+        try:
+            payload = json.loads(response.read())
+        finally:
+            response.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert payload["answered"] is True
+    assert rival_took == [True], "the dispatch lock was held across the model call"

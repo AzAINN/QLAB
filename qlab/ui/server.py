@@ -41,7 +41,8 @@ POST /api/atlas/observe          run one deterministic Atlas observe tick
 POST /api/atlas/mode             set Atlas mode (observe|research|propose|paused)
 POST /api/atlas/pause            pause Atlas's autonomous work
 POST /api/atlas/resume           resume Atlas into a mode
-POST /api/atlas/message          ask Atlas a question (never grants authority)
+POST /api/atlas/message          ask Atlas a question; the configured reasoner
+                                 answers on the bus (never grants authority)
 GET  /api/events               event stream with cursor and limit
 GET  /api/plans                recent order plans
 GET  /api/orders               recent orders
@@ -125,6 +126,47 @@ _VALUATION_TTL_SECONDS = 15.0
 # `ollama pull` finishing is visible almost at once, and long enough that a
 # burst of clicks costs one probe.
 _LLM_CATALOG_TTL_SECONDS = 5.0
+# The chat surface's budget. A desk brief, not an essay: enough for a read with
+# its numbers and a recommendation, short enough that an operator gets an answer
+# rather than a wall.
+_ATLAS_REPLY_TOKENS = 700
+# And its ceiling. Far below the backends' own batch defaults (300s for Ollama,
+# 600s for the CLI) because a human is watching this one, and the thread it
+# holds is an owner worker.
+_ATLAS_REPLY_TIMEOUT_S = 60.0
+# What a single bus row may carry of an answer. `max_tokens` bounds a backend
+# that honours it; the claude CLI has no such flag, so the ceiling is enforced
+# here too — an unbounded model row rides the SSE bus to every client.
+_ATLAS_REPLY_CHARS = 4000
+
+# The desk manager's role, in qlab's own voice. This is the *judgment* half of
+# planning-docs/2026-07-31-atlas-as-llm.md:28-47 stated to the model, and the
+# refusals it names are not instructions the model is trusted to follow — they
+# are code it cannot reach. `check_startable`, the workflow budget, the
+# referee's targets_hash binding and human confirmation on every fill refuse it
+# whether or not it has read this. Saying so anyway is what keeps a reply
+# arguing inside the desk's authority instead of proposing work that will
+# simply be refused.
+_ATLAS_DESK_MANAGER_PROMPT = """\
+You are Atlas, the desk manager of qlab — a governed, single-operator quant \
+research desk. You are answering your operator directly.
+
+You decide: what is worth investigating and why now rather than later; which \
+registered workflow template fits the situation; how the qualitative record \
+and the quantitative panel relate, especially where they disagree; what the \
+operator needs told, and when silence is the right answer.
+
+You never execute. You hold no order path, no approval, and no way to create a \
+plan. The mode gate, the daily workflow budget, the referee's hash binding and \
+the human confirmation on every fill are deterministic code and refuse you as \
+written. Propose only work the `startable` list already shows as startable; \
+when nothing is, say so and say what would have to change.
+
+Answer in conclusions, not process. No preamble, no restating the question, no \
+reading the context back. Cite the numbers you actually used — a level, a \
+percentile, a headline — and name the ones that disagree with you. If the \
+context does not support an answer, say what is missing; an invented reading \
+is worse than none. Keep it to what fits on a desk card."""
 
 _MARKET_EVENT_LIMIT = 500
 # How many approvals of *each* actionable status ride in one /api/tui payload.
@@ -838,8 +880,12 @@ class UISession:
             "surface": surface,
             **self.llm_config.to_dict(),
             "effect": (
-                f"the reasoner is chosen but off; enable it to route Atlas's "
-                f"own questions to {chosen.backend} {chosen.model}"
+                # Not "off, so nothing happens": the chat surface reads the
+                # pair regardless of the switch, and a sentence saying
+                # otherwise would describe a desk that is already answering as
+                # silent. What the switch buys is the template judgment.
+                f"Atlas answers you on {chosen.backend} {chosen.model}; enable "
+                f"the reasoner to let it choose templates too"
                 if surface == "reasoner" and not self.llm_config.reasoner_enabled
                 else f"Atlas reasons with {chosen.backend} {chosen.model}"
                 if surface == "reasoner"
@@ -2070,24 +2116,124 @@ class UISession:
         return self.atlas.start_task(task_id, facts,
                                    runner=self.atlas_workflow_runner)
 
-    def atlas_message(self, body: dict) -> dict:
-        """Accept a human question or explicit workflow request.
+    def _record_atlas_reply(self, text: str, error: str | None = None) -> None:
+        """Put the desk's own words on the bus as a second `atlas_message` row.
 
-        This never grants authority. The message is recorded; a substantive
-        answer needs the coordinator, so when Claude is absent Atlas acknowledges
-        and reports itself degraded rather than fabricating an answer.
+        The existing kind, deliberately. Both clients already render it — the
+        Rust console keys `atlas_message` in `CONSOLE_KINDS` and reads `text` as
+        the row's subject, the Textual timeline prints the payload — so a reply
+        arrives in front of the operator with no client change at all. A new
+        kind would have been an answer nothing displays.
+        """
+        payload = {"actor": "atlas", "text": text[:_ATLAS_REPLY_CHARS]}
+        if error is not None:
+            payload["error"] = error[:500]
+        self.registry.record_event("atlas_message", payload)
+
+    def atlas_message(self, body: dict, offline: bool) -> dict:
+        """Answer the operator through the configured reasoner.
+
+        This never grants authority. The reply is words on a bus: no tool, no
+        plan, no approval, and no path to one. What makes that safe is not
+        instruction but absence — the model is handed a context and a question
+        and its answer is recorded, exactly as `atlas_context`'s own docstring
+        splits the reasoning surface from the gate's nine booleans.
+
+        Which model answers is `llm_config.reasoner`, and it answers whenever
+        its backend can serve. `reasoner_enabled` is NOT consulted: that flag
+        gates Atlas's template judgment (what the desk starts unattended), and
+        gating a question the operator typed behind it would withhold an answer
+        to protect an authority the answer does not carry.
+
+        **Must not be called while the dispatch lock is held.** The model call
+        is the longest network wait the owner makes on a request — up to
+        `_ATLAS_REPLY_TIMEOUT_S` — and it runs outside the lock, which is taken
+        twice and briefly around the registry work instead. `_Handler.do_POST`
+        routes this path accordingly; `_LOCK` is not reentrant.
         """
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("message text is required")
-        self.registry.record_event("atlas_message", {"text": text[:500]})
-        available = bool(shutil.which("claude"))
+        choice = self.llm_config.reasoner
+
+        # The question goes on the record before anything can fail.
+        with _LOCK:
+            self.registry.record_event(
+                "atlas_message", {"actor": "operator", "text": text[:500]})
+
+        # Outside the lock: the catalog probes the network, and it is the one
+        # place availability is asked, so the refusal carries the same sentence
+        # the picker shows rather than a second opinion composed here.
+        entries = {entry["name"]: entry
+                   for entry in self.llm_backends_catalog()["backends"]}
+        entry = entries.get(choice.backend)
+        if entry is None or not entry["available"]:
+            reason = (entry["reason"] if entry else
+                      f"this desk has no {choice.backend!r} backend")
+            return self._atlas_refusal(choice, reason)
+
+        from qlab.operator.llm_backends import LlmBackendError, build_backend
+
+        # Composed only once a model exists to read it. `atlas_context` costs a
+        # regime panel under the dispatch lock, and paying that for a desk whose
+        # reasoner is down would make the one unanswerable question the most
+        # expensive request the owner serves.
+        with _LOCK:
+            context = self.atlas_context(offline)
+        user = (
+            "The desk right now, as JSON:\n\n"
+            # Compact: this is ~12KB of context and every separator is a token.
+            f"{json.dumps(context, default=str, separators=(',', ':'))}\n\n"
+            f"The operator asks:\n\n{text}")
+        try:
+            reply = build_backend(choice.backend).complete(
+                system=_ATLAS_DESK_MANAGER_PROMPT, user=user,
+                model=choice.model, max_tokens=_ATLAS_REPLY_TOKENS,
+                timeout=_ATLAS_REPLY_TIMEOUT_S)
+        except LlmBackendError as exc:
+            # A model that was asked and could not answer is a desk event, not
+            # a 500: the operator asked a question, and "I could not answer,
+            # here is why" is an answer. Only LlmBackendError — a bug in this
+            # method must still surface as one.
+            return self._atlas_refusal(choice, str(exc), asked=True)
+
+        with _LOCK:
+            self._record_atlas_reply(reply)
         return {
             "received": True,
-            "coordinator_available": available,
-            "note": ("queued for the interpreting agent" if available
-                     else "coordinator unavailable; Atlas is degraded and cannot "
-                          "answer, but the owner, data, and book remain usable"),
+            "answered": True,
+            "backend": choice.backend,
+            "model": choice.model,
+            "reply": reply[:_ATLAS_REPLY_CHARS],
+            "note": f"{choice.backend} {choice.model} answered on the console",
+        }
+
+    def _atlas_refusal(self, choice: SurfaceModel, reason: str, *,
+                       asked: bool = False) -> dict:
+        """Record and report that the desk could not answer, and why.
+
+        Never a fabricated reply: what lands on the bus is the desk's own
+        sentence about its own failure, carrying the backend's reason verbatim.
+
+        Both notes say "unavailable" because the Rust client reads that word to
+        raise its toast from Info to Warn — a degraded desk must not render as
+        a receipt (`toast.rs`), and a backend that was asked and failed is as
+        unable to answer as one that was never reachable.
+        """
+        note = (f"the reasoner is unavailable: {choice.backend} "
+                f"{choice.model} was asked and failed — {reason}"
+                if asked else
+                f"the reasoner is unavailable; Atlas is degraded and cannot "
+                f"answer, but the owner, data, and book remain usable — "
+                f"{reason}")
+        with _LOCK:
+            self._record_atlas_reply(note, error=reason)
+        return {
+            "received": True,
+            "answered": False,
+            "backend": choice.backend,
+            "model": choice.model,
+            "note": note,
         }
 
     # -- human approvals (the persisted execution gate) ---------------------
@@ -2880,7 +3026,7 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "POST" and path == "/api/atlas/message":
         try:
-            return 200, session.atlas_message(body)
+            return 200, session.atlas_message(body, off)
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
@@ -3471,9 +3617,20 @@ class _Handler(BaseHTTPRequestHandler):
                 # different answer, and the accepted trade for the same reason
                 # the GET route accepts serving a cached catalog at all.
                 self.session.llm_backends_catalog()
-            with _LOCK:
+            if parsed.path == "/api/atlas/message":
+                # The whole route runs outside the lock, not just a warm-up: an
+                # answer is a model call, up to _ATLAS_REPLY_TIMEOUT_S of it,
+                # and one operator question must not freeze the snapshot poll,
+                # the SSE poll and every approval behind it. `atlas_message`
+                # takes the dispatch lock itself, twice and briefly, around the
+                # registry work at either end — which is why it must not be
+                # reached from inside it (`_LOCK` is not reentrant).
                 status, obj = handle_api(self.session, "POST", parsed.path,
                                          parse_qs(parsed.query), body)
+            else:
+                with _LOCK:
+                    status, obj = handle_api(self.session, "POST", parsed.path,
+                                             parse_qs(parsed.query), body)
         except Exception as exc:
             status, obj = 500, {"error": repr(exc)}
         self._json(status, obj)

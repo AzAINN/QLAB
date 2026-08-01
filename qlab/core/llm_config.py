@@ -68,6 +68,16 @@ class LlmConfig:
     workforce: SurfaceModel
     # The reasoner is a surface the desk did not have before this. Off by
     # default so an upgrade changes nothing until an operator turns it on.
+    #
+    # What it gates is narrower than its name suggests, and the split is
+    # deliberate. The `reasoner` PAIR chooses which model answers the operator's
+    # questions — `UISession.atlas_message` reads it whenever the backend can
+    # serve, because answering a question grants no authority and an operator
+    # who configured a model expects the desk to speak. This FLAG gates only
+    # Atlas's template judgment: whether "which workflow fits this situation"
+    # stops being `template_for_trigger`'s lookup table and becomes a model's
+    # choice. That is the one that changes what the desk *does* unattended, so
+    # it is the one behind a switch.
     reasoner_enabled: bool = False
 
     def with_surface(self, surface: str, choice: SurfaceModel,

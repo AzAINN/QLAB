@@ -485,6 +485,10 @@ def test_claude_completion_shells_a_toolless_one_shot(claude_on_path, monkeypatc
     assert argv[argv.index("--tools") + 1] == ""
     assert "--strict-mcp-config" in argv
     assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": {}}
+    # The throwaway cwd only stops CLAUDE.md discovery; the operator's own
+    # ~/.claude settings and hooks still loaded, so a desk answer varied with
+    # whose machine served it. `project` resolves inside that empty temp dir.
+    assert argv[argv.index("--setting-sources") + 1] == "project"
     # "--" so a prompt beginning with a dash is never parsed as a flag.
     assert argv[-2:] == ["--", "-what regime?"]
 

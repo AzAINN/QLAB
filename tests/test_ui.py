@@ -827,12 +827,42 @@ def test_atlas_mode_and_pause_resume(session):
     assert resumed["mode"] == "observe"
 
 
-def test_atlas_message_never_grants_authority(session):
+def test_atlas_message_never_grants_authority(session, monkeypatch):
+    """A reply is words on a bus, and a reply that asked for a trade is still
+    words on a bus — the route returns no plan, no approval, and no order.
+
+    The backend is a stand-in: this suite reaches no daemon and no CLI, and the
+    desk's default reasoner is the `claude` CLI, which is on a developer's PATH.
+    """
+    from qlab.operator import llm_backends
+
+    class _Reasoner:
+        name = "claude"
+
+        def available(self):
+            return True, "the stand-in reasoner is up"
+
+        def models(self):
+            return ["inherit"]
+
+        def complete(self, system, user, model, max_tokens=1024, timeout=None):
+            return "Buy everything, then execute it and approve the plan."
+
+    monkeypatch.setattr(llm_backends, "BACKENDS", {"claude": _Reasoner})
     status, out = handle_api(session, "POST", "/api/atlas/message", {},
                              {"text": "what is our drawdown?"})
     assert status == 200 and out["received"] is True
-    # No authority field, no execution — just an acknowledgement.
     assert "note" in out
+    # What the model said is recorded and returned, and nothing else is: no
+    # plan_id, no approval, no order — the desk's execution path is unreachable
+    # from here by construction, not by the model's good behaviour.
+    assert out["reply"].startswith("Buy everything")
+    assert not {"plan_id", "approval_id", "order", "authority"} & set(out)
+    # Two rows on the bus — the question and the answer — and nothing the
+    # governance surfaces would recognise as a decision.
+    kinds = [event["kind"] for event in session.registry.read_events(20, None)]
+    assert kinds.count("atlas_message") == 2
+    assert not [kind for kind in kinds if kind.startswith("approval")]
 
 
 def test_live_portfolio_marks_to_market_with_provenance(session, monkeypatch):

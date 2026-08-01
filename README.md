@@ -14,25 +14,26 @@ The whole design is one boundary:
 
 Nothing an agent says can move that boundary. That is the point of the project.
 
+[![qlab demo — the Atlas workstation on live data](https://img.youtube.com/vi/Mhk9sOC2GfE/maxresdefault.jpg)](https://youtu.be/Mhk9sOC2GfE)
+
+**▶ [Watch the demo](https://youtu.be/Mhk9sOC2GfE)** — the workstation on live
+data, a governed workforce run, and the plan stopping at the human gate.
+
 ## Start
 
-Python 3.10+.
+Python 3.10+ and Rust (for the workstation client).
 
 ```bash
 python -m pip install -e ".[operator]"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # skip if you have cargo
+(cd clients/atlas-tui && cargo build --release)                  # one-time build
 qlab tui
 ```
 
 `qlab tui` starts the owner runtime and opens the **Atlas workstation** — the
 Rust/Ratatui client in `clients/atlas-tui`, seven views on `1`–`7`: Desk,
-Markets, Book, Research, Workforce, Audit, Settings. It needs Rust and a
-one-time build; the launcher refuses rather than falling back if the binary is
-not there.
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # skip if you have cargo
-cd clients/atlas-tui && cargo build --release
-```
+Markets, Book, Research, Workforce, Audit, Settings. The launcher refuses
+rather than falling back if the binary is not there.
 
 ```bash
 qlab tui --classic    # the Textual client, against the same owner

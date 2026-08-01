@@ -14,6 +14,8 @@ GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
 GET  /api/desk_mode            the chosen data source and book + credential status
 POST /api/desk_mode            choose the data source and the book
+POST /api/alpaca/credentials   store an Alpaca paper login (never switches book)
+POST /api/alpaca/test          ask the venue whether the stored login works
 GET  /api/llm/backends         model backends, availability, and what they serve
 POST /api/llm                  point a surface at a model, or switch the reasoner
 GET  /api/data/health          data-policy provenance, freshness, eligibility
@@ -743,6 +745,50 @@ class UISession:
             "credentials": description,
             "credentials_ok": ok,
         }
+
+    def set_alpaca_credentials(self, api_key: object, api_secret: object) -> dict:
+        """Store a login the operator typed, and report what the desk can see.
+
+        The write itself belongs to ``alpaca_auth`` and stays there: it is the
+        single secrets authority, so no surface — this one included — learns
+        what a profile looks like or what mode it needs.
+
+        The book is NOT switched. Mode is explicit-never-inferred
+        (``desk_mode.py``), so a login makes LIVE·ALPACA *choosable* and
+        nothing more; ``credentials_ok`` in the response is how the client
+        learns that.
+        """
+        from qlab.trader.alpaca_auth import write_credentials
+
+        write_credentials(api_key, api_secret)
+        # Names nothing else. An event row replays forever, so neither the key,
+        # nor the secret, nor a mask of either, nor the path they went to
+        # belongs on the bus — "a login was stored, from the desk" is the whole
+        # auditable fact.
+        self.registry.record_event(
+            "alpaca.credentials_updated", {"source": "tui"})
+        return self.desk_mode_payload()
+
+    def probe_alpaca_credentials(self) -> dict:
+        """Ask the venue whether the resolved credentials work.
+
+        Does network I/O: callers must NOT hold the owner dispatch lock — the
+        same rule as ``llm_backends_catalog``, and do_POST routes it outside
+        for exactly that reason.
+
+        Every outcome is a result rather than a rejection, including a broken
+        credential source. This route takes no body, so there is no input for a
+        400 to be about, and a client that has to render "did it work?" should
+        read one shape however the answer turned out.
+        """
+        from qlab.trader.alpaca_auth import (
+            AlpacaAuthError, probe_credentials, resolve_alpaca_credentials)
+
+        try:
+            creds = resolve_alpaca_credentials()
+        except AlpacaAuthError as exc:
+            return {"ok": False, "reason": str(exc)}
+        return probe_credentials(creds).to_dict()
 
     # -- model routing ------------------------------------------------------
     def llm_backends_catalog(self, refresh: bool = False) -> dict:
@@ -3073,6 +3119,21 @@ def handle_api(session: UISession, method: str, path: str,
         session.set_desk_mode(mode)
         return 200, session.desk_mode_payload()
 
+    if method == "POST" and path == "/api/alpaca/credentials":
+        from qlab.trader.alpaca_auth import AlpacaAuthError
+
+        try:
+            return 200, session.set_alpaca_credentials(
+                body.get("api_key"), body.get("api_secret"))
+        except AlpacaAuthError as exc:
+            # The module's own sentence, which never quotes what was typed.
+            return 400, {"error": str(exc)}
+
+    if method == "POST" and path == "/api/alpaca/test":
+        # Network I/O. do_POST runs this one outside the dispatch lock; it
+        # touches no registry state, so it does not need it.
+        return 200, session.probe_alpaca_credentials()
+
     if method == "GET" and path == "/api/llm/backends":
         # Network I/O. do_GET runs this one outside the dispatch lock; nothing
         # here touches the registry, so it does not need it.
@@ -3819,7 +3880,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # different answer, and the accepted trade for the same reason
                 # the GET route accepts serving a cached catalog at all.
                 self.session.llm_backends_catalog()
-            if parsed.path == "/api/atlas/message":
+            if parsed.path in ("/api/atlas/message", "/api/alpaca/test"):
                 # The whole route runs outside the lock, not just a warm-up: an
                 # answer is a model call, up to _ATLAS_REPLY_TIMEOUT_S of it,
                 # and one operator question must not freeze the snapshot poll,
@@ -3827,6 +3888,13 @@ class _Handler(BaseHTTPRequestHandler):
                 # takes the dispatch lock itself, twice and briefly, around the
                 # registry work at either end — which is why it must not be
                 # reached from inside it (`_LOCK` is not reentrant).
+                #
+                # The credential probe is here for the same reason and a
+                # simpler one: it is a socket to a venue with a PROBE_TIMEOUT_S
+                # deadline, and it touches no registry state at all, so it has
+                # no business holding the book while an operator waits on
+                # Alpaca. Storing a login does take the lock — that one writes
+                # an event row.
                 status, obj = handle_api(self.session, "POST", parsed.path,
                                          parse_qs(parsed.query), body)
             else:

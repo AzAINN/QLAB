@@ -1011,3 +1011,297 @@ def test_the_completion_never_runs_under_the_dispatch_lock(owner, monkeypatch):
 
     assert payload["answered"] is True
     assert rival_took == [True], "the dispatch lock was held across the model call"
+
+
+# ---------------------------------------------------------------------------
+# the reasoner's template judgment (B2) — the flag's first real reader
+# ---------------------------------------------------------------------------
+
+def _reply(template_id: str, rationale: str = "Turbulence is at its 92nd "
+                                              "percentile and credit is "
+                                              "unspoken for.") -> str:
+    import json as _json
+
+    return _json.dumps({"template_id": template_id, "rationale": rationale})
+
+
+def _canned_facts(**over) -> dict:
+    """The nine flat fields `check_startable` reads, with nothing blocked.
+
+    Hand-built rather than taken from the owner: `atlas_facts` CONSUMES a
+    regime flip (it records the state it saw), so a test that called it to
+    build a fixture would find the tick that followed reporting no flip.
+    """
+    facts = {
+        "universe": ["ACWI", "BNDW"],
+        "data": {"provider": "synthetic", "blocked": False,
+                 "eligible_for_paper_proposal": False},
+        "portfolio": {"equity": 10000.0, "drawdown": 0.01,
+                      "drawdown_tier": "none", "halted": False,
+                      "gross_exposure": 1.0, "drift": 0.0},
+        "regime": {"robust_state": "turbulent", "flip": True},
+        "open_workflows": 0, "pending_approvals": 0,
+        # `news_read` needs a non-empty window; without one the reasoner's menu
+        # is a single entry and there is nothing to diverge about.
+        "news_window_sufficient": True, "news_window_items": 19,
+    }
+    facts.update(over)
+    return facts
+
+
+def _pin_facts(owner, monkeypatch, facts: dict) -> None:
+    monkeypatch.setattr(owner, "atlas_facts", lambda offline: dict(facts))
+
+
+def _tick(owner, *, autonomous: bool = False) -> dict:
+    """One heartbeat tick against the real owner and the real dispatch lock."""
+    from qlab.operator.heartbeat import build_owner_tick
+    from qlab.ui.server import _LOCK
+
+    return build_owner_tick(owner, _LOCK, offline=True,
+                            autonomous=autonomous)()
+
+
+def _tasks(owner) -> list[dict]:
+    return owner.registry.list_atlas_tasks(50)
+
+
+def _events(owner, kind: str) -> list[dict]:
+    return [event for event in owner.registry.read_events(200, None)
+            if event["kind"] == kind]
+
+
+def test_the_flag_off_leaves_the_lookup_exactly_where_it_was(owner, monkeypatch):
+    """Differential: with the switch off every trigger keeps the table's answer.
+
+    The cheap version of a full differential — every trigger kind that maps to
+    a template is driven through the supervisor and compared against
+    TRIGGER_TEMPLATE itself, and the reasoner is never asked at all.
+    """
+    from qlab.operator.templates import TRIGGER_TEMPLATE
+
+    up = _fake("up", served=("m-1",), said=_reply("news_read"))
+    _install(monkeypatch, up=up)
+    # The pair is configured; the FLAG is what stays off.
+    owner.set_llm_config("reasoner", "up", "m-1")
+    assert owner.llm_config.reasoner_enabled is False
+
+    _pin_facts(owner, monkeypatch, _canned_facts(
+        startup=True, portfolio={"equity": 10000.0, "drawdown": 0.2,
+                                 "drawdown_tier": "warning", "halted": False,
+                                 "gross_exposure": 1.0, "drift": 0.9}))
+    _tick(owner)
+
+    chosen = {task["trigger_kind"]: task["template_id"] for task in _tasks(owner)}
+    assert chosen, "no trigger fired; the differential would be vacuous"
+    for kind, template_id in chosen.items():
+        assert template_id == TRIGGER_TEMPLATE.get(kind), kind
+    assert up.calls == [], "the reasoner was asked while its flag was off"
+    assert _events(owner, "reasoner.divergence") == []
+    assert _events(owner, "reasoner.fallback") == []
+    assert {row["payload"]["source"] for row in _events(owner, "atlas_task")} == {
+        "lookup"}
+
+
+def test_the_reasoner_chooses_the_template_and_the_gate_runs_after_it(
+        owner, monkeypatch):
+    """Judgment is the model's; authority is still `check_startable`'s.
+
+    The order is the whole design, so it is asserted rather than assumed: the
+    model answers, and the gate runs on what it returned afterwards, in code
+    the model cannot reach.
+    """
+    from qlab.operator import templates as templates_module
+
+    order: list[str] = []
+
+    class Ordered(_FakeBackend):
+        name = "up"
+        probes: list[str] = []
+        calls: list[dict] = []
+        served = ("m-1",)
+        said = _reply("news_read")
+
+        def complete(self, *args, **kwargs):
+            order.append("reasoner")
+            return super().complete(*args, **kwargs)
+
+    real_gate = templates_module.check_startable
+
+    def spied(template_id, mode, facts):
+        order.append("gate")
+        return real_gate(template_id, mode, facts)
+
+    monkeypatch.setattr(templates_module, "check_startable", spied)
+    _install(monkeypatch, up=Ordered)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    _pin_facts(owner, monkeypatch, _canned_facts())
+
+    _tick(owner)
+
+    flip = [task for task in _tasks(owner)
+            if task["trigger_kind"] == "regime_flip"]
+    assert len(flip) == 1
+    # The table would have said `regime_review`; the reasoner said otherwise
+    # and its choice survived the gate, so its choice is what runs.
+    assert flip[0]["template_id"] == "news_read"
+    row, = [e["payload"] for e in _events(owner, "atlas_task")
+            if e["payload"]["trigger"] == "regime_flip"]
+    assert row["source"] == "reasoner"
+    assert row["template_id"] == "news_read"
+
+    assert "reasoner" in order, "the model was never asked"
+    # Whatever the gate did while composing the menu, the LAST word is the
+    # gate's, after the reply came back.
+    assert order[-1] == "gate"
+    assert order.index("reasoner") < len(order) - 1
+
+    # The menu it was offered came from the gate, and the table's own answer
+    # was withheld — a comparison contaminated by the answer is not one.
+    call, = Ordered.calls
+    assert "news_read" in call["user"] and "regime_review" in call["user"]
+    assert "desk_rebalance_review" not in call["user"]
+    assert "lookup" not in call["user"]
+    assert call["timeout"] is not None and call["timeout"] <= 45
+
+
+def test_a_reply_outside_the_startable_set_is_discarded_and_the_table_stands(
+        owner, monkeypatch):
+    """The reasoner may want anything; it selects among what the gate permits."""
+    # Research mode refuses every plan-creating template, so this is a real
+    # authority violation rather than a typo.
+    up = _fake("up", served=("m-1",), said=_reply("desk_rebalance_review"))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    _pin_facts(owner, monkeypatch, _canned_facts())
+
+    _tick(owner)
+
+    flip, = [task for task in _tasks(owner)
+             if task["trigger_kind"] == "regime_flip"]
+    assert flip["template_id"] == "regime_review"
+    row, = [e["payload"] for e in _events(owner, "atlas_task")
+            if e["payload"]["trigger"] == "regime_flip"]
+    assert row["source"] == "lookup"
+
+    fallback, = _events(owner, "reasoner.fallback")
+    reason = fallback["payload"]["reason"]
+    # Refused by the PARSER, against the menu the gate composed — the reply
+    # never reached the point of being gated, which is what "the reasoner
+    # selects among what check_startable already permits" means.
+    assert "desk_rebalance_review" in reason
+    assert "startable" in reason
+    assert _events(owner, "reasoner.divergence") == []
+
+
+def test_a_backend_that_fails_mid_observe_leaves_the_deterministic_path_whole(
+        owner, monkeypatch):
+    """A reasoner that cannot answer degrades the desk to the table, never stops it."""
+    from qlab.operator.llm_backends import LlmBackendError
+
+    up = _fake("up", served=("m-1",),
+               fails=LlmBackendError("ollama did not answer within 45s"))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    _pin_facts(owner, monkeypatch, _canned_facts())
+
+    result = _tick(owner)
+
+    assert result["state"] in ("observing", "coordinating")
+    flip, = [task for task in _tasks(owner)
+             if task["trigger_kind"] == "regime_flip"]
+    assert flip["template_id"] == "regime_review"
+    fallback, = _events(owner, "reasoner.fallback")
+    assert "45s" in fallback["payload"]["reason"]
+
+
+def test_a_divergent_choice_is_recorded_so_the_two_paths_can_be_compared(
+        owner, monkeypatch):
+    """The doc's condition for ever removing the table: both answers, one trigger."""
+    up = _fake("up", served=("m-1",),
+               said=_reply("news_read",
+                           "The record is thin: 15% corroboration and nothing "
+                           "on credit. Read the window before re-estimating."))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    _pin_facts(owner, monkeypatch, _canned_facts())
+
+    _tick(owner)
+
+    divergence, = _events(owner, "reasoner.divergence")
+    payload = divergence["payload"]
+    assert payload["trigger"] == "regime_flip"
+    assert payload["reasoner"] == "news_read"
+    assert payload["lookup"] == "regime_review"
+    assert payload["rationale"].startswith("The record is thin")
+
+
+def test_the_gate_refuses_a_choice_the_mode_stopped_allowing_mid_flight(
+        owner, monkeypatch):
+    """The second gate run is load-bearing, and this is the case that proves it.
+
+    The menu is composed in one lock phase and the reply is gated in the next,
+    so an operator who drops the desk to Observe mode while the model is still
+    answering is the one window in which `check_startable` sees something the
+    menu did not. Without the re-check, judgment made under Research authority
+    would execute under Observe authority — the reasoner widening what the desk
+    does by nothing more than being slow.
+    """
+    class Racing(_FakeBackend):
+        name = "up"
+        probes: list[str] = []
+        calls: list[dict] = []
+        served = ("m-1",)
+        said = _reply("news_read")
+
+        def complete(self, *args, **kwargs):
+            # The operator's hand on the mode switch, mid-completion.
+            owner.atlas.set_mode("observe")
+            return super().complete(*args, **kwargs)
+
+    _install(monkeypatch, up=Racing)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    _pin_facts(owner, monkeypatch, _canned_facts())
+
+    _tick(owner)
+
+    assert Racing.calls, "the reasoner was never asked; the race never happened"
+    flip, = [task for task in _tasks(owner)
+             if task["trigger_kind"] == "regime_flip"]
+    assert flip["template_id"] == "regime_review", "judgment outlived its authority"
+    row, = [e["payload"] for e in _events(owner, "atlas_task")
+            if e["payload"]["trigger"] == "regime_flip"]
+    assert row["source"] == "lookup"
+    fallback, = _events(owner, "reasoner.fallback")
+    assert "the gate refused" in fallback["payload"]["reason"]
+    assert "Observe mode" in fallback["payload"]["reason"]
+    assert _events(owner, "reasoner.divergence") == []
+
+
+def test_a_backend_that_explodes_while_being_probed_still_leaves_a_whole_tick(
+        owner, monkeypatch):
+    """Not every failure is an `LlmBackendError`, and the tick may not care.
+
+    The catalog turns a *misbehaving* backend into a reason, but a backend that
+    raises something else entirely — a bug, a broken socket library — comes
+    straight out of the probe. That happens on the observe loop's path now, so
+    an unguarded probe would skip the whole deterministic tick: no task, no
+    drawdown tier, no approval expiry, once per tick for as long as it lasts.
+    """
+    up = _fake("up", served=("m-1",))
+    _install(monkeypatch, up=up)
+    # Configured while healthy — the picker refuses a backend it cannot probe,
+    # so the only way to reach a tick with a broken one is to break it after.
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    up.boom = RuntimeError("the probe segfaulted")
+    owner._llm_catalog = None      # past the TTL the picker's warm entry sits in
+    _pin_facts(owner, monkeypatch, _canned_facts())
+
+    result = _tick(owner)
+
+    assert result["state"] in ("observing", "coordinating")
+    flip, = [task for task in _tasks(owner)
+             if task["trigger_kind"] == "regime_flip"]
+    assert flip["template_id"] == "regime_review"
+    fallback, = _events(owner, "reasoner.fallback")
+    assert "segfaulted" in fallback["payload"]["reason"]

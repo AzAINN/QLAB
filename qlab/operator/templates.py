@@ -1,10 +1,12 @@
 """The registered workflow templates Atlas may start, and nothing else.
 
 Atlas does not compose arbitrary work. In Research mode it may start one of these
-named templates, chosen deterministically by the trigger that woke it; the
-interpreting agent may argue for a different registered template but cannot
-invent one. Each template declares what it needs before it can start and what
-authority it carries — and none of them carry execution authority.
+named templates, chosen by ``TRIGGER_TEMPLATE`` from the trigger that woke it or
+— behind ``reasoner_enabled`` — by the reasoner from ``startable_templates``,
+which is this module's own gate answering "what may run right now". Either way
+the menu is this registry: an agent may argue for a different registered
+template and cannot invent one. Each template declares what it needs before it
+can start and what authority it carries — and none carry execution authority.
 
 ``creates_plan`` is the authority boundary: in Research mode a template that
 would create a paper plan is refused. Propose mode (a later phase) is what
@@ -164,3 +166,23 @@ def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplat
 
 def template_for_trigger(trigger_kind: str) -> str | None:
     return TRIGGER_TEMPLATE.get(trigger_kind)
+
+
+def startable_templates(mode: str, facts: dict) -> dict[str, str]:
+    """Every registered template Atlas may start right now → its purpose.
+
+    The reasoner's menu, and it is *derived* from ``check_startable`` rather
+    than written down beside it. A second list of what is permitted would be a
+    second authority, and the two would disagree the first time a template's
+    requirements changed — which is exactly the failure this whole gate exists
+    to prevent. Nothing here relaxes anything: a template absent from this map
+    is one ``check_startable`` refuses, for the reason it gives.
+    """
+    allowed: dict[str, str] = {}
+    for template_id, template in TEMPLATES.items():
+        try:
+            check_startable(template_id, mode, facts)
+        except TemplateNotAllowed:
+            continue
+        allowed[template_id] = template.purpose
+    return allowed

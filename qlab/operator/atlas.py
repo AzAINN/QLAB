@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from qlab.state.registry import Registry
+
+if TYPE_CHECKING:      # annotations only; a runtime import would be a cycle
+    from qlab.operator.reasoner import ReasonerChoice
 
 MANAGER_ID = "atlas"
 
@@ -121,6 +125,18 @@ class AtlasSupervisor:
                 {"mode": DEFAULT_MODE, "state": STARTING}, MANAGER_ID)
 
     # -- mode / lifecycle controls ------------------------------------------
+    @property
+    def mode(self) -> str:
+        """The persisted authority mode. The one read, in one place.
+
+        Four call sites read it with the same inline `or {}` dance and a fifth
+        was about to: the owner needs it to compose the reasoner's menu, and a
+        menu built from a differently-defaulted mode than the gate uses is the
+        exact disagreement `startable_templates` exists to prevent.
+        """
+        return (self.registry.get_atlas_state(MANAGER_ID) or {}).get(
+            "mode", "observe")
+
     def status(self) -> dict:
         state = self.registry.get_atlas_state(MANAGER_ID) or {}
         return {
@@ -150,16 +166,55 @@ class AtlasSupervisor:
         return self.set_mode(mode)
 
     # -- the observe tick (deterministic; no LLM for unchanged health) ------
-    def observe(self, facts: dict, *, trading_date: str) -> dict:
+    def pending_judgments(self, facts: dict, *,
+                          trading_date: str) -> list[Trigger]:
+        """Triggers that would open a NEW task and so need a template chosen.
+
+        Deterministic, read-only, and with no model anywhere near it: the owner
+        calls this while it holds its dispatch lock and asks the reasoner
+        outside it, which is the only arrangement in which a model call can sit
+        on the observe loop's path without freezing the owner.
+
+        Deduplicated on purpose. A condition that persists — a drawdown tier, a
+        drift breach — fires on every tick and creates exactly one task, so
+        asking a model on each of those ticks would spend the desk's latency
+        and the operator's tokens on an answer discarded before it was read.
+        The daily budget is checked for the same reason: a workflow trigger
+        past the ceiling starts nothing, so its template is not worth choosing.
+        """
+        if self.mode == "paused":
+            return []
+        known = {task.get("dedupe_key")
+                 for task in self.registry.list_atlas_tasks(200)}
+        pending: list[Trigger] = []
+        for trig in self._evaluate_triggers(facts):
+            if trig.template_id is None or trig.action == "block":
+                continue
+            if trig.action == "workflow" and not self._within_daily_budget(
+                    trading_date):
+                continue
+            if self._dedupe_key(trig, trading_date, facts) in known:
+                continue
+            pending.append(trig)
+        return pending
+
+    def observe(self, facts: dict, *, trading_date: str,
+                judgments: Mapping[str, "ReasonerChoice"] | None = None) -> dict:
         """Evaluate triggers against owner facts and persist any new tasks.
 
         Returns a summary: the resolved lifecycle state, the deterministic desk
         brief, and the tasks created this tick (deduplicated). In Observe mode
         no workforce is launched; workflow-action triggers are recorded as
         queued tasks for a human or a higher mode to act on.
+
+        ``judgments`` maps a trigger kind to the reasoner's template choice for
+        it, already made — out of band, by the owner, from a menu this gate
+        composed. It arrives as *data* rather than as a callable so this method
+        stays what its docstring has always said it is: deterministic, with no
+        model call inside it and nothing that can block the loop. An empty or
+        absent map is the desk exactly as it was before the reasoner existed.
         """
-        state_row = self.registry.get_atlas_state(MANAGER_ID) or {}
-        mode = state_row.get("mode", "observe")
+        mode = self.mode
         coordinator = bool(self._coordinator_available())
 
         triggers = self._evaluate_triggers(facts)
@@ -179,13 +234,28 @@ class AtlasSupervisor:
                         f"autonomous workflow budget exhausted "
                         f"({self.config.max_autonomous_workflows_per_day}/day)")
                     continue
+                template_id, source, judged = self._judged_template(
+                    trig, mode, facts, judgments)
                 dedupe = self._dedupe_key(trig, trading_date, facts)
                 task_id = self._id_gen()
                 if self.registry.create_atlas_task(
-                        task_id, dedupe, trig.kind, trig.payload, trig.template_id):
+                        task_id, dedupe, trig.kind, trig.payload, template_id):
                     self.registry.record_event(
                         "atlas_task", {"task_id": task_id, "trigger": trig.kind,
-                                     "action": trig.action})
+                                     "action": trig.action,
+                                     # Which path chose the template, on every
+                                     # row. The doc's condition for ever
+                                     # removing the table is that both are
+                                     # recorded against identical facts and
+                                     # compared; a row that did not say which
+                                     # one it came from would make that
+                                     # comparison unrunnable after the fact.
+                                     "template_id": template_id,
+                                     "source": source})
+                    if judged is not None:
+                        kind, payload = judged
+                        self.registry.record_event(
+                            kind, {"task_id": task_id, **payload})
                     created.append({"task_id": task_id, "trigger": trig.kind,
                                     "action": trig.action})
 
@@ -211,7 +281,7 @@ class AtlasSupervisor:
         from qlab.operator.templates import (
             TemplateNotAllowed, check_startable, template_for_trigger)
 
-        mode = (self.registry.get_atlas_state(MANAGER_ID) or {}).get("mode", "observe")
+        mode = self.mode
         out: list[dict] = []
         for task in self.registry.list_atlas_tasks(50):
             if task.get("status") != "queued":
@@ -259,7 +329,7 @@ class AtlasSupervisor:
                               blocked_reason=f"task {task_id} exhausted retries")
             return {"started": False, "blocked_by": "retry_budget"}
 
-        mode = (self.registry.get_atlas_state(MANAGER_ID) or {}).get("mode", "observe")
+        mode = self.mode
         template_id = str(task.get("template_id") or "")
         try:
             template = check_startable(template_id, mode, facts)
@@ -404,6 +474,47 @@ class AtlasSupervisor:
         }
 
     # -- internals -----------------------------------------------------------
+    def _judged_template(
+        self, trig: Trigger, mode: str, facts: dict,
+        judgments: Mapping[str, "ReasonerChoice"] | None,
+    ) -> tuple[str | None, str, tuple[str, dict] | None]:
+        """Which template this trigger starts, and which path chose it.
+
+        The order is the whole design and it is ``start_task``'s precedent:
+        authority is checked in code, after judgment, never by it.
+        The reasoner has already chosen — out of band, from a menu
+        ``check_startable`` composed — and here the SAME gate runs again on
+        what it returned. That second run is not belt-and-braces: the menu was
+        composed one lock phase earlier, so a mode the operator changed in
+        between is caught here and nowhere else.
+
+        Returns ``(template_id, source, event)`` where ``source`` is
+        ``reasoner`` or ``lookup`` and ``event`` is the extra row to record
+        once the task actually exists — a divergence to compare later, or the
+        reason a choice was dropped. Nothing is recorded here, because a
+        deduplicated trigger creates no task and must leave no trace either.
+        """
+        from qlab.operator.templates import TemplateNotAllowed, check_startable
+
+        lookup = trig.template_id
+        choice = (judgments or {}).get(trig.kind)
+        if choice is None:
+            return lookup, "lookup", None
+        try:
+            check_startable(choice.template_id, mode, facts)
+        except TemplateNotAllowed as exc:
+            # Discarded loudly. The reasoner may want anything; what it gets is
+            # what the gate already permits, and the table's answer stands.
+            return lookup, "lookup", ("reasoner.fallback", {
+                "trigger": trig.kind, "lookup": lookup,
+                "reasoner": choice.template_id,
+                "reason": f"the gate refused the reasoner's choice: {exc}"})
+        if choice.template_id == lookup:
+            return choice.template_id, "reasoner", None
+        return choice.template_id, "reasoner", ("reasoner.divergence", {
+            "trigger": trig.kind, "reasoner": choice.template_id,
+            "lookup": lookup, "rationale": choice.rationale[:300]})
+
     def _evaluate_triggers(self, facts: dict) -> list[Trigger]:
         triggers: list[Trigger] = []
         data = facts.get("data", {})

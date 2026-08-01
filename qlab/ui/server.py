@@ -138,6 +138,12 @@ _ATLAS_REPLY_TIMEOUT_S = 60.0
 # that honours it; the claude CLI has no such flag, so the ceiling is enforced
 # here too — an unbounded model row rides the SSE bus to every client.
 _ATLAS_REPLY_CHARS = 4000
+# How many template judgments one observe tick will pay for. Triggers are
+# already deduplicated before they get here, so this bites only when several
+# distinct conditions appear at once — and a tick that turned into a batch of
+# model calls would stall the desk's own loop for their sum. The rest fall back
+# to the table, which is exactly why the table is still here.
+_REASONER_MAX_PER_TICK = 2
 
 # The desk manager's role, in qlab's own voice. This is the *judgment* half of
 # planning-docs/2026-07-31-atlas-as-llm.md:28-47 stated to the model, and the
@@ -1393,7 +1399,7 @@ class UISession:
         return {"as_of": as_of, "fingerprint": fingerprint, "decisions": rows}
 
     # -- Atlas desk manager -------------------------------------------
-    def atlas_context(self, offline: bool) -> dict:
+    def atlas_context(self, offline: bool, *, facts: dict | None = None) -> dict:
         """The rich, abstract surface a reasoning Atlas forms a view from.
 
         Deliberately NOT `atlas_facts`. That surface feeds `check_startable`,
@@ -1410,8 +1416,17 @@ class UISession:
         past decisions arrive with what actually happened. Nothing here is
         summarised down to a verdict, because summarising to a verdict is the
         judgment the reasoner is supposed to be doing.
+
+        ``facts`` is accepted rather than always recomputed because
+        ``atlas_facts`` is not idempotent within a tick: ``_atlas_regime_facts``
+        records the robust state it saw, so a second call reports ``flip:
+        False`` and a context composed that way would tell the reasoner nothing
+        happened on the very tick something did.
         """
-        facts = self.atlas_facts(offline)
+        from qlab.operator.templates import startable_templates
+
+        if facts is None:
+            facts = self.atlas_facts(offline)
         read = self.desk_read(offline)
         try:
             panel = self.regime_panel(offline)
@@ -1495,6 +1510,12 @@ class UISession:
             # so the reasoner argues within its authority rather than proposing
             # work that will simply be refused.
             "startable": self.atlas.startable_tasks(facts),
+            # And the menu itself: every registered template the gate permits
+            # right now, keyed by id. `startable` above is about the QUEUED
+            # tasks; this is about the templates, which is the set a template
+            # choice has to come from. Derived from `check_startable`, never
+            # written down beside it.
+            "startable_templates": startable_templates(self.atlas.mode, facts),
         }
 
     def atlas_facts(self, offline: bool) -> dict:
@@ -1577,19 +1598,132 @@ class UISession:
             self._last_robust_state = state
         return {"robust_state": state, "flip": flip}
 
-    def atlas_observe(self, offline: bool) -> dict:
+    def atlas_observe(self, offline: bool, *, facts: dict | None = None,
+                      judgments: dict | None = None) -> dict:
         """Run one deterministic Atlas observe tick against current owner facts.
 
         Reconciliation runs first: a dispatched workflow may have reached a
         terminal state since the last tick (or while this process was down), and
         its task must be resolved from that state before new work is considered.
+
+        ``facts`` and ``judgments`` are the reasoner's two-phase tick handing
+        back what it took. ``facts`` MUST be the same dict the judgment was
+        made against — not because recomputing is slow but because
+        ``atlas_facts`` consumes a regime flip, so a second assembly in one tick
+        reports no flip and the observe would refuse to act on the very change
+        the reasoner was just asked about.
+
+        Both default to absent, which is this method exactly as it was: the
+        `/api/atlas/observe` route passes neither, deliberately. That route runs
+        inside the dispatch lock, where a model call cannot go, so a manual tick
+        is deterministic and the desk's own heartbeat is the one loop that
+        carries judgment.
         """
         reconciled = self.atlas.reconcile_tasks()
-        facts = self.atlas_facts(offline)
-        observed = self.atlas.observe(facts, trading_date=date.today().isoformat())
+        if facts is None:
+            facts = self.atlas_facts(offline)
+        observed = self.atlas.observe(facts, trading_date=date.today().isoformat(),
+                                      judgments=judgments)
         if reconciled:
             observed = {**observed, "reconciled_tasks": reconciled}
         return observed
+
+    def atlas_judgment_request(self, offline: bool) -> dict:
+        """The facts and the triggers whose template the reasoner may choose.
+
+        Registry-only and cheap — no model call — because the caller holds the
+        dispatch lock here. Empty when the flag is off, and empty is the whole
+        of the off state: nothing else in this path runs, so a desk that never
+        turned the reasoner on takes exactly the code it took before.
+
+        The facts come back with the request because the observe phase must use
+        these and not its own (see ``atlas_observe``). The context is composed
+        only when something is actually pending, since it costs a regime panel.
+        """
+        if not self.llm_config.reasoner_enabled:
+            return {}
+        facts = self.atlas_facts(offline)
+        pending = self.atlas.pending_judgments(
+            facts, trading_date=date.today().isoformat())
+        request = {"facts": facts, "triggers": pending}
+        if pending:
+            request["context"] = self.atlas_context(offline, facts=facts)
+        return request
+
+    def atlas_judge(self, request: dict) -> dict:
+        """Ask the reasoner which template fits each pending trigger.
+
+        **Must not be called while the dispatch lock is held.** This makes
+        model calls — the same rule and the same reason as ``atlas_message``,
+        and here it is load-bearing rather than polite: the observe tick holds
+        the lock for its whole body, so a completion inside it would freeze the
+        snapshot poll, the SSE poll and every approval behind them for up to
+        ``REASONER_TIMEOUT_S``. It takes ``_LOCK`` itself, briefly, only to
+        record what it could not do.
+
+        Returns the choices that were made; a trigger absent from the map falls
+        back to the table in ``observe``. Every failure is one of those
+        absences, because the deterministic path has to complete regardless of
+        what the reasoner did.
+        """
+        triggers = request.get("triggers") or []
+        if not triggers:
+            return {}
+        choice = self.llm_config.reasoner
+        # (trigger kind or None, why) — recorded once, at the end, under a
+        # brief lock this method takes for itself.
+        notes: list[tuple[str | None, str]] = []
+        chosen: dict = {}
+
+        try:
+            # Deliberately broad, against this file's usual rule, and it starts
+            # at the PROBE rather than at the completion. A reasoner bug must
+            # degrade the desk to the lookup, not stop the heartbeat: the
+            # observe that follows this line is what keeps the drawdown tiers
+            # and the approval expiry moving, and it is the deterministic half.
+            # The catalog turns a misbehaving backend into a reason but lets
+            # anything that is not an `LlmBackendError` straight through, and
+            # on this path — unlike the picker route, where it becomes one
+            # failed render — that would skip the whole tick, every tick, for
+            # as long as the condition lasted. The reason is recorded, so a
+            # desk that has quietly stopped judging is visible on the bus
+            # rather than merely quiet.
+            #
+            # The catalog is the one place availability is asked, so a refusal
+            # here carries the picker's own sentence rather than a second
+            # opinion.
+            entries = {entry["name"]: entry
+                       for entry in self.llm_backends_catalog()["backends"]}
+            entry = entries.get(choice.backend)
+            if entry is None or not entry["available"]:
+                # `trigger: null` — this refusal is about the desk, not about
+                # one trigger, and a wildcard string in a field that otherwise
+                # holds a trigger kind would read as one.
+                notes.append((None, entry["reason"] if entry else
+                              f"this desk has no {choice.backend!r} backend"))
+            else:
+                from qlab.operator.llm_backends import build_backend
+                from qlab.operator.reasoner import choose_template
+
+                backend = build_backend(choice.backend)
+                for trig in triggers[:_REASONER_MAX_PER_TICK]:
+                    picked = choose_template(
+                        request.get("context") or {}, trig, backend,
+                        choice.model,
+                        note=lambda why, kind=trig.kind: notes.append((kind, why)))
+                    if picked is not None:
+                        chosen[trig.kind] = picked
+        except Exception as exc:
+            notes.append((None, f"the reasoner could not be asked: {exc!r}"))
+
+        if notes:
+            with _LOCK:
+                for trigger_kind, why in notes:
+                    self.registry.record_event("reasoner.fallback", {
+                        "trigger": trigger_kind, "backend": choice.backend,
+                        "model": choice.model,
+                        "reason": self._bounded(why, 500)})
+        return chosen
 
     def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:
         """Atlas's composed qualitative read across signals, news, and research.

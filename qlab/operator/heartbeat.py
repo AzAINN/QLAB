@@ -9,6 +9,14 @@ takes the same dispatch lock the HTTP handlers use, so a tick never races a
 request. Everything it does is deterministic: assemble owner facts, evaluate
 triggers, persist any new task, publish a state event. No LLM call happens on
 a quiet tick — an unchanged desk costs nothing.
+
+The one exception is the reasoner's template judgment, and it is shaped by that
+rule rather than against it. It runs only when the operator has switched
+``reasoner_enabled`` on AND a trigger would open a genuinely new task, so a
+quiet tick still costs nothing; and when it does run, the tick splits in two so
+the completion happens with the dispatch lock RELEASED. A model call inside the
+lock would hold the snapshot poll, the SSE poll and every approval behind it
+for the reasoner's whole timeout.
 """
 
 from __future__ import annotations
@@ -130,6 +138,14 @@ def build_owner_tick(session, lock, *, offline: bool,
     refuses anything the mode forbids, so autonomy in Research mode launches
     research and still cannot create a paper plan. It only removes the need for
     a human to press the button on work Atlas was already allowed to do.
+
+    The tick is in two lock phases rather than one when the reasoner is on:
+    take the lock, compose the read and gather what needs judging; release it
+    and ask the model; take it again and observe. Each phase is internally
+    consistent and the owner facts are assembled exactly once and carried
+    across, which matters for correctness and not just cost —
+    ``_atlas_regime_facts`` records the state it saw, so a second assembly in
+    one tick reports no flip.
     """
 
     def tick() -> dict:
@@ -138,6 +154,20 @@ def build_owner_tick(session, lock, *, offline: bool,
         # happen below while the one-writer boundary is held.
         fetch_news = getattr(session, "fetch_desk_news", None)
         prefetched_news = fetch_news(offline) if callable(fetch_news) else None
+        live_autonomous = autonomous
+
+        def observe(**handed) -> dict:
+            # `handed` is empty unless the reasoner ran, so a desk with the
+            # flag off calls exactly what it called before.
+            result = session.atlas_observe(offline, **handed)
+            result["autonomous_enabled"] = bool(live_autonomous)
+            if live_autonomous:
+                try:
+                    result["autonomous"] = session.atlas_run_startable(offline)
+                except Exception as exc:
+                    result["autonomous_error"] = str(exc)[:200]
+            return result
+
         with lock:
             # Read the switch each tick so the UI toggle takes effect
             # immediately rather than at the next owner restart.
@@ -160,14 +190,23 @@ def build_owner_tick(session, lock, *, offline: bool,
                 mark_stale = getattr(session, "mark_desk_read_stale", None)
                 if callable(mark_stale):
                     mark_stale(str(exc))
-            result = session.atlas_observe(offline)
-            result["autonomous_enabled"] = bool(live_autonomous)
-            if live_autonomous:
-                try:
-                    result["autonomous"] = session.atlas_run_startable(offline)
-                except Exception as exc:
-                    result["autonomous_error"] = str(exc)[:200]
-            return result
+            # Facts and the triggers whose template a reasoner may choose.
+            # Empty unless the reasoner flag is on, and a session that predates
+            # the method (a test stub) is the same as the flag being off.
+            request_judgments = getattr(session, "atlas_judgment_request", None)
+            request = (request_judgments(offline)
+                       if callable(request_judgments) else {})
+            if not request:
+                return observe()
+
+        # Outside the lock, and that placement is the whole reason this tick is
+        # split in two: a completion under the owner's dispatch lock would hold
+        # every request behind it for the reasoner's timeout. The facts travel
+        # with the request because `atlas_facts` consumes a regime flip and must
+        # not be assembled twice in one tick.
+        judgments = session.atlas_judge(request)
+        with lock:
+            return observe(facts=request.get("facts"), judgments=judgments)
 
     return tick
 

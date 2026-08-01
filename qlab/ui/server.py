@@ -1700,13 +1700,16 @@ class UISession:
         triggers = request.get("triggers") or []
         if not triggers:
             return {}
-        choice = self.llm_config.reasoner
         # (trigger kind or None, why) — recorded once, at the end, under a
         # brief lock this method takes for itself.
         notes: list[tuple[str | None, str]] = []
         chosen: dict = {}
 
         try:
+            # Inside the guard with everything else it feeds. Reading the
+            # persisted config is not obviously fallible, which is exactly how
+            # it sat above the try being called bare from the heartbeat.
+            choice = self.llm_config.reasoner
             # Deliberately broad, against this file's usual rule, and it starts
             # at the PROBE rather than at the completion. A reasoner bug must
             # degrade the desk to the lookup, not stop the heartbeat: the
@@ -1755,9 +1758,18 @@ class UISession:
             notes.append((None, f"the reasoner could not be asked: {exc!r}"))
 
         if notes:
-            with _LOCK:
-                for trigger_kind, why in notes:
-                    self.note_reasoner_fallback(trigger_kind, why)
+            try:
+                with _LOCK:
+                    for trigger_kind, why in notes:
+                        self.note_reasoner_fallback(trigger_kind, why)
+            except Exception:
+                # A recorder that throws must not do what it guards. This block
+                # sat outside the try above, so a failing `record_event` — the
+                # write that exists to keep a degraded reasoner VISIBLE — was
+                # itself enough to abort the tick, since `atlas_judge` is called
+                # bare from the heartbeat. Losing the note is a lost note;
+                # losing the tick is a desk that stopped observing.
+                pass
         return chosen
 
     def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:

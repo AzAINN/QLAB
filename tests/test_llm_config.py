@@ -1362,3 +1362,100 @@ def test_a_broken_desk_composition_cannot_take_the_deterministic_tick_down(
     fallback, = _events(owner, "reasoner.fallback")
     assert "came apart" in fallback["payload"]["reason"]
     assert up.calls == [], "a desk that could not be composed was asked anyway"
+
+
+def _pin_consuming_facts(owner, monkeypatch, facts: dict) -> dict:
+    """`atlas_facts` as it really behaves: the reader CONSUMES the flip.
+
+    `_atlas_regime_facts` records the robust state it saw, so the first
+    assembly in a tick reports the flip and every one after it reports none.
+    A fixture that hands back the same dict forever cannot tell facts that were
+    *preserved* across the two lock phases from facts that were *recomputed* —
+    which is the entire difference the inner guard exists to make. Both guards
+    look identical under a constant mock; under this one they do not.
+
+    Returns the call counter, so a test can say which assembly it got.
+    """
+    seen = {"n": 0}
+    regime = dict(facts.get("regime") or {})
+
+    def assembled(offline):
+        out = dict(facts)
+        out["regime"] = dict(regime, flip=seen["n"] == 0)
+        seen["n"] += 1
+        return out
+
+    monkeypatch.setattr(owner, "atlas_facts", assembled)
+    return seen
+
+
+def test_the_composer_guard_keeps_the_flip_it_already_spent(owner, monkeypatch):
+    """The inner guard's whole point, and it needs a fixture that can see it.
+
+    By the time the context blows up, `atlas_facts` has already consumed this
+    tick's regime flip. Falling through without the facts would send `observe`
+    to assemble them a second time, and the second assembly reports no flip —
+    so the desk completes a tick that silently forgets the change it was about
+    to reason about. Returning `{}` from that except block passes every other
+    test in this file.
+    """
+    up = _fake("up", served=("m-1",), said=_reply("news_read"))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    seen = _pin_consuming_facts(owner, monkeypatch, _canned_facts())
+    # Autonomy off so the counter means what it says: `atlas_run_startable`
+    # assembles facts again AFTER observe, which is harmless to the flip and
+    # noise to a test about how many times it was read before one.
+    monkeypatch.setattr(owner, "autonomous", False)
+
+    def came_apart(offline):
+        raise RuntimeError("the news payload came apart")
+
+    monkeypatch.setattr(owner, "news_payload", came_apart)
+
+    _tick(owner)
+
+    # The flip was spent composing a context that failed, and it still reached
+    # the supervisor — because the facts travelled, not because they were
+    # recomputed. A second assembly would have reported `flip: False`.
+    assert seen["n"] == 1, "the facts were assembled twice; the flip was lost"
+    flip, = [task for task in _tasks(owner)
+             if task["trigger_kind"] == "regime_flip"]
+    assert flip["template_id"] == "regime_review"
+    fallback, = _events(owner, "reasoner.fallback")
+    # The composer's own sentence: this guard, not the one above it.
+    assert "could not be composed" in fallback["payload"]["reason"]
+
+
+def test_the_heartbeat_guard_catches_what_the_composer_does_not(owner, monkeypatch):
+    """The outer net, witnessed on its own.
+
+    Everything the composer anticipates it now guards itself, which is why this
+    injection fails the composer's own frame instead — the config read, the
+    `getattr`, or whatever call is added there next. Without the heartbeat's
+    `try` the tick dies and the deterministic half never runs.
+    """
+    up = _fake("up", served=("m-1",), said=_reply("news_read"))
+    _install(monkeypatch, up=up)
+    owner.set_llm_config("reasoner", "up", "m-1", enabled=True)
+    seen = _pin_consuming_facts(owner, monkeypatch, _canned_facts())
+    monkeypatch.setattr(owner, "autonomous", False)      # see the test above
+
+    def unprepared(offline):
+        raise RuntimeError("the judgment request came apart")
+
+    monkeypatch.setattr(owner, "atlas_judgment_request", unprepared)
+
+    result = _tick(owner)
+
+    assert result["state"] in ("observing", "coordinating")
+    # Nothing was consumed before the failure, so observe's own assembly is the
+    # first one and still carries the flip.
+    assert seen["n"] == 1
+    flip, = [task for task in _tasks(owner)
+             if task["trigger_kind"] == "regime_flip"]
+    assert flip["template_id"] == "regime_review"
+    fallback, = _events(owner, "reasoner.fallback")
+    # The heartbeat's own sentence, distinct from the composer's above.
+    assert "could not be prepared" in fallback["payload"]["reason"]
+    assert up.calls == [], "a tick that could not be prepared asked anyway"

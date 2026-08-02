@@ -204,6 +204,16 @@ async fn run(
         // decides against the instant the caller measured, not against whatever
         // the clock says several statements later.
         let now = Instant::now();
+        // And the one wall-clock read, taken here for the same reason and put
+        // on the store as data. An `Instant` is monotonic — it cannot be
+        // compared with a stamp the owner wrote — and exactly one row needs
+        // that comparison (`format::since`). Every renderer stays a pure
+        // function of the store, and a clock this loop never reached would
+        // leave the model reading's age permanently `--`.
+        store.wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| i64::try_from(since.as_secs()).ok());
         let mut quit = false;
         if let Some(first) = next {
             quit |= ingest(

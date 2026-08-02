@@ -312,20 +312,57 @@ mod armed {
     /// read, and silence about the credential that reaches a real venue must
     /// not pass as a clean one. Invariant 4: refuse loudly rather than degrade
     /// quietly.
+    ///
+    /// The description is **bounded**, which the refusal path already was and
+    /// this one was not. It is the 200 body rather than a 400, so C2 read it as
+    /// the owner's own and safe; but nothing on this path is guaranteed to be
+    /// the owner's — a proxy answering 200 with a page of its own reaches the
+    /// same toast — and the rule is cheaper to keep uniform than to reason
+    /// about per call site. `NOTE_MAX` is the toast's own room: two wrapped
+    /// lines of a box that has to stay readable over whatever pane is under it.
     fn credentials_of(said: &serde_json::Value) -> Result<String, String> {
+        const NOTE_MAX: usize = 160;
         let described = said
             .get("credentials")
             .and_then(|v| v.as_str())
             // `Some("")` is absent, as everywhere in this client.
-            .filter(|said| !said.is_empty());
+            .filter(|said| !said.is_empty())
+            .map(|said| crate::format::bounded(said, NOTE_MAX));
         match said.get("credentials_ok").and_then(|v| v.as_bool()) {
-            Some(true) => Ok(described
-                .unwrap_or("the owner reports a usable Alpaca login")
-                .to_string()),
+            Some(true) => {
+                Ok(described.unwrap_or_else(|| "the owner reports a usable Alpaca login".into()))
+            }
             Some(false) => Err(described
-                .unwrap_or("the owner reports no usable Alpaca credentials")
-                .to_string()),
+                .unwrap_or_else(|| "the owner reports no usable Alpaca credentials".into())),
             None => Err("the owner did not say whether the Alpaca credentials work".to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_stored_login_reports_the_owners_description_bounded_like_every_other() {
+            // The C2 residual: the 200 path rendered the description straight
+            // into a toast. A 200 is not proof the answer came from the owner.
+            let said = serde_json::json!({
+                "credentials_ok": true,
+                "credentials": "a ".repeat(400),
+            });
+            let note = credentials_of(&said).unwrap();
+            assert!(note.ends_with('…'), "{note}");
+            assert!(note.chars().count() <= 161, "{note}");
+            // And the ordinary sentence is untouched — the bound is a ceiling,
+            // not a reformatting.
+            let said = serde_json::json!({
+                "credentials_ok": false,
+                "credentials": "no ALPACA_API_KEY_ID in the environment or .env",
+            });
+            assert_eq!(
+                credentials_of(&said),
+                Err("no ALPACA_API_KEY_ID in the environment or .env".to_string())
+            );
         }
     }
 }

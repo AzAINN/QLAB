@@ -39,6 +39,7 @@ fn every_modeled_section_is_present_in_the_fixture() {
     assert!(s.desk_mode.is_some(), "desk_mode");
     assert!(s.policy.is_some(), "policy");
     assert!(s.system.is_some(), "system");
+    assert!(s.llm.is_some(), "llm");
     assert!(!s.leaderboard.is_empty(), "leaderboard");
     assert!(!s.runs.is_empty(), "runs");
     assert!(!s.algorithms.is_empty(), "algorithms");
@@ -53,6 +54,20 @@ fn absent_sections_decode_as_none_not_zero() {
     assert!(s.market.is_none());
     assert!(s.performance.is_none());
     assert!(s.events.is_empty());
+
+    // The owner serves `availability: null` from startup until the picker's own
+    // route probes once, and a bare `#[serde(default)]` would reject the whole
+    // snapshot over it — the `null_or_default` rule, which is why every desk
+    // that has not yet asked its backends still renders.
+    let s: Snapshot =
+        serde_json::from_str(r#"{"llm": {"availability": null, "probed_at": null}}"#).unwrap();
+    let llm = s.llm.unwrap();
+    assert!(llm.availability.is_empty());
+    assert_eq!(llm.probed_at, None);
+    assert!(
+        llm.reasoner_enabled.is_none(),
+        "an owner that did not say is not a reasoner that is switched off"
+    );
 
     let s: Snapshot = serde_json::from_str(r#"{"live_portfolio": {}}"#).unwrap();
     let live = s.live_portfolio.unwrap();

@@ -154,6 +154,11 @@ pub fn fixture_store() -> Store {
     // address instead of whichever `QLAB_UI_PORT` the test binary happened to
     // see. The default port every qlab surface agrees on.
     store.base = "http://127.0.0.1:8765".to_string();
+    // The mocked clock: twelve seconds after the fixture's own `llm.probed_at`.
+    // Set here for the reason `base` is — the runtime reads a wall clock once
+    // per iteration and puts it on the store, so an age on a golden is a fact
+    // about the fixture rather than about how long the suite took to reach it.
+    store.wall = Some(1_785_696_869);
     let now = Instant::now();
     store.apply(AppEvent::ConnUp(Channel::Owner), now);
     store.apply(AppEvent::Snapshot(Box::new(snapshot)), now);

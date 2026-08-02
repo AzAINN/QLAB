@@ -192,6 +192,153 @@ fn a_window_that_cannot_switch_the_desk_does_not_offer_the_way_to() {
     assert!(content(&frame).contains("read-only"), "{frame}");
 }
 
+// -- the models card --------------------------------------------------------
+//
+// The clock these read against is passed in, never read here: `Store::wall` is
+// data the runtime stamps, so an age on a golden is a fact about the fixture
+// rather than about how long the suite took to reach this line.
+
+/// Twelve seconds after `llm.probed_at` in the fixture and in every inline
+/// block below.
+const NOW: i64 = 1_785_696_869;
+const PROBED: &str = "2026-08-02T18:54:17.856581+00:00";
+
+/// SETTINGS over an owner that answered about its models, at a fixed clock.
+fn models_from(llm: &str) -> Client {
+    let mut store = store_from(&format!(r#"{{"llm": {llm}}}"#));
+    store.wall = Some(NOW);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('7'));
+    client
+}
+
+#[test]
+fn the_models_card_names_the_backend_each_surface_actually_runs_on() {
+    let client = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "ollama", "model": "granite3.3:8b"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "claude", "available": true, "reason": "claude CLI on PATH"}},
+                              {{"name": "ollama", "available": true,
+                                "reason": "ollama at 127.0.0.1:11434, 1 model pulled"}}],
+             "probed_at": "{PROBED}"}}"#
+    ));
+    let frame = client.frame(120, 36);
+    let body = content(&frame);
+    assert!(body.contains("MODELS"), "{body}");
+    assert!(
+        line_with(&frame, "reasoner").contains("ollama · granite3.3:8b"),
+        "{frame}"
+    );
+    // The flag, not the choice: a model named for a reasoner nobody switched on
+    // is a mind the desk is not using.
+    assert!(line_with(&frame, "judgment").contains("on"), "{frame}");
+    // The A3 carry — a claude surface never offers a model name, because the
+    // tier map owns it and the picker would be offering a choice that does
+    // nothing.
+    assert!(
+        line_with(&frame, "workforce").contains("claude · tiers decide"),
+        "{frame}"
+    );
+    // And never a model name beside it: on the claude path the tier map owns
+    // the model, so a name here would be an offer that changes nothing.
+    assert!(
+        !line_with(&frame, "workforce").contains("inherit"),
+        "{frame}"
+    );
+    // A backend that can serve is not a quiet fact either.
+    assert_eq!(
+        body_style_of(&client.buffer(120, 36), "ollama · granite3.3:8b").fg,
+        Some(Theme::truecolor().positive)
+    );
+    // The A2 carry: the block is the LAST reading, so the card says how old it
+    // is rather than presenting it as live.
+    assert!(line_with(&frame, "probed").contains("12s ago"), "{frame}");
+}
+
+#[test]
+fn a_backend_that_cannot_serve_is_toned_and_carries_the_owners_own_reason() {
+    // The owner's sentence verbatim (`OllamaBackend._absent_reason`): it names
+    // the remedy, and this client owns none of that wording.
+    let client = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "ollama", "model": "granite3.3:8b"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "claude", "available": true, "reason": "claude CLI on PATH"}},
+                              {{"name": "ollama", "available": false,
+                                "reason": "ollama is not running at 127.0.0.1:11434 — start it with `ollama serve`"}}],
+             "probed_at": "{PROBED}"}}"#
+    ));
+    let frame = client.frame(120, 36);
+    assert_eq!(
+        body_style_of(&client.buffer(120, 36), "ollama · granite3.3:8b").fg,
+        Some(Theme::truecolor().warning),
+        "a mind the desk cannot reach is not a quiet fact"
+    );
+    assert!(content(&frame).contains("ollama serve"), "{frame}");
+    assert_eq!(
+        body_style_of(&client.buffer(120, 36), "ollama is not running").fg,
+        Some(Theme::truecolor().text_dim),
+        "the reason explains the tone; it does not compete with it"
+    );
+}
+
+#[test]
+fn an_owner_string_on_this_card_is_bounded_rather_than_left_to_run() {
+    // Nothing on the wire is guaranteed to be the owner's — a proxy in front of
+    // the desk answers with pages of its own — and the C2 rule is now uniform:
+    // every foreign string a surface renders is collapsed and cut at the
+    // boundary rather than pushing the rows under it off the card.
+    let client = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "ollama", "model": "granite3.3:8b"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "ollama", "available": false,
+                                "reason": "{}"}}],
+             "probed_at": "{PROBED}"}}"#,
+        "verbose ".repeat(400)
+    ));
+    let body = content(&client.frame(120, 36));
+    assert!(body.contains('…'), "{body}");
+    // The card ends where it always did — the theme card under it is still on
+    // the frame, which is the property an unbounded reason would take away.
+    assert!(body.contains("palette"), "{body}");
+}
+
+#[test]
+fn a_desk_that_has_not_probed_says_so_rather_than_claiming_a_fresh_reading() {
+    // A2's first state: the config is served from the moment the owner starts,
+    // and `availability` stays null until something asks the backends. "Nothing
+    // has been probed" and "everything is absent" are different facts.
+    let client = models_from(
+        r#"{"reasoner": {"backend": "claude", "model": "inherit"},
+            "workforce": {"backend": "claude", "model": "inherit"},
+            "reasoner_enabled": false,
+            "availability": null, "probed_at": null}"#,
+    );
+    let frame = client.frame(120, 36);
+    assert!(line_with(&frame, "probed").contains("not yet"), "{frame}");
+    assert!(line_with(&frame, "judgment").contains("off"), "{frame}");
+}
+
+#[test]
+fn the_models_card_says_nothing_the_owner_did_not_send() {
+    let client = settings_from(r#"{"portfolio": {"equity": 1.0}}"#);
+    let body = content(&client.frame(120, 36));
+    assert!(body.contains("the owner sent no model routing"), "{body}");
+}
+
+#[test]
+fn a_stripped_store_renders_every_card_absent_and_never_a_zero() {
+    // The all-`None` frame, goldened. A constraint that came back as `0.0%`, a
+    // reasoner that came back `off` because nobody said, or an age of `0s` over
+    // a stamp that was never written are all statements the owner never made.
+    insta::assert_snapshot!(settings_from(
+        r#"{"llm": {}, "policy": {"constraints": {}}, "system": {}, "desk_mode": {}}"#
+    )
+    .frame(120, 36));
+}
+
 #[test]
 fn an_owner_that_sent_no_configuration_says_so_rather_than_drawing_empty_cards() {
     // "Nothing configured" and "this pane is broken" must not look the same.

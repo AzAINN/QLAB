@@ -638,17 +638,20 @@ fn confirmable(body: &str) -> bool {
 /// footer off the box or clip mid-sentence. Capping at the boundary rather than
 /// at the renderer means every surface downstream inherits it: the note, the
 /// toast, and the `Wrote::Failed` a log line would carry.
+///
+/// The collapse-and-cut half now lives in `format::bounded`, because the rule
+/// was never about refusals: SETTINGS' model card and the stored-login note
+/// render foreign text too, and three copies of "how long is too long" is three
+/// chances for one of them to be the one that forgot. What stays here is the
+/// part that is about *this* route — which field of a JSON body is the half a
+/// human reads.
 fn sentence(body: &str) -> String {
     const MAX: usize = 240;
     let said = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|parsed| field(&parsed, "error"))
         .unwrap_or_else(|| body.to_string());
-    let one_line = said.split_whitespace().collect::<Vec<_>>().join(" ");
-    match one_line.char_indices().nth(MAX) {
-        Some((cut, _)) => format!("{}…", &one_line[..cut]),
-        None => one_line,
-    }
+    crate::format::bounded(&said, MAX)
 }
 
 /// Foreign text, unless it handed back what was just sent.

@@ -11,8 +11,8 @@ use crate::cmd::CmdLine;
 use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
-    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, Plan, Policy, RegimePanel,
-    Run, Snapshot, System, Template, Workflow,
+    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmConfig, Plan, Policy,
+    RegimePanel, Run, Snapshot, System, Template, Workflow,
 };
 use crate::net::http;
 use serde_json::Value;
@@ -391,6 +391,17 @@ pub struct Store {
     /// subtraction the golden frames can pin rather than a clock read buried
     /// in a renderer.
     pub last_snapshot_at: Option<Instant>,
+    /// This machine's wall clock in unix seconds, stamped by the runtime beside
+    /// the frame's `Instant` and never read in a renderer.
+    ///
+    /// An `Instant` is monotonic and says nothing about *when*, so it cannot be
+    /// compared with a stamp the owner wrote. Exactly one row needs that
+    /// comparison — how old the model availability reading is — and
+    /// `format::since` states what measuring across two machines' clocks costs
+    /// and what it refuses rather than guess. Data, so a golden pins the age it
+    /// renders instead of blessing whatever the suite measured; absent before
+    /// the runtime's first iteration, and in every test that does not set one.
+    pub wall: Option<i64>,
     /// The last payload that did not decode, cleared by the next that does.
     pub malformed: Option<Malformed>,
     /// Where this client is looking — the owner base every request goes to.
@@ -467,6 +478,7 @@ impl Store {
             conn: Conn::default(),
             stale_after,
             last_snapshot_at: None,
+            wall: None,
             malformed: None,
             base: String::new(),
             posture: Posture::Glass,
@@ -645,6 +657,13 @@ impl Store {
     /// Health and authority facts, as the owner reports them.
     pub fn system(&self) -> Option<&System> {
         self.snapshot.as_ref()?.system.as_ref()
+    }
+
+    /// Which minds the desk is using, and when it last asked whether they can
+    /// serve. Absent is an owner that sent no routing at all — not a desk
+    /// running on nothing.
+    pub fn llm(&self) -> Option<&LlmConfig> {
+        self.snapshot.as_ref()?.llm.as_ref()
     }
 
     /// The newest ablation, ranked by Sharpe as the owner ranked it.

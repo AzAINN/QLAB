@@ -276,13 +276,18 @@ pub fn age(elapsed: std::time::Duration) -> String {
 
 // -- the owner's clock -----------------------------------------------------
 //
-// This client has no wall clock in its render path — see `store::Store` on time
-// as data — so anything it says about *when* has to come from stamps the owner
-// wrote. Both helpers below read the owner's own ISO-8601 text and never
-// convert it: the registry writes UTC with a fixed offset
-// (`qlab/state/registry.py::_now`), a surface renders the time the owner
-// stated, and a timezone conversion here would be this client inventing a clock
-// the audit log does not have.
+// This client reads no wall clock in its render path — see `store::Store` on
+// time as data — so anything it says about *when* comes either from stamps the
+// owner wrote or from a clock the caller passed as data. `clock` and `span`
+// read the owner's own ISO-8601 text and never convert it: the registry writes
+// UTC with a fixed offset (`qlab/state/registry.py::_now`), a surface renders
+// the time the owner stated, and a timezone conversion here would be this
+// client inventing a clock the audit log does not have.
+//
+// `since` is the one helper that compares an owner stamp with this machine's,
+// and it exists because the model availability reading is the one fact the
+// owner stamps without sending a second stamp to measure it against. Its
+// docstring states what that costs and what it refuses rather than guess.
 
 /// `HH:MM:SS` out of an ISO stamp, or absent.
 ///
@@ -320,6 +325,54 @@ pub fn span(from: Option<&String>, to: Option<&String>) -> Option<String> {
     }
     let elapsed = civil_secs(to)?.checked_sub(civil_secs(from)?)?;
     (elapsed >= 0).then(|| age(std::time::Duration::from_secs(elapsed as u64)))
+}
+
+/// How long ago the owner wrote `stamp`, at [`age`]'s coarseness.
+///
+/// **The one place this client measures an owner's stamp against its own
+/// clock**, and it takes that clock as an argument rather than reading one:
+/// `now` is unix seconds the runtime stamped where it stamps the frame's
+/// `Instant` (`main::run`), so a renderer stays a pure function of its inputs
+/// and a golden pins an age instead of blessing whatever the suite measured.
+///
+/// [`span`] is preferred wherever both ends are the owner's, and everything on
+/// this workstation but one row uses it. The exception is the model
+/// availability reading, where the owner sends *when it probed* and no second
+/// stamp to measure it against — and "the desk last asked its backends an hour
+/// ago" is the whole point of sending the first one.
+///
+/// Two clocks are two clocks, so the disagreement is refused rather than
+/// rendered: a `now` before the stamp is `None` — the caller falls back to the
+/// owner's own wall time, which asserts no duration at all — and so is any
+/// stamp that does not say UTC, because `civil_secs` reads the stamp's own wall
+/// fields and comparing those with a unix clock is only sound when the two
+/// agree on the zone.
+pub fn since(stamp: Option<&String>, now: Option<i64>) -> Option<String> {
+    let (stamp, now) = (text(stamp)?, now?);
+    if !matches!(offset_of(stamp), "Z" | "z" | "+00:00") {
+        return None;
+    }
+    let elapsed = now.checked_sub(civil_secs(stamp)?)?;
+    (elapsed >= 0).then(|| age(std::time::Duration::from_secs(elapsed as u64)))
+}
+
+/// Foreign text, collapsed to one line and cut where it stops fitting.
+///
+/// Promoted out of `net::write::sentence` once the rule stopped being about
+/// refusals: **nothing on the wire is guaranteed to be the owner's.** A proxy
+/// in front of the desk answers with an HTML page, and a field, a toast or a
+/// card is not the place to discover that. Bounding at the boundary rather than
+/// at each renderer is what keeps a surface added later from being the one that
+/// forgot.
+///
+/// Cut on a character boundary, and marked. A silently shortened sentence reads
+/// as one the owner wrote that way; `…` says there was more.
+pub fn bounded(said: &str, max: usize) -> String {
+    let one_line = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    match one_line.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &one_line[..cut]),
+        None => one_line,
+    }
 }
 
 /// The zone suffix of an ISO stamp — `+00:00`, `Z`, or nothing at all.
@@ -442,6 +495,75 @@ mod clock_tests {
         assert_eq!(clock(None), None);
         assert_eq!(clock(Some(&String::new())), None);
         assert_eq!(at("2026-07-30"), None);
+    }
+
+    #[test]
+    fn an_age_is_measured_against_a_now_the_caller_passed_and_never_a_clock_read() {
+        // 2026-08-02T18:54:17Z, plus twelve seconds. Both ends are data, which
+        // is the whole property: a golden that read a clock in here would have
+        // to be blessed again every time the suite ran.
+        let probed = "2026-08-02T18:54:17.856581+00:00".to_string();
+        assert_eq!(
+            since(Some(&probed), Some(1_785_696_869)),
+            Some("12s".to_string())
+        );
+        assert_eq!(
+            since(Some(&probed), Some(1_785_696_857 + 3_600)),
+            Some("1h".to_string())
+        );
+        // `Z` is the same instant spelled the other way, and the owner's
+        // registry writes both forms.
+        assert_eq!(
+            since(
+                Some(&"2026-08-02T18:54:17Z".to_string()),
+                Some(1_785_696_869)
+            ),
+            Some("12s".to_string())
+        );
+    }
+
+    #[test]
+    fn an_age_this_client_cannot_be_sure_of_is_absent_rather_than_guessed() {
+        let probed = "2026-08-02T18:54:17.856581+00:00".to_string();
+        // No clock passed is no age. The caller has to supply one, so a surface
+        // that forgot renders the owner's own stamp instead of a made-up span.
+        assert_eq!(since(Some(&probed), None), None);
+        // A now *before* the stamp means the two clocks disagree. `0s` would
+        // hide that, and a wrapping subtraction would report a century.
+        assert_eq!(since(Some(&probed), Some(1_785_696_800)), None);
+        // Any zone but UTC: `civil_secs` reads the stamp's own wall fields, so
+        // comparing them with a unix clock is only sound when the stamp says
+        // UTC. An offset stamp is refused rather than silently shifted.
+        assert_eq!(
+            since(
+                Some(&"2026-08-02T18:54:17+02:00".to_string()),
+                Some(1_785_696_869)
+            ),
+            None
+        );
+        assert_eq!(since(None, Some(1_785_696_869)), None);
+        assert_eq!(since(Some(&String::new()), Some(1_785_696_869)), None);
+        assert_eq!(
+            since(Some(&"2026-08-02".to_string()), Some(1_785_696_869)),
+            None
+        );
+    }
+
+    #[test]
+    fn foreign_text_is_bounded_at_one_line_wherever_it_is_rendered() {
+        // The C2 rule, now shared: collapse to one line, then cut with a mark
+        // that says it was cut. A surface that let a 4 kB body through would
+        // push everything under it off whatever box it is in.
+        assert_eq!(
+            bounded("ollama  is\n  not running", 80),
+            "ollama is not running"
+        );
+        assert_eq!(bounded(&"x".repeat(400), 8), "xxxxxxxx…");
+        // Exactly at the bound is not cut: the mark means "there was more".
+        assert_eq!(bounded("12345678", 8), "12345678");
+        // Cut on a character boundary, never a byte one — a multi-byte glyph
+        // sliced in half is a panic, not a truncation.
+        assert_eq!(bounded("ααααα", 2), "αα…");
     }
 
     #[test]

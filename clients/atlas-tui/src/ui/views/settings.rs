@@ -1,9 +1,15 @@
 //! SETTINGS — what this desk is configured by, and the one thing an operator may type into it.
 //!
-//! Five cards of read-only facts an operator would otherwise have to assemble
+//! Six cards of read-only facts an operator would otherwise have to assemble
 //! from `mandate.yaml`, `.mcp.json`, a shell prompt and whatever the last
 //! `/mode` did. Everything on the pane is the owner's own answer; nothing here
 //! is composed, defaulted, or inferred.
+//!
+//! **MODELS is read-only too, and deliberately so for now.** It says which
+//! minds the desk is using and how fresh that answer is; changing them is the
+//! owner's own route, and the keys that reach it arrive with D4. Until then
+//! this pane claims no key for it — an affordance that looked like a control
+//! and did nothing would be worse than none.
 //!
 //! Absence is the rule this view is mostly about. A `max_weight` rendered as
 //! `0.0%` because the owner did not send one is a mandate that forbids holding
@@ -35,7 +41,7 @@
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
-use crate::model::{Constraints, DeskMode, System};
+use crate::model::{Constraints, DeskMode, LlmConfig, LlmSurface, System};
 use crate::store::Store;
 use crate::theme::{palette, theme};
 use crate::ui::views::View;
@@ -162,20 +168,43 @@ impl View for SettingsView {
         // `Paragraph` taller than its area is clipped silently, so every card
         // with a known row count states it rather than sharing a ratio that
         // would shorten one of them the first time a card grew a row.
-        let left =
-            Layout::vertical([Constraint::Length(POLICY_H), Constraint::Min(0)]).split(cols[0]);
+        // THEME moved down here when MODELS arrived. The left column's slack is
+        // the rationale, which is one wrapped sentence over ten empty rows, and
+        // the right column had none to give a card whose whole point is that the
+        // owner's reason for an unreachable backend is not clipped. Anchored to
+        // the bottom rather than stacked under the rationale, which has no
+        // height of its own to end at.
+        let left = Layout::vertical([
+            Constraint::Length(POLICY_H),
+            Constraint::Min(0),
+            Constraint::Length(THEME_H),
+        ])
+        .split(cols[0]);
         draw_policy(f, left[0], store);
         draw_rationale(f, left[1], store);
+        draw_theme(f, left[2]);
 
+        // MODELS sits directly under SYSTEM rather than growing SYSTEM a row.
+        // The two answer the same question — what this desk is made of — and
+        // the adjacency is the pointer: SYSTEM's `claude` row stays the owner's
+        // own health fact about the CLI, and the card under it is where both
+        // backends' availability, the choice per surface, and the age of that
+        // reading are named. A row on SYSTEM could carry the names or the
+        // reasons but not the stamp, and a summary without its stamp is the
+        // exact thing A2 warned this payload would become.
+        //
+        // UNIVERSE takes the remainder because it is the one card here that
+        // uses extra rows: its symbol list wraps, and a desk watching thirty
+        // names has more of them on screen instead of a column of blanks.
         let right = Layout::vertical([
             Constraint::Length(SYSTEM_H),
-            Constraint::Length(UNIVERSE_H),
-            Constraint::Min(0),
+            Constraint::Length(MODELS_H),
+            Constraint::Min(UNIVERSE_H),
         ])
         .split(cols[1]);
         draw_system(f, right[0], store);
-        draw_universe(f, right[1], store);
-        draw_theme(f, right[2]);
+        draw_models(f, right[1], store);
+        draw_universe(f, right[2], store);
 
         // Over the view rather than over the frame: the question it asks is
         // about this pane's own controls, unlike the confirm box, which asks
@@ -744,8 +773,35 @@ const DESK_H: u16 = 10;
 const POLICY_H: u16 = 10;
 /// Header, seven rows, and the rule.
 const SYSTEM_H: u16 = 9;
-/// Header, the count, the symbol list, and the rule.
+/// Header, four rows, four of slack, and the rule.
+///
+/// The slack is for the availability reasons, which are the owner's sentences
+/// rather than values. "ollama is running at 127.0.0.1:11434 but no models are
+/// pulled — pull one with `ollama pull granite3.3:8b`" is three wrapped rows in
+/// a half-width card, and the remedy is the last third of it. A card sized for
+/// the four fixed rows alone would clip exactly the state where the sentence is
+/// the whole message, which is the class of refusal this pane spends rows to
+/// avoid.
+const MODELS_H: u16 = 10;
+/// Header, the count, the symbol list, and the rule. A floor rather than a
+/// fixed height: this card is the one that takes the column's remainder.
 const UNIVERSE_H: u16 = 4;
+/// Header, the palette, and the rule.
+const THEME_H: u16 = 3;
+
+/// The bound every owner sentence on the MODELS card passes.
+///
+/// Sized to what [`MODELS_H`]'s slack can actually show — four wrapped rows of
+/// a half-width card at the baseline width — so the bound and the card agree
+/// about how much sentence there is room for. Nothing on the wire is guaranteed
+/// to be the owner's, which is the C2 rule now made uniform: an unbounded
+/// `reason` would push UNIVERSE off the column rather than being clipped inside
+/// this card.
+const SAID_MAX: usize = 120;
+
+/// The bound a backend or model name passes. A name is a token, not a sentence:
+/// `granite3.3:8b` is thirteen characters and anything past this is not one.
+const NAME_MAX: usize = 36;
 
 /// What the desk is pointed at, and whether it can reach it.
 fn draw_desk(f: &mut Frame, area: Rect, store: &Store) {
@@ -879,6 +935,14 @@ fn draw_system(f: &mut Frame, area: Rect, store: &Store) {
     let rows = vec![
         kv("desk", or_missing(system.mode.as_ref()), t.text_primary),
         kv("provenance", provenance(system), t.text_secondary),
+        // The owner's own health fact about the CLI, and only that. Since the
+        // desk grew a second backend this row is no longer the whole answer to
+        // "which minds can this desk reach" — the MODELS card directly under
+        // this one is, because it can carry both backends, the owner's reason
+        // for each, and the stamp that says how old the reading is. Left narrow
+        // rather than generalized here: a summary of two backends without its
+        // stamp would read as live, which is the exact misreading that stamp
+        // exists to prevent.
         kv(
             "claude",
             availability(system.claude_available),
@@ -938,6 +1002,160 @@ fn availability(flag: Option<bool>) -> String {
         Some(true) => "available".to_string(),
         Some(false) => "absent".to_string(),
         None => MISSING.to_string(),
+    }
+}
+
+/// Which minds the desk is using, and how fresh that answer is.
+///
+/// Read-only, like every other card here. The choice is made through the
+/// owner's own route, and D4 brings the keys that reach it; until then this
+/// pane claims none, so a key pressed on it falls through to whoever claims it
+/// next.
+fn draw_models(f: &mut Frame, area: Rect, store: &Store) {
+    let t = theme();
+    let Some(llm) = store.llm() else {
+        card(
+            f,
+            area,
+            "models",
+            vec![absent("the owner sent no model routing")],
+        );
+        return;
+    };
+    let mut rows = vec![
+        surface_row("reasoner", llm.reasoner.as_ref(), llm),
+        // The flag rather than the choice. A model named for a reasoner nobody
+        // switched on is a mind the desk is not using, and the owner refuses to
+        // infer the switch from the name — so this row is the one that says
+        // whether the row above it is in play at all.
+        kv(
+            "judgment",
+            match llm.reasoner_enabled {
+                Some(true) => "on".to_string(),
+                Some(false) => "off".to_string(),
+                None => MISSING.to_string(),
+            },
+            match llm.reasoner_enabled {
+                Some(true) => t.accent,
+                _ => t.text_secondary,
+            },
+        ),
+        surface_row("workforce", llm.workforce.as_ref(), llm),
+        // Never presented as live: the owner refuses to probe on the poll path,
+        // so this block is the *last* reading, and the row saying how old it is
+        // is what keeps an hour-old verdict from reading as current.
+        kv("probed", probed_row(llm, store.wall), t.text_secondary),
+    ];
+    // Only for the backends a surface actually runs on. The reason is a
+    // sentence about a desk that cannot do something it was configured to do,
+    // and one about a backend nothing here uses is noise beside it.
+    for name in [
+        surface_backend(llm.reasoner.as_ref()),
+        surface_backend(llm.workforce.as_ref()),
+    ] {
+        let Some(entry) = name.and_then(|name| llm.backend(&name)) else {
+            continue;
+        };
+        if entry.available == Some(false) {
+            if let Some(reason) = format::text(entry.reason.as_ref()) {
+                rows.push(Line::from(Span::styled(
+                    format!(" {}", format::bounded(reason, SAID_MAX)),
+                    // Dim: the reason explains the tone on the row above, and a
+                    // second warning-coloured line would compete with it.
+                    Style::default().fg(t.text_dim),
+                )));
+            }
+        }
+    }
+    card(f, area, "models", rows);
+}
+
+/// One surface's row, toned by what the last reading said about its backend.
+fn surface_row(label: &str, surface: Option<&LlmSurface>, llm: &LlmConfig) -> Line<'static> {
+    let t = theme();
+    let available = surface_backend(surface)
+        .and_then(|name| llm.backend(&name))
+        .and_then(|entry| entry.available);
+    kv(
+        label,
+        surface_value(surface),
+        match available {
+            Some(true) => t.positive,
+            Some(false) => t.warning,
+            // Nothing has asked. Unknown is not broken, and toning it as a
+            // problem would train an operator to read past the row that is one.
+            None => t.text_primary,
+        },
+    )
+}
+
+/// The backend one surface runs on, bounded, or nothing.
+fn surface_backend(surface: Option<&LlmSurface>) -> Option<String> {
+    format::text(surface?.backend.as_ref()).map(|name| format::bounded(name, NAME_MAX))
+}
+
+/// What one surface runs, in the owner's words — except on the claude path.
+///
+/// **The A3 fact this row exists to keep visible.** On claude the tier map owns
+/// the model (`model_routing.TIER_MODEL` is "the one place"), so the surface's
+/// model half is not a choice: `inherit` is what the desk stores, and the tiers
+/// then pick per role. A bare `claude · haiku` would read as a setting an
+/// operator could make, and making it would change nothing — which is the one
+/// thing a picker must never offer.
+///
+/// So `inherit` renders as what it *means* rather than how it is spelled, the
+/// way `lane` renders a bool as the words for it. A model that is **not**
+/// `inherit` is named and marked ignored rather than quietly rewritten to
+/// `inherit`: hiding it would be this client lying about the config, and
+/// printing it bare would be the desk lying about what it does with it.
+///
+/// Both forms are short because the value column is 24 cells at the baseline
+/// (`LABEL_W` inside the card's half width). `claude · inherit (tiers decide)`
+/// is 31 and wraps onto an unindented second row, spending one of the slack
+/// rows [`MODELS_H`] reserves for the availability reasons — the one thing on
+/// this card that must not be clipped.
+fn surface_value(surface: Option<&LlmSurface>) -> String {
+    let Some(surface) = surface else {
+        return MISSING.to_string();
+    };
+    // Half a pair is not a pair: a backend with no model names nothing that can
+    // run, and a model with no backend names nothing that can run it.
+    let (Some(backend), Some(model)) = (
+        format::text(surface.backend.as_ref()),
+        format::text(surface.model.as_ref()),
+    ) else {
+        return MISSING.to_string();
+    };
+    let (backend, model) = (
+        format::bounded(backend, NAME_MAX),
+        format::bounded(model, NAME_MAX),
+    );
+    match (backend.as_str(), model.as_str()) {
+        ("claude", "inherit") => format!("{backend} · tiers decide"),
+        ("claude", _) => format!("{backend} · {model} ignored"),
+        _ => format!("{backend} · {model}"),
+    }
+}
+
+/// How old the availability reading is.
+///
+/// Three answers, and they are three different facts. A stamp measured against
+/// a clock the caller passed is an age; a stamp with no clock to measure it
+/// against is the owner's own wall time, which asserts no duration at all; and
+/// no stamp at all is a desk nothing has asked yet — A2's first state, which
+/// the owner serves from startup until the picker's route probes once. A stamp
+/// this client cannot read is `--`, because that is a contract failure rather
+/// than any of the three.
+fn probed_row(llm: &LlmConfig, now: Option<i64>) -> String {
+    let Some(stamp) = format::text(llm.probed_at.as_ref()) else {
+        return "not yet".to_string();
+    };
+    let stamp = stamp.to_string();
+    match format::since(Some(&stamp), now) {
+        Some(age) => format!("{age} ago"),
+        None => format::clock(Some(&stamp))
+            .map(|at| format!("at {at}"))
+            .unwrap_or_else(|| MISSING.to_string()),
     }
 }
 
@@ -1098,6 +1316,76 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mcp(&quiet), "qlab-operator");
+    }
+
+    #[test]
+    fn a_claude_surface_never_shows_a_model_name_the_tiers_will_ignore() {
+        // The A3 fact this row exists to keep visible: on the claude path the
+        // tier map owns the model, so a name in this column would read as a
+        // choice an operator could make and would change nothing.
+        let claude = |model: &str| {
+            surface_value(Some(&LlmSurface {
+                backend: Some("claude".into()),
+                model: Some(model.into()),
+            }))
+        };
+        // `inherit` rendered as what it means, never as an editable-looking
+        // name for a choice that does nothing.
+        assert_eq!(claude("inherit"), "claude · tiers decide");
+        // A model the desk will not honour is named *and* marked, rather than
+        // hidden behind `inherit` — hiding it would be this client lying about
+        // the config, and printing it bare would be the desk lying about what
+        // it does with it.
+        assert_eq!(claude("haiku"), "claude · haiku ignored");
+        // Every other backend runs the model it names.
+        assert_eq!(
+            surface_value(Some(&LlmSurface {
+                backend: Some("ollama".into()),
+                model: Some("granite3.3:8b".into()),
+            })),
+            "ollama · granite3.3:8b"
+        );
+        // Absent stays absent, and half a pair is not a pair: a backend with no
+        // model is a surface nobody can say what runs on.
+        assert_eq!(surface_value(None), MISSING);
+        assert_eq!(surface_value(Some(&LlmSurface::default())), MISSING);
+        assert_eq!(
+            surface_value(Some(&LlmSurface {
+                backend: Some("ollama".into()),
+                // `Some("")` is absent, as everywhere in this client.
+                model: Some(String::new()),
+            })),
+            MISSING
+        );
+    }
+
+    #[test]
+    fn a_desk_that_has_never_probed_reads_differently_from_one_whose_stamp_will_not_parse() {
+        let probed = "2026-08-02T18:54:17.856581+00:00".to_string();
+        let block = |stamp: Option<String>| LlmConfig {
+            probed_at: stamp,
+            ..Default::default()
+        };
+        // The A2 carry: this block is the LAST reading, so the row says how old
+        // it is rather than presenting it as live.
+        assert_eq!(
+            probed_row(&block(Some(probed.clone())), Some(1_785_696_869)),
+            "12s ago"
+        );
+        // No clock to measure against — the owner's own wall time, which
+        // asserts nothing about durations between two machines.
+        assert_eq!(probed_row(&block(Some(probed)), None), "at 18:54:17");
+        // Nothing has asked the backends yet. Not the same fact as a reading
+        // this client could not read, and `--` for both would merge them.
+        assert_eq!(probed_row(&block(None), Some(1_785_696_869)), "not yet");
+        assert_eq!(
+            probed_row(&block(Some(String::new())), Some(1_785_696_869)),
+            "not yet"
+        );
+        assert_eq!(
+            probed_row(&block(Some("yesterday".into())), Some(1_785_696_869)),
+            MISSING
+        );
     }
 
     #[test]

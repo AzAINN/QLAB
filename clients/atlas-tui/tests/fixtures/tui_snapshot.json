@@ -1,4 +1,12 @@
 {
+  "llm": {"reasoner": {"backend": "ollama", "model": "qwen2.5:7b"},
+          "workforce": {"backend": "claude", "model": "inherit"},
+          "reasoner_enabled": true,
+          "availability": [{"name": "claude", "available": true,
+                            "reason": "claude CLI at /Users/azainmac/.local/bin/claude"},
+                           {"name": "ollama", "available": true,
+                            "reason": "ollama at 127.0.0.1:11434, 1 model pulled"}],
+          "probed_at": "2026-08-02T18:54:17.856581+00:00"},
   "desk_mode": {"data": "synthetic", "book": "simulated", "label": "SYNTHETIC", "offline": true,
                 "credentials": "no ALPACA_API_KEY_ID in the environment or .env", "credentials_ok": false},
   "portfolio": {

@@ -13,11 +13,23 @@
 //! `Secret` around and cannot read it.
 //!
 //! **What this does not claim.** Rust moves are copies, `String` reallocates as
-//! it grows, and the allocator does not zero what it hands back — so the
-//! wiping below is best effort over the buffer this code can still name, and an
-//! earlier buffer a growing field left behind is memory nothing here can reach.
-//! It is worth doing anyway (the live copy is the one a core dump of a
-//! long-running client would carry) and it is not worth overstating.
+//! it grows, and the allocator does not zero what it hands back — so the wiping
+//! below is best effort over the buffer this code can still name. Named
+//! plainly, because a half-stated guarantee is worse than none, the copies it
+//! does **not** reach are:
+//!
+//! * the earlier allocations a growing field left behind as it was typed into,
+//!   which are already free memory by the time anything here runs;
+//! * the `serde_json::Value` the request body is built into, which holds both
+//!   values as `String`s of its own and is dropped unwiped;
+//! * the serialized request buffer under that — the bytes `reqwest` writes to
+//!   the socket — which this crate never sees a handle to at all;
+//! * whatever the TLS stack copied them into on the way out.
+//!
+//! What the wipe does buy is the *live* copy: the one a core dump, a swap file
+//! or a debugger attached to a client that has been up for a week would carry,
+//! which is the copy that persists rather than the ones freed a millisecond
+//! later. That is worth doing and is not worth overstating.
 
 /// A credential, carried without being readable.
 ///

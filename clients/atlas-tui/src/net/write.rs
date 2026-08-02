@@ -76,6 +76,37 @@ impl std::fmt::Display for WriteError {
 
 impl std::error::Error for WriteError {}
 
+impl WriteError {
+    /// The foreign text this error carries, whichever shape it is.
+    ///
+    /// Every variant holds exactly one string that came from outside this
+    /// process — a refusal body, a transport message, a decode error — and a
+    /// caller that has to sanitise one needs to reach it without matching on
+    /// four arms and forgetting the fourth. That forgetting is precisely how
+    /// the credential path leaked at every status but 400.
+    fn said(&self) -> &str {
+        match self {
+            WriteError::Refused { said, .. } => said,
+            WriteError::Unreachable(why)
+            | WriteError::Unreadable(why)
+            | WriteError::NoClient(why) => why,
+        }
+    }
+
+    /// The same error with its foreign text replaced.
+    ///
+    /// The *inner* string, not the `Display` line: rebuilding `Unreachable`
+    /// from its own rendering would nest the prefix on every pass.
+    fn with_said(self, said: String) -> WriteError {
+        match self {
+            WriteError::Refused { status, .. } => WriteError::Refused { status, said },
+            WriteError::Unreachable(_) => WriteError::Unreachable(said),
+            WriteError::Unreadable(_) => WriteError::Unreadable(said),
+            WriteError::NoClient(_) => WriteError::NoClient(said),
+        }
+    }
+}
+
 type Wrote = Result<Value, WriteError>;
 
 /// What became of a confirmed plan. Three outcomes, and the caller must face all
@@ -442,25 +473,38 @@ impl WriteClient {
         if let Some(replace) = replace {
             body["replace"] = json!(replace);
         }
-        match self.post("/api/alpaca/credentials", body).await {
-            Ok(said) => Ok(Login::Stored(said)),
-            // Both refusals are 400s and only one is an invitation. A refusal
-            // with any other status is a broken owner rather than a question:
-            // offering to discard a browser login off the back of a 500 would
-            // be this client inventing a consent prompt out of a traceback.
-            Err(WriteError::Refused { status: 400, said }) => {
-                // The field is read off the whole body; the sentence is the
-                // half written for a human, and it is checked against what was
-                // just sent before it is handed anywhere that renders it.
-                let asked = confirmable(&said);
-                let text = unquoted(sentence(&said), api_key, api_secret);
-                Ok(match asked {
-                    true => Login::ConsentNeeded(text),
-                    false => Login::Rejected(text),
-                })
-            }
-            Err(err) => Err(err),
+        let answered = self.post("/api/alpaca/credentials", body).await;
+        let Err(err) = answered else {
+            return answered.map(Login::Stored);
+        };
+        // **One gate over every way this call can fail**, before any branch
+        // decides what kind of failure it was.
+        //
+        // The first version of this scrubbed inside the 400 arm and let every
+        // other status through verbatim, which is the same per-call-site
+        // reasoning about what can carry a credential that took four rounds to
+        // fix in B1 — and it was worse than it looked: an interposing proxy
+        // answers 401, 413, 502 or 504 far more readily than 400, and each of
+        // those fell to `Err`, whose `Display` prints the body into
+        // `Wrote::Failed`, the toast, and the form's own note.
+        //
+        // The discriminator is read off the raw body *first*, because it is a
+        // field of that JSON and the scrub replaces the body with the sentence
+        // inside it.
+        let asked = matches!(&err, WriteError::Refused { status: 400, said } if confirmable(said));
+        let confirmable_refusal = matches!(err, WriteError::Refused { status: 400, .. });
+        let said = unquoted(sentence(err.said()), api_key, api_secret);
+        // Both 400s are the owner answering a question about this request. Any
+        // other status is a broken owner rather than a question: offering to
+        // discard a browser login off the back of a 500 would be this client
+        // inventing a consent prompt out of a traceback.
+        if confirmable_refusal {
+            return Ok(match asked {
+                true => Login::ConsentNeeded(said),
+                false => Login::Rejected(said),
+            });
         }
+        Err(err.with_said(said))
     }
 
     /// Ask the owner to put the stored login to the venue.
@@ -580,13 +624,20 @@ fn confirmable(body: &str) -> bool {
         .is_some_and(|flag| flag == "replace")
 }
 
-/// The operator-facing half of a refusal.
+/// The operator-facing half of a refusal, bounded.
 ///
 /// The owner writes these for a human and never quotes what was typed, so it is
 /// rendered rather than paraphrased. Bounded and collapsed to one line because
 /// the body on this path is not always the owner's: a proxy in front of the
-/// desk answers 400 with an HTML page, and a form field is not the place to
+/// desk answers with an HTML page, and a form field is not the place to
 /// discover that.
+///
+/// **The bound is what caps the form's note.** A failed login is rendered into
+/// `Form::note`, which wraps into whatever room the box has and is the one
+/// surface here with no length of its own — an unbounded body would push the
+/// footer off the box or clip mid-sentence. Capping at the boundary rather than
+/// at the renderer means every surface downstream inherits it: the note, the
+/// toast, and the `Wrote::Failed` a log line would carry.
 fn sentence(body: &str) -> String {
     const MAX: usize = 240;
     let said = serde_json::from_str::<Value>(body)
@@ -600,18 +651,20 @@ fn sentence(body: &str) -> String {
     }
 }
 
-/// A refusal, unless it handed back what was just sent.
+/// Foreign text, unless it handed back what was just sent.
 ///
 /// The owner never quotes what was typed — C1 pins that at every one of its
-/// refusals — but the body on this path is not always the owner's. A proxy in
-/// front of the desk answers 400 with a page of its own, and one that echoes
-/// the request would put the pair into a form note and a toast without anything
-/// between here and the screen noticing.
+/// refusals — but nothing on this path is guaranteed to be the owner's. A proxy
+/// in front of the desk answers with a page of its own, at whichever status it
+/// likes, and one that echoes the request would put the pair into a form note
+/// and a toast without anything between here and the screen noticing.
 ///
 /// This client is the only thing that knows what it just sent, so this is the
-/// only place the check can be made. It refuses the whole sentence rather than
-/// cutting the value out of it: a redacted refusal that still reads as a
-/// sentence invites an operator to trust the rest of it.
+/// only place the check can be made — and it is made **once, over every failure
+/// shape**, rather than in the arm whose status somebody happened to think of.
+/// It refuses the whole sentence rather than cutting the value out of it: a
+/// redacted refusal that still reads as a sentence invites an operator to trust
+/// the rest of it.
 fn unquoted(said: String, key: &Secret, secret: &Secret) -> String {
     let quoted = [key, secret]
         .into_iter()

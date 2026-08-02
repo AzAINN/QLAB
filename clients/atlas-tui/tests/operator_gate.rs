@@ -406,13 +406,18 @@ mod operator {
     }
 
     fn frame(store: &atlas::store::Store) -> String {
+        frame_with(store, &atlas::ui::views::Views::new())
+    }
+
+    /// One frame drawn from views a test has already pressed keys into — the
+    /// only way to read what a *surface* did with an outcome, rather than what
+    /// the outcome said.
+    fn frame_with(store: &atlas::store::Store, views: &atlas::ui::views::Views) -> String {
         use atlas::fx::Fx;
-        use atlas::ui::views::Views;
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
-        let views = Views::new();
         let fx = Fx::default();
         let now = std::time::Instant::now();
-        term.draw(|f| atlas::ui::shell::draw(f, store, &views, &fx, now))
+        term.draw(|f| atlas::ui::shell::draw(f, store, views, &fx, now))
             .unwrap();
         term.backend()
             .buffer()
@@ -1493,33 +1498,99 @@ mod operator {
         }
     }
 
-    #[tokio::test]
-    async fn a_refusal_that_hands_the_pair_back_is_not_the_sentence_that_reaches_the_screen() {
-        // The owner never quotes what was typed. The body on this path is not
-        // always the owner's: a proxy in front of the desk answers 400 with a
-        // page of its own, and an echoing one would put the pair into a form
-        // note and a toast. This client is the only thing that knows what it
-        // just sent, so this is the only place the check can be made.
-        let owner = spawn_owner(
-            400,
-            r#"{"error": "cannot POST api_key=PKTEST0123456789 secret=s3cret/abcdefghijklmnopqrstuv"}"#,
+    /// A reply that hands back exactly what was sent — the shape an interposing
+    /// proxy produces, at whichever status it likes.
+    const ECHOED: &str = r#"{"error": "cannot POST api_key=PKTEST0123456789 api_secret=s3cret/abcdefghijklmnopqrstuv to upstream"}"#;
+
+    /// What the login form's own box says after one outcome.
+    ///
+    /// The third surface, and the one with no length of its own: `Form::note`
+    /// wraps into whatever room the box has. Driven through the real shell,
+    /// because the question is what a *renderer* did with the outcome rather
+    /// than what the outcome said.
+    fn form_note_after(outcome: &Wrote) -> String {
+        use atlas::store::{Store, ViewId};
+        use atlas::ui::views::Views;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut store = Store::default();
+        store.posture = Posture::Operator;
+        store.nav.view = ViewId::Settings;
+        let _ = store.apply(
+            AppEvent::Snapshot(Box::new(snapshot())),
+            std::time::Instant::now(),
         );
-        let client = WriteClient::new(&owner.base).unwrap();
+        let mut views = Views::new();
+        fn press(store: &mut Store, views: &mut Views, code: KeyCode) {
+            atlas::ui::shell::on_key(KeyEvent::new(code, KeyModifiers::NONE), store, views);
+        }
+        // A frame first: the pane publishes the area the form's floor is read
+        // off, exactly as the runtime draws one before its first event.
+        frame_with(&store, &views);
+        press(&mut store, &mut views, KeyCode::Char('a'));
+        for c in "PKTEST0123456789".chars() {
+            press(&mut store, &mut views, KeyCode::Char(c));
+        }
+        press(&mut store, &mut views, KeyCode::Tab);
+        for c in "s3cret/abcdefghijklmnopqrstuv".chars() {
+            press(&mut store, &mut views, KeyCode::Char(c));
+        }
+        press(&mut store, &mut views, KeyCode::Enter);
+        views.wrote(outcome);
+        frame_with(&store, &views)
+    }
+
+    #[tokio::test]
+    async fn a_refusal_at_any_status_cannot_hand_the_pair_to_the_screen() {
+        // The owner never quotes what was typed, and C1 pins that at every one
+        // of its refusals. Nothing on this path is *guaranteed* to be the
+        // owner: a proxy in front of the desk answers with a page of its own,
+        // and 401, 413, 502 and 504 are far likelier from one than 400.
+        //
+        // The first version of this guard scrubbed inside the 400 arm, and the
+        // first version of this test asserted the pair was absent from
+        // sentences that never contained it — a tautology. So the fixture
+        // carries both values upstream, and the statuses swept are the ones
+        // that fall through to `Wrote::Failed`.
         let (key, secret) = pair();
-        match client
-            .set_alpaca_credentials(&key, &secret, None)
-            .await
-            .unwrap()
-        {
-            Login::Rejected(said) => {
-                assert!(!said.contains("PKTEST0123456789"), "{said}");
-                assert!(!said.contains("s3cret/abcdefghijklmnopqrstuv"), "{said}");
-                // And it says why there is nothing to read, rather than going
-                // blank: a refusal an operator cannot act on is bad enough
-                // without also being unexplained.
-                assert!(said.contains("quoted what was typed"), "{said}");
+        for typed in [key.expose(), secret.expose()] {
+            assert!(
+                ECHOED.contains(typed),
+                "the fixture must carry {typed} upstream or absence proves nothing"
+            );
+        }
+        for status in [400, 401, 502] {
+            let owner = spawn_owner(status, ECHOED);
+            let client = WriteClient::new(&owner.base).unwrap();
+            let outcome = perform(&client, login_cmd(false))
+                .await
+                .expect("a login always answers");
+            // Three surfaces, because the pair reaches an operator through
+            // three different renderers and the first fix covered one of them:
+            // the outcome a log line would carry, the toast, and the form's
+            // own note.
+            let printed = format!("{outcome:?}");
+            let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.clone()))
+                .expect("a refused login owes the operator a box");
+            let note = form_note_after(&outcome);
+            // The positive control. A frame with no box drawn in it would pass
+            // every absence assertion below for the wrong reason — the way a
+            // pin of this shape dies quietly.
+            assert!(note.contains("ALPACA LOGIN"), "{status}: no form drawn");
+            for surface in [&printed, &format!("{toast:?}"), &note] {
+                for typed in [key.expose(), secret.expose()] {
+                    assert!(!surface.contains(typed), "{status}: {surface}");
+                }
             }
-            other => panic!("{other:?}"),
+            // And it says why there is nothing to read, rather than going
+            // blank: a refusal an operator cannot act on is bad enough without
+            // also being unexplained.
+            assert!(
+                printed.contains("quoted what was typed"),
+                "{status}: {printed}"
+            );
+            // One word, because the note is read off a rendered frame and the
+            // sentence wraps across rows inside the box.
+            assert!(note.contains("quoted"), "{status}: {note}");
         }
     }
 
@@ -1658,11 +1729,18 @@ mod operator {
     }
 
     #[test]
-    fn every_credential_outcome_reaches_the_operator_and_none_of_them_carries_the_secret() {
-        // Invariant 10 at the toast seam — a `Wrote` variant with no arm is a
-        // write nobody is told about — and the class-level secrecy assertion
-        // beside it: the outcomes carry the owner's sentences and nothing this
-        // client typed, so no box can print a credential however it is worded.
+    fn every_credential_outcome_reaches_the_operator_with_the_level_it_deserves() {
+        // Invariant 10 at the toast seam: a `Wrote` variant with no arm is a
+        // write nobody is told about. The levels are the content — a stored
+        // login the owner cannot read is `Warn`, because a file that changed
+        // and a desk that cannot trade is the "succeeded and did nothing" shape
+        // this client refuses to draw as a receipt.
+        //
+        // The secrecy claim is *not* here. These sentences are hand-written and
+        // never contained a credential, so asserting one is absent from them
+        // proves nothing about the path that could carry one — that is
+        // `a_refusal_at_any_status_cannot_hand_the_pair_to_the_screen`, which
+        // drives an echoing owner.
         use atlas::ui::widgets::toast::Level;
         let cases = [
             (
@@ -1711,9 +1789,6 @@ mod operator {
                 .expect("every write outcome owes the operator a box");
             assert_eq!(toast.level, level, "{outcome:?}");
             assert!(!toast.message.is_empty(), "{outcome:?}");
-            for typed in ["PKTEST0123456789", "s3cret/abcdefghijklmnopqrstuv"] {
-                assert!(!format!("{toast:?}").contains(typed), "{outcome:?}");
-            }
             assert!(
                 refetches(&AppEvent::Wrote(outcome.clone())),
                 "{outcome:?} must bring the next poll forward"

@@ -18,6 +18,12 @@ pub mod glyph;
 pub mod input;
 pub mod model;
 pub mod net;
+/// A credential an operator typed, carried without being printable. Gated with
+/// the only path that can produce or spend one: the login form and the POST it
+/// feeds both exist under `operator`, so the default build has no such value to
+/// hold and nothing that could construct one.
+#[cfg(feature = "operator")]
+pub mod secret;
 pub mod store;
 pub mod theme;
 pub mod ui;

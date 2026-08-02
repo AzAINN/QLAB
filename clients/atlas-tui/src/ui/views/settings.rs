@@ -1,19 +1,36 @@
-//! SETTINGS — what this desk is configured by, and nothing that changes it.
+//! SETTINGS — what this desk is configured by, and the one thing an operator may type into it.
 //!
 //! Five cards of read-only facts an operator would otherwise have to assemble
 //! from `mandate.yaml`, `.mcp.json`, a shell prompt and whatever the last
 //! `/mode` did. Everything on the pane is the owner's own answer; nothing here
 //! is composed, defaulted, or inferred.
 //!
-//! It changes nothing on purpose. Switching the desk is `/mode`, which is an
-//! operator affordance and therefore *absent* from a glass window rather than
-//! greyed — a pane that named the command in a build that has no writer would
-//! be an instruction with nothing behind it. So the card says which of the two
-//! this window is instead.
-//!
 //! Absence is the rule this view is mostly about. A `max_weight` rendered as
 //! `0.0%` because the owner did not send one is a mandate that forbids holding
 //! anything, which is a statement about the desk that nobody made.
+//!
+//! **The exception is the alpaca login.** The pane still changes no desk
+//! setting — switching the desk is `/mode`, and this form does not do it — but
+//! it is where a credential is typed, because the owner's credential route is
+//! the only writer of that file and a desk that can only be logged into from a
+//! shell is one an operator will log into some other way. What the form sends
+//! grants no authority: a stored login makes `LIVE·ALPACA` *choosable*, the
+//! book is not switched by it, and every gate between a plan and a fill is
+//! unmoved.
+//!
+//! Three rules shape it, and all three are about the value rather than the
+//! layout. Both fields render as `•` — the key is the less sensitive half and
+//! masking only one of them would make the other look like the secret. The
+//! plaintext lives in this module's own `Form` and in the `Secret` it hands the
+//! runtime, and nowhere else: no history, no tracing line, no toast, and no
+//! `Debug` (see `Form`'s hand-written one, and `crate::secret`). And the box is
+//! cleared on the way out, best effort and honestly so — a `String` that grew
+//! may have left an earlier buffer behind that nothing here can reach.
+//!
+//! What the keys can do is the posture's decision, not the build's, exactly as
+//! on AUDIT and WORKFORCE: in the glass build there is no `Command::AlpacaLogin`
+//! and no writer to carry it, so the form does not exist at all and the alpaca
+//! row is the status display it has always been.
 
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
@@ -23,6 +40,8 @@ use crate::store::Store;
 use crate::theme::{palette, theme};
 use crate::ui::views::View;
 use crate::ui::widgets::{panel_block, panel_header, refuse};
+#[cfg(feature = "operator")]
+use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -46,14 +65,72 @@ const CARD_MIN: u16 = 34;
 /// Two cards side by side, with a column of space between them.
 const TWO_COL: u16 = CARD_MIN * 2 + 1;
 
-/// Nothing to retain: no cursor, no page, no field. The pane is a rendering of
-/// what the owner said and there is nowhere for an operator to be looking
-/// inside it.
+/// The login form's own floor, in rows of the *view's* area.
+///
+/// Its own, and higher than the view's: SETTINGS draws its cards from twelve
+/// rows, and a box drawn into what is left of those would have room for a
+/// header and nothing else — no fields, no footer, no owner's sentence — while
+/// still holding the keyboard and still sending on Enter. That is the state
+/// WORKFORCE's picker already refuses at, and for the same reason: an armed
+/// control an operator cannot see is worse than one that says what it would
+/// take.
+#[cfg(feature = "operator")]
+const FORM_MIN_H: u16 = 14;
+
+/// The box's width. Wide enough for the label column beside a masked field, and
+/// for the owner's consent sentence to wrap in four lines rather than eight.
+#[cfg(feature = "operator")]
+const FORM_W: u16 = 60;
+
+/// The word a login that would destroy another one asks for.
+///
+/// Static, unlike the execution modal's six characters of a `targets_hash`.
+/// There is no hash here because there is no plan: what this consent authorises
+/// is the destruction of a stored profile, and the thing it must not be is one
+/// keystroke. A challenge that bound to nothing the desk had checked would be
+/// worse than none — it teaches an operator that typing the characters means
+/// something was verified — so this one binds nothing and says nothing about
+/// having been verified.
+#[cfg(feature = "operator")]
+const CONFIRM: &str = "CONFIRM";
+
+/// Where the operator is looking, and what they have typed. Never what the desk
+/// says — that is the `Store`'s.
+///
+/// The cards retain nothing: no cursor, no page. The form is the one thing on
+/// this pane an operator can be inside.
 #[derive(Default)]
-pub struct SettingsView;
+pub struct SettingsView {
+    /// The login form, while the operator is asking for it.
+    ///
+    /// *Asking for*, not *showing*: below [`FORM_MIN_H`] the pane refuses to
+    /// draw the box and says so instead, and this stays `Some` only until the
+    /// next keystroke retires it. What must never happen is the third state — a
+    /// box that is armed and invisible.
+    #[cfg(feature = "operator")]
+    form: Option<Form>,
+    /// The view's area at the last frame, published by `draw`.
+    ///
+    /// Interior mutability for the reason WORKFORCE's height has it: `draw` is
+    /// a `&self` renderer that publishes the layout it derived, and whether the
+    /// form fits is a fact about that layout. Nothing *renders* from it — the
+    /// frame stays a pure function of (store, effects, instant) — it only
+    /// decides whether a key may open a box that would not fit.
+    ///
+    /// The whole rect rather than the height, because this pane refuses on
+    /// width as well: at 68 columns the cards are a refusal message, and a form
+    /// opened over that would be a box on a pane that is not drawn.
+    #[cfg(feature = "operator")]
+    area: std::cell::Cell<Rect>,
+}
 
 impl View for SettingsView {
     fn draw(&self, f: &mut Frame, area: Rect, store: &Store, _fx: &FlashTracker, _now: Instant) {
+        // Published first, and on every frame including the ones that draw no
+        // cards: this is what a later keystroke reads to decide whether the
+        // form may open, and an area only recorded when the pane already fitted
+        // could never report that it stopped fitting.
+        self.publish(area);
         // Label/value rows do not compress: a provenance clipped to `synthe` is
         // a source an operator has to guess at, and an authority clipped to
         // `propose_` is a governance claim that has lost its qualifier. So the
@@ -99,16 +176,563 @@ impl View for SettingsView {
         draw_system(f, right[0], store);
         draw_universe(f, right[1], store);
         draw_theme(f, right[2]);
+
+        // Over the view rather than over the frame: the question it asks is
+        // about this pane's own controls, unlike the confirm box, which asks
+        // about an order and belongs to the whole workstation.
+        self.draw_form(f, area, store);
     }
 
+    fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
+        self.keys(k, store)
+    }
+
+    /// Whether the login form currently owns the keyboard.
+    ///
+    /// True only while a form an operator can actually see is open. A form too
+    /// tall for the pane is drawn as a refusal, not as a box, so it holds no
+    /// keyboard — without that half the fields would swallow every key, and
+    /// Enter would still store a credential, against a box nobody can see.
+    fn typing(&self) -> bool {
+        #[cfg(feature = "operator")]
+        {
+            self.form.is_some() && self.form_fits()
+        }
+        #[cfg(not(feature = "operator"))]
+        false
+    }
+}
+
+// -- the login form ---------------------------------------------------------
+
+/// Which of the two fields the caret is in.
+#[cfg(feature = "operator")]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    #[default]
+    Key,
+    Secret,
+}
+
+/// Where the form is in the one exchange it can have with the owner.
+///
+/// Three states, and the middle one is why the form does not close on Enter: a
+/// login the owner will not store without consent has to be re-sent *with the
+/// pair still in hand*, and a box that cleared itself on send would have to ask
+/// the operator to type both values again to answer a question about the values
+/// they just typed.
+#[cfg(feature = "operator")]
+#[derive(Default)]
+enum Stage {
+    /// Typing the pair.
+    #[default]
+    Editing,
+    /// Sent, and waiting for the owner. Enter does nothing here: one request at
+    /// a time, so a held key cannot queue a second write of a credential file.
+    Sent,
+    /// The owner will not overwrite what is already stored without being asked
+    /// twice. `said` is its sentence, rendered verbatim; `typed` is the
+    /// challenge so far.
+    Consent { said: String, typed: String },
+}
+
+/// The two values, where the operator is in them, and what the desk last said.
+///
+/// **No `derive(Debug)`.** The hand-written one below is the reason: a derived
+/// implementation would print both fields, and `{:?}` on anything holding this
+/// — a view, a registry, a panic message — would print them with it. The
+/// redaction is the default rather than a rule somebody has to remember.
+#[cfg(feature = "operator")]
+#[derive(Default)]
+struct Form {
+    key: String,
+    secret: String,
+    at: Field,
+    stage: Stage,
+    /// What the desk, or this form, last said back. Retired by the next
+    /// keystroke: an answer beside a field the operator has since changed is an
+    /// answer to a question they are no longer asking.
+    note: Option<String>,
+}
+
+#[cfg(feature = "operator")]
+impl std::fmt::Debug for Form {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Form(<redacted>)")
+    }
+}
+
+/// However the form goes away — `Esc`, a stored login, the view being dropped —
+/// the buffers are covered on the way out.
+///
+/// On `Drop` rather than at each exit, so there is no path that forgets. Best
+/// effort, and stated as such at `secret::wipe`: a `String` that grew while it
+/// was typed into may have left an earlier allocation behind, and that one is
+/// already out of reach of any code here.
+#[cfg(feature = "operator")]
+impl Drop for Form {
+    fn drop(&mut self) {
+        crate::secret::wipe(&mut self.key);
+        crate::secret::wipe(&mut self.secret);
+        if let Stage::Consent { typed, .. } = &mut self.stage {
+            crate::secret::wipe(typed);
+        }
+    }
+}
+
+#[cfg(feature = "operator")]
+impl Form {
+    /// The field the caret is in, while there is one to type into.
+    fn field(&mut self) -> &mut String {
+        match self.at {
+            Field::Key => &mut self.key,
+            Field::Secret => &mut self.secret,
+        }
+    }
+
+    fn push(&mut self, c: char) {
+        self.note = None;
+        match &mut self.stage {
+            Stage::Editing => self.field().push(c),
+            // Bounded by the challenge's own length, so a held key cannot push
+            // the correct prefix out of the field and leave a human looking at
+            // an unarmed box they believe they filled in — the same rule the
+            // execution modal's field has.
+            Stage::Consent { typed, .. } => {
+                if typed.chars().count() < CONFIRM.chars().count() {
+                    typed.push(c);
+                }
+            }
+            Stage::Sent => {}
+        }
+    }
+
+    fn backspace(&mut self) {
+        self.note = None;
+        match &mut self.stage {
+            Stage::Editing => {
+                self.field().pop();
+            }
+            Stage::Consent { typed, .. } => {
+                typed.pop();
+            }
+            Stage::Sent => {}
+        }
+    }
+
+    /// The other field. Only while there are two — inside the consent question
+    /// there is one thing to type and Tab has nowhere to go.
+    fn focus_other(&mut self) {
+        if matches!(self.stage, Stage::Editing) {
+            self.at = match self.at {
+                Field::Key => Field::Secret,
+                Field::Secret => Field::Key,
+            };
+        }
+    }
+
+    /// The pair as it would be sent: trimmed, because the fields are masked and
+    /// a trailing space from a paste is invisible in them. The owner would
+    /// refuse the shape and the operator could not see why.
+    fn pair(&self) -> (String, String) {
+        (self.key.trim().to_string(), self.secret.trim().to_string())
+    }
+}
+
+#[cfg(feature = "operator")]
+impl SettingsView {
+    /// Whether the last frame left room to draw the form.
+    ///
+    /// Read off the area `draw` published, because the floor is a fact about
+    /// the pane and a key handler is never told one. Zero before the first
+    /// frame, which refuses — a client that has not drawn cannot know it has
+    /// room, and the runtime draws once before it reads its first event.
+    fn form_fits(&self) -> bool {
+        let area = self.area.get();
+        area.height >= FORM_MIN_H && area.width >= TWO_COL
+    }
+
+    fn publish(&self, area: Rect) {
+        self.area.set(area);
+    }
+
+    /// Every key this pane claims, gated on the posture rather than the build.
+    ///
+    /// The order is load-bearing: an open form outranks the two keys that reach
+    /// the desk, or `t` would be untypeable inside a secret.
     // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
     // this function to check it. That module's header lists what the check
     // cannot see — including why a comment in here may not spell a key variant.
-    //
-    // This one claims none. Nothing on the pane scrolls or selects, so a key
-    // pressed here belongs to whoever claims it next; swallowing one would read
-    // as a hung client.
-    fn on_key(&mut self, _k: KeyEvent, _store: &mut Store) -> Option<Command> {
+    fn keys(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
+        if !store.posture.writes() {
+            // Same rule as AUDIT's arrows: a key with no visible effect reads
+            // as a hung client, so an unarmed window declines rather than
+            // swallows, and the keys stay free for whoever claims them next.
+            return None;
+        }
+        // A terminal that shrank under an open form retires it, on the first
+        // key after the resize — and the fields go with it, so growing back
+        // cannot restore a half-typed credential the operator has not seen
+        // since. The box is already refusing to draw and already holding no
+        // keyboard by then; this is what keeps the *state* from outliving it.
+        if self.form.is_some() && !self.form_fits() {
+            self.close();
+            return None;
+        }
+        if self.form.is_some() {
+            return self.form_key(k);
+        }
+        match k.code {
+            KeyCode::Char('a') => self.form = Some(Form::default()),
+            // No client-side gate on there being a login to test. A desk that
+            // has never logged in is one of the answers the route is built to
+            // give ("no credentials are configured"), and a client that
+            // pre-empted it would be a second, drifting copy of the owner's
+            // own account of what it can read.
+            KeyCode::Char('t') => return Some(Command::TestAlpaca),
+            _ => {}
+        }
+        None
+    }
+
+    /// The form's own keys. One match over both stages, because they are one
+    /// surface to an operator: the same four keys mean the same four things
+    /// whether the box is asking for a pair or for a word.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
+    fn form_key(&mut self, k: KeyEvent) -> Option<Command> {
+        let form = self.form.as_mut()?;
+        match k.code {
+            KeyCode::Char(c) => form.push(c),
+            KeyCode::Backspace => form.backspace(),
+            KeyCode::Tab => form.focus_other(),
+            // Closes *and* clears. A form left holding a key pair behind
+            // whichever view the operator moved to is a credential this client
+            // is keeping for no reason.
+            KeyCode::Esc => self.close(),
+            KeyCode::Enter => return self.submit(),
+            _ => {}
+        }
+        None
+    }
+
+    /// What Enter does, per stage.
+    fn submit(&mut self) -> Option<Command> {
+        let form = self.form.as_mut()?;
+        match &form.stage {
+            // One request at a time. The owner writes an audit row per stored
+            // login, and a second Enter while the first is in flight would put
+            // two of them on the bus for one decision.
+            Stage::Sent => None,
+            Stage::Editing => {
+                let (key, secret) = form.pair();
+                // An incomplete login is not a login. The owner refuses it
+                // anyway — with a sentence about a field this form knows is
+                // empty — which would reach the operator as a failed write
+                // rather than as a slip.
+                if key.is_empty() || secret.is_empty() {
+                    form.note = Some("both the key and the secret are required".to_string());
+                    return None;
+                }
+                form.stage = Stage::Sent;
+                Some(Command::AlpacaLogin {
+                    key: crate::secret::Secret::new(key),
+                    secret: crate::secret::Secret::new(secret),
+                    // Never on the first send. The flag is consent, and nobody
+                    // has been asked yet.
+                    replace: false,
+                })
+            }
+            Stage::Consent { typed, .. } => {
+                // An unarmed Enter leaves the question up rather than closing
+                // it: a human who mistyped the challenge has to see that they
+                // did.
+                if typed != CONFIRM {
+                    return None;
+                }
+                let (key, secret) = form.pair();
+                // The consent is spent by the send that carries it. `Sent` is
+                // terminal for this question — nothing moves the form back into
+                // `Consent`, so retyping the word cannot authorise a second
+                // overwrite, and the answer that comes back decides what
+                // happens next.
+                form.stage = Stage::Sent;
+                Some(Command::AlpacaLogin {
+                    key: crate::secret::Secret::new(key),
+                    secret: crate::secret::Secret::new(secret),
+                    replace: true,
+                })
+            }
+        }
+    }
+
+    /// Close the form and clear it. The wipe is `Form`'s own `Drop`.
+    fn close(&mut self) {
+        self.form = None;
+    }
+
+    /// What the owner said about the login this form sent.
+    ///
+    /// Called from the runtime's one drain point, because the answer arrives on
+    /// the bus rather than out of the key that asked for it — see
+    /// `views::Views::wrote`. Only a form that is *waiting* reacts: an outcome
+    /// belonging to another key, or one that arrived after the operator
+    /// abandoned the box, must not reopen it or overwrite what is being typed
+    /// into it now.
+    pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
+        use crate::bus::Wrote;
+        if !matches!(
+            self.form.as_ref().map(|form| &form.stage),
+            Some(Stage::Sent)
+        ) {
+            return;
+        }
+        // Stored: the box has done its work and the toast reports it. Closing
+        // is also what clears the pair — there is no state in which this client
+        // holds a credential it has already sent.
+        if matches!(outcome, Wrote::LoggedIn { .. }) {
+            self.close();
+            return;
+        }
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
+        match outcome {
+            // The owner's question, verbatim. It names what would be lost, and
+            // this client owns none of that wording.
+            Wrote::LoginNeedsConsent { said } => {
+                form.stage = Stage::Consent {
+                    said: said.clone(),
+                    typed: String::new(),
+                }
+            }
+            // Not confirmable: the request is wrong and the operator fixes it,
+            // so the box stays up with the pair still in it and the owner's
+            // sentence under the fields.
+            Wrote::LoginRefused { said } => {
+                form.stage = Stage::Editing;
+                form.note = Some(said.clone());
+            }
+            // A request that never landed. The form must not stay in `Sent`
+            // over it — a box that refuses Enter forever after one timeout is a
+            // client that looks broken.
+            Wrote::Failed { said, .. } => {
+                form.stage = Stage::Editing;
+                form.note = Some(said.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// The form, drawn over the pane that opened it.
+    fn draw_form(&self, f: &mut Frame, area: Rect, store: &Store) {
+        use ratatui::widgets::{Block, Borders, Clear};
+        let Some(form) = &self.form else {
+            return;
+        };
+        // Refuse rather than open invisible, exactly as WORKFORCE's picker
+        // does: below the floor the box would have room for a header and
+        // nothing else, and `typing` declines the keyboard for the same frame,
+        // so the refusal is the whole of what the operator gets.
+        if !self.form_fits() {
+            let row = Rect {
+                x: area.x,
+                y: area.y + area.height / 2,
+                width: area.width,
+                height: 1,
+            };
+            f.render_widget(Clear, row);
+            refuse(
+                f,
+                row,
+                format!(
+                    "the alpaca login form needs {FORM_MIN_H} rows; this pane has {}.",
+                    area.height
+                ),
+            );
+            return;
+        }
+        let t = theme();
+        let w = FORM_W.min(area.width.saturating_sub(4)).max(3);
+        // Built before the box is sized, because how tall it has to be is a
+        // fact about what is in it: the owner's sentences vary from four words
+        // to four lines, and a fixed box would either clip the long ones or
+        // draw eight blank rows under the short ones.
+        let lines = match &form.stage {
+            Stage::Consent { said, typed } => consent_lines(said, typed),
+            _ => editing_lines(form, store, w - 2),
+        };
+        let rect = centred(area, w, wanted(&lines, w - 2));
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(match form.stage {
+                // The one stage that is a question about destroying something.
+                Stage::Consent { .. } => t.warning,
+                _ => t.accent,
+            }))
+            .style(Style::default().bg(t.bg_raised));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        // Wrapped, because the owner's sentences are sentences: half a refusal
+        // about why a login cannot be stored is worse than one that took two
+        // lines.
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+}
+
+/// How many rows the box needs for what it is about to draw, borders included.
+///
+/// An estimate, and it rounds up: `Paragraph` wraps at word boundaries, so a
+/// line one cell past the width can take a whole row more than the division
+/// says. The extra row when anything wraps is what keeps the last line of an
+/// owner's refusal on screen rather than one cell under the border.
+#[cfg(feature = "operator")]
+fn wanted(lines: &[Line<'static>], inner_w: u16) -> u16 {
+    let width = inner_w.max(1) as usize;
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().div_ceil(width).max(1))
+        .sum();
+    let wrapped = lines.iter().any(|line| line.width() > width);
+    rows as u16 + u16::from(wrapped) + 2
+}
+
+/// The box's rect: centred, and never larger than the pane it is drawn over.
+#[cfg(feature = "operator")]
+fn centred(area: Rect, w: u16, h: u16) -> Rect {
+    let h = h.min(area.height.saturating_sub(2)).max(1);
+    Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// The two masked fields, and what the box last said.
+#[cfg(feature = "operator")]
+fn editing_lines(form: &Form, store: &Store, width: u16) -> Vec<Line<'static>> {
+    let t = theme();
+    let room = (width as usize).saturating_sub(LABEL_W + 3);
+    let sending = matches!(form.stage, Stage::Sent);
+    let mut lines = vec![
+        panel_header("alpaca login"),
+        field_row("key", &form.key, form.at == Field::Key && !sending, room),
+        field_row(
+            "secret",
+            &form.secret,
+            form.at == Field::Secret && !sending,
+            room,
+        ),
+        Line::from(""),
+    ];
+    lines.push(Line::from(Span::styled(
+        match (&form.note, sending) {
+            (_, true) => "asking the owner…".to_string(),
+            (Some(note), _) => format!(" {note}"),
+            // Stated because it is a documented property of the route this key
+            // calls, and an operator who typed a login expecting the desk to
+            // start trading it would otherwise read the unchanged book as a
+            // bug: the owner stores the credential and switches nothing.
+            (None, _) => " stored by the owner — the book is not switched by it".to_string(),
+        },
+        Style::default().fg(match form.note {
+            Some(_) => t.warning,
+            None => t.text_dim,
+        }),
+    )));
+    lines.push(Line::from(Span::styled(
+        " Enter stores · Tab the other field · Esc clears",
+        Style::default().fg(t.text_dim),
+    )));
+    // What the desk currently reads, so an operator can tell "this replaced
+    // nothing" from "this replaced something" before they are asked to.
+    if let Some(mode) = store.desk_mode() {
+        if let Some(said) = format::text(mode.credentials.as_ref()) {
+            lines.push(Line::from(Span::styled(
+                format!(" now: {said}"),
+                Style::default().fg(t.text_tertiary),
+            )));
+        }
+    }
+    lines
+}
+
+/// One masked field. Both are masked: the key id is the less sensitive half,
+/// and masking only one of them would make the other look like the secret.
+#[cfg(feature = "operator")]
+fn field_row(label: &str, value: &str, focused: bool, room: usize) -> Line<'static> {
+    let t = theme();
+    let typed = value.chars().count();
+    // Clipped rather than run past the box, and marked when it is: a field that
+    // silently stopped growing would read as one that stopped accepting keys.
+    let dots = match typed > room {
+        true => format!("{}…", "•".repeat(room.saturating_sub(1))),
+        false => "•".repeat(typed),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!(" {label:<LABEL_W$}"),
+            Style::default().fg(t.text_secondary),
+        ),
+        Span::styled(dots, Style::default().fg(t.text_primary)),
+        // A field with no caret is one an operator cannot tell from a label.
+        Span::styled(
+            if focused { "▏" } else { "" },
+            Style::default().fg(t.accent),
+        ),
+    ])
+}
+
+/// The owner's question, and the word that answers it.
+#[cfg(feature = "operator")]
+fn consent_lines(said: &str, typed: &str) -> Vec<Line<'static>> {
+    let t = theme();
+    vec![
+        panel_header("replace the stored login"),
+        Line::from(Span::styled(
+            format!(" {said}"),
+            Style::default().fg(t.text_primary),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" type ", Style::default().fg(t.text_secondary)),
+            Span::styled(
+                CONFIRM,
+                Style::default()
+                    .fg(t.warning)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Span::styled(
+                " to replace it · Esc leaves it alone",
+                Style::default().fg(t.text_secondary),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" > ", Style::default().fg(t.text_tertiary)),
+            Span::styled(
+                typed.to_string(),
+                Style::default()
+                    .fg(match typed == CONFIRM {
+                        true => t.positive,
+                        false => t.text_primary,
+                    })
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+        ]),
+    ]
+}
+
+/// The default build's half: no form, and no branch that could grow one — the
+/// commands it would send are not in this build.
+#[cfg(not(feature = "operator"))]
+impl SettingsView {
+    fn publish(&self, _area: Rect) {}
+    fn draw_form(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
+
+    fn keys(&mut self, _k: KeyEvent, _store: &mut Store) -> Option<Command> {
         None
     }
 }
@@ -151,10 +775,12 @@ fn draw_desk(f: &mut Frame, area: Rect, store: &Store) {
     rows.push(Line::from(""));
     rows.push(Line::from(Span::styled(
         // Posture, not the build: a featured binary the human did not arm reads
-        // GLASS on the status line and must not be told about a command it
-        // would refuse.
+        // GLASS on the status line and must not be told about keys it would
+        // refuse. The two the armed window has are named beside the command
+        // that is *not* one of them — a login does not switch the desk, and the
+        // line reads as one sentence about which is which.
         if store.posture.writes() {
-            " /mode switches the desk — this pane only reports it"
+            " /mode switches the desk · a types a login · t tests it"
         } else {
             " read-only — this window cannot switch the desk"
         },

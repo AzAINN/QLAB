@@ -77,6 +77,12 @@ pub enum Source {
     WorkforceAsk,
     /// WORKFORCE's template picker, while it is open.
     WorkforcePicker,
+    /// SETTINGS' alpaca login form, while it is open.
+    ///
+    /// Its own section for the same reason the two WORKFORCE fields are: the
+    /// keys that *open* it and the keys *inside* it are two routers, and one
+    /// section over both would describe the form with a row about the pane.
+    SettingsLogin,
     /// The confirmation box, which outranks everything but Ctrl-C.
     Confirm,
 }
@@ -85,7 +91,7 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 13] = [
+    pub const ALL: [Source; 14] = [
         Source::Shell,
         Source::Command,
         Source::Help,
@@ -98,6 +104,7 @@ impl Source {
         Source::WorkforcePicker,
         Source::View(ViewId::Audit),
         Source::View(ViewId::Settings),
+        Source::SettingsLogin,
         Source::Confirm,
     ];
 
@@ -110,6 +117,7 @@ impl Source {
             Source::View(id) => id.label(),
             Source::WorkforceAsk => "WORK · the question row",
             Source::WorkforcePicker => "WORK · the template picker",
+            Source::SettingsLogin => "SETT · the alpaca login form",
             Source::Confirm => "a confirmation box",
         }
     }
@@ -148,13 +156,16 @@ impl Source {
             Source::WorkforceAsk => ("ui/views/workforce.rs", "", "ask_key"),
             Source::WorkforcePicker => ("ui/views/workforce.rs", "", "picker_key"),
             Source::View(ViewId::Audit) => ("ui/views/audit.rs", "", "on_key"),
-            // RSCH and SETT bind nothing: everything on them is read-only and
-            // nothing scrolls, so a key pressed there belongs to whoever claims
-            // it next. Pointed at their own routers rather than at a shared
-            // placeholder, which is what would catch a cursor added to one of
-            // them without a help row.
+            // RSCH binds nothing: everything on it is read-only and nothing
+            // scrolls, so a key pressed there belongs to whoever claims it
+            // next. Pointed at its own router rather than at a shared
+            // placeholder, which is what would catch a cursor added to it
+            // without a help row.
             Source::View(ViewId::Research) => ("ui/views/research.rs", "", "on_key"),
-            Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "on_key"),
+            // SETT's `View::on_key` only forwards; `keys` is the router, and
+            // the form under it is the section below.
+            Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "keys"),
+            Source::SettingsLogin => ("ui/views/settings.rs", "", "form_key"),
             Source::Confirm => ("ui/widgets/confirm.rs", "", "on_key"),
         }
     }
@@ -408,6 +419,45 @@ pub const KEYMAP: &[Binding] = &[
         "R",
         Source::View(ViewId::Audit),
         "reject it — R, because the shell owns lowercase r",
+    ),
+    // -- SETT -------------------------------------------------------------
+    w(
+        "Char('a')",
+        "a",
+        Source::View(ViewId::Settings),
+        "type an Alpaca paper login — the desk stores it, the book is unchanged",
+    ),
+    w(
+        "Char('t')",
+        "t",
+        Source::View(ViewId::Settings),
+        "ask the venue whether the stored login works",
+    ),
+    // -- SETT, the alpaca login form --------------------------------------
+    w(
+        "Char(c)",
+        "any key",
+        Source::SettingsLogin,
+        "types into the field — both are masked",
+    ),
+    w(
+        "Backspace",
+        "Backspace",
+        Source::SettingsLogin,
+        "deletes a character",
+    ),
+    w("Tab", "Tab", Source::SettingsLogin, "the other field"),
+    w(
+        "Enter",
+        "Enter",
+        Source::SettingsLogin,
+        "stores the login — or answers the question about replacing one",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::SettingsLogin,
+        "closes the form and clears both fields",
     ),
     // -- the confirmation box ---------------------------------------------
     w(

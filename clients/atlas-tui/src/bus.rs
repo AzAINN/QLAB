@@ -78,6 +78,26 @@ pub enum Wrote {
         label: String,
         warning: Option<String>,
     },
+    /// The owner stored an Alpaca paper login.
+    ///
+    /// `usable` is its own verdict on what it can now read (`credentials_ok`),
+    /// not this client's: a login can be written and still be shadowed by an
+    /// environment pair or unreadable at the resolver, which is a 200 that
+    /// changed a file and cannot trade — the "succeeded and did nothing" shape
+    /// this client refuses to draw as a receipt. `note` is the owner's own
+    /// description of the credential, and never anything that was typed.
+    LoggedIn { usable: bool, note: String },
+    /// The owner will not overwrite what is already stored without being asked
+    /// twice. `said` is its sentence, which names what would be lost — rendered
+    /// verbatim, because this client owns none of that wording.
+    LoginNeedsConsent { said: String },
+    /// The owner would not store the login as sent. Its own sentence, which
+    /// never quotes what was typed.
+    LoginRefused { said: String },
+    /// The stored login was put to the venue. `ok` is the venue's answer and
+    /// `summary` is what to show either way — the masked account and its buying
+    /// power, or the reason it was refused.
+    Tested { ok: bool, summary: String },
     /// The request itself failed: no owner, a timeout, a non-2xx. `said` is the
     /// owner's words verbatim when there were any.
     Failed { what: String, said: String },

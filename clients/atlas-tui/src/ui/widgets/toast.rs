@@ -343,6 +343,42 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
                 None => format!("the desk is now {label}"),
             },
         ),
+        // The owner's own verdict on what it stored, never a receipt this
+        // client composed: a login can be written and still be shadowed by an
+        // environment pair, which is a file that changed and a desk that cannot
+        // trade. `Warn` for that, as for the book it cannot reach.
+        Wrote::LoggedIn { usable, note } => Toast::new(
+            match usable {
+                true => Level::Info,
+                false => Level::Warn,
+            },
+            "alpaca login",
+            note.clone(),
+        ),
+        // A question, not news — and it has a box because the form that asked
+        // it is on one pane. An operator who navigated away while the request
+        // was in flight would otherwise be left with a consent question drawn
+        // where they are not looking. The owner's sentence, verbatim.
+        Wrote::LoginNeedsConsent { said } => {
+            Toast::new(Level::Warn, "alpaca login not stored", said.clone())
+        }
+        Wrote::LoginRefused { said } => {
+            Toast::new(Level::Warn, "alpaca login refused", said.clone())
+        }
+        // `Warn`, not `Alarm`: a venue that will not take the stored key is a
+        // desk that cannot trade the real book, which is the same severity as
+        // pointing at that book without a login. The request itself worked.
+        Wrote::Tested { ok, summary } => Toast::new(
+            match ok {
+                true => Level::Info,
+                false => Level::Warn,
+            },
+            match ok {
+                true => "alpaca reachable",
+                false => "alpaca refused the login",
+            },
+            summary.clone(),
+        ),
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

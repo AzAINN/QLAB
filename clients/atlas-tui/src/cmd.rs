@@ -96,6 +96,31 @@ pub enum Command {
         data: String,
         book: String,
     },
+    /// Store an Alpaca paper login the operator typed.
+    ///
+    /// The two values are `Secret`s, so this variant — which `Command` derives
+    /// `Debug` for, and which the dispatcher hands to a tracing-capable layer —
+    /// cannot print what it carries. See `crate::secret`.
+    ///
+    /// `replace` is consent and nothing else. It is `false` on every login the
+    /// operator has not been asked about, and `true` only on the re-send that
+    /// follows a confirmable refusal the owner raised for this exact pair: the
+    /// owner destroys a stored browser login on that flag, and the flag is
+    /// therefore never a default and never a retry's convenience.
+    ///
+    /// It authorises no trade. A stored credential makes the Alpaca book
+    /// *choosable*; the desk is switched by `/mode`, every gate downstream is
+    /// unmoved, and a fill still needs a persisted approval and a typed hash.
+    #[cfg(feature = "operator")]
+    AlpacaLogin {
+        key: crate::secret::Secret,
+        secret: crate::secret::Secret,
+        replace: bool,
+    },
+    /// Ask the owner to put the stored login to the venue. Reads nothing back
+    /// into the desk and changes nothing — the answer is a sentence.
+    #[cfg(feature = "operator")]
+    TestAlpaca,
 }
 
 /// Hand-written rather than derived, and neither `Eq` nor `Clone`.
@@ -134,6 +159,25 @@ impl PartialEq for Command {
             (Command::DeskMode { data: a, book: x }, Command::DeskMode { data: b, book: y }) => {
                 a == b && x == y
             }
+            // Compared, unlike a confirmation, because there is nothing to
+            // substitute: a login is the pair itself rather than a capability
+            // minted for one plan, and a test that could not read back what a
+            // keystroke built could not pin the form at all.
+            #[cfg(feature = "operator")]
+            (
+                Command::AlpacaLogin {
+                    key: a,
+                    secret: x,
+                    replace: p,
+                },
+                Command::AlpacaLogin {
+                    key: b,
+                    secret: y,
+                    replace: q,
+                },
+            ) => a == b && x == y && p == q,
+            #[cfg(feature = "operator")]
+            (Command::TestAlpaca, Command::TestAlpaca) => true,
             _ => false,
         }
     }

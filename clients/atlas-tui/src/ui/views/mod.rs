@@ -126,8 +126,22 @@ impl Views {
             research: research::ResearchView,
             workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
-            settings: settings::SettingsView,
+            settings: settings::SettingsView::default(),
         }
+    }
+
+    /// Hand one write outcome to the surface that is waiting for it.
+    ///
+    /// Not routed by `ViewId`, deliberately: the answer arrives on the bus
+    /// while the operator may be looking anywhere, and a form that only heard
+    /// about its own request when SETTINGS happened to be on screen would sit
+    /// in "asking the owner…" forever. SETTINGS is the only view that awaits an
+    /// answer at all — every other outcome is a toast and a refetch — so this
+    /// names it rather than asking seven views a question six of them have no
+    /// state for.
+    #[cfg(feature = "operator")]
+    pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
+        self.settings.wrote(outcome);
     }
 
     /// The modal the active view is showing, if any.

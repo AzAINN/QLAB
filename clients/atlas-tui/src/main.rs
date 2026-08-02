@@ -337,6 +337,15 @@ fn ingest(
     if atlas::dispatch::refetches(&ev) {
         poller.now();
     }
+    // And the one surface that is *waiting* for an answer rather than being
+    // told about one. The login form sends and then has to hear what the owner
+    // said — a consent question to put to the operator, a refusal to show under
+    // the fields — and the answer arrives here rather than out of the key that
+    // asked for it, because a write never blocks the frame loop.
+    #[cfg(feature = "operator")]
+    if let AppEvent::Wrote(outcome) = &ev {
+        views.wrote(outcome);
+    }
     // Before the fold, because the fold consumes the event. A toast is about the
     // event itself rather than about the state it leaves behind — an approval
     // that arrived and was consumed inside one drain still happened.

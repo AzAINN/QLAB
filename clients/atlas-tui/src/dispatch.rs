@@ -22,7 +22,7 @@
 mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::Command;
-    use crate::net::write::{Execution, WriteClient, WriteError};
+    use crate::net::write::{Execution, Login, WriteClient, WriteError};
     use crate::store::Posture;
     use std::sync::Arc;
 
@@ -231,6 +231,50 @@ mod armed {
                     said: err.to_string(),
                 },
             },
+            // A login is not a governance decision either, and it books
+            // nothing: the owner writes the credential file and does not switch
+            // the book. Three answers, and the middle one is a question — the
+            // form is what puts it to the operator, so it travels back as its
+            // own outcome rather than as a failure.
+            Command::AlpacaLogin {
+                key,
+                secret,
+                replace,
+            } => {
+                // `Some(true)` only. The flag is consent, so "not asked" must
+                // not be spelled the same way on the wire as "answered no".
+                let consented = replace.then_some(true);
+                match client
+                    .set_alpaca_credentials(&key, &secret, consented)
+                    .await
+                {
+                    Ok(Login::Stored(said)) => match credentials_of(&said) {
+                        Ok(note) => Wrote::LoggedIn { usable: true, note },
+                        Err(note) => Wrote::LoggedIn {
+                            usable: false,
+                            note,
+                        },
+                    },
+                    Ok(Login::ConsentNeeded(said)) => Wrote::LoginNeedsConsent { said },
+                    Ok(Login::Rejected(said)) => Wrote::LoginRefused { said },
+                    Err(err) => Wrote::Failed {
+                        // Names the action and never the pair: `what` is
+                        // rendered in a toast and in the form's own note.
+                        what: "store the alpaca login".to_string(),
+                        said: err.to_string(),
+                    },
+                }
+            }
+            Command::TestAlpaca => match client.test_alpaca().await {
+                Ok(verdict) => Wrote::Tested {
+                    ok: verdict.ok,
+                    summary: verdict.summary,
+                },
+                Err(err) => Wrote::Failed {
+                    what: "test the alpaca login".to_string(),
+                    said: err.to_string(),
+                },
+            },
             Command::Quit | Command::Refresh => return None,
         })
     }
@@ -251,16 +295,37 @@ mod armed {
         if book != "alpaca" {
             return None;
         }
+        credentials_of(said).err()
+    }
+
+    /// What a `desk_mode_payload()` says about the credentials behind it.
+    ///
+    /// `Ok` is the owner's description of a login it can read; `Err` is its
+    /// description of one it cannot. One definition because two surfaces ask —
+    /// the desk-mode switch, which warns about a book it cannot reach, and the
+    /// login form, which reports what the desk made of what it just stored —
+    /// and two copies of "what counts as a working login" is how the two come
+    /// to disagree.
+    ///
+    /// An owner that does not say at all is an `Err`. `desk_mode_payload`
+    /// always carries the flag, so its absence is a contract this client cannot
+    /// read, and silence about the credential that reaches a real venue must
+    /// not pass as a clean one. Invariant 4: refuse loudly rather than degrade
+    /// quietly.
+    fn credentials_of(said: &serde_json::Value) -> Result<String, String> {
+        let described = said
+            .get("credentials")
+            .and_then(|v| v.as_str())
+            // `Some("")` is absent, as everywhere in this client.
+            .filter(|said| !said.is_empty());
         match said.get("credentials_ok").and_then(|v| v.as_bool()) {
-            Some(true) => None,
-            Some(false) => Some(
-                said.get("credentials")
-                    .and_then(|v| v.as_str())
-                    .filter(|said| !said.is_empty())
-                    .unwrap_or("the owner reports no usable Alpaca credentials")
-                    .to_string(),
-            ),
-            None => Some("the owner did not say whether the Alpaca credentials work".to_string()),
+            Some(true) => Ok(described
+                .unwrap_or("the owner reports a usable Alpaca login")
+                .to_string()),
+            Some(false) => Err(described
+                .unwrap_or("the owner reports no usable Alpaca credentials")
+                .to_string()),
+            None => Err("the owner did not say whether the Alpaca credentials work".to_string()),
         }
     }
 }

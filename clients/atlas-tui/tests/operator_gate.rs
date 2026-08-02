@@ -45,6 +45,49 @@ fn files_mentioning(needle: &str) -> Vec<String> {
     found
 }
 
+/// Every file under `src` whose *production* source contains `literal`, as
+/// paths relative to `src`.
+///
+/// The test modules are cut off, exactly as `input`'s keymap scrape cuts them
+/// and for the same reason: a module's own tests read back what the module
+/// holds, and a check that counted those would either be permanently wrong or
+/// would push the tests into spelling the accessor some other way — which is
+/// gaming the pin rather than passing it. Cut at the test *module* rather than
+/// at the first `#[cfg(test)]`, because several files carry test-only helpers
+/// above it.
+fn production_files_mentioning(literal: &str) -> Vec<String> {
+    fn walk(dir: &std::path::Path, literal: &str, found: &mut Vec<String>) {
+        let entries = std::fs::read_dir(dir).unwrap_or_else(|err| panic!("{dir:?}: {err}"));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, literal, found);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let whole = std::fs::read_to_string(&path).unwrap_or_default();
+            let source = match whole.find("#[cfg(test)]\nmod tests") {
+                Some(at) => &whole[..at],
+                None => &whole[..],
+            };
+            if source.contains(literal) {
+                found.push(
+                    path.to_string_lossy()
+                        .trim_start_matches(SRC)
+                        .trim_start_matches('/')
+                        .to_string(),
+                );
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(std::path::Path::new(SRC), literal, &mut found);
+    found.sort();
+    found
+}
+
 /// The files that may never perform IO, by path prefix.
 ///
 /// `ui/` renders and returns `Command`s. `cmd.rs` is the other half of that
@@ -148,6 +191,36 @@ fn no_view_or_widget_can_reach_the_writer() {
         reachers.iter().any(|f| f == "main.rs"),
         "the writer-grep found nothing at all: {reachers:?}"
     );
+}
+
+#[test]
+fn the_plaintext_of_a_typed_credential_is_readable_in_exactly_one_file() {
+    // The same shape as the `.post(` pin above, for the other thing this crate
+    // must not spread around: a credential an operator typed is unwrapped in
+    // the file that puts it on the wire and nowhere else. Everywhere between —
+    // the form, the `Command`, the dispatcher — holds a `Secret`, whose `Debug`
+    // is the redaction, so no tracing line, panic message or toast can render
+    // one however it is worded.
+    //
+    // Asserting the exact list rather than "nothing found": a grep that cannot
+    // read the tree returns no matches, which would read as a clean crate.
+    assert_eq!(
+        production_files_mentioning(".expose("),
+        vec!["net/write.rs".to_string()],
+        "a credential's plaintext may only be read where it is sent"
+    );
+    // And the owner's own field names, which are the other spelling of the same
+    // reach: a second module building this body would be a second place that
+    // has to be reasoned about.
+    assert_eq!(
+        production_files_mentioning("api_secret"),
+        vec!["net/write.rs".to_string()],
+        "the credential body is built in one place"
+    );
+    // The search really ran, and the walker really reaches the deep files: a
+    // reader that could not open the tree returns nothing, which would read as
+    // a crate with no secrets in it at all.
+    assert!(production_files_mentioning("Secret").contains(&"ui/views/settings.rs".to_string()));
 }
 
 // -- the glass build --------------------------------------------------------
@@ -1276,6 +1349,393 @@ mod operator {
             }
             other => panic!("a refused pair must not read as a switch: {other:?}"),
         }
+    }
+
+    // -- the alpaca login --------------------------------------------------
+    //
+    // C1's settled contract, driven against a canned owner rather than read off
+    // its report: `POST /api/alpaca/credentials` answers 200 with
+    // `desk_mode_payload()`, **400 carrying `confirm`** when a stored login
+    // would be destroyed, and 400 without it when the request itself is wrong.
+    // The two 400s are told apart by that field and never by the sentence — the
+    // validation refusal ("replace must be true or false") contains the word.
+
+    use atlas::net::write::{Login, WriteError};
+    use atlas::secret::Secret;
+
+    /// A plausible pair, in the shapes the owner's own patterns admit.
+    fn pair() -> (Secret, Secret) {
+        (
+            Secret::new("PKTEST0123456789".into()),
+            Secret::new("s3cret/abcdefghijklmnopqrstuv".into()),
+        )
+    }
+
+    /// The owner's answer to a login it accepted.
+    const STORED: &str = r#"{"data": "live", "book": "alpaca", "label": "LIVE · ALPACA BOOK",
+        "offline": false, "credentials_ok": true, "credentials": "paper key ending 4f21"}"#;
+
+    /// The consent refusal, in the owner's own words (`AlpacaConsentRequired`).
+    const CONSENT: &str = r#"{"error": "the active alpaca profile holds a browser login; storing a key pair discards its access token and refresh token, and they cannot be recovered without logging in again", "confirm": "replace"}"#;
+
+    #[tokio::test]
+    async fn a_login_carries_the_pair_and_never_a_replace_nobody_asked_for() {
+        let owner = spawn_owner(200, STORED);
+        let client = WriteClient::new(&owner.base).unwrap();
+        let (key, secret) = pair();
+        let out = client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap();
+        assert!(matches!(out, Login::Stored(_)), "{out:?}");
+
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/alpaca/credentials");
+        // `replace` is absent, not `false`: the owner defaults it, and a client
+        // that sent the flag on every login would be one edit away from sending
+        // `true` on every login.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({
+                "api_key": "PKTEST0123456789",
+                "api_secret": "s3cret/abcdefghijklmnopqrstuv"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_two_four_hundreds_are_told_apart_by_the_confirm_field_and_not_by_the_words() {
+        // The consentable one, rendered verbatim: the sentence names what would
+        // be lost, and this client owns none of that wording.
+        let owner = spawn_owner(400, CONSENT);
+        let client = WriteClient::new(&owner.base).unwrap();
+        let (key, secret) = pair();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::ConsentNeeded(said) => {
+                assert!(said.contains("refresh token"), "{said}");
+                assert!(!said.contains("confirm"), "the field is not the sentence");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // The trap. This refusal *contains the word* `replace` and is not
+        // confirmable — a client sniffing the sentence would offer to destroy a
+        // profile over a body the operator should fix instead.
+        let owner = spawn_owner(400, r#"{"error": "replace must be true or false"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::Rejected(said) => assert!(said.contains("true or false"), "{said}"),
+            other => panic!("a validation refusal must not offer consent: {other:?}"),
+        }
+
+        // A field this client cannot act on is not a question either. The value
+        // names *which* flag would grant the request, and there is exactly one
+        // this form knows how to set — offering to confirm anything else would
+        // be sending `replace: true` at a refusal that never asked for it.
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "the desk is not configured for that", "confirm": "force"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::Rejected(said) => assert!(said.contains("not configured"), "{said}"),
+            other => panic!("an unknown confirm flag is not consent: {other:?}"),
+        }
+
+        // And consent, once given, is the only thing that sets the flag.
+        let owner = spawn_owner(200, STORED);
+        let client = WriteClient::new(&owner.base).unwrap();
+        client
+            .set_alpaca_credentials(&key, &secret, Some(true))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&owner.only().body).unwrap();
+        assert_eq!(body["replace"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn only_a_four_hundred_can_ask_this_client_to_overwrite_a_stored_login() {
+        // A 500 carrying the field is a broken owner, not an invitation to
+        // discard a browser login. It stays an error, and the form never puts
+        // the consent question up.
+        let owner = spawn_owner(500, CONSENT);
+        let client = WriteClient::new(&owner.base).unwrap();
+        let (key, secret) = pair();
+        match client.set_alpaca_credentials(&key, &secret, None).await {
+            Err(WriteError::Refused { status, .. }) => assert_eq!(status, 500),
+            other => panic!("a 500 must not become a consent prompt: {other:?}"),
+        }
+
+        // A 400 that is not JSON at all is still a refusal to fix — never a
+        // consent prompt, and never an error that loses what the owner said.
+        let owner = spawn_owner(400, "the desk is not answering json today");
+        let client = WriteClient::new(&owner.base).unwrap();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::Rejected(said) => assert!(said.contains("not answering json"), "{said}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_hands_the_pair_back_is_not_the_sentence_that_reaches_the_screen() {
+        // The owner never quotes what was typed. The body on this path is not
+        // always the owner's: a proxy in front of the desk answers 400 with a
+        // page of its own, and an echoing one would put the pair into a form
+        // note and a toast. This client is the only thing that knows what it
+        // just sent, so this is the only place the check can be made.
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "cannot POST api_key=PKTEST0123456789 secret=s3cret/abcdefghijklmnopqrstuv"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let (key, secret) = pair();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::Rejected(said) => {
+                assert!(!said.contains("PKTEST0123456789"), "{said}");
+                assert!(!said.contains("s3cret/abcdefghijklmnopqrstuv"), "{said}");
+                // And it says why there is nothing to read, rather than going
+                // blank: a refusal an operator cannot act on is bad enough
+                // without also being unexplained.
+                assert!(said.contains("quoted what was typed"), "{said}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn testing_a_login_is_a_verdict_and_a_venue_that_says_no_is_one_too() {
+        // `/api/alpaca/test` always answers 200 — a rejected key, a silent
+        // venue and a missing profile are all results with a sentence, which is
+        // why this reads `ok` rather than the status code.
+        let owner = spawn_owner(
+            200,
+            r#"{"ok": true, "account_masked": "…7788", "status": "ACTIVE",
+                "buying_power": 200000.0, "currency": "USD"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let verdict = client.test_alpaca().await.unwrap();
+        assert!(verdict.ok);
+        assert!(verdict.summary.contains("7788"), "{verdict:?}");
+        assert!(verdict.summary.contains("$200,000.00"), "{verdict:?}");
+        assert_eq!(owner.only().path, "/api/alpaca/test");
+
+        let owner = spawn_owner(
+            200,
+            r#"{"ok": false, "reason": "rejected by alpaca — that key and secret are not a valid paper login"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let verdict = client.test_alpaca().await.unwrap();
+        assert!(!verdict.ok);
+        assert!(
+            verdict.summary.contains("rejected by alpaca"),
+            "{verdict:?}"
+        );
+
+        // `Some("")` is absent, exactly as everywhere else: a verdict with a
+        // blank line under it says less than the fallback sentence does.
+        let owner = spawn_owner(200, r#"{"ok": false, "reason": ""}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(!client.test_alpaca().await.unwrap().summary.is_empty());
+
+        // And a 200 that will not say whether it worked is a broken contract,
+        // for the same reason an execution without `executed` is: both guesses
+        // are indefensible.
+        let owner = spawn_owner(200, r#"{"account_masked": "…7788"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(client.test_alpaca().await.is_err());
+    }
+
+    /// One login command, built the way the form builds it.
+    fn login_cmd(replace: bool) -> Command {
+        let (key, secret) = pair();
+        Command::AlpacaLogin {
+            key,
+            secret,
+            replace,
+        }
+    }
+
+    #[tokio::test]
+    async fn each_credential_command_reports_what_the_owner_said_and_nothing_it_invented() {
+        let owner = spawn_owner(200, STORED);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, login_cmd(false)).await,
+            Some(Wrote::LoggedIn {
+                usable: true,
+                note: "paper key ending 4f21".into(),
+            })
+        );
+        // Driven through the seam rather than through the client, because this
+        // is where "not asked" becomes a wire body: a `false` sent on every
+        // login is one edit away from a `true` sent on every login, and the
+        // route-level pin above cannot see the conversion at all.
+        let seen: serde_json::Value = serde_json::from_str(&owner.only().body).unwrap();
+        assert_eq!(
+            seen.get("replace"),
+            None,
+            "a login nobody was asked about carried the consent flag"
+        );
+
+        // A login the owner stored and then reports it cannot read is the
+        // "succeeded and did nothing" shape this client refuses to draw as a
+        // receipt.
+        let owner = spawn_owner(
+            200,
+            r#"{"data": "live", "book": "alpaca", "label": "LIVE · ALPACA BOOK",
+                "credentials_ok": false, "credentials": "ALPACA_API_KEY_ID is set in the environment"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, login_cmd(false)).await {
+            Some(Wrote::LoggedIn { usable, note }) => {
+                assert!(!usable);
+                assert!(note.contains("environment"), "{note}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let owner = spawn_owner(400, CONSENT);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, login_cmd(false)).await {
+            Some(Wrote::LoginNeedsConsent { said }) => {
+                assert!(said.contains("refresh token"), "{said}")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "that does not look like an alpaca key id"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, login_cmd(false)).await {
+            Some(Wrote::LoginRefused { said }) => assert!(said.contains("key id"), "{said}"),
+            other => panic!("{other:?}"),
+        }
+
+        // The consented re-POST is the same command with the flag set.
+        let owner = spawn_owner(200, STORED);
+        let client = WriteClient::new(&owner.base).unwrap();
+        perform(&client, login_cmd(true)).await;
+        let body: serde_json::Value = serde_json::from_str(&owner.only().body).unwrap();
+        assert_eq!(body["replace"], serde_json::json!(true));
+
+        let owner = spawn_owner(
+            200,
+            r#"{"ok": true, "account_masked": "…7788", "status": "ACTIVE",
+                "buying_power": 200000.0, "currency": "USD"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::TestAlpaca).await {
+            Some(Wrote::Tested { ok, summary }) => {
+                assert!(ok);
+                assert!(summary.contains("7788"), "{summary}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(owner.only().path, "/api/alpaca/test");
+    }
+
+    #[test]
+    fn every_credential_outcome_reaches_the_operator_and_none_of_them_carries_the_secret() {
+        // Invariant 10 at the toast seam — a `Wrote` variant with no arm is a
+        // write nobody is told about — and the class-level secrecy assertion
+        // beside it: the outcomes carry the owner's sentences and nothing this
+        // client typed, so no box can print a credential however it is worded.
+        use atlas::ui::widgets::toast::Level;
+        let cases = [
+            (
+                Wrote::LoggedIn {
+                    usable: true,
+                    note: "paper key ending 4f21".into(),
+                },
+                Level::Info,
+            ),
+            (
+                Wrote::LoggedIn {
+                    usable: false,
+                    note: "ALPACA_API_KEY_ID is set in the environment".into(),
+                },
+                Level::Warn,
+            ),
+            (
+                Wrote::LoginNeedsConsent {
+                    said: "the active alpaca profile holds a browser login".into(),
+                },
+                Level::Warn,
+            ),
+            (
+                Wrote::LoginRefused {
+                    said: "that does not look like an alpaca key id".into(),
+                },
+                Level::Warn,
+            ),
+            (
+                Wrote::Tested {
+                    ok: true,
+                    summary: "…7788 · ACTIVE · $200,000.00 USD".into(),
+                },
+                Level::Info,
+            ),
+            (
+                Wrote::Tested {
+                    ok: false,
+                    summary: "rejected by alpaca".into(),
+                },
+                Level::Warn,
+            ),
+        ];
+        for (outcome, level) in cases {
+            let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.clone()))
+                .expect("every write outcome owes the operator a box");
+            assert_eq!(toast.level, level, "{outcome:?}");
+            assert!(!toast.message.is_empty(), "{outcome:?}");
+            for typed in ["PKTEST0123456789", "s3cret/abcdefghijklmnopqrstuv"] {
+                assert!(!format!("{toast:?}").contains(typed), "{outcome:?}");
+            }
+            assert!(
+                refetches(&AppEvent::Wrote(outcome.clone())),
+                "{outcome:?} must bring the next poll forward"
+            );
+        }
+    }
+
+    #[test]
+    fn a_typed_credential_cannot_be_printed_by_anything_that_prints() {
+        // `Command` derives `Debug`, the dispatcher traces, and a panic message
+        // formats whatever it was given. The value therefore travels wrapped in
+        // a type whose `Debug` is the redaction — not in a `String` that every
+        // one of those would render in full.
+        let (key, secret) = pair();
+        assert_eq!(format!("{key:?}"), "Secret(<redacted>)");
+        let printed = format!("{:?}", login_cmd(true));
+        for typed in ["PKTEST0123456789", "s3cret/abcdefghijklmnopqrstuv"] {
+            assert!(!printed.contains(typed), "{printed}");
+        }
+        // And the value is still there to be sent — a redaction that lost it
+        // would pass this test and store nothing.
+        assert_eq!(secret.expose(), "s3cret/abcdefghijklmnopqrstuv");
     }
 
     #[test]

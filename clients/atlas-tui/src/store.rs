@@ -552,10 +552,22 @@ impl Store {
                     // A desk mode is the same: the owner persists the pair and
                     // serves it back in the next snapshot, and a client copy
                     // would be a second account of which desk this is.
+                    //
+                    // So is a login. `credentials_ok` reflows through the
+                    // snapshot the write brings forward, so the alpaca row
+                    // retones from the owner's own account of the credential
+                    // rather than from this client remembering what it sent —
+                    // and the two answers a form has to act on (a consent
+                    // question, a refusal) belong to the form, which is where
+                    // the pair it would re-send still is.
                     Wrote::Decided { .. }
                     | Wrote::Asked { .. }
                     | Wrote::Started { .. }
                     | Wrote::Pointed { .. }
+                    | Wrote::LoggedIn { .. }
+                    | Wrote::LoginNeedsConsent { .. }
+                    | Wrote::LoginRefused { .. }
+                    | Wrote::Tested { .. }
                     | Wrote::Failed { .. } => {}
                 }
                 self.dirty = true;

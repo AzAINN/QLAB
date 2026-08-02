@@ -39,6 +39,7 @@
 //! documentation. Two differ from the plan's Part IV sketch and the difference
 //! matters — see `execute_plan` and `approve`.
 
+use crate::secret::Secret;
 use crate::ui::widgets::confirm::ConfirmToken;
 use serde_json::{json, Value};
 
@@ -154,6 +155,46 @@ impl Execution {
             ))),
         }
     }
+}
+
+/// What became of a login the operator typed. Three outcomes, and the middle
+/// one is the whole reason this is a type.
+///
+/// The owner refuses with **400 twice**, for two things a client must do
+/// differently: a stored login it would destroy (confirmable — ask, then re-POST
+/// with `replace: true`), and a request that is simply wrong (not confirmable —
+/// render the sentence and let the operator fix it). C1's contract puts a
+/// `confirm` field on the first and deliberately leaves it off the second,
+/// because the second's own sentence is "replace must be true or false" — a
+/// client that sniffed the wording would offer to discard an operator's browser
+/// login over a typo in a boolean.
+#[derive(Debug)]
+pub enum Login {
+    /// Stored. Carries `desk_mode_payload()`, whose `credentials_ok` is how the
+    /// caller learns whether the desk can now read what it just wrote.
+    Stored(Value),
+    /// A login already on disk would be lost. The owner's own sentence, which
+    /// names what would go — never paraphrased here, and never acted on
+    /// without the operator's word.
+    ConsentNeeded(String),
+    /// The request cannot be stored as sent. The owner's own sentence, which
+    /// never quotes what was typed.
+    Rejected(String),
+}
+
+/// What the venue said about the stored login.
+///
+/// `/api/alpaca/test` answers **200 whatever happened** — a missing profile, a
+/// rejected key, a silent venue and a captive portal are all results with a
+/// sentence, and C1 states that plainly: "a client rendering 'did it work?'
+/// reads one shape however the answer turned out". So `ok` is read from the
+/// body and never from the status code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestVerdict {
+    pub ok: bool,
+    /// What to show the operator: the masked account and its buying power when
+    /// the login works, the owner's reason when it does not. Never empty.
+    pub summary: String,
 }
 
 /// The operator's end of the owner API.
@@ -363,6 +404,75 @@ impl WriteClient {
         .await
     }
 
+    // -- the alpaca login --------------------------------------------------
+
+    /// Store a paper login through the owner, which is the only thing in qlab
+    /// that writes a credential file.
+    ///
+    /// The two values are `Secret`s rather than `&str` for the reason
+    /// `crate::secret` states: everything between the form and this line
+    /// formats what it is given, and this is the one place the plaintext is
+    /// unwrapped.
+    ///
+    /// `replace` is an `Option` and not a `bool` so that "the operator has not
+    /// been asked" and "the operator said no" are not the same wire body as
+    /// "the operator said yes". `None` omits the field entirely and the owner
+    /// defaults it; the flag is only ever set by a caller holding a consent it
+    /// obtained for this exact pair, which is [`Login::ConsentNeeded`]'s whole
+    /// purpose.
+    ///
+    /// Never switches the book. The owner is explicit about that — a login
+    /// makes `LIVE·ALPACA` *choosable* and nothing more — so the answer's
+    /// `credentials_ok` is a fact about the credential, not about the desk.
+    pub async fn set_alpaca_credentials(
+        &self,
+        api_key: &Secret,
+        api_secret: &Secret,
+        replace: Option<bool>,
+    ) -> Result<Login, WriteError> {
+        // No tracing on this call. `execute_plan` logs because a fill's request
+        // may be the only record it was ever attempted; a login leaves the
+        // owner's own `alpaca.credentials_updated` row, which is written on the
+        // side that succeeded, and a line here could only add a second place
+        // that has to be reasoned about for key material.
+        let mut body = json!({
+            "api_key": api_key.expose(),
+            "api_secret": api_secret.expose(),
+        });
+        if let Some(replace) = replace {
+            body["replace"] = json!(replace);
+        }
+        match self.post("/api/alpaca/credentials", body).await {
+            Ok(said) => Ok(Login::Stored(said)),
+            // Both refusals are 400s and only one is an invitation. A refusal
+            // with any other status is a broken owner rather than a question:
+            // offering to discard a browser login off the back of a 500 would
+            // be this client inventing a consent prompt out of a traceback.
+            Err(WriteError::Refused { status: 400, said }) => {
+                // The field is read off the whole body; the sentence is the
+                // half written for a human, and it is checked against what was
+                // just sent before it is handed anywhere that renders it.
+                let asked = confirmable(&said);
+                let text = unquoted(sentence(&said), api_key, api_secret);
+                Ok(match asked {
+                    true => Login::ConsentNeeded(text),
+                    false => Login::Rejected(text),
+                })
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Ask the owner to put the stored login to the venue.
+    ///
+    /// One outcome, not two: the route answers 200 for a rejected key, a silent
+    /// venue and a desk that has never logged in, because every one of those is
+    /// a sentence an operator can act on rather than a failure.
+    pub async fn test_alpaca(&self) -> Result<TestVerdict, WriteError> {
+        let said = self.post("/api/alpaca/test", json!({})).await?;
+        TestVerdict::read(said)
+    }
+
     // NOTE: no `halt()` / `resume()` of the book. The plan's Part IV lists them,
     // but `qlab/ui/server.py` has no HTTP route for either — `set_halt` is
     // reachable only from the `halt`/`resume` MCP tools in
@@ -395,6 +505,122 @@ impl WriteClient {
             });
         }
         serde_json::from_str(&text).map_err(|err| WriteError::Unreadable(err.to_string()))
+    }
+}
+
+impl TestVerdict {
+    /// Read one 200 body from `/api/alpaca/test`.
+    fn read(body: Value) -> Result<TestVerdict, WriteError> {
+        match body.get("ok").and_then(Value::as_bool) {
+            Some(true) => Ok(TestVerdict {
+                ok: true,
+                summary: account_line(&body),
+            }),
+            Some(false) => Ok(TestVerdict {
+                ok: false,
+                // The owner's reason, and a sentence of last resort rather than
+                // a blank box: "it did not work" with nothing after it is not
+                // something an operator can act on.
+                summary: field(&body, "reason")
+                    .unwrap_or_else(|| "alpaca would not take the stored login".to_string()),
+            }),
+            // The route always sets `ok`. A 200 without it is a broken contract,
+            // and both guesses are indefensible — one vouches for a credential
+            // nobody checked, the other condemns a working one.
+            None => Err(WriteError::Unreadable(format!(
+                "the owner answered 200 for a credential test without saying whether it \
+                 worked: {body}"
+            ))),
+        }
+    }
+}
+
+/// What a working login is worth showing: the account it reached, its state,
+/// and what it can buy with.
+///
+/// Every part is optional because every part comes from the venue's own JSON,
+/// and an absent one is left out rather than rendered as a dash — the question
+/// this line answers is "did it work", and it already has.
+fn account_line(body: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    parts.extend(field(body, "account_masked"));
+    parts.extend(field(body, "status"));
+    if let Some(buying_power) = body.get("buying_power").and_then(Value::as_f64) {
+        parts.push(match field(body, "currency") {
+            Some(currency) => format!("{} {currency}", crate::format::money(buying_power)),
+            None => crate::format::money(buying_power),
+        });
+    }
+    match parts.is_empty() {
+        true => "alpaca accepted the stored login".to_string(),
+        false => parts.join(" · "),
+    }
+}
+
+/// One string field of an owner answer, absent when it is empty — the
+/// `Some("")`-is-absent rule this client holds everywhere.
+fn field(body: &Value, key: &str) -> Option<String> {
+    body.get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether a 400 body is the owner asking a question rather than refusing.
+///
+/// The **field**, and the exact flag it names. Never the sentence: the owner's
+/// other 400 reads "replace must be true or false", so a substring check would
+/// offer to discard a browser login over a mistyped boolean. And never the
+/// field's mere presence: the value is which flag would grant the request, and
+/// this client knows how to set exactly one.
+fn confirmable(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|body| field(&body, "confirm"))
+        .is_some_and(|flag| flag == "replace")
+}
+
+/// The operator-facing half of a refusal.
+///
+/// The owner writes these for a human and never quotes what was typed, so it is
+/// rendered rather than paraphrased. Bounded and collapsed to one line because
+/// the body on this path is not always the owner's: a proxy in front of the
+/// desk answers 400 with an HTML page, and a form field is not the place to
+/// discover that.
+fn sentence(body: &str) -> String {
+    const MAX: usize = 240;
+    let said = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|parsed| field(&parsed, "error"))
+        .unwrap_or_else(|| body.to_string());
+    let one_line = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    match one_line.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}…", &one_line[..cut]),
+        None => one_line,
+    }
+}
+
+/// A refusal, unless it handed back what was just sent.
+///
+/// The owner never quotes what was typed — C1 pins that at every one of its
+/// refusals — but the body on this path is not always the owner's. A proxy in
+/// front of the desk answers 400 with a page of its own, and one that echoes
+/// the request would put the pair into a form note and a toast without anything
+/// between here and the screen noticing.
+///
+/// This client is the only thing that knows what it just sent, so this is the
+/// only place the check can be made. It refuses the whole sentence rather than
+/// cutting the value out of it: a redacted refusal that still reads as a
+/// sentence invites an operator to trust the rest of it.
+fn unquoted(said: String, key: &Secret, secret: &Secret) -> String {
+    let quoted = [key, secret]
+        .into_iter()
+        .any(|value| !value.expose().is_empty() && said.contains(value.expose()));
+    match quoted {
+        true => "the desk refused the login with a reply that quoted what was typed, so it is \
+                 not shown here"
+            .to_string(),
+        false => said,
     }
 }
 

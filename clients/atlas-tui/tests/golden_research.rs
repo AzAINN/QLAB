@@ -23,7 +23,7 @@ use std::time::Instant;
 /// The fixture desk, already switched to RESEARCH.
 fn research() -> Client {
     let mut client = Client::fixture();
-    client.press(KeyCode::Char('4'));
+    client.press(KeyCode::Char('5'));
     client
 }
 
@@ -41,7 +41,7 @@ fn store_from(json: &str) -> Store {
 
 fn research_from(json: &str) -> Client {
     let mut client = Client::new(store_from(json));
-    client.press(KeyCode::Char('4'));
+    client.press(KeyCode::Char('5'));
     client
 }
 

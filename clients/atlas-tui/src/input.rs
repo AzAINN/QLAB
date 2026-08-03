@@ -67,6 +67,12 @@ pub enum Source {
     Help,
     /// One view's keys, while that view is on screen.
     View(ViewId),
+    /// ATLAS's ask row, while it has the keyboard.
+    ///
+    /// Its own section for the reason WORKFORCE's fields are: the keys that
+    /// scroll the conversation and the keys inside the row are two routers,
+    /// and one section over both would describe one with rows about the other.
+    AtlasAsk,
     /// WORKFORCE's question row, while it has the keyboard.
     ///
     /// Its own section rather than part of `View(Workforce)`, because it is its
@@ -97,10 +103,12 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 16] = [
+    pub const ALL: [Source; 18] = [
         Source::Shell,
         Source::Command,
         Source::Help,
+        Source::View(ViewId::Atlas),
+        Source::AtlasAsk,
         Source::View(ViewId::Desk),
         Source::View(ViewId::Markets),
         Source::View(ViewId::Book),
@@ -123,6 +131,7 @@ impl Source {
             Source::Command => "the command line",
             Source::Help => "this overlay",
             Source::View(id) => id.label(),
+            Source::AtlasAsk => "ATLAS · the ask row",
             Source::WorkforceAsk => "WORK · the question row",
             Source::WorkforcePicker => "WORK · the template picker",
             Source::SettingsLogin => "SETT · the alpaca login form",
@@ -157,6 +166,10 @@ impl Source {
             Source::Shell => ("ui/shell.rs", "", "on_key"),
             Source::Command => ("cmd.rs", "", "edit"),
             Source::Help => ("ui/widgets/help.rs", "", "on_key"),
+            // ATLAS's `View::on_key` only forwards; `keys` is the router, and
+            // the ask row under it is the section below.
+            Source::View(ViewId::Atlas) => ("ui/views/atlas.rs", "", "keys"),
+            Source::AtlasAsk => ("ui/views/atlas.rs", "", "ask_key"),
             Source::View(ViewId::Desk) => ("ui/views/desk.rs", "", "on_key"),
             Source::View(ViewId::Markets) => ("ui/views/markets.rs", "", "on_key"),
             Source::View(ViewId::Book) => ("ui/views/book.rs", "", "on_key"),
@@ -250,7 +263,7 @@ pub const KEYMAP: &[Binding] = &[
         Source::Shell,
         "refresh now, without waiting for the poll",
     ),
-    b("Char(c)", "1–7", Source::Shell, "show that view"),
+    b("Char(c)", "1–8", Source::Shell, "show that view"),
     b("Tab", "Tab", Source::Shell, "the next view"),
     b("BackTab", "Shift-Tab", Source::Shell, "the previous view"),
     b(
@@ -292,6 +305,62 @@ pub const KEYMAP: &[Binding] = &[
     b("Down", "↓", Source::Help, "scroll down"),
     b("Esc", "Esc", Source::Help, "close"),
     b("Char('?')", "?", Source::Help, "close"),
+    // -- ATLAS ------------------------------------------------------------
+    b(
+        "Up",
+        "↑",
+        Source::View(ViewId::Atlas),
+        "the conversation, one line up",
+    ),
+    b(
+        "Down",
+        "↓",
+        Source::View(ViewId::Atlas),
+        "one line down — the bottom pins to the newest answer",
+    ),
+    b(
+        "PageUp",
+        "PgUp",
+        Source::View(ViewId::Atlas),
+        "a page of conversation up",
+    ),
+    b(
+        "PageDown",
+        "PgDn",
+        Source::View(ViewId::Atlas),
+        "a page down",
+    ),
+    // -- ATLAS, the ask row -----------------------------------------------
+    w(
+        "Char('i')",
+        "i",
+        Source::AtlasAsk,
+        "focus the empty row — for a question starting with a key the shell claims",
+    ),
+    w(
+        "Char(c)",
+        "any key",
+        Source::AtlasAsk,
+        "types straight in — there is no mode key on this pane",
+    ),
+    w(
+        "Backspace",
+        "Backspace",
+        Source::AtlasAsk,
+        "deletes a character",
+    ),
+    w(
+        "Enter",
+        "Enter",
+        Source::AtlasAsk,
+        "puts the question to the desk — an empty one is not sent",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::AtlasAsk,
+        "clears the row and gives the keyboard back",
+    ),
     // -- MKTS -------------------------------------------------------------
     b("Up", "↑", Source::View(ViewId::Markets), "the row above"),
     b("Down", "↓", Source::View(ViewId::Markets), "the row below"),

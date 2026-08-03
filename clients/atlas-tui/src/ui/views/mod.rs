@@ -17,6 +17,7 @@
 //! disagree about the book, and a frame stays a pure function of (store,
 //! effects, instant) — plus, now, the cursor the operator put somewhere.
 
+pub mod atlas;
 pub mod audit;
 pub mod book;
 pub mod desk;
@@ -30,7 +31,7 @@ use crate::fx::FlashTracker;
 use crate::store::{Store, ViewId};
 #[cfg(feature = "operator")]
 use crate::ui::widgets::confirm;
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{layout::Rect, Frame};
 use std::time::Instant;
 
@@ -101,6 +102,17 @@ pub trait View {
     fn typing(&self) -> bool {
         false
     }
+
+    /// A mouse event over this view's content, already routed by the shell.
+    ///
+    /// Default `None` — declining is what most views do, and a wheel over a
+    /// pane with nothing to scroll must read as nothing rather than as a hung
+    /// client's swallowed input. Deliberately minimal: wheel and click only,
+    /// no drag and no hover, because a terminal client that depends on hover
+    /// is unusable over half the transports this one runs on.
+    fn on_mouse(&mut self, _m: MouseEvent, _store: &mut Store) -> Option<Command> {
+        None
+    }
 }
 
 /// Which panes took a symbol the operator named.
@@ -115,8 +127,9 @@ pub struct Selected {
     pub blotter: bool,
 }
 
-/// The seven views, alive for the life of the process.
+/// The eight views, alive for the life of the process.
 pub struct Views {
+    atlas: atlas::AtlasView,
     desk: desk::DeskView,
     markets: markets::MarketsView,
     book: book::BookView,
@@ -145,6 +158,7 @@ impl Default for Views {
 impl Views {
     pub fn new() -> Self {
         Self {
+            atlas: atlas::AtlasView::default(),
             desk: desk::DeskView,
             markets: markets::MarketsView::default(),
             book: book::BookView::default(),
@@ -233,6 +247,11 @@ impl Views {
         self.at(id).typing()
     }
 
+    /// One mouse event to the active view, routed like `on_key`.
+    pub fn on_mouse(&mut self, id: ViewId, m: MouseEvent, store: &mut Store) -> Option<Command> {
+        self.at_mut(id).on_mouse(m, store)
+    }
+
     /// Put every cursor that holds a symbol on this one, and say which panes
     /// actually moved.
     ///
@@ -255,6 +274,7 @@ impl Views {
 
     fn at(&self, id: ViewId) -> &dyn View {
         match id {
+            ViewId::Atlas => &self.atlas,
             ViewId::Desk => &self.desk,
             ViewId::Markets => &self.markets,
             ViewId::Book => &self.book,
@@ -267,6 +287,7 @@ impl Views {
 
     fn at_mut(&mut self, id: ViewId) -> &mut dyn View {
         match id {
+            ViewId::Atlas => &mut self.atlas,
             ViewId::Desk => &mut self.desk,
             ViewId::Markets => &mut self.markets,
             ViewId::Book => &mut self.book,

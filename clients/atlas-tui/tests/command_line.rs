@@ -498,7 +498,7 @@ mod armed {
             !client.frame(120, 36).contains("ask to execute"),
             "the fixture no longer scrolls; this test is checking nothing"
         );
-        for _ in 0..24 {
+        for _ in 0..36 {
             client.press(KeyCode::Down);
         }
         let frame = client.frame(120, 36);
@@ -751,7 +751,7 @@ fn the_strip_never_reaches_into_the_rails() {
     // row, which is where an operator reads which view they are in.
     let store = palette_store(false);
     let frame = frame_to_string(&store, 120, 36);
-    let nav = line_with(&frame, "7 SETT");
+    let nav = line_with(&frame, "8 SETT");
     assert!(!nav.contains("SPY"), "{nav}");
     assert_eq!(NAV_W, 8, "the crop this test reads is keyed to the rail");
 }

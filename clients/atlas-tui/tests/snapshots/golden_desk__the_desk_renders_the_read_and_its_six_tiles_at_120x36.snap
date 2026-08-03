@@ -1,16 +1,17 @@
 ---
 source: tests/golden_desk.rs
+assertion_line: 122
 expression: "desk_from(DESK).frame(120, 36)"
 ---
 " no market assets in the last snapshot                                                                                  "
-"▌1 DESK │▌ THE READ  2026-07-30         ▌ EQUITY                                      │▌ PULSE                          "
-" 2 MKTS │▮ 42.0% CONVICTION             ▗█▄ ▗█  ▟▀▜▖    ▟▀▜▖▟▀▜▖▟▀▜▖    ▟▀▜▖▟▀▜▖      │ desk stress  …                  "
-" 3 BOOK │DIVERGENT · STRESS             ▜▄▖  █  █▗█▌    █▗█▌█▗█▌█▗█▌    █▗█▌█▗█▌      │ regime CALM  robust UNCERTAIN   "
-" 4 RSCH │                               ▄▄▛  █  █▛▐▌ ▄  █▛▐▌█▛▐▌█▛▐▌ ▄  █▛▐▌█▛▐▌      │ drawdown --  tier WARNING       "
-" 5 WORK │TENSIONS                        ▀  ▀▀▀ ▝▀▀ ▗▛  ▝▀▀ ▝▀▀ ▝▀▀  ▀  ▝▀▀ ▝▀▀       │ gross --                        "
-" 6 AUDIT│▌ Absorption is high while the ──────────────────────────────────────────────│                                 "
-" 7 SETT │  tape is quiet.               ▌ REGIME                ▌ ALERTS              │▌ BREADTH                        "
-"        │                               STATE    UNCERTAIN      TIER     WARNING      │ --                              "
+" 1 ATLAS│▌ THE READ  2026-07-30         ▌ EQUITY                                      │▌ PULSE                          "
+"▌2 DESK │▮ 42.0% CONVICTION             ▗█▄ ▗█  ▟▀▜▖    ▟▀▜▖▟▀▜▖▟▀▜▖    ▟▀▜▖▟▀▜▖      │ desk stress  …                  "
+" 3 MKTS │DIVERGENT · STRESS             ▜▄▖  █  █▗█▌    █▗█▌█▗█▌█▗█▌    █▗█▌█▗█▌      │ regime CALM  robust UNCERTAIN   "
+" 4 BOOK │                               ▄▄▛  █  █▛▐▌ ▄  █▛▐▌█▛▐▌█▛▐▌ ▄  █▛▐▌█▛▐▌      │ drawdown --  tier WARNING       "
+" 5 RSCH │TENSIONS                        ▀  ▀▀▀ ▝▀▀ ▗▛  ▝▀▀ ▝▀▀ ▝▀▀  ▀  ▝▀▀ ▝▀▀       │ gross --                        "
+" 6 WORK │▌ Absorption is high while the ──────────────────────────────────────────────│                                 "
+" 7 AUDIT│  tape is quiet.               ▌ REGIME                ▌ ALERTS              │▌ BREADTH                        "
+" 8 SETT │                               STATE    UNCERTAIN      TIER     WARNING      │ --                              "
 "        │WOULD CHANGE THIS              DETECTOR CALM           HEADROOM 25.0%        │ adv -- / dec --                 "
 "        │▌ Absorption falling back      SIG/THR  9.2% / 11.1%   VOL/LIM  10.1% / 30.0%│                                 "
 "        │  under its threshold.         CONF     66.7%          GATE     1 REFUSED    │▌ MOVERS                         "

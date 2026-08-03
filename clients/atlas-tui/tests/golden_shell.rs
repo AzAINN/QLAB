@@ -112,31 +112,32 @@ fn the_regime_reaches_the_frame_from_the_typed_snapshot() {
     assert!(line_with(&frame, "regime").contains("STRESS"), "{frame}");
 }
 
-/// The seven nav entries as the rail renders them once the shell has marked one.
+/// The eight nav entries as the rail renders them once the shell has marked one.
 ///
 /// Spelled out rather than counted off the frame's `▌` glyphs: `▌` is the
 /// workstation's accent bar everywhere — panel headers wear it, and so does the
 /// markets grid's selected row — so the only reading that stays about *the nav*
 /// is the entries themselves.
-const NAV_MARKED: [&str; 7] = [
-    "▌1 DESK",
-    "▌2 MKTS",
-    "▌3 BOOK",
-    "▌4 RSCH",
-    "▌5 WORK",
-    "▌6 AUDIT",
-    "▌7 SETT",
+const NAV_MARKED: [&str; 8] = [
+    "▌1 ATLAS",
+    "▌2 DESK",
+    "▌3 MKTS",
+    "▌4 BOOK",
+    "▌5 RSCH",
+    "▌6 WORK",
+    "▌7 AUDIT",
+    "▌8 SETT",
 ];
 
 #[test]
 fn the_nav_highlight_moves_with_the_number_keys() {
     let mut store = fixture_store();
     let mut views = Views::new();
-    assert!(frame_to_string(&store, 120, 36).contains(NAV_MARKED[0]));
+    // The workstation opens on DESK — second on the rail now that ATLAS sits
+    // first — so the walk starts one past it and comes back around.
+    assert!(frame_to_string(&store, 120, 36).contains(NAV_MARKED[1]));
 
-    // Starting one past the entry the shell opens on, so the seventh press is
-    // the one that has to come back to DESK.
-    for marked in NAV_MARKED.iter().cycle().skip(1).take(NAV_MARKED.len()) {
+    for marked in NAV_MARKED.iter().cycle().skip(2).take(NAV_MARKED.len()) {
         let digit = marked
             .chars()
             .nth(1)
@@ -166,13 +167,14 @@ fn tab_cycles_the_views_and_wraps_in_both_directions() {
         ViewId::Workforce,
         ViewId::Audit,
         ViewId::Settings,
+        ViewId::Atlas,
         ViewId::Desk,
     ] {
         atlas::ui::shell::on_key(key(KeyCode::Tab), &mut store, &mut views);
         assert_eq!(store.nav.view, expected);
     }
     atlas::ui::shell::on_key(key(KeyCode::BackTab), &mut store, &mut views);
-    assert_eq!(store.nav.view, ViewId::Settings, "BackTab wraps backwards");
+    assert_eq!(store.nav.view, ViewId::Atlas, "BackTab wraps backwards");
 }
 
 #[test]
@@ -654,7 +656,7 @@ fn the_tape_moves_one_cell_per_beat() {
     // And the desk under it did not move: a beat is not news. (The glyph is the
     // one other thing a tick drives, on its mood's own slower tempo.)
     assert_eq!(line_with(&first, "GLASS"), line_with(&second, "GLASS"));
-    assert_eq!(line_with(&first, "▌1 DESK"), line_with(&second, "▌1 DESK"));
+    assert_eq!(line_with(&first, "▌2 DESK"), line_with(&second, "▌2 DESK"));
 }
 
 #[test]

@@ -1,16 +1,17 @@
 ---
 source: tests/golden_markets.rs
+assertion_line: 60
 expression: "markets().frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
-" 1 DESK │ SYMBOL   LAST   CHG%    20D   VOL    SPARK    WT   TGT ▌ ACWI               │▌ PULSE                          "
-"▌2 MKTS │▌ACWI   152.47 ▼ 1.34  -2.9% 15.4% ▅██▄▄▅▅▁  6.3%  6.3% 156.36 ⡇   ⢠⡀        │ desk stress  …                  "
-" 3 BOOK │ SPY    729.46 ▼ 1.54  -2.3% 13.3% ▆██▄▅▅▅▁    --    --        ⢇   ⢸⠈⡆       │ regime CALM  robust UNCERTAIN   "
-" 4 RSCH │ QQQ    661.73 ▼ 2.04 -10.1% 24.7% ▆█▇▅▄▄▃▁    --    --        ⢸   ⢸ ⡇       │ drawdown 0.0%  tier NONE        "
-" 5 WORK │ XLK    285.24 ▼ 2.08  -4.6% 24.1% ▆██▅▄▅▅▁    --    --        ⢸   ⡇ ⢇       │ gross 100.0%                    "
-" 6 AUDIT│ XLF     52.40 ▲ 1.24   1.8% 16.4% ▁▃▅▄▅▆▅█    --    --        ⢸   ⡇ ⢸       │                                 "
-" 7 SETT │                                                               ⠈⡆  ⡇ ⢸       │▌ BREADTH                        "
-"        │                                                                ⡇  ⡇ ⢸       │ ███████████████████████████████ "
+" 1 ATLAS│ SYMBOL   LAST   CHG%    20D   VOL    SPARK    WT   TGT ▌ ACWI               │▌ PULSE                          "
+" 2 DESK │▌ACWI   152.47 ▼ 1.34  -2.9% 15.4% ▅██▄▄▅▅▁  6.3%  6.3% 156.36 ⡇   ⢠⡀        │ desk stress  …                  "
+"▌3 MKTS │ SPY    729.46 ▼ 1.54  -2.3% 13.3% ▆██▄▅▅▅▁    --    --        ⢇   ⢸⠈⡆       │ regime CALM  robust UNCERTAIN   "
+" 4 BOOK │ QQQ    661.73 ▼ 2.04 -10.1% 24.7% ▆█▇▅▄▄▃▁    --    --        ⢸   ⢸ ⡇       │ drawdown 0.0%  tier NONE        "
+" 5 RSCH │ XLK    285.24 ▼ 2.08  -4.6% 24.1% ▆██▅▄▅▅▁    --    --        ⢸   ⡇ ⢇       │ gross 100.0%                    "
+" 6 WORK │ XLF     52.40 ▲ 1.24   1.8% 16.4% ▁▃▅▄▅▆▅█    --    --        ⢸   ⡇ ⢸       │                                 "
+" 7 AUDIT│                                                               ⠈⡆  ⡇ ⢸       │▌ BREADTH                        "
+" 8 SETT │                                                                ⡇  ⡇ ⢸       │ ███████████████████████████████ "
 "        │                                                                ⡇ ⢠⠃ ⢸       │ adv 1 / dec 4                   "
 "        │                                                                ⢣ ⢸  ⠈⡆      │                                 "
 "        │                                                        155.06  ⢸ ⢸   ⡇      │▌ MOVERS                         "

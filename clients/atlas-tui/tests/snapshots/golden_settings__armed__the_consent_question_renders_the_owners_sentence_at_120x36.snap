@@ -1,16 +1,17 @@
 ---
 source: tests/golden_settings.rs
+assertion_line: 626
 expression: "client.frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
-" 1 DESK │▌ DESK                                                                       │▌ PULSE                          "
-" 2 MKTS │ mode         SYNTHETIC                                                      │ desk stress  …                  "
-" 3 BOOK │ data         synthetic                                                      │ regime CALM  robust UNCERTAIN   "
-" 4 RSCH │ book         simulated                                                      │ drawdown 0.0%  tier NONE        "
-" 5 WORK │ lane         offline · synthetic                                            │ gross 100.0%                    "
-" 6 AUDIT│ alpaca login no ALPACA_API_KEY_ID in the environment or .env                │                                 "
-"▌7 SETT │                                                                             │▌ BREADTH                        "
-"        │                                                                             │ ███████████████████████████████ "
+" 1 ATLAS│▌ DESK                                                                       │▌ PULSE                          "
+" 2 DESK │ mode         SYNTHETIC                                                      │ desk stress  …                  "
+" 3 MKTS │ data         synthetic                                                      │ regime CALM  robust UNCERTAIN   "
+" 4 BOOK │ book         simulated                                                      │ drawdown 0.0%  tier NONE        "
+" 5 RSCH │ lane         offline · synthetic                                            │ gross 100.0%                    "
+" 6 WORK │ alpaca login no ALPACA_API_KEY_ID in the environment or .env                │                                 "
+" 7 AUDIT│                                                                             │▌ BREADTH                        "
+"▌8 SETT │                                                                             │ ███████████████████████████████ "
 "        │                                                                             │ adv 1 / dec 4                   "
 "        │ a types a login · t tests it · /mode switches the desk ─────────────────────│                                 "
 "        │▌ POLICY                               ▌ SYSTEM                              │▌ MOVERS                         "

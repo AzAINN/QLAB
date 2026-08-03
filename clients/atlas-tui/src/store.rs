@@ -79,9 +79,16 @@ pub enum Trigger {
     AuditEvent(String),
 }
 
-/// The seven views, in nav-rail order.
+/// The eight views, in nav-rail order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewId {
+    /// The desk manager's own pane: the conversation with Atlas, beside the
+    /// evidence base it reasons from. First on the rail because the chat is
+    /// the surface this client is named for — an operator's question should be
+    /// one keystroke away. The *opening* view stays DESK: which pane a
+    /// workstation opens on is a separate decision from where a pane sits,
+    /// and the opening frame is pinned by golden tests as the desk.
+    Atlas,
     #[default]
     Desk,
     Markets,
@@ -95,7 +102,8 @@ pub enum ViewId {
 impl ViewId {
     /// Nav order. The digit keys index this, so it is also the numbering an
     /// operator sees — the two cannot drift apart.
-    pub const ALL: [ViewId; 7] = [
+    pub const ALL: [ViewId; 8] = [
+        ViewId::Atlas,
         ViewId::Desk,
         ViewId::Markets,
         ViewId::Book,
@@ -109,6 +117,7 @@ impl ViewId {
     /// on the active marker and the digit.
     pub fn label(self) -> &'static str {
         match self {
+            ViewId::Atlas => "ATLAS",
             ViewId::Desk => "DESK",
             ViewId::Markets => "MKTS",
             ViewId::Book => "BOOK",
@@ -672,8 +681,10 @@ impl Store {
                 self.dirty = true;
             }
             // A keystroke may move a selection and a resize moves everything;
-            // both owe a frame even though neither is desk news.
-            AppEvent::Key(_) | AppEvent::Resize => self.dirty = true,
+            // both owe a frame even though neither is desk news. A mouse event
+            // is a keystroke's shape: a wheel moved a scroll, a click moved
+            // the nav.
+            AppEvent::Key(_) | AppEvent::Mouse(_) | AppEvent::Resize => self.dirty = true,
             // The beat advances but does not dirty: the glyph is redrawn by the
             // idle heartbeat in the pacing rule, and dirtying here would force a
             // frame every 120 ms and make that rule decorative.
@@ -786,6 +797,20 @@ impl Store {
             .as_ref()
             .map(|s| s.workflows.as_slice())
             .unwrap_or_default()
+    }
+
+    /// The conversation with the desk manager, oldest first as the owner
+    /// serves it (`atlas_chat`, limit 60).
+    pub fn atlas_chat(&self) -> &[crate::model::Event] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.atlas_chat.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// The predictor board summary, if the owner served one.
+    pub fn predictors(&self) -> Option<&crate::model::Predictors> {
+        self.snapshot.as_ref()?.predictors.as_ref()
     }
 
     /// What the owner's coordinator is doing, if it said.
@@ -2247,9 +2272,10 @@ mod tests {
 
     #[test]
     fn the_view_order_is_the_numbering_the_operator_sees() {
-        assert_eq!(ViewId::from_digit('1'), Some(ViewId::Desk));
-        assert_eq!(ViewId::from_digit('7'), Some(ViewId::Settings));
-        assert_eq!(ViewId::from_digit('8'), None);
+        assert_eq!(ViewId::from_digit('1'), Some(ViewId::Atlas));
+        assert_eq!(ViewId::from_digit('2'), Some(ViewId::Desk));
+        assert_eq!(ViewId::from_digit('8'), Some(ViewId::Settings));
+        assert_eq!(ViewId::from_digit('9'), None);
         assert_eq!(ViewId::from_digit('0'), None, "there is no view zero");
         for (i, id) in ViewId::ALL.iter().enumerate() {
             assert_eq!(
@@ -2262,8 +2288,8 @@ mod tests {
             );
         }
         // Wrapping in both directions: a wall would read as a hung client.
-        assert_eq!(ViewId::Settings.next(), ViewId::Desk);
-        assert_eq!(ViewId::Desk.prev(), ViewId::Settings);
+        assert_eq!(ViewId::Settings.next(), ViewId::Atlas);
+        assert_eq!(ViewId::Atlas.prev(), ViewId::Settings);
     }
 
     /// One durable bus frame, as `net::sse` hands it over.

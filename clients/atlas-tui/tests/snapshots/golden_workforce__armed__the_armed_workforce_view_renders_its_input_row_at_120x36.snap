@@ -1,17 +1,17 @@
 ---
 source: tests/golden_workforce.rs
-assertion_line: 357
+assertion_line: 366
 expression: "desk().frame(120, 36)"
 ---
 " no market assets in the last snapshot                                                                                  "
-" 1 DESK │▌ WORKFLOWS                                                  driving 805e0729│▌ PULSE                          "
-" 2 MKTS │▌805e0729 running     Review the current portfolio and market read.     29m  │ desk stress  …                  "
-" 3 BOOK │  ●───●───●•──◉───○  referee     Regime NEUTRAL (fragile calm, 2 of 5…       │ regime --  robust --            "
-" 4 RSCH │                                                                             │ drawdown --  tier --            "
-"▌5 WORK │                                                                             │ gross --                        "
-" 6 AUDIT│                                                                             │                                 "
-" 7 SETT │                                                                             │▌ BREADTH                        "
-"        │                                                                             │ --                              "
+" 1 ATLAS│▌ WORKFLOWS                                                  driving 805e0729│▌ PULSE                          "
+" 2 DESK │▌805e0729 running     Review the current portfolio and market read.     29m  │ desk stress  …                  "
+" 3 MKTS │  ●───●───●•──◉───○  referee     Regime NEUTRAL (fragile calm, 2 of 5…       │ regime --  robust --            "
+" 4 BOOK │                                                                             │ drawdown --  tier --            "
+" 5 RSCH │                                                                             │ gross --                        "
+"▌6 WORK │                                                                             │                                 "
+" 7 AUDIT│                                                                             │▌ BREADTH                        "
+" 8 SETT │                                                                             │ --                              "
 "        │                                                                             │ adv -- / dec --                 "
 "        │                                                                             │                                 "
 "        │                                                                             │▌ MOVERS                         "

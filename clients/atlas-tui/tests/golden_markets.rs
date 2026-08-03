@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 /// The fixture desk, already switched to MARKETS.
 fn markets() -> Client {
     let mut client = Client::fixture();
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     client
 }
 
@@ -137,7 +137,7 @@ fn a_desk_with_no_sector_etfs_says_what_to_prewarm_instead_of_nothing() {
               "history": [750.72, 743.29, 742.09, 729.46]}
            ]}}"#,
     ));
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     let frame = client.frame(120, 36);
     assert!(
         frame.contains("sector map needs the extended universe"),
@@ -187,14 +187,14 @@ fn the_selection_survives_a_trip_through_another_view() {
     client.keys(&[KeyCode::Down, KeyCode::Down]);
     assert!(client.frame(120, 36).contains("▌ QQQ"));
 
-    client.press(KeyCode::Char('3'));
+    client.press(KeyCode::Char('4'));
     // BOOK's own headline, which only that view renders: until Task 11 this
     // read `▌ BOOK` off the placeholder that used to stand there.
     assert!(
         client.frame(120, 36).contains("PORTFOLIO VALUE"),
         "left MARKETS"
     );
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     assert!(
         client.frame(120, 36).contains("▌ QQQ"),
         "the selection was rebuilt away:\n{}",
@@ -425,7 +425,7 @@ fn a_strip_too_narrow_for_its_sectors_says_so_rather_than_clipping_one_away() {
              {"ticker": "SOXX", "price": 312.66, "change_1d": -0.0295}
            ]}}"#,
     ));
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
 
     // Every cell rendered, and only the strip renders a signed percent — the
     // grid spells the same move as `▼ 2.08` under a `CHG%` header.
@@ -486,7 +486,7 @@ fn a_number_wider_than_its_column_keeps_its_sign_and_loses_its_tail() {
            "portfolio": {"weights": {"SPY": -0.125},
                          "target_weights": {"SPY": -0.125}}}"#,
     ));
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     let body = body(&client.frame(120, 36));
     let row = line_with(&body, "729.46");
     assert!(
@@ -514,7 +514,7 @@ fn an_asset_the_book_does_not_hold_shows_no_weight_rather_than_zero() {
 #[test]
 fn an_empty_universe_says_so_rather_than_drawing_an_empty_grid() {
     let mut client = Client::new(store_from(r#"{"atlas": {"mode": "research"}}"#));
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     let frame = client.frame(120, 36);
     assert!(frame.contains("no market assets"), "{frame}");
 }

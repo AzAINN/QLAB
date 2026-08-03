@@ -1,16 +1,17 @@
 ---
 source: tests/golden_audit.rs
+assertion_line: 52
 expression: "audit().frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
-" 1 DESK │▌ APPROVALS                        view-only ▌ EVENT STREAM      newest first│▌ PULSE                          "
-" 2 MKTS │ 1a2b3c4d5e6 9661b0e88b pending     19:12:18 18:12:18 approval_created   9661│ desk stress  …                  "
-" 3 BOOK │                                             18:12:09 approval_consumed  a06e│ regime CALM  robust UNCERTAIN   "
-" 4 RSCH │                                                                             │ drawdown 0.0%  tier NONE        "
-" 5 WORK │                                                                             │ gross 100.0%                    "
-"▌6 AUDIT│                                                                             │                                 "
-" 7 SETT │                                                                             │▌ BREADTH                        "
-"        │                                                                             │ ███████████████████████████████ "
+" 1 ATLAS│▌ APPROVALS                        view-only ▌ EVENT STREAM      newest first│▌ PULSE                          "
+" 2 DESK │ 1a2b3c4d5e6 9661b0e88b pending     19:12:18 18:12:18 approval_created   9661│ desk stress  …                  "
+" 3 MKTS │                                             18:12:09 approval_consumed  a06e│ regime CALM  robust UNCERTAIN   "
+" 4 BOOK │                                                                             │ drawdown 0.0%  tier NONE        "
+" 5 RSCH │                                                                             │ gross 100.0%                    "
+" 6 WORK │                                                                             │                                 "
+"▌7 AUDIT│                                                                             │▌ BREADTH                        "
+" 8 SETT │                                                                             │ ███████████████████████████████ "
 "        │                                                                             │ adv 1 / dec 4                   "
 "        │                                                                             │                                 "
 "        │                                                                             │▌ MOVERS                         "

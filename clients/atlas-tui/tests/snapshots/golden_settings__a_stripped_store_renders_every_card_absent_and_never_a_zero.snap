@@ -1,16 +1,17 @@
 ---
 source: tests/golden_settings.rs
+assertion_line: 510
 expression: "settings_from(r#\"{\"llm\": {}, \"policy\": {\"constraints\": {}}, \"system\": {}, \"desk_mode\": {}}\"#).frame(120,\n36)"
 ---
 " no market assets in the last snapshot                                                                                  "
-" 1 DESK │▌ DESK                                                                       │▌ PULSE                          "
-" 2 MKTS │ mode         --                                                             │ desk stress  …                  "
-" 3 BOOK │ data         --                                                             │ regime --  robust --            "
-" 4 RSCH │ book         --                                                             │ drawdown --  tier --            "
-" 5 WORK │ lane         --                                                             │ gross --                        "
-" 6 AUDIT│ alpaca login --                                                             │                                 "
-"▌7 SETT │                                                                             │▌ BREADTH                        "
-"        │                                                                             │ --                              "
+" 1 ATLAS│▌ DESK                                                                       │▌ PULSE                          "
+" 2 DESK │ mode         --                                                             │ desk stress  …                  "
+" 3 MKTS │ data         --                                                             │ regime --  robust --            "
+" 4 BOOK │ book         --                                                             │ drawdown --  tier --            "
+" 5 RSCH │ lane         --                                                             │ gross --                        "
+" 6 WORK │ alpaca login --                                                             │                                 "
+" 7 AUDIT│                                                                             │▌ BREADTH                        "
+"▌8 SETT │                                                                             │ --                              "
 "        │                                                                             │ adv -- / dec --                 "
 "        │ read-only — this window cannot switch the desk ─────────────────────────────│                                 "
 "        │▌ POLICY                               ▌ SYSTEM                              │▌ MOVERS                         "

@@ -111,6 +111,43 @@
   .badge.warn{color:var(--warn);border-color:rgba(241,194,27,.4);background:rgba(241,194,27,.1)}
   .badge.bad{color:var(--bad);border-color:rgba(250,77,86,.4);background:rgba(250,77,86,.1)}
   .badge.q{color:var(--violet);border-color:rgba(165,110,255,.4);background:rgba(165,110,255,.1)}
+  /* ---- per-fold IC strip: signed bars off ONE zero line, so a sign flip is
+     visible before the mean is read. Two fixed rows of equal height with the
+     positive bar bottom-anchored in the upper row and the negative bar
+     top-anchored in the lower row is the only layout where "above the line"
+     and "below the line" mean the same thing for every bar. ---- */
+  .folds{display:inline-flex;align-items:center;gap:2px;height:40px}
+  .folds .f{display:grid;grid-template-rows:19px 19px;width:6px;height:38px;
+    border-bottom:0;position:relative}
+  .folds .f::after{content:'';position:absolute;top:19px;left:-1px;right:-1px;
+    height:1px;background:var(--border)}
+  .folds .f > i{display:block;width:6px;border-radius:1px}
+  .folds .f > i.pos{grid-row:1;align-self:end;background:var(--good)}
+  .folds .f > i.neg{grid-row:2;align-self:start;background:var(--bad)}
+  td.up{color:var(--good)} td.down{color:var(--bad)}
+  /* ---- workforce rows ---- */
+  .wfrow{padding:11px 0;border-bottom:1px solid var(--border)}
+  .wfrow:last-child{border-bottom:0}
+  .wfhead{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:12.5px}
+  .rail{display:inline-flex;gap:3px;margin-left:auto}
+  .rail i{width:15px;height:5px;border-radius:2px;background:var(--border)}
+  .rail i.done{background:var(--good)}
+  .rail i.stall{background:var(--warn)}
+  .wfgoal{font-size:12px;color:var(--muted);margin-top:5px}
+  .wfstall{margin-top:7px;padding:8px 11px;border-radius:8px;font-size:12.5px;
+    border:1px solid rgba(241,194,27,.3);background:rgba(241,194,27,.06)}
+  /* A settled stall is history, not a to-do: it keeps the record and loses
+     the colour that means "you need to act". */
+  .wfstall.settled{border-color:var(--border);background:transparent;opacity:.72}
+  .wfsay{margin-top:4px;font-size:12.5px;color:var(--text);font-style:italic}
+  /* ---- agent stream ---- */
+  .evrow{display:flex;align-items:baseline;gap:8px;padding:5px 0;font-size:12.5px;
+    border-bottom:1px solid var(--border)}
+  .evrow:last-child{border-bottom:0}
+  .evrow.op{opacity:.62}
+  .evag{font-weight:600;color:var(--q)}
+  .evtx{flex:1;min-width:0;overflow-wrap:anywhere}
+  .evrow.say .evtx{color:var(--text)}
   /* ---- vs viz ---- */
   .vs{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:18px;margin:6px 0}
   .vsbox{text-align:center;padding:22px;border-radius:12px;border:1px solid var(--border)}
@@ -163,6 +200,8 @@
     <button data-nav="autopilot"><span class="ic">◐</span>Autopilot</button>
     <button data-nav="experiment"><span class="ic">▤</span>Experiment</button>
     <button data-nav="algorithms"><span class="ic">⌘</span>Algorithms</button>
+    <button data-nav="research"><span class="ic">◎</span>Research lane</button>
+    <button data-nav="workforce"><span class="ic">⚙</span>Workforce</button>
     <button data-nav="registry"><span class="ic">❏</span>Registry</button>
     <div class="sep"></div>
     <button data-nav="about"><span class="ic">◇</span>About &amp; Governance</button>
@@ -246,6 +285,36 @@
         <h3>Methods</h3>
         <div id="algorithmRows" class="empty">Loading catalog…</div>
       </div>
+    </section>
+
+    <!-- RESEARCH LANE -->
+    <section data-panel="research">
+      <h1>Research lane</h1>
+      <p class="sub">The predictor board: quantum feature-map augmented models against the
+        unaugmented control, on walk-forward folds with an embargo. Admitted is not promoted —
+        the authority gate never reads this board.</p>
+      <div class="btnrow" style="margin-top:0">
+        <button class="btn" id="resRefresh">Refresh</button>
+        <button class="btn" id="resRun">Run board</button>
+      </div>
+      <div id="resStatus" class="empty" style="margin-top:16px">—</div>
+      <div id="resBody"></div>
+    </section>
+
+    <!-- WORKFORCE -->
+    <section data-panel="workforce">
+      <h1>Workforce</h1>
+      <p class="sub">The five-agent pipeline, run by run: how far each got, and the sentence the
+        agent wrote when one stopped. Resuming or abandoning a run is an operator act; no agent
+        may do it.</p>
+      <div class="btnrow" style="margin-top:0"><button class="btn" id="wfRefresh">Refresh</button></div>
+      <div id="wfStatus" class="empty" style="margin-top:16px">—</div>
+      <div id="wfBody"></div>
+      <h2 style="margin-top:26px">What the agents said</h2>
+      <p class="sub">The coordinator session as it happened: reasoning, tool calls, and the
+        handoff that names which specialist picked the work up.</p>
+      <div id="wfStreamReason" class="muted" style="font-size:12.5px"></div>
+      <div id="wfStream"></div>
     </section>
 
     <!-- REGISTRY -->
@@ -438,6 +507,165 @@ async function loadRegistry(){
     <div style="font-size:12.5px;margin-top:4px">${x.rationale||''}</div>
     ${x.reflection?`<div class="muted" style="font-size:12px;margin-top:3px">↩ ${x.reflection}</div>`:''}</div>`).join('')
     :'<div class="empty">No decisions yet — run the autopilot.</div>';}
+
+/* ---- research lane (predictor board) ---- */
+$('#resRefresh').onclick=e=>run(e.target,loadResearch);
+$('#resRun').onclick=e=>run(e.target,async()=>{
+  await api('POST','/api/lab/research.predictor_board',{offline:OFF()});
+  toast('board complete');await loadResearch();});
+/* Folds drawn as signed bars from a shared zero line: a mean over folds that
+   changed sign is not a skill estimate, and the picture should say that
+   before the number does. */
+function foldStrip(fold,mx){
+  if(!fold||!fold.length) return '<span class="muted">no folds recorded</span>';
+  return '<span class="folds">'+fold.map((v,i)=>{
+    const h=Math.max(2,Math.round(Math.abs(v)/mx*18));
+    return `<span class="f"><i class="${v<0?'neg':'pos'}" title="fold ${i+1}: IC ${num(v,3)}"
+      style="height:${h}px"></i></span>`;}).join('')+'</span>';}
+async function loadResearch(){
+  const b=await api('GET','/api/research/predictors');
+  const lane=`<div class="note-line">${b.lane||''}</div>`;
+  if(b.status!=='ok'){
+    $('#resStatus').innerHTML=`${badge(b.status.replace('_',' '),'warn')} ${b.reason||''}`;
+    $('#resBody').innerHTML=lane;return;}
+  const bar=b.admission&&b.admission.mean_ic_strictly_above;
+  $('#resStatus').className='';
+  // The admission badge is the loudest claim on this panel. 66 of 100 pure
+  // noise panels produced an admitted champion, so green-on-admitted alone
+  // reads as a result where there may be none. Establishment sets the colour.
+  const est=b.champion_established;
+  const nul=b.selection_null||{};
+  const estBadge=b.admitted_any
+    ? (est===true ? badge('null-tested: p='+num(nul.p_value,3),'good')
+     : est===false ? badge('NOT established vs noise: p='+num(nul.p_value,3),'bad')
+     : badge('never null-tested','warn'))
+    : '';
+  $('#resStatus').innerHTML=`${badge(b.admitted_any?'admitted: '+b.champion:'nothing admitted',
+      b.admitted_any?(est===false?'warn':'good'):'warn')}
+    ${estBadge}
+    ${badge((b.source||'?')+' · '+(b.as_of||'?'),'')}
+    ${badge(b.n_obs+' obs · '+b.n_folds+' folds','')}
+    <div class="muted" style="font-size:12.5px;margin-top:6px">${b.reason||''}</div>`;
+
+  const all=b.models.flatMap(m=>m.per_fold||[]).map(Math.abs);
+  const mx=all.length?Math.max(...all):1;
+  const order=b.ranking&&b.ranking.length
+    ? b.ranking.map(id=>b.models.find(m=>m.model_id===id)).filter(Boolean) : b.models;
+  // Selection null. The admission bar is per-model but the champion is the
+  // argmax over 7 tuned models, so the bar alone says nothing about the
+  // winner. This card shows the winner against its own selection procedure.
+  const nullCard = nul && nul.trials
+    ? `<div class="card" style="margin-top:14px"><h3>Selection null — could noise do this?</h3>
+       ${[['Method',nul.method||'—'],
+          ['Null trials',nul.trials],
+          ['This run&rsquo;s selected IC',num(nul.observed_max_mean_ic,4)],
+          ['Null median selected IC',num(nul.null_median_max_mean_ic,4)],
+          ['Null best selected IC',num(nul.null_max_mean_ic,4)],
+          ['Runs matching or beating it',
+            (nul.exceedances??'?')+' of '+nul.trials],
+          ['p-value',num(nul.p_value,3)+(nul.p_value_resolution
+             ? ` (grid of ${num(nul.p_value_resolution,3)} — no finer p exists at ${nul.trials} trials)` : '')],
+          ['Established at 0.05',
+            est===true?'yes':est===false?'NO':'not tested']]
+         .map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('')}
+       <div class="note-line" style="margin-top:8px">${nul.reason||''}</div></div>`
+    : `<div class="card" style="margin-top:14px"><h3>Selection null</h3>
+       <div class="note-line">This board carries no selection null, so whether
+       noise reproduces its champion is unknown — which is not the same as it
+       having been tested and held up.${nul&&nul.reason?' '+nul.reason:''}</div></div>`;
+  $('#resBody').innerHTML=lane+nullCard+`
+  <div class="card" style="margin-top:14px"><h3>Target &amp; protocol</h3>
+    ${[['Target',b.target||'—'],['Horizon',(b.horizon_days??'—')+' d'],
+       ['Embargo',(b.embargo_days??'—')+' d'],['Baseline (control)',b.baseline||'—'],
+       ['Feature maps',(b.kernels||[]).join(', ')||'—'],
+       ['Admission bar',bar==null?'NOT RECORDED':`mean IC &gt; ${num(bar,3)} and IC stability &gt; ${num(b.admission.ic_stability_strictly_above,3)}`]]
+      .map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('')}
+  </div>
+  <div class="card" style="margin-top:14px"><h3>Models — augmented lane vs control</h3>
+  <table><tr><th style="text-align:left">Model</th><th>Lane</th><th>Mean IC</th><th>vs baseline</th>
+    <th>Stability</th><th>t (n=${b.n_folds??'?'})</th><th>Wins</th><th>Folds</th><th>Verdict</th></tr>
+  ${order.map(m=>`<tr class="${m.is_champion?'best':''}">
+    <td style="text-align:left" class="mono">${m.model_id}</td>
+    <td>${m.augmented?badge('quantum map','q')
+        :badge(m.is_baseline?'control (baseline)':'control','')}${
+        m.control_note?`<span class="muted" title="${m.control_note}"> ⓘ</span>`:''}</td>
+    <td>${num(m.mean_ic,3)}</td>
+    <td class="${m.delta_mean_ic_vs_baseline>0?'up':m.delta_mean_ic_vs_baseline<0?'down':''}">
+      ${m.is_baseline?'—':(m.delta_mean_ic_vs_baseline>0?'+':'')+num(m.delta_mean_ic_vs_baseline,3)}</td>
+    <td>${num(m.ic_stability,2)}</td>
+    <td>${m.paired_t_vs_baseline==null?'—':num(m.paired_t_vs_baseline,2)+
+        (m.significant?'':' <span class="muted">n.s.</span>')}</td>
+    <td>${m.wins_vs_baseline==null?'—':m.wins_vs_baseline+'/'+(b.n_folds??'?')}</td>
+    <td>${foldStrip(m.per_fold,mx)}${m.negative_folds?`<span class="muted"> ${m.negative_folds}−</span>`:''}</td>
+    <td>${m.usable?badge('ADMITTED','good'):badge('below bar','')}</td></tr>`).join('')}</table>
+  <div class="note-line">A mean IC averaged over folds that changed sign is not a skill
+    estimate. |t| &lt; 2 on ${b.n_folds??'?'} folds cannot distinguish a model from its
+    baseline; "n.s." marks exactly that. Admission is a research bar, not a promotion.</div>
+  </div>`;}
+$('nav [data-nav="research"]').addEventListener('click',()=>{
+  if(!$('#resBody').innerHTML) run($('#resRefresh'),loadResearch);});
+
+/* ---- workforce (the five-agent pipeline, run by run) ---- */
+$('#wfRefresh').onclick=e=>run(e.target,loadWorkforce);
+const WF_PHASES=['analyst','challenger','optimizer','referee','reporter'];
+const WF_TONE={complete:'good',running:'',blocked:'warn',failed:'bad',
+  interrupted:'warn',abandoned:''};
+/* The pipeline drawn as five pips: how far the work got is the first thing an
+   operator needs, and "blocked at the reporter with four phases banked" is a
+   different situation from "died at the analyst". */
+function phaseRail(w){
+  const done=new Set(w.completed_phases||[]), stall=(w.stalled_at||{}).phase;
+  const phases=(w.completed_phases||[]).concat(w.pending_phases||[]).length
+    ? [...new Set([...(w.completed_phases||[]),stall,...(w.pending_phases||[])].filter(Boolean))]
+    : WF_PHASES;
+  return '<span class="rail">'+phases.map(p=>{
+    const k=p===stall?'stall':done.has(p)?'done':'todo';
+    return `<i class="${k}" title="${p}: ${k==='stall'?'stopped here':k==='done'?'completed':'never ran'}"></i>`;
+  }).join('')+'</span>';}
+async function loadWorkforce(){
+  const d=await api('GET','/api/workforce');
+  const counts=Object.entries(d.counts||{}).map(([k,v])=>
+    badge(v+' '+k,WF_TONE[k]===undefined?'':WF_TONE[k])).join(' ');
+  $('#wfStatus').className='';
+  $('#wfStatus').innerHTML=(counts||badge('idle',''))+
+    (d.needs_attention?' '+badge(d.needs_attention+' need attention','warn'):'')+
+    `<div class="muted" style="font-size:12.5px;margin-top:6px">${d.reason||''}</div>`;
+  if(!d.workflows.length){$('#wfBody').innerHTML='';await loadAgentStream();return;}
+  $('#wfBody').innerHTML=`<div class="card" style="margin-top:14px">`+
+    d.workflows.map(w=>`<div class="wfrow">
+      <div class="wfhead">${badge(w.status,WF_TONE[w.status]||'')}
+        <span class="mono muted">${(w.workflow_id||'').slice(0,10)}</span>
+        <span class="muted">${w.kind||''} · ${w.as_of||'—'}</span>
+        ${phaseRail(w)}</div>
+      ${w.goal?`<div class="wfgoal">${w.goal}</div>`:''}
+      ${w.stalled_at?`<div class="wfstall${w.awaiting_operator===false?' settled':''}">
+        <b>stopped at ${w.stalled_at.phase}</b>
+        <span class="muted">(agent ${w.stalled_at.agent||'—'}, ${w.stalled_at.status})</span>
+        ${w.awaiting_operator===true?badge('awaiting you','warn')
+          :w.awaiting_operator===false?badge('already decided','')
+          :badge('unknown: this desk did not say','bad')}
+        <div class="wfsay">${w.stalled_at.summary||'no reason recorded — itself a gap'}</div>
+      </div>`:'<div class="muted" style="font-size:12px">nothing stopped this run</div>'}
+    </div>`).join('')+`</div>`;
+  await loadAgentStream();}
+/* The coordinator session, rendered. `text` is the agent reasoning and gets
+   the room; tool traffic is one dim line each, because a wall of equal-weight
+   rows is how a stream stops being read. */
+const EV_TONE={text:'',tool_start:'q',tool_result:'',error:'bad',
+  session:'',result:'good'};
+async function loadAgentStream(){
+  const d=await api('GET','/api/workforce/stream');
+  $('#wfStreamReason').textContent=d.reason||'';
+  $('#wfStream').innerHTML=!d.events.length?'':
+    `<div class="card" style="margin-top:12px">`+d.events.map(e=>`
+      <div class="evrow ${e.event_kind==='text'?'say':'op'}">
+        <span class="evk">${badge(e.event_kind,EV_TONE[e.event_kind]||'')}</span>
+        ${e.agent?`<span class="evag">${e.agent}</span>`:''}
+        ${e.tool?`<span class="mono muted">${e.tool}</span>`:''}
+        <span class="evtx">${(e.text||'').slice(0,400)}</span>
+      </div>`).join('')+`</div>`;}
+$('nav [data-nav="workforce"]').addEventListener('click',()=>{
+  if(!$('#wfBody').innerHTML) run($('#wfRefresh'),loadWorkforce);});
 
 /* ---- about ---- */
 function renderAgents(agents){$('#aboutAgents').innerHTML=agents.map((a,i)=>`<div class="agent">

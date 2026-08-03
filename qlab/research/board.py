@@ -59,6 +59,12 @@ MODEL_IDS = (
 BASELINE_MODEL_ID = "ridge:none"
 DEFAULT_ALPHAS = (0.1, 1.0, 10.0)
 DEFAULT_MAP_WEIGHTS = (0.25, 1.0, 4.0)
+# The board's headline number is a maximum over models, each tuned over its
+# own grid. Positioning it needs a null of the whole selection, which costs
+# one full board per trial; 24 buys a p-value resolution of ~0.04, enough to
+# separate "noise reproduces this routinely" from "it does not".
+_DEFAULT_NULL_TRIALS = 24
+_NULL_ALPHA = 0.05
 
 
 def _validated_models(models) -> tuple[str, ...]:
@@ -235,6 +241,113 @@ def _paired_t(diffs: np.ndarray) -> float:
     return float(np.mean(diffs) / (spread / math.sqrt(len(diffs))))
 
 
+def _selected_max_ic(
+    model_ids: tuple[str, ...],
+    feature_matrix: np.ndarray,
+    target: np.ndarray,
+    folds: list[tuple[np.ndarray, np.ndarray]],
+    alphas: tuple[float, ...],
+    map_weights: tuple[float, ...],
+) -> float:
+    """The number the board's ranking actually reports: the selected maximum."""
+    best = -math.inf
+    for model_id in model_ids:
+        per_fold = _evaluate_model(
+            model_id, feature_matrix, target, folds, alphas, map_weights
+        )
+        best = max(best, float(np.mean([f["ic"] for f in per_fold])))
+    return best
+
+
+def _selection_null(
+    model_ids: tuple[str, ...],
+    feature_matrix: np.ndarray,
+    target: np.ndarray,
+    folds: list[tuple[np.ndarray, np.ndarray]],
+    alphas: tuple[float, ...],
+    map_weights: tuple[float, ...],
+    observed_max_ic: float,
+    trials: int,
+) -> dict:
+    """What this selection procedure scores when there is nothing to find.
+
+    The board reports a maximum over models, each tuned over its own grid,
+    and then judges it against a per-model bar. That bar cannot hold: a
+    threshold calibrated for one estimator is being applied to the best of
+    seven, and the top-ranked mean IC is a selected extremum. Measured on
+    100 panels of pure noise, the unmodified procedure admitted a champion
+    66 times, 39 of them quantum-mapped, and 84 of 100 cleared the 0.03
+    mean_ic bar. The live desk's admitted champion scored 0.178; the noise
+    median was 0.21. Nothing in the board said so.
+
+    The null is built by circularly shifting the target against the features.
+    A shift preserves the target's autocorrelation exactly -- it is the same
+    series, rotated -- which matters because the 21-day overlapping horizon
+    is the reason the effective sample is so much smaller than the row count.
+    Shuffling instead would destroy that dependence and produce a flattering
+    null, understating the very problem being measured.
+
+    Deterministic: offsets are fixed spans of the sample, so a board is
+    reproducible and two boards over the same panel are comparable.
+    """
+    n = len(target)
+    # Keep every shift well away from 0 and n, where the rotated target still
+    # lines up with the features over most of the sample.
+    usable = [
+        int(round(n * (i + 1) / (trials + 1)))
+        for i in range(trials)
+    ]
+    offsets = sorted({o for o in usable if PREDICTION_HORIZON_DAYS < o < n - PREDICTION_HORIZON_DAYS})
+    scores = [
+        _selected_max_ic(
+            model_ids, feature_matrix, np.roll(target, offset), folds,
+            alphas, map_weights,
+        )
+        for offset in offsets
+    ]
+    if not scores:
+        return {
+            "trials": 0,
+            "p_value": None,
+            "reason": (
+                f"a {n}-row sample admits no circular shift clear of the "
+                f"{PREDICTION_HORIZON_DAYS}-day horizon, so the selected "
+                "maximum could not be nulled and is unpositioned"
+            ),
+        }
+    arr = np.array(scores, dtype=float)
+    # +1 in numerator and denominator: the observed run is itself one draw,
+    # so a p-value of exactly zero is not available from a finite null.
+    exceedances = int(np.sum(arr >= observed_max_ic))
+    p_value = float((exceedances + 1) / (len(arr) + 1))
+    # A p-value from T resamples lives on a grid of width 1/(T+1). On a
+    # deterministic 250-day vol cycle -- IC +0.86 against a null median of
+    # +0.21 -- this came back as exactly 0.080 six runs running: one single
+    # exceedance, the shift that realigns the cycle. `established` therefore
+    # turns on one null draw, and a bare p hides that completely.
+    resolution = 1.0 / (len(arr) + 1)
+    return {
+        "trials": int(len(arr)),
+        "method": "circular_shift_of_target",
+        "p_value": p_value,
+        "exceedances": exceedances,
+        "p_value_resolution": float(resolution),
+        "observed_max_mean_ic": float(observed_max_ic),
+        "null_median_max_mean_ic": float(np.median(arr)),
+        "null_p90_max_mean_ic": float(np.percentile(arr, 90)),
+        "null_max_mean_ic": float(arr.max()),
+        "reason": (
+            f"the best of {len(model_ids)} tuned models scored "
+            f"{observed_max_ic:+.4f}; the same selection over {len(arr)} "
+            f"null shifts had median {float(np.median(arr)):+.4f} and "
+            f"reached {float(arr.max()):+.4f}. {exceedances} of {len(arr)} "
+            f"null runs matched or beat it, so p={p_value:.3f} "
+            f"(resolution {resolution:.3f} — no finer p is available from "
+            f"{len(arr)} trials)"
+        ),
+    }
+
+
 def run_predictor_board(
     panel: pd.DataFrame,
     *,
@@ -242,6 +355,7 @@ def run_predictor_board(
     alphas=DEFAULT_ALPHAS,
     map_weights=DEFAULT_MAP_WEIGHTS,
     n_splits: int = _DEFAULT_FOLDS,
+    null_trials: int = _DEFAULT_NULL_TRIALS,
 ) -> dict:
     """Evaluate every requested model on one shared set of purged folds.
 
@@ -249,6 +363,10 @@ def run_predictor_board(
     comparisons against the fixed baseline, a deterministic ranking
     ``(-mean_ic, ic_std, model_id)``, and the first admitted model as
     ``champion`` (or ``None`` — an honest empty answer, never a default).
+
+    ``usable`` and ``champion`` remain what they always were: the documented
+    fixed bar. ``champion_established`` is the separate, harder question of
+    whether the selection beats its own null — see :func:`_selection_null`.
     """
     model_ids = _validated_models(models)
     candidates = _validated_alphas(alphas)
@@ -314,6 +432,22 @@ def run_predictor_board(
     champion = next(
         (entry["model_id"] for entry in entries if entry["usable"]), None
     )
+    # Position the selected maximum against its own null. This is the number
+    # the ranking reports, so it is the number that has to be nulled --
+    # nulling a fixed model would answer a question nobody asked.
+    null = _selection_null(
+        model_ids, feature_matrix, target, folds, candidates, weights,
+        observed_max_ic=float(entries[0]["mean_ic"]) if entries else 0.0,
+        trials=int(null_trials),
+    )
+    p_value = null.get("p_value")
+    if champion is None:
+        established = False
+    elif p_value is None:
+        # The null could not be built. Unknown must not read as established.
+        established = None
+    else:
+        established = bool(p_value <= _NULL_ALPHA)
     return {
         "n_obs": int(len(frame)),
         "n_folds": int(n_splits),
@@ -326,6 +460,12 @@ def run_predictor_board(
         "ranking": [entry["model_id"] for entry in entries],
         "champion": champion,
         "admitted_any": champion is not None,
+        # Admission is the fixed bar. Establishment is whether the selection
+        # beat its own null. They are different claims and are reported
+        # separately: None means the null could not be built, which is not
+        # the same as failing it.
+        "champion_established": established,
+        "selection_null": null,
         "admission": {
             "mean_ic_strictly_above": IC_ADMISSION_THRESHOLD,
             "ic_stability_strictly_above": IC_STABILITY_THRESHOLD,

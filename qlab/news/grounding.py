@@ -131,6 +131,11 @@ class GroundedNews:
     claims: list[Claim]
     dropped_future: int = 0
     dropped_untagged: int = 0
+    # Kept, but bearing on no named holding. Counted apart from the item total
+    # so a reader can tell a window about the book from a window about the
+    # world -- both are useful, and confusing them reads macro noise as a
+    # statement about a position.
+    untagged_count: int = 0
     window_hash: str = ""
     quality_flags: list[str] = field(default_factory=list)
 
@@ -148,6 +153,7 @@ class GroundedNews:
             "corroborated_count": len(self.corroborated_claims),
             "dropped_future": self.dropped_future,
             "dropped_untagged": self.dropped_untagged,
+            "untagged_count": self.untagged_count,
             "window_hash": self.window_hash,
             "quality_flags": list(self.quality_flags),
         }
@@ -155,16 +161,29 @@ class GroundedNews:
 
 def ground(items, *, as_of: str, provider: str,
            universe: list[str] | None = None,
-           min_overlap: int = 3) -> GroundedNews:
+           min_overlap: int = 3,
+           keep_macro: bool = True) -> GroundedNews:
     """Turn fetched records into an auditable, point-in-time evidence window.
 
     Enforces the look-ahead boundary (anything published at/after ``as_of`` is
     dropped and counted), hashes each record for immutability, and groups
     records describing the same story so corroboration is visible.
+
+    ``keep_macro`` keeps records that carry no tickers at all. ``feed.py``
+    fetches those deliberately -- "an untagged item is macro context, not a
+    mis-tagged holding item" -- because a cross-asset desk gets almost no
+    symbol-tagged coverage, and this function then dropped every one of them.
+    On the live desk that discarded 46 of 50 stories before anything could
+    read them, and the desk reported a quiet market that was not quiet.
+
+    A record tagged with a ticker the desk does not hold is still dropped:
+    that is a claim about someone else's position, not macro context. Pass
+    ``keep_macro=False`` for holdings-only evidence -- it has to be asked for,
+    so the default cannot silently starve the window again.
     """
     universe_set = set(universe or [])
     kept, hashes = [], []
-    dropped_future = dropped_untagged = 0
+    dropped_future = dropped_untagged = untagged_kept = 0
 
     for item in list(items or []):
         published = str(getattr(item, "published", ""))
@@ -180,8 +199,12 @@ def ground(items, *, as_of: str, provider: str,
             continue
         tickers = tuple(getattr(item, "tickers", ()) or ())
         if universe_set and not (set(tickers) & universe_set):
-            dropped_untagged += 1
-            continue
+            if tickers or not keep_macro:
+                dropped_untagged += 1
+                continue
+            # Untagged: kept as macro context, and it stays untagged so
+            # nothing downstream can mistake it for evidence about a holding.
+            untagged_kept += 1
         kept.append(item)
         hashes.append(content_hash(item))
 
@@ -194,6 +217,12 @@ def ground(items, *, as_of: str, provider: str,
         flags.append("empty window")
     if dropped_future:
         flags.append(f"{dropped_future} record(s) dropped as look-ahead")
+    if kept and untagged_kept == len(kept):
+        # A real property of the window, not a defect: nothing here bears on a
+        # named holding, and a reader must not assume otherwise.
+        flags.append(
+            f"all {len(kept)} record(s) are untagged macro context; none of "
+            f"them bears on a named holding")
     single_source = {getattr(i, "source", "") for i in kept}
     if (len(kept) >= 3 and len(single_source) == 1
             and source_tier(next(iter(single_source))) == "secondary"):
@@ -206,8 +235,8 @@ def ground(items, *, as_of: str, provider: str,
     return GroundedNews(
         as_of=as_of, provider=provider, items=kept, hashes=hashes,
         claims=claims, dropped_future=dropped_future,
-        dropped_untagged=dropped_untagged, window_hash=window_hash,
-        quality_flags=flags)
+        dropped_untagged=dropped_untagged, untagged_count=untagged_kept,
+        window_hash=window_hash, quality_flags=flags)
 
 
 def _cluster(items, hashes, *, min_overlap: int) -> list[Claim]:

@@ -8,10 +8,14 @@ second, reports every refusal, and never turns a refusal into a task failure.
 
 from __future__ import annotations
 
+import json
+import re
+
 import pytest
 
 from qlab.operator.coordinator import CoordinatorDriver, resume_prompt
 from qlab.state.registry import Registry
+from qlab.tui.claude import parse_stream_line
 
 
 class FakeSession:
@@ -171,9 +175,13 @@ def test_coordinator_events_reach_the_owner_audit_bus():
         driver = _driver(reg)
         driver.drive("wf-1", "regime re-read")
         session = FakeSession.instances[-1]
-        session.on_event(Event("agent", "moments-analyst starting",
+        # Kinds the real parser emits. Inventing kinds here is what let
+        # _RECORDED_KINDS name "tool" and "agent" -- which it never sends --
+        # while this test stayed green and production recorded nothing.
+        session.on_event(Event("text", "moments-analyst starting",
                                agent="moments-analyst"))
-        session.on_event(Event("tool", "moments_estimate", tool="moments_estimate"))
+        session.on_event(Event("tool_start", "calling moments_estimate",
+                               tool="moments_estimate"))
         kinds = [e["kind"] for e in reg.read_events(50)]
         assert "atlas_coordinator_started" in kinds
         # This is what makes an unattended run legible instead of a black box.
@@ -491,3 +499,105 @@ def test_shutdown_is_terminal_so_no_tree_outlives_the_owner():
     # And it stays refused afterwards, with a reason.
     out = driver.drive("wf-c", "goal")
     assert out["driving"] is False and "shutting down" in out["reason"]
+
+
+def test_the_recorded_kinds_are_kinds_the_real_parser_actually_emits():
+    """The filter named three kinds that no parser branch ever produces.
+
+    `_RECORDED_KINDS` listed "tool" and "agent". `parse_stream_line` emits
+    `tool_start`, `tool_result`, `text`, `text_delta`, `session`, `error` and
+    `result` — so every tool call and every subagent handoff was dropped on
+    the floor. The existing bus test passed because it fed the driver events
+    it had invented, in kinds production never sends.
+
+    Pinning the filter against the parser's real vocabulary is the invariant:
+    a name that matches nothing must fail here rather than silently record
+    nothing for months.
+    """
+    import inspect
+
+    from qlab.operator.coordinator import _RECORDED_KINDS
+    from qlab.tui import claude as claude_mod
+
+    source = inspect.getsource(claude_mod)
+    emitted = set(re.findall(r'ClaudeEvent\(\s*"([a-z_]+)"', source))
+    assert emitted, "parser vocabulary could not be read"
+    unknown = sorted(set(_RECORDED_KINDS) - emitted)
+    assert not unknown, (
+        f"_RECORDED_KINDS names kinds the parser never emits: {unknown}; "
+        f"the parser emits {sorted(emitted)}")
+
+
+def test_a_subagent_handoff_is_recorded_with_the_agent_that_took_it():
+    """All 31 coordinator events on the live desk had an empty `agent`.
+
+    The agent is only ever set on a tool_start block for the `Agent` tool, and
+    `tool_start` was not a recorded kind — so the one event that names which
+    specialist picked up the work was exactly the one being discarded.
+    """
+    reg = Registry(":memory:")
+    try:
+        driver = _driver(reg)
+        driver.drive("wf-1", "regime re-read")
+        line = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "name": "Agent",
+                "input": {"subagent_type": "moments-analyst"}}]}})
+        for event in parse_stream_line(line):
+            FakeSession.instances[-1].on_event(event)
+        recorded = [e for e in reg.read_events(50)
+                    if e["kind"] == "atlas_coordinator_event"]
+        assert recorded, "a subagent handoff reached the bus as nothing"
+        assert recorded[0]["payload"]["agent"] == "moments-analyst"
+    finally:
+        reg.close()
+
+
+def test_an_agents_reasoning_reaches_the_bus():
+    """`text` blocks are the agent's actual reasoning, and they were kept —
+    but this pins it, because it is the whole point of the stream."""
+    reg = Registry(":memory:")
+    try:
+        driver = _driver(reg)
+        driver.drive("wf-1", "goal")
+        line = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "text",
+                "text": "Vol is in the top decile; I am widening the band."}]}})
+        for event in parse_stream_line(line):
+            FakeSession.instances[-1].on_event(event)
+        texts = [e["payload"]["text"] for e in reg.read_events(50)
+                 if e["kind"] == "atlas_coordinator_event"]
+        assert any("top decile" in t for t in texts), texts
+    finally:
+        reg.close()
+
+
+def test_sdk_liveness_chatter_does_not_bury_the_agents_reasoning():
+    """On the live desk 56 of 60 recorded events were `Claude session ...`.
+
+    42 of them said `task_progress`. That is the SDK reporting it is still
+    alive, not the desk's agents saying anything, and it pushed the four
+    events that carried actual debate reasoning off the end of the window.
+    The coordinator's own lifecycle is already bracketed by the dedicated
+    `atlas_coordinator_started` / `_stopped` events, so nothing is lost.
+    """
+    reg = Registry(":memory:")
+    try:
+        driver = _driver(reg)
+        driver.drive("wf-1", "goal")
+        session = FakeSession.instances[-1]
+        for _ in range(20):
+            session.on_event(Event("session", "Claude session task_progress"))
+        session.on_event(Event("text", "Challenger has a live counter-case."))
+        payloads = [e["payload"] for e in reg.read_events(200)
+                    if e["kind"] == "atlas_coordinator_event"]
+        assert len(payloads) == 1, [p["text"] for p in payloads]
+        assert "counter-case" in payloads[0]["text"]
+        # The lifecycle is still on the record, just not once per heartbeat.
+        kinds = [e["kind"] for e in reg.read_events(200)]
+        assert "atlas_coordinator_started" in kinds
+    finally:
+        reg.close()

@@ -28,6 +28,9 @@ GET  /api/models/invocations   model tier/route audit records
 GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
 GET  /api/news                   the news window, its coverage, and provenance
 GET  /api/atlas/context          the rich surface a reasoning Atlas forms a view from
+GET  /api/research/predictors    the predictor board: augmented lane vs its control
+GET  /api/workforce              recent runs, how far each got, and where it stopped
+GET  /api/workforce/stream       what the agents said and did, off the audit bus
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
 POST /api/atlas/escalate         open a bounded debate on a material disagreement
 GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
@@ -98,6 +101,12 @@ from qlab.paths import workspace_root
 
 _HERE = Path(__file__).resolve().parent
 _INDEX = _HERE / "index.html"
+
+# Workflow statuses where a run stopped and a human decision is what unblocks
+# it. `abandoned` is deliberately absent: that run also stopped, but the
+# operator already made the call, so counting it as outstanding work would
+# report a decision back to the person who made it.
+_AWAITING_OPERATOR = frozenset({"blocked", "failed", "interrupted"})
 
 # A ThreadingHTTPServer keeps the browser's parallel/keep-alive connections
 # responsive, but the shared DuckDB connection is not thread-safe, so every
@@ -1172,6 +1181,9 @@ class UISession:
             return {
                 "blocked": True, "mode": policy.mode, "provider": policy.provider,
                 "feed": policy.feed, "reason": str(exc),
+                # Both spellings, so a client reading either one sees the
+                # refusal rather than an empty list next to a bare `false`.
+                "reasons": [str(exc)],
                 "eligible_for_paper_proposal": False,
                 "eligible_for_execution": False,
             }
@@ -1183,12 +1195,20 @@ class UISession:
             snapshot_id=snap.content_hash(), purpose=purpose, policy=policy,
             health=health, universe=tickers, as_of=str(snap.as_of))
         self.registry.record_data_permit(permit.to_dict())
+        payload = health.to_dict()
         return {
             "blocked": False, "mode": policy.mode, "feed": policy.feed,
             "permit_id": permit.permit_id,
             "quote_health": (
                 self.market_stream.health() if self.market_stream else None),
-            **health.to_dict(),
+            # Singular `reason` is what `atlas_facts` and the TUI read, and
+            # only the *blocked* branch above ever set it. On the ordinary
+            # ineligible path both surfaces saw `eligible: false` with no
+            # cause, so the desk refused without saying why (invariant 4).
+            # The first reason is the governing one: `_integrity` writes
+            # before the provenance and freshness checks append theirs.
+            "reason": (payload["reasons"][0] if payload["reasons"] else None),
+            **payload,
         }
 
     def quotes(self, symbols: list[str] | None = None) -> dict:
@@ -1305,12 +1325,32 @@ class UISession:
         def _metrics(entry: dict | None) -> dict | None:
             if not isinstance(entry, dict):
                 return None
+            # Everything the admission verdict was derived from travels with
+            # the verdict. `usable: true` alone is a comparison with its
+            # threshold, its sample size and its dispersion stripped off, and
+            # a reader given only the flattering half of a board reads a
+            # scraped bar as a decisive win.
             return {
                 "model_id": entry.get("model_id"),
+                "family": entry.get("family"),
+                "variant": entry.get("variant"),
                 "mean_ic": entry.get("mean_ic"),
+                "ic_std": entry.get("ic_std"),
                 "ic_stability": entry.get("ic_stability"),
                 "usable": entry.get("usable"),
                 "paired_t_vs_baseline": entry.get("paired_t_vs_baseline"),
+                "wins_vs_baseline": entry.get("wins_vs_baseline"),
+                "delta_mean_ic_vs_baseline": entry.get(
+                    "delta_mean_ic_vs_baseline"),
+                # Per-fold IC is what makes a mean interpretable: folds that
+                # change sign are not a skill estimate, and only the folds
+                # show that. Hyperparameters are dropped — they are a
+                # reproducibility detail carried by the run row, not evidence.
+                "per_fold": [
+                    {"fold": fold.get("fold"), "ic": fold.get("ic")}
+                    for fold in (entry.get("per_fold") or [])
+                    if isinstance(fold, dict)
+                ],
             }
 
         return {
@@ -1320,11 +1360,351 @@ class UISession:
             "source": spec.get("source"),
             "age_days": age_days,
             "admitted_any": bool(board.get("admitted_any")),
+            # The bar a model had to clear, so `usable` can be re-derived
+            # rather than trusted, and the sample it was measured on, so a
+            # t-statistic arrives with its n.
+            "admission": board.get("admission"),
+            # Admission is a fixed per-model bar applied to a maximum over
+            # seven tuned models. Measured on 100 noise panels, that
+            # procedure admitted a champion 66 times and 84 cleared the 0.03
+            # bar, so `usable` alone cannot carry the claim. `.get` returns
+            # None for a board that predates the null, which is neither
+            # established nor refuted and must not read as either.
+            "champion_established": board.get("champion_established"),
+            "selection_null": board.get("selection_null"),
+            "n_obs": board.get("n_obs"),
+            "n_folds": board.get("n_folds"),
+            "target": board.get("target"),
+            "horizon_days": board.get("horizon_days"),
+            "embargo_days": board.get("embargo_days"),
+            "kernels": board.get("kernels"),
             "champion": _metrics(champion),
             "baseline": _metrics(baseline),
             "best_delta_vs_baseline": max(deltas, default=None),
             "ranking": board.get("ranking"),
         }
+
+    def predictor_board_detail(self) -> dict:
+        """The whole predictor board, for a screen rather than for a prompt.
+
+        `predictor_board_summary` is deliberately narrow: it feeds a reasoner
+        that must not be flooded. An operator asking "is the quantum feature
+        augmentation earning its place" needs the opposite — every model, the
+        full ranking, and the per-fold series that says whether a mean IC is a
+        skill estimate or an average over folds that changed sign.
+
+        Nothing here is a judgment the algorithm did not make. `significant`
+        is a stated |t| convention applied to the board's own numbers, and it
+        is false whenever the fold count is unknown, because a t-statistic
+        without its n cannot be significant — it is a ratio.
+        """
+        row = next(
+            (
+                r
+                for r in self.registry.list_runs(limit=100)
+                if r.get("kind") == "predictor_board"
+            ),
+            None,
+        )
+        lane = (
+            "The augmented lane is the angle and ZZ quantum feature maps "
+            "(`*:angle`, `*:zz`, `*:angle_zz`), simulated classically at no "
+            "quantum cost. `ridge:none` is the unaugmented control, and "
+            "`kernel:linear` applies no map at all — it is that same control "
+            "in dual form, which is why the two agree to the last digit. A "
+            "mapped model above the baseline is the augmentation earning its "
+            "place; below it, the augmentation costs accuracy."
+        )
+        if row is None:
+            # A desk that has never run the board is a fact about the desk. A
+            # 404 would read as a broken endpoint instead, and an operator
+            # would go looking for the wrong problem.
+            return {
+                "status": "never_ran", "models": [], "lane": lane,
+                "reason": "no predictor board has been run on this desk; "
+                          "no model has been evaluated, which is not the "
+                          "same as one having been evaluated and rejected",
+            }
+
+        spec = row.get("spec")
+        board = spec.get("board") if isinstance(spec, dict) else None
+        models = board.get("models") if isinstance(board, dict) else None
+        if not isinstance(models, list):
+            return {
+                "status": "unreadable", "run_id": row.get("run_id"),
+                "models": [], "lane": lane,
+                "reason": "the newest board row could not be read; its "
+                          "result is unknown, not absent",
+            }
+
+        baseline_id = board.get("baseline")
+        champion_id = board.get("champion")
+        n_folds = board.get("n_folds")
+
+        def _row(entry: dict) -> dict:
+            family = str(entry.get("family") or "")
+            variant = str(entry.get("variant") or "")
+            t_stat = entry.get("paired_t_vs_baseline")
+            per_fold = [
+                fold.get("ic") for fold in (entry.get("per_fold") or [])
+                if isinstance(fold, dict)
+                and isinstance(fold.get("ic"), (int, float))
+            ]
+            # The augmented lane is defined by the FEATURE MAP, not the family.
+            # `kernel:linear` sits in the kernel family but `quantum_gram`
+            # returns before any map is applied, so it is the dual of the
+            # plain ridge baseline and comes back bit-identical to it. Calling
+            # it quantum-augmented would file a control in the treatment arm
+            # and let the lane claim a row it did not earn.
+            augmented = any(m in variant for m in ("angle", "zz"))
+            control_note = None
+            if family in ("kernel", "groupwise") and not augmented:
+                control_note = (
+                    f"{family}:{variant} applies no quantum feature map — it "
+                    f"is the dual of the plain ridge baseline, a control "
+                    f"sitting in the kernel family, not augmentation"
+                )
+            return {
+                "model_id": entry.get("model_id"),
+                "family": family or None,
+                "variant": entry.get("variant"),
+                # Which side of the experiment this model is on, stated rather
+                # than left to be inferred from a naming convention.
+                "augmented": augmented,
+                "control_note": control_note,
+                "is_baseline": entry.get("model_id") == baseline_id,
+                "is_champion": entry.get("model_id") == champion_id,
+                "mean_ic": entry.get("mean_ic"),
+                "ic_std": entry.get("ic_std"),
+                "ic_stability": entry.get("ic_stability"),
+                "usable": entry.get("usable"),
+                "delta_mean_ic_vs_baseline": entry.get(
+                    "delta_mean_ic_vs_baseline"),
+                "wins_vs_baseline": entry.get("wins_vs_baseline"),
+                "paired_t_vs_baseline": t_stat,
+                # |t| >= 2 is the stated convention. Without a fold count the
+                # answer is False, never None: a t with no n is not weak
+                # evidence, it is not evidence.
+                "significant": bool(
+                    isinstance(t_stat, (int, float))
+                    and isinstance(n_folds, int) and n_folds > 1
+                    and abs(t_stat) >= 2.0
+                ),
+                "per_fold": per_fold,
+                "negative_folds": sum(1 for ic in per_fold if ic < 0),
+            }
+
+        rows = [_row(e) for e in models if isinstance(e, dict)]
+        admitted = bool(board.get("admitted_any"))
+        established = board.get("champion_established")
+        null = board.get("selection_null")
+        p_value = null.get("p_value") if isinstance(null, dict) else None
+        if admitted and champion_id:
+            reason = (
+                f"{champion_id} was admitted: it cleared both admission "
+                f"thresholds. Admitted is not promoted — the authority gate "
+                f"never reads this board."
+            )
+            # The admission bar is a per-model threshold applied to the best
+            # of seven tuned models. Measured on 100 pure-noise panels, 84
+            # cleared the 0.03 mean_ic bar and 66 produced an admitted
+            # champion. So "cleared the bar" cannot stand alone in the one
+            # sentence most likely to be read.
+            if established is False:
+                reason += (
+                    f" NOT ESTABLISHED: the same selection procedure run on "
+                    f"null resamples reproduces a champion this good "
+                    f"about as often (p={p_value}), so this is the fixed bar "
+                    f"being cleared, not evidence of skill."
+                )
+            elif established is True:
+                reason += (
+                    f" It also beat its own selection null (p={p_value}), so "
+                    f"the ranking is not obviously luck."
+                )
+            else:
+                reason += (
+                    " Whether noise reproduces it was NOT tested by this run,"
+                    " which is not the same as it having been tested and"
+                    " held up."
+                )
+        else:
+            reason = (
+                "the board ran and admitted no model. That is its result, "
+                "not a missing value: no candidate cleared both thresholds."
+            )
+        return {
+            "status": "ok",
+            "run_id": row.get("run_id"),
+            "as_of": spec.get("as_of"),
+            "source": spec.get("source"),
+            "universe": spec.get("universe"),
+            "lane": lane,
+            "reason": reason,
+            "admitted_any": admitted,
+            # None means no null was built, and must stay distinguishable from
+            # False: "not tested" is not "tested and refuted".
+            "champion_established": established,
+            "selection_null": null,
+            "champion": champion_id,
+            "baseline": baseline_id,
+            "admission": board.get("admission"),
+            "n_obs": board.get("n_obs"),
+            "n_folds": n_folds,
+            "target": board.get("target"),
+            "horizon_days": board.get("horizon_days"),
+            "embargo_days": board.get("embargo_days"),
+            "kernels": board.get("kernels"),
+            "features": board.get("features"),
+            "search": board.get("search"),
+            "ranking": board.get("ranking"),
+            "models": rows,
+            "caveats": spec.get("caveats") or [],
+        }
+
+    def workforce_summary(self, limit: int = 10) -> dict:
+        """What the agents Atlas directs are actually doing, and where they stuck.
+
+        Atlas is the manager of this workforce, and its reasoning surface used
+        to carry regime, news, predictors and decisions but not one key naming
+        a workflow, step, phase or agent. Asked "why is my desk stuck", it had
+        nothing to answer from — while the registry held ten runs whose failing
+        steps each carried a written sentence saying exactly what stopped them.
+
+        A count of blocked runs is not that answer. The words on the step are,
+        so the stalled step travels whole: its phase, the agent that owns it,
+        and the summary that agent wrote.
+        """
+        rows = self.registry.list_workflows(limit=limit)
+        # A step is terminal-bad if it stopped the run rather than finishing
+        # it. Reported in the order the DAG runs, so "how far did it get" is
+        # answerable, not just "did it finish".
+        stuck_states = ("blocked", "failed", "interrupted", "abandoned")
+        out: list[dict] = []
+        counts: dict[str, int] = {}
+        for wf in rows:
+            status = str(wf.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+            steps = wf.get("steps") or []
+            stalled = next(
+                (s for s in steps if s.get("status") in stuck_states), None)
+            request = wf.get("request")
+            request = request if isinstance(request, dict) else {}
+            out.append({
+                "workflow_id": wf.get("workflow_id"),
+                "kind": wf.get("kind"),
+                "status": status,
+                "current_phase": wf.get("current_phase"),
+                "as_of": request.get("as_of"),
+                "goal": str(request.get("goal") or "")[:300] or None,
+                "created_at": str(wf.get("created_at") or "") or None,
+                "updated_at": str(wf.get("updated_at") or "") or None,
+                "completed_phases": [
+                    s.get("phase") for s in steps if s.get("status") == "done"],
+                "pending_phases": [
+                    s.get("phase") for s in steps
+                    if s.get("status") in ("queued", "working")],
+                # None means "nothing stopped it", stated rather than left as
+                # a missing key that reads the same as an unknown one.
+                "stalled_at": None if stalled is None else {
+                    "phase": stalled.get("phase"),
+                    "agent": stalled.get("agent"),
+                    "status": stalled.get("status"),
+                    # The whole sentence the agent wrote. Truncating this to a
+                    # label is what made the desk unreadable in the first place.
+                    "summary": str(stalled.get("summary") or "") or None,
+                },
+                # Separate from `stalled_at`, because "it stopped here" and
+                # "someone is waiting on you" are different claims. An
+                # abandoned run stopped at a phase and is nobody's to-do: the
+                # operator already decided. Showing the two as one thing put
+                # seven amber boxes on a desk with six live decisions.
+                "awaiting_operator": status in _AWAITING_OPERATOR,
+            })
+
+        # Resumable is the registry's own word for it, so this stays a fact
+        # rather than a judgment about what the operator ought to do.
+        needs = sum(1 for w in out if w["awaiting_operator"])
+        if not out:
+            reason = ("no workflow has ever run on this desk; the workforce "
+                      "is idle because nothing has been started, which is not "
+                      "the same as it having run and produced nothing")
+        elif needs:
+            reason = (f"{needs} of {len(out)} recent runs stopped short and "
+                      f"can be resumed or abandoned; each carries the step "
+                      f"that stopped it and the words its agent wrote")
+        else:
+            reason = (f"all {len(out)} recent runs reached a terminal state "
+                      f"without stalling")
+        return {
+            "workflows": out,
+            "counts": counts,
+            "needs_attention": needs,
+            "reason": reason,
+        }
+
+    def agent_stream(self, limit: int = 60) -> dict:
+        """What the desk's agents actually said and did, most recent last.
+
+        The coordinator republishes its session onto the audit bus precisely so
+        an unattended run is legible, and nothing rendered it: the web UI had
+        no reference to /api/events at all. Reasoning that is recorded and
+        never read is not visibility, it is a log file.
+
+        Kept to coordinator events. The bus also carries news archiving and
+        owner-tick bookkeeping, which would bury the agents in their own feed.
+
+        `session` events are set aside rather than shown. The coordinator no
+        longer records them, but the bus is durable, so the heartbeats it
+        recorded before that fix are still there: on the live desk 56 of 60
+        rows were `Claude session task_progress` against 4 carrying actual
+        debate reasoning. They are counted in the reason rather than dropped
+        in silence, because an audit surface that quietly discards rows is no
+        longer a record of what happened.
+        """
+        # Over-read, because the liveness rows being filtered are the bulk of
+        # the history and would otherwise fill the window on their own.
+        rows = self.registry.read_events_of_kind(
+            "atlas_coordinator_event", max(limit * 8, 200))
+        events = []
+        suppressed = 0
+        for row in rows:
+            payload = row.get("payload") or {}
+            if payload.get("event_kind") == "session":
+                suppressed += 1
+                continue
+            events.append({
+                "ts": row.get("ts"),
+                "workflow_id": payload.get("workflow_id"),
+                "event_kind": payload.get("event_kind"),
+                # Empty string means the event carried no agent, which is
+                # normal: only a subagent handoff names one. It is not a
+                # missing value and is reported as the empty string it is.
+                "agent": str(payload.get("agent") or ""),
+                "tool": str(payload.get("tool") or ""),
+                "text": str(payload.get("text") or ""),
+            })
+        events = events[-limit:]
+        aside = (f"; {suppressed} SDK liveness heartbeats set aside"
+                 if suppressed else "")
+        if not events and suppressed:
+            # A coordinator plainly ran; it just never said anything worth
+            # keeping. Reporting that as silence would be a wrong reason.
+            reason = (f"a coordinator ran and published only {suppressed} SDK "
+                      "liveness heartbeats: no reasoning, tool call or result "
+                      "was recorded for it")
+        elif not events:
+            reason = ("no coordinator has published to this desk's bus; the "
+                      "agents are silent because none has run under this "
+                      "owner, not because a run produced nothing to say")
+        else:
+            named = sorted({e["agent"] for e in events if e["agent"]})
+            reason = (f"{len(events)} events from the coordinator session"
+                      + (f", naming {', '.join(named)}" if named else
+                         "; none names a subagent, so no handoff was recorded")
+                      + aside)
+        return {"events": events, "reason": reason,
+                "suppressed_liveness": suppressed}
 
     def atlas_context(self, offline: bool) -> dict:
         """The rich, abstract surface a reasoning Atlas forms a view from.
@@ -1435,6 +1815,9 @@ class UISession:
             # so the reasoner argues within its authority rather than proposing
             # work that will simply be refused.
             "startable": self.atlas.startable_tasks(facts),
+            # The agents Atlas actually directs. Without this the manager
+            # could describe the market in detail and not its own desk.
+            "workforce": self.workforce_summary(),
         }
 
     def atlas_facts(self, offline: bool) -> dict:
@@ -2964,6 +3347,21 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/atlas/context":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.atlas_context(offline)
+
+    if method == "GET" and path == "/api/research/predictors":
+        # Read-only over the newest persisted board. Running one is a POST to
+        # /api/lab/research.predictor_board, which is owner-gated: reading the
+        # evidence and producing it are different authorities.
+        return 200, session.predictor_board_detail()
+
+    if method == "GET" and path == "/api/workforce":
+        # The same summary Atlas reasons from, so the operator and the manager
+        # are looking at one picture of the desk rather than two.
+        return 200, session.workforce_summary()
+
+    if method == "GET" and path == "/api/workforce/stream":
+        # What the agents themselves said, off the same bus the TUI renders.
+        return 200, session.agent_stream()
 
     if method == "GET" and path == "/api/atlas/read":
         # refresh=1 recomposes here; the HTTP handler intercepts that case

@@ -1047,6 +1047,47 @@ mod cards {
     }
 
     #[test]
+    fn a_catalog_that_shrinks_under_an_open_box_keeps_a_cursor_on_it() {
+        // The box is rebuilt from the store on every keystroke and every frame,
+        // and the store moves under it — the key that opened it asked for a
+        // fresh catalog, and a daemon that has gone down since answers with
+        // fewer models than the cursor was sitting past. Without the clamp the
+        // list draws with no cursor at all and Enter reports an empty catalog
+        // over a box plainly showing rows, which is a client an operator cannot
+        // tell from one that has stopped taking keys.
+        let mut client = armed();
+        focus_on(&mut client, "MODELS");
+        press(&mut client, KeyCode::Char('m'));
+        for _ in 0..6 {
+            press(&mut client, KeyCode::Down);
+        }
+        // The owner answers again, with the daemon down and claude thinned to
+        // one tier: seven offers become two.
+        client.store.apply(
+            AppEvent::Backends(
+                serde_json::from_value(serde_json::json!({
+                    "backends": [
+                        {"name": "claude", "available": true, "reason": "claude CLI on PATH",
+                         "models": ["inherit"]}
+                    ],
+                    "probed_at": PROBED
+                }))
+                .unwrap(),
+            ),
+            std::time::Instant::now(),
+        );
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("▸"), "the list lost its cursor:\n{body}");
+        // And Enter chooses the last row rather than answering about a catalog
+        // it can plainly see is not empty.
+        assert!(
+            press(&mut client, KeyCode::Enter).is_some(),
+            "Enter refused a row the box was showing:\n{}",
+            content(&client.frame(120, 36))
+        );
+    }
+
+    #[test]
     fn a_backend_the_desk_cannot_reach_stays_on_the_list_with_the_owners_reason() {
         // Shown, never hidden, and refused in the owner's own sentence — the
         // rule `/model` and the startup door both submit to, held here because

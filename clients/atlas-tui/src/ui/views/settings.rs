@@ -747,6 +747,13 @@ impl SettingsView {
         let rows = choices(store);
         let switch = self.switch.as_mut()?;
         switch.note = None;
+        // The list is rebuilt from the store every keystroke, and the store
+        // moves under it: the key that opened this box asked for a fresh
+        // catalog, and a daemon that has gone down since answers with fewer
+        // models than the cursor was sitting past. Clamped here rather than
+        // guarded at the read, so `Enter` on a shrunk list chooses the last row
+        // rather than reporting an empty catalog it can plainly see is not.
+        switch.at = switch.at.min(rows.len().saturating_sub(1));
         match k.code {
             KeyCode::Up => switch.at = switch.at.saturating_sub(1),
             KeyCode::Down => switch.at = (switch.at + 1).min(rows.len().saturating_sub(1)),
@@ -987,6 +994,11 @@ impl Switch {
     fn lines(&self, store: &Store, cap: usize) -> Vec<Line<'static>> {
         let t = theme();
         let rows = choices(store);
+        // The same clamp `switch_key` applies, on the read side: a catalog that
+        // shrank between the keystroke and this frame would otherwise draw a
+        // list with no cursor on it at all, which is a box an operator cannot
+        // tell from one that has stopped taking keys.
+        let at = self.at.min(rows.len().saturating_sub(1));
         let mut lines = vec![panel_header("which minds"), Line::from("")];
         if rows.is_empty() {
             // Absence, stated. The catalog is fetched by the key that opened
@@ -1004,7 +1016,7 @@ impl Switch {
             )));
         }
         for (i, row) in rows.iter().enumerate().skip(self.top).take(cap) {
-            let on = i == self.at;
+            let on = i == at;
             let mut spans = vec![
                 // A glyph and not only a colour: on a 256-colour terminal the
                 // highlight is a shade, and a shade is not an answer to "which

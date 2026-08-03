@@ -1522,6 +1522,17 @@ class UISession:
                     f" It also beat its own selection null (p={p_value}), so "
                     f"the ranking is not obviously luck."
                 )
+            elif isinstance(null, dict) and null.get("underpowered_for_alpha"):
+                # `None` has two causes. This null ran; it cannot reach alpha
+                # because the smallest p available from T trials is 1/(T+1).
+                # "not tested" would send an operator hunting a missing run.
+                reason += (
+                    f" VERDICT WITHHELD: the null ran, but {null.get('trials')}"
+                    f" trials cannot establish anything at the 0.05 level —"
+                    f" the smallest p reachable is"
+                    f" {null.get('p_value_resolution')}. Neither a pass nor a"
+                    f" refutation; re-run with more trials for a verdict."
+                )
             else:
                 reason += (
                     " Whether noise reproduces it was NOT tested by this run,"

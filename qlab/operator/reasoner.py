@@ -853,6 +853,19 @@ def _selection_null_lines(board: Mapping) -> list[str]:
                    "good at least this often, so `usable: true` here is the "
                    "fixed bar being cleared, not evidence of skill. Do not "
                    "report the augmentation as working on this board.")
+    elif null.get("underpowered_for_alpha"):
+        # `None` has two causes and they are different facts. This null RAN;
+        # it just cannot reach alpha, because the smallest p available from T
+        # trials is 1/(T+1). Saying "not recorded" here would misdescribe what
+        # the desk did and hide the one thing that fixes it.
+        out.append(
+            f"    VERDICT WITHHELD: this null ran but "
+            f"{_fmt_optional(null.get('trials'), 'its trial count')} trials "
+            f"cannot establish anything at the 0.05 level — the smallest "
+            f"p reachable is "
+            f"{_fmt_optional(null.get('p_value_resolution'), 'unknown')}, so "
+            f"no champion could clear the bar. This is not a refutation and "
+            f"not a pass; re-run with more trials to get a verdict at all.")
     else:
         out.append("    whether the champion beats its null was not recorded "
                    "by this run — unknown, not established.")

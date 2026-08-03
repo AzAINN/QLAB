@@ -209,6 +209,7 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         alphas: list[float] | None = None,
         map_weights: list[float] | None = None,
         n_splits: int | None = None,
+        null_trials: int | None = None,
     ) -> dict:
         """Run the owner-held paired predictor board (baseline vs rescues).
 
@@ -225,6 +226,11 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             ("alphas", alphas),
             ("map_weights", map_weights),
             ("n_splits", n_splits),
+            # Below 19 trials the selection null cannot reach alpha, so the
+            # board withholds the verdict entirely. That makes this knob the
+            # difference between a board that can establish a champion and
+            # one that structurally cannot.
+            ("null_trials", null_trials),
         ):
             if value is not None:
                 args[key] = value

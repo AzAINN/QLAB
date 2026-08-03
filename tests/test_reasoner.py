@@ -1546,3 +1546,42 @@ def test_a_p_value_at_the_null_resolution_is_flagged_as_marginal():
     text = "\n".join(_predictors_block({"predictors": board}))
     assert "marginal" in text.lower()
     assert "resolution" in text.lower()
+
+
+def test_an_underpowered_null_is_not_described_as_never_having_run():
+    """`established: None` has two causes and they are different facts.
+
+    A board predating the null never tested the champion. A board that ran a
+    9-trial null DID test it -- the arithmetic simply cannot reach alpha,
+    since the smallest p a 9-trial null can produce is 0.100. Telling the
+    model "not recorded by this run" in the second case is a false statement
+    about what the desk did, and it hides the one thing that would fix it:
+    raise the trial count.
+    """
+    board = {
+        "status": "ok", "admitted_any": True, "n_obs": 671, "n_folds": 5,
+        "champion_established": None,
+        "selection_null": {"trials": 9, "p_value": 0.10, "exceedances": 0,
+                           "p_value_resolution": 0.10,
+                           "underpowered_for_alpha": True,
+                           "observed_max_mean_ic": 0.31,
+                           "null_median_max_mean_ic": 0.088,
+                           "null_max_mean_ic": 0.29,
+                           "reason": "9 trials cannot establish anything"},
+        "champion": {"model_id": "kernel:angle", "mean_ic": 0.31,
+                     "usable": True, "per_fold": []},
+        "baseline": {"model_id": "ridge:none", "mean_ic": 0.11,
+                     "usable": False, "per_fold": []},
+        "ranking": ["kernel:angle"],
+    }
+    text = "\n".join(_predictors_block({"predictors": board}))
+    # Scope to the null's own lines: "not recorded" legitimately appears
+    # elsewhere in the block for the absent admission bar.
+    null_lines = "\n".join(
+        ln for ln in text.splitlines()
+        if "null" in ln.lower() or "withheld" in ln.lower())
+    assert "not recorded" not in null_lines.lower()
+    assert "withheld" in null_lines.lower()
+    # It must name the arithmetic and the remedy.
+    assert "9" in null_lines
+    assert "trials" in null_lines.lower()

@@ -3,6 +3,9 @@ use crate::model::{LlmCatalog, RegimePanel, Snapshot, Template};
 
 pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
+    /// A mouse event, captured because the nav rail and the chat scroll are
+    /// clickable. Kept deliberately minimal downstream — wheel and click only.
+    Mouse(crossterm::event::MouseEvent),
     Resize,
     Tick,
     Snapshot(Box<Snapshot>),

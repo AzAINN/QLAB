@@ -40,7 +40,9 @@ use atlas::{theme, ui};
 use color_eyre::eyre::Result;
 use crossterm::{
     cursor,
-    event::{Event, EventStream, KeyEventKind},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -371,6 +373,23 @@ fn ingest(
             }
         }
     }
+    // The mouse rides the same seam the keys do: the shell decides what it
+    // means, the runtime dispatches whatever `Command` comes back. Today no
+    // view produces one from a click, and the arm is here so the first that
+    // does is dispatched rather than dropped.
+    if let AppEvent::Mouse(m) = &ev {
+        let before = store.nav.view;
+        match ui::shell::on_mouse(*m, store, views) {
+            #[cfg(feature = "operator")]
+            Some(cmd) => writes.dispatch(cmd),
+            #[cfg(not(feature = "operator"))]
+            Some(_) => {}
+            None => {}
+        }
+        if store.nav.view != before {
+            fx.on_view_switch();
+        }
+    }
     // What a write outcome owes the poller is `dispatch::refetches`, which is
     // where it can be pinned per variant. The rule is not obvious enough to
     // live as a `matches!` in a loop nothing tests: a *failed* write is the
@@ -435,6 +454,20 @@ fn spawn_terminal_events(tx: Tx) {
         while let Some(next) = stream.next().await {
             let ev = match next {
                 Ok(Event::Key(key)) => AppEvent::Key(key),
+                // Wheel and press only. Move and drag arrive dozens per
+                // second under capture, and nothing downstream reads them —
+                // forwarding them would wake the loop for events every view
+                // declines.
+                Ok(Event::Mouse(m))
+                    if matches!(
+                        m.kind,
+                        MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::Down(_)
+                    ) =>
+                {
+                    AppEvent::Mouse(m)
+                }
                 Ok(Event::Resize(_, _)) => AppEvent::Resize,
                 Ok(_) => continue,
                 // A terminal that stopped producing events cannot be recovered
@@ -518,7 +551,15 @@ fn restore() {
     if let Err(err) = disable_raw_mode() {
         tracing::error!(%err, "could not leave raw mode");
     }
-    if let Err(err) = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show) {
+    // Mouse capture off before the screen goes back: releasing the alternate
+    // screen first would leave one report's worth of mouse escapes printing
+    // into the shell the operator just got back.
+    if let Err(err) = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        cursor::Show
+    ) {
         tracing::error!(%err, "could not leave the alternate screen");
     }
 }
@@ -528,7 +569,10 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+        // Capture after the screen is taken, mirroring `restore`'s reverse
+        // order: a capture enabled on the primary screen would spray mouse
+        // escapes into the scrollback if the next call failed.
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
         ENTERED.store(true, Ordering::SeqCst);
         Ok(Self)
     }

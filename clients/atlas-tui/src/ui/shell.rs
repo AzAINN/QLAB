@@ -28,7 +28,7 @@ use crate::theme::theme;
 use crate::theme::Theme;
 use crate::ui::views::{book::PlanAt, Selected, Views};
 use crate::ui::widgets::{help, panel_block, panel_header, pulse, ticker};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -313,6 +313,36 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
         _ => {}
     }
     views.on_key(store.nav.view, key, store)
+}
+
+/// One mouse event: the nav rail's rows select views, everything else goes to
+/// the active view.
+///
+/// Deliberately behind every surface that owns the keyboard: a door, a modal,
+/// the command line and the help overlay all take the whole terminal, and a
+/// click that switched views under one would move a pane the operator cannot
+/// see. Minimal on purpose — wheel and click, no drag, no hover.
+pub fn on_mouse(m: MouseEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
+    if store.door().is_some() || store.nav.focus != Focus::Content {
+        return None;
+    }
+    #[cfg(feature = "operator")]
+    if let Some(host) = views.confirm(store.nav.view) {
+        if host.showing().is_some() {
+            return None;
+        }
+    }
+    // The nav rail's geometry, restated from `draw`'s own constants rather
+    // than published: the tape is one row and the rail starts under it, and
+    // both facts are pinned by the goldens that pin the layout itself.
+    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) && m.column < NAV_W {
+        let row = m.row as usize;
+        if (1..=ViewId::ALL.len()).contains(&row) {
+            store.nav.view = ViewId::ALL[row - 1];
+            return None;
+        }
+    }
+    views.on_mouse(store.nav.view, m, store)
 }
 
 // -- the command line -------------------------------------------------------

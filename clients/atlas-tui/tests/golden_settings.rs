@@ -390,15 +390,19 @@ fn a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half() {
         "{}",
         client.frame(120, 36)
     );
-    // Counted where it will not fit — and the four rows it qualifies survive,
-    // because the reason is the section that gives way.
-    let short = content(&client.frame(120, 28));
-    if short.contains("probed") {
-        assert!(
-            short.contains("ollama pull") || short.contains("▾ 1 more"),
-            "a clipped remedy is worse than a count:\n{short}"
-        );
-    }
+    // Counted where it will not fit. Unconditional and without an `||`: the
+    // first version of this test allowed either outcome at a height where only
+    // one is possible, and deleting the marker altogether still passed it — the
+    // reason then vanished silently, which is the failure the count exists to
+    // prevent.
+    let short = content(&client.frame(120, 30));
+    assert!(short.contains("▾ 1 more"), "{short}");
+    // And no half of it survives beside the count.
+    assert!(!short.contains("ollama is running at"), "{short}");
+    // The four rows it qualifies are untouched — the reason is the section that
+    // gives way, never the reading.
+    assert!(short.contains("probed"), "{short}");
+    assert!(short.contains("ollama · granite3.3:8b"), "{short}");
 }
 
 #[test]

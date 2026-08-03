@@ -396,6 +396,28 @@ def test_ollama_completion_without_content_is_an_error(ollama):
     assert "/api/chat" in str(exc.value)
 
 
+def test_a_tools_turn_carries_the_declarations_and_returns_the_message_whole(
+        ollama):
+    """``chat`` reads nothing: what a tool call means is the harness's call."""
+    ollama.routes["/api/chat"] = (200, "application/json", json.dumps({
+        "message": {"role": "assistant", "content": "",
+                    "tool_calls": [{"function": {"name": "t", "arguments": {}}}]}}))
+    backend = OllamaBackend(base_url=ollama.url)
+    tools = [{"type": "function", "function": {"name": "t", "description": "d",
+                                               "parameters": {}}}]
+    message = backend.chat([{"role": "user", "content": "go"}],
+                           "granite3.3:8b", tools=tools, timeout=5)
+    assert message["tool_calls"][0]["function"]["name"] == "t"
+    body = ollama.seen[-1]["body"]
+    assert body["tools"] == tools and body["stream"] is False
+    # A daemon that answers a tools turn with no message at all is a fault,
+    # not an empty answer: there is nothing for a caller to route on.
+    ollama.routes["/api/chat"] = (200, "application/json", '{"done":true}')
+    with pytest.raises(LlmBackendError) as exc:
+        backend.chat([{"role": "user", "content": "go"}], "granite3.3:8b")
+    assert "without a message" in str(exc.value)
+
+
 def test_ollama_read_timeout_is_absence_not_a_fault(ollama, monkeypatch):
     """A daemon that accepts the socket and never answers is unreachable."""
     class Stalling(BaseHTTPRequestHandler):

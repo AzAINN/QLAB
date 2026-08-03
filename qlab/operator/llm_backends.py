@@ -413,6 +413,61 @@ class OllamaBackend:
         except _Unreachable:
             return []
 
+    def _chat(self, payload: dict, model: str, timeout: float | None) -> dict:
+        """The ``/api/chat`` round trip both public entry points share.
+
+        Kept as one function so the two model-facing calls cannot drift on the
+        transport's own vocabulary: the same clamp, and the same translation of
+        the one actionable fault (an unpulled model) into the pull command.
+        """
+        try:
+            return self._request(
+                "/api/chat", payload=payload,
+                timeout=_deadline(timeout, COMPLETE_TIMEOUT_S))
+        except _Unreachable as exc:
+            raise LlmBackendError(str(exc)) from None
+        except _HttpFault as exc:
+            # The one actionable fault: the model simply is not on this host.
+            # The operator gets the command, not a 404.
+            if exc.status == 404:
+                raise LlmBackendError(_head(
+                    f"ollama has no model {model!r} at {self.safe_url} — "
+                    f"pull it with `ollama pull {model}`")) from None
+            raise
+
+    def chat(self, messages: list[dict], model: str, *,
+             tools: list[dict] | None = None,
+             timeout: float | None = None) -> dict:
+        """One blocking tools-capable turn; returns the assistant message.
+
+        Deliberately NOT part of ``LlmBackend``: tool calling is a capability,
+        not a promise every provider makes, and the Claude backend here is a
+        conclusions-only CLI with no tool path at all. A caller that needs
+        tools asks for this concrete backend and says so in its own signature.
+
+        The request and reply shapes were verified against a live Ollama
+        0.31.2 daemon rather than taken from memory: ``tools`` is a list of
+        ``{"type": "function", "function": {name, description, parameters}}``,
+        and the reply's ``message`` carries ``tool_calls[].function.{name,
+        arguments}`` with ``arguments`` already decoded into an object. A tool
+        result is fed back as ``{"role": "tool", "tool_name": …, "content":
+        …}``, which the same daemon answered with a plain final message.
+
+        The message is returned whole, unread. Deciding what a tool call means
+        is the role harness's job and doing any of it here would put a second
+        opinion about authority in the transport.
+        """
+        payload: dict = {"model": model, "messages": messages, "stream": False}
+        if tools:
+            payload["tools"] = tools
+        response = self._chat(payload, model, timeout)
+        message = response.get("message")
+        if not isinstance(message, dict):
+            raise LlmBackendError(_head(
+                f"ollama answered /api/chat for {model!r} without a message: "
+                f"{_head(json.dumps(response))}"))
+        return message
+
     def complete(self, system: str, user: str, model: str,
                  max_tokens: int = 1024, timeout: float | None = None) -> str:
         payload = {
@@ -426,20 +481,7 @@ class OllamaBackend:
             # accepted and dropped — a budget the caller sets must bind.
             "options": {"num_predict": max_tokens},
         }
-        try:
-            response = self._request(
-                "/api/chat", payload=payload,
-                timeout=_deadline(timeout, COMPLETE_TIMEOUT_S))
-        except _Unreachable as exc:
-            raise LlmBackendError(str(exc)) from None
-        except _HttpFault as exc:
-            # The one actionable fault: the model simply is not on this host.
-            # The operator gets the command, not a 404.
-            if exc.status == 404:
-                raise LlmBackendError(_head(
-                    f"ollama has no model {model!r} at {self.safe_url} — "
-                    f"pull it with `ollama pull {model}`")) from None
-            raise
+        response = self._chat(payload, model, timeout)
         message = response.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():

@@ -28,6 +28,7 @@ GET  /api/models/invocations   model tier/route audit records
 GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
 GET  /api/news                   the news window, its coverage, and provenance
 GET  /api/atlas/context          the rich surface a reasoning Atlas forms a view from
+GET  /api/research/predictors    the predictor board: augmented lane vs its control
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
 POST /api/atlas/escalate         open a bounded debate on a material disagreement
 GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
@@ -1365,6 +1366,154 @@ class UISession:
             "baseline": _metrics(baseline),
             "best_delta_vs_baseline": max(deltas, default=None),
             "ranking": board.get("ranking"),
+        }
+
+    def predictor_board_detail(self) -> dict:
+        """The whole predictor board, for a screen rather than for a prompt.
+
+        `predictor_board_summary` is deliberately narrow: it feeds a reasoner
+        that must not be flooded. An operator asking "is the quantum feature
+        augmentation earning its place" needs the opposite — every model, the
+        full ranking, and the per-fold series that says whether a mean IC is a
+        skill estimate or an average over folds that changed sign.
+
+        Nothing here is a judgment the algorithm did not make. `significant`
+        is a stated |t| convention applied to the board's own numbers, and it
+        is false whenever the fold count is unknown, because a t-statistic
+        without its n cannot be significant — it is a ratio.
+        """
+        row = next(
+            (
+                r
+                for r in self.registry.list_runs(limit=100)
+                if r.get("kind") == "predictor_board"
+            ),
+            None,
+        )
+        lane = (
+            "The augmented lane is the angle and ZZ quantum feature maps "
+            "(`*:angle`, `*:zz`, `*:angle_zz`), simulated classically at no "
+            "quantum cost. `ridge:none` is the unaugmented control, and "
+            "`kernel:linear` applies no map at all — it is that same control "
+            "in dual form, which is why the two agree to the last digit. A "
+            "mapped model above the baseline is the augmentation earning its "
+            "place; below it, the augmentation costs accuracy."
+        )
+        if row is None:
+            # A desk that has never run the board is a fact about the desk. A
+            # 404 would read as a broken endpoint instead, and an operator
+            # would go looking for the wrong problem.
+            return {
+                "status": "never_ran", "models": [], "lane": lane,
+                "reason": "no predictor board has been run on this desk; "
+                          "no model has been evaluated, which is not the "
+                          "same as one having been evaluated and rejected",
+            }
+
+        spec = row.get("spec")
+        board = spec.get("board") if isinstance(spec, dict) else None
+        models = board.get("models") if isinstance(board, dict) else None
+        if not isinstance(models, list):
+            return {
+                "status": "unreadable", "run_id": row.get("run_id"),
+                "models": [], "lane": lane,
+                "reason": "the newest board row could not be read; its "
+                          "result is unknown, not absent",
+            }
+
+        baseline_id = board.get("baseline")
+        champion_id = board.get("champion")
+        n_folds = board.get("n_folds")
+
+        def _row(entry: dict) -> dict:
+            family = str(entry.get("family") or "")
+            variant = str(entry.get("variant") or "")
+            t_stat = entry.get("paired_t_vs_baseline")
+            per_fold = [
+                fold.get("ic") for fold in (entry.get("per_fold") or [])
+                if isinstance(fold, dict)
+                and isinstance(fold.get("ic"), (int, float))
+            ]
+            # The augmented lane is defined by the FEATURE MAP, not the family.
+            # `kernel:linear` sits in the kernel family but `combined_gram`
+            # returns before any map is applied, so it is the dual of the
+            # plain ridge baseline and comes back bit-identical to it. Calling
+            # it quantum-augmented would file a control in the treatment arm
+            # and let the lane claim a row it did not earn.
+            augmented = any(m in variant for m in ("angle", "zz"))
+            control_note = None
+            if family in ("kernel", "groupwise") and not augmented:
+                control_note = (
+                    f"{family}:{variant} applies no quantum feature map — it "
+                    f"is the dual of the plain ridge baseline, a control "
+                    f"sitting in the kernel family, not augmentation"
+                )
+            return {
+                "model_id": entry.get("model_id"),
+                "family": family or None,
+                "variant": entry.get("variant"),
+                # Which side of the experiment this model is on, stated rather
+                # than left to be inferred from a naming convention.
+                "augmented": augmented,
+                "control_note": control_note,
+                "is_baseline": entry.get("model_id") == baseline_id,
+                "is_champion": entry.get("model_id") == champion_id,
+                "mean_ic": entry.get("mean_ic"),
+                "ic_std": entry.get("ic_std"),
+                "ic_stability": entry.get("ic_stability"),
+                "usable": entry.get("usable"),
+                "delta_mean_ic_vs_baseline": entry.get(
+                    "delta_mean_ic_vs_baseline"),
+                "wins_vs_baseline": entry.get("wins_vs_baseline"),
+                "paired_t_vs_baseline": t_stat,
+                # |t| >= 2 is the stated convention. Without a fold count the
+                # answer is False, never None: a t with no n is not weak
+                # evidence, it is not evidence.
+                "significant": bool(
+                    isinstance(t_stat, (int, float))
+                    and isinstance(n_folds, int) and n_folds > 1
+                    and abs(t_stat) >= 2.0
+                ),
+                "per_fold": per_fold,
+                "negative_folds": sum(1 for ic in per_fold if ic < 0),
+            }
+
+        rows = [_row(e) for e in models if isinstance(e, dict)]
+        admitted = bool(board.get("admitted_any"))
+        if admitted and champion_id:
+            reason = (
+                f"{champion_id} was admitted: it cleared both admission "
+                f"thresholds. Admitted is not promoted — the authority gate "
+                f"never reads this board."
+            )
+        else:
+            reason = (
+                "the board ran and admitted no model. That is its result, "
+                "not a missing value: no candidate cleared both thresholds."
+            )
+        return {
+            "status": "ok",
+            "run_id": row.get("run_id"),
+            "as_of": spec.get("as_of"),
+            "source": spec.get("source"),
+            "universe": spec.get("universe"),
+            "lane": lane,
+            "reason": reason,
+            "admitted_any": admitted,
+            "champion": champion_id,
+            "baseline": baseline_id,
+            "admission": board.get("admission"),
+            "n_obs": board.get("n_obs"),
+            "n_folds": n_folds,
+            "target": board.get("target"),
+            "horizon_days": board.get("horizon_days"),
+            "embargo_days": board.get("embargo_days"),
+            "kernels": board.get("kernels"),
+            "features": board.get("features"),
+            "search": board.get("search"),
+            "ranking": board.get("ranking"),
+            "models": rows,
+            "caveats": spec.get("caveats") or [],
         }
 
     def atlas_context(self, offline: bool) -> dict:
@@ -3005,6 +3154,12 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/atlas/context":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.atlas_context(offline)
+
+    if method == "GET" and path == "/api/research/predictors":
+        # Read-only over the newest persisted board. Running one is a POST to
+        # /api/lab/research.predictor_board, which is owner-gated: reading the
+        # evidence and producing it are different authorities.
+        return 200, session.predictor_board_detail()
 
     if method == "GET" and path == "/api/atlas/read":
         # refresh=1 recomposes here; the HTTP handler intercepts that case

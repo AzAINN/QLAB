@@ -641,14 +641,23 @@ def _predictors_block(context: Mapping) -> list[str]:
     # What the lane IS, in the words an operator uses to ask about it. The
     # board speaks in model_ids; "is the quantum feature augmentation earning
     # its place" is answerable from `kernel:angle` only if something states
-    # that the kernel and groupwise families ARE that augmentation and that
-    # ridge:none is the unaugmented control they are measured against.
+    # which models carry that augmentation and which are the controls it is
+    # measured against.
+    #
+    # The lane is defined by the feature map, not the family prefix.
+    # `kernel:linear` sits in the kernel family but applies no map at all --
+    # `combined_gram` returns before the map term -- so it is the plain ridge
+    # baseline in dual form and reports the identical mean IC. Calling the
+    # whole kernel family "the quantum lane" would hand Atlas a control filed
+    # as treatment.
     out.append(
-        "  the lane: `kernel:*` and `groupwise:*` are the quantum "
-        "feature-map augmented models (angle and ZZ feature maps, simulated "
-        "classically); `ridge:none` is the unaugmented control. A kernel "
-        "model ranking above the baseline is the augmentation earning its "
-        "place; below it, the augmentation is costing accuracy.")
+        "  the lane: the quantum feature-map augmented models are the ones "
+        "whose variant names a map -- `*:angle`, `*:zz`, `*:angle_zz` (angle "
+        "and ZZ feature maps, simulated classically). `ridge:none` is the "
+        "unaugmented control, and `kernel:linear` applies no map either: it "
+        "is that same control in dual form, which is why the two report the "
+        "same IC. A mapped model ranking above the baseline is the "
+        "augmentation earning its place; below it, it is costing accuracy.")
 
     folds = board.get("n_folds")
     n_obs = board.get("n_obs")

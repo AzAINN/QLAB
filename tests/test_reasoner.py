@@ -1321,3 +1321,28 @@ def _perturb(value, marker: str):
                                "startable": False, "reason": marker,
                                "headline": marker}]
     return marker
+
+
+def test_the_linear_kernel_is_not_sold_to_atlas_as_quantum():
+    """`kernel:linear` applies no feature map: `combined_gram` returns before
+    the map term, so it is the plain ridge baseline in dual form and comes
+    back bit-identical to `ridge:none` on the live board (both 0.11049604765).
+
+    A prompt that says "`kernel:*` are the quantum feature-map augmented
+    models" therefore hands Atlas a control filed as treatment, and an
+    operator asking whether the quantum lane earns its place can be answered
+    with a row that contains no quantum anything. The lane must be defined by
+    the map, not by the family prefix."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["predictors"] = _live_shaped_board()
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="how is research going?",
+                                     spec=spec()).prompt
+    assert "`kernel:*`" not in prompt, (
+        "the whole kernel family is not the augmented lane; kernel:linear "
+        "carries no feature map")
+    low = prompt.lower()
+    assert "kernel:linear" in low and "no" in low
+    # The maps themselves are what must be named.
+    assert "angle" in low and "zz" in low

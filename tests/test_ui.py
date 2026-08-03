@@ -3306,3 +3306,191 @@ def test_atlas_context_names_an_unreadable_board(session):
     predictors = session.atlas_context(True)["predictors"]
     assert predictors["status"] == "unreadable"
     assert predictors["run_id"]
+
+
+# --- the predictor board on screen -------------------------------------------
+#
+# The board is the whole quantum feature-augmentation lane, and until now it
+# had no web surface at all: no route, and nothing in index.html. An operator
+# could not see whether the augmented models were earning their place, and the
+# only way to run one was a POST to /api/lab/ that no client issued.
+
+
+def _board_run(session, **over):
+    """A board row shaped exactly like `run_predictor_board`'s output."""
+    board = {
+        "n_obs": 671, "n_folds": 5, "baseline": "ridge:none",
+        "champion": "kernel:angle", "admitted_any": True,
+        "target": "next_21d_equal_weight_realized_vol",
+        "horizon_days": 21, "embargo_days": 21,
+        "kernels": ["linear", "angle", "zz"],
+        "admission": {"mean_ic_strictly_above": 0.03,
+                      "ic_stability_strictly_above": 0.5},
+        "ranking": ["kernel:angle", "ridge:none"],
+        "models": [
+            {"model_id": "kernel:angle", "family": "kernel", "variant": "angle",
+             "mean_ic": 0.178, "ic_std": 0.33, "ic_stability": 0.54,
+             "usable": True, "delta_mean_ic_vs_baseline": 0.068,
+             "wins_vs_baseline": 3, "paired_t_vs_baseline": 0.237,
+             "per_fold": [{"fold": 1, "ic": 0.324}, {"fold": 2, "ic": 0.531},
+                          {"fold": 3, "ic": 0.471}, {"fold": 4, "ic": -0.239},
+                          {"fold": 5, "ic": -0.195}]},
+            {"model_id": "ridge:none", "family": "ridge", "variant": "none",
+             "mean_ic": 0.110, "ic_std": 0.41, "ic_stability": 0.27,
+             "usable": False, "delta_mean_ic_vs_baseline": 0.0,
+             "wins_vs_baseline": 0, "paired_t_vs_baseline": None,
+             "per_fold": [{"fold": i, "ic": 0.1} for i in range(1, 6)]},
+        ],
+    }
+    board.update(over)
+    return session.registry.log_run("predictor_board", {
+        "as_of": "2026-07-30", "source": "yfinance", "universe": "core",
+        "board": board, "dsr_trial_counted": False,
+    })
+
+
+def test_the_predictor_board_has_a_route_of_its_own(session):
+    """`atlas_context` carried a summary for the reasoner, but no client could
+    ask for the board itself, so the augmented lane had no screen."""
+    run_id = _board_run(session)
+    status, payload = handle_api(session, "GET", "/api/research/predictors",
+                                 {}, {})
+    assert status == 200
+    assert payload["status"] == "ok"
+    assert payload["run_id"] == run_id
+    # Every model, not just the champion: the ranking IS the finding.
+    assert {m["model_id"] for m in payload["models"]} == {
+        "kernel:angle", "ridge:none"}
+
+
+def test_the_route_says_which_models_are_the_augmented_lane(session):
+    """A screen showing `kernel:angle` answers "is the quantum augmentation
+    working" only if something on it says the kernel and groupwise families
+    ARE that augmentation and ridge:none is the control."""
+    _board_run(session)
+    _, payload = handle_api(session, "GET", "/api/research/predictors", {}, {})
+    by_id = {m["model_id"]: m for m in payload["models"]}
+    assert by_id["kernel:angle"]["augmented"] is True
+    assert by_id["ridge:none"]["augmented"] is False
+    assert by_id["ridge:none"]["is_baseline"] is True
+    assert "quantum" in payload["lane"].lower()
+
+
+def test_the_route_carries_the_bar_and_the_folds_not_just_the_verdict(session):
+    """Same rule the reasoner block follows: a verdict without its threshold,
+    and a t-statistic without its n, are not evidence."""
+    _board_run(session)
+    _, payload = handle_api(session, "GET", "/api/research/predictors", {}, {})
+    assert payload["admission"]["mean_ic_strictly_above"] == 0.03
+    assert payload["n_folds"] == 5 and payload["n_obs"] == 671
+    champ = next(m for m in payload["models"]
+                 if m["model_id"] == "kernel:angle")
+    assert champ["per_fold"] == [0.324, 0.531, 0.471, -0.239, -0.195]
+    assert champ["negative_folds"] == 2
+    # 0.237 on 5 folds cannot separate anything from anything, and the payload
+    # says so rather than leaving a bare number to be read as a win.
+    assert champ["significant"] is False
+
+
+def test_a_desk_that_never_ran_the_board_says_so_rather_than_404(session):
+    """An empty research lane is a fact about the desk, and a 404 would read
+    as a broken endpoint instead."""
+    status, payload = handle_api(session, "GET", "/api/research/predictors",
+                                 {}, {})
+    assert status == 200
+    assert payload["status"] == "never_ran"
+    assert payload["models"] == []
+    assert payload["reason"]
+
+
+def test_a_board_that_admitted_nothing_is_reported_as_a_result(session):
+    _board_run(session, champion=None, admitted_any=False,
+               models=[{"model_id": "ridge:none", "family": "ridge",
+                        "variant": "none", "mean_ic": 0.01,
+                        "ic_stability": 0.02, "usable": False,
+                        "delta_mean_ic_vs_baseline": 0.0,
+                        "paired_t_vs_baseline": None, "per_fold": []}])
+    _, payload = handle_api(session, "GET", "/api/research/predictors", {}, {})
+    assert payload["status"] == "ok"
+    assert payload["admitted_any"] is False
+    assert payload["champion"] is None
+    assert payload["reason"], "an empty result still states what happened"
+
+
+def test_the_ui_has_a_research_panel_for_the_augmented_lane():
+    """The route is useless if nothing renders it."""
+    html = _INDEX.read_text(encoding="utf-8")
+    assert 'data-nav="research"' in html
+    assert 'data-panel="research"' in html
+    assert "/api/research/predictors" in html
+
+
+def test_the_linear_kernel_is_not_labelled_a_quantum_map(session):
+    """`kernel:linear` is in the `kernel` family but carries NO quantum feature
+    map: `combined_gram` returns early on it, so it is the dual of the plain
+    ridge baseline and comes back bit-identical to `ridge:none`. Labelling it
+    "quantum-augmented" would put a control in the treatment arm and let the
+    lane claim a row it did not earn. Only the angle and ZZ maps are quantum.
+    """
+    _board_run(session, models=[
+        {"model_id": "kernel:linear", "family": "kernel", "variant": "linear",
+         "mean_ic": 0.110, "ic_stability": 0.27, "usable": False,
+         "delta_mean_ic_vs_baseline": 0.0, "paired_t_vs_baseline": 0.0,
+         "per_fold": []},
+        {"model_id": "kernel:angle", "family": "kernel", "variant": "angle",
+         "mean_ic": 0.178, "ic_stability": 0.54, "usable": True,
+         "delta_mean_ic_vs_baseline": 0.068, "paired_t_vs_baseline": 0.237,
+         "per_fold": []},
+        {"model_id": "groupwise:angle_zz", "family": "groupwise",
+         "variant": "angle_zz", "mean_ic": 0.026, "ic_stability": 0.1,
+         "usable": False, "delta_mean_ic_vs_baseline": -0.084,
+         "paired_t_vs_baseline": -0.286, "per_fold": []},
+    ])
+    _, payload = handle_api(session, "GET", "/api/research/predictors", {}, {})
+    by_id = {m["model_id"]: m for m in payload["models"]}
+    assert by_id["kernel:linear"]["augmented"] is False
+    assert by_id["kernel:linear"]["control_note"], (
+        "a kernel-family row that is really a control must say why")
+    assert by_id["kernel:angle"]["augmented"] is True
+    assert by_id["groupwise:angle_zz"]["augmented"] is True
+
+
+@pytest.mark.parametrize("variant,augmented", [
+    ("linear", False), ("angle", True), ("zz", True), ("angle_zz", True),
+    ("none", False),
+])
+def test_augmentation_is_decided_by_the_feature_map_not_the_family(
+        session, variant, augmented):
+    """The invariant over the whole variant space: a model is in the augmented
+    lane iff its variant names a quantum feature map, whatever family it is
+    filed under."""
+    for family in ("kernel", "groupwise", "ridge"):
+        _board_run(session, models=[
+            {"model_id": f"{family}:{variant}", "family": family,
+             "variant": variant, "mean_ic": 0.1, "ic_stability": 0.3,
+             "usable": False, "delta_mean_ic_vs_baseline": 0.0,
+             "paired_t_vs_baseline": None, "per_fold": []}])
+        _, payload = handle_api(session, "GET", "/api/research/predictors",
+                                {}, {})
+        assert payload["models"][0]["augmented"] is augmented
+
+
+def test_the_fold_strip_draws_both_signs_from_one_zero_line():
+    """The first version of this chart bottom-anchored every bar in a flex row
+    and pushed it with a margin, so all the positive bars shared a TOP edge and
+    the height of a bar no longer meant its magnitude. Driving the real page
+    showed +0.324 rendered taller-looking than +0.531.
+
+    The fix is two fixed rows of equal height with the positive bar
+    bottom-anchored in the upper one and the negative bar top-anchored in the
+    lower one, which is the only layout where "above the line" and "below the
+    line" mean the same thing for every bar. This test pins the mechanism,
+    because the failure was invisible in the payload and only showed up in
+    layout."""
+    html = _INDEX.read_text(encoding="utf-8")
+    css = html.split("</style>")[0]
+    assert ".folds .f{display:grid;grid-template-rows:19px 19px" in css
+    assert ".folds .f > i.pos{grid-row:1;align-self:end" in css
+    assert ".folds .f > i.neg{grid-row:2;align-self:start" in css
+    # No margin-based nudging: that was the bug.
+    assert "margin-${v<0?'top':'bottom'}" not in html

@@ -3627,6 +3627,17 @@ class UISession:
             "leaderboard": self.leaderboard(),
             "performance": self.performance(offline),
             "workflows": self.registry.list_workflows(10),
+            # The same summary the reasoner is handed (atlas_context), so the
+            # operator can see the evidence base the desk reasons from — the
+            # quantum-augmented lane against its ridge control. Reads only
+            # persisted run rows; never triggers a board run.
+            "predictors": self.predictor_board_summary(),
+            # The conversation, selected by kind at the store. The general
+            # `events` window above cannot carry it: a news-archive poll writes
+            # a row every 30s, so an hour of idling floods any fixed window and
+            # the chat a client renders would silently end an hour back.
+            "atlas_chat": self.registry.read_events_of_kind(
+                "atlas_message", limit=60),
         }
 
     def read_market_events(

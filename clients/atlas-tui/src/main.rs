@@ -156,7 +156,21 @@ fn posture(args: &[String]) -> atlas::store::Posture {
 }
 
 #[cfg(not(feature = "operator"))]
-fn posture(_args: &[String]) -> atlas::store::Posture {
+fn posture(args: &[String]) -> atlas::store::Posture {
+    // A glass build cannot arm — but an operator who typed `--operator` asked
+    // for a write path this binary does not contain, and running anyway would
+    // hand them a workstation that looks like the one they asked for with the
+    // chat, the pickers and every write silently missing. That is exactly the
+    // downgrade "fail loud" exists to prevent: refuse with the rebuild line
+    // rather than let the absence be discovered one dead keystroke at a time.
+    if args.iter().any(|a| a == "--operator") {
+        eprintln!(
+            "this atlas binary was built without the operator feature, so \
+             --operator has nothing to arm.\n    cd clients/atlas-tui && \
+             cargo build --release --features operator"
+        );
+        std::process::exit(2);
+    }
     atlas::store::Posture::Glass
 }
 

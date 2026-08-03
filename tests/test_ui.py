@@ -3922,3 +3922,37 @@ def test_the_panel_says_when_no_null_was_run_rather_than_implying_one_held(sessi
     detail = session.predictor_board_detail()
     assert detail["champion_established"] is None
     assert "not" in detail["reason"].lower()
+
+
+def test_tui_snapshot_carries_the_predictor_board(session):
+    """The workstation renders what the reasoner reads, or the operator is
+    the one party at the desk who cannot see the quantum lane's evidence."""
+    _board_run(session)
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert snap["predictors"]["champion"]["model_id"] == "kernel:angle"
+    assert snap["predictors"]["baseline"]["model_id"] == "ridge:none"
+
+
+def test_tui_snapshot_names_a_board_that_never_ran(session):
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert snap["predictors"] == {"status": "never_ran"}
+
+
+def test_tui_snapshot_carries_the_atlas_conversation_unflooded(session):
+    """The chat is selected by kind at the store, so a noisy desk cannot push
+    it off the payload. 200 unrelated rows land AFTER the exchange; a client
+    reading the general `events` window would have lost the entire chat."""
+    session.registry.record_event(
+        "atlas_message", {"actor": "operator", "text": "what do we hold?"})
+    session.registry.record_event(
+        "atlas_message", {"actor": "atlas", "text": "Seven ETFs, long only."})
+    for i in range(200):
+        session.registry.record_event("news_archive", {"returned": i})
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    texts = [row["payload"]["text"] for row in snap["atlas_chat"]]
+    assert texts == ["what do we hold?", "Seven ETFs, long only."]
+    assert [row["payload"]["actor"] for row in snap["atlas_chat"]] == [
+        "operator", "atlas"]

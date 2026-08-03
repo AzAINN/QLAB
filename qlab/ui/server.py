@@ -30,6 +30,7 @@ GET  /api/news                   the news window, its coverage, and provenance
 GET  /api/atlas/context          the rich surface a reasoning Atlas forms a view from
 GET  /api/research/predictors    the predictor board: augmented lane vs its control
 GET  /api/workforce              recent runs, how far each got, and where it stopped
+GET  /api/workforce/stream       what the agents said and did, off the audit bus
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
 POST /api/atlas/escalate         open a bounded debate on a material disagreement
 GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
@@ -1603,6 +1604,69 @@ class UISession:
             "needs_attention": needs,
             "reason": reason,
         }
+
+    def agent_stream(self, limit: int = 60) -> dict:
+        """What the desk's agents actually said and did, most recent last.
+
+        The coordinator republishes its session onto the audit bus precisely so
+        an unattended run is legible, and nothing rendered it: the web UI had
+        no reference to /api/events at all. Reasoning that is recorded and
+        never read is not visibility, it is a log file.
+
+        Kept to coordinator events. The bus also carries news archiving and
+        owner-tick bookkeeping, which would bury the agents in their own feed.
+
+        `session` events are set aside rather than shown. The coordinator no
+        longer records them, but the bus is durable, so the heartbeats it
+        recorded before that fix are still there: on the live desk 56 of 60
+        rows were `Claude session task_progress` against 4 carrying actual
+        debate reasoning. They are counted in the reason rather than dropped
+        in silence, because an audit surface that quietly discards rows is no
+        longer a record of what happened.
+        """
+        # Over-read, because the liveness rows being filtered are the bulk of
+        # the history and would otherwise fill the window on their own.
+        rows = self.registry.read_events_of_kind(
+            "atlas_coordinator_event", max(limit * 8, 200))
+        events = []
+        suppressed = 0
+        for row in rows:
+            payload = row.get("payload") or {}
+            if payload.get("event_kind") == "session":
+                suppressed += 1
+                continue
+            events.append({
+                "ts": row.get("ts"),
+                "workflow_id": payload.get("workflow_id"),
+                "event_kind": payload.get("event_kind"),
+                # Empty string means the event carried no agent, which is
+                # normal: only a subagent handoff names one. It is not a
+                # missing value and is reported as the empty string it is.
+                "agent": str(payload.get("agent") or ""),
+                "tool": str(payload.get("tool") or ""),
+                "text": str(payload.get("text") or ""),
+            })
+        events = events[-limit:]
+        aside = (f"; {suppressed} SDK liveness heartbeats set aside"
+                 if suppressed else "")
+        if not events and suppressed:
+            # A coordinator plainly ran; it just never said anything worth
+            # keeping. Reporting that as silence would be a wrong reason.
+            reason = (f"a coordinator ran and published only {suppressed} SDK "
+                      "liveness heartbeats: no reasoning, tool call or result "
+                      "was recorded for it")
+        elif not events:
+            reason = ("no coordinator has published to this desk's bus; the "
+                      "agents are silent because none has run under this "
+                      "owner, not because a run produced nothing to say")
+        else:
+            named = sorted({e["agent"] for e in events if e["agent"]})
+            reason = (f"{len(events)} events from the coordinator session"
+                      + (f", naming {', '.join(named)}" if named else
+                         "; none names a subagent, so no handoff was recorded")
+                      + aside)
+        return {"events": events, "reason": reason,
+                "suppressed_liveness": suppressed}
 
     def atlas_context(self, offline: bool) -> dict:
         """The rich, abstract surface a reasoning Atlas forms a view from.
@@ -3256,6 +3320,10 @@ def handle_api(session: UISession, method: str, path: str,
         # The same summary Atlas reasons from, so the operator and the manager
         # are looking at one picture of the desk rather than two.
         return 200, session.workforce_summary()
+
+    if method == "GET" and path == "/api/workforce/stream":
+        # What the agents themselves said, off the same bus the TUI renders.
+        return 200, session.agent_stream()
 
     if method == "GET" and path == "/api/atlas/read":
         # refresh=1 recomposes here; the HTTP handler intercepts that case

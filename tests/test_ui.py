@@ -3666,3 +3666,86 @@ def test_the_stall_box_distinguishes_absent_from_already_decided():
     # ...and the truthiness form must not come back.
     assert "w.awaiting_operator?" not in html
     assert "unknown" in html
+
+
+def test_the_agent_stream_has_a_route_and_reaches_the_page(session):
+    """The coordinator republishes every agent event onto the audit bus and no
+    page ever read it: `grep api/events qlab/ui/index.html` returned nothing.
+
+    Agent reasoning that is recorded but never rendered is not visibility.
+    """
+    session.registry.record_event("atlas_coordinator_event", {
+        "workflow_id": "wf-1", "event_kind": "tool_start",
+        "agent": "moments-analyst", "tool": "Agent", "text": "calling Agent"})
+    session.registry.record_event("atlas_coordinator_event", {
+        "workflow_id": "wf-1", "event_kind": "text", "agent": "", "tool": "",
+        "text": "Realised vol sits in the top decile."})
+    status, payload = handle_api(session, "GET", "/api/workforce/stream", {}, {})
+    assert status == 200
+    kinds = [e["event_kind"] for e in payload["events"]]
+    assert "tool_start" in kinds and "text" in kinds
+    assert any(e["agent"] == "moments-analyst" for e in payload["events"])
+    assert payload["reason"]
+    html = _INDEX.read_text(encoding="utf-8")
+    assert "/api/workforce/stream" in html
+
+
+def test_an_empty_agent_stream_says_why_rather_than_showing_nothing(session):
+    """Nothing recorded and nothing having happened must not look the same."""
+    payload = session.agent_stream()
+    assert payload["events"] == []
+    assert "no coordinator" in payload["reason"].lower()
+
+
+def test_the_agent_stream_is_not_crowded_out_by_a_noisier_event_kind(session):
+    """Filtering a fixed window in Python is not a filter.
+
+    The live desk records a news_archive row per story; 500 of them landed in
+    four hours, so reading the newest 500 events and keeping the coordinator
+    ones returned nothing on a desk with 31 coordinator events. The panel then
+    said "no coordinator has published to this desk's bus", which was a
+    confident, wrong reason -- worse than showing nothing.
+    """
+    session.registry.record_event("atlas_coordinator_event", {
+        "workflow_id": "wf-1", "event_kind": "text", "agent": "",
+        "tool": "", "text": "the reasoning that must survive the flood"})
+    for i in range(600):
+        session.registry.record_event("news_archive", {"n": i})
+    payload = session.agent_stream()
+    assert len(payload["events"]) == 1, payload["reason"]
+    assert "flood" in payload["events"][0]["text"]
+
+
+def test_historic_liveness_rows_are_set_aside_but_counted_not_hidden(session):
+    """The bus is durable, so heartbeats recorded before the filter fix stay.
+
+    On the live desk that left the panel at 56 `Claude session task_progress`
+    rows against 4 carrying real debate reasoning. The panel sets them aside
+    so the reasoning is readable, and says how many it set aside, because
+    silently dropping rows from an audit surface is how the desk stops being
+    a record of what happened.
+    """
+    for _ in range(9):
+        session.registry.record_event("atlas_coordinator_event", {
+            "workflow_id": "wf-1", "event_kind": "session",
+            "agent": "", "tool": "", "text": "Claude session task_progress"})
+    session.registry.record_event("atlas_coordinator_event", {
+        "workflow_id": "wf-1", "event_kind": "text", "agent": "", "tool": "",
+        "text": "Challenger has a live, numeric counter-case."})
+    payload = session.agent_stream()
+    assert [e["event_kind"] for e in payload["events"]] == ["text"]
+    assert payload["suppressed_liveness"] == 9
+    assert "9" in payload["reason"]
+    assert "liveness" in payload["reason"].lower()
+
+
+def test_heartbeats_only_is_not_reported_as_the_agents_being_silent(session):
+    """"Nothing ran" and "something ran and said nothing" are different facts."""
+    for _ in range(5):
+        session.registry.record_event("atlas_coordinator_event", {
+            "workflow_id": "wf-1", "event_kind": "session",
+            "agent": "", "tool": "", "text": "Claude session task_progress"})
+    payload = session.agent_stream()
+    assert payload["events"] == []
+    assert "a coordinator ran" in payload["reason"]
+    assert "none has run" not in payload["reason"]

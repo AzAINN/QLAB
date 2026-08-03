@@ -140,6 +140,14 @@
      the colour that means "you need to act". */
   .wfstall.settled{border-color:var(--border);background:transparent;opacity:.72}
   .wfsay{margin-top:4px;font-size:12.5px;color:var(--text);font-style:italic}
+  /* ---- agent stream ---- */
+  .evrow{display:flex;align-items:baseline;gap:8px;padding:5px 0;font-size:12.5px;
+    border-bottom:1px solid var(--border)}
+  .evrow:last-child{border-bottom:0}
+  .evrow.op{opacity:.62}
+  .evag{font-weight:600;color:var(--q)}
+  .evtx{flex:1;min-width:0;overflow-wrap:anywhere}
+  .evrow.say .evtx{color:var(--text)}
   /* ---- vs viz ---- */
   .vs{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:18px;margin:6px 0}
   .vsbox{text-align:center;padding:22px;border-radius:12px;border:1px solid var(--border)}
@@ -302,6 +310,11 @@
       <div class="btnrow" style="margin-top:0"><button class="btn" id="wfRefresh">Refresh</button></div>
       <div id="wfStatus" class="empty" style="margin-top:16px">—</div>
       <div id="wfBody"></div>
+      <h2 style="margin-top:26px">What the agents said</h2>
+      <p class="sub">The coordinator session as it happened: reasoning, tool calls, and the
+        handoff that names which specialist picked the work up.</p>
+      <div id="wfStreamReason" class="muted" style="font-size:12.5px"></div>
+      <div id="wfStream"></div>
     </section>
 
     <!-- REGISTRY -->
@@ -583,7 +596,7 @@ async function loadWorkforce(){
   $('#wfStatus').innerHTML=(counts||badge('idle',''))+
     (d.needs_attention?' '+badge(d.needs_attention+' need attention','warn'):'')+
     `<div class="muted" style="font-size:12.5px;margin-top:6px">${d.reason||''}</div>`;
-  if(!d.workflows.length){$('#wfBody').innerHTML='';return;}
+  if(!d.workflows.length){$('#wfBody').innerHTML='';await loadAgentStream();return;}
   $('#wfBody').innerHTML=`<div class="card" style="margin-top:14px">`+
     d.workflows.map(w=>`<div class="wfrow">
       <div class="wfhead">${badge(w.status,WF_TONE[w.status]||'')}
@@ -599,7 +612,24 @@ async function loadWorkforce(){
           :badge('unknown: this desk did not say','bad')}
         <div class="wfsay">${w.stalled_at.summary||'no reason recorded — itself a gap'}</div>
       </div>`:'<div class="muted" style="font-size:12px">nothing stopped this run</div>'}
-    </div>`).join('')+`</div>`;}
+    </div>`).join('')+`</div>`;
+  await loadAgentStream();}
+/* The coordinator session, rendered. `text` is the agent reasoning and gets
+   the room; tool traffic is one dim line each, because a wall of equal-weight
+   rows is how a stream stops being read. */
+const EV_TONE={text:'',tool_start:'q',tool_result:'',error:'bad',
+  session:'',result:'good'};
+async function loadAgentStream(){
+  const d=await api('GET','/api/workforce/stream');
+  $('#wfStreamReason').textContent=d.reason||'';
+  $('#wfStream').innerHTML=!d.events.length?'':
+    `<div class="card" style="margin-top:12px">`+d.events.map(e=>`
+      <div class="evrow ${e.event_kind==='text'?'say':'op'}">
+        <span class="evk">${badge(e.event_kind,EV_TONE[e.event_kind]||'')}</span>
+        ${e.agent?`<span class="evag">${e.agent}</span>`:''}
+        ${e.tool?`<span class="mono muted">${e.tool}</span>`:''}
+        <span class="evtx">${(e.text||'').slice(0,400)}</span>
+      </div>`).join('')+`</div>`;}
 $('nav [data-nav="workforce"]').addEventListener('click',()=>{
   if(!$('#wfBody').innerHTML) run($('#wfRefresh'),loadWorkforce);});
 

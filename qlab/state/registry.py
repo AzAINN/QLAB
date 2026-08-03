@@ -2319,6 +2319,22 @@ class Registry:
             [limit],
         )
 
+    def read_events_of_kind(self, kind: str, limit: int = 60) -> list[dict]:
+        """The newest ``limit`` events of one kind, in chronological order.
+
+        Filtering a fixed window in Python is not a filter. The desk records a
+        `news_archive` row per story and 500 of them landed inside four hours,
+        so reading the newest 500 events and keeping the coordinator ones
+        returned zero on a desk that had 31 of them. The selection has to
+        happen where the ordering does.
+        """
+        limit = max(1, min(int(limit), 500))
+        return self._rows(
+            "SELECT * FROM (SELECT * FROM events WHERE kind = ? "
+            "ORDER BY ts DESC LIMIT ?) ORDER BY ts ASC",
+            [kind, limit],
+        )
+
     # -- internals ----------------------------------------------------------
     def _rows(self, query: str, params: list) -> list[dict]:
         cur = self.con.execute(query, params)

@@ -932,5 +932,143 @@
       }
     ],
     "probed_at": "2026-08-02T18:54:17.856581+00:00"
+  },
+  "atlas_chat": [
+    {
+      "event_id": "chat-001",
+      "ts": "2026-07-30T15:31:02.114312+00:00",
+      "kind": "atlas_message",
+      "payload": {
+        "actor": "operator",
+        "text": "why is the book flat into the print?"
+      }
+    },
+    {
+      "event_id": "chat-002",
+      "ts": "2026-07-30T15:31:09.882410+00:00",
+      "kind": "atlas_message",
+      "payload": {
+        "actor": "atlas",
+        "text": "The regime read is fragile calm with 2 of 5 detectors disagreeing, so the operational policy holds the defensive tilt. The referee passed the last plan against its exact targets hash and nothing since has moved the read enough to re-propose."
+      }
+    },
+    {
+      "event_id": "chat-003",
+      "ts": "2026-07-30T15:33:41.020991+00:00",
+      "kind": "atlas_message",
+      "payload": {
+        "actor": "operator",
+        "text": "is the quantum lane earning its place?"
+      }
+    },
+    {
+      "event_id": "chat-004",
+      "ts": "2026-07-30T15:33:52.667208+00:00",
+      "kind": "atlas_message",
+      "payload": {
+        "actor": "atlas",
+        "text": "the reasoner backend did not answer in time",
+        "error": "ollama timed out after 45s"
+      }
+    }
+  ],
+  "predictors": {
+    "status": "ok",
+    "run_id": "d41f2b8c9a734e01",
+    "as_of": "2026-07-28",
+    "source": "stooq",
+    "age_days": 2,
+    "admitted_any": true,
+    "admission": {
+      "mean_ic_strictly_above": 0.03,
+      "ic_stability_strictly_above": 0.5
+    },
+    "champion_established": false,
+    "selection_null": {
+      "panels": 100,
+      "champions_admitted": 66
+    },
+    "n_obs": 1216,
+    "n_folds": 5,
+    "target": "fwd_vol_20d",
+    "horizon_days": 20,
+    "embargo_days": 20,
+    "kernels": [
+      "rbf",
+      "quantum_gram"
+    ],
+    "champion": {
+      "model_id": "krr:quantum_gram",
+      "family": "krr",
+      "variant": "quantum_gram",
+      "mean_ic": 0.1412,
+      "ic_std": 0.0631,
+      "ic_stability": 2.238,
+      "usable": true,
+      "paired_t_vs_baseline": 1.94,
+      "wins_vs_baseline": 4,
+      "delta_mean_ic_vs_baseline": 0.0187,
+      "per_fold": [
+        {
+          "fold": 0,
+          "ic": 0.201
+        },
+        {
+          "fold": 1,
+          "ic": 0.088
+        },
+        {
+          "fold": 2,
+          "ic": 0.176
+        },
+        {
+          "fold": 3,
+          "ic": 0.061
+        },
+        {
+          "fold": 4,
+          "ic": 0.18
+        }
+      ]
+    },
+    "baseline": {
+      "model_id": "ridge:none",
+      "family": "ridge",
+      "variant": "none",
+      "mean_ic": 0.1225,
+      "ic_std": 0.0702,
+      "ic_stability": 1.745,
+      "usable": true,
+      "paired_t_vs_baseline": null,
+      "wins_vs_baseline": 0,
+      "delta_mean_ic_vs_baseline": 0.0,
+      "per_fold": [
+        {
+          "fold": 0,
+          "ic": 0.184
+        },
+        {
+          "fold": 1,
+          "ic": 0.071
+        },
+        {
+          "fold": 2,
+          "ic": 0.149
+        },
+        {
+          "fold": 3,
+          "ic": 0.043
+        },
+        {
+          "fold": 4,
+          "ic": 0.166
+        }
+      ]
+    },
+    "best_delta_vs_baseline": 0.0187,
+    "ranking": [
+      "krr:quantum_gram",
+      "ridge:none"
+    ]
   }
 }

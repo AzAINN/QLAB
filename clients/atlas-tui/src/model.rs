@@ -95,6 +95,20 @@ pub struct Snapshot {
     pub atlas_read: Option<AtlasRead>,
     #[serde(default, deserialize_with = "null_or_default")]
     pub events: Vec<Event>,
+    /// The conversation with the desk manager, oldest first as the owner
+    /// serves it (`read_events_of_kind("atlas_message", limit=60)`).
+    ///
+    /// Its own key rather than a filter over `events`, because the general
+    /// window floods: a news-archive poll writes a row every 30 s, so an hour
+    /// of idling pushes the chat out of any fixed window and the conversation
+    /// a client renders would silently end an hour back.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub atlas_chat: Vec<Event>,
+    /// The newest persisted predictor board, summarised — the same summary the
+    /// reasoner is handed, so the operator can see the evidence base the desk
+    /// reasons from.
+    #[serde(default)]
+    pub predictors: Option<Predictors>,
     /// The allocation policy the paper book is run under, with the mandate's
     /// constraints attached by the owner.
     #[serde(default)]
@@ -398,6 +412,64 @@ pub struct BoardModel {
     pub mean_ic: Option<f64>,
     pub usable: Option<bool>,
     pub delta_mean_ic_vs_baseline: Option<f64>,
+}
+
+/// The `predictors` section: `predictor_board_summary()` as `/api/tui` serves
+/// it.
+///
+/// Deliberately **not** `BoardSpec` widened. That struct is the one-line
+/// readout's subset of a *run row's* spec; this is the owner's own summary of
+/// the newest board, with the baseline/champion rows expanded into full
+/// metrics. One struct for both would leave whichever surface reads the other
+/// shape decoding absent fields forever.
+///
+/// `status` is the only field the owner always sends: `never_ran` and
+/// `unreadable` payloads carry nothing else worth a name, and every metric is
+/// optional because a zero where a measurement is missing is a claim nobody
+/// made.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Predictors {
+    pub status: Option<String>,
+    pub run_id: Option<String>,
+    pub as_of: Option<String>,
+    pub age_days: Option<i64>,
+    pub admitted_any: Option<bool>,
+    /// Whether the champion's edge survives the owner's selection null.
+    /// `None` is a board that predates the null — neither established nor
+    /// refuted, and it must not render as either.
+    pub champion_established: Option<bool>,
+    pub n_obs: Option<i64>,
+    pub n_folds: Option<i64>,
+    pub champion: Option<PredictorMetrics>,
+    pub baseline: Option<PredictorMetrics>,
+    pub best_delta_vs_baseline: Option<f64>,
+}
+
+/// One evaluated model's full metrics row on the board summary.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PredictorMetrics {
+    pub model_id: Option<String>,
+    pub family: Option<String>,
+    /// The quantum feature augmentation, or `"none"` for a classical lane.
+    /// What earns the `q` badge — the same rule as the web UI's.
+    pub variant: Option<String>,
+    pub mean_ic: Option<f64>,
+    pub ic_std: Option<f64>,
+    pub ic_stability: Option<f64>,
+    pub usable: Option<bool>,
+    pub paired_t_vs_baseline: Option<f64>,
+    pub wins_vs_baseline: Option<i64>,
+    pub delta_mean_ic_vs_baseline: Option<f64>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub per_fold: Vec<PredictorFold>,
+}
+
+/// One purged walk-forward fold's IC. The folds are what make a mean
+/// interpretable: folds that change sign are not a skill estimate.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PredictorFold {
+    pub fold: Option<i64>,
+    pub ic: Option<f64>,
 }
 
 /// The admission gate a prediction run states about itself.

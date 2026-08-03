@@ -358,6 +358,21 @@ def test_the_chosen_workforce_backend_reaches_the_coordinator(owner, monkeypatch
     assert plan.pinned_reason == no_role_harness_reason("up")
     assert "workforce runs on claude" in plan.pinned_reason
 
+    # And it reaches an operator without reading invocation rows. Every client
+    # renders `reason` only when `can_drive` is False, and this desk can drive,
+    # so retiring the refusal would have made the unhonoured choice silent.
+    status = owner.coordinator_status()
+    assert status["can_drive"] is True or status["reason"]
+    assert status["note"] == no_role_harness_reason("up")
+    # Absent, not empty, on a desk with nothing to say — an empty string would
+    # render as a blank line on a card that only ever asks "is there a note".
+    # Repointed directly: the picker refuses `claude` on a desk whose catalog
+    # this fixture stubbed to one backend, and the question here is about the
+    # payload, not about the picker.
+    owner.llm_config = owner.llm_config.with_surface(
+        "workforce", SurfaceModel("claude", "inherit"))
+    assert "note" not in owner.coordinator_status()
+
 
 def test_a_desk_restart_keeps_the_chosen_models(owner, monkeypatch):
     _install(monkeypatch, up=_fake("up", served=("granite3.3:8b",)))

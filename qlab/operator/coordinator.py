@@ -60,6 +60,7 @@ from qlab.core.llm_config import SurfaceModel
 from qlab.operator.llm_backends import _head
 from qlab.operator.model_routing import (
     CLAUDE_BACKEND,
+    pinned_to_claude_reason,
     record_invocation,
     resolve_route,
 )
@@ -119,12 +120,16 @@ def no_role_harness_reason(backend: str) -> str:
 
 
 def coordinator_walks_reason(backend: str, roles: tuple[str, ...]) -> str:
-    """Why a graph ran on claude although the workforce named another backend.
+    """Why a multi-role graph ran on claude although the workforce named another.
 
     Recorded, never silent. A run that quietly ignored the operator's choice is
     the inference this whole feature refuses; a run that says which roles it
     could not move, and why, is the desk being honest about a capability it
     does not have.
+
+    Only for graphs the harness could not serve *whatever* their roles were. A
+    single role it declined is the route's own pin and says so in the route's
+    own words — see ``_plan``.
     """
     return (f"the {backend} role harness serves one role per session; this "
             f"{len(roles)}-phase graph is walked by the claude coordinator")
@@ -271,11 +276,37 @@ class CoordinatorDriver:
         if backend != _HARNESS_BACKEND:
             return SessionPlan(CLAUDE_BACKEND,
                                pinned_reason=no_role_harness_reason(backend))
-        if len(roles) == 1 and resolve_route(
-                roles[0], workforce=self.workforce).backend == backend:
-            return SessionPlan(backend, role=roles[0])
+        if len(roles) == 1:
+            if resolve_route(roles[0],
+                             workforce=self.workforce).backend == backend:
+                return SessionPlan(backend, role=roles[0])
+            # A one-role graph IS the shape the harness serves, so the graph is
+            # not the reason — the role is. Saying "this 1-phase graph is walked
+            # by the coordinator" here would contradict the row's own sentence
+            # in the one case where both are written about the same dispatch.
+            return SessionPlan(
+                CLAUDE_BACKEND,
+                pinned_reason=pinned_to_claude_reason(roles[0], backend))
         return SessionPlan(CLAUDE_BACKEND,
                            pinned_reason=coordinator_walks_reason(backend, roles))
+
+    def workforce_note(self) -> str:
+        """What the desk should say about a workforce choice it cannot honour.
+
+        A backend with no role harness serves nothing, on any graph, until one
+        is built — a standing fact about the desk rather than about a dispatch,
+        so it is said once on the status card. It used to be said by refusing
+        the desk outright, and retiring that refusal is what would otherwise
+        have made an unhonoured operator choice silent.
+
+        The harness backend gets no note here on purpose: what it serves
+        depends on the graph, and a per-dispatch fact belongs on the rows that
+        dispatch records, not on a card that cannot know which graph is next.
+        """
+        backend = self.workforce.backend if self.workforce else CLAUDE_BACKEND
+        if backend in (CLAUDE_BACKEND, _HARNESS_BACKEND):
+            return ""
+        return no_role_harness_reason(backend)
 
     def _backend_reading(self, backend: str) -> tuple[bool | None, str]:
         """The last availability reading for ``backend``; never a probe."""
@@ -466,7 +497,11 @@ class CoordinatorDriver:
             "agent": _head(str(getattr(event, "agent", "") or "")),
             "tool": _head(str(getattr(event, "tool", "") or "")),
             # A coordinator can emit long blocks and the event bus is a durable
-            # table, not a scrollback buffer.
+            # table, not a scrollback buffer. `_head` also COLLAPSES: a
+            # recorded block is one line where it used to keep its newlines.
+            # That is the gate's doing and it is kept — a row is a record, the
+            # renderer is where prose gets its shape back — but it is a real
+            # change to what `atlas_coordinator_event.text` looks like.
             "text": _head(text, _TEXT_CHARS),
         })
 

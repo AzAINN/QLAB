@@ -3754,6 +3754,32 @@ def test_the_atlas_view_says_why_nothing_is_running():
     asyncio.run(run())
 
 
+def test_a_workforce_the_desk_cannot_honour_is_said_on_the_atlas_card():
+    # It stopped being a refusal, so `can_drive` is True and `reason` is empty
+    # — the two fields this card renders. Without its own line an operator
+    # choice the desk cannot honour would be visible only on invocation rows.
+    from qlab.tui.app import QlabTui
+
+    snap = _atlas_snapshot()
+    beat = dict(snap.get("atlas_heartbeat") or {})
+    beat["coordinator"] = {
+        "driving": False, "can_drive": True, "reason": "",
+        "note": "the Up role harness is not built — workforce runs on claude"}
+    snap["atlas_heartbeat"] = beat
+
+    async def run():
+        app = QlabTui(_AtlasStubClient(snap), refresh_interval=0,
+                      desk_mode=_SYNTH, claude_start="off")
+        async with app.run_test(size=(200, 52)) as pilot:
+            await pilot.pause(0.25)
+            app.action_view("atlas")
+            await pilot.pause(0.15)
+            read = str(app.query_one("#atlas-read").content)
+            assert "role harness is not built" in read
+
+    asyncio.run(run())
+
+
 def test_settings_offers_a_route_to_the_desk_mode_and_alpaca_sign_in():
     # The desk mode was reachable only from a modal shown once at startup, so a
     # session that answered it — or was started with a flag — had no way back.

@@ -2360,12 +2360,22 @@ class UISession:
         """What the desk should say about unattended coordination."""
         driver = self.coordinator_driver
         ok, reason = driver.available()
-        return {
+        status = {
             "driving": driver.busy,
             "workflow_id": driver.current_workflow_id,
             "can_drive": ok,
             "reason": reason or driver.last_reason,
         }
+        # A configured workforce the desk cannot honour is not a refusal any
+        # more, so it would otherwise be visible only on invocation rows. Every
+        # client renders `reason` only when `can_drive` is False, and this desk
+        # CAN drive — so the fact needs its own field or it is silent. Carried
+        # only when there is one: an absent key is what old clients already
+        # tolerate, and an empty string would render as a blank line.
+        note = driver.workforce_note()
+        if note:
+            status["note"] = note
+        return status
 
     def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
         """Start the queued work Atlas's current mode already permits.

@@ -189,6 +189,11 @@ def test_an_ollama_workforce_composes_both_halves_of_its_readiness():
                          backend_status=lambda name: (False, "up is not running"))
     assert no_harness.available() == (True, "")
 
+    # And the same argument one graph in: a stopped daemon must not strand a
+    # review the coordinator walks entirely on claude. The gate asks about the
+    # provider THIS dispatch uses, which is the half that decides it.
+    assert down.available(roles=_REVIEW_ROLES) == (True, "")
+
 
 def test_claude_roles_still_need_the_cli_under_an_ollama_workforce(monkeypatch):
     from qlab.core.llm_config import SurfaceModel
@@ -291,8 +296,12 @@ def test_the_sink_bounds_every_field_it_copies_from_either_producer():
         rows = [e["payload"] for e in reg.read_events(50)
                 if e["kind"] == "atlas_coordinator_event"]
         assert len(rows) == 2
+        # `event_kind` and `workflow_id` are checked by the gate too, but they
+        # are structurally bounded here — one is an allowlisted literal and the
+        # other is the driver's own id — so asserting on them would be a green
+        # light that cannot go red. The two foreign fields are the test.
         for row in rows:
-            for field in ("event_kind", "agent", "tool", "workflow_id"):
+            for field in ("agent", "tool"):
                 assert len(row[field]) < 300, f"{field} rode the row unbounded"
     finally:
         reg.close()

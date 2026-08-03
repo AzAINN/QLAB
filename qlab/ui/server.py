@@ -1443,7 +1443,7 @@ class UISession:
                 and isinstance(fold.get("ic"), (int, float))
             ]
             # The augmented lane is defined by the FEATURE MAP, not the family.
-            # `kernel:linear` sits in the kernel family but `combined_gram`
+            # `kernel:linear` sits in the kernel family but `quantum_gram`
             # returns before any map is applied, so it is the dual of the
             # plain ridge baseline and comes back bit-identical to it. Calling
             # it quantum-augmented would file a control in the treatment arm

@@ -731,7 +731,7 @@ def _predictors_block(context: Mapping) -> list[str]:
     #
     # The lane is defined by the feature map, not the family prefix.
     # `kernel:linear` sits in the kernel family but applies no map at all --
-    # `combined_gram` returns before the map term -- so it is the plain ridge
+    # `quantum_gram` returns before the map term -- so it is the plain ridge
     # baseline in dual form and reports the identical mean IC. Calling the
     # whole kernel family "the quantum lane" would hand Atlas a control filed
     # as treatment.

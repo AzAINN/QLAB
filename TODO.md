@@ -24,4 +24,14 @@ note - for Azain to keep track and jot things down
   ridge baseline. The predictor board (`research.predictor_board`) keeps the
   paired comparison honest and is Atlas-readable; next candidates, if any:
   story-backed feature pairs, not more data
+* `feat/atlas-full-desk` (2026-08-03, 8 commits, not pushed): the desk could
+  not see itself. Twelve seam bugs where a producer computed the right thing
+  and the consumer never got it — reasoner rendering 6 of 13 context keys,
+  grounding deleting 46 of 50 fetched stories, the agent bus filtering on
+  kinds the parser never emits. Full write-up with live numbers in
+  planning-docs/2026-08-03-desk-visibility-audit.md. The predictor board now
+  has a web panel, and `kernel:linear` turned out to be a **control** (no
+  feature map — `quantum_gram` returns early for linear) that was being
+  counted in the augmented arm. The ZZ figures above are unaffected: those
+  variants do carry a map.
 * emit real `.bob/custom_modes.yaml` from `agents/`

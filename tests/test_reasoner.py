@@ -1325,7 +1325,7 @@ def _perturb(value, marker: str):
 
 
 def test_the_linear_kernel_is_not_sold_to_atlas_as_quantum():
-    """`kernel:linear` applies no feature map: `combined_gram` returns before
+    """`kernel:linear` applies no feature map: `quantum_gram` returns before
     the map term, so it is the plain ridge baseline in dual form and comes
     back bit-identical to `ridge:none` on the live board (both 0.11049604765).
 

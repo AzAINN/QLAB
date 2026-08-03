@@ -3432,7 +3432,7 @@ def test_the_ui_has_a_research_panel_for_the_augmented_lane():
 
 def test_the_linear_kernel_is_not_labelled_a_quantum_map(session):
     """`kernel:linear` is in the `kernel` family but carries NO quantum feature
-    map: `combined_gram` returns early on it, so it is the dual of the plain
+    map: `quantum_gram` returns early on it, so it is the dual of the plain
     ridge baseline and comes back bit-identical to `ridge:none`. Labelling it
     "quantum-augmented" would put a control in the treatment arm and let the
     lane claim a row it did not earn. Only the angle and ZZ maps are quantum.
@@ -3749,3 +3749,33 @@ def test_heartbeats_only_is_not_reported_as_the_agents_being_silent(session):
     assert payload["events"] == []
     assert "a coordinator ran" in payload["reason"]
     assert "none has run" not in payload["reason"]
+
+
+def test_the_control_split_matches_what_the_kernel_code_actually_does():
+    """The augmented/control split rests on a claim about `quantum_gram`: that
+    it returns before the map term for `linear`. That claim is repeated in
+    comments in three modules, and a rename or a refactor there would leave
+    them confidently describing code that no longer exists -- the same
+    producer/consumer drift this whole surface was built to catch.
+
+    So verify the behaviour, not the prose: a linear Gram must equal the raw
+    inner product exactly, while angle and zz must not.
+    """
+    import numpy as np
+    from qlab.research.kernels import quantum_gram
+
+    rng = np.random.default_rng(11)
+    std = rng.normal(size=(6, 3))
+    unit = rng.uniform(-1.0, 1.0, size=(6, 3))
+    raw = std @ std.T
+
+    linear = quantum_gram(std, std, unit, unit, "linear")
+    assert np.array_equal(linear, raw), (
+        "kernel:linear is classified as a control because it carries no "
+        "feature map; if quantum_gram now adds one, that classification and "
+        "the comments citing it are wrong")
+    for kind in ("angle", "zz"):
+        mapped = quantum_gram(std, std, unit, unit, kind)
+        assert not np.allclose(mapped, raw), (
+            f"{kind} is classified as augmented but added nothing to the "
+            "raw Gram")

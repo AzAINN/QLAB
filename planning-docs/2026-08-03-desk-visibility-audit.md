@@ -45,7 +45,7 @@ Triage: [SEAM] producer/consumer contract broken · [SILENT] absence rendered as
 
 5. **[WRONG-ARM] A control model was filed in the treatment arm.** — `2a9f5c6`
    Found by running the new research-lane route against the real board (run `460363cb26581770`, 671 obs, 5 folds): `kernel:linear augmented=True` sat at mean_ic `0.11049604765723449` — digit for digit identical to `ridge:none`.
-   **Cause:** `combined_gram` returns before the map term when `kind == "linear"`, so `kernel:linear` carries no quantum feature map at all and is the plain ridge baseline in dual form. Classifying by family prefix filed a control as a treatment.
+   **Cause:** `quantum_gram` returns before the map term when `kind == "linear"`, so `kernel:linear` carries no quantum feature map at all and is the plain ridge baseline in dual form. Classifying by family prefix filed a control as a treatment.
    **Why it matters:** it lets the lane claim a row it did not earn, and lets "is the quantum lane working" be answered with a model containing no quantum anything. The same wrong claim was in the reasoner's `_predictors_block`, stated to Atlas in prose.
    **Fix:** the lane is decided by the feature map (a variant naming `angle` or `zz`); a kernel-family row carrying no map ships a `control_note` explaining that it is a control. Prompt and screen now describe the same experiment.
    **Test:** parametrised over the whole variant space × all three families, so it cannot regress into a prefix check.

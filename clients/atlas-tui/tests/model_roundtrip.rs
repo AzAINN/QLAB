@@ -73,6 +73,49 @@ fn every_modeled_section_is_present_in_the_fixture() {
     assert!(!s.leaderboard.is_empty(), "leaderboard");
     assert!(!s.runs.is_empty(), "runs");
     assert!(!s.algorithms.is_empty(), "algorithms");
+    assert!(!s.atlas_chat.is_empty(), "atlas_chat");
+    assert!(s.predictors.is_some(), "predictors");
+}
+
+#[test]
+fn the_chat_and_the_board_decode_the_shapes_the_owner_serves() {
+    let s = snapshot();
+    // The conversation, oldest first, with both voices and the failure shape.
+    let chat = &s.atlas_chat;
+    let actor = |i: usize| {
+        chat[i]
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("actor"))
+            .and_then(|a| a.as_str())
+    };
+    assert_eq!(actor(0), Some("operator"));
+    assert_eq!(actor(1), Some("atlas"));
+    assert!(
+        chat.last()
+            .and_then(|e| e.payload.as_ref())
+            .and_then(|p| p.get("error"))
+            .is_some(),
+        "the failed answer lost its error"
+    );
+
+    // The board: the champion's metrics arrive whole, per-fold included, and
+    // the tri-state null verdict stays a tri-state.
+    let board = s.predictors.as_ref().unwrap();
+    assert_eq!(board.status.as_deref(), Some("ok"));
+    let champion = board.champion.as_ref().unwrap();
+    assert_eq!(champion.variant.as_deref(), Some("quantum_gram"));
+    assert_eq!(champion.mean_ic, Some(0.1412));
+    assert_eq!(champion.per_fold.len(), 5);
+    assert_eq!(board.champion_established, Some(false));
+    // A payload the owner serves for a desk with no board yet must not reject
+    // the whole snapshot, and its absent metrics must stay absent.
+    let bare: Snapshot =
+        serde_json::from_str(r#"{"predictors": {"status": "never_ran"}}"#).unwrap();
+    let bare_board = bare.predictors.unwrap();
+    assert_eq!(bare_board.status.as_deref(), Some("never_ran"));
+    assert!(bare_board.champion.is_none());
+    assert!(bare_board.age_days.is_none(), "missing age is not day zero");
 }
 
 #[test]

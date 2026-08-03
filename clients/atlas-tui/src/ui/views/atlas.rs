@@ -89,7 +89,7 @@ impl View for AtlasView {
         // The sidebar is dropped whole before the chat is squeezed: a board
         // clipped to half its metrics misreads as a different board, while a
         // narrower chat is the same conversation in shorter lines.
-        let boarded = area.width >= CHAT_MIN + SIDEBAR_W + 1;
+        let boarded = area.width > CHAT_MIN + SIDEBAR_W;
         let cols = Layout::horizontal([
             Constraint::Min(0),
             Constraint::Length(if boarded { SIDEBAR_W } else { 0 }),
@@ -133,12 +133,15 @@ impl View for AtlasView {
         match m.kind {
             MouseEventKind::ScrollUp => self.scroll(WHEEL),
             MouseEventKind::ScrollDown => self.scroll(-WHEEL),
-            MouseEventKind::Down(MouseButton::Left) =>
-            {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // A click on the ask row focuses it — the mouse's answer to
+                // the focus key. Armed windows only: a glass frame publishes
+                // an empty rect, so the branch is unreachable there.
                 #[cfg(feature = "operator")]
-                if store.posture.writes() {
+                {
                     let row = self.input_row.get();
-                    if row.height > 0
+                    if store.posture.writes()
+                        && row.height > 0
                         && m.row == row.y
                         && m.column >= row.x
                         && m.column < row.x.saturating_add(row.width)
@@ -280,9 +283,9 @@ impl AtlasView {
 
         self.draw_input(f, rows[2], store);
         let hint = if self.input_row_shown(store) {
-            "Enter sends · Esc clears · ↑↓ PgUp PgDn wheel scroll · click the row to focus"
+            "Enter sends · Esc clears · ↑↓ wheel scroll"
         } else {
-            "read-only in this posture — the chat is watchable, asking needs an operator window"
+            "read-only in this posture — asking needs an operator window"
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -556,11 +559,11 @@ fn board_lines(lines: &mut Vec<Line<'static>>, board: &Predictors, width: u16) {
     if let Some(established) = board.champion_established {
         lines.push(match established {
             true => Line::from(Span::styled(
-                "edge survives the selection null",
+                "edge survives selection null",
                 Style::default().fg(t.positive),
             )),
             false => Line::from(Span::styled(
-                "edge not established vs selection null",
+                "edge not established vs null",
                 Style::default().fg(t.warning),
             )),
         });
@@ -635,19 +638,26 @@ fn model_lines(
             ));
         }
     }
+    lines.push(Line::from(verdict));
+    // Its own line: beside the verdict the three ran past the sidebar's width
+    // and the t-statistic was clipped mid-number — a truncated number is a
+    // different number.
+    let mut versus = Vec::new();
     if let Some(wins) = m.wins_vs_baseline.filter(|w| *w > 0) {
-        verdict.push(Span::styled(
+        versus.push(Span::styled(
             format!("  wins {wins}"),
             Style::default().fg(t.text_secondary),
         ));
     }
     if let Some(paired) = m.paired_t_vs_baseline {
-        verdict.push(Span::styled(
+        versus.push(Span::styled(
             format!("  t {paired:.2}"),
             Style::default().fg(t.text_secondary),
         ));
     }
-    lines.push(Line::from(verdict));
+    if !versus.is_empty() {
+        lines.push(Line::from(versus));
+    }
 
     if !m.per_fold.is_empty() {
         lines.push(Line::from(vec![

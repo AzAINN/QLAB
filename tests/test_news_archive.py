@@ -111,19 +111,34 @@ def test_item_hash_is_grounding_content_hash():
 
 
 def test_batch_keeps_macro_items_that_grounding_would_drop():
-    samsung = _item("Samsung flags a memory shortage", tickers=())
+    """The archive is fed from the raw fetch, never from the grounded window.
 
-    batch = _batch([samsung])
-    grounded = ground([samsung], as_of=AS_OF, provider="alpaca",
+    Grounding is narrower than the archive by design, so anything it discards
+    would be unanswerable forever if the archive were fed from its output --
+    "what would have made Samsung surge" is exactly that question.
+
+    The untagged-macro case used to be the example here: grounding dropped
+    every untagged record, which starved the desk of the only coverage a
+    cross-asset book gets, and is now kept (see
+    test_untagged_macro_context_survives_the_universe_filter). A record tagged
+    with a ticker the desk does not hold is still dropped by grounding -- it
+    is a claim about someone else's position -- and still archived, which
+    keeps the invariant this test exists for."""
+    samsung = _item("Samsung flags a memory shortage", tickers=())
+    tesla = _item("Tesla cuts prices", tickers=("TSLA",),
+                  url="https://example.invalid/2")
+
+    batch = _batch([samsung, tesla])
+    grounded = ground([samsung, tesla], as_of=AS_OF, provider="alpaca",
                       universe=list(UNIVERSE))
 
-    # The archive keeps it...
-    assert len(batch.rows) == 1
-    assert batch.rows[0].headline == "Samsung flags a memory shortage"
-    assert batch.ticker_edges == ()
-    # ...and grounding deletes it. Feeding the archive from grounded.items is
-    # exactly what makes "what would have made Samsung surge" unanswerable.
-    assert grounded.items == []
+    # The archive keeps both...
+    assert {row.headline for row in batch.rows} == {
+        "Samsung flags a memory shortage", "Tesla cuts prices"}
+    # ...grounding keeps the macro one as context...
+    assert [i.headline for i in grounded.items] == [
+        "Samsung flags a memory shortage"]
+    # ...and still drops the one that is about a position the desk lacks.
     assert grounded.dropped_untagged == 1
 
 

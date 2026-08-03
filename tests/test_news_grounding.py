@@ -65,6 +65,61 @@ def test_records_outside_the_universe_are_dropped():
     assert grounded.dropped_untagged == 1
 
 
+def test_untagged_macro_context_survives_the_universe_filter():
+    """`feed.py` deliberately keeps untagged items -- "macro context, not a
+    mis-tagged holding item" -- because a cross-asset desk gets almost no
+    symbol-tagged coverage. `ground` then dropped every one of them.
+
+    On the live desk that was 46 of 50 stories discarded before Atlas saw
+    anything, and the desk reported a quiet market that was not quiet. It
+    simply was not talking about ACWI or BNDW."""
+    grounded = ground(
+        [_item("About our book", tickers=("ACWI",)),
+         _item("ECB holds rates steady", tickers=(), url="http://x/2"),
+         _item("About something else", tickers=("TSLA",), url="http://x/3")],
+        as_of=AS_OF, provider="test", universe=["ACWI", "BNDW"])
+    headlines = {i.headline for i in grounded.items}
+    assert "ECB holds rates steady" in headlines, (
+        "untagged macro context is the only coverage a cross-asset desk gets")
+    # A record tagged with a ticker the desk does not hold is still dropped:
+    # that is a claim about someone else's position, not macro context.
+    assert "About something else" not in headlines
+    assert grounded.dropped_untagged == 1
+
+
+def test_the_macro_lane_can_be_closed_explicitly_but_never_by_accident():
+    """Some callers want holdings-only evidence. That has to be asked for, so
+    the default cannot silently starve the window the way it did."""
+    items = [_item("About our book", tickers=("ACWI",)),
+             _item("ECB holds rates steady", tickers=(), url="http://x/2")]
+    strict = ground(items, as_of=AS_OF, provider="test",
+                    universe=["ACWI", "BNDW"], keep_macro=False)
+    assert len(strict.items) == 1
+    assert strict.dropped_untagged == 1
+
+
+def test_a_window_that_is_only_macro_says_so_rather_than_looking_specific():
+    """Every record being untagged is a real fact about the window: nothing
+    here bears on a named holding, and a reader must not assume otherwise."""
+    grounded = ground(
+        [_item("ECB holds rates steady", tickers=()),
+         _item("Treasury yields drift", tickers=(), url="http://x/2")],
+        as_of=AS_OF, provider="test", universe=["ACWI", "BNDW"])
+    assert len(grounded.items) == 2
+    assert any("macro" in f for f in grounded.quality_flags), \
+        grounded.quality_flags
+    assert grounded.to_dict()["untagged_count"] == 2
+
+
+def test_the_kept_macro_records_carry_no_tickers_so_nothing_reads_them_as_positions():
+    grounded = ground(
+        [_item("ECB holds rates steady", tickers=())],
+        as_of=AS_OF, provider="test", universe=["ACWI", "BNDW"])
+    assert grounded.items[0].tickers == ()
+    # And no claim invents a ticker for them.
+    assert all(c.tickers == () for c in grounded.claims)
+
+
 # --- corroboration -----------------------------------------------------------
 
 

@@ -77,3 +77,40 @@ reasoner/workforce, live availability probes, `RouteDecision.backend`,
 4. No collision in credentials: B never touched `resolve_alpaca_credentials`;
    A's browser-login fix and B's `AlpacaConsentRequired` describe the same
    state from two surfaces.
+
+---
+
+## ADDENDUM (2026-08-03, post-final-review) — main moved again; amendments
+
+Main is now `1c97b19` (PR #1 `feat/atlas-full-desk`: A's reasoner grew to
+1413 lines with workforce/predictor context blocks; new server surfaces
+`predictor_board_summary/_detail`, `workforce_summary`, `agent_stream`; the
+`_RECORDED_KINDS` parser-vocabulary fix). Branch HEAD `edb2bb5` (+ the
+final-wave commit after). `git merge-tree` now: **five conflicts, seven
+hunks** — reasoner.py (add/add ×2), server.py ×2, atlas.py ×2,
+coordinator.py ×1, the fixture.
+
+**Amended resolutions (supersede §per-file above where they differ):**
+- `atlas.py` (was "take as-is" — dead): h1 imports keep both lines; h2 =
+  `mode = self.mode` (B's extraction) followed by A's `today = …` line.
+- `coordinator.py` — **the one genuinely competing hunk**: take A's
+  `_RECORDED_KINDS` tuple and comment verbatim (B's comment is FALSE — the
+  Claude parser emits `tool_start`/`tool_result`, never `tool`/`agent`; A
+  ships the test that pins it); keep B's five imports above it. Run A's
+  parser-vocabulary test after resolving — it catches a botched merge here.
+- `server.py` h1: A's FOUR methods verbatim, then B's `atlas_context`
+  signature. h2 (new): union `"workforce": self.workforce_summary()` (A) with
+  `"startable_templates": …` (B) — dropping A's key silently blanks PR #1's
+  feature (`_workforce_block` reads it).
+- `reasoner.py`: conclusion stands (concatenate; B's 224 lines →
+  `template_judge.py`) but the rationale is amended — concatenation would
+  PASS A's AST tests (`llm_backends` is not in FORBIDDEN_IMPORTS); the real
+  argument is semantic collision between the two modules' prompt constants.
+  Split on clarity.
+- Fixture: unchanged (PR #1 touched nothing under `clients/`).
+
+**Strategy unchanged**: PR #1 never touches the model seam — B-transport /
+A-catalog stands; PR #1 adds one more consumer (`workforce`) to A's context.
+Note: main independently fixed its own mid-dispatch workforce race (764872f);
+B's final-wave commit fixes B's — the merge reconciles two parallel fixes of
+the same bug.

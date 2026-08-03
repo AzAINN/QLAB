@@ -1012,6 +1012,143 @@ def test_an_unreadable_predictor_board_is_not_reported_as_a_result():
     assert "r9" in prompt
 
 
+# The live board admitted `kernel:angle` -- a quantum angle feature map -- as
+# champion on mean_ic 0.178 against a 0.03 bar. Read alone that is a triumph
+# for the augmented lane. The same run also scored a paired t of 0.237 across
+# five folds, and was negative in two of them. Both facts are computed. Only
+# the flattering one reached Atlas.
+
+
+def _live_shaped_board(**over) -> dict:
+    """The champion row exactly as the live desk produced it."""
+    board = {
+        "status": "ok", "run_id": "r1", "as_of": "2026-07-30",
+        "source": "yfinance", "age_days": 4, "admitted_any": True,
+        "n_obs": 671, "n_folds": 5,
+        "admission": {"mean_ic_strictly_above": 0.03,
+                      "ic_stability_strictly_above": 0.5},
+        "champion": {
+            "model_id": "kernel:angle", "family": "kernel", "variant": "angle",
+            "mean_ic": 0.17838927712223623, "ic_std": 0.33001754801785516,
+            "ic_stability": 0.5405448231273591, "usable": True,
+            "paired_t_vs_baseline": 0.23657619605499555,
+            "wins_vs_baseline": 3,
+            "per_fold": [{"fold": 1, "ic": 0.3243502051983584},
+                         {"fold": 2, "ic": 0.5307406683603674},
+                         {"fold": 3, "ic": 0.470805226661635},
+                         {"fold": 4, "ic": -0.2389876880984952},
+                         {"fold": 5, "ic": -0.19496202651068445}],
+        },
+        "baseline": {"model_id": "ridge:none", "mean_ic": 0.11049604765723449,
+                     "ic_stability": 0.26858064964853823, "usable": False,
+                     "paired_t_vs_baseline": None},
+        "best_delta_vs_baseline": 0.06789322946500173,
+        "ranking": ["kernel:angle", "ridge:none"],
+    }
+    board.update(over)
+    return board
+
+
+def test_an_admitted_model_arrives_with_the_bar_it_cleared():
+    """`usable: true` is a comparison, and the prompt carried the verdict
+    without the threshold. A reader cannot tell a model that cleared the bar
+    by a mile from one that scraped it, so both read as "admitted"."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["predictors"] = _live_shaped_board()
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="is the quantum lane working?",
+                                     spec=spec()).prompt
+    assert "0.03" in prompt, "the mean_ic admission bar"
+    assert "0.5" in prompt, "the ic_stability admission bar"
+    # kernel:angle cleared stability by 0.04. That margin is the whole story.
+    assert "margin" in prompt.lower() or "scraped" in prompt.lower()
+
+
+def test_a_t_statistic_never_arrives_without_the_folds_it_was_computed_over():
+    """0.237 sounds like a number until you learn it came from five folds.
+    A paired t with no n is not evidence, and a model shown one will read it
+    as one."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["predictors"] = _live_shaped_board()
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="is the quantum lane working?",
+                                     spec=spec()).prompt
+    t_at = prompt.find("0.2365")
+    assert t_at > 0, "the paired t reaches the prompt"
+    nearby = prompt[t_at:t_at + 400]
+    assert "5" in nearby and "fold" in nearby.lower(), nearby
+    # And it is named as not significant rather than left to be read as a win.
+    assert "not significant" in prompt.lower() or "cannot distinguish" in prompt.lower()
+
+
+def test_a_champion_that_lost_in_some_folds_says_so():
+    """Three wins in five is the same headline mean_ic as five in five, and a
+    mean over folds that flip sign is not a skill estimate. The live champion
+    was negative in two of its five folds and the prompt said only 0.178."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["predictors"] = _live_shaped_board()
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="is the quantum lane working?",
+                                     spec=spec()).prompt
+    low = prompt.lower()
+    assert "3 of 5" in prompt or "3/5" in prompt, "wins vs the baseline"
+    assert "negative in 2" in low or "2 of 5" in prompt, \
+        "folds where the champion was worse than useless"
+
+
+def test_the_quantum_lane_is_named_as_such_so_the_question_can_be_answered():
+    """An operator asks "is the quantum feature augmentation earning its
+    place". `kernel:angle` answers that only if the prompt says the kernel
+    family IS the augmented lane and ridge:none is the unaugmented control.
+
+    The question deliberately avoids the word, so this cannot pass on the
+    echoed question text -- the *board block* has to say it."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["predictors"] = _live_shaped_board()
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="how is research going?",
+                                     spec=spec()).prompt
+    low = prompt.lower()
+    assert "quantum" in low or "feature map" in low, \
+        "the augmented lane must be identifiable by the name an operator uses"
+    assert "ridge:none" in prompt and "baseline" in low
+
+
+def test_a_board_that_admitted_nothing_is_not_softened_by_the_new_detail():
+    """The added rigour must not turn "nothing was admitted" into a hedge."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["predictors"] = _live_shaped_board(champion=None, admitted_any=False,
+                                           best_delta_vs_baseline=-0.0012)
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="is the quantum lane working?",
+                                     spec=spec()).prompt
+    low = prompt.lower()
+    assert "no model" in low and "admitted" in low
+    assert "no candidate beat the baseline" in low
+
+
+def test_a_board_missing_its_admission_bar_says_so_rather_than_assuming_one():
+    """An older run predates the field. Rendering a default bar would state a
+    threshold the run never used -- worse than saying it is unknown."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    board = _live_shaped_board()
+    board.pop("admission")
+    board.pop("n_folds")
+    ctx["predictors"] = board
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="is the quantum lane working?",
+                                     spec=spec()).prompt
+    assert "0.03" not in prompt, "must not invent a bar the run did not record"
+    low = prompt.lower()
+    assert "not recorded" in low or "unknown" in low
+
+
 def test_recent_decisions_reach_the_prompt_with_unresolved_outcomes_named():
     """A decision whose outcome the reflection loop has not resolved is
     unresolved, never neutral — the same absence rule the panel gets."""

@@ -638,15 +638,51 @@ def _predictors_block(context: Mapping) -> list[str]:
            f"age_days={_fmt_optional(board.get('age_days'), 'absent')} "
            f"source={_fmt_optional(board.get('source'), 'absent')}"]
 
+    # What the lane IS, in the words an operator uses to ask about it. The
+    # board speaks in model_ids; "is the quantum feature augmentation earning
+    # its place" is answerable from `kernel:angle` only if something states
+    # that the kernel and groupwise families ARE that augmentation and that
+    # ridge:none is the unaugmented control they are measured against.
+    out.append(
+        "  the lane: `kernel:*` and `groupwise:*` are the quantum "
+        "feature-map augmented models (angle and ZZ feature maps, simulated "
+        "classically); `ridge:none` is the unaugmented control. A kernel "
+        "model ranking above the baseline is the augmentation earning its "
+        "place; below it, the augmentation is costing accuracy.")
+
+    folds = board.get("n_folds")
+    n_obs = board.get("n_obs")
+    if folds is not None or n_obs is not None:
+        out.append(
+            f"  evaluated on {_fmt_optional(n_obs, 'an unrecorded number of')}"
+            f" observations across "
+            f"{_fmt_optional(folds, 'an unrecorded number of')} purged "
+            f"walk-forward folds")
+
+    admission = board.get("admission")
+    if isinstance(admission, Mapping) and admission:
+        out.append(
+            f"  admission bar: mean_ic strictly above "
+            f"{_fmt_optional(admission.get('mean_ic_strictly_above'), 'unknown')}"
+            f" AND ic_stability strictly above "
+            f"{_fmt_optional(admission.get('ic_stability_strictly_above'), 'unknown')}")
+    else:
+        # An older run predates the field. Rendering today's default would
+        # state a threshold this run never used, which is worse than unknown.
+        out.append("  admission bar: NOT RECORDED by this run. Whether a "
+                   "model is `usable` was decided against a threshold that "
+                   "is unknown here, so the verdict cannot be re-derived.")
+
     baseline = board.get("baseline")
     if isinstance(baseline, Mapping):
-        out.append("  baseline: " + _predictor_line(baseline))
+        out.append("  baseline: " + _predictor_line(baseline, board))
     else:
         out.append("  baseline: absent — nothing to measure a candidate against.")
 
     champion = board.get("champion")
     if isinstance(champion, Mapping):
-        out.append("  champion: " + _predictor_line(champion))
+        out.append("  champion: " + _predictor_line(champion, board))
+        out.extend(_champion_caveats(champion, board))
     else:
         out.append("  champion: no model was admitted. The board ran and "
                    "admitted nothing — that is its result, not a missing value.")
@@ -666,13 +702,84 @@ def _predictors_block(context: Mapping) -> list[str]:
     return out
 
 
-def _predictor_line(entry: Mapping) -> str:
+def _champion_caveats(champion: Mapping, board: Mapping) -> list[str]:
+    """Everything about the champion that its headline mean IC conceals.
+
+    The live desk admitted `kernel:angle` on mean_ic 0.178 against a 0.03 bar,
+    which reads as a decisive win for the augmented lane. The same run scored
+    a paired t of 0.237 and was negative in two of its five folds. Both were
+    computed; only the flattering one was rendered, so an operator asking
+    whether the quantum lane works got a yes the evidence does not support.
+    """
+    out: list[str] = []
+
+    admission = board.get("admission")
+    if isinstance(admission, Mapping):
+        # `usable: true` is a comparison whose threshold was invisible, so a
+        # model that scraped the bar read identically to one that cleared it
+        # by a mile. The margin is the difference between those two readings.
+        for field, bar_key in (("mean_ic", "mean_ic_strictly_above"),
+                               ("ic_stability", "ic_stability_strictly_above")):
+            value, bar = champion.get(field), admission.get(bar_key)
+            if not isinstance(value, (int, float)) or not isinstance(bar, (int, float)):
+                continue
+            margin = value - bar
+            note = "  (scraped the bar)" if 0 < margin < 0.1 * max(abs(bar), 1e-9) else ""
+            out.append(f"    {field} margin over the bar: {margin:+.4f}{note}")
+
+    folds = board.get("n_folds")
+    t_stat = champion.get("paired_t_vs_baseline")
+    if isinstance(t_stat, (int, float)):
+        # A t with no n is not evidence. Five folds cannot separate this
+        # champion from the baseline at any conventional level, and a reader
+        # shown the bare 0.237 will take it for a result.
+        if isinstance(folds, int) and folds > 1:
+            out.append(
+                f"    paired t vs the baseline is {t_stat} over {folds} "
+                f"folds. |t| below ~2 on {folds} folds is not significant: "
+                f"this cannot distinguish the champion from the baseline.")
+        else:
+            out.append(
+                f"    paired t vs the baseline is {t_stat}, over an "
+                f"unrecorded number of folds — a t with no n is not "
+                f"significant evidence, it is a ratio.")
+
+    wins = champion.get("wins_vs_baseline")
+    if isinstance(wins, int) and isinstance(folds, int) and folds:
+        out.append(f"    beat the baseline in {wins} of {folds} folds")
+
+    per_fold = [f.get("ic") for f in (champion.get("per_fold") or ())
+                if isinstance(f, Mapping) and isinstance(f.get("ic"), (int, float))]
+    if per_fold:
+        negative = [ic for ic in per_fold if ic < 0]
+        out.append("    per-fold IC: "
+                   + ", ".join(f"{ic:+.3f}" for ic in per_fold))
+        if negative:
+            # A mean over folds that flip sign is not a skill estimate.
+            out.append(
+                f"    NEGATIVE in {len(negative)} of {len(per_fold)} folds. "
+                f"The mean IC is an average over folds that changed sign, so "
+                f"it is not a stable estimate of skill.")
+    return out
+
+
+def _predictor_line(entry: Mapping, board: Mapping | None = None) -> str:
+    """One model's row.
+
+    `usable` is the board's own admission verdict, so it is stated as such
+    rather than as a property of the model: whether it is admissible depends
+    on a threshold, and the threshold is rendered beside it.
+    """
+    usable = entry.get("usable")
+    verdict = ("ADMITTED" if usable is True else
+               "not admitted" if usable is False else "not established")
     return (f"{_fmt_optional(entry.get('model_id'), 'absent')} "
             f"mean_ic={_fmt_optional(entry.get('mean_ic'), 'absent')} "
+            f"ic_std={_fmt_optional(entry.get('ic_std'), 'absent')} "
             f"ic_stability={_fmt_optional(entry.get('ic_stability'), 'absent')} "
-            f"usable={_fmt_optional(entry.get('usable'), 'not established')} "
+            f"-> {verdict} "
             f"paired_t_vs_baseline="
-            f"{_fmt_optional(entry.get('paired_t_vs_baseline'), 'not computed')}")
+            f"{_fmt_optional(entry.get('paired_t_vs_baseline'), 'not computed (it IS the baseline)')}")
 
 
 def _decisions_block(context: Mapping) -> list[str]:

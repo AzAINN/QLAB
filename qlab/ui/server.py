@@ -1316,12 +1316,32 @@ class UISession:
         def _metrics(entry: dict | None) -> dict | None:
             if not isinstance(entry, dict):
                 return None
+            # Everything the admission verdict was derived from travels with
+            # the verdict. `usable: true` alone is a comparison with its
+            # threshold, its sample size and its dispersion stripped off, and
+            # a reader given only the flattering half of a board reads a
+            # scraped bar as a decisive win.
             return {
                 "model_id": entry.get("model_id"),
+                "family": entry.get("family"),
+                "variant": entry.get("variant"),
                 "mean_ic": entry.get("mean_ic"),
+                "ic_std": entry.get("ic_std"),
                 "ic_stability": entry.get("ic_stability"),
                 "usable": entry.get("usable"),
                 "paired_t_vs_baseline": entry.get("paired_t_vs_baseline"),
+                "wins_vs_baseline": entry.get("wins_vs_baseline"),
+                "delta_mean_ic_vs_baseline": entry.get(
+                    "delta_mean_ic_vs_baseline"),
+                # Per-fold IC is what makes a mean interpretable: folds that
+                # change sign are not a skill estimate, and only the folds
+                # show that. Hyperparameters are dropped — they are a
+                # reproducibility detail carried by the run row, not evidence.
+                "per_fold": [
+                    {"fold": fold.get("fold"), "ic": fold.get("ic")}
+                    for fold in (entry.get("per_fold") or [])
+                    if isinstance(fold, dict)
+                ],
             }
 
         return {
@@ -1331,6 +1351,16 @@ class UISession:
             "source": spec.get("source"),
             "age_days": age_days,
             "admitted_any": bool(board.get("admitted_any")),
+            # The bar a model had to clear, so `usable` can be re-derived
+            # rather than trusted, and the sample it was measured on, so a
+            # t-statistic arrives with its n.
+            "admission": board.get("admission"),
+            "n_obs": board.get("n_obs"),
+            "n_folds": board.get("n_folds"),
+            "target": board.get("target"),
+            "horizon_days": board.get("horizon_days"),
+            "embargo_days": board.get("embargo_days"),
+            "kernels": board.get("kernels"),
             "champion": _metrics(champion),
             "baseline": _metrics(baseline),
             "best_delta_vs_baseline": max(deltas, default=None),

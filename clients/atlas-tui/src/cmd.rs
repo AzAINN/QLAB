@@ -470,9 +470,12 @@ const DESK_MODES: [(&str, &str); 3] = [
 /// nav rail's view labels, which `/view` also answers from a list this client
 /// holds — while which model a surface can run is a fact about the desk, and
 /// that stays the owner's.
-const SURFACES: [&str; 2] = [REASONER, WORKFORCE];
+///
+/// `pub(crate)` because the startup door offers the same two surfaces: one
+/// vocabulary, so the door cannot ask about a surface the line would refuse.
+pub(crate) const SURFACES: [&str; 2] = [REASONER, WORKFORCE];
 const REASONER: &str = "reasoner";
-const WORKFORCE: &str = "workforce";
+pub(crate) const WORKFORCE: &str = "workforce";
 
 /// The reasoner's switch, spelled the way an operator says it out loud. The
 /// owner's route takes a boolean; these are the two words that become one.
@@ -738,7 +741,7 @@ fn chose(surface: &str, choice: ModelChoice) -> Resolved {
 /// Values come off that catalog and nowhere else, so the strip cannot offer a
 /// pair the owner never said it could run. Absent — nothing fetched yet — is an
 /// empty list rather than a guess.
-fn offers(surface: &str, store: &Store) -> Vec<Offer> {
+pub(crate) fn offers(surface: &str, store: &Store) -> Vec<Offer> {
     let Some(catalog) = store.backends() else {
         return Vec::new();
     };
@@ -800,7 +803,12 @@ fn unservable(entry: &crate::model::CatalogEntry, name: &str) -> String {
 }
 
 /// One thing `/model` can be pointed at, or one backend it cannot.
-enum Offer {
+///
+/// `pub(crate)` because the startup door draws the same list. One producer for
+/// both surfaces, so a rule the strip keeps — a down backend shown with the
+/// owner's reason, the workforce offered `claude` alone — cannot hold in one
+/// place and be quietly dropped in the other.
+pub(crate) enum Offer {
     /// A pair the desk said it can run. `value` is what an operator types or
     /// accepts; the pair is what gets sent.
     Runs {
@@ -817,7 +825,7 @@ enum Offer {
 }
 
 impl Offer {
-    fn value(&self) -> &str {
+    pub(crate) fn value(&self) -> &str {
         match self {
             Offer::Runs { value, .. } | Offer::Down { value, .. } => value,
         }
@@ -825,10 +833,22 @@ impl Offer {
 
     /// The owner's sentence about why this cannot be chosen — `None` for one
     /// the desk can run.
-    fn refusal(&self) -> Option<&str> {
+    pub(crate) fn refusal(&self) -> Option<&str> {
         match self {
             Offer::Runs { .. } => None,
             Offer::Down { said, .. } => Some(said),
+        }
+    }
+
+    /// What choosing this sends, or `None` for a backend the desk cannot serve
+    /// — which names no model, so there is no pair to send.
+    pub(crate) fn choice(&self) -> Option<ModelChoice> {
+        match self {
+            Offer::Runs { backend, model, .. } => Some(ModelChoice::Pair {
+                backend: backend.clone(),
+                model: model.clone(),
+            }),
+            Offer::Down { .. } => None,
         }
     }
 

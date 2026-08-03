@@ -78,6 +78,14 @@ async fn main() -> Result<()> {
     // names no host and guess which desk it is about.
     store.base = base.clone();
     store.posture = posture(&args);
+    // Parsed in both builds, and acted on in both: a glass window started with
+    // it is shown the door it cannot answer, which is the honest reply to
+    // "let me choose" from a window that cannot. Before the first frame, so a
+    // run started to choose opens on the question rather than on one frame of a
+    // desk the operator has not answered for yet.
+    if args.iter().any(|a| a == "--pick") {
+        store.pick();
+    }
     // Probe before the screen is taken. The first frame is drawn before any
     // event arrives, and a frame that says "no owner" because it has not asked
     // yet has already lied to the operator once.

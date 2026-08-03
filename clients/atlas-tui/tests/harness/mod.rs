@@ -142,6 +142,27 @@ pub fn body_style_of(buf: &Buffer, needle: &str) -> Style {
     panic!("no rendered cell run matches {needle:?}:\n{buf:?}");
 }
 
+/// A store this test is not asking the startup door about.
+///
+/// The door opens on a desk whose owner **answered and said nothing about which
+/// desk it is** (`ui::door::Door::wanted`), and almost every fixture below is a
+/// snapshot carrying only the sections the view under test reads — so without
+/// this each of them would draw a modal over the frame it is pinning. Settling
+/// is what the first keystroke into the door would do, and it changes nothing
+/// else about the frame.
+///
+/// Deliberately **not** folded into `frame_to_string` or `Client::new`: a
+/// suppression inside the render path would hide a door that opened when it
+/// should not have from every golden in the suite at once. It is a per-fixture
+/// statement, and `tests/golden_door.rs` builds its stores without it.
+///
+/// The captured payload (`fixture_store`) needs none of this: it carries the
+/// `desk_mode` block a real owner always sends, which is the state that opens
+/// no door.
+pub fn no_door(store: &mut Store) {
+    store.settle_door();
+}
+
 /// The captured owner payload, folded in the way the runtime folds it.
 ///
 /// Through `Store::apply` rather than by assigning the field: a fixture that

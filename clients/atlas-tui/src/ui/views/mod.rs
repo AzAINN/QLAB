@@ -144,6 +144,23 @@ impl Views {
         self.settings.wrote(outcome);
     }
 
+    /// Open the one box in this client a credential is typed into.
+    ///
+    /// Named here rather than reached for, so the startup door's third step is
+    /// a call to SETTINGS' own form instead of a second one built beside it —
+    /// see `settings::SettingsView::open_login`. The caller is responsible for
+    /// putting the operator in front of it; this registry does not move the
+    /// nav, because which pane is on screen is the shell's to decide.
+    #[cfg(feature = "operator")]
+    pub fn open_login(&mut self) {
+        self.settings.open_login();
+    }
+
+    /// The default build's half: there is no form to open, because there is no
+    /// `Command::AlpacaLogin` for it to produce and no writer to carry one.
+    #[cfg(not(feature = "operator"))]
+    pub fn open_login(&mut self) {}
+
     /// The modal the active view is showing, if any.
     ///
     /// Routed through the registry rather than reached for on a view, so the

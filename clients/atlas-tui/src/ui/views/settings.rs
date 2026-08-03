@@ -501,6 +501,25 @@ impl SettingsView {
         self.form = None;
     }
 
+    /// Open the login box from somewhere that is not this pane's `a` key.
+    ///
+    /// The startup door's third step is this call and nothing else. There is no
+    /// second form: a credential is typed into exactly one box in this client,
+    /// with one masking rule, one `Drop` that wipes it, one consent flow for
+    /// the owner's question about destroying a stored profile, and one file
+    /// `operator_gate` lets the plaintext be readable in. A door that grew
+    /// fields of its own would be a second answer to every one of those.
+    ///
+    /// It opens rather than toggles: a door that had already handed over and a
+    /// pane the operator opened by hand must not close each other's box.
+    /// Whether it can be *drawn* is still the form's own floor — below it the
+    /// pane refuses in place and the next keystroke retires the box.
+    pub fn open_login(&mut self) {
+        if self.form.is_none() {
+            self.form = Some(Form::default());
+        }
+    }
+
     /// What the owner said about the login this form sent.
     ///
     /// Called from the runtime's one drain point, because the answer arrives on

@@ -150,6 +150,12 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     if store.nav.focus == Focus::Help {
         help::draw(f, area, store.posture, store.help_top);
     }
+    // And over that: the door is the first thing a workstation opens on, and it
+    // claims every key above everything but Ctrl-C, so nothing may be drawn on
+    // top of the question it is asking.
+    if let Some(door) = store.door() {
+        door.draw(f, area, store);
+    }
 
     fx.rects.frame.set(area);
     fx.rects.content.set(content);
@@ -198,24 +204,42 @@ fn stale_for(store: &Store, now: Instant) -> Option<Duration> {
 // this function to check it. That module's header lists what the check
 // cannot see — including why a comment in here may not spell a key variant.
 pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
-    // Before everything, including `q` and the digits. A modal is a blocking
-    // question, and a global key that walked away from it would leave a human
-    // having half-answered a question about an order — worse, `3` and `q` are
-    // both characters the challenge field has to be able to accept.
+    // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at all —
+    // and the reflex every operator has has to work. First, above every surface
+    // that takes the keyboard, because this is the one key that must reach the
+    // runtime whatever is on screen: a field, a modal, or the door the
+    // workstation opens on. It sat under the confirmation box, where the
+    // challenge field read it as a typed `c` — the box's own arm still swallows
+    // every other key it is handed, which is what it is for.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(Command::Quit);
+    }
+    // Then the door, which is up before anything else exists to be walked away
+    // from. Taken out of the store because answering it reads the whole desk;
+    // it goes back unless the keystroke finished it, and a door too big for the
+    // terminal is retired here rather than left armed and invisible — the rule
+    // WORKFORCE's picker and SETTINGS' login form are already held to.
+    if let Some(mut door) = store.take_door() {
+        if !door.fits() {
+            store.settle_door();
+            return None;
+        }
+        let acted = door.on_key(key, store, views);
+        match door.standing() {
+            true => store.keep_door(door),
+            false => store.settle_door(),
+        }
+        return acted;
+    }
+    // Before everything else, including `q` and the digits. A modal is a
+    // blocking question, and a global key that walked away from it would leave
+    // a human having half-answered a question about an order — worse, `3` and
+    // `q` are both characters the challenge field has to be able to accept.
     #[cfg(feature = "operator")]
     if let Some(host) = views.confirm_mut(store.nav.view) {
         if host.showing().is_some() {
             return host.on_key(key);
         }
-    }
-    // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at all —
-    // and the reflex every operator has has to work. Above the typing check
-    // rather than inside the match below it, because this is the one key that
-    // must reach the runtime even while a field owns the keyboard: a text field
-    // that swallowed it would leave the operator's only exit reflex dead in a
-    // fullscreen client.
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return Some(Command::Quit);
     }
     // The two surfaces that take the keyboard outright, before anything a view
     // or the shell claims. Both are things an operator opened deliberately, and

@@ -15,6 +15,7 @@ use crate::model::{
     Policy, RegimePanel, Run, Snapshot, System, Template, Workflow,
 };
 use crate::net::http;
+use crate::ui::door::Door;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -482,6 +483,28 @@ pub struct Store {
     /// Private on purpose: `take_dirty` is the only reader, so the flag cannot
     /// be observed by something that then forgets to clear it.
     dirty: bool,
+    /// The startup door, while it is up.
+    ///
+    /// Here beside `cmd` and `help_top` — *where the operator is looking* —
+    /// rather than in the runtime, which is what keeps a frame a pure function
+    /// of (store, effects, instant) and lets a golden pin the door the way it
+    /// pins every other surface.
+    ///
+    /// Private, with `take_door`/`keep_door`/`settle_door` as the whole
+    /// protocol: the door has to be driven against the desk it is asking about,
+    /// which means being taken out of the store that holds it, and a public
+    /// field would let a caller put one back that had already been answered.
+    door: Option<Door>,
+    /// Whether a door has already been up in this run.
+    ///
+    /// The latch is load-bearing rather than tidy: the store-driven condition —
+    /// an owner that answered and never said which desk this is — stays true
+    /// for as long as that owner is up, so without this the door an operator
+    /// just dismissed would be back on the next poll, for ever.
+    door_settled: bool,
+    /// `--pick`: this run was started to choose, so the door opens whatever the
+    /// desk says.
+    door_forced: bool,
 }
 
 impl Default for Store {
@@ -517,7 +540,71 @@ impl Store {
             refusals: HashMap::new(),
             tick: 0,
             dirty: false,
+            door: None,
+            door_settled: false,
+            door_forced: false,
         }
+    }
+
+    // -- the startup door --------------------------------------------------
+
+    /// `--pick`: ask which desk this is, whatever the owner says it already is.
+    ///
+    /// Called by the composition root before the first frame. It considers the
+    /// door itself rather than only setting a flag, so a run started to choose
+    /// opens on the question instead of on one frame of a desk the operator has
+    /// not answered for yet.
+    pub fn pick(&mut self) {
+        self.door_forced = true;
+        self.consider_door();
+    }
+
+    /// Open the door, if this desk needs one and none has been up yet.
+    ///
+    /// The predicate is [`Door::wanted`], which is where the honesty about what
+    /// the owner can actually report lives.
+    fn consider_door(&mut self) {
+        if self.door_settled || self.door.is_some() {
+            return;
+        }
+        if Door::wanted(
+            self.door_forced,
+            self.last_snapshot_at.is_some(),
+            self.desk_mode().is_none(),
+        ) {
+            self.door = Some(Door::default());
+            self.dirty = true;
+        }
+    }
+
+    /// The door, if one is up.
+    pub fn door(&self) -> Option<&Door> {
+        self.door.as_ref()
+    }
+
+    /// The door, out of the store, so it can be driven against the desk it is
+    /// asking about.
+    ///
+    /// Taken rather than borrowed because a keystroke into the door reads the
+    /// whole store — the pair the owner reports, the credential description,
+    /// the catalog — and `&mut self.door` would hold the store hostage for all
+    /// of it. The caller must put it back with [`Store::keep_door`] or settle
+    /// it with [`Store::settle_door`]; a door dropped on the floor would leave
+    /// the latch clear and `consider_door` free to open a second one.
+    pub fn take_door(&mut self) -> Option<Door> {
+        self.door.take()
+    }
+
+    /// Put a door that is still asking back.
+    pub fn keep_door(&mut self, door: Door) {
+        self.door = Some(door);
+    }
+
+    /// The door is answered. One per run, whatever the owner keeps saying.
+    pub fn settle_door(&mut self) {
+        self.door = None;
+        self.door_settled = true;
+        self.dirty = true;
     }
 
     /// Fold one event in and report what changed on the desk.
@@ -526,6 +613,20 @@ impl Store {
     /// arrival with the same instant it paces the frame against, so an age on
     /// screen and the pacing decision behind it cannot disagree.
     pub fn apply(&mut self, ev: AppEvent, now: Instant) -> Vec<Trigger> {
+        let triggers = self.fold(ev, now);
+        // After the fold and on every event, because what opens the door is
+        // what the fold just learned — the owner's first answer, and whether it
+        // named the desk. Here rather than in the runtime's loop for the reason
+        // invariant 10 keeps teaching this crate: `main.rs` is in no test
+        // binary, and a trigger only the binary could reach is a trigger
+        // nothing can pin.
+        self.consider_door();
+        triggers
+    }
+
+    /// One event into the state. Everything the fold decides; nothing it owes
+    /// afterwards — see `apply`, which is the caller and the only one.
+    fn fold(&mut self, ev: AppEvent, now: Instant) -> Vec<Trigger> {
         match ev {
             AppEvent::Snapshot(snap) => return self.apply_snapshot(*snap, now),
             AppEvent::RegimePanel(panel) => {

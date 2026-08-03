@@ -223,6 +223,36 @@ fn the_plaintext_of_a_typed_credential_is_readable_in_exactly_one_file() {
     assert!(production_files_mentioning("Secret").contains(&"ui/views/settings.rs".to_string()));
 }
 
+#[test]
+fn there_is_one_box_a_credential_is_typed_into_however_it_was_opened() {
+    // The startup door's third step is a *call* to SETTINGS' own login form,
+    // never a second form beside it. Pinned by module path rather than by
+    // behaviour because that is the thing that can go wrong quietly: a door
+    // that grew two masked fields of its own would draw identically, pass every
+    // frame test, and give this crate a second answer to each of the rules the
+    // one form carries — the masking, the `Drop` that wipes the buffers, the
+    // owner's consent question about destroying a stored profile, and the
+    // single file the plaintext is readable in above.
+    for owned in ["Stage::Consent", "field_row", "secret::wipe"] {
+        assert_eq!(
+            production_files_mentioning(owned),
+            vec!["ui/views/settings.rs".to_string()],
+            "{owned} belongs to the one login form"
+        );
+    }
+    // And the door reaches it by name, holding nothing itself: the handoff is
+    // one call, so there is no state in which the door is carrying a pair.
+    let door = source("ui/door.rs");
+    assert!(
+        door.contains("views.open_login()"),
+        "the door opens no form"
+    );
+    assert!(
+        !door.contains("Secret"),
+        "the door holds something it should have handed over"
+    );
+}
+
 // -- the glass build --------------------------------------------------------
 
 #[cfg(not(feature = "operator"))]

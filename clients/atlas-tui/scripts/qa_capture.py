@@ -323,8 +323,12 @@ def run(
             with raw_lock:
                 marks.append((len(raw), arg or "screen"))
         elif verb == "quit":
-            os.write(master, b"q")
-            time.sleep(1.0)
+            # A client that has already gone is not a failed quit — the door
+            # scene's Esc can be the last key an unarmed window needs — but a
+            # write that fails while it is still running is.
+            if child.poll() is None:
+                os.write(master, b"q")
+                time.sleep(1.0)
         else:
             print(f"qa_capture: unknown step {step!r}", file=sys.stderr)
             ok = False

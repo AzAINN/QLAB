@@ -74,8 +74,13 @@ scene() {
   local label="$1" script="$2" more="${3:-}"
   echo
   echo "############ $label"
+  # `--args=` and never `--args "…"`: a value that starts with a dash and
+  # holds no space is read as another flag, and argparse then refuses the
+  # whole invocation. Every armed scene had been dying on that line — the
+  # unarmed pass sends an empty string and never met it, so the QA pass this
+  # script exists to be had run on one posture only.
   "$python" "$capture" "$bin" --port "$port" --size "$size" \
-    --args "$extra${more:+ $more}" --script "$script" || return 1
+    --args="$extra${more:+ $more}" --script "$script" || return 1
 }
 
 failed=0
@@ -107,12 +112,18 @@ scene "refresh" \
 
 # The startup door, which is the one scene that needs no owner at all: `--pick`
 # asks whatever the desk says, and a machine with nothing listening still gets
-# the question. An armed run walks it — the first row, the row that moves on,
-# then Esc out of the models; a glass one is a statement any key dismisses.
-scene "the startup door (--pick)" \
-  "wait:2,shot:the first question,down,down,enter,shot:the second question,\
-esc,shot:the desk behind it,quit" \
-  "--pick" || failed=1
+# the question.
+#
+# Two scripts, because the two postures are two surfaces rather than one with a
+# key greyed out. An armed window is walked — the data row, the row that moves
+# on, then Esc out of the models — while a glass one is a statement, and the
+# first key it is handed dismisses it.
+if [[ -n "$extra" ]]; then
+  door="wait:2,shot:the first question,down,down,enter,shot:the second question,esc,shot:the desk behind it,quit"
+else
+  door="wait:2,shot:the read-only door,key:x,shot:the desk behind it,quit"
+fi
+scene "the startup door (--pick)" "$door" "--pick" || failed=1
 
 echo
 if [[ $failed -eq 0 ]]; then

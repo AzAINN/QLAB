@@ -211,7 +211,7 @@ pub struct SettingsView {
     /// `Card::Desk` is where it opens, which is the card an operator arriving
     /// on this pane is already reading.
     #[cfg(feature = "operator")]
-    focus: Card,
+    focus: std::cell::Cell<Card>,
     /// The view's area at the last frame, published by `draw`.
     ///
     /// Interior mutability for the reason WORKFORCE's height has it: `draw` is
@@ -315,6 +315,19 @@ impl View for SettingsView {
 
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         self.keys(k, store)
+    }
+
+    /// Back on this pane: the keys aim at the desk card again.
+    ///
+    /// The focus is the only thing here that decides what a key *means*, and it
+    /// is invisible from anywhere else on the workstation — so a walk to MODELS
+    /// followed by a trip to BOOK and back left `a` silently dead on a pane
+    /// whose desk card the operator was reading. Every other cursor on this
+    /// client is worth keeping across a switch because it is drawn where it
+    /// was left; this one had no cue at all.
+    fn entered(&self) {
+        #[cfg(feature = "operator")]
+        self.focus.set(Card::Desk);
     }
 
     /// Whether a box on this pane currently owns the keyboard.
@@ -505,7 +518,7 @@ impl SettingsView {
     /// as listening there would be the greyed-affordance claim this client
     /// refuses everywhere.
     fn focused(&self, store: &Store) -> Option<Card> {
-        store.posture.writes().then_some(self.focus)
+        store.posture.writes().then_some(self.focus.get())
     }
 
     /// Every key this pane claims, gated on the posture rather than the build.
@@ -551,18 +564,22 @@ impl SettingsView {
         match k.code {
             KeyCode::Up => self.walk(-1),
             KeyCode::Down => self.walk(1),
-            KeyCode::Char('a') if self.focus == Card::Desk => self.form = Some(Form::default()),
+            KeyCode::Char('a') if self.focus.get() == Card::Desk => {
+                self.form = Some(Form::default())
+            }
             // No client-side gate on there being a login to test. A desk that
             // has never logged in is one of the answers the route is built to
             // give ("no credentials are configured"), and a client that
             // pre-empted it would be a second, drifting copy of the owner's
             // own account of what it can read.
-            KeyCode::Char('t') if self.focus == Card::Desk => return Some(Command::TestAlpaca),
+            KeyCode::Char('t') if self.focus.get() == Card::Desk => {
+                return Some(Command::TestAlpaca)
+            }
             // The catalog on the store is a *reading* and may be an hour old —
             // `/api/tui` refuses to probe under the dispatch lock — so the key
             // that opens the box asks for a fresh one on the way in, exactly as
             // the door's first question does on its transition.
-            KeyCode::Char('m') if self.focus == Card::Models => {
+            KeyCode::Char('m') if self.focus.get() == Card::Models => {
                 self.switch = Some(Switch::opened_on(store));
                 return Some(Command::Backends);
             }
@@ -580,9 +597,10 @@ impl SettingsView {
         let last = Card::ALL.len() - 1;
         let at = Card::ALL
             .iter()
-            .position(|card| *card == self.focus)
+            .position(|card| *card == self.focus.get())
             .unwrap_or(0);
-        self.focus = Card::ALL[at.saturating_add_signed(by).min(last)];
+        self.focus
+            .set(Card::ALL[at.saturating_add_signed(by).min(last)]);
     }
 
     /// The form's own keys. One match over both stages, because they are one
@@ -994,11 +1012,29 @@ impl Switch {
     fn lines(&self, store: &Store, cap: usize) -> Vec<Line<'static>> {
         let t = theme();
         let rows = choices(store);
-        // The same clamp `switch_key` applies, on the read side: a catalog that
-        // shrank between the keystroke and this frame would otherwise draw a
-        // list with no cursor on it at all, which is a box an operator cannot
-        // tell from one that has stopped taking keys.
+        // **The invariant this function keeps: the cursor is on screen.** Both
+        // halves are derived here rather than read off the struct, because the
+        // list is rebuilt from the store on every frame and the store moves
+        // under it — `self.at` and `self.top` are where the walk left them, and
+        // neither is a promise about a catalog that has since changed.
+        //
+        // The cursor is clamped to the list; the window then follows the
+        // cursor. Clamping only the cursor was the bug this pair replaced: a
+        // scrolled box whose catalog shrank kept `top` past the end and drew
+        // `▴ N above` with no offer rows under it at all. And a box opened on a
+        // row past the first window (`opened_on`, on a desk running the
+        // twentieth model) drew no cursor at all, so the next Down jumped the
+        // window and sent a model the operator had never seen.
         let at = self.at.min(rows.len().saturating_sub(1));
+        let top = self
+            .top
+            // Never past the last full window, so a short list is shown whole.
+            .min(rows.len().saturating_sub(cap))
+            // Never below the cursor, and never so far above it that the cursor
+            // falls off the bottom. These two are what make the invariant hold
+            // for any `self.top` at all, including one no keystroke produced.
+            .min(at)
+            .max((at + 1).saturating_sub(cap));
         let mut lines = vec![panel_header("which minds"), Line::from("")];
         if rows.is_empty() {
             // Absence, stated. The catalog is fetched by the key that opened
@@ -1009,13 +1045,13 @@ impl Switch {
                 Style::default().fg(t.text_dim),
             )));
         }
-        if self.top > 0 {
+        if top > 0 {
             lines.push(Line::from(Span::styled(
-                format!(" ▴ {} above", self.top),
+                format!(" ▴ {top} above"),
                 Style::default().fg(t.text_dim),
             )));
         }
-        for (i, row) in rows.iter().enumerate().skip(self.top).take(cap) {
+        for (i, row) in rows.iter().enumerate().skip(top).take(cap) {
             let on = i == at;
             let mut spans = vec![
                 // A glyph and not only a colour: on a 256-colour terminal the
@@ -1046,7 +1082,7 @@ impl Switch {
             }
             lines.push(Line::from(spans));
         }
-        let hidden = rows.len().saturating_sub(self.top + cap);
+        let hidden = rows.len().saturating_sub(top + cap);
         if hidden > 0 {
             lines.push(Line::from(Span::styled(
                 format!(" ▾ {hidden} more"),

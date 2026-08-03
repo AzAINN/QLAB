@@ -65,6 +65,21 @@ pub trait View {
         None
     }
 
+    /// This pane has just come back on screen.
+    ///
+    /// Called by the registry on the first frame after the nav moved here, and
+    /// not on the frames after it. `&self`, because what it resets is where the
+    /// operator is looking rather than anything the owner said — the same
+    /// interior mutability `draw` already uses to publish a rect.
+    ///
+    /// It exists because a cursor an operator cannot see is a cursor they
+    /// cannot correct: SETTINGS routes its keys by which card has focus, and a
+    /// focus left on MODELS across a trip to BOOK makes `a` silently dead on a
+    /// pane whose desk card is the one being read. A default of nothing, since
+    /// every other view either retains something worth keeping across a switch
+    /// (a blotter page, a crosshair) or retains nothing at all.
+    fn entered(&self) {}
+
     /// Whether this view is holding a text field open, and therefore owns every
     /// keystroke — including the ones the shell claims for the whole
     /// workstation.
@@ -109,6 +124,16 @@ pub struct Views {
     workforce: workforce::WorkforceView,
     audit: audit::AuditView,
     settings: settings::SettingsView,
+    /// The pane the last frame drew, so a view can be told it has been
+    /// re-entered.
+    ///
+    /// Here rather than in the shell because the shell changes the nav from
+    /// seven places — three keys, the command line's `/view`, a ticker
+    /// selection, and the startup door's handoff — and an entry hook wired at
+    /// each of them is one refactor away from missing one. The registry sees
+    /// every switch by construction: it is asked to draw exactly one pane per
+    /// frame, and a different answer than last frame *is* the switch.
+    shown: std::cell::Cell<Option<ViewId>>,
 }
 
 impl Default for Views {
@@ -127,6 +152,10 @@ impl Views {
             workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
             settings: settings::SettingsView::default(),
+            // `None`, not the first view: the frame that draws the pane a
+            // client opens on is an entry too, and a pane that assumed it was
+            // already showing would skip its own reset exactly once.
+            shown: std::cell::Cell::new(None),
         }
     }
 
@@ -184,6 +213,12 @@ impl Views {
         fx: &FlashTracker,
         now: Instant,
     ) {
+        // The switch, seen the only place it cannot be missed: the registry is
+        // asked for exactly one pane per frame, so an id that differs from the
+        // last one it drew *is* the operator having moved.
+        if self.shown.replace(Some(id)) != Some(id) {
+            self.at(id).entered();
+        }
         self.at(id).draw(f, area, store, fx, now);
     }
 

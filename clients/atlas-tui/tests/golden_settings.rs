@@ -968,6 +968,29 @@ mod cards {
             press(&mut client, KeyCode::Up);
         }
         assert!(content(&client.frame(120, 36)).contains("a types a login"));
+
+        // Leaving the pane and coming back aims the keys at the desk card
+        // again. The focus is the only thing on this client that decides what a
+        // key *means* while being invisible from everywhere else, so a walk to
+        // MODELS followed by a trip to BOOK left `a` silently dead on a pane
+        // whose desk card the operator was reading — no cue, and nothing to
+        // correct. Every other cursor here is worth keeping because it is drawn
+        // where it was left.
+        focus_on(&mut client, "MODELS");
+        client.press(KeyCode::Char('3'));
+        client.frame(120, 36);
+        client.press(KeyCode::Char('7'));
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("a types a login"),
+            "the focus survived a trip away from the pane:\n{body}"
+        );
+        // Not just the footer: the key it names works.
+        press(&mut client, KeyCode::Char('a'));
+        assert!(
+            content(&client.frame(120, 36)).contains("ALPACA LOGIN"),
+            "the card said `a` and `a` did nothing"
+        );
     }
 
     #[test]
@@ -1044,6 +1067,128 @@ mod cards {
         );
         // And the box stays up, because both surfaces are chosen from it.
         assert!(content(&client.frame(120, 36)).contains("WHICH MINDS"));
+    }
+
+    /// A catalog with more offers than the box shows at once.
+    ///
+    /// Twenty ollama models, which is a real desk with a few families pulled —
+    /// and, crucially, more than the eight-row window: every bug in this pair
+    /// needs `top > 0` to be reachable, and the seven-offer fixture above can
+    /// never produce it. `running` is what the caller asks the desk to be on,
+    /// so the cursor can be opened deep in the list.
+    fn deep_catalog(running: &str) -> Client {
+        let models: Vec<String> = (0..20).map(|i| format!("m{i:02}")).collect();
+        let mut store = super::store_from(&format!(
+            r#"{{"llm": {{"reasoner": {{"backend": "ollama", "model": "{running}"}},
+                          "workforce": {{"backend": "claude", "model": "inherit"}},
+                          "reasoner_enabled": false}}}}"#
+        ));
+        store.posture = Posture::Operator;
+        store.apply(
+            AppEvent::Backends(
+                serde_json::from_value(serde_json::json!({
+                    "backends": [
+                        {"name": "claude", "available": true, "reason": "claude CLI on PATH",
+                         "models": ["inherit"]},
+                        {"name": "ollama", "available": true,
+                         "reason": "ollama at 127.0.0.1:11434, 20 models pulled",
+                         "models": models}
+                    ],
+                    "probed_at": PROBED
+                }))
+                .unwrap(),
+            ),
+            std::time::Instant::now(),
+        );
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('7'));
+        client.frame(120, 36);
+        client
+    }
+
+    /// The row the cursor is on, as an operator sees it.
+    fn under_cursor(client: &Client) -> String {
+        let frame = client.frame(120, 36);
+        line_with(&frame, "▸").trim().to_string()
+    }
+
+    /// The daemon has gone down: two claude offers and two refusals, where
+    /// there were forty-two.
+    fn daemon_down(client: &mut Client) {
+        client.store.apply(
+            AppEvent::Backends(
+                serde_json::from_value(serde_json::json!({
+                    "backends": [
+                        {"name": "claude", "available": true, "reason": "claude CLI on PATH",
+                         "models": ["inherit"]},
+                        {"name": "ollama", "available": false,
+                         "reason": "ollama is not running at http://127.0.0.1:11434 — start \
+                                    it with `ollama serve`",
+                         "models": []}
+                    ],
+                    "probed_at": PROBED
+                }))
+                .unwrap(),
+            ),
+            std::time::Instant::now(),
+        );
+    }
+
+    #[test]
+    fn a_scrolled_box_whose_catalog_shrinks_still_draws_the_offers_it_has() {
+        // The half a seven-offer fixture cannot reach: with the list scrolled,
+        // clamping the *cursor* alone left `top` past the end of the shrunk
+        // list, so the box drew `▴ N above` and **no offer rows at all** — a
+        // window onto nothing, over a desk that plainly had two models.
+        let mut client = deep_catalog("m00");
+        focus_on(&mut client, "MODELS");
+        press(&mut client, KeyCode::Char('m'));
+        for _ in 0..12 {
+            press(&mut client, KeyCode::Down);
+        }
+        let scrolled = content(&client.frame(120, 36));
+        assert!(
+            scrolled.contains("▴"),
+            "the list did not scroll, so this test cannot see the bug:\n{scrolled}"
+        );
+        daemon_down(&mut client);
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("claude:inherit"),
+            "the box windowed onto nothing:\n{body}"
+        );
+        assert!(body.contains("▸"), "the cursor left the box:\n{body}");
+        // A list shorter than the window is shown whole, so nothing claims
+        // there are rows above it either.
+        assert!(!body.contains("▴"), "{body}");
+    }
+
+    #[test]
+    fn a_box_opened_on_a_row_past_the_first_window_opens_with_the_cursor_on_screen() {
+        // `opened_on` puts the cursor on the row the surface is running and
+        // left the window at the top, so a desk running the twentieth model
+        // opened showing rows 0..8 with no ▸ anywhere — and the next Down
+        // jumped the window, which means the operator could send a model they
+        // had never had on screen.
+        let mut client = deep_catalog("m19");
+        focus_on(&mut client, "MODELS");
+        press(&mut client, KeyCode::Char('m'));
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("▸"), "the box opened with no cursor:\n{body}");
+        assert!(
+            under_cursor(&client).contains("m19"),
+            "the cursor is not on what the desk is running: {}",
+            under_cursor(&client)
+        );
+        // And the first Down moves one row rather than a window: the row it
+        // lands on is the next one in the list, which the operator was already
+        // looking at.
+        press(&mut client, KeyCode::Down);
+        assert!(
+            under_cursor(&client).contains("workforce"),
+            "one Down skipped the rest of the list: {}",
+            under_cursor(&client)
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import copy
 import inspect
+from collections.abc import Mapping
 from dataclasses import fields
 
 import pytest
@@ -868,3 +869,318 @@ def test_a_question_of_only_stopwords_has_no_terms():
     assert normalise_terms("what would have made Samsung surge?") == ("samsung", "surge")
     # No subject is not the same as matching nothing.
     assert normalise_terms("what is the") == ()
+
+
+# ---------------------------------------------------------------------------
+# 24. The book — the desk Atlas is asked about
+# ---------------------------------------------------------------------------
+#
+# `atlas_context` composed a portfolio, a predictor board and a decision
+# history, handed them over, and the prompt rendered none of them. An operator
+# asking "how is my book doing" got an answer formed from news and a regime
+# panel by a model that could not see the book. These pin the three blocks and
+# the absence wording each one owes.
+
+def book(*, equity=10_000.0, drawdown=0.0, halted=False, positions=None,
+         weights=None, kill_switch_at=0.15, cash=0.0,
+         broker="simulated_paper", high_water_mark=None) -> dict:
+    """Exactly the payload `SessionOwner.portfolio` returns."""
+    return {
+        "broker": broker,
+        "cash": cash,
+        "equity": equity,
+        "high_water_mark": equity if high_water_mark is None else high_water_mark,
+        "drawdown": drawdown,
+        "kill_switch_at": kill_switch_at,
+        "kill_switch_distance": round(kill_switch_at - drawdown, 4),
+        "halted": halted,
+        "positions": dict(positions or {}),
+        "weights": dict(weights or {}),
+        "target_weights": {},
+    }
+
+
+def position(qty=10.0, price=100.0, unrealized_pl=0.0) -> dict:
+    return {"qty": qty, "price": price, "value": qty * price,
+            "unrealized_pl": unrealized_pl}
+
+
+def test_the_book_reaches_the_prompt_so_a_portfolio_question_can_be_answered():
+    """The operator's whole question is usually about the book. A prompt
+    without it answers a different question than the one that was asked."""
+    ev = evidence(items=[item("h1", headline="Rates hold")])
+    ctx = dict(context())
+    ctx["portfolio"] = book(equity=10_007.58, drawdown=0.5929, halted=True,
+                            high_water_mark=24_584.34,
+                            positions={"SPY": position(unrealized_pl=-412.0)},
+                            weights={"SPY": 0.31})
+    request = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                      question="how is my book doing?",
+                                      spec=spec())
+    assert "THE BOOK" in request.prompt
+    # The three facts that change what an honest answer says.
+    assert "10,007.58" in request.prompt or "10007.58" in request.prompt
+    assert "59.29%" in request.prompt or "0.5929" in request.prompt
+    assert "HALTED" in request.prompt
+    assert "SPY" in request.prompt
+
+
+def test_a_halted_book_says_so_in_words_the_model_cannot_read_past():
+    """A breached kill switch is the single most consequential fact on the
+    desk. Reported as a bare boolean it reads as one field among twelve."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["portfolio"] = book(drawdown=0.5929, halted=True, kill_switch_at=0.15)
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="should we rebalance?",
+                                     spec=spec()).prompt
+    assert "HALTED" in prompt
+    assert "kill switch" in prompt.lower()
+    # Not a suggestion the model may weigh: trading is stopped as a fact.
+    assert "no new risk" in prompt.lower() or "trading is stopped" in prompt.lower()
+
+
+def test_an_absent_book_is_named_rather_than_read_as_a_flat_desk():
+    """Zero equity and no book are different facts. A desk whose valuation
+    failed must never render as a desk that holds nothing."""
+    ev = evidence(items=[item("h1", headline="x")])
+    prompt = compose_reasoner_prompt(context=context(), evidence=ev,
+                                     question="how is my book?",
+                                     spec=spec()).prompt
+    assert "THE BOOK: absent" in prompt
+    assert "not established" in prompt.lower()
+    assert "empty" in prompt.lower() or "flat" in prompt.lower()
+
+
+def test_a_book_that_holds_nothing_is_not_the_same_as_an_absent_one():
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["portfolio"] = book(positions={})
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="what do we hold?",
+                                     spec=spec()).prompt
+    assert "THE BOOK:" in prompt
+    assert "absent" not in prompt.split("THE BOOK:")[1].split("\n")[0]
+    assert "holds no position" in prompt.lower()
+
+
+def test_the_predictor_board_reaches_the_prompt_with_its_own_absence_states():
+    """The board is the desk's forward-looking research evidence and the whole
+    point of the augmented lane. Handed over and never rendered, an operator
+    asking "is the quantum lane working" got an answer from news."""
+    ev = evidence(items=[item("h1", headline="x")])
+
+    never = dict(context())
+    never["predictors"] = {"status": "never_ran"}
+    prompt = compose_reasoner_prompt(context=never, evidence=ev,
+                                     question="is the augmented lane working?",
+                                     spec=spec()).prompt
+    assert "PREDICTOR BOARD" in prompt
+    assert "never been run" in prompt or "never run" in prompt
+
+    # `predictor_board_summary`'s own shape, admitting nothing.
+    ran = dict(context())
+    ran["predictors"] = {
+        "status": "ok", "run_id": "r1", "as_of": "2026-07-31",
+        "source": "synthetic", "age_days": 3, "admitted_any": False,
+        "champion": None,
+        "baseline": {"model_id": "ridge:none", "mean_ic": 0.069,
+                     "ic_stability": 0.31, "usable": True,
+                     "paired_t_vs_baseline": None},
+        "best_delta_vs_baseline": -0.0012,
+        "ranking": ["ridge:none", "kernel:zz"],
+    }
+    prompt = compose_reasoner_prompt(context=ran, evidence=ev,
+                                     question="is the augmented lane working?",
+                                     spec=spec()).prompt
+    assert "ridge:none" in prompt
+    assert "kernel:zz" in prompt
+    # No admitted model is the board's honest answer, not a missing value.
+    assert "no model" in prompt.lower() and "admitted" in prompt.lower()
+    # The board is advisory; the gate never reads it and the prompt says so.
+    assert "advisory" in prompt.lower()
+
+
+def test_an_unreadable_predictor_board_is_not_reported_as_a_result():
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["predictors"] = {"status": "unreadable", "run_id": "r9"}
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="how did the board do?",
+                                     spec=spec()).prompt
+    assert "could not be read" in prompt.lower()
+    assert "r9" in prompt
+
+
+def test_recent_decisions_reach_the_prompt_with_unresolved_outcomes_named():
+    """A decision whose outcome the reflection loop has not resolved is
+    unresolved, never neutral — the same absence rule the panel gets."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["recent_decisions"] = [
+        {"decision_id": "d1", "as_of": "2026-07-30", "kind": "rebalance",
+         "rationale": "turbulence cleared", "outcome": "drawdown widened"},
+        {"decision_id": "d2", "as_of": "2026-07-31", "kind": "hold",
+         "rationale": "record too thin", "outcome": None},
+    ]
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="what did we decide?",
+                                     spec=spec()).prompt
+    assert "RECENT DECISIONS" in prompt
+    assert "turbulence cleared" in prompt
+    assert "drawdown widened" in prompt
+    assert "unresolved" in prompt.lower()
+
+
+def test_the_book_block_never_invites_a_weight_the_guard_would_refuse():
+    """The prompt now shows weights, and the view guard refuses a view that
+    states one. Without an explicit instruction the model reads the block as
+    permission and every answer it gives is refused — so the block must carry
+    the caution in its own words. Proved rather than asserted: the rendered
+    block is fed to the very guard that judges views, and it is refused."""
+    ev = evidence(items=[item("h1", headline="x", tickers=("SPY",))])
+    ctx = dict(context())
+    ctx["portfolio"] = book(positions={"SPY": position()}, weights={"SPY": 0.31})
+    request = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                      question="how is my book?", spec=spec())
+    assert "NEVER state a weight" in request.system
+
+    rendered = request.prompt.split("THE BOOK:")[1].split("\n\n")[0]
+    assert "31.00%" in rendered, (
+        "the test is vacuous unless the block really does carry a weight")
+    with pytest.raises(ReasonerRefused):
+        reasoner._refuse_weights(rendered, ev)
+    # So the block must say, in the prompt, that these are context not vocabulary.
+    assert "do not repeat" in rendered.lower()
+
+
+def test_the_gates_own_verdict_reaches_the_prompt_with_its_refusal_reason():
+    """`gate_facts` is the deterministic layer's verbatim view — what it will
+    and will not permit right now. Dropped from the prompt, the reasoner argued
+    outside its authority and the gate refused it afterwards, so the operator
+    saw a suggestion followed by a refusal instead of one honest answer."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["gate_facts"] = facts(paper_eligible=False)
+    ctx["gate_facts"]["data"] = {
+        "provider": "yfinance", "blocked": False,
+        "eligible_for_paper_proposal": False,
+        "reason": "yfinance is not an execution-grade provider"}
+    ctx["gate_facts"]["pending_approvals"] = 2
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="can we trade?",
+                                     spec=spec()).prompt
+    assert "AUTHORITY" in prompt
+    # The refusal reason is the part an operator can act on.
+    assert "not an execution-grade provider" in prompt
+    assert "yfinance" in prompt
+    assert "2" in prompt.split("AUTHORITY")[1].split("\n\n")[0]
+
+
+def test_an_ineligible_desk_with_no_stated_reason_is_flagged_as_unexplained():
+    """Invariant 4: a refusal always states why. When the gate hands over a
+    bare `false` with no reason, the prompt must not launder it into a fact —
+    it says the refusal is unexplained so the view can say so too."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["gate_facts"] = facts(paper_eligible=False)
+    ctx["gate_facts"]["data"] = {"provider": "alpaca", "blocked": False,
+                                 "eligible_for_paper_proposal": False,
+                                 "reason": None}
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="can we trade?",
+                                     spec=spec()).prompt
+    assert "no reason" in prompt.lower() or "unexplained" in prompt.lower()
+
+
+def test_the_archive_depth_reaches_the_prompt_so_thinness_can_be_named():
+    """An answer drawn from a nine-row archive and one drawn from a nine
+    thousand row archive deserve different confidence, and only the second
+    number tells the model which it is holding."""
+    ev = evidence(items=[item("h1", headline="x")])
+    ctx = dict(context())
+    ctx["archive"] = {"rows": 61, "begins": "2026-07-28T00:00:00Z",
+                      "newest_published": "2026-08-02T00:00:00Z",
+                      "synthetic_rows": 12}
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="what is new?", spec=spec()).prompt
+    assert "ARCHIVE DEPTH" in prompt
+    assert "61" in prompt
+    assert "12" in prompt          # synthetic rows are not citable evidence
+    assert "2026-07-28" in prompt
+
+
+def test_an_empty_archive_is_named_as_empty_rather_than_omitted():
+    ev = evidence(items=[])
+    ctx = dict(context())
+    ctx["archive"] = {"rows": 0, "begins": None, "newest_published": None,
+                      "synthetic_rows": 0}
+    prompt = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                     question="what is new?", spec=spec()).prompt
+    assert "ARCHIVE DEPTH" in prompt
+    assert "holds nothing" in prompt.lower() or "no records" in prompt.lower()
+
+
+def test_every_key_atlas_context_composes_is_rendered_by_the_prompt():
+    """The bug this whole section exists for: `atlas_context` composed ten
+    keys, `compose_reasoner_prompt` rendered six, and the four it dropped were
+    the four an operator actually asks about. Nothing warned. This test fails
+    the moment a new key is added to the context and not to the prompt."""
+    composed = {
+        "as_of", "gate_facts", "mandate", "regime_panel", "qualitative_signals",
+        "news", "supported_claims", "tensions", "archive", "recent_decisions",
+        "predictors", "startable", "portfolio",
+    }
+    # `as_of` rides on the evidence extract, and `news` reaches the model as
+    # the grounded evidence rows themselves; both are rendered, not dropped.
+    rendered_elsewhere = {"as_of", "news"}
+
+    ev = evidence(items=[item("h1", headline="x")])
+    marker = "ZZUNIQUEMARKERZZ"
+    for key in sorted(composed - rendered_elsewhere):
+        ctx = dict(context())
+        ctx["gate_facts"] = facts()
+        ctx["archive"] = {"rows": 3, "begins": None, "newest_published": None,
+                          "synthetic_rows": 0}
+        ctx["portfolio"] = book()
+        ctx["predictors"] = {"status": "never_ran"}
+        ctx["recent_decisions"] = []
+        base = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                       question="q", spec=spec()).prompt
+        # Perturb exactly one key and require the prompt to change.
+        ctx[key] = _perturb(ctx.get(key), marker)
+        after = compose_reasoner_prompt(context=ctx, evidence=ev,
+                                        question="q", spec=spec()).prompt
+        assert after != base, (
+            f"context key {key!r} is composed by atlas_context and reaches the "
+            f"model unchanged — it is being silently dropped")
+
+
+def _perturb(value, marker: str):
+    """Change a context value in a way any honest renderer must show."""
+    if isinstance(value, Mapping):
+        out = dict(value)
+        out["reason"] = marker
+        if "status" in out:
+            out["status"] = "unreadable"
+            out["run_id"] = marker
+        if "rows" in out:
+            out["rows"] = 987654
+        if "equity" in out:
+            out["equity"] = 987654.0
+        if "universe" in out:
+            out["universe"] = [marker]
+        if "readings" in out:
+            out["robust_state"] = marker
+        if "signals" in out:
+            out["item_count"] = 987654
+        if "data" in out:
+            out["data"] = dict(out["data"], reason=marker)
+        return out
+    if isinstance(value, list):
+        return list(value) + [{"decision_id": marker, "as_of": marker,
+                               "kind": marker, "rationale": marker,
+                               "outcome": None, "template_id": marker,
+                               "startable": False, "reason": marker,
+                               "headline": marker}]
+    return marker

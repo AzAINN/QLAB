@@ -453,6 +453,272 @@ def _startable_block(context: Mapping) -> list[str]:
     return out
 
 
+def _authority_block(context: Mapping) -> list[str]:
+    """The deterministic gate's own verdict, carried verbatim.
+
+    `atlas_context` documents this as "carried verbatim so the reasoner can see
+    exactly what the deterministic layer will and will not permit" — and then
+    the prompt dropped it. The reasoner argued outside its authority and the
+    gate refused it afterwards, so the operator read a suggestion followed by
+    a contradiction instead of one honest answer.
+
+    Invariant 4 is enforced here rather than assumed: an ineligible desk whose
+    gate stated no reason is rendered as an UNEXPLAINED refusal, so the view
+    can say the refusal is unexplained instead of inventing a cause for it.
+    """
+    facts = context.get("gate_facts")
+    if not isinstance(facts, Mapping) or not facts:
+        return ["AUTHORITY: the gate's verdict did not reach this prompt. What "
+                "the deterministic layer will permit is not established, so do "
+                "not assert that anything is or is not allowed."]
+
+    data = facts.get("data") if isinstance(facts.get("data"), Mapping) else {}
+    eligible = data.get("eligible_for_paper_proposal")
+    reason = data.get("reason")
+
+    out = ["AUTHORITY — the deterministic gate's own verdict. You reason "
+           "WITHIN this; it is not advice and you cannot argue past it:"]
+    out.append(f"  data provider = {_fmt_optional(data.get('provider'), 'absent')}"
+               f" blocked={_fmt_optional(data.get('blocked'), 'not established')}")
+
+    if eligible:
+        out.append("  paper proposals: ALLOWED by the gate right now.")
+    elif eligible is None:
+        out.append("  paper proposals: the gate did not say. Treat as not "
+                   "established, never as allowed.")
+    elif reason:
+        out.append(f"  paper proposals: REFUSED — {reason}")
+        out.append("  Say this reason plainly if the question bears on it; it "
+                   "is the part the operator can act on.")
+    else:
+        # A refusal with no reason is the invariant-4 violation itself. Named
+        # rather than smoothed over, so the answer can report the gap.
+        out.append("  paper proposals: REFUSED, and the gate stated NO REASON. "
+                   "This refusal is UNEXPLAINED. Do not invent a cause for it; "
+                   "say that the desk is refusing without stating why.")
+
+    out.append(f"  open workflows = "
+               f"{_fmt_optional(facts.get('open_workflows'), 'absent')}"
+               f"; pending approvals = "
+               f"{_fmt_optional(facts.get('pending_approvals'), 'absent')}"
+               f"; order anomaly = "
+               f"{_fmt_optional(facts.get('order_anomaly'), 'not established')}")
+
+    regime = facts.get("regime") if isinstance(facts.get("regime"), Mapping) else {}
+    if regime:
+        out.append(f"  the gate reads regime as "
+                   f"{_fmt_optional(regime.get('robust_state'), 'not established')}"
+                   f" (flip={_fmt_optional(regime.get('flip'), 'not established')})")
+    return out
+
+
+def _archive_depth_block(context: Mapping) -> list[str]:
+    """How much record there is to reason from at all.
+
+    A view drawn from nine rows and one drawn from nine thousand deserve
+    different confidence, and only this number tells the model which it holds.
+    Synthetic rows are counted separately because they are not citable.
+    """
+    stats = context.get("archive")
+    if not isinstance(stats, Mapping) or not stats:
+        return ["ARCHIVE DEPTH: not reported. How much record stands behind "
+                "this extract is unknown."]
+    rows = stats.get("rows")
+    if not rows:
+        return ["ARCHIVE DEPTH: the archive holds nothing — zero records, no "
+                "span. Every answer here is unsupported by the record, and "
+                "that is what to say."]
+    out = [f"ARCHIVE DEPTH: {rows} record(s) in total, spanning "
+           f"{_fmt_optional(stats.get('begins'), 'an unrecorded start')} to "
+           f"{_fmt_optional(stats.get('newest_published'), 'an unrecorded end')}."]
+    synthetic = stats.get("synthetic_rows")
+    if synthetic:
+        out.append(f"  {synthetic} of those are SYNTHETIC and are not citable "
+                   f"evidence. Judge the record's thickness by the rest.")
+    return out
+
+
+def _book_block(context: Mapping) -> list[str]:
+    """The desk itself — equity, drawdown, the kill switch, what is held.
+
+    `atlas_context` composed this from the moment the surface was written and
+    the prompt rendered none of it, so a model asked "how is my book doing"
+    answered from news and a regime panel. The absence rules are the panel's:
+    a book that could not be valued and a book that holds nothing are
+    different facts and must not render alike.
+
+    The weights are shown because a view formed without them is a view about
+    a different desk, and withheld as vocabulary because `_refuse_weights`
+    refuses any view that states one. The caution rides in the block itself:
+    a model that only sees the numbers reads them as permission.
+    """
+    port = context.get("portfolio")
+    if not isinstance(port, Mapping) or not port:
+        return ["THE BOOK: absent — the context carried no portfolio. What the "
+                "desk holds is NOT established. This is a valuation that did "
+                "not arrive, never an empty or flat book; do not answer a "
+                "question about the book from it."]
+
+    equity = port.get("equity")
+    drawdown = port.get("drawdown")
+    halted = bool(port.get("halted"))
+    kill = port.get("kill_switch_at")
+
+    head = (f"THE BOOK: broker={_fmt_optional(port.get('broker'), 'absent')} "
+            f"equity={_fmt_money(equity)} cash={_fmt_money(port.get('cash'))} "
+            f"high_water_mark={_fmt_money(port.get('high_water_mark'))}")
+    out = [head, f"  drawdown from the high-water mark: {_fmt_pct(drawdown)} "
+                 f"(kill switch at {_fmt_pct(kill)})"]
+
+    if halted:
+        # The single most consequential fact on the desk. As a bare boolean it
+        # reads as one field among twelve, so it is stated as a condition.
+        out.append("  *** THE BOOK IS HALTED — the kill switch has fired. "
+                   "Trading is stopped and no new risk may be taken. Any "
+                   "answer that bears on positioning must say this first. ***")
+    elif (isinstance(drawdown, (int, float))
+          and isinstance(kill, (int, float)) and kill > 0):
+        out.append(f"  the kill switch has NOT fired; distance to it: "
+                   f"{_fmt_pct(kill - drawdown)}")
+
+    positions = port.get("positions") or {}
+    weights = port.get("weights") or {}
+    if not positions:
+        out.append("  the book holds no position — it is in cash. This is a "
+                   "book that was read and found flat, not a missing one.")
+    else:
+        out.append("  held (weight, and unrealised P&L in the book's currency):")
+        for ticker in sorted(positions):
+            row = positions[ticker] if isinstance(positions[ticker], Mapping) else {}
+            out.append(
+                f"    - {ticker}: weight={_fmt_pct(weights.get(ticker))} "
+                f"unrealised={_fmt_money(row.get('unrealized_pl'))}")
+
+    targets = port.get("target_weights") or {}
+    if targets:
+        out.append("  the last recorded decision targeted: "
+                   + ", ".join(f"{t} {_fmt_pct(w)}" for t, w in sorted(targets.items())))
+
+    # Stated inside the block, next to the numbers it governs, because the
+    # system prompt's rule is read once and this block is read as data.
+    out.append("  These figures are CONTEXT for your judgment. Do not repeat "
+               "any weight, allocation, notional or position size in your "
+               "answer — describe the book in words. A view that states one "
+               "is refused before the operator ever sees it.")
+    return out
+
+
+def _predictors_block(context: Mapping) -> list[str]:
+    """The predictor board — the desk's forward-looking research evidence.
+
+    Advisory by construction: the gate never reads it, and a champion here is
+    an admitted model, never a promoted one. Rendering it lets an operator ask
+    whether the augmented lane is earning its place and get an answer drawn
+    from the board rather than from the news.
+    """
+    board = context.get("predictors")
+    if not isinstance(board, Mapping) or not board:
+        return ["PREDICTOR BOARD: the context carried none. Whether any "
+                "predictor has been evaluated is not established."]
+
+    status = board.get("status")
+    if status == "never_ran":
+        return ["PREDICTOR BOARD: never been run on this desk. No predictor "
+                "has been evaluated, which is not the same as one having been "
+                "evaluated and rejected."]
+    if status == "unreadable":
+        return [f"PREDICTOR BOARD: the newest board "
+                f"(run_id={_fmt_optional(board.get('run_id'), 'absent')}) "
+                f"could not be read. Its result is unknown, not absent."]
+
+    admitted = board.get("admitted_any")
+    out = [f"PREDICTOR BOARD (advisory — the authority gate never reads it; "
+           f"an admitted model is not a promoted one): "
+           f"as_of={_fmt_optional(board.get('as_of'), 'absent')} "
+           f"age_days={_fmt_optional(board.get('age_days'), 'absent')} "
+           f"source={_fmt_optional(board.get('source'), 'absent')}"]
+
+    baseline = board.get("baseline")
+    if isinstance(baseline, Mapping):
+        out.append("  baseline: " + _predictor_line(baseline))
+    else:
+        out.append("  baseline: absent — nothing to measure a candidate against.")
+
+    champion = board.get("champion")
+    if isinstance(champion, Mapping):
+        out.append("  champion: " + _predictor_line(champion))
+    else:
+        out.append("  champion: no model was admitted. The board ran and "
+                   "admitted nothing — that is its result, not a missing value.")
+
+    if not admitted and isinstance(champion, Mapping):
+        out.append("  admitted_any is false despite a champion row; treat the "
+                   "admission as not established.")
+
+    delta = board.get("best_delta_vs_baseline")
+    if delta is not None:
+        out.append(f"  best delta in mean IC vs the baseline: {delta}"
+                   + ("  (negative — no candidate beat the baseline)"
+                      if isinstance(delta, (int, float)) and delta < 0 else ""))
+    ranking = list(board.get("ranking") or ())
+    if ranking:
+        out.append("  ranked: " + ", ".join(str(m) for m in ranking))
+    return out
+
+
+def _predictor_line(entry: Mapping) -> str:
+    return (f"{_fmt_optional(entry.get('model_id'), 'absent')} "
+            f"mean_ic={_fmt_optional(entry.get('mean_ic'), 'absent')} "
+            f"ic_stability={_fmt_optional(entry.get('ic_stability'), 'absent')} "
+            f"usable={_fmt_optional(entry.get('usable'), 'not established')} "
+            f"paired_t_vs_baseline="
+            f"{_fmt_optional(entry.get('paired_t_vs_baseline'), 'not computed')}")
+
+
+def _decisions_block(context: Mapping) -> list[str]:
+    """What the desk did lately, and what came of it.
+
+    An outcome the reflection loop has not resolved yet is unresolved, never
+    neutral: a model that reads a missing outcome as "it went fine" learns the
+    opposite of the lesson.
+    """
+    decisions = list(context.get("recent_decisions") or ())
+    if not decisions:
+        return ["RECENT DECISIONS: none on the record. The desk has decided "
+                "nothing yet, or its history did not load; either way there "
+                "is no past decision to reason from."]
+    out = ["RECENT DECISIONS (newest first; an absent outcome is UNRESOLVED, "
+           "never a good one):"]
+    for d in decisions:
+        if not isinstance(d, Mapping):
+            out.append(f"  - {d}")
+            continue
+        out.append(f"  - {_fmt_optional(d.get('as_of'), 'undated')} "
+                   f"{_fmt_optional(d.get('kind'), 'unknown kind')}: "
+                   f"{_fmt_optional(d.get('rationale'), 'no rationale recorded')}")
+        outcome = d.get("outcome")
+        out.append(f"    outcome: {outcome}" if outcome else
+                   "    outcome: unresolved — the reflection loop has not "
+                   "scored this decision yet.")
+    return out
+
+
+def _fmt_money(value) -> str:
+    if value is None:
+        return "absent"
+    if isinstance(value, (int, float)):
+        return f"{value:,.2f}"
+    return str(value)
+
+
+def _fmt_pct(value) -> str:
+    if value is None:
+        return "absent"
+    if isinstance(value, (int, float)):
+        return f"{value * 100:.2f}%"
+    return str(value)
+
+
 def compose_reasoner_prompt(*, context: Mapping, evidence: ArchiveEvidence,
                             question: str | None, spec: ModelSpec,
                             max_output_tokens: int = 1200) -> CompletionRequest:
@@ -476,13 +742,27 @@ def compose_reasoner_prompt(*, context: Mapping, evidence: ArchiveEvidence,
     blocks.append("")
     blocks.extend(_mandate_block(context))
     blocks.append("")
+    # What the deterministic layer permits, before any judgment is formed on
+    # top of it: a view argued outside its authority is refused anyway.
+    blocks.extend(_authority_block(context))
+    blocks.append("")
+    # The desk itself, high up: most questions put to Atlas are about the book,
+    # and a view formed from news alone is a view about someone else's desk.
+    blocks.extend(_book_block(context))
+    blocks.append("")
     blocks.extend(_regime_block(context))
     blocks.append("")
     blocks.extend(_signals_block(context))
     blocks.append("")
+    blocks.extend(_archive_depth_block(context))
+    blocks.append("")
     blocks.extend(_evidence_block(evidence))
     blocks.append("")
     blocks.extend(_relevance_block(evidence))
+    blocks.append("")
+    blocks.extend(_predictors_block(context))
+    blocks.append("")
+    blocks.extend(_decisions_block(context))
 
     tensions = list(context.get("tensions") or ())
     if tensions:

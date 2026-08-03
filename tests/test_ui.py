@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from qlab.state.registry import Registry
@@ -2918,7 +2920,10 @@ def test_an_autonomous_start_is_never_reported_as_completed():
     session.atlas.set_mode("research")
     facts = session.atlas_facts(True)
     facts["regime"]["flip"] = True
-    session.atlas.observe(facts, trading_date="2026-07-26")
+    # Today's date, because that is what the production observe tick passes.
+    # A hardcoded past date used to work here and now correctly reads as a
+    # stale trigger, which is the whole point of max_task_age_days.
+    session.atlas.observe(facts, trading_date=date.today().isoformat())
 
     started = session.atlas_run_startable(True, limit=1)
 
@@ -3494,3 +3499,170 @@ def test_the_fold_strip_draws_both_signs_from_one_zero_line():
     assert ".folds .f > i.neg{grid-row:2;align-self:start" in css
     # No margin-based nudging: that was the bug.
     assert "margin-${v<0?'top':'bottom'}" not in html
+
+
+# --- the workforce Atlas manages -------------------------------------------
+#
+# Live gap: /api/atlas/context returned 12 keys and not one of them mentioned
+# a workflow, a step, an agent or a phase. The desk had ten durable workflows
+# on it -- three blocked at the reporter, two interrupted mid-debate, one
+# abandoned by the operator -- each carrying a written step summary saying
+# exactly what happened. Atlas, the manager of that workforce, could not see
+# any of it: asked "why is the desk stuck", it had nothing to answer from.
+
+
+def _stalled_workflow(session):
+    """A workflow that got four phases deep and then blocked, as live ones do.
+
+    The referee phase goes through the real verdict path rather than a stubbed
+    id: the registry refuses a verdict_id that is not a persisted PASS bound to
+    these exact targets, and that refusal is worth honouring in a fixture.
+    """
+    targets = {"SPY": 1.0}
+    wf = session.registry.start_workflow(
+        "portfolio_review", {"as_of": "2026-08-03", "universe": "core",
+                             "goal": "[risk_event] brief the human"})
+    wid = wf["workflow_id"]
+    session.registry.update_workflow_phase(
+        wid, "analyst", "done", "Regime = STRESS (3/5 detectors)",
+        {"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+         "regime": "stress", "regime_summary": "3 of 5 detectors in stress"})
+    session.registry.update_workflow_phase(
+        wid, "challenger", "done", "Challenge SUSTAINED; analyst amended",
+        {"challenger_view": "sustained; window moved 504d -> 756d"})
+    session.registry.update_workflow_phase(
+        wid, "optimizer", "done", "Solved amended objective",
+        {"targets": targets, "algorithm_id": "hrp"})
+    vid = session.registry.log_verdict(
+        "d1", "PASS", ["constraints clean"], targets=targets)
+    session.registry.update_workflow_phase(
+        wid, "referee", "done", f"PASS (verdict {vid})",
+        {"verdict": "PASS", "verdict_id": vid, "targets": targets,
+         "decision_id": "d1"})
+    session.registry.update_workflow_phase(
+        wid, "reporter", "blocked",
+        "Memo compiled and referee PASS reported, but the paper-trade "
+        "preview is blocked: the permit does not allow it",
+        {"recommendation": "hold"})
+    return wid
+
+
+def test_atlas_can_see_the_workforce_it_manages(session):
+    """Atlas is the manager. A manager whose context contains no key naming a
+    workflow, step, phase or agent cannot answer "what is my desk doing"."""
+    wid = _stalled_workflow(session)
+    ctx = session.atlas_context(True)
+    assert "workforce" in ctx, (
+        "the reasoning surface carried regime, news, predictors and decisions "
+        "but nothing about the agents Atlas directs")
+    wf = ctx["workforce"]
+    ids = [w["workflow_id"] for w in wf["workflows"]]
+    assert wid in ids
+
+
+def test_a_stalled_workflow_arrives_with_the_step_that_stalled_it(session):
+    """The live blocked runs each carried a written reason on the failing
+    step. A count of blocked workflows is not that reason; the words are."""
+    wid = _stalled_workflow(session)
+    wf = session.atlas_context(True)["workforce"]
+    row = next(w for w in wf["workflows"] if w["workflow_id"] == wid)
+    assert row["status"] == "blocked"
+    assert row["stalled_at"]["phase"] == "reporter"
+    assert row["stalled_at"]["agent"] == "reporter"
+    assert "permit does not allow it" in row["stalled_at"]["summary"]
+    # And the phases that DID succeed, so Atlas knows how far the work got
+    # rather than only that it stopped.
+    assert row["completed_phases"] == [
+        "analyst", "challenger", "optimizer", "referee"]
+
+
+def test_a_healthy_workflow_is_not_reported_as_stalled(session):
+    """The absence of a stall is stated, not left as a missing key that reads
+    the same as an unknown one."""
+    wf_row = session.registry.start_workflow(
+        "portfolio_review", {"as_of": "2026-08-03", "universe": "core"})
+    wid = wf_row["workflow_id"]
+    session.registry.update_workflow_phase(
+        wid, "analyst", "done", "ok",
+        {"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+         "regime": "calm", "regime_summary": "no detector in stress"})
+    wf = session.atlas_context(True)["workforce"]
+    row = next(w for w in wf["workflows"] if w["workflow_id"] == wid)
+    assert row["stalled_at"] is None
+    assert row["status"] == "running"
+
+
+def test_the_workforce_block_counts_what_needs_a_human(session):
+    """Three blocked runs sitting on a desk is the single most actionable
+    thing about it, and it should not require Atlas to tally a list itself."""
+    _stalled_workflow(session)
+    _stalled_workflow(session)
+    wf = session.atlas_context(True)["workforce"]
+    assert wf["needs_attention"] == 2
+    assert wf["counts"]["blocked"] == 2
+
+
+def test_an_empty_desk_says_so_rather_than_omitting_the_key(session):
+    wf = session.atlas_context(True)["workforce"]
+    assert wf["workflows"] == []
+    assert wf["needs_attention"] == 0
+    assert wf["reason"], "no runs is a fact about the desk, and it is stated"
+
+
+def test_the_workforce_has_a_route_and_a_panel(session):
+    """The desk's ten runs were reachable only through /api/workflows, which
+    no page called: `grep workflow qlab/ui/index.html` returned zero hits."""
+    wid = _stalled_workflow(session)
+    status, payload = handle_api(session, "GET", "/api/workforce", {}, {})
+    assert status == 200
+    assert wid in [w["workflow_id"] for w in payload["workflows"]]
+    assert payload["needs_attention"] == 1
+    html = _INDEX.read_text(encoding="utf-8")
+    assert 'data-nav="workforce"' in html
+    assert 'data-panel="workforce"' in html
+    assert "/api/workforce" in html
+    # The stall reason must be rendered, not just fetched.
+    assert "stalled_at" in html
+
+
+def test_an_abandoned_run_stopped_but_is_not_awaiting_the_operator(session):
+    """A stall box on an abandoned run reads as "act on me", and it is not.
+
+    The live desk showed seven stalled runs against six needing attention: the
+    seventh was abandoned, a decision the operator had already taken. Where it
+    stopped is still worth recording, so the row keeps its `stalled_at` and
+    answers the separate question of whether anyone is waiting on a human.
+    """
+    wid = _stalled_workflow(session)
+    session.registry.abandon_workflow(wid, "operator closed it out")
+    row = [w for w in session.workforce_summary()["workflows"]
+           if w["workflow_id"] == wid][0]
+    assert row["stalled_at"] is not None, "where it stopped is still a fact"
+    assert row["awaiting_operator"] is False
+    assert session.workforce_summary()["needs_attention"] == 0
+    # ...and every row answers the question, so absent never reads as false.
+    assert all("awaiting_operator" in w
+               for w in session.workforce_summary()["workflows"])
+
+
+def test_a_blocked_run_is_awaiting_the_operator(session):
+    wid = _stalled_workflow(session)
+    row = [w for w in session.workforce_summary()["workflows"]
+           if w["workflow_id"] == wid][0]
+    assert row["awaiting_operator"] is True
+
+
+def test_the_stall_box_distinguishes_absent_from_already_decided():
+    """`w.awaiting_operator ? a : b` reads an ABSENT key as false.
+
+    Driving the live page proved this: against an older server that did not
+    send the key, all seven stall boxes rendered "already decided" — the UI
+    inventing an operator decision that had never been taken. The template
+    must test the three states explicitly, so absent renders as unknown.
+    """
+    html = _INDEX.read_text(encoding="utf-8")
+    assert "awaiting_operator===true" in html
+    assert "awaiting_operator===false" in html
+    # ...and the truthiness form must not come back.
+    assert "w.awaiting_operator?" not in html
+    assert "unknown" in html

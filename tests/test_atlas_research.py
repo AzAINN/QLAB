@@ -111,7 +111,10 @@ def test_startable_tasks_explains_refusals_in_observe(reg):
     facts = _facts()
     facts["regime"]["flip"] = True
     atlas.observe(facts, trading_date="2026-07-24")
-    startable = atlas.startable_tasks(facts)
+    # `today` is pinned to the trading date: this test is about the mode gate,
+    # and a hardcoded date that silently ages into "stale" would quietly stop
+    # testing that. (Which is the very bug max_task_age_days exists for.)
+    startable = atlas.startable_tasks(facts, today="2026-07-24")
     assert startable and all(not s["startable"] for s in startable)
     assert any("Observe mode" in s["reason"] for s in startable)
 
@@ -238,7 +241,7 @@ def test_raising_the_mode_recovers_a_task_refused_on_authority(reg):
     # The refusal was about the mode, so the mode is what changes it.
     atlas.set_mode("propose")
     assert any(entry["task_id"] == task_id
-               for entry in atlas.startable_tasks(facts))
+               for entry in atlas.startable_tasks(facts, today="2026-07-24"))
     assert atlas.start_task(task_id, facts)["started"] is True
 
 
@@ -272,7 +275,7 @@ def test_autonomous_tick_runs_only_what_the_mode_permits(reg):
         def atlas_run_startable(self, offline, limit=1):
             facts = self.atlas_facts(offline)
             out = []
-            for c in self.atlas.startable_tasks(facts):
+            for c in self.atlas.startable_tasks(facts, today="2020-01-02"):
                 if c.get("startable") and len(out) < limit:
                     self.atlas.start_task(c["task_id"], facts,
                                           runner=self.atlas_workflow_runner)
@@ -639,3 +642,75 @@ def test_a_coordinator_template_declares_the_graph_it_actually_runs():
         template = get_template(template_id)
         assert "optimizer" in template.phases, (
             f"{template_id} declares a referee without the optimizer it depends on")
+
+
+# --- stale queued tasks ------------------------------------------------------
+
+
+def test_a_queued_task_from_a_past_trading_day_is_not_offered_as_startable(reg):
+    """The live desk had 15 queued `drift_breach` tasks, one per trading day
+    back to 2026-07-19, all still offered as startable work.
+
+    A drift breach is a statement about a portfolio on a given day. Fifteen
+    days later the weights that raised it are gone, so starting it would run a
+    rebalance review against a drift that no longer exists. The dedupe key
+    holds the trading date, so staleness is knowable without a clock guess.
+    """
+    atlas = _atlas(reg)
+    atlas.set_mode("propose")   # so the fresh one clears the mode gate too
+    facts = _facts()
+    facts["portfolio"]["drift"] = 0.9
+    atlas.observe(facts, trading_date="2026-07-19")
+    atlas.observe(facts, trading_date="2026-08-03")
+
+    entries = atlas.startable_tasks(facts, today="2026-08-03")
+    assert len(entries) == 2
+    stale = [e for e in entries if not e["startable"]
+             and "stale" in (e.get("reason") or "")]
+    assert len(stale) == 1, entries
+    # Invariant 4: a refusal states its reason, and the reason names the age.
+    assert "2026-07-19" in stale[0]["reason"]
+    assert stale[0]["stale"] is True
+    # ...and the fresh one is still offered, so the cutoff did not eat the desk.
+    assert [e for e in entries if e["startable"]]
+
+
+def test_staleness_is_judged_against_the_trading_date_not_wall_clock(reg):
+    """`today` is injected, never read from the clock: a deterministic surface
+    that changes answer at midnight UTC cannot be tested or reproduced."""
+    atlas = _atlas(reg)
+    atlas.set_mode("research")
+    facts = _facts()
+    facts["portfolio"]["drift"] = 0.9
+    atlas.observe(facts, trading_date="2026-07-19")
+    fresh = atlas.startable_tasks(facts, today="2026-07-20")
+    assert all(not e.get("stale") for e in fresh), fresh
+    stale = atlas.startable_tasks(facts, today="2026-09-01")
+    assert all(e.get("stale") for e in stale), stale
+
+
+def test_startable_never_answers_stale_and_startable_at_once(reg):
+    """Whatever else is true, a stale entry is never offered as startable."""
+    atlas = _atlas(reg)
+    atlas.set_mode("research")
+    facts = _facts()
+    facts["portfolio"]["drift"] = 0.9
+    for day in ("2026-07-19", "2026-07-27", "2026-08-01", "2026-08-03"):
+        atlas.observe(facts, trading_date=day)
+    for today in ("2026-08-03", "2026-08-10", "2027-01-01"):
+        for entry in atlas.startable_tasks(facts, today=today):
+            assert not (entry.get("stale") and entry.get("startable")), entry
+            # An absence is named: every entry answers the staleness question.
+            assert "stale" in entry
+
+
+def test_a_task_with_an_unparsable_dedupe_key_is_not_silently_called_fresh(reg):
+    """Unknown age must not read the same as known-fresh."""
+    atlas = _atlas(reg)
+    atlas.set_mode("research")
+    reg.create_atlas_task("t-odd", "no-date-here", "drift_breach", {},
+                          "desk_rebalance_review")
+    entry = atlas.startable_tasks(_facts(), today="2026-08-03")[0]
+    assert entry["stale"] is None
+    assert entry["startable"] is False
+    assert "unknown" in entry["reason"].lower()

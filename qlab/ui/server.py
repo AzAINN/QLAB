@@ -29,6 +29,7 @@ GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
 GET  /api/news                   the news window, its coverage, and provenance
 GET  /api/atlas/context          the rich surface a reasoning Atlas forms a view from
 GET  /api/research/predictors    the predictor board: augmented lane vs its control
+GET  /api/workforce              recent runs, how far each got, and where it stopped
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
 POST /api/atlas/escalate         open a bounded debate on a material disagreement
 GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
@@ -99,6 +100,12 @@ from qlab.paths import workspace_root
 
 _HERE = Path(__file__).resolve().parent
 _INDEX = _HERE / "index.html"
+
+# Workflow statuses where a run stopped and a human decision is what unblocks
+# it. `abandoned` is deliberately absent: that run also stopped, but the
+# operator already made the call, so counting it as outstanding work would
+# report a decision back to the person who made it.
+_AWAITING_OPERATOR = frozenset({"blocked", "failed", "interrupted"})
 
 # A ThreadingHTTPServer keeps the browser's parallel/keep-alive connections
 # responsive, but the shared DuckDB connection is not thread-safe, so every
@@ -1516,6 +1523,87 @@ class UISession:
             "caveats": spec.get("caveats") or [],
         }
 
+    def workforce_summary(self, limit: int = 10) -> dict:
+        """What the agents Atlas directs are actually doing, and where they stuck.
+
+        Atlas is the manager of this workforce, and its reasoning surface used
+        to carry regime, news, predictors and decisions but not one key naming
+        a workflow, step, phase or agent. Asked "why is my desk stuck", it had
+        nothing to answer from — while the registry held ten runs whose failing
+        steps each carried a written sentence saying exactly what stopped them.
+
+        A count of blocked runs is not that answer. The words on the step are,
+        so the stalled step travels whole: its phase, the agent that owns it,
+        and the summary that agent wrote.
+        """
+        rows = self.registry.list_workflows(limit=limit)
+        # A step is terminal-bad if it stopped the run rather than finishing
+        # it. Reported in the order the DAG runs, so "how far did it get" is
+        # answerable, not just "did it finish".
+        stuck_states = ("blocked", "failed", "interrupted", "abandoned")
+        out: list[dict] = []
+        counts: dict[str, int] = {}
+        for wf in rows:
+            status = str(wf.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+            steps = wf.get("steps") or []
+            stalled = next(
+                (s for s in steps if s.get("status") in stuck_states), None)
+            request = wf.get("request")
+            request = request if isinstance(request, dict) else {}
+            out.append({
+                "workflow_id": wf.get("workflow_id"),
+                "kind": wf.get("kind"),
+                "status": status,
+                "current_phase": wf.get("current_phase"),
+                "as_of": request.get("as_of"),
+                "goal": str(request.get("goal") or "")[:300] or None,
+                "created_at": str(wf.get("created_at") or "") or None,
+                "updated_at": str(wf.get("updated_at") or "") or None,
+                "completed_phases": [
+                    s.get("phase") for s in steps if s.get("status") == "done"],
+                "pending_phases": [
+                    s.get("phase") for s in steps
+                    if s.get("status") in ("queued", "working")],
+                # None means "nothing stopped it", stated rather than left as
+                # a missing key that reads the same as an unknown one.
+                "stalled_at": None if stalled is None else {
+                    "phase": stalled.get("phase"),
+                    "agent": stalled.get("agent"),
+                    "status": stalled.get("status"),
+                    # The whole sentence the agent wrote. Truncating this to a
+                    # label is what made the desk unreadable in the first place.
+                    "summary": str(stalled.get("summary") or "") or None,
+                },
+                # Separate from `stalled_at`, because "it stopped here" and
+                # "someone is waiting on you" are different claims. An
+                # abandoned run stopped at a phase and is nobody's to-do: the
+                # operator already decided. Showing the two as one thing put
+                # seven amber boxes on a desk with six live decisions.
+                "awaiting_operator": status in _AWAITING_OPERATOR,
+            })
+
+        # Resumable is the registry's own word for it, so this stays a fact
+        # rather than a judgment about what the operator ought to do.
+        needs = sum(1 for w in out if w["awaiting_operator"])
+        if not out:
+            reason = ("no workflow has ever run on this desk; the workforce "
+                      "is idle because nothing has been started, which is not "
+                      "the same as it having run and produced nothing")
+        elif needs:
+            reason = (f"{needs} of {len(out)} recent runs stopped short and "
+                      f"can be resumed or abandoned; each carries the step "
+                      f"that stopped it and the words its agent wrote")
+        else:
+            reason = (f"all {len(out)} recent runs reached a terminal state "
+                      f"without stalling")
+        return {
+            "workflows": out,
+            "counts": counts,
+            "needs_attention": needs,
+            "reason": reason,
+        }
+
     def atlas_context(self, offline: bool) -> dict:
         """The rich, abstract surface a reasoning Atlas forms a view from.
 
@@ -1625,6 +1713,9 @@ class UISession:
             # so the reasoner argues within its authority rather than proposing
             # work that will simply be refused.
             "startable": self.atlas.startable_tasks(facts),
+            # The agents Atlas actually directs. Without this the manager
+            # could describe the market in detail and not its own desk.
+            "workforce": self.workforce_summary(),
         }
 
     def atlas_facts(self, offline: bool) -> dict:
@@ -3160,6 +3251,11 @@ def handle_api(session: UISession, method: str, path: str,
         # /api/lab/research.predictor_board, which is owner-gated: reading the
         # evidence and producing it are different authorities.
         return 200, session.predictor_board_detail()
+
+    if method == "GET" and path == "/api/workforce":
+        # The same summary Atlas reasons from, so the operator and the manager
+        # are looking at one picture of the desk rather than two.
+        return 200, session.workforce_summary()
 
     if method == "GET" and path == "/api/atlas/read":
         # refresh=1 recomposes here; the HTTP handler intercepts that case

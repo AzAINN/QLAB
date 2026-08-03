@@ -440,16 +440,101 @@ def _startable_block(context: Mapping) -> list[str]:
         return ["QUEUED WORK: no task is waiting. That is not the same as "
                 "nothing being startable.", f"  {tail}"]
     out = ["QUEUED WORK (the gate's own verdict on each waiting task):"]
+    # Identical verdicts collapse. The live desk queued fifteen drift_breach
+    # tasks carrying one sentence between them, which spent fifteen lines of
+    # prompt to say one thing and buried the single startable template in the
+    # repetition. Grouping keeps the count, because "fifteen days running"
+    # is itself information a manager should act on.
+    groups: dict[tuple, list] = {}
     for entry in startable:
         if isinstance(entry, Mapping):
-            allowed = entry.get("startable")
-            out.append(
-                f"  - {entry.get('template_id')}: "
-                f"{'startable' if allowed else 'refused'}"
-                + (f" — {entry.get('reason')}" if entry.get("reason") else ""))
+            key = (entry.get("template_id"), bool(entry.get("startable")),
+                   entry.get("reason"))
         else:
-            out.append(f"  - {entry}")
+            key = ("", False, str(entry))
+        groups.setdefault(key, []).append(entry)
+    for (template_id, allowed, reason), members in groups.items():
+        count = f" [×{len(members)} waiting]" if len(members) > 1 else ""
+        out.append(
+            f"  - {template_id}: {'startable' if allowed else 'refused'}"
+            + count + (f" — {reason}" if reason else ""))
     out.append(f"  {tail}")
+    return out
+
+
+def _workforce_block(context: Mapping) -> list[str]:
+    """The agents Atlas directs, and where each run actually stopped.
+
+    Atlas is the manager of this workforce. Its prompt described the market in
+    detail and never named a single one of the desk's own runs, so "why is the
+    desk stuck" had no answer in it — while the registry held ten workflows
+    whose failing steps each carried a written sentence saying exactly what
+    stopped them.
+
+    A tally is not that answer. The tally says three are blocked; the sentence
+    says the paper-trade preview was refused by the permit. Only one of those
+    tells Atlas what to do next, so the stalled step's own words travel whole.
+    """
+    wf = context.get("workforce")
+    if not isinstance(wf, Mapping):
+        # An older context that predates this key. Absent is not idle, and
+        # saying "no runs" here would invent a fact about the desk.
+        return ["WORKFORCE: not reported by this context (unknown, which is "
+                "NOT the same as idle). Do not claim the desk is quiet."]
+
+    rows = list(wf.get("workflows") or ())
+    reason = str(wf.get("reason") or "").strip()
+    if not rows:
+        return ["WORKFORCE: no run is on the desk."
+                + (f" {reason}" if reason else "")]
+
+    needs = wf.get("needs_attention")
+    counts = wf.get("counts")
+    head = f"WORKFORCE ({len(rows)} recent runs"
+    if isinstance(counts, Mapping) and counts:
+        tally = ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
+        head += f": {tally}"
+    head += "):"
+    out = [head]
+    if reason:
+        out.append(f"  {reason}")
+
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        wid = row.get("workflow_id")
+        out.append(
+            f"  - {wid} {row.get('kind')} status={row.get('status')} "
+            f"phase={_fmt_optional(row.get('current_phase'), 'none')}")
+        goal = str(row.get("goal") or "").strip()
+        if goal:
+            out.append(f"      goal: {goal}")
+        done = list(row.get("completed_phases") or ())
+        if done:
+            # How far the work got, not only that it stopped: a run that died
+            # at the reporter has four phases of usable output behind it.
+            out.append(f"      completed: {', '.join(str(p) for p in done)}")
+        pending = list(row.get("pending_phases") or ())
+        if pending:
+            out.append(
+                f"      never ran: {', '.join(str(p) for p in pending)}")
+        stalled = row.get("stalled_at")
+        if isinstance(stalled, Mapping):
+            out.append(
+                f"      STOPPED at {stalled.get('phase')} "
+                f"(agent {stalled.get('agent')}, {stalled.get('status')})")
+            summary = str(stalled.get("summary") or "").strip()
+            # The agent's own sentence, verbatim. Summarising it back down to
+            # a label is exactly the loss this block exists to undo.
+            out.append(f'      it wrote: "{summary}"' if summary else
+                       "      it recorded no reason, which is itself a gap")
+        else:
+            out.append("      nothing has stopped this run")
+
+    if isinstance(needs, int) and needs:
+        out.append(
+            f"  {needs} run(s) stopped short. Resuming or abandoning one is "
+            f"an operator act; you may recommend it, and you may not do it.")
     return out
 
 
@@ -897,6 +982,11 @@ def compose_reasoner_prompt(*, context: Mapping, evidence: ArchiveEvidence,
 
     blocks.append("")
     blocks.extend(_startable_block(context))
+    blocks.append("")
+    # The desk's own agents, last: the queued-work block says what MAY start,
+    # and this says what already did and where it stopped. Read together they
+    # are the manager's picture of its own workforce.
+    blocks.extend(_workforce_block(context))
 
     prompt = "\n".join(blocks)
 

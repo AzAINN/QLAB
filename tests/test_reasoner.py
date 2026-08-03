@@ -24,6 +24,7 @@ from qlab.operator.reasoner import (ANSWER_MAX_COLS, ANSWER_MAX_LINES,
                                     ArchiveEvidence, ParsedView, ReasonerRefused,
                                     answer, compose_reasoner_prompt, fit_answer,
                                     offer_for, parse_view, reason)
+from qlab.operator.reasoner import _startable_block
 from qlab.operator.templates import TEMPLATES, TemplateNotAllowed
 
 AS_OF = "2026-07-31T09:00:00+00:00"
@@ -1346,3 +1347,122 @@ def test_the_linear_kernel_is_not_sold_to_atlas_as_quantum():
     assert "kernel:linear" in low and "no" in low
     # The maps themselves are what must be named.
     assert "angle" in low and "zz" in low
+
+
+# --- the workforce block ----------------------------------------------------
+#
+# Live gap: /api/atlas/context carried 12 keys and none named a workflow,
+# step, phase or agent, while the desk held ten runs -- three blocked at the
+# reporter, two interrupted mid-debate, one abandoned. Adding the key to the
+# context is only half of it; a key the prompt never renders is a key Atlas
+# cannot read.
+
+
+def _workforce(**over):
+    wf = {
+        "workflows": [{
+            "workflow_id": "368e327533734c03", "kind": "portfolio_review",
+            "status": "blocked", "current_phase": "reporter",
+            "as_of": "2026-08-03",
+            "goal": "[risk_event] Analyze a drawdown-tier event",
+            "completed_phases": ["analyst", "challenger", "optimizer",
+                                 "referee"],
+            "pending_phases": [],
+            "stalled_at": {
+                "phase": "reporter", "agent": "reporter", "status": "blocked",
+                "summary": "Memo compiled and referee PASS reported, but the "
+                           "paper-trade preview is blocked: the permit does "
+                           "not allow it"},
+        }],
+        "counts": {"blocked": 1},
+        "needs_attention": 1,
+        "reason": "1 of 1 recent runs stopped short and can be resumed",
+    }
+    wf.update(over)
+    return wf
+
+
+def test_the_prompt_tells_atlas_what_its_own_agents_are_doing():
+    """Atlas manages this workforce. The prompt named the market in detail and
+    never named the desk's own runs."""
+    ctx = dict(context())
+    ctx["workforce"] = _workforce()
+    prompt = compose_reasoner_prompt(context=ctx,
+                                     evidence=evidence(items=[item("h1", headline="x")]),
+                                     question="why is the desk stuck?",
+                                     spec=spec()).prompt
+    assert "368e327533734c03" in prompt
+    assert "portfolio_review" in prompt
+
+
+def test_a_stalled_run_carries_the_agent_s_own_words_into_the_prompt():
+    """"3 blocked" is a tally. The sentence the reporter wrote is the reason,
+    and it is the only thing that answers "why"."""
+    ctx = dict(context())
+    ctx["workforce"] = _workforce()
+    prompt = compose_reasoner_prompt(context=ctx,
+                                     evidence=evidence(items=[item("h1", headline="x")]),
+                                     question="why is the desk stuck?",
+                                     spec=spec()).prompt
+    assert "the permit does not allow it" in prompt
+    assert "reporter" in prompt
+    # How far it got, not only that it stopped.
+    assert "referee" in prompt
+
+
+def test_an_idle_workforce_is_stated_rather_than_left_blank():
+    """A desk with no runs must not read like a desk whose runs are unknown."""
+    ctx = dict(context())
+    ctx["workforce"] = _workforce(
+        workflows=[], counts={}, needs_attention=0,
+        reason="no workflow has ever run on this desk")
+    prompt = compose_reasoner_prompt(context=ctx,
+                                     evidence=evidence(items=[item("h1", headline="x")]),
+                                     question="what is running?",
+                                     spec=spec()).prompt
+    assert "no workflow has ever run on this desk" in prompt
+
+
+def test_a_missing_workforce_key_is_named_as_unknown_not_as_idle():
+    """An older context without the key at all is an ABSENT reading, and the
+    difference from "idle" is the whole point of invariant 4."""
+    ctx = dict(context())
+    ctx.pop("workforce", None)
+    prompt = compose_reasoner_prompt(context=ctx,
+                                     evidence=evidence(items=[item("h1", headline="x")]),
+                                     question="what is running?",
+                                     spec=spec()).prompt
+    low = prompt.lower()
+    assert "workforce" in low
+    assert "not reported" in low or "unknown" in low or "absent" in low
+
+
+def test_the_queued_block_groups_repeats_instead_of_reciting_them():
+    """The live desk queued fifteen `drift_breach` tasks carrying one sentence.
+
+    Reciting them cost fifteen lines of prompt to say one thing, and buried any
+    other queued template in the repetition. Identical refusals collapse to one
+    line that states how many there were.
+    """
+    startable = [{"task_id": f"t{i}", "template_id": "desk_rebalance_review",
+                  "startable": False, "stale": True,
+                  "reason": "stale: this trigger fired on 2026-07-19"}
+                 for i in range(15)]
+    startable.append({"task_id": "fresh", "template_id": "regime_review",
+                      "startable": True, "stale": False})
+    text = "\n".join(_startable_block({"startable": startable}))
+    assert text.count("desk_rebalance_review") == 1
+    assert "15" in text
+    # The one startable template must not be lost in the crowd.
+    assert "regime_review" in text
+    assert "startable" in text
+
+
+def test_the_queued_block_says_stale_rather_than_implying_a_permit_problem():
+    """A stale task's refusal must not read as 'widen the permit and it runs'."""
+    text = "\n".join(_startable_block({"startable": [
+        {"task_id": "t1", "template_id": "desk_rebalance_review",
+         "startable": False, "stale": True, "age_days": 15,
+         "reason": "stale: this trigger fired on 2026-07-19, 15 days before"}]}))
+    assert "stale" in text.lower()
+    assert "2026-07-19" in text

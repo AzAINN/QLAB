@@ -337,19 +337,26 @@ def test_only_the_reasoner_surface_can_be_switched_off(owner, monkeypatch):
 
 
 def test_the_chosen_workforce_backend_reaches_the_coordinator(owner, monkeypatch):
-    """A config nothing consults is a config nothing honours (invariant 10)."""
-    _, before = owner.coordinator_driver.available()
-    assert "role harness" not in before        # today's desk, whatever PATH says
+    """A config nothing consults is a config nothing honours (invariant 10).
+
+    Exactly one backend has a role harness. A desk pointed at any other one
+    keeps working — the graph runs on claude — and says so in the row every
+    dispatched role records, rather than refusing the desk or pretending the
+    choice was honoured.
+    """
+    from qlab.operator.coordinator import no_role_harness_reason
 
     _install(monkeypatch, up=_fake("up", served=("granite3.3:8b",)))
     owner.set_llm_config("workforce", "up", "granite3.3:8b")
 
     # Re-read on access, like fast mode: the choice binds on the next dispatch
     # rather than the next owner restart.
-    ok, reason = owner.coordinator_driver.available()
-    assert ok is False
-    assert "role harness is not built" in reason
-    assert "workforce runs on claude" in reason
+    driver = owner.coordinator_driver
+    assert driver.workforce.backend == "up"
+    plan = driver._plan(("moments-analyst",))
+    assert plan.backend == "claude"
+    assert plan.pinned_reason == no_role_harness_reason("up")
+    assert "workforce runs on claude" in plan.pinned_reason
 
 
 def test_a_desk_restart_keeps_the_chosen_models(owner, monkeypatch):

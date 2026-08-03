@@ -8,6 +8,9 @@ from qlab.core.llm_config import SurfaceModel
 from qlab.operator.model_routing import (
     DEEP,
     NONE,
+    NOTE_CHEAPENED,
+    NOTE_PINNED,
+    NOTE_UNREGISTERED,
     QUICK,
     REQUIRED_CLAUDE_ROLES,
     ROLE_TIER,
@@ -15,6 +18,7 @@ from qlab.operator.model_routing import (
     degrades_result,
     record_invocation,
     resolve_route,
+    route_event_kind,
     tier_for,
 )
 from qlab.state.registry import Registry
@@ -109,24 +113,100 @@ def test_invocation_is_audited_with_tier_and_resolved_model(reg):
     assert "model.route_resolved" in events
 
 
-def test_fallback_emits_a_distinct_event(reg):
+def test_an_unregistered_role_says_so_instead_of_claiming_a_fallback(reg):
+    """A note is not a fallback, and the event kind is where that got lost.
+
+    `news-analyst` is a registered workflow phase with no tier entry, so every
+    route it took published `model.fallback_used` although nothing fell back.
+    The kind is now selected from a structural note, never from the prose.
+    """
     decision = resolve_route("mystery-role")
+    assert decision.notes == (NOTE_UNREGISTERED,)
+    assert route_event_kind(decision) == "model.route_unregistered"
     record_invocation(reg, decision, status="ok")
     events = [e["kind"] for e in reg.read_events(10)]
-    assert "model.fallback_used" in events
+    assert "model.route_unregistered" in events
+    assert "model.fallback_used" not in events
+    # The reason still rides the row: an unregistered role may be a caller's
+    # typo, and losing the sentence would be the opposite mistake.
     assert reg.list_model_invocations()[0]["fallback_reason"]
 
 
-def test_required_deep_role_on_a_fallback_degrades_the_result():
-    # The referee must run deep; a fallback cannot be read as a clean PASS.
+def test_an_exemption_that_fired_is_not_a_cheapened_route(reg):
+    """The pin is the mechanism that PROTECTS the gate, not damage to it."""
+    workforce = SurfaceModel("ollama", "granite3.3:8b")
+    pinned = resolve_route("referee", workforce=workforce)
+    assert pinned.notes == (NOTE_PINNED,)
+    assert route_event_kind(pinned) == "model.route_pinned"
+    # Reading the pin as degradation inverted its meaning: a referee that kept
+    # its deep tier on claude is the clean case, not the degraded one.
+    assert degrades_result("referee", pinned) is False
+
+    exempt = resolve_route("referee", fast=True)
+    assert exempt.notes == (NOTE_PINNED,)
+    assert route_event_kind(exempt) == "model.route_pinned"
+    assert degrades_result("referee", exempt) is False
+
+    record_invocation(reg, pinned)
+    assert [e["kind"] for e in reg.read_events(10)
+            if e["kind"].startswith("model.")] == ["model.route_pinned"]
+
+
+def test_fast_mode_is_the_route_that_genuinely_cheapens_and_says_so(reg):
+    """The one real fallback in the module, and it used to be the silent one.
+
+    Fast mode swaps a judgment role's deep tier for the quick model. That is a
+    cheapened answer by construction, and it published `model.route_resolved`
+    with no note at all while the exempt referee beside it published
+    `model.fallback_used`. Both readings were backwards.
+    """
+    cheap = resolve_route("moments-analyst", fast=True)
+    assert cheap.notes == (NOTE_CHEAPENED,)
+    assert route_event_kind(cheap) == "model.fallback_used"
+    assert "the deep tier was served by" in cheap.fallback_reason
+    # The note is new; the routing is not. Only the audit reading changed.
+    assert cheap.resolved_model == "sonnet"
+    assert resolve_route("moments-analyst").notes == ()
+
+    record_invocation(reg, cheap)
+    assert "model.fallback_used" in [e["kind"] for e in reg.read_events(10)]
+
+
+def test_required_deep_role_that_is_actually_cheapened_degrades_the_result():
+    from dataclasses import replace
+
+    # The referee must run deep; a route that did not give it that cannot be
+    # read as a clean PASS.
     good = resolve_route("referee")
     assert degrades_result("referee", good) is False
-    degraded = resolve_route("referee")
-    degraded = type(degraded)(**{**degraded.to_dict(),
-                                 "fallback_reason": "deep tier unavailable"})
+    degraded = replace(good, notes=(NOTE_CHEAPENED,),
+                       fallback_reason="deep tier unavailable")
     assert degrades_result("referee", degraded) is True
+    # A role that never reached its deep tier at all is degraded too.
+    assert degrades_result("referee", resolve_route("mystery-role")) is True
     # A mechanical role is not subject to the deep requirement.
     assert degrades_result("reporter", resolve_route("reporter")) is False
+
+
+def test_news_analyst_stays_unregistered_because_a_tier_would_move_it():
+    """Why the tier gap is closed by the kind and not by a ROLE_TIER entry.
+
+    `news-analyst` is a judgment role, so DEEP is the semantically right tier —
+    and registering it there provably changes what fast mode resolves for a
+    live role. The honesty therefore rides the event kind, which changes no
+    routing at all; the tier decision is a separate, evidenced one.
+    """
+    from qlab.operator import model_routing as routing
+
+    assert "news-analyst" not in ROLE_TIER
+    for fast in (False, True):
+        # Unregistered today: `inherit`, in both modes.
+        assert resolve_route("news-analyst", fast=fast).resolved_model == "inherit"
+    # Registered DEEP tomorrow: `sonnet` under fast mode. That is a live
+    # routing change, which this task is not the place to make.
+    assert routing.FAST_TIER_MODEL[DEEP] != "inherit"
+    assert route_event_kind(
+        resolve_route("news-analyst")) == "model.route_unregistered"
 
 
 # ---------------------------------------------------------------------------

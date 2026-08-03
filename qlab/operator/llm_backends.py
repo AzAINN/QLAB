@@ -117,7 +117,7 @@ def _redact(text: str) -> str:
     return _USERINFO.sub("…@", text)
 
 
-def _head(raw: bytes | str) -> str:
+def _head(raw: bytes | str, limit: int = _HEAD_CHARS) -> str:
     """A bounded, single-line, REDACTED excerpt of what a backend said back.
 
     The module's one gate for foreign text, and it is a gate in two senses:
@@ -146,14 +146,19 @@ def _head(raw: bytes | str) -> str:
     coverage of the URL is ``_safe_url``'s job; this is the floor under it, and
     the route test asserts on the whole payload rather than on ``@`` alone
     because of precisely that gap.
+
+    ``limit`` is the one thing a caller may vary, and it is a rendering choice
+    rather than a safety one: an audit row can afford more of a coordinator's
+    reasoning than of a tool's name. Collapsing and redaction are not
+    negotiable at any budget, which is the whole point of there being one gate.
     """
     text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
     # Collapse first: a control character is whitespace to `split()`, so the
     # redaction below scans exactly the string that will be shown, and a
     # credential broken by one cannot slip past on a technicality.
     text = _redact(" ".join(text.split()))
-    if len(text) > _HEAD_CHARS:
-        return text[:_HEAD_CHARS] + "…"
+    if len(text) > limit:
+        return text[:limit] + "…"
     return text
 
 

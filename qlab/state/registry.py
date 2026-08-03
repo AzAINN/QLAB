@@ -1268,7 +1268,7 @@ class Registry:
                 self.con.execute(
                     "INSERT INTO workflow_steps VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     [f"{workflow_id}:{phase}", workflow_id, seq, phase,
-                     _agent_for_phase(phase), "queued", "", _j({}), None, None, now],
+                     agent_for_phase(phase), "queued", "", _j({}), None, None, now],
                 )
         self.record_event("workflow_started", {
             "workflow_id": workflow_id, "kind": kind, "phases": list(phases),
@@ -1594,7 +1594,7 @@ class Registry:
                 [workflow_status, current_phase, _j(result), now, workflow_id],
             )
         self.record_event("workflow_phase", {
-            "workflow_id": workflow_id, "phase": phase, "agent": _agent_for_phase(phase),
+            "workflow_id": workflow_id, "phase": phase, "agent": agent_for_phase(phase),
             "status": status, "summary": summary[:240],
         })
         return self.get_workflow(workflow_id) or {}
@@ -2137,7 +2137,13 @@ class Registry:
         return out
 
 
-def _agent_for_phase(phase: str) -> str:
+def agent_for_phase(phase: str) -> str:
+    """The role that owns ``phase``. The one place the mapping lives.
+
+    Public because the coordinator driver has to resolve a model route per
+    role, and a template declares phases: a second copy of this map is how
+    "which agent runs this phase" would come to have two answers.
+    """
     # The judge is the referee agent wearing its comparison hat: it holds the
     # evidence-reading tools and no solver, which is exactly a judge's kit.
     return {

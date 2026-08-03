@@ -29,13 +29,11 @@ Four rules the module is built around:
   constant re-declared here, and the runner holds no execution tool because the
   piloted role holds none. Swapping the provider must not move the gate.
 
-**Scaffolding clock (invariant 10).** Nothing in production constructs a runner
-yet: E3 is the caller, and until it lands the coordinator still refuses a
-non-claude workforce with ``coordinator.no_role_harness_reason``. That refusal
-is the thing keeping this honest — a harness that existed *and* was reachable
-without the driver consulting a route per role would be the second execution
-path this repo has spent three tasks refusing to grow. E3 wires it or this
-module is dead code, and it should be deleted rather than kept.
+**The caller (invariant 10, clock closed).** ``CoordinatorDriver`` constructs a
+runner for a dispatch whose graph is one role, on a desk whose workforce names
+this backend; every other graph is walked by the Claude coordinator, and the
+driver records why. Nothing else may construct one — a second caller would be
+the second execution path this repo has spent four tasks refusing to grow.
 """
 
 from __future__ import annotations
@@ -594,18 +592,20 @@ class OllamaRoleRunner:
 
         Everything here is untrusted: a model's prose, an owner's body, a
         daemon's error — and a tool *name*, which is the model's string too and
-        which ``CoordinatorDriver._on_event`` copies whole into a durable event
-        row. An earlier version gated ``text`` alone and reasoned that the other
+        which ``CoordinatorDriver._on_event`` copies into a durable event row.
+        An earlier version gated ``text`` alone and reasoned that the other
         fields were safe; a ten-thousand-character tool name went straight
         through it. So the gate is per-EVENT, not per-field: nothing leaves this
-        method without passing ``llm_backends._head``, including ``agent``,
-        which this module composes itself and which therefore needs no bounding
-        — deciding that per field is the habit that let the last one out.
+        method without passing ``llm_backends._head``, including ``agent`` and
+        ``kind``, which this module composes itself and which therefore need no
+        bounding — deciding that per field is the habit that let the last one
+        out, and a docstring saying "every field" while one field was exempt is
+        the same habit wearing a promise.
         """
         if self.on_event is None:
             return
         try:
-            self.on_event(RoleEvent(kind=kind, text=_head(text),
+            self.on_event(RoleEvent(kind=_head(kind), text=_head(text),
                                     tool=_head(tool), agent=_head(agent)))
         except Exception as exc:
             self.render_failures.append(_head(f"{kind}: {exc!r}"))

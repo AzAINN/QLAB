@@ -185,14 +185,14 @@ def test_a_tool_call_reaches_the_owner_and_a_plain_reply_ends_the_session(owner)
     row = registry.list_model_invocations()[0]
     assert row["backend"] == "ollama" and row["role"] == "news-analyst"
     assert row["resolved_model"] == "granite3.3:8b" and row["status"] == "ok"
-    # Recorded here because it is a fact about the desk, not about this run:
-    # `news-analyst` is a registered workflow phase (templates.news_read) with
-    # no entry in ROLE_TIER, so every route it takes — on claude too — carries
-    # a fallback_reason and is published as `model.fallback_used`. Nothing
-    # fell back. E3 owns the split between "an exemption fired" and "the role
-    # was cheapened"; this pins the current, misleading reading so the split
-    # cannot be made without seeing it.
+    # A fact about the desk, not about this run: `news-analyst` is a registered
+    # workflow phase (templates.news_read) with no entry in ROLE_TIER, so every
+    # route it takes carries a note. E2 pinned that note being published as
+    # `model.fallback_used` although nothing fell back; E3 split the kind off a
+    # structural note, and this is the honest half of that pin.
     assert row["fallback_reason"] == "role 'news-analyst' has no configured tier"
+    kinds = [e["kind"] for e in registry.read_events(20)]
+    assert "model.route_unregistered" in kinds and "model.fallback_used" not in kinds
 
 
 # -- the authority boundary ---------------------------------------------------

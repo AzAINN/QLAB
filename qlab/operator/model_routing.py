@@ -87,6 +87,29 @@ def tier_model_for(*, fast: bool = False) -> dict[str, str]:
     return dict(FAST_TIER_MODEL if fast else TIER_MODEL)
 
 
+# Why a decision carries a note — as a fact, not as prose. Three different
+# things wrote one sentence into ``fallback_reason`` and the audit read all
+# three as "a fallback was used", which is the opposite of true for two of
+# them: an exemption fired is the mechanism PROTECTING a role, and an
+# unregistered role has not fallen back from anything. Only the third is a
+# genuinely cheaper answer. Selecting an event kind by sniffing the sentence
+# would rebuild the same conflation one layer up, so the classification lives
+# here and the sentence stays purely operator-facing.
+NOTE_PINNED = "pinned"              # an exemption fired; the tier was kept
+NOTE_UNREGISTERED = "unregistered"  # no configured tier for this role
+NOTE_CHEAPENED = "cheapened"        # served below the tier that was asked for
+
+# The event each note publishes under. Cheapened first: it is the only one that
+# endangers a result, so when a route is both cheapened and noted for something
+# else, the louder fact is the one the bus carries.
+ROUTE_EVENT_KIND: dict[str, str] = {
+    NOTE_CHEAPENED: "model.fallback_used",
+    NOTE_PINNED: "model.route_pinned",
+    NOTE_UNREGISTERED: "model.route_unregistered",
+}
+_KIND_ORDER = (NOTE_CHEAPENED, NOTE_PINNED, NOTE_UNREGISTERED)
+
+
 @dataclass(frozen=True)
 class RouteDecision:
     role: str
@@ -96,13 +119,37 @@ class RouteDecision:
     source: str
     backend: str = CLAUDE_BACKEND
     fallback_reason: str | None = None
+    # Zero or more of the NOTE_* facts above. ``fallback_reason`` is the same
+    # information as a sentence for a human; this is the half code reads.
+    notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {
             "role": self.role, "requested_tier": self.requested_tier,
             "resolved_model": self.resolved_model, "source": self.source,
             "backend": self.backend, "fallback_reason": self.fallback_reason,
+            "notes": list(self.notes),
         }
+
+
+def route_event_kind(decision: RouteDecision) -> str:
+    """The audit event ``decision`` publishes under.
+
+    Selected from the notes, never from the reason, so "nothing fell back"
+    cannot be published as ``model.fallback_used`` again.
+    """
+    for note in _KIND_ORDER:
+        if note in decision.notes:
+            return ROUTE_EVENT_KIND[note]
+    return "model.route_resolved"
+
+
+def _noted(decision: RouteDecision, note: str, reason: str) -> RouteDecision:
+    """Add one note and its sentence, keeping any the decision already had."""
+    return replace(
+        decision, notes=decision.notes + (note,),
+        fallback_reason=(f"{decision.fallback_reason}; {reason}"
+                         if decision.fallback_reason else reason))
 
 
 def tier_for(role: str) -> str:
@@ -129,7 +176,8 @@ def pinned_to_claude_reason(role: str, backend: str) -> str:
 def resolve_route(role: str, *, source_model: str | None = None,
                   tier_model: dict[str, str] | None = None,
                   fast: bool = False,
-                  workforce: SurfaceModel | None = None) -> RouteDecision:
+                  workforce: SurfaceModel | None = None,
+                  pinned_reason: str = "") -> RouteDecision:
     """Resolve which backend and model serve ``role``.
 
     ``workforce`` is the operator's configured surface (``llm_config``). A role
@@ -143,24 +191,36 @@ def resolve_route(role: str, *, source_model: str | None = None,
     mechanism fast mode uses for REQUIRED_DEEP_ROLES — the exemption is
     recorded, never silent, so an audit shows what the config asked for.
 
+    ``pinned_reason`` is a caller's own pin: a session that cannot serve this
+    role on the configured backend says why, and the role then resolves exactly
+    as a claude-pinned one does. The driver uses it for a multi-phase graph,
+    which only the Claude coordinator can walk — the same recorded-not-silent
+    mechanism REQUIRED_CLAUDE_ROLES uses, extended to a capability the harness
+    does not have rather than a policy the desk sets.
+
     With no configured backend (or a Claude one), this is today's routing
     unchanged: the model still comes from the tier, because ``inherit`` already
     follows the operator's own session.
     """
     backend = workforce.backend if workforce is not None else CLAUDE_BACKEND
-    if backend != CLAUDE_BACKEND and role not in REQUIRED_CLAUDE_ROLES:
+    if (backend != CLAUDE_BACKEND and not pinned_reason
+            and role not in REQUIRED_CLAUDE_ROLES):
+        unknown = _unknown_role_reason(role)
         return RouteDecision(role=role, requested_tier=tier_for(role),
                              resolved_model=workforce.model, backend=backend,
                              source="workforce_config",
-                             fallback_reason=_unknown_role_reason(role))
+                             fallback_reason=unknown,
+                             notes=(NOTE_UNREGISTERED,) if unknown else ())
     decision = _claude_route(role, source_model=source_model,
                              tier_model=tier_model, fast=fast)
     if backend == CLAUDE_BACKEND:
         return decision
-    pinned = pinned_to_claude_reason(role, backend)
-    return replace(decision, fallback_reason=(
-        f"{decision.fallback_reason}; {pinned}" if decision.fallback_reason
-        else pinned))
+    # The role's own pin outranks the caller's: "the approval gate does not
+    # move" is true on every desk, while a graph-shaped reason is true of one
+    # dispatch.
+    return _noted(decision, NOTE_PINNED,
+                  pinned_to_claude_reason(role, backend)
+                  if role in REQUIRED_CLAUDE_ROLES else pinned_reason)
 
 
 def _claude_route(role: str, *, source_model: str | None,
@@ -183,18 +243,32 @@ def _claude_route(role: str, *, source_model: str | None,
     tier = tier_for(role)
     if fast and role in REQUIRED_DEEP_ROLES:
         # Recorded as a deliberate exemption, so an audit shows fast mode was on
-        # and shows which role refused it.
+        # and shows which role refused it. NOT a fallback: the role kept its
+        # tier, which is the opposite of being served below it.
         return RouteDecision(
             role=role, requested_tier=tier,
             resolved_model=TIER_MODEL[tier], source="tier",
-            fallback_reason="fast mode does not apply to a required-deep role")
+            fallback_reason="fast mode does not apply to a required-deep role",
+            notes=(NOTE_PINNED,))
     if role not in ROLE_TIER:
         return RouteDecision(role=role, requested_tier=NONE,
                              resolved_model=models.get(NONE, "inherit"),
                              source="unknown_role",
-                             fallback_reason=_unknown_role_reason(role))
-    return RouteDecision(role=role, requested_tier=tier,
-                         resolved_model=models[tier], source="tier")
+                             fallback_reason=_unknown_role_reason(role),
+                             notes=(NOTE_UNREGISTERED,))
+    decision = RouteDecision(role=role, requested_tier=tier,
+                             resolved_model=models[tier], source="tier")
+    if tier == DEEP and models[tier] != TIER_MODEL[DEEP]:
+        # The module's one genuinely cheapened route, and it was the silent
+        # one: a judgment role served by the quick model published
+        # `model.route_resolved` with no note while the exempt referee beside
+        # it published `model.fallback_used`. Keyed on the resolved model
+        # rather than on the `fast` flag so a custom `tier_model` that swaps
+        # the deep tier for a cheaper model is read the same way.
+        return _noted(decision, NOTE_CHEAPENED,
+                      f"the deep tier was served by {models[tier]!r} rather "
+                      f"than {TIER_MODEL[DEEP]!r}")
+    return decision
 
 
 def record_invocation(registry, decision: RouteDecision, *,
@@ -224,18 +298,21 @@ def record_invocation(registry, decision: RouteDecision, *,
         "tokens": tokens,
         "fallback_reason": decision.fallback_reason,
     })
-    registry.record_event(
-        "model.fallback_used" if decision.fallback_reason else "model.route_resolved",
-        decision.to_dict())
+    registry.record_event(route_event_kind(decision), decision.to_dict())
     return invocation_id
 
 
 def degrades_result(role: str, decision: RouteDecision) -> bool:
     """True when ``role`` required its deep tier but did not get it.
 
-    A required deep role served by a fallback cannot be reported as a clean
+    A required deep role served below its tier cannot be reported as a clean
     PASS — the caller must mark the phase degraded.
+
+    Reading *any* note as degradation inverted the meaning of the two that
+    exist to protect the gate: a referee pinned to claude, or exempted from
+    fast mode, got exactly the tier it required, and calling that degraded
+    would make the safeguard indistinguishable from the damage.
     """
     if role not in REQUIRED_DEEP_ROLES:
         return False
-    return decision.requested_tier != DEEP or decision.fallback_reason is not None
+    return decision.requested_tier != DEEP or NOTE_CHEAPENED in decision.notes

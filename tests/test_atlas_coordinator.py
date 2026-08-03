@@ -50,6 +50,12 @@ class Event:
         self.kind, self.text, self.agent, self.tool = kind, text, agent, tool
 
 
+# The roles behind `desk_rebalance_review`'s phases — a graph no one-role
+# harness can walk, and the one that carries the referee.
+_REVIEW_ROLES = ("moments-analyst", "challenger", "optimization-runner",
+                 "referee", "reporter")
+
+
 @pytest.fixture(autouse=True)
 def _clear_instances(monkeypatch):
     FakeSession.instances = []
@@ -58,6 +64,9 @@ def _clear_instances(monkeypatch):
     monkeypatch.setattr("qlab.tui.claude.resolve_claude_executable",
                         lambda: "/usr/bin/claude")
     monkeypatch.delenv("QLAB_ATLAS_DRIVE", raising=False)
+    # `fast` defaults to the operator's env, and a desk with it set would route
+    # the judgment roles differently — the recorded rows below would change.
+    monkeypatch.delenv("QLAB_LLM_FAST", raising=False)
 
 
 def _driver(reg=None, **over):
@@ -153,21 +162,49 @@ def test_a_session_that_refuses_to_start_surfaces_its_own_error():
     assert driver.busy is False
 
 
-def test_a_workforce_backend_with_no_role_harness_is_refused_by_name():
-    # The picker accepts a non-claude workforce (it is persisted config), and
-    # nothing yet knows how to run the five roles on one. Offered, not hidden —
-    # and refused with the reason rather than silently downgraded to claude.
+def test_an_ollama_workforce_composes_both_halves_of_its_readiness():
+    """E1 refused every non-claude workforce by name. The harness exists now.
+
+    What replaces that refusal is a composition, not a blanket yes: the
+    configured provider has to be up for the graphs it serves, and the CLI has
+    to be there for the ones it does not — the referee's, and every multi-role
+    graph's.
+    """
     from qlab.core.llm_config import SurfaceModel
 
-    driver = _driver(workforce=SurfaceModel("ollama", "granite3.3:8b"))
-    ok, reason = driver.available()
-    assert ok is False
-    assert reason == ("the Ollama role harness is not built — "
-                      "workforce runs on claude")
-    assert driver.drive("wf-1", "goal")["driving"] is False
-    assert FakeSession.instances == []      # nothing was spawned to find out
-    # The desk as it is keeps working.
-    assert _driver(workforce=SurfaceModel("claude", "inherit")).available()[0]
+    ollama = SurfaceModel("ollama", "granite3.3:8b")
+    up = _driver(workforce=ollama, backend_status=lambda name: (True, "ok"))
+    assert up.available() == (True, "")
+
+    down = _driver(workforce=ollama,
+                   backend_status=lambda name: (False, "ollama is not running"))
+    ok, reason = down.available()
+    # The backend's own sentence, not a second opinion composed here.
+    assert ok is False and reason == "ollama is not running"
+
+    # The other side of that comparison: a backend with no harness cannot stop
+    # a graph it was never going to serve. Refusing the desk because an
+    # unusable provider is down would be a refusal about nothing.
+    no_harness = _driver(workforce=SurfaceModel("up", "m-1"),
+                         backend_status=lambda name: (False, "up is not running"))
+    assert no_harness.available() == (True, "")
+
+
+def test_claude_roles_still_need_the_cli_under_an_ollama_workforce(monkeypatch):
+    from qlab.core.llm_config import SurfaceModel
+
+    monkeypatch.setattr("qlab.tui.claude.resolve_claude_executable", lambda: None)
+    driver = _driver(workforce=SurfaceModel("ollama", "granite3.3:8b"),
+                     backend_status=lambda name: (True, "ok"))
+    # A multi-role graph is walked by the claude coordinator whatever the
+    # workforce says, so its absence is still a refusal.
+    ok, reason = driver.available(roles=_REVIEW_ROLES)
+    assert ok is False and "not on PATH" in reason
+    # A one-role graph the harness serves does not need the CLI at all.
+    assert driver.available(roles=("news-analyst",)) == (True, "")
+    # With no graph named the question is the desk's general readiness, and the
+    # honest answer is the strict one: this desk runs both kinds of graph.
+    assert driver.available()[0] is False
 
 
 def test_a_raising_factory_is_reported_not_propagated():
@@ -207,8 +244,56 @@ def test_recorded_event_text_is_bounded():
         FakeSession.instances[-1].on_event(Event("text", "x" * 5000))
         payloads = [e for e in reg.read_events(50)
                     if e["kind"] == "atlas_coordinator_event"]
-        # The event bus is a durable table, not a scrollback buffer.
-        assert len(payloads[0]["payload"]["text"]) == 1000
+        text = payloads[0]["payload"]["text"]
+        # The event bus is a durable table, not a scrollback buffer — and a
+        # truncated audit row has to say that it was truncated.
+        assert len(text) == 1001 and text.endswith("…")
+    finally:
+        reg.close()
+
+
+def test_the_sink_bounds_every_field_it_copies_from_either_producer():
+    """A 10KB tool name reached a durable row whole, from both directions.
+
+    The producers were fixed one at a time and the sink bounded nothing at
+    all, which is the same per-call-site reasoning that leaked a credential
+    twice: the gate belongs where the row is written, and at each boundary a
+    foreign string crosses.
+    """
+    from qlab.operator.ollama_role import RoleEvent
+    from qlab.tui.claude import parse_stream_line
+    import json as _json
+
+    reg = Registry(":memory:")
+    try:
+        driver = _driver(reg)
+        driver.drive("wf-1", "goal")
+        sink = FakeSession.instances[-1].on_event
+
+        # Producer 1: the Claude stream. The tool name and the subagent name
+        # are both the model's strings, bounded where they are parsed.
+        line = _json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "n" * 10_000,
+                                     "input": {"subagent_type": "a" * 10_000}}]},
+        })
+        claude_event = parse_stream_line(line)[0]
+        assert len(claude_event.tool) < 300, "bounded at its own boundary"
+        assert len(claude_event.agent) < 300
+
+        # Producer 2: the ollama harness, whose own gate is already per-event.
+        sink(RoleEvent(kind="tool", text="t", tool="n" * 10_000, agent="x"))
+        # And the sink's own gate, which is what makes the row safe whatever a
+        # producer forgot: every field it copies, not the ones it reasoned about.
+        sink(Event("text", text="t" * 10_000, tool="n" * 10_000,
+                   agent="a" * 10_000))
+
+        rows = [e["payload"] for e in reg.read_events(50)
+                if e["kind"] == "atlas_coordinator_event"]
+        assert len(rows) == 2
+        for row in rows:
+            for field in ("event_kind", "agent", "tool", "workflow_id"):
+                assert len(row[field]) < 300, f"{field} rode the row unbounded"
     finally:
         reg.close()
 
@@ -239,6 +324,158 @@ def test_stop_on_an_idle_driver_is_safe_and_still_closes_it():
     out = driver.drive("wf-1", "goal")
     assert out["driving"] is False and "shutting down" in out["reason"]
     assert FakeSession.instances == []
+
+
+# --- mixed pipelines ----------------------------------------------------------
+#
+# Mixing is per dispatch, not per phase. The driver builds ONE session for the
+# graph it is handed: a one-role graph (templates.news_read) is served by the
+# ollama harness, and every multi-role graph is walked by the claude
+# coordinator, because nothing else speaks the phase protocol. The referee is
+# therefore claude twice over — by the route's own pin, and by the fact that
+# every graph carrying it is a graph the harness cannot walk.
+
+
+class StubDaemon:
+    """An Ollama backend that answers once, with a conclusion and no tools.
+
+    `hold` makes the turn block until the test releases it, so a stop can land
+    while a turn is genuinely in flight instead of racing it.
+    """
+
+    def __init__(self, answer="the record is thin; nothing primary.", hold=False):
+        import threading
+
+        self.answer = answer
+        self.asked: list[dict] = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        if not hold:
+            self.release.set()
+
+    def chat(self, messages, model, *, tools=None, timeout=None):
+        self.asked.append({"model": model, "tools": tools})
+        self.entered.set()
+        assert self.release.wait(timeout=5), "the turn was never released"
+        return {"role": "assistant", "content": self.answer}
+
+
+def _ollama_driver(reg, daemon, **over):
+    from qlab.core.llm_config import SurfaceModel
+
+    kwargs = dict(workforce=SurfaceModel("ollama", "granite3.3:8b"),
+                  registry=reg, backend_factory=lambda name: daemon,
+                  backend_status=lambda name: (True, "ok"))
+    kwargs.update(over)
+    return _driver(reg, **kwargs)
+
+
+def test_one_desk_runs_a_role_on_the_harness_and_a_graph_on_claude():
+    reg, daemon = Registry(":memory:"), StubDaemon()
+    try:
+        driver = _ollama_driver(reg, daemon)
+
+        # A one-role graph: the harness serves it, on the operator's model.
+        assert driver.drive("wf-news", "read the week",
+                            roles=("news-analyst",))["driving"] is True
+        assert FakeSession.instances == [], "claude was spawned for a role it does not serve"
+        driver._session.join(timeout=5)
+        assert daemon.asked and daemon.asked[0]["model"] == "granite3.3:8b"
+
+        # A multi-role graph on the same desk: the coordinator walks it.
+        assert driver.drive("wf-review", "full review",
+                            roles=_REVIEW_ROLES)["driving"] is True
+        assert len(FakeSession.instances) == 1
+        assert FakeSession.instances[-1].governed is True
+
+        invocations = reg.list_model_invocations()
+        rows = {row["role"]: row for row in invocations}
+        # One row per role and no more: the runner records its own, so a driver
+        # that also recorded the harness path would double-count it.
+        assert len(invocations) == 1 + len(_REVIEW_ROLES)
+        # The role that ran locally names the provider that served it...
+        assert rows["news-analyst"]["backend"] == "ollama"
+        assert rows["news-analyst"]["resolved_model"] == "granite3.3:8b"
+        # ...and every role of the graph claude walked says claude, including
+        # the ones the operator's workforce would otherwise have moved. Each
+        # carries the reason it did not move.
+        for role in _REVIEW_ROLES:
+            assert rows[role]["backend"] == "claude_cli", role
+            assert rows[role]["fallback_reason"], role
+        assert "pinned to claude" in rows["referee"]["fallback_reason"]
+        assert rows["referee"]["resolved_model"] == "inherit"
+        assert "one role per session" in rows["reporter"]["fallback_reason"]
+        kinds = [e["kind"] for e in reg.read_events(200)]
+        assert "model.route_pinned" in kinds
+        # Nothing in this run fell back, so nothing says it did.
+        assert "model.fallback_used" not in kinds
+    finally:
+        reg.close()
+
+
+def test_the_gate_never_reaches_the_harness_even_alone_in_a_graph():
+    """The referee's two independent claims to claude, one of them alone.
+
+    A one-role graph is the shape the harness serves, so a referee-only
+    dispatch is the case where "every graph carrying it is multi-role" stops
+    being the reason and the route's own pin has to be.
+    """
+    reg, daemon = Registry(":memory:"), StubDaemon()
+    try:
+        driver = _ollama_driver(reg, daemon)
+        assert driver.drive("wf-gate", "check it",
+                            roles=("referee",))["driving"] is True
+        assert len(FakeSession.instances) == 1, "the gate reached the harness"
+        assert daemon.asked == []
+        row = reg.list_model_invocations()[0]
+        assert row["role"] == "referee" and row["backend"] == "claude_cli"
+    finally:
+        reg.close()
+
+
+def test_the_recorded_row_names_the_model_the_cli_was_configured_with():
+    """The row is a claim about what the coordinator was given, so pin it.
+
+    `build_workforce_agents` is the authority for the claude path's models;
+    this driver resolves the same routes independently to record them. Two
+    computations of one fact drift, so their agreement is asserted rather than
+    assumed — including for a future agent file that names a concrete model.
+    """
+    from qlab.agents.loader import load_agents
+    from qlab.operator.model_routing import resolve_route
+    from qlab.tui.claude import _routed_model
+
+    sources = {source.name: source.model for source in load_agents()}
+    for role in _REVIEW_ROLES:
+        for fast in (False, True):
+            assert _routed_model(role, sources[role], fast=fast) == \
+                resolve_route(role, fast=fast).resolved_model, role
+
+
+def test_a_cooperative_stop_still_refuses_the_next_dispatch():
+    """The harness cannot be killed mid-turn, only asked to stop.
+
+    So `running` stays True for the in-flight window, and a driver that
+    reopened its slot on stop() would have a second session spawned against a
+    runtime that is going away. `_closed` is what makes that unreachable, and
+    the composition — not either half — is the guarantee.
+    """
+    reg, daemon = Registry(":memory:"), StubDaemon(hold=True)
+    try:
+        driver = _ollama_driver(reg, daemon)
+        driver.drive("wf-news", "read the week", roles=("news-analyst",))
+        session = driver._session
+        assert daemon.entered.wait(timeout=5), "the turn never started"
+        driver.stop("owner shutting down")
+        # Cooperative: the runner is asked, never signalled, so it is still
+        # running with a turn in flight at exactly this moment.
+        assert session._stopped and session.running is True
+        out = driver.drive("wf-2", "goal", roles=("news-analyst",))
+        assert out["driving"] is False and "shutting down" in out["reason"]
+    finally:
+        daemon.release.set()
+        session.join(timeout=5)
+        reg.close()
 
 
 # --- the owner seam -----------------------------------------------------------
@@ -275,6 +512,11 @@ def test_dispatch_drives_the_workflow_it_registered(monkeypatch):
         # second one for the same trigger.
         workflow_id = session.registry.list_workflows(5)[0]["workflow_id"]
         assert f"RESUME_WORKFLOW_ID: {workflow_id}" in driven.prompt
+        # The template's graph reached the driver as roles, and the routes the
+        # coordinator was configured with are on the record. Without the roles
+        # this dispatch would look identical and audit to nothing.
+        roles = {row["role"] for row in session.registry.list_model_invocations()}
+        assert {"moments-analyst", "referee", "reporter"} <= roles
     finally:
         session.registry.close()
 

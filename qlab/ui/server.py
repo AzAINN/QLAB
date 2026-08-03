@@ -2245,6 +2245,7 @@ class UISession:
         """
         from qlab.operator.atlas import Dispatched
         from qlab.operator.templates import get_template
+        from qlab.state.registry import agent_for_phase
 
         template = get_template(template_id)
         if not template.needs_coordinator:
@@ -2275,9 +2276,13 @@ class UISession:
         # Registering the workflow is not running it. Its phases advance only
         # when a coordinator walks them, so dispatch alone left the run parked at
         # phase one forever. Drive it here.
+        # The graph's roles, not its phases: which provider serves a dispatch
+        # is a per-role route, and `agent_for_phase` is the one place a phase
+        # becomes a role.
         driven = self.drive_workflow(
             str(workflow_id),
-            f"[{template_id}] {template.purpose}")
+            f"[{template_id}] {template.purpose}",
+            roles=tuple(agent_for_phase(phase) for phase in template.phases))
         # A workflow row is not a finding. Report the dispatch and let
         # AtlasSupervisor.reconcile_tasks resolve the task from the workflow's
         # own terminal state.
@@ -2320,11 +2325,36 @@ class UISession:
             cwd=workspace_root(),
             record_event=self.registry.record_event,
             offline=self.offline_default,
+            # The owner IS the single writer, and the driver runs inside it, so
+            # this is the same handle rather than a second one.
+            registry=self.registry,
+            backend_status=self._last_backend_reading,
         )
 
-    def drive_workflow(self, workflow_id: str, goal: str) -> dict:
+    def _last_backend_reading(self, name: str) -> tuple[bool | None, str]:
+        """The last availability reading for one backend — never a probe.
+
+        `coordinator_status()` runs on the snapshot path, under the dispatch
+        lock, every tick. `llm_payload` reports the same way and for the same
+        reason: probing here would block every other request behind a daemon
+        that may be a network hop away. `None` means nothing has been probed
+        yet, which is not a refusal — the run itself fails with the daemon's
+        own sentence, which beats a pre-flight guess.
+        """
+        with self._llm_catalog_lock:
+            cached = self._llm_catalog
+        if cached is None:
+            return None, ""
+        _, catalog = cached
+        for entry in catalog["backends"]:
+            if entry["name"] == name:
+                return bool(entry["available"]), str(entry["reason"])
+        return None, ""
+
+    def drive_workflow(self, workflow_id: str, goal: str,
+                       roles: tuple[str, ...] = ()) -> dict:
         """Spawn a coordinator for a workflow this owner just registered."""
-        return self.coordinator_driver.drive(workflow_id, goal)
+        return self.coordinator_driver.drive(workflow_id, goal, roles=roles)
 
     def coordinator_status(self) -> dict:
         """What the desk should say about unattended coordination."""

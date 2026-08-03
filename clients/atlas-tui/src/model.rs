@@ -216,6 +216,41 @@ pub struct LlmBackend {
     pub reason: Option<String>,
 }
 
+/// `GET /api/llm/backends`: every backend the desk knows, and what each serves
+/// *right now*.
+///
+/// Its own payload rather than a section of the snapshot, because the owner
+/// refuses to probe on the poll path: `/api/tui` runs under the dispatch lock
+/// every two seconds and a hung daemon there would stall every other request,
+/// so the snapshot carries the last reading and this route is the only prober.
+/// It is fetched when the palette enters the model scope and at no other time —
+/// there is no cadence here, deliberately.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmCatalog {
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub backends: Vec<CatalogEntry>,
+    pub probed_at: Option<String>,
+}
+
+/// One backend as the catalog reports it: the summary plus the model list.
+///
+/// Deliberately **not** `LlmBackend` with a `models` field bolted on. The
+/// snapshot's summary is the same three fields with the lists stripped, and one
+/// struct for both would leave `store.llm()` handing out a permanently empty
+/// `models` — a client reading its own silence as "this backend serves
+/// nothing". Two payloads, two types, and the compiler decides which one a
+/// caller is holding.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CatalogEntry {
+    pub name: Option<String>,
+    pub available: Option<bool>,
+    pub reason: Option<String>,
+    /// What this backend can serve now — empty when it cannot serve at all
+    /// (the owner does not ask an unavailable backend for its list).
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub models: Vec<String>,
+}
+
 // -- the policy and its limits ---------------------------------------------
 
 /// `allocation_policy()`: the operational policy plus the mandate's constraints.

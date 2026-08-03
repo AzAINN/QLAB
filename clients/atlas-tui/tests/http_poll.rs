@@ -20,6 +20,7 @@ enum Seen {
     ConnDown,
     Snapshot,
     Regime,
+    Backends,
     Malformed(String),
     Other,
 }
@@ -30,6 +31,7 @@ fn seen(ev: &AppEvent) -> Seen {
         AppEvent::ConnDown(Channel::Owner) => Seen::ConnDown,
         AppEvent::Snapshot(_) => Seen::Snapshot,
         AppEvent::RegimePanel(_) => Seen::Regime,
+        AppEvent::Backends(_) => Seen::Backends,
         AppEvent::Http(HttpResult::Malformed { url, .. }) => Seen::Malformed(url.clone()),
         _ => Seen::Other,
     }
@@ -141,6 +143,13 @@ fn regime_fixture() -> (&'static str, String) {
     (
         "/api/regime/panel",
         include_str!("fixtures/regime_panel.json").to_string(),
+    )
+}
+
+fn backends_fixture() -> (&'static str, String) {
+    (
+        "/api/llm/backends",
+        include_str!("fixtures/llm_backends.json").to_string(),
     )
 }
 
@@ -395,6 +404,98 @@ async fn a_manual_refresh_fetches_ahead_of_the_cadence() {
     assert!(
         jumped < POLL_INTERVAL,
         "this test only means something while the cadence is longer than its budget"
+    );
+}
+
+#[tokio::test]
+async fn the_backend_catalog_is_fetched_when_it_is_asked_for_and_never_on_the_beat() {
+    // The route probes every configured daemon, so a cadence here would put a
+    // network round trip per backend behind a beat — the cost the owner refuses
+    // to pay on `/api/tui`, moved rather than avoided. The palette entering the
+    // model scope is the only thing that asks.
+    let owner = spawn_owner(vec![
+        ready(),
+        snapshot_fixture(),
+        regime_fixture(),
+        backends_fixture(),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let poller = spawn_poller(owner.base.clone(), true, tx);
+
+    // Two desk polls' worth of the beat, which is where a fourth `*_INTERVAL`
+    // would have shown up.
+    drain_until_owner(&mut rx, || owner.asked_for("/api/tui").len() >= 2, CEILING).await;
+    assert!(
+        owner.asked_for("/api/llm/backends").is_empty(),
+        "the catalog rode a poll: {:?}",
+        owner.targets()
+    );
+    let polls = owner.asked_for("/api/tui").len();
+
+    poller
+        .refetch
+        .send(Refetch::Backends)
+        .expect("poller alive");
+    let seen = drain_until(&mut rx, |ev| *ev == Seen::Backends, Duration::from_secs(5)).await;
+    assert!(
+        seen.contains(&Seen::Backends),
+        "the catalog has to reach the bus typed: {seen:?}"
+    );
+    assert_eq!(owner.asked_for("/api/llm/backends").len(), 1);
+    // And it did not drag the desk's own beat forward with it. `Refetch::Now`
+    // means "poll the desk"; this one means "ask what the backends serve", and
+    // a client that conflated them would poll on every palette entry.
+    assert_eq!(
+        owner.asked_for("/api/tui").len(),
+        polls,
+        "asking what the backends serve also polled the desk: {:?}",
+        owner.targets()
+    );
+}
+
+#[tokio::test]
+async fn a_nudge_and_a_catalog_request_that_arrive_together_are_both_served() {
+    // The queue is drained on every wake so that three nudges in flight are one
+    // fetch. Draining it *wholesale* would coalesce the two kinds into each
+    // other — whichever arrived first would swallow the other, and a palette
+    // opened right after `r` would offer an empty catalog with nothing saying
+    // why. The coalesce is per kind for that reason.
+    let owner = spawn_owner(vec![
+        ready(),
+        snapshot_fixture(),
+        regime_fixture(),
+        backends_fixture(),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let poller = spawn_poller(owner.base.clone(), true, tx);
+
+    drain_until(&mut rx, |ev| *ev == Seen::Snapshot, Duration::from_secs(5)).await;
+    let polls = owner.asked_for("/api/tui").len();
+    poller
+        .refetch
+        .send(Refetch::Backends)
+        .expect("poller alive");
+    poller.refetch.send(Refetch::Now).expect("poller alive");
+
+    drain_until_owner(
+        &mut rx,
+        || {
+            !owner.asked_for("/api/llm/backends").is_empty()
+                && owner.asked_for("/api/tui").len() > polls
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        owner.asked_for("/api/llm/backends").len(),
+        1,
+        "the catalog request was swallowed by the nudge: {:?}",
+        owner.targets()
+    );
+    assert!(
+        owner.asked_for("/api/tui").len() > polls,
+        "the nudge was swallowed by the catalog request: {:?}",
+        owner.targets()
     );
 }
 

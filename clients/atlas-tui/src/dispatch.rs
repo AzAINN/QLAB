@@ -21,8 +21,8 @@
 #[cfg(feature = "operator")]
 mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
-    use crate::cmd::Command;
-    use crate::net::write::{Execution, Login, WriteClient, WriteError};
+    use crate::cmd::{Command, ModelChoice};
+    use crate::net::write::{Choice, Execution, Login, WriteClient, WriteError};
     use crate::store::Posture;
     use std::sync::Arc;
 
@@ -265,6 +265,43 @@ mod armed {
                     },
                 }
             }
+            // Not a governance decision either, and it books nothing: it
+            // chooses which mind answers a question. The owner is the authority
+            // on what its backends can serve — it refuses an unreachable daemon
+            // and a model it does not hold — so what the operator named is sent
+            // and the owner's own sentence comes back either way.
+            Command::SetLlm { surface, choice } => {
+                // Named before the call, because the outcome has to say what it
+                // was about whichever way it goes. Model ids are inert — no
+                // credential is nameable here — so this quotes what was sent,
+                // unlike the login path.
+                let what = match &choice {
+                    ModelChoice::Pair { backend, model } => {
+                        format!("point {surface} at {backend} {model}")
+                    }
+                    ModelChoice::Enabled(on) => {
+                        format!("switch the {surface} {}", if *on { "on" } else { "off" })
+                    }
+                };
+                let (pair, enabled) = match &choice {
+                    ModelChoice::Pair { backend, model } => {
+                        (Some((backend.as_str(), model.as_str())), None)
+                    }
+                    ModelChoice::Enabled(on) => (None, Some(*on)),
+                };
+                match client.set_llm(&surface, pair, enabled).await {
+                    Ok(Choice::Chosen(said)) => Wrote::Chose { said },
+                    // A considered no, not a broken request: the owner's 400
+                    // carries the remedy, and rendering it as a failure would
+                    // bury "start it with `ollama serve`" under a transport
+                    // error nobody can act on.
+                    Ok(Choice::Rejected(said)) => Wrote::ChoiceRefused { said },
+                    Err(err) => Wrote::Failed {
+                        what,
+                        said: err.to_string(),
+                    },
+                }
+            }
             Command::TestAlpaca => match client.test_alpaca().await {
                 Ok(verdict) => Wrote::Tested {
                     ok: verdict.ok,
@@ -275,7 +312,12 @@ mod armed {
                     said: err.to_string(),
                 },
             },
-            Command::Quit | Command::Refresh => return None,
+            // The three the runtime handles itself. They cannot arrive here
+            // through the loop; the arm exists because the match is over the
+            // whole type, and `Backends` is a *read* the poller serves — a
+            // write outcome for it would put a row on the bus about a request
+            // that changed nothing.
+            Command::Quit | Command::Refresh | Command::Backends => return None,
         })
     }
 

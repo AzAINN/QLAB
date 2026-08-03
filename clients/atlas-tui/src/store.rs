@@ -11,8 +11,8 @@ use crate::cmd::CmdLine;
 use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
-    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmConfig, Plan, Policy,
-    RegimePanel, Run, Snapshot, System, Template, Workflow,
+    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig, Plan,
+    Policy, RegimePanel, Run, Snapshot, System, Template, Workflow,
 };
 use crate::net::http;
 use serde_json::Value;
@@ -34,6 +34,15 @@ pub const IDLE_FRAME: Duration = Duration::from_millis(100);
 /// the cadences the pacing rule is about, and the two drifting apart is how the
 /// glyph would start stepping between frames that never get drawn.
 pub const TICK: Duration = Duration::from_millis(120);
+
+/// How long a fetched backend catalog is worth reusing.
+///
+/// The owner's own cache window (`_LLM_CATALOG_TTL_SECONDS = 5.0` in
+/// `qlab/ui/server.py`), matched rather than chosen: inside it the route serves
+/// the same reading whatever this client does, so a second request buys nothing
+/// and costs a round trip. Stated here rather than inside the accessor so the
+/// number and its provenance sit together.
+const CATALOG_TTL: Duration = Duration::from_secs(5);
 
 /// Whether the loop owes the terminal a frame.
 ///
@@ -355,6 +364,23 @@ pub struct Store {
     /// not be able to grow a template the owner never registered, and a public
     /// `Vec` is a field anything could push to.
     templates: Vec<Template>,
+    /// What the owner's backends serve, from the palette's own fetch.
+    ///
+    /// Private with one reader for the reason `templates` is: the model strip
+    /// must not be able to offer a pair the owner never said it could run, and
+    /// a public field is one anything could push to.
+    backends: Option<LlmCatalog>,
+    /// When that catalog arrived — this client's own clock, not the owner's
+    /// `probed_at`.
+    ///
+    /// Two stamps for two questions. `probed_at` is when the *daemons* were
+    /// asked, which is what SETTINGS renders an age from; this is when *this
+    /// client* last asked the owner, which is the only one that can say whether
+    /// asking again would learn anything. Time as data, as an `Instant`: the
+    /// comparison is against this machine's own monotonic clock, and the one
+    /// place this client compares two machines' wall clocks stays the one place
+    /// (`format::since`).
+    backends_at: Option<Instant>,
     pub nav: Nav,
     /// What the operator has typed into the command line, and what it said back.
     ///
@@ -472,6 +498,8 @@ impl Store {
             snapshot: None,
             regime_panel: None,
             templates: Vec::new(),
+            backends: None,
+            backends_at: None,
             nav: Nav::default(),
             cmd: CmdLine::default(),
             help_top: 0,
@@ -509,6 +537,14 @@ impl Store {
             // must stop offering.
             AppEvent::Templates(templates) => {
                 self.templates = templates;
+                self.dirty = true;
+            }
+            // Replaced wholesale for the same reason, and stamped with the
+            // instant it arrived rather than with a clock read here — the fold
+            // is told the instant the frame is paced against.
+            AppEvent::Backends(catalog) => {
+                self.backends = Some(catalog);
+                self.backends_at = Some(now);
                 self.dirty = true;
             }
             // A keystroke may move a selection and a resize moves everything;
@@ -572,7 +608,14 @@ impl Store {
                     // and the two answers a form has to act on (a consent
                     // question, a refusal) belong to the form, which is where
                     // the pair it would re-send still is.
-                    Wrote::Decided { .. }
+                    //
+                    // And so is a model choice: the owner persists it and the
+                    // next snapshot's `llm` block is what SETTINGS draws, so a
+                    // client copy would be a second account of which minds the
+                    // desk is using. Its refusal changes nothing at all.
+                    Wrote::Chose { .. }
+                    | Wrote::ChoiceRefused { .. }
+                    | Wrote::Decided { .. }
                     | Wrote::Asked { .. }
                     | Wrote::Started { .. }
                     | Wrote::Pointed { .. }
@@ -664,6 +707,27 @@ impl Store {
     /// running on nothing.
     pub fn llm(&self) -> Option<&LlmConfig> {
         self.snapshot.as_ref()?.llm.as_ref()
+    }
+
+    /// What each backend serves, as the last fetch found it. Absent is a desk
+    /// this client has not asked yet — which is not a desk with no backends.
+    pub fn backends(&self) -> Option<&LlmCatalog> {
+        self.backends.as_ref()
+    }
+
+    /// Whether asking the owner what its backends serve could learn anything.
+    ///
+    /// The window is the owner's own (`_LLM_CATALOG_TTL_SECONDS = 5.0`): inside
+    /// it the route answers out of its cache, so a second request cannot return
+    /// a different reading and is pure cost — a probe per daemon on the owner's
+    /// side and a round trip on this one. Outside it, the palette asks again,
+    /// because a daemon that has come up since is exactly what an operator
+    /// opening the model scope is looking for.
+    pub fn wants_backends(&self, now: Instant) -> bool {
+        match self.backends_at {
+            None => true,
+            Some(at) => now.saturating_duration_since(at) >= CATALOG_TTL,
+        }
     }
 
     /// The newest ablation, ranked by Sharpe as the owner ranked it.
@@ -1485,6 +1549,36 @@ mod tests {
         assert!(triggers.contains(&Trigger::Halted));
         assert!(triggers.contains(&Trigger::RegimeChanged));
         assert!(triggers.contains(&Trigger::ReadChanged));
+    }
+
+    #[test]
+    fn the_catalog_is_asked_for_again_only_once_the_owners_own_cache_has_lapsed() {
+        // Both sides of the comparison, because one case that merely reaches
+        // the code proves nothing about which way it went.
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        assert!(
+            store.wants_backends(t0),
+            "a desk that has never asked has nothing to reuse"
+        );
+        let catalog: crate::model::LlmCatalog = serde_json::from_value(json!({
+            "backends": [{"name": "ollama", "available": true,
+                          "reason": "ollama at 127.0.0.1:11434, 1 model pulled",
+                          "models": ["qwen2.5:7b"]}],
+            "probed_at": "2026-08-03T04:10:08.417505+00:00"
+        }))
+        .unwrap();
+        store.apply(AppEvent::Backends(catalog), t0);
+        assert_eq!(store.backends().unwrap().backends.len(), 1);
+        assert!(store.take_dirty(), "a new catalog owes the strip a frame");
+        assert!(
+            !store.wants_backends(t0 + CATALOG_TTL - Duration::from_millis(1)),
+            "inside the owner's own cache window the answer cannot have moved"
+        );
+        assert!(
+            store.wants_backends(t0 + CATALOG_TTL),
+            "a daemon that came up since is what the operator is looking for"
+        );
     }
 
     #[test]

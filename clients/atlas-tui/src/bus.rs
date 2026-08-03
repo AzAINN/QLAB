@@ -1,5 +1,5 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
-use crate::model::{RegimePanel, Snapshot, Template};
+use crate::model::{LlmCatalog, RegimePanel, Snapshot, Template};
 
 pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
@@ -12,6 +12,15 @@ pub enum AppEvent {
     /// Its own event rather than a field folded into the snapshot, because it
     /// comes off its own endpoint on its own cadence — see `model::Templates`.
     Templates(Vec<Template>),
+    /// What the owner's backends serve, from `/api/llm/backends`.
+    ///
+    /// Its own event for the same reason `Templates` is, and one more: it is
+    /// the only payload this client fetches on an *action* rather than on a
+    /// beat. The route probes daemons, so a cadence here would put a network
+    /// round trip per backend behind every poll — the owner refuses to do that
+    /// on `/api/tui` for exactly that reason, and a client that polled the
+    /// prober would have moved the cost rather than avoided it.
+    Backends(LlmCatalog),
     Sse(SseEvent),
     Http(HttpResult),
     ConnUp(Channel),
@@ -94,6 +103,17 @@ pub enum Wrote {
     /// The owner would not store the login as sent. Its own sentence, which
     /// never quotes what was typed.
     LoginRefused { said: String },
+    /// A surface is pointed at a model, or the reasoner was switched.
+    ///
+    /// `said` is the owner's own account of what that means (`effect`), never a
+    /// receipt this client composed: the same 200 can mean "Atlas reasons with
+    /// ollama qwen2.5:7b" or "Atlas answers you on it; enable the reasoner to
+    /// let it choose templates too", and only the owner knows which.
+    Chose { said: String },
+    /// The owner would not point the surface there — an unreachable daemon, a
+    /// model it does not serve, a switch on the surface that has none. Its own
+    /// sentence, which carries the remedy.
+    ChoiceRefused { said: String },
     /// The stored login was put to the venue. `ok` is the venue's answer and
     /// `summary` is what to show either way — the masked account and its buying
     /// power, or the reason it was refused.

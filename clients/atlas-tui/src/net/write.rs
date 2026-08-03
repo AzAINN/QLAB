@@ -213,6 +213,30 @@ pub enum Login {
     Rejected(String),
 }
 
+/// What the owner did with a model choice. Two outcomes, and the second is not
+/// an error.
+///
+/// The route refuses with **400 and a sentence** — an unknown backend, a model
+/// it does not serve, a daemon that is not running, a switch on the surface
+/// that has none — and every one of those is a considered answer about a
+/// well-formed request, written for a human to read and act on. Folding them
+/// into `Err` would put "the desk cannot reach ollama right now" in the same
+/// shape as a broken socket, and the remedy is in the sentence.
+///
+/// Any other status is not a considered answer, so it stays an error: a 500 is
+/// a broken owner and a 502 is something in front of it, and neither is the
+/// desk saying no.
+#[derive(Debug)]
+pub enum Choice {
+    /// The owner moved the surface, and this is its own sentence about what
+    /// that means (`effect`) — never a receipt composed here out of the two
+    /// words that were sent.
+    Chosen(String),
+    /// The owner would not point the surface there. Its own sentence, which for
+    /// an unreachable backend is the catalog's own reason.
+    Rejected(String),
+}
+
 /// What the venue said about the stored login.
 ///
 /// `/api/alpaca/test` answers **200 whatever happened** — a missing profile, a
@@ -405,6 +429,53 @@ impl WriteClient {
     pub async fn workforce_fast(&self, enabled: bool) -> Wrote {
         self.post("/api/workforce/fast", json!({ "enabled": enabled }))
             .await
+    }
+
+    /// Point one surface at a model, or switch the reasoner.
+    ///
+    /// `pair` travels as one argument because the owner takes it as one:
+    /// `backend` and `model` are optional *together*, and absent means "leave
+    /// the pair alone" — which is what makes `{surface, enabled}` a switch. A
+    /// signature with two independent `Option`s could express half a choice,
+    /// and the owner answers that with "a model choice needs both a backend and
+    /// a model".
+    ///
+    /// Absent is not empty. An empty string is a choice of nothing and the
+    /// owner refuses it, so nothing here ever sends one — the parser will not
+    /// build a pair with an empty half.
+    ///
+    /// Grants no authority. Which model answers a question is not permission to
+    /// act on the answer: the owner pins the referee to claude in its own
+    /// routing, and a fill still needs a persisted approval and a typed hash.
+    pub async fn set_llm(
+        &self,
+        surface: &str,
+        pair: Option<(&str, &str)>,
+        enabled: Option<bool>,
+    ) -> Result<Choice, WriteError> {
+        let mut body = json!({ "surface": surface });
+        if let Some((backend, model)) = pair {
+            body["backend"] = json!(backend);
+            body["model"] = json!(model);
+        }
+        if let Some(enabled) = enabled {
+            body["enabled"] = json!(enabled);
+        }
+        match self.post("/api/llm", body).await {
+            // The owner answers with what the change *means* ("Atlas reasons
+            // with ollama qwen2.5:7b"). A 200 without one is a broken contract
+            // and says so, rather than this client inventing a receipt out of
+            // the words it just sent — the same rule as `desk_mode`'s label and
+            // `start_workflow`'s handle.
+            Ok(said) => match field(&said, "effect") {
+                Some(effect) => Ok(Choice::Chosen(crate::format::bounded(&effect, SAID_MAX))),
+                None => Err(WriteError::Unreadable(format!(
+                    "the owner answered 200 for a model choice without saying what it did: {said}"
+                ))),
+            },
+            Err(WriteError::Refused { status: 400, said }) => Ok(Choice::Rejected(sentence(&said))),
+            Err(err) => Err(err),
+        }
     }
 
     // -- the desk ----------------------------------------------------------
@@ -646,13 +717,20 @@ fn confirmable(body: &str) -> bool {
 /// part that is about *this* route — which field of a JSON body is the half a
 /// human reads.
 fn sentence(body: &str) -> String {
-    const MAX: usize = 240;
     let said = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|parsed| field(&parsed, "error"))
         .unwrap_or_else(|| body.to_string());
-    crate::format::bounded(&said, MAX)
+    crate::format::bounded(&said, SAID_MAX)
 }
+
+/// How much of an owner sentence this module passes on.
+///
+/// One bound for both directions, because the rule was never about refusals: a
+/// 200 body is not proof the answer came from the owner either — a proxy in
+/// front of the desk answers 200 with a page of its own — and the surfaces
+/// downstream (a toast, a form note) are the same ones.
+const SAID_MAX: usize = 240;
 
 /// Foreign text, unless it handed back what was just sent.
 ///

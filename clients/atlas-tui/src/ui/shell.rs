@@ -19,7 +19,7 @@
 //! the frame is still a pure function of (store, effects, instant), and the
 //! effect pass that reads those rects runs after `draw` returns.
 
-use crate::cmd::{self, CmdState, Command, Edit, Resolved};
+use crate::cmd::{self, CmdState, Command, Edit, Resolved, Scope};
 use crate::format::{self, MISSING};
 use crate::fx::{Fx, ShellRects};
 use crate::glyph;
@@ -289,7 +289,11 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
 /// the suggestions and the store are the shell's to read and the field is a
 /// pure text model by design.
 fn command_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
-    match store.cmd.edit(key) {
+    // Which scope the line was pointed at before this keystroke. Entering one
+    // is a transition rather than a state: a fetch fired on the scope itself
+    // would ask the owner once per character typed inside it.
+    let before = scope_of(store.cmd.text());
+    let acted = match store.cmd.edit(key) {
         Edit::Idle => None,
         Edit::Close => {
             store.cmd.clear();
@@ -297,18 +301,44 @@ fn command_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Co
             None
         }
         Edit::Accept => {
-            if let Some(first) = suggestions(store).first() {
-                store.cmd.accept(first);
+            // The first suggestion the desk can actually serve. The model strip
+            // shows backends it cannot reach — hiding them would read as a desk
+            // that never had one — and a Tab that pasted one would hand the
+            // operator a line already refused.
+            if let Some(first) = suggestions(store).iter().find(|s| s.choosable()) {
+                store.cmd.accept(&first.value);
             }
             None
         }
         Edit::Submit => submit(store, views),
-    }
+    };
+    acted.or_else(|| entered_model_scope(before, store).then_some(Command::Backends))
 }
 
 /// What the line could become from here, for this window.
-fn suggestions(store: &Store) -> Vec<String> {
+fn suggestions(store: &Store) -> Vec<cmd::Suggestion> {
     cmd::suggestions(&cmd::parse(store.cmd.text()), store, store.posture)
+}
+
+/// Which scope the line is pointed at, if it has been accepted into one.
+fn scope_of(text: &str) -> Option<Scope> {
+    match cmd::parse(text) {
+        CmdState::Scoped { scope, .. } => Some(scope),
+        _ => None,
+    }
+}
+
+/// Whether this keystroke is what put the line into the model scope.
+///
+/// The catalog behind that scope is the one payload with no cadence: the route
+/// probes every configured daemon, so it is asked for on the way in and not on
+/// a beat. Only for a window that can choose — an unarmed one is offered
+/// nothing there, and a request for a list it will never be shown is a round
+/// trip nobody asked for.
+fn entered_model_scope(before: Option<Scope>, store: &Store) -> bool {
+    store.posture.writes()
+        && before != Some(Scope::Model)
+        && scope_of(store.cmd.text()) == Some(Scope::Model)
 }
 
 /// Act on the line, or say why it cannot be acted on.
@@ -325,7 +355,10 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
     if let CmdState::Picker { .. } = state {
         let choices = suggestions(store);
         if let [only] = choices.as_slice() {
-            store.cmd.accept(only);
+            // Accepting `/mod` into `/model ` is a scope entry like any other,
+            // and `command_key` is the one place that notices — it holds the
+            // scope from before the keystroke, so nothing here has to.
+            store.cmd.accept(&only.value);
             return None;
         }
     }
@@ -379,6 +412,11 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
         Resolved::Mode { data, book } => {
             done(store);
             Some(Command::DeskMode { data, book })
+        }
+        #[cfg(feature = "operator")]
+        Resolved::Model { surface, choice } => {
+            done(store);
+            Some(Command::SetLlm { surface, choice })
         }
     }
 }
@@ -691,17 +729,29 @@ fn draw_suggestions(f: &mut Frame, area: Rect, store: &Store) {
             Style::default().fg(t.text_dim),
         ));
     }
+    // The one Tab and a lone Enter accept — which is the first *choosable* one,
+    // not the first one drawn. The model strip shows backends the desk cannot
+    // reach, and a highlight on one of those would point the accept key at a
+    // line that is already refused.
+    let accepts = choices.iter().position(cmd::Suggestion::choosable);
     for (i, choice) in choices.iter().enumerate() {
-        spans.push(Span::styled(
-            format!(" {choice}"),
-            if i == 0 {
-                // The one Tab and a lone Enter accept, so it cannot look like
-                // the rest of the list.
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(t.text_secondary)
-            },
-        ));
+        match &choice.refusal {
+            // Dim, and carrying the owner's own sentence: an entry the desk
+            // cannot serve is shown rather than hidden, and the reason is the
+            // half an operator can act on.
+            Some(said) => spans.push(Span::styled(
+                format!(" {} — {said}", choice.value),
+                Style::default().fg(t.text_dim),
+            )),
+            None => spans.push(Span::styled(
+                format!(" {}", choice.value),
+                if Some(i) == accepts {
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.text_secondary)
+                },
+            )),
+        }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

@@ -266,7 +266,7 @@ mod glass {
 #[cfg(feature = "operator")]
 mod operator {
     use atlas::model::Snapshot;
-    use atlas::net::write::{Execution, WriteClient};
+    use atlas::net::write::{Choice, Execution, WriteClient};
     use atlas::store::Posture;
     use atlas::ui::widgets::confirm::Modal;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1040,12 +1040,16 @@ mod operator {
     }
 
     #[tokio::test]
-    async fn the_two_commands_the_runtime_handles_itself_send_nothing() {
+    async fn the_three_commands_the_runtime_handles_itself_send_nothing() {
         // A stray `Quit` reaching the writer must not put a meaningless row on
-        // the bus — every `Wrote` raises a toast and refetches the desk.
+        // the bus — every `Wrote` raises a toast and refetches the desk. The
+        // catalog fetch is here for a second reason: it is a *read*, served by
+        // the poller, and a write outcome for it would announce a request that
+        // changed nothing.
         let client = WriteClient::new("http://127.0.0.1:1").unwrap();
         assert_eq!(perform(&client, Command::Quit).await, None);
         assert_eq!(perform(&client, Command::Refresh).await, None);
+        assert_eq!(perform(&client, Command::Backends).await, None);
     }
 
     #[tokio::test]
@@ -1124,11 +1128,213 @@ mod operator {
                 template: "regime_review".into(),
                 workflow_id: "805e0729cfec4d67".into(),
             },
+            // A model choice is persisted by the owner and served back in the
+            // next snapshot's `llm` block, which is what SETTINGS' MODELS card
+            // draws. Without the refetch that card would keep naming the old
+            // backend for a whole poll interval after the operator moved it.
+            Wrote::Chose {
+                said: "Atlas reasons with ollama qwen2.5:7b".into(),
+            },
+            // And the refusal, for the reason the failures are here: nothing
+            // moved, but the reading the operator is about to act on is the one
+            // on screen, and the catalog behind the refusal is what changed
+            // under it.
+            Wrote::ChoiceRefused {
+                said: "ollama is not running at http://127.0.0.1:11499".into(),
+            },
         ] {
             assert!(
                 refetches(&AppEvent::Wrote(outcome.clone())),
                 "{outcome:?} must bring the next poll forward"
             );
+        }
+    }
+
+    // -- the model choice --------------------------------------------------
+    //
+    // Bodies and outcomes pinned against `POST /api/llm` as the owner actually
+    // answers it — every sentence below was captured from a live worktree owner
+    // rather than copied from a note that can rot.
+
+    #[tokio::test]
+    async fn a_model_choice_lands_on_the_route_in_the_two_shapes_the_owner_takes() {
+        // The pair and the switch are one route with two bodies, and the
+        // difference is load-bearing: an absent `backend`/`model` means "leave
+        // the pair alone", which is what makes `{surface, enabled}` a switch. A
+        // client that sent the current pair alongside `enabled: false` would
+        // re-validate a daemon that is probably the reason it was sent.
+        let owner = spawn_owner(
+            200,
+            r#"{"surface": "reasoner", "reasoner": {"backend": "ollama", "model": "qwen2.5:7b"},
+                "workforce": {"backend": "claude", "model": "inherit"},
+                "reasoner_enabled": false,
+                "effect": "Atlas answers you on ollama qwen2.5:7b; enable the reasoner to let it choose templates too"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let said = match client
+            .set_llm("reasoner", Some(("ollama", "qwen2.5:7b")), None)
+            .await
+            .unwrap()
+        {
+            Choice::Chosen(said) => said,
+            other => panic!("{other:?}"),
+        };
+        // The owner's own account of what it did, which is not what an operator
+        // would assume: naming a reasoner model does not switch the reasoner on,
+        // and only this sentence says so.
+        assert!(said.contains("enable the reasoner"), "{said}");
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/llm");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({"surface": "reasoner", "backend": "ollama",
+                               "model": "qwen2.5:7b"}),
+            "a pair choice carries no `enabled` nobody asked for"
+        );
+
+        let owner = spawn_owner(
+            200,
+            r#"{"surface": "reasoner", "reasoner": {"backend": "ollama", "model": "qwen2.5:7b"},
+                "workforce": {"backend": "claude", "model": "inherit"},
+                "reasoner_enabled": true, "effect": "Atlas reasons with ollama qwen2.5:7b"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(matches!(
+            client.set_llm("reasoner", None, Some(true)).await.unwrap(),
+            Choice::Chosen(_)
+        ));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&owner.only().body).unwrap(),
+            serde_json::json!({"surface": "reasoner", "enabled": true}),
+            "the switch names no pair, which is what leaves the pair alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_way_the_owner_says_no_to_a_model_is_a_refusal_and_not_a_failure() {
+        // All four are 400s with a sentence written for a human, and all four
+        // are considered answers to a well-formed request. Folded into `Err`
+        // they would arrive as "the owner refused with 400: {…}" — the remedy
+        // buried inside a transport error nobody can act on.
+        for said in [
+            "ollama is not running at http://127.0.0.1:11499 — start it with `ollama serve`",
+            "the ollama backend cannot serve 'granite3.3:8b' right now; it serves qwen2.5:7b",
+            "only the reasoner surface can be switched on or off",
+            "unknown model surface 'banana'; the desk has reasoner and workforce",
+        ] {
+            let owner = spawn_owner(400, serde_json::json!({"error": said}).to_string());
+            let client = WriteClient::new(&owner.base).unwrap();
+            match client
+                .set_llm("workforce", Some(("ollama", "granite3.3:8b")), None)
+                .await
+            {
+                Ok(Choice::Rejected(back)) => assert_eq!(back, said),
+                other => panic!("{said}: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_answer_the_owner_did_not_explain_is_a_failure_and_a_broken_owner_is_an_error()
+    {
+        // `set_llm_config` always returns its `effect`. A 200 without one is a
+        // broken contract, and inventing a receipt out of the two words just
+        // sent is the shape `desk_mode`'s label and `start_workflow`'s handle
+        // already refuse.
+        for body in [
+            r#"{"surface": "reasoner", "reasoner_enabled": true}"#,
+            r#"{"surface": "reasoner", "effect": ""}"#,
+        ] {
+            let owner = spawn_owner(200, body);
+            let client = WriteClient::new(&owner.base).unwrap();
+            match client.set_llm("reasoner", None, Some(true)).await {
+                Err(err) => assert!(
+                    err.to_string().contains("without saying what it did"),
+                    "{err}"
+                ),
+                other => panic!("{body}: {other:?}"),
+            }
+        }
+        // And a status that is not a considered answer stays an error: a 502 is
+        // something in front of the desk, not the desk saying no, and offering
+        // it as a refusal would put a proxy's page where the owner's remedy goes.
+        let owner = spawn_owner(502, "<html>bad gateway</html>");
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(client.set_llm("reasoner", None, Some(false)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_model_command_reaches_the_owner_and_comes_back_in_its_own_words() {
+        // The dispatch routing: which method a `Command` lands on, and which
+        // `Wrote` each answer becomes.
+        let owner = spawn_owner(
+            200,
+            r#"{"surface": "workforce", "effect": "the workforce roles run on claude inherit"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(
+                &client,
+                Command::SetLlm {
+                    surface: "workforce".into(),
+                    choice: atlas::cmd::ModelChoice::Pair {
+                        backend: "claude".into(),
+                        model: "inherit".into(),
+                    },
+                }
+            )
+            .await,
+            Some(Wrote::Chose {
+                said: "the workforce roles run on claude inherit".into(),
+            })
+        );
+        assert_eq!(owner.only().path, "/api/llm");
+
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "only the reasoner surface can be switched on or off"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let outcome = perform(
+            &client,
+            Command::SetLlm {
+                surface: "workforce".into(),
+                choice: atlas::cmd::ModelChoice::Enabled(false),
+            },
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            Some(Wrote::ChoiceRefused {
+                said: "only the reasoner surface can be switched on or off".into(),
+            })
+        );
+        // And both reach the operator. A `Wrote` variant with no toast arm is a
+        // write nobody is told about; the refusal is `Warn` because the desk
+        // considered it and nothing moved.
+        let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.unwrap()))
+            .expect("a refused choice owes the operator a box");
+        assert_eq!(toast.level, atlas::ui::widgets::toast::Level::Warn);
+        assert!(toast.message.contains("only the reasoner"), "{toast:?}");
+
+        // A request that never landed names the action it was about — and names
+        // the switch as a switch, not as a pair it never sent.
+        let client = WriteClient::new("http://127.0.0.1:1").unwrap();
+        match perform(
+            &client,
+            Command::SetLlm {
+                surface: "reasoner".into(),
+                choice: atlas::cmd::ModelChoice::Enabled(false),
+            },
+        )
+        .await
+        {
+            Some(Wrote::Failed { what, said }) => {
+                assert_eq!(what, "switch the reasoner off");
+                assert!(!said.is_empty());
+            }
+            other => panic!("{other:?}"),
         }
     }
 

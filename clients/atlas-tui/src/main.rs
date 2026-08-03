@@ -323,6 +323,16 @@ fn ingest(
                 // a synchronous fetch in this loop froze the client for its
                 // duration.
                 Some(Command::Refresh) => poller.now(),
+                // A read, and the only one a keystroke asks for. The store
+                // decides whether asking again could learn anything — the
+                // owner's own cache window — so a palette opened twice in a
+                // second does not probe every daemon twice.
+                Some(Command::Backends) if store.wants_backends(now) => poller.backends(),
+                // Inside that window the route can only answer out of its own
+                // cache. Its own arm rather than a guard falling through: the
+                // arm below dispatches to the *writer*, and a read that reached
+                // it would be a request this command never meant.
+                Some(Command::Backends) => {}
                 // The only place a keystroke reaches the network. A view
                 // decided what the key means and handed back a `Command`; the
                 // runtime is what acts on it.

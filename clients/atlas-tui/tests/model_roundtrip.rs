@@ -3,10 +3,40 @@
 //! Fixtures only — a client test that reached the owner would pass or fail on
 //! whatever the desk happened to be holding, and would not run offline.
 
-use atlas::model::{RegimePanel, Snapshot};
+use atlas::model::{LlmCatalog, RegimePanel, Snapshot};
 
 fn snapshot() -> Snapshot {
     serde_json::from_str(include_str!("fixtures/tui_snapshot.json")).unwrap()
+}
+
+#[test]
+fn the_catalog_is_the_shape_the_backends_route_actually_serves() {
+    // Captured from a live worktree owner, so the model lists are the owner's
+    // own vocabulary rather than a guess: `CLAUDE_MODELS` is the routing
+    // vocabulary (`inherit` first, and it is what "the tiers decide" is
+    // spelled), and ollama reports whatever is pulled.
+    let catalog: LlmCatalog =
+        serde_json::from_str(include_str!("fixtures/llm_backends.json")).unwrap();
+    assert_eq!(catalog.backends.len(), 2);
+    assert_eq!(catalog.backends[0].name.as_deref(), Some("claude"));
+    assert_eq!(catalog.backends[0].available, Some(true));
+    assert_eq!(catalog.backends[0].models[0], "inherit");
+    assert_eq!(catalog.backends[1].models, vec!["qwen2.5:7b"]);
+    assert!(catalog.probed_at.is_some());
+
+    // A backend that cannot serve is asked for no list at all, so `models` is
+    // absent-or-empty on exactly the entries whose reason matters most — and
+    // `null` may not reject the payload the strip is drawn from.
+    let down: LlmCatalog = serde_json::from_str(
+        r#"{"backends": [{"name": "ollama", "available": false,
+                          "reason": "ollama is not running at http://127.0.0.1:11499 — start it with `ollama serve`",
+                          "models": null}], "probed_at": null}"#,
+    )
+    .unwrap();
+    assert!(down.backends[0].models.is_empty());
+    assert_eq!(down.probed_at, None);
+    let empty: LlmCatalog = serde_json::from_str(r#"{"backends": null}"#).unwrap();
+    assert!(empty.backends.is_empty());
 }
 
 #[test]

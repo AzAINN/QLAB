@@ -343,6 +343,17 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
                 None => format!("the desk is now {label}"),
             },
         ),
+        // The owner's own account of what the choice means, which is not always
+        // what an operator expects: naming a reasoner model does not switch the
+        // reasoner on, and the owner says so in the same sentence. A box that
+        // read "model set" would hide exactly that.
+        Wrote::Chose { said } => Toast::new(Level::Info, "model routing", said.clone()),
+        // `Warn`, not `Alarm`: the desk considered the choice and declined it,
+        // and nothing moved. The sentence carries the remedy — "start it with
+        // `ollama serve`" — which is the half that has to survive.
+        Wrote::ChoiceRefused { said } => {
+            Toast::new(Level::Warn, "model choice refused", said.clone())
+        }
         // The owner's own verdict on what it stored, never a receipt this
         // client composed: a login can be written and still be shadowed by an
         // environment pair, which is a file that changed and a desk that cannot

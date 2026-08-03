@@ -379,6 +379,28 @@ fn typed_blind_the_write_scope_refuses_out_loud() {
     assert!(strip(&frame).contains("GLASS"), "{}", strip(&frame));
 }
 
+#[test]
+fn an_unarmed_window_neither_offers_the_model_scope_nor_asks_what_it_serves() {
+    // Two claims. The affordance is absent, as every operator affordance is on
+    // glass — and the fetch behind it does not happen either: a request for a
+    // list this window will never be shown is a round trip nobody asked for.
+    let mut client = Client::fixture();
+    client.press(KeyCode::Char('/'));
+    assert!(!strip(&client.frame(120, 36)).contains("/model"));
+    let mut asked = false;
+    for c in "model ".chars() {
+        asked |= atlas::ui::shell::on_key(
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        ) == Some(atlas::cmd::Command::Backends);
+    }
+    assert!(!asked, "a glass window fetched a catalog it cannot use");
+    client.press(KeyCode::Enter);
+    let frame = client.frame(120, 36);
+    assert!(strip(&frame).contains("GLASS"), "{}", strip(&frame));
+}
+
 // -- goldens ----------------------------------------------------------------
 
 /// A store with the line open on `/ti`, drawn the way the runtime draws it.
@@ -449,6 +471,180 @@ mod armed {
         assert!(frame.contains("ask to execute"), "{frame}");
         assert!(frame.contains("confirmation box"), "{frame}");
         insta::assert_snapshot!(frame_to_string(&client.store, 120, 36));
+    }
+
+    /// A desk that has been told what its backends serve, with ollama down —
+    /// the state the strip has the most to say about.
+    fn desk_with_backends(store: &mut Store) {
+        let catalog = serde_json::from_str(
+            r#"{"backends": [
+                   {"name": "claude", "available": true,
+                    "reason": "claude CLI at /Users/azainmac/.local/bin/claude",
+                    "models": ["inherit", "sonnet", "opus", "haiku"]},
+                   {"name": "ollama", "available": false,
+                    "reason": "ollama is not running at http://127.0.0.1:11499 — start it with `ollama serve`",
+                    "models": []}],
+                 "probed_at": "2026-08-03T04:11:20.138463+00:00"}"#,
+        )
+        .unwrap();
+        store.apply(
+            atlas::bus::AppEvent::Backends(catalog),
+            store.last_snapshot_at.unwrap(),
+        );
+    }
+
+    fn armed_client() -> Client {
+        let mut client = Client::new(fixture_store());
+        client.store.posture = Posture::Operator;
+        client
+    }
+
+    #[test]
+    fn entering_the_model_scope_is_what_asks_the_owner_what_it_serves() {
+        // Once, on the way in. The route probes every configured daemon, so a
+        // fetch fired on the scope rather than on the transition would ask the
+        // owner once per character typed inside it.
+        let mut client = armed_client();
+        client.press(KeyCode::Char('/'));
+        let asked: Vec<Option<atlas::cmd::Command>> = "model "
+            .chars()
+            .map(|c| {
+                atlas::ui::shell::on_key(
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                    &mut client.store,
+                    &mut client.views,
+                )
+            })
+            .collect();
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|cmd| **cmd == Some(atlas::cmd::Command::Backends))
+                .count(),
+            1,
+            "the catalog was asked for more than once, or not at all: {asked:?}"
+        );
+        assert_eq!(
+            asked.last().unwrap(),
+            &Some(atlas::cmd::Command::Backends),
+            "the space is the accept, so it is the keystroke that enters the scope"
+        );
+        // And typing an argument inside the scope asks for nothing more.
+        for c in "reasoner ol".chars() {
+            assert_eq!(
+                atlas::ui::shell::on_key(
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                    &mut client.store,
+                    &mut client.views,
+                ),
+                None,
+                "typing inside the scope asked again"
+            );
+        }
+        // Leaving and coming back does, though — a daemon that has come up
+        // since is exactly what an operator reopening the scope is looking for.
+        client.press(KeyCode::Esc);
+        client.press(KeyCode::Char('/'));
+        for c in "model".chars() {
+            client.press(KeyCode::Char(c));
+        }
+        assert_eq!(
+            atlas::ui::shell::on_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut client.store,
+                &mut client.views,
+            ),
+            Some(atlas::cmd::Command::Backends)
+        );
+    }
+
+    #[test]
+    fn the_model_strip_shows_a_backend_it_cannot_reach_rather_than_hiding_it() {
+        let mut client = armed_client();
+        desk_with_backends(&mut client.store);
+        client.press(KeyCode::Char('/'));
+        type_line(&mut client, "model reasoner oll");
+        let frame = client.frame(120, 36);
+        let offered = strip(&frame);
+        assert!(offered.contains("reasoner ollama"), "{offered}");
+        assert!(
+            offered.contains("start it with `ollama serve`"),
+            "the owner's own remedy is the half an operator acts on: {offered}"
+        );
+        // And submitting it gets that same sentence back, rather than a second
+        // opinion this client composed.
+        type_line(&mut client, "ama");
+        client.press(KeyCode::Enter);
+        let refused = client.frame(120, 36);
+        let said = strip(&refused);
+        assert!(said.contains("ollama is not running"), "{said}");
+    }
+
+    #[test]
+    fn the_accept_key_never_points_at_a_backend_the_desk_cannot_serve() {
+        // `o` puts the down backend *first* on the strip, ahead of the two
+        // switch words that also answer to it. Tab takes the first entry the
+        // desk can serve, not the first one drawn — and the accent has to agree
+        // with the key, or the highlight points at a line already refused.
+        let mut client = armed_client();
+        desk_with_backends(&mut client.store);
+        client.press(KeyCode::Char('/'));
+        type_line(&mut client, "model reasoner o");
+        let buffer = client.buffer(120, 36);
+        let down = harness::body_style_of(&buffer, "reasoner ollama");
+        let taken = harness::body_style_of(&buffer, "reasoner on");
+        assert_ne!(
+            taken.fg, down.fg,
+            "an entry that cannot be chosen is drawn like one that can"
+        );
+        client.press(KeyCode::Tab);
+        assert_eq!(
+            client.store.cmd.text(),
+            "/model reasoner on",
+            "Tab took an entry the desk cannot run"
+        );
+    }
+
+    #[test]
+    fn an_armed_model_choice_reaches_the_runtime_as_one_command_and_nothing_else() {
+        // The routing pin, and the first-colon rule end to end: the parser
+        // never executes anything, and a model id carrying its own colon
+        // survives the split intact.
+        let mut client = armed_client();
+        desk_with_backends(&mut client.store);
+        client.press(KeyCode::Char('/'));
+        type_line(&mut client, "model reasoner ollama:qwen2.5:7b");
+        let cmd = atlas::ui::shell::on_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        );
+        assert_eq!(
+            cmd,
+            Some(atlas::cmd::Command::SetLlm {
+                surface: "reasoner".into(),
+                choice: atlas::cmd::ModelChoice::Pair {
+                    backend: "ollama".into(),
+                    model: "qwen2.5:7b".into(),
+                },
+            })
+        );
+        assert_eq!(client.store.nav.focus, Focus::Content);
+
+        // And the switch, which sends no pair at all.
+        client.press(KeyCode::Char('/'));
+        type_line(&mut client, "model reasoner off");
+        assert_eq!(
+            atlas::ui::shell::on_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut client.store,
+                &mut client.views,
+            ),
+            Some(atlas::cmd::Command::SetLlm {
+                surface: "reasoner".into(),
+                choice: atlas::cmd::ModelChoice::Enabled(false),
+            })
+        );
     }
 
     #[test]

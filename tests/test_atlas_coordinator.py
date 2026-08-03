@@ -495,6 +495,131 @@ def test_a_cooperative_stop_still_refuses_the_next_dispatch():
         reg.close()
 
 
+# --- one dispatch, one workforce ----------------------------------------------
+#
+# The owner reassigns `driver.workforce` on EVERY access of its
+# `coordinator_driver` property — including the snapshot poll, unlocked and
+# without ever taking the driver's lock. So a POST /api/llm can land while a
+# dispatch is between its plan and its recorded rows. `drive` captures the
+# surface once for exactly that reason; these are the two readers a later
+# reading used to reach.
+
+
+def test_a_workforce_change_mid_dispatch_cannot_rewrite_the_rows():
+    """The rows name the surface the dispatch ran on, not the one now set.
+
+    Before this, `_plan` and `_record_routes` were two reads of a mutable
+    attribute: an operator switching the picker while the coordinator spawned
+    made every unpinned role's invocation row claim backend=ollama for a role
+    the Claude coordinator actually ran. An audit row that names a provider
+    that served nothing is worse than no row.
+    """
+    from qlab.core.llm_config import SurfaceModel
+
+    reg = Registry(":memory:")
+    other = SurfaceModel("ollama", "granite3.3:8b")
+    try:
+        driver = None
+
+        def flipping_factory(*args, **kwargs):
+            # Stands in for a POST /api/llm landing between the plan and the
+            # rows — the property write the owner makes, at the moment it can
+            # do damage.
+            driver.workforce = other
+            return FakeSession(*args, **kwargs)
+
+        driver = _driver(reg, registry=reg, session_factory=flipping_factory)
+        assert driver.workforce is None, "this desk starts unconfigured"
+        assert driver.drive("wf-flip", "full review",
+                            roles=_REVIEW_ROLES)["driving"] is True
+        assert driver.workforce is other, "the flip never landed"
+
+        rows = {row["role"]: row for row in reg.list_model_invocations()}
+        assert len(rows) == len(_REVIEW_ROLES)
+        for role in _REVIEW_ROLES:
+            # The claude coordinator walked all five, so all five say so.
+            assert rows[role]["backend"] == "claude_cli", role
+            assert rows[role]["resolved_model"] != other.model, role
+            # An unconfigured desk pins nothing: a reason here would mean the
+            # rows were derived from a workforce this dispatch never had.
+            assert not rows[role]["fallback_reason"], role
+
+        # ...and the capture is per dispatch, not a freeze. The next one reads
+        # the surface the operator actually left set, and says the graph could
+        # not follow it.
+        driver.stop("done")
+        driver._closed = False           # stop() is terminal by design
+        assert driver.drive("wf-next", "full review",
+                            roles=_REVIEW_ROLES)["driving"] is True
+        # Ordered by a shared-second timestamp, so compared as a set: one row
+        # per dispatch, and only the second one carries the operator's choice.
+        reasons = [row["fallback_reason"] or "" for row
+                   in reg.list_model_invocations() if row["role"] == "reporter"]
+        assert len(reasons) == 2 and "" in reasons
+        assert any("one role per session" in reason for reason in reasons)
+    finally:
+        reg.close()
+
+
+def test_a_reader_handed_a_surface_answers_about_that_surface():
+    """The two readers whose divergence has no seam a test can hook.
+
+    `available` and `_plan` are both called from inside one dispatch, back to
+    back, so no injectable callback fires between the capture and their reads
+    — a flip there is real in the owner's threads but unreachable from a
+    scripted run. What is testable is the property the capture depends on:
+    each reader answers about the surface it is HANDED, and still reads the
+    live attribute when handed nothing (the snapshot path's whole contract).
+    """
+    from qlab.core.llm_config import SurfaceModel
+
+    other = SurfaceModel("ollama", "granite3.3:8b")
+    driver = _driver(workforce=None,
+                     backend_status=lambda name: (False, "ollama is not running"))
+
+    assert driver._plan(_REVIEW_ROLES, workforce=other).pinned_reason
+    assert driver._plan(_REVIEW_ROLES).pinned_reason == "", "the live read broke"
+    # A down daemon is a refusal for the graph `other` would serve...
+    assert driver.available(roles=("news-analyst",), workforce=other) == \
+        (False, "ollama is not running")
+    # ...and no refusal at all for the unconfigured desk this driver still is.
+    assert driver.available(roles=("news-analyst",)) == (True, "")
+
+
+def test_a_workforce_cleared_mid_dispatch_does_not_break_the_harness_run():
+    """The other reader: the model the harness session is built with.
+
+    `_build_session` read the live surface for its model, so a picker cleared
+    between the plan and the session construction turned a valid ollama
+    dispatch into `coordinator failed to start` — and a picker *switched*
+    would have handed the daemon a model belonging to another backend.
+    """
+    reg, daemon = Registry(":memory:"), StubDaemon()
+    session = None
+    try:
+        driver = None
+
+        def flipping_backend(name):
+            # `_build_backend` is called while the session's arguments are
+            # evaluated, immediately before the model is read.
+            driver.workforce = None
+            return daemon
+
+        driver = _ollama_driver(reg, daemon, backend_factory=flipping_backend)
+        out = driver.drive("wf-news", "read the week", roles=("news-analyst",))
+        assert out["driving"] is True, out["reason"]
+        assert driver.workforce is None, "the flip never landed"
+        session = driver._session
+        session.join(timeout=5)
+        # The dispatch ran on the model it planned with, not on whatever the
+        # attribute held by the time the arguments were assembled.
+        assert daemon.asked and daemon.asked[0]["model"] == "granite3.3:8b"
+    finally:
+        if session is not None:
+            session.join(timeout=5)
+        reg.close()
+
+
 # --- the owner seam -----------------------------------------------------------
 
 

@@ -81,6 +81,11 @@ _RECORDED_KINDS = ("text", "tool", "agent", "error", "session", "result")
 # reasoning a reader actually wants; every other field is a name.
 _TEXT_CHARS = 1000
 
+# "read the live attribute" — distinct from None, which is a real workforce
+# value meaning the unconfigured desk. Callers on the snapshot path want the
+# live read; one dispatch passes the surface it captured and gets that one.
+_LIVE = object()
+
 
 def drive_enabled() -> bool:
     """Whether the owner may spawn its own coordinator.
@@ -215,7 +220,18 @@ class CoordinatorDriver:
     def current_workflow_id(self) -> str:
         return self._workflow_id if self.busy else ""
 
-    def available(self, roles: tuple[str, ...] = ()) -> tuple[bool, str]:
+    def _surface(self, workforce) -> SurfaceModel | None:
+        """The captured workforce, or the live attribute when none was passed.
+
+        The owner reassigns ``self.workforce`` on every property access, so a
+        method that re-reads it is sampling a value that can change under it.
+        Inside one dispatch every reader takes the surface ``drive`` captured;
+        everywhere else the live read is the point.
+        """
+        return self.workforce if workforce is _LIVE else workforce
+
+    def available(self, roles: tuple[str, ...] = (), *,
+                  workforce=_LIVE) -> tuple[bool, str]:
         """Can a coordinator be spawned right now, and if not, why not.
 
         Returns the reason alongside the verdict because every caller needs to
@@ -234,8 +250,9 @@ class CoordinatorDriver:
         """
         if self._closed:
             return False, "the owner is shutting down"
-        backend = self.workforce.backend if self.workforce else CLAUDE_BACKEND
-        plan = self._plan(roles)
+        workforce = self._surface(workforce)
+        backend = workforce.backend if workforce else CLAUDE_BACKEND
+        plan = self._plan(roles, workforce=workforce)
         # Only the backend a harness exists for: refusing a claude graph
         # because an unusable backend is down would be a refusal about nothing.
         if backend == _HARNESS_BACKEND and (not roles or plan.backend == backend):
@@ -256,7 +273,7 @@ class CoordinatorDriver:
                 return False, "the `claude` CLI is not on PATH"
         return True, ""
 
-    def _plan(self, roles: tuple[str, ...]) -> SessionPlan:
+    def _plan(self, roles: tuple[str, ...], *, workforce=_LIVE) -> SessionPlan:
         """Which provider serves this graph.
 
         The harness serves a dispatch only when the dispatch IS one role: it
@@ -270,7 +287,8 @@ class CoordinatorDriver:
         here would mean parsing an agent file on the snapshot path, every tick,
         to refuse something the construction refuses anyway.
         """
-        backend = self.workforce.backend if self.workforce else CLAUDE_BACKEND
+        workforce = self._surface(workforce)
+        backend = workforce.backend if workforce else CLAUDE_BACKEND
         if backend == CLAUDE_BACKEND:
             return SessionPlan(CLAUDE_BACKEND)
         if backend != _HARNESS_BACKEND:
@@ -278,7 +296,7 @@ class CoordinatorDriver:
                                pinned_reason=no_role_harness_reason(backend))
         if len(roles) == 1:
             if resolve_route(roles[0],
-                             workforce=self.workforce).backend == backend:
+                             workforce=workforce).backend == backend:
                 return SessionPlan(backend, role=roles[0])
             # A one-role graph IS the shape the harness serves, so the graph is
             # not the reason — the role is. Saying "this 1-phase graph is walked
@@ -327,17 +345,28 @@ class CoordinatorDriver:
         Returns ``{"driving": bool, "reason": str}``. Never raises for an
         ordinary refusal — a dispatch that cannot be driven is still a valid
         dispatch a human can resume, so it must not fail the Atlas task.
+
+        One dispatch reads one workforce. The owner reassigns the driver's
+        ``workforce`` on every property access — including the snapshot poll —
+        so a Settings change landing between the plan and the recorded routes
+        used to make the rows name a backend that did not serve those roles.
+        It is captured here and threaded through every reader below; the
+        driver's own lock does not help, because the writer never takes it.
+        ``fast`` has the identical shape and predates this — untouched here so
+        the fix stays one claim, and it deserves the same capture.
         """
         with self._lock:
-            ok, reason = self.available(roles)
+            workforce = self.workforce
+            ok, reason = self.available(roles, workforce=workforce)
             if not ok:
                 self.last_reason = reason
                 self._emit("atlas_coordinator_skipped",
                            {"workflow_id": workflow_id, "reason": reason})
                 return {"driving": False, "reason": reason}
-            plan = self._plan(roles)
+            plan = self._plan(roles, workforce=workforce)
             try:
-                session = self._build_session(workflow_id, plan)
+                session = self._build_session(workflow_id, plan,
+                                              workforce=workforce)
                 started = session.start(resume_prompt(workflow_id, goal),
                                         governed=True)
             except Exception as exc:
@@ -356,7 +385,7 @@ class CoordinatorDriver:
             self._session = session
             self._workflow_id = str(workflow_id)
             self.last_reason = ""
-            self._record_routes(plan, roles)
+            self._record_routes(plan, roles, workforce=workforce)
             self._emit("atlas_coordinator_started",
                        {"workflow_id": workflow_id, "goal": goal[:300],
                         "backend": plan.backend, "role": plan.role})
@@ -404,14 +433,20 @@ class CoordinatorDriver:
 
     # -- internals ------------------------------------------------------------
 
-    def _build_session(self, workflow_id: str, plan: SessionPlan):
+    def _build_session(self, workflow_id: str, plan: SessionPlan, *,
+                       workforce=_LIVE):
         """The session for one dispatch — a coordinator, or one role.
 
         Both are constructed identically because ``OllamaRoleRunner`` was
         written to the signature this driver already used; the differences it
         cannot honour (``cwd``, ``fast``) are dropped in its own factory and
         named there rather than absorbed here.
+
+        The model comes from the same surface ``plan`` was built from: reading
+        it live could hand the harness a model belonging to another backend, or
+        no surface at all on a desk that just cleared its choice.
         """
+        workforce = self._surface(workforce)
         if plan.backend == CLAUDE_BACKEND:
             factory = self._session_factory
             if factory is None:
@@ -422,7 +457,7 @@ class CoordinatorDriver:
 
             factory = session_factory(
                 backend=self._build_backend(plan.backend),
-                model=self.workforce.model, role=plan.role,
+                model=workforce.model, role=plan.role,
                 registry=self.registry)
         return factory(
             lambda event: self._on_event(workflow_id, event),
@@ -439,7 +474,8 @@ class CoordinatorDriver:
 
         return build_backend(name)
 
-    def _record_routes(self, plan: SessionPlan, roles: tuple[str, ...]) -> None:
+    def _record_routes(self, plan: SessionPlan, roles: tuple[str, ...], *,
+                       workforce=_LIVE) -> None:
         """One invocation row per role the CLAUDE coordinator was configured with.
 
         Deliberately not written for the harness path: the runner records its
@@ -452,11 +488,16 @@ class CoordinatorDriver:
         non-claude workforce every one of these rows carries the reason its
         role did not move, which is why the multi-role case is a recorded pin
         rather than a silent downgrade.
+
+        The surface is the dispatch's, not the current one: these rows and
+        ``plan`` are two readings of one choice, and a row derived from a
+        later reading would claim a provider this dispatch never ran on.
         """
         if self.registry is None or plan.backend != CLAUDE_BACKEND:
             return
         from qlab.tui.claude import fast_mode_enabled
 
+        workforce = self._surface(workforce)
         # The session resolves `None` the same way; the row has to name the
         # model the CLI was actually configured with, not a default.
         fast = fast_mode_enabled() if self.fast is None else bool(self.fast)
@@ -464,7 +505,7 @@ class CoordinatorDriver:
             for role in roles:
                 record_invocation(
                     self.registry,
-                    resolve_route(role, workforce=self.workforce, fast=fast,
+                    resolve_route(role, workforce=workforce, fast=fast,
                                   pinned_reason=plan.pinned_reason),
                     status="dispatched")
         except Exception as exc:

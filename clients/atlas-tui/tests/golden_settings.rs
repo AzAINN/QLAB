@@ -403,6 +403,30 @@ fn a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half() {
     // gives way, never the reading.
     assert!(short.contains("probed"), "{short}");
     assert!(short.contains("ollama · granite3.3:8b"), "{short}");
+
+    // Two down backends, which is what makes the marker's *reservation* load
+    // bearing rather than a no-op. With one reason the row is always affordable
+    // after the fact; with two, a first reason costing exactly the slack would
+    // be drawn, leave nothing, and push the count onto a row the card does not
+    // have — one sentence on screen and no sign the other exists. Reachable the
+    // moment the two surfaces sit on different daemons and both are down.
+    let both = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "ollama", "model": "granite3.3:8b"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "ollama", "available": false,
+                                "reason": "ollama is running at 127.0.0.1:11434 but no models are pulled — pull one with `ollama pull granite3.3:8b`"}},
+                              {{"name": "claude", "available": false,
+                                "reason": "the claude CLI exited 1: Invalid API key · Please run /login — the desk cannot start a workforce session"}}],
+             "probed_at": "{PROBED}"}}"#
+    ));
+    // At the baseline, where a single reason of this size fits whole.
+    let body = content(&both.frame(120, 36));
+    assert!(body.contains("▾ 2 more"), "{body}");
+    // And neither half-sentence survives beside the count.
+    assert!(!body.contains("ollama is running at"), "{body}");
+    assert!(!body.contains("the claude CLI exited"), "{body}");
+    assert!(body.contains("probed"), "{body}");
 }
 
 #[test]

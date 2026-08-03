@@ -68,14 +68,25 @@ from qlab.operator.model_routing import (
 # re-declared, so a second harness is wired by the module that implements it.
 from qlab.operator.ollama_role import OLLAMA_BACKEND as _HARNESS_BACKEND
 
-# The event kinds worth putting on the audit bus. A coordinator emits far more
-# than a reader needs; recording every token would bury the desk's own events.
+# The coordinator event kinds worth keeping on the durable audit bus. Every
+# name here must be one `parse_stream_line` actually emits; this list used to
+# say "tool" and "agent", which it never does, so every tool call and every
+# subagent handoff was dropped and the live desk's 31 recorded events all
+# carried an empty `agent`. A test pins these against the parser's vocabulary.
+# The role harness speaks the same vocabulary by design — two producers, one
+# set of names — so the pin covers both.
 #
-# `tool` and `agent` are the role harness's vocabulary — a ``ClaudeSession``
-# emits `tool_start`/`tool_result`, which this deliberately does not record,
-# because a governed run's tool traffic is TUI material and would outnumber the
-# desk's own events on the bus by an order of magnitude.
-_RECORDED_KINDS = ("text", "tool", "agent", "error", "session", "result")
+# `text_delta` is deliberately excluded: it is the token-by-token stream of the
+# same text a `text` block later carries whole, and recording both would write
+# an agent's reasoning to a durable table hundreds of times over.
+#
+# `session` is excluded for the same reason: on the live desk 56 of 60 recorded
+# events were `Claude session ...`, 42 of them `task_progress`, which is the SDK
+# saying it is still alive rather than the desk's agents saying anything. They
+# pushed the four events carrying actual debate reasoning off the end of the
+# window. The coordinator's own lifecycle stays on the record through the
+# dedicated `atlas_coordinator_started` / `_stopped` events.
+_RECORDED_KINDS = ("text", "tool_start", "tool_result", "error", "result")
 
 # What one field of one event may be worth in a durable row. `text` is the
 # reasoning a reader actually wants; every other field is a name.

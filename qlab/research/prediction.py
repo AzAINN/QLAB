@@ -293,6 +293,93 @@ def _choose_alpha(
     return max(alphas, key=lambda alpha: scores[alpha])
 
 
+def _groupwise_ridge_predict(
+    train_x: np.ndarray,
+    train_y: np.ndarray,
+    test_x: np.ndarray,
+    alpha_raw: float,
+    alpha_map: float,
+    n_raw: int,
+) -> np.ndarray:
+    """Ridge with separate penalties for the raw and mapped feature groups.
+
+    The measured failure of the explicit augmentation was a single global
+    alpha over-shrinking the raw columns along with the near-collinear mapped
+    ones (``planning-docs/2026-07-30-ml-lane.md``). A per-group diagonal
+    penalty is rescue path #1 from that document. With equal alphas this is
+    exactly :func:`_ridge_predict` — the identity the tests pin.
+    """
+    width = train_x.shape[1]
+    if isinstance(n_raw, bool) or not isinstance(n_raw, int):
+        raise TypeError("n_raw must be an integer")
+    if not 0 < n_raw <= width:
+        raise ValueError(
+            f"n_raw must lie in [1, {width}] for a {width}-column matrix"
+        )
+    for name, alpha in (("alpha_raw", alpha_raw), ("alpha_map", alpha_map)):
+        if not math.isfinite(float(alpha)) or float(alpha) <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
+    mean_x = train_x.mean(axis=0)
+    scale_x = train_x.std(axis=0)
+    scale_x = np.where(scale_x > 1e-12, scale_x, 1.0)
+    standardized_train = (train_x - mean_x) / scale_x
+    standardized_test = (test_x - mean_x) / scale_x
+    mean_y = float(train_y.mean())
+    centered_y = train_y - mean_y
+    penalty = np.diag(np.concatenate([
+        np.full(n_raw, float(alpha_raw)),
+        np.full(width - n_raw, float(alpha_map)),
+    ]))
+    gram = standardized_train.T @ standardized_train + penalty
+    rhs = standardized_train.T @ centered_y
+    try:
+        coefficients = np.linalg.solve(gram, rhs)
+    except np.linalg.LinAlgError:
+        coefficients = np.linalg.pinv(gram) @ rhs
+    return mean_y + standardized_test @ coefficients
+
+
+def _choose_groupwise_alphas(
+    train_x: np.ndarray,
+    train_y: np.ndarray,
+    alphas: tuple[float, ...],
+    n_raw: int,
+) -> tuple[float, float]:
+    """Tune both group alphas inside the outer fold's already-purged history.
+
+    Grid order is the deterministic tie-breaker, mirroring
+    :func:`_choose_alpha`; when the training block is too small for inner
+    splits the middle grid pair is the same conservative fallback.
+    """
+    grid = [(a_raw, a_map) for a_raw in alphas for a_map in alphas]
+    inner_min_train = max(42, len(train_y) // 2)
+    try:
+        inner_folds = purged_walk_forward_splits(
+            len(train_y),
+            n_splits=3,
+            embargo=PREDICTION_HORIZON_DAYS,
+            min_train_size=inner_min_train,
+        )
+    except ValueError:
+        return grid[len(grid) // 2]
+
+    scores: dict[tuple[float, float], float] = {}
+    for pair in grid:
+        inner_ics = []
+        for inner_train, inner_test in inner_folds:
+            predicted = _groupwise_ridge_predict(
+                train_x[inner_train],
+                train_y[inner_train],
+                train_x[inner_test],
+                pair[0],
+                pair[1],
+                n_raw,
+            )
+            inner_ics.append(_spearman_ic(predicted, train_y[inner_test]))
+        scores[pair] = float(np.mean(inner_ics))
+    return max(grid, key=lambda pair: scores[pair])
+
+
 def _index_text(value: object) -> str:
     if hasattr(value, "isoformat"):
         return str(value.isoformat())

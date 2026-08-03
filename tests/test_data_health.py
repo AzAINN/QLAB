@@ -97,6 +97,83 @@ def test_missing_ticker_fails_integrity():
     assert not h.eligible_for_paper_proposal
 
 
+# --- invariant 4: a refusal always states its reason -------------------------
+#
+# The live desk served `eligible_for_paper_proposal: false` with `reasons: []`
+# and every named check passing. The cause was the execution-grade provider
+# rule, which gates eligibility and was the one rule that never wrote a reason.
+# An operator reading that payload saw a desk refusing to work and no way to
+# find out why — the exact failure invariant 4 exists to prevent.
+
+
+def test_a_research_grade_provider_states_why_it_cannot_back_a_proposal():
+    panel = _panel(["2026-07-23", "2026-07-24"], "synthetic", True)
+    h = evaluate_panel_health(panel, DataPolicy.demo(), tickers=TICKERS, now=NOW)
+    assert not h.eligible_for_paper_proposal
+    assert any("execution-grade" in r for r in h.reasons), h.reasons
+    # The provider is named, so the operator knows what to change.
+    assert any("synthetic" in r for r in h.reasons), h.reasons
+
+
+def test_synthetic_alpaca_data_is_refused_as_synthetic_not_as_wrong_provider():
+    """`alpaca` in the sandbox can still hand back a synthetic panel. The
+    reason must name that, not the provider, or the operator swaps a provider
+    that was already correct."""
+    panel = _panel(["2026-07-23", "2026-07-24"], "alpaca", True)
+    h = evaluate_panel_health(panel, DataPolicy.alpaca_operational(),
+                              tickers=TICKERS, now=NOW)
+    assert not h.eligible_for_paper_proposal
+    assert any("synthetic" in r for r in h.reasons), h.reasons
+
+
+@pytest.mark.parametrize("source,synthetic,policy_name", [
+    ("synthetic", True, "demo"),
+    ("yfinance", False, "demo"),
+    ("yfinance", False, "alpaca_operational"),
+    ("alpaca", True, "alpaca_operational"),
+    ("alpaca", False, "alpaca_operational"),
+    ("unknown", False, "demo"),
+])
+def test_no_panel_is_ever_refused_without_a_reason(source, synthetic, policy_name):
+    """The invariant itself, over every provider and policy pairing: an
+    ineligible verdict with an empty `reasons` list is unreachable."""
+    policy = getattr(DataPolicy, policy_name)()
+    for dates in (["2026-07-23", "2026-07-24"], ["2026-07-20", "2026-07-21"]):
+        h = evaluate_panel_health(_panel(dates, source, synthetic), policy,
+                                  tickers=TICKERS, now=NOW)
+        if not h.eligible_for_paper_proposal:
+            assert h.reasons, (
+                f"{source}/{policy.provider} refuses a paper proposal and "
+                f"states no reason; every check reported clean")
+        if not h.eligible_for_research:
+            assert h.reasons
+        if not h.eligible_for_execution:
+            assert h.reasons
+
+
+def test_an_eligible_panel_carries_no_reasons():
+    """The other direction: reasons are refusals, never commentary. A desk
+    that is working must not print a list of things that look like problems."""
+    panel = _panel(["2026-07-22", "2026-07-23", "2026-07-24"], "alpaca", False)
+    h = evaluate_panel_health(panel, DataPolicy.alpaca_operational(),
+                              tickers=TICKERS, now=NOW)
+    assert h.eligible_for_paper_proposal
+    assert h.reasons == []
+
+
+def test_the_execution_grade_rule_is_discoverable_not_folded_into_a_boolean():
+    """The rule that blocked the live desk was a module-level frozenset no
+    payload ever mentioned. It is surfaced so a client can say which providers
+    would work rather than making the operator read the source."""
+    from qlab.data.health import execution_grade_providers
+
+    providers = execution_grade_providers()
+    assert "alpaca" in providers
+    assert "synthetic" not in providers and "yfinance" not in providers
+    # A returned copy, so a caller cannot silently widen the execution gate.
+    assert isinstance(providers, frozenset)
+
+
 # --- data permits ------------------------------------------------------------
 
 

@@ -365,7 +365,11 @@ class OllamaRoleRunner:
         self._emit("session",
                    f"{self.role} started on ollama/{self.model}, "
                    f"{len(self._allowed)} tools")
-        self._emit("agent", f"{self.role} is reading the desk's record",
+        # `text`, not a private kind: the harness speaks the Claude parser's
+        # vocabulary so `_RECORDED_KINDS` has one set of names for two
+        # producers (the merge that unified them is where "tool"/"agent"
+        # died — kinds no parser emitted, pinned against ever returning).
+        self._emit("text", f"{self.role} is reading the desk's record",
                    agent=self.role)
         messages = [{"role": "system", "content": self._system},
                     {"role": "user", "content": prompt}]
@@ -477,7 +481,7 @@ class OllamaRoleRunner:
         model always sees the same thing the audit row saw.
         """
         refusal = f"REFUSED: {reason}"
-        self._emit("tool", refusal, tool=name)
+        self._emit("tool_result", refusal, tool=name)
         return refusal
 
     def _execute(self, name: str, raw_arguments) -> str:
@@ -503,7 +507,7 @@ class OllamaRoleRunner:
         if problem is not None:
             return self._refuse(name, f"{name} was not called — {problem}")
 
-        self._emit("tool", f"calling {name}", tool=name)
+        self._emit("tool_start", f"calling {name}", tool=name)
         payload = dict(arguments)
         # The proxy attaches the session's own offline flag to every lab call;
         # a model may not choose whether the desk is online.
@@ -514,7 +518,7 @@ class OllamaRoleRunner:
                 f"{name} answered with {len(result)} characters, past this "
                 f"session's {_MAX_TOOL_RESULT_CHARS}; ask for less (a smaller "
                 "limit) rather than reading it all."))
-        self._emit("tool", f"{name} answered: {_head(result)}", tool=name)
+        self._emit("tool_result", f"{name} answered: {_head(result)}", tool=name)
         return result
 
     def _owner_post(self, path: str, payload: dict) -> str:

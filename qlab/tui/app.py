@@ -3587,6 +3587,50 @@ class QlabTui(App[None]):
                 f"[{prediction_tone}]vol forecast IC {mean_ic:.3f} "
                 f"({stability_label}) — {usability_label}[/]"
             )
+        latest_board = next(
+            (run for run in runs if run.get("kind") == "predictor_board"),
+            None,
+        )
+        if latest_board is None:
+            summary.append(f"[{MUTED}]predictor board — never run[/]")
+        else:
+            board_spec = latest_board.get("spec")
+            board = (
+                board_spec.get("board") if isinstance(board_spec, dict) else None
+            )
+            models = board.get("models") if isinstance(board, dict) else None
+            if not isinstance(models, list):
+                summary.append(f"[{MUTED}]predictor board — unreadable spec[/]")
+            else:
+                champion = board.get("champion")
+                board_tone = UP if board.get("admitted_any") else DOWN
+                headline = (
+                    f"champion {champion}" if champion else "no admitted model"
+                )
+                summary.append(
+                    f"[{board_tone}]predictor board — {headline}[/]"
+                )
+                for entry in models:
+                    if not isinstance(entry, dict):
+                        continue
+                    marker = "★" if entry.get("model_id") == champion else " "
+                    admitted = (
+                        "admitted" if entry.get("usable") else "not admitted"
+                    )
+                    delta = entry.get("delta_mean_ic_vs_baseline")
+                    delta_cell = (
+                        f"{delta:+.3f}"
+                        if isinstance(delta, (int, float))
+                        else "   — "
+                    )
+                    name_cell = escape(
+                        f"{str(entry.get('model_id', '')):<18}"
+                    )
+                    summary.append(
+                        f"[{TEXT}]{marker} {name_cell} "
+                        f"IC {float(entry.get('mean_ic', 0.0)):+.3f}  "
+                        f"Δ {delta_cell}  {admitted}[/]"
+                    )
         summary.append("Run [bold]: batch[/] for the staged comparison suite.")
         self.query_one("#research-summary", Static).update("\n".join(summary))
 

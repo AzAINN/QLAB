@@ -19,12 +19,13 @@ import hashlib
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from qlab.state.registry import Registry
 
 if TYPE_CHECKING:      # annotations only; a runtime import would be a cycle
-    from qlab.operator.reasoner import ReasonerChoice
+    from qlab.operator.template_judge import ReasonerChoice
 
 MANAGER_ID = "atlas"
 
@@ -61,6 +62,12 @@ class AtlasConfig:
     # One corrected retry per failed task; a second failure blocks rather than
     # looping (plan §8.6: "no automatic loop after a second failure").
     max_task_attempts: int = 2
+    # A trigger is a claim about a specific trading day. After this many days
+    # the portfolio it described has moved, so the queued task is reported
+    # stale rather than startable; if the condition still holds, the observe
+    # tick fires it again under today's date. Five covers a trading week, so a
+    # Friday breach is still actionable on the following Wednesday.
+    max_task_age_days: int = 5
 
 
 @dataclass(frozen=True)
@@ -272,16 +279,31 @@ class AtlasSupervisor:
         }
 
     # -- research mode: start registered templates only ---------------------
-    def startable_tasks(self, facts: dict) -> list[dict]:
+    def startable_tasks(self, facts: dict, *, today: str | None = None) -> list[dict]:
         """Queued tasks whose template Atlas may start right now, with reasons.
 
         Deterministic and side-effect free: it reports what *could* run under
         the current mode and data state, and why anything is refused.
+
+        Queued tasks do not expire on their own, so this surface had grown into
+        fifteen `drift_breach` rows — one per trading day back to 2026-07-19 —
+        every one of them offered as work Atlas could start, all carrying the
+        same permit refusal. Two things were wrong with that. Fifteen rows
+        saying one sentence is not a list of options, it is noise that buries
+        whatever else is queued. Worse, the refusal named the *permit*, so
+        widening the permit would have started a fifteen-day-old drift breach
+        against a portfolio whose weights had long since moved: a trigger is a
+        claim about a specific day, and it does not keep.
+
+        ``today`` is injected rather than read from the clock. A deterministic
+        surface whose answer changes at midnight UTC cannot be reproduced or
+        tested, and this one is read by the authority gate.
         """
         from qlab.operator.templates import (
             TemplateNotAllowed, check_startable, template_for_trigger)
 
         mode = self.mode
+        today = (today or _utc_today())[:10]
         out: list[dict] = []
         for task in self.registry.list_atlas_tasks(50):
             if task.get("status") != "queued":
@@ -291,6 +313,16 @@ class AtlasSupervisor:
             if not template_id:
                 continue
             entry = {"task_id": task["task_id"], "template_id": template_id}
+            entry.update(self._task_age(task, today))
+            if entry["stale"] is not False:
+                # Stale, or of unknown age. Either way it is refused, and the
+                # reason is the age rather than the permit, because the permit
+                # is not what is wrong with it.
+                entry["startable"] = False
+                entry["reason"] = entry.pop("age_reason")
+                out.append(entry)
+                continue
+            entry.pop("age_reason", None)
             try:
                 template = check_startable(template_id, mode, facts)
             except TemplateNotAllowed as exc:
@@ -301,6 +333,33 @@ class AtlasSupervisor:
                               "creates_plan": template.creates_plan})
             out.append(entry)
         return out
+
+    def _task_age(self, task: dict, today: str) -> dict:
+        """How old this task's triggering condition is, in trading days.
+
+        Read from the dedupe key, which carries the trading date the trigger
+        fired on; `created_at` is wall-clock and would call a task recorded
+        just after midnight UTC a day older than it is.
+        """
+        day = _dedupe_trading_date(task.get("dedupe_key"))
+        if not _looks_like_a_date(day):
+            # Unknown age must never read the same as known-fresh, so this is
+            # None rather than False and the task is not offered.
+            return {"stale": None, "trading_date": day or None,
+                    "age_days": None,
+                    "age_reason": ("age unknown: this task carries no readable "
+                                   "trading date, so whether its trigger still "
+                                   "describes today cannot be established")}
+        age = _days_between(day, today)
+        limit = self.config.max_task_age_days
+        if age > limit:
+            return {"stale": True, "trading_date": day, "age_days": age,
+                    "age_reason": (
+                        f"stale: this trigger fired on {day}, {age} days before "
+                        f"{today}, and describes a portfolio that has since "
+                        f"moved. Tasks older than {limit} days are not started; "
+                        f"if the condition still holds it will fire again.")}
+        return {"stale": False, "trading_date": day, "age_days": age}
 
     def start_task(self, task_id: str, facts: dict, *,
                    runner: Callable[[dict, str], dict] | None = None) -> dict:
@@ -642,6 +701,22 @@ def _dedupe_trading_date(dedupe_key) -> str:
     """The trading date segment of ``kind|trading_date|universe|state_hash``."""
     parts = str(dedupe_key or "").split("|")
     return parts[1][:10] if len(parts) > 1 else ""
+
+
+def _looks_like_a_date(value: str) -> bool:
+    try:
+        date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return False
+    return True
+
+
+def _days_between(earlier: str, later: str) -> int:
+    return (date.fromisoformat(later[:10]) - date.fromisoformat(earlier[:10])).days
+
+
+def _utc_today() -> str:
+    return datetime.now(UTC).date().isoformat()
 
 
 def _hash(payload: dict) -> str:

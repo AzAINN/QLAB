@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from qlab.state.registry import Registry
@@ -185,6 +187,33 @@ def test_data_health_endpoint_reports_demo_data_as_research_only(session):
     assert health["permit_id"].startswith("sha256:")
 
 
+def test_an_ineligible_desk_tells_the_operator_why_over_the_api(session):
+    """The live desk served every check PASS, `eligible_for_paper_proposal:
+    false` and `reasons: []`. Invariant 4 says a refusal states its reason,
+    and this is the endpoint an operator actually reads."""
+    _, health = handle_api(
+        session, "GET", "/api/data/health", {"offline": ["1"]}, {})
+    assert health["eligible_for_paper_proposal"] is False
+    assert health["reasons"], "a refusal with no reason is unactionable"
+    assert any("synthetic" in r for r in health["reasons"])
+    # Singular `reason` is what atlas_facts and the TUI read; it must not be
+    # None while `reasons` is populated, or the gate reports an unexplained
+    # refusal to the operator and to Atlas.
+    assert health["reason"]
+    assert health["reason"] in health["reasons"]
+
+
+def test_the_gate_carries_the_data_refusal_reason_not_a_bare_false(session):
+    """`atlas_facts` read `health["reason"]`, which only the *blocked* branch
+    ever set. On the ordinary ineligible path the gate handed Atlas
+    `eligible: false, reason: None` — a refusal with no cause attached."""
+    facts = session.atlas_facts(True)
+    assert facts["data"]["eligible_for_paper_proposal"] is False
+    assert facts["data"]["reason"], (
+        "the gate refuses paper proposals and states no reason to Atlas")
+    assert "synthetic" in facts["data"]["reason"]
+
+
 def test_data_permit_current_returns_recorded_permit(session):
     # Recording happens as a side effect of the health evaluation.
     handle_api(session, "GET", "/api/data/health", {"offline": ["1"]}, {})
@@ -242,6 +271,88 @@ def test_data_health_withdraws_execution_when_quotes_stale(session):
     assert status == 200
     assert health["eligible_for_execution"] is False
     assert health["quote_health"]["fresh"] is False
+
+
+def test_a_live_desk_mode_attaches_the_market_stream(session, monkeypatch):
+    # The comment above `market_stream = None` promised an attachment "under an
+    # operational policy"; nothing ever performed it, so live desks priced off
+    # the daily bar path forever. The transport is injected: a bare session
+    # (every other test here) never opens a socket.
+    import threading
+
+    from qlab.core.desk_mode import DeskMode
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials",
+        lambda: AlpacaCredentials(
+            kind="api_key", api_key="k", secret_key="s",
+            oauth_token=None, profile_name=None, source="test"))
+
+    calls, ran = [], threading.Event()
+
+    def fake_runner(*, supervisor, key, secret, stop_event):
+        calls.append((supervisor, key, secret, stop_event))
+        ran.set()
+
+    session.attach_market_stream_runner(fake_runner)
+    # A runner alone attaches nothing: demo mode has no live feed to hold.
+    assert session.market_stream is None
+
+    session.set_desk_mode(DeskMode("live", "simulated"))
+    assert session.market_stream is not None
+    assert list(session.market_stream.symbols) == \
+        list(session.mandate.universe_whitelist)
+    assert ran.wait(2.0)
+    [(supervisor, key, secret, stop)] = calls
+    assert supervisor is session.market_stream
+    assert (key, secret) == ("k", "s")
+
+    session.set_desk_mode(DeskMode("synthetic", "simulated"))
+    # The switch tears the transport down, not just the handle.
+    assert session.market_stream is None
+    assert stop.is_set()
+
+
+def test_live_mode_without_credentials_names_the_gap(session, monkeypatch):
+    # Invariant 4: a live desk that cannot stream says which credential is
+    # missing, rather than reporting the demo runtime's reason.
+    from qlab.core.desk_mode import DeskMode
+
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: None)
+    session.attach_market_stream_runner(
+        lambda **kw: pytest.fail("the transport must not run without keys"))
+    session.set_desk_mode(DeskMode("live", "simulated"))
+
+    assert session.market_stream is None
+    status, out = handle_api(session, "GET", "/api/quotes", {}, {})
+    assert status == 200
+    assert out["live_stream"] is False
+    assert "ALPACA_API_KEY" in out["reason"]
+
+
+def test_an_oauth_profile_is_named_not_prescribed_again(session, monkeypatch):
+    # An operator with a browser-login profile has already done `alpaca profile
+    # login`; telling them to do it again is a loop. The refusal must say the
+    # data websocket needs an API key pair and that the profile cannot carry it.
+    from qlab.core.desk_mode import DeskMode
+    from qlab.trader.alpaca_auth import AlpacaCredentials
+
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials",
+        lambda: AlpacaCredentials(
+            kind="oauth", api_key=None, secret_key=None,
+            oauth_token="t", profile_name="paper", source="profile"))
+    session.attach_market_stream_runner(
+        lambda **kw: pytest.fail("an oauth token cannot open the websocket"))
+    session.set_desk_mode(DeskMode("live", "simulated"))
+
+    assert session.market_stream is None
+    _, out = handle_api(session, "GET", "/api/quotes", {}, {})
+    assert "browser login" in out["reason"]
+    assert "ALPACA_API_KEY" in out["reason"]
+    assert "profile login" not in out["reason"]
 
 
 def test_regime_panel_endpoint_is_a_diagnostic_not_a_signal(session):
@@ -2899,7 +3010,10 @@ def test_an_autonomous_start_is_never_reported_as_completed():
     session.atlas.set_mode("research")
     facts = session.atlas_facts(True)
     facts["regime"]["flip"] = True
-    session.atlas.observe(facts, trading_date="2026-07-26")
+    # Today's date, because that is what the production observe tick passes.
+    # A hardcoded past date used to work here and now correctly reads as a
+    # stale trigger, which is the whole point of max_task_age_days.
+    session.atlas.observe(facts, trading_date=date.today().isoformat())
 
     started = session.atlas_run_startable(True, limit=1)
 
@@ -3237,3 +3351,574 @@ def test_atlas_context_survives_a_broken_regime_panel(session):
 def test_atlas_context_route_is_reachable(session):
     status, ctx = handle_api(session, "GET", "/api/atlas/context", {}, {})
     assert status == 200 and "regime_panel" in ctx
+
+
+def test_atlas_context_names_a_board_that_never_ran(session):
+    # A desk that never measured its predictors must say so, not show zeros.
+    assert session.atlas_context(True)["predictors"] == {"status": "never_ran"}
+
+
+def test_atlas_context_carries_the_predictor_board(session):
+    run_id = session.registry.log_run("predictor_board", {
+        "as_of": "2026-07-01",
+        "source": "synthetic",
+        "board": {
+            "baseline": "ridge:none",
+            "champion": "kernel:zz",
+            "admitted_any": True,
+            "ranking": ["kernel:zz", "ridge:none"],
+            "models": [
+                {"model_id": "kernel:zz", "mean_ic": 0.09,
+                 "ic_stability": 1.4, "usable": True,
+                 "delta_mean_ic_vs_baseline": 0.03,
+                 "paired_t_vs_baseline": 2.1},
+                {"model_id": "ridge:none", "mean_ic": 0.06,
+                 "ic_stability": 1.1, "usable": True,
+                 "delta_mean_ic_vs_baseline": 0.0,
+                 "paired_t_vs_baseline": None},
+            ],
+        },
+        "dsr_trial_counted": False,
+    })
+
+    predictors = session.atlas_context(True)["predictors"]
+    assert predictors["status"] == "ok"
+    assert predictors["run_id"] == run_id
+    assert predictors["as_of"] == "2026-07-01"
+    assert predictors["champion"]["model_id"] == "kernel:zz"
+    assert predictors["champion"]["usable"] is True
+    assert predictors["baseline"]["mean_ic"] == 0.06
+    assert predictors["admitted_any"] is True
+    assert predictors["best_delta_vs_baseline"] == 0.03
+    # A number, not a judgment: whether it is too old is the reasoner's call.
+    assert isinstance(predictors["age_days"], int)
+
+
+def test_atlas_context_names_an_unreadable_board(session):
+    session.registry.log_run(
+        "predictor_board", {"as_of": "2026-07-01", "board": "corrupt"}
+    )
+    predictors = session.atlas_context(True)["predictors"]
+    assert predictors["status"] == "unreadable"
+    assert predictors["run_id"]
+
+
+# --- the predictor board on screen -------------------------------------------
+#
+# The board is the whole quantum feature-augmentation lane, and until now it
+# had no web surface at all: no route, and nothing in index.html. An operator
+# could not see whether the augmented models were earning their place, and the
+# only way to run one was a POST to /api/lab/ that no client issued.
+
+
+def _board_run(session, **over):
+    """A board row shaped exactly like `run_predictor_board`'s output."""
+    board = {
+        "n_obs": 671, "n_folds": 5, "baseline": "ridge:none",
+        "champion": "kernel:angle", "admitted_any": True,
+        "target": "next_21d_equal_weight_realized_vol",
+        "horizon_days": 21, "embargo_days": 21,
+        "kernels": ["linear", "angle", "zz"],
+        "admission": {"mean_ic_strictly_above": 0.03,
+                      "ic_stability_strictly_above": 0.5},
+        "ranking": ["kernel:angle", "ridge:none"],
+        "models": [
+            {"model_id": "kernel:angle", "family": "kernel", "variant": "angle",
+             "mean_ic": 0.178, "ic_std": 0.33, "ic_stability": 0.54,
+             "usable": True, "delta_mean_ic_vs_baseline": 0.068,
+             "wins_vs_baseline": 3, "paired_t_vs_baseline": 0.237,
+             "per_fold": [{"fold": 1, "ic": 0.324}, {"fold": 2, "ic": 0.531},
+                          {"fold": 3, "ic": 0.471}, {"fold": 4, "ic": -0.239},
+                          {"fold": 5, "ic": -0.195}]},
+            {"model_id": "ridge:none", "family": "ridge", "variant": "none",
+             "mean_ic": 0.110, "ic_std": 0.41, "ic_stability": 0.27,
+             "usable": False, "delta_mean_ic_vs_baseline": 0.0,
+             "wins_vs_baseline": 0, "paired_t_vs_baseline": None,
+             "per_fold": [{"fold": i, "ic": 0.1} for i in range(1, 6)]},
+        ],
+    }
+    board.update(over)
+    return session.registry.log_run("predictor_board", {
+        "as_of": "2026-07-30", "source": "yfinance", "universe": "core",
+        "board": board, "dsr_trial_counted": False,
+    })
+
+
+def test_the_predictor_board_has_a_route_of_its_own(session):
+    """`atlas_context` carried a summary for the reasoner, but no client could
+    ask for the board itself, so the augmented lane had no screen."""
+    run_id = _board_run(session)
+    status, payload = handle_api(session, "GET", "/api/research/predictors",
+                                 {}, {})
+    assert status == 200
+    assert payload["status"] == "ok"
+    assert payload["run_id"] == run_id
+    # Every model, not just the champion: the ranking IS the finding.
+    assert {m["model_id"] for m in payload["models"]} == {
+        "kernel:angle", "ridge:none"}
+
+
+def test_the_route_says_which_models_are_the_augmented_lane(session):
+    """A screen showing `kernel:angle` answers "is the quantum augmentation
+    working" only if something on it says the kernel and groupwise families
+    ARE that augmentation and ridge:none is the control."""
+    _board_run(session)
+    _, payload = handle_api(session, "GET", "/api/research/predictors", {}, {})
+    by_id = {m["model_id"]: m for m in payload["models"]}
+    assert by_id["kernel:angle"]["augmented"] is True
+    assert by_id["ridge:none"]["augmented"] is False
+    assert by_id["ridge:none"]["is_baseline"] is True
+    assert "quantum" in payload["lane"].lower()
+
+
+def test_the_route_carries_the_bar_and_the_folds_not_just_the_verdict(session):
+    """Same rule the reasoner block follows: a verdict without its threshold,
+    and a t-statistic without its n, are not evidence."""
+    _board_run(session)
+    _, payload = handle_api(session, "GET", "/api/research/predictors", {}, {})
+    assert payload["admission"]["mean_ic_strictly_above"] == 0.03
+    assert payload["n_folds"] == 5 and payload["n_obs"] == 671
+    champ = next(m for m in payload["models"]
+                 if m["model_id"] == "kernel:angle")
+    assert champ["per_fold"] == [0.324, 0.531, 0.471, -0.239, -0.195]
+    assert champ["negative_folds"] == 2
+    # 0.237 on 5 folds cannot separate anything from anything, and the payload
+    # says so rather than leaving a bare number to be read as a win.
+    assert champ["significant"] is False
+
+
+def test_a_desk_that_never_ran_the_board_says_so_rather_than_404(session):
+    """An empty research lane is a fact about the desk, and a 404 would read
+    as a broken endpoint instead."""
+    status, payload = handle_api(session, "GET", "/api/research/predictors",
+                                 {}, {})
+    assert status == 200
+    assert payload["status"] == "never_ran"
+    assert payload["models"] == []
+    assert payload["reason"]
+
+
+def test_a_board_that_admitted_nothing_is_reported_as_a_result(session):
+    _board_run(session, champion=None, admitted_any=False,
+               models=[{"model_id": "ridge:none", "family": "ridge",
+                        "variant": "none", "mean_ic": 0.01,
+                        "ic_stability": 0.02, "usable": False,
+                        "delta_mean_ic_vs_baseline": 0.0,
+                        "paired_t_vs_baseline": None, "per_fold": []}])
+    _, payload = handle_api(session, "GET", "/api/research/predictors", {}, {})
+    assert payload["status"] == "ok"
+    assert payload["admitted_any"] is False
+    assert payload["champion"] is None
+    assert payload["reason"], "an empty result still states what happened"
+
+
+def test_the_ui_has_a_research_panel_for_the_augmented_lane():
+    """The route is useless if nothing renders it."""
+    html = _INDEX.read_text(encoding="utf-8")
+    assert 'data-nav="research"' in html
+    assert 'data-panel="research"' in html
+    assert "/api/research/predictors" in html
+
+
+def test_the_linear_kernel_is_not_labelled_a_quantum_map(session):
+    """`kernel:linear` is in the `kernel` family but carries NO quantum feature
+    map: `quantum_gram` returns early on it, so it is the dual of the plain
+    ridge baseline and comes back bit-identical to `ridge:none`. Labelling it
+    "quantum-augmented" would put a control in the treatment arm and let the
+    lane claim a row it did not earn. Only the angle and ZZ maps are quantum.
+    """
+    _board_run(session, models=[
+        {"model_id": "kernel:linear", "family": "kernel", "variant": "linear",
+         "mean_ic": 0.110, "ic_stability": 0.27, "usable": False,
+         "delta_mean_ic_vs_baseline": 0.0, "paired_t_vs_baseline": 0.0,
+         "per_fold": []},
+        {"model_id": "kernel:angle", "family": "kernel", "variant": "angle",
+         "mean_ic": 0.178, "ic_stability": 0.54, "usable": True,
+         "delta_mean_ic_vs_baseline": 0.068, "paired_t_vs_baseline": 0.237,
+         "per_fold": []},
+        {"model_id": "groupwise:angle_zz", "family": "groupwise",
+         "variant": "angle_zz", "mean_ic": 0.026, "ic_stability": 0.1,
+         "usable": False, "delta_mean_ic_vs_baseline": -0.084,
+         "paired_t_vs_baseline": -0.286, "per_fold": []},
+    ])
+    _, payload = handle_api(session, "GET", "/api/research/predictors", {}, {})
+    by_id = {m["model_id"]: m for m in payload["models"]}
+    assert by_id["kernel:linear"]["augmented"] is False
+    assert by_id["kernel:linear"]["control_note"], (
+        "a kernel-family row that is really a control must say why")
+    assert by_id["kernel:angle"]["augmented"] is True
+    assert by_id["groupwise:angle_zz"]["augmented"] is True
+
+
+@pytest.mark.parametrize("variant,augmented", [
+    ("linear", False), ("angle", True), ("zz", True), ("angle_zz", True),
+    ("none", False),
+])
+def test_augmentation_is_decided_by_the_feature_map_not_the_family(
+        session, variant, augmented):
+    """The invariant over the whole variant space: a model is in the augmented
+    lane iff its variant names a quantum feature map, whatever family it is
+    filed under."""
+    for family in ("kernel", "groupwise", "ridge"):
+        _board_run(session, models=[
+            {"model_id": f"{family}:{variant}", "family": family,
+             "variant": variant, "mean_ic": 0.1, "ic_stability": 0.3,
+             "usable": False, "delta_mean_ic_vs_baseline": 0.0,
+             "paired_t_vs_baseline": None, "per_fold": []}])
+        _, payload = handle_api(session, "GET", "/api/research/predictors",
+                                {}, {})
+        assert payload["models"][0]["augmented"] is augmented
+
+
+def test_the_fold_strip_draws_both_signs_from_one_zero_line():
+    """The first version of this chart bottom-anchored every bar in a flex row
+    and pushed it with a margin, so all the positive bars shared a TOP edge and
+    the height of a bar no longer meant its magnitude. Driving the real page
+    showed +0.324 rendered taller-looking than +0.531.
+
+    The fix is two fixed rows of equal height with the positive bar
+    bottom-anchored in the upper one and the negative bar top-anchored in the
+    lower one, which is the only layout where "above the line" and "below the
+    line" mean the same thing for every bar. This test pins the mechanism,
+    because the failure was invisible in the payload and only showed up in
+    layout."""
+    html = _INDEX.read_text(encoding="utf-8")
+    css = html.split("</style>")[0]
+    assert ".folds .f{display:grid;grid-template-rows:19px 19px" in css
+    assert ".folds .f > i.pos{grid-row:1;align-self:end" in css
+    assert ".folds .f > i.neg{grid-row:2;align-self:start" in css
+    # No margin-based nudging: that was the bug.
+    assert "margin-${v<0?'top':'bottom'}" not in html
+
+
+# --- the workforce Atlas manages -------------------------------------------
+#
+# Live gap: /api/atlas/context returned 12 keys and not one of them mentioned
+# a workflow, a step, an agent or a phase. The desk had ten durable workflows
+# on it -- three blocked at the reporter, two interrupted mid-debate, one
+# abandoned by the operator -- each carrying a written step summary saying
+# exactly what happened. Atlas, the manager of that workforce, could not see
+# any of it: asked "why is the desk stuck", it had nothing to answer from.
+
+
+def _stalled_workflow(session):
+    """A workflow that got four phases deep and then blocked, as live ones do.
+
+    The referee phase goes through the real verdict path rather than a stubbed
+    id: the registry refuses a verdict_id that is not a persisted PASS bound to
+    these exact targets, and that refusal is worth honouring in a fixture.
+    """
+    targets = {"SPY": 1.0}
+    wf = session.registry.start_workflow(
+        "portfolio_review", {"as_of": "2026-08-03", "universe": "core",
+                             "goal": "[risk_event] brief the human"})
+    wid = wf["workflow_id"]
+    session.registry.update_workflow_phase(
+        wid, "analyst", "done", "Regime = STRESS (3/5 detectors)",
+        {"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+         "regime": "stress", "regime_summary": "3 of 5 detectors in stress"})
+    session.registry.update_workflow_phase(
+        wid, "challenger", "done", "Challenge SUSTAINED; analyst amended",
+        {"challenger_view": "sustained; window moved 504d -> 756d"})
+    session.registry.update_workflow_phase(
+        wid, "optimizer", "done", "Solved amended objective",
+        {"targets": targets, "algorithm_id": "hrp"})
+    vid = session.registry.log_verdict(
+        "d1", "PASS", ["constraints clean"], targets=targets)
+    session.registry.update_workflow_phase(
+        wid, "referee", "done", f"PASS (verdict {vid})",
+        {"verdict": "PASS", "verdict_id": vid, "targets": targets,
+         "decision_id": "d1"})
+    session.registry.update_workflow_phase(
+        wid, "reporter", "blocked",
+        "Memo compiled and referee PASS reported, but the paper-trade "
+        "preview is blocked: the permit does not allow it",
+        {"recommendation": "hold"})
+    return wid
+
+
+def test_atlas_can_see_the_workforce_it_manages(session):
+    """Atlas is the manager. A manager whose context contains no key naming a
+    workflow, step, phase or agent cannot answer "what is my desk doing"."""
+    wid = _stalled_workflow(session)
+    ctx = session.atlas_context(True)
+    assert "workforce" in ctx, (
+        "the reasoning surface carried regime, news, predictors and decisions "
+        "but nothing about the agents Atlas directs")
+    wf = ctx["workforce"]
+    ids = [w["workflow_id"] for w in wf["workflows"]]
+    assert wid in ids
+
+
+def test_a_stalled_workflow_arrives_with_the_step_that_stalled_it(session):
+    """The live blocked runs each carried a written reason on the failing
+    step. A count of blocked workflows is not that reason; the words are."""
+    wid = _stalled_workflow(session)
+    wf = session.atlas_context(True)["workforce"]
+    row = next(w for w in wf["workflows"] if w["workflow_id"] == wid)
+    assert row["status"] == "blocked"
+    assert row["stalled_at"]["phase"] == "reporter"
+    assert row["stalled_at"]["agent"] == "reporter"
+    assert "permit does not allow it" in row["stalled_at"]["summary"]
+    # And the phases that DID succeed, so Atlas knows how far the work got
+    # rather than only that it stopped.
+    assert row["completed_phases"] == [
+        "analyst", "challenger", "optimizer", "referee"]
+
+
+def test_a_healthy_workflow_is_not_reported_as_stalled(session):
+    """The absence of a stall is stated, not left as a missing key that reads
+    the same as an unknown one."""
+    wf_row = session.registry.start_workflow(
+        "portfolio_review", {"as_of": "2026-08-03", "universe": "core"})
+    wid = wf_row["workflow_id"]
+    session.registry.update_workflow_phase(
+        wid, "analyst", "done", "ok",
+        {"moment_set_id": "m1", "objective_id": "o1", "decision_id": "d1",
+         "regime": "calm", "regime_summary": "no detector in stress"})
+    wf = session.atlas_context(True)["workforce"]
+    row = next(w for w in wf["workflows"] if w["workflow_id"] == wid)
+    assert row["stalled_at"] is None
+    assert row["status"] == "running"
+
+
+def test_the_workforce_block_counts_what_needs_a_human(session):
+    """Three blocked runs sitting on a desk is the single most actionable
+    thing about it, and it should not require Atlas to tally a list itself."""
+    _stalled_workflow(session)
+    _stalled_workflow(session)
+    wf = session.atlas_context(True)["workforce"]
+    assert wf["needs_attention"] == 2
+    assert wf["counts"]["blocked"] == 2
+
+
+def test_an_empty_desk_says_so_rather_than_omitting_the_key(session):
+    wf = session.atlas_context(True)["workforce"]
+    assert wf["workflows"] == []
+    assert wf["needs_attention"] == 0
+    assert wf["reason"], "no runs is a fact about the desk, and it is stated"
+
+
+def test_the_workforce_has_a_route_and_a_panel(session):
+    """The desk's ten runs were reachable only through /api/workflows, which
+    no page called: `grep workflow qlab/ui/index.html` returned zero hits."""
+    wid = _stalled_workflow(session)
+    status, payload = handle_api(session, "GET", "/api/workforce", {}, {})
+    assert status == 200
+    assert wid in [w["workflow_id"] for w in payload["workflows"]]
+    assert payload["needs_attention"] == 1
+    html = _INDEX.read_text(encoding="utf-8")
+    assert 'data-nav="workforce"' in html
+    assert 'data-panel="workforce"' in html
+    assert "/api/workforce" in html
+    # The stall reason must be rendered, not just fetched.
+    assert "stalled_at" in html
+
+
+def test_an_abandoned_run_stopped_but_is_not_awaiting_the_operator(session):
+    """A stall box on an abandoned run reads as "act on me", and it is not.
+
+    The live desk showed seven stalled runs against six needing attention: the
+    seventh was abandoned, a decision the operator had already taken. Where it
+    stopped is still worth recording, so the row keeps its `stalled_at` and
+    answers the separate question of whether anyone is waiting on a human.
+    """
+    wid = _stalled_workflow(session)
+    session.registry.abandon_workflow(wid, "operator closed it out")
+    row = [w for w in session.workforce_summary()["workflows"]
+           if w["workflow_id"] == wid][0]
+    assert row["stalled_at"] is not None, "where it stopped is still a fact"
+    assert row["awaiting_operator"] is False
+    assert session.workforce_summary()["needs_attention"] == 0
+    # ...and every row answers the question, so absent never reads as false.
+    assert all("awaiting_operator" in w
+               for w in session.workforce_summary()["workflows"])
+
+
+def test_a_blocked_run_is_awaiting_the_operator(session):
+    wid = _stalled_workflow(session)
+    row = [w for w in session.workforce_summary()["workflows"]
+           if w["workflow_id"] == wid][0]
+    assert row["awaiting_operator"] is True
+
+
+def test_the_stall_box_distinguishes_absent_from_already_decided():
+    """`w.awaiting_operator ? a : b` reads an ABSENT key as false.
+
+    Driving the live page proved this: against an older server that did not
+    send the key, all seven stall boxes rendered "already decided" — the UI
+    inventing an operator decision that had never been taken. The template
+    must test the three states explicitly, so absent renders as unknown.
+    """
+    html = _INDEX.read_text(encoding="utf-8")
+    assert "awaiting_operator===true" in html
+    assert "awaiting_operator===false" in html
+    # ...and the truthiness form must not come back.
+    assert "w.awaiting_operator?" not in html
+    assert "unknown" in html
+
+
+def test_the_agent_stream_has_a_route_and_reaches_the_page(session):
+    """The coordinator republishes every agent event onto the audit bus and no
+    page ever read it: `grep api/events qlab/ui/index.html` returned nothing.
+
+    Agent reasoning that is recorded but never rendered is not visibility.
+    """
+    session.registry.record_event("atlas_coordinator_event", {
+        "workflow_id": "wf-1", "event_kind": "tool_start",
+        "agent": "moments-analyst", "tool": "Agent", "text": "calling Agent"})
+    session.registry.record_event("atlas_coordinator_event", {
+        "workflow_id": "wf-1", "event_kind": "text", "agent": "", "tool": "",
+        "text": "Realised vol sits in the top decile."})
+    status, payload = handle_api(session, "GET", "/api/workforce/stream", {}, {})
+    assert status == 200
+    kinds = [e["event_kind"] for e in payload["events"]]
+    assert "tool_start" in kinds and "text" in kinds
+    assert any(e["agent"] == "moments-analyst" for e in payload["events"])
+    assert payload["reason"]
+    html = _INDEX.read_text(encoding="utf-8")
+    assert "/api/workforce/stream" in html
+
+
+def test_an_empty_agent_stream_says_why_rather_than_showing_nothing(session):
+    """Nothing recorded and nothing having happened must not look the same."""
+    payload = session.agent_stream()
+    assert payload["events"] == []
+    assert "no coordinator" in payload["reason"].lower()
+
+
+def test_the_agent_stream_is_not_crowded_out_by_a_noisier_event_kind(session):
+    """Filtering a fixed window in Python is not a filter.
+
+    The live desk records a news_archive row per story; 500 of them landed in
+    four hours, so reading the newest 500 events and keeping the coordinator
+    ones returned nothing on a desk with 31 coordinator events. The panel then
+    said "no coordinator has published to this desk's bus", which was a
+    confident, wrong reason -- worse than showing nothing.
+    """
+    session.registry.record_event("atlas_coordinator_event", {
+        "workflow_id": "wf-1", "event_kind": "text", "agent": "",
+        "tool": "", "text": "the reasoning that must survive the flood"})
+    for i in range(600):
+        session.registry.record_event("news_archive", {"n": i})
+    payload = session.agent_stream()
+    assert len(payload["events"]) == 1, payload["reason"]
+    assert "flood" in payload["events"][0]["text"]
+
+
+def test_historic_liveness_rows_are_set_aside_but_counted_not_hidden(session):
+    """The bus is durable, so heartbeats recorded before the filter fix stay.
+
+    On the live desk that left the panel at 56 `Claude session task_progress`
+    rows against 4 carrying real debate reasoning. The panel sets them aside
+    so the reasoning is readable, and says how many it set aside, because
+    silently dropping rows from an audit surface is how the desk stops being
+    a record of what happened.
+    """
+    for _ in range(9):
+        session.registry.record_event("atlas_coordinator_event", {
+            "workflow_id": "wf-1", "event_kind": "session",
+            "agent": "", "tool": "", "text": "Claude session task_progress"})
+    session.registry.record_event("atlas_coordinator_event", {
+        "workflow_id": "wf-1", "event_kind": "text", "agent": "", "tool": "",
+        "text": "Challenger has a live, numeric counter-case."})
+    payload = session.agent_stream()
+    assert [e["event_kind"] for e in payload["events"]] == ["text"]
+    assert payload["suppressed_liveness"] == 9
+    assert "9" in payload["reason"]
+    assert "liveness" in payload["reason"].lower()
+
+
+def test_heartbeats_only_is_not_reported_as_the_agents_being_silent(session):
+    """"Nothing ran" and "something ran and said nothing" are different facts."""
+    for _ in range(5):
+        session.registry.record_event("atlas_coordinator_event", {
+            "workflow_id": "wf-1", "event_kind": "session",
+            "agent": "", "tool": "", "text": "Claude session task_progress"})
+    payload = session.agent_stream()
+    assert payload["events"] == []
+    assert "a coordinator ran" in payload["reason"]
+    assert "none has run" not in payload["reason"]
+
+
+def test_the_control_split_matches_what_the_kernel_code_actually_does():
+    """The augmented/control split rests on a claim about `quantum_gram`: that
+    it returns before the map term for `linear`. That claim is repeated in
+    comments in three modules, and a rename or a refactor there would leave
+    them confidently describing code that no longer exists -- the same
+    producer/consumer drift this whole surface was built to catch.
+
+    So verify the behaviour, not the prose: a linear Gram must equal the raw
+    inner product exactly, while angle and zz must not.
+    """
+    import numpy as np
+    from qlab.research.kernels import quantum_gram
+
+    rng = np.random.default_rng(11)
+    std = rng.normal(size=(6, 3))
+    unit = rng.uniform(-1.0, 1.0, size=(6, 3))
+    raw = std @ std.T
+
+    linear = quantum_gram(std, std, unit, unit, "linear")
+    assert np.array_equal(linear, raw), (
+        "kernel:linear is classified as a control because it carries no "
+        "feature map; if quantum_gram now adds one, that classification and "
+        "the comments citing it are wrong")
+    for kind in ("angle", "zz"):
+        mapped = quantum_gram(std, std, unit, unit, kind)
+        assert not np.allclose(mapped, raw), (
+            f"{kind} is classified as augmented but added nothing to the "
+            "raw Gram")
+
+
+def test_the_summary_carries_whether_the_champion_beat_its_own_null(session):
+    """`usable` is a fixed per-model bar applied to a selected maximum.
+
+    Measured: on 100 noise panels the board's own procedure admitted a
+    champion 66 times and 84 cleared the 0.03 mean_ic bar. So the bar cannot
+    carry the claim, and a summary that ships `usable: true` without the
+    null ships the same over-reading this file already fixed once for the
+    missing admission bar.
+    """
+    _board_run(session, champion_established=False,
+               selection_null={"trials": 24, "p_value": 0.36,
+                               "observed_max_mean_ic": 0.178,
+                               "null_median_max_mean_ic": 0.139,
+                               "reason": "noise reproduces this routinely"})
+    summary = session.predictor_board_summary()
+    assert summary["champion_established"] is False
+    assert summary["selection_null"]["p_value"] == 0.36
+
+
+def test_a_board_predating_the_null_says_so_rather_than_claiming_established(session):
+    """Absent must not read as either established or refuted."""
+    _board_run(session)  # no champion_established key at all
+    summary = session.predictor_board_summary()
+    assert summary["champion_established"] is None
+    assert summary["selection_null"] is None
+
+
+def test_the_panel_reason_does_not_call_a_noise_champion_admitted_and_stop(session):
+    """The operator-facing reason is the one sentence most likely to be read.
+
+    "kernel:angle was admitted: it cleared both admission thresholds" is true
+    and, on its own, misleading: 84 of 100 pure-noise panels cleared that
+    same mean_ic bar. If the null refuted the champion, the reason has to
+    say so in the same breath, not leave it to a field further down.
+    """
+    _board_run(session, champion_established=False,
+               selection_null={"trials": 24, "p_value": 0.36, "exceedances": 8,
+                               "p_value_resolution": 0.04,
+                               "observed_max_mean_ic": 0.178,
+                               "null_median_max_mean_ic": 0.139})
+    detail = session.predictor_board_detail()
+    assert detail["champion_established"] is False
+    assert "not established" in detail["reason"].lower()
+    assert "0.36" in detail["reason"]
+
+
+def test_the_panel_says_when_no_null_was_run_rather_than_implying_one_held(session):
+    _board_run(session)
+    detail = session.predictor_board_detail()
+    assert detail["champion_established"] is None
+    assert "not" in detail["reason"].lower()

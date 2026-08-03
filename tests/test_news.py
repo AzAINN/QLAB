@@ -250,3 +250,64 @@ def test_every_whitelisted_ticker_has_a_synthetic_template():
     templates = load_news_sources()["synthetic"]
     missing = [t for t in load_mandate().universe_whitelist if t not in templates]
     assert not missing, f"whitelisted tickers with no synthetic news: {missing}"
+
+
+def test_the_point_in_time_boundary_has_no_same_day_exemption():
+    """`published.startswith(as_of[:10])` let the whole calendar day through.
+
+    An item filed at 23:59 entered a window whose as_of was 12:00 — a twelve-hour
+    look-ahead. Invisible while the only caller passes "now", and fatal the
+    moment anything replays an intraday point in time against the archive.
+    """
+    from qlab.news.feed import NewsItem
+    from qlab.news.grounding import ground
+
+    late = NewsItem(source="wire", published="2026-07-31T23:59:00+00:00",
+                    headline="filed late", summary="s", url="u",
+                    tickers=("SPY",), provider="alpaca")
+    early = NewsItem(source="wire", published="2026-07-31T09:00:00+00:00",
+                     headline="filed early", summary="s", url="u",
+                     tickers=("SPY",), provider="alpaca")
+    window = ground([late, early], as_of="2026-07-31T12:00:00+00:00",
+                    provider="alpaca", universe=["SPY"])
+    kept = [i.headline for i in window.items]
+    assert kept == ["filed early"]
+
+
+def test_the_desk_window_asks_for_an_instant_not_a_calendar_date():
+    """`date.today().isoformat()` excluded every story filed so far today.
+
+    The feed reads a bare date as local-midnight-labelled-UTC and drops anything
+    published after as_of, so the desk's own news window structurally could not
+    contain today's news. Measured at 24 hours of exclusion.
+    """
+    from datetime import datetime, timezone
+
+    from qlab.state.registry import Registry
+    from qlab.ui.server import UISession
+
+    seen = {}
+
+    def capture(as_of, universe, **kw):
+        seen["as_of"] = as_of
+        return []
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    try:
+        import qlab.news.feed as feed
+
+        original = feed.fetch_news
+        feed.fetch_news = capture
+        try:
+            session.fetch_desk_news(True)
+        finally:
+            feed.fetch_news = original
+    finally:
+        session.registry.close()
+
+    as_of = seen["as_of"]
+    # An instant, not a date: a bare date resolves to midnight and the feed
+    # drops everything published after it.
+    assert isinstance(as_of, datetime)
+    now = datetime.now(timezone.utc)
+    assert (now - as_of).total_seconds() < 60

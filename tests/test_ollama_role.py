@@ -180,7 +180,7 @@ def test_a_tool_call_reaches_the_owner_and_a_plain_reply_ends_the_session(owner)
     assert "dec-1" in fed_back["content"]
     kinds = [e.kind for e in events]
     assert kinds[0] == "session" and kinds[-1] == "result"
-    assert "tool" in kinds
+    assert "tool_start" in kinds
     # The invocation row names the provider that actually served the role.
     row = registry.list_model_invocations()[0]
     assert row["backend"] == "ollama" and row["role"] == "news-analyst"
@@ -219,7 +219,7 @@ def test_a_tool_off_the_roles_allowlist_is_refused_and_the_loop_continues(owner)
     assert "algorithms_solve" in results[0]["content"]
     assert results[1]["content"].startswith("REFUSED:")
     # And the refusal is on the audit stream, not only in the model's context.
-    noted = [e.text for e in events if e.kind == "tool"]
+    noted = [e.text for e in events if e.kind == "tool_result"]
     assert any("algorithms_solve" in text and "allowlist" in text
                for text in noted)
 
@@ -294,7 +294,7 @@ def test_what_the_owner_says_is_bounded_and_redacted_on_its_way_to_an_event(owne
     events: list = []
     _runner(daemon, owner, events).run("Read the week.")
 
-    answered = [e.text for e in events if e.kind == "tool"
+    answered = [e.text for e in events if e.kind == "tool_result"
                 and "answered" in e.text][0]
     assert "s3cr3t@" not in answered and len(answered) <= 241
     # The model is not the audit row: it still sees the whole record it asked
@@ -423,7 +423,7 @@ def test_one_reply_cannot_flood_the_owner_with_five_hundred_writes(owner):
     assert len(refused) == 500 - ollama_role.MAX_CALLS_PER_TURN
     assert f"{ollama_role.MAX_CALLS_PER_TURN} tool calls" in refused[0]["content"]
     # And the refusals are on the audit stream, not only in the model's context.
-    assert sum(1 for e in events if e.kind == "tool"
+    assert sum(1 for e in events if e.kind == "tool_result"
                and "tool calls" in e.text) == len(refused)
 
 
@@ -463,7 +463,7 @@ def test_the_deadline_is_read_between_calls_not_only_between_turns(owner):
     assert 0 < len(owner.seen) < ollama_role.MAX_CALLS_PER_TURN
     assert len(daemon.calls) == 1          # the second turn was never asked for
     # Each unexecuted call was refused by name, with the reason, on the bus.
-    refusals = [e for e in events if e.kind == "tool"
+    refusals = [e for e in events if e.kind == "tool_result"
                 and f"{DEADLINE_S:.0f}s" in e.text]
     assert len(refusals) == 5 - len(owner.seen)
     assert [e.kind for e in events][-1] == "error"
@@ -500,7 +500,7 @@ def test_a_stop_mid_turn_refuses_the_calls_that_have_not_run(owner):
 
     def watch(event):
         events.append(event)
-        if event.kind == "tool" and event.text.startswith("calling"):
+        if event.kind == "tool_start" and event.text.startswith("calling"):
             runner.stop("the owner is shutting down")
 
     runner = OllamaRoleRunner(watch, backend=daemon, model="granite3.3:8b",
@@ -553,7 +553,10 @@ def test_every_kind_the_runner_emits_is_one_the_driver_records(owner,
     assert republished, "the driver recorded none of the runner's events"
     emitted = {p["event_kind"] for p in republished}
     assert emitted <= set(_RECORDED_KINDS)
-    assert {"session", "tool", "result"} <= emitted
+    assert {"text", "tool_start", "tool_result", "result"} <= emitted
+    # `session` is deliberately absent: emitted by the runner, excluded by
+    # _RECORDED_KINDS — the same treatment ClaudeSession keepalives get.
+    assert "session" not in emitted
     assert any(p["agent"] == "news-analyst" for p in republished)
     assert all(len(p["text"]) <= 1000 for p in republished)
 

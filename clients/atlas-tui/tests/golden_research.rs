@@ -403,3 +403,71 @@ fn research_claims_no_key_at_all() {
         assert_eq!(client.frame(120, 36), frame, "{code:?} changed RESEARCH");
     }
 }
+
+// -- the predictor board readout --------------------------------------------
+//
+// Parity with the Textual research summary's board lines. The champion is the
+// owner's call — the first *admitted* model in its own ranking — and this
+// client repeats it rather than re-deriving it.
+
+#[test]
+fn the_predictor_board_names_its_champion_and_the_edge_over_baseline() {
+    let t = Theme::truecolor();
+    let client = research_from(
+        r#"{"runs": [{"run_id": "b1", "kind": "predictor_board",
+             "spec": {"board": {"baseline": "ridge:none", "champion": "kernel:zz",
+                      "admitted_any": true,
+                      "models": [{"model_id": "kernel:zz", "mean_ic": 0.091,
+                                  "usable": true,
+                                  "delta_mean_ic_vs_baseline": 0.031}]}}}]}"#,
+    );
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "predictors");
+    assert!(row.contains("champion kernel:zz"), "{row}");
+    // Signed, because an edge over the baseline has a side.
+    assert!(row.contains("+0.031"), "{row}");
+    assert!(row.contains("vs ridge:none"), "{row}");
+    assert_eq!(
+        body_style_of(&client.buffer(120, 36), "kernel:zz").fg,
+        Some(t.positive)
+    );
+}
+
+#[test]
+fn a_board_with_no_admitted_model_says_so_rather_than_promoting_one() {
+    let t = Theme::truecolor();
+    let client = research_from(
+        r#"{"runs": [{"run_id": "b1", "kind": "predictor_board",
+             "spec": {"board": {"baseline": "ridge:none", "champion": null,
+                      "admitted_any": false, "models": []}}}]}"#,
+    );
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "predictors");
+    assert!(row.contains("no admitted model"), "{row}");
+    assert!(row.contains("vs ridge:none"), "{row}");
+    assert_eq!(
+        body_style_of(&client.buffer(120, 36), "no admitted model").fg,
+        Some(t.negative)
+    );
+}
+
+#[test]
+fn a_board_run_with_an_unreadable_spec_is_loud_not_absent() {
+    // "Never ran" and "ran, and this client cannot read the answer" have
+    // different remedies and must not share a sentence.
+    let client = research_from(
+        r#"{"runs": [{"run_id": "b1", "kind": "predictor_board",
+             "spec": {"board": 17}}]}"#,
+    );
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "predictors");
+    assert!(row.contains("no readable board"), "{row}");
+}
+
+#[test]
+fn a_desk_that_never_ran_the_board_says_so() {
+    let client = research_from(r#"{"runs": []}"#);
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "predictors");
+    assert!(row.contains("no predictor board run yet"), "{row}");
+}

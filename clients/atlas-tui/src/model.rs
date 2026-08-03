@@ -369,6 +369,35 @@ pub struct RunSpec {
     pub usable: Option<bool>,
     /// The rule that verdict was reached by, as the run recorded it.
     pub admission: Option<Admission>,
+    /// Present only on `predictor_board` runs: the paired evaluation of the
+    /// augmented lane's rescue models against the ridge baseline.
+    pub board: Option<BoardSpec>,
+}
+
+/// The predictor board a `predictor_board` run carries in its spec.
+///
+/// Same subset rule as `RunSpec`: only what the one-line readout renders.
+/// The full board (per-fold ICs, hyperparameters, paired t-statistics) stays
+/// in the registry row for surfaces that ask for it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BoardSpec {
+    /// The fixed comparison arm — `ridge:none`, the admitted v1 forecaster.
+    pub baseline: Option<String>,
+    /// The first *admitted* model in the owner's ranking. Absent means the
+    /// board ran and nothing cleared admission — an honest empty answer.
+    pub champion: Option<String>,
+    pub admitted_any: Option<bool>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub models: Vec<BoardModel>,
+}
+
+/// One evaluated model's summary row on the board.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BoardModel {
+    pub model_id: Option<String>,
+    pub mean_ic: Option<f64>,
+    pub usable: Option<bool>,
+    pub delta_mean_ic_vs_baseline: Option<f64>,
 }
 
 /// The admission gate a prediction run states about itself.
@@ -834,7 +863,8 @@ pub struct AtlasHeartbeat {
     /// against the owner's own clock mean anything.
     pub last_tick_at: Option<f64>,
     pub last_error: Option<String>,
-    pub last_error_at: Option<String>,
+    /// Same clock as `last_tick_at`; absent until a tick has failed.
+    pub last_error_at: Option<f64>,
     pub last_state: Option<String>,
     pub autonomous: Option<bool>,
     pub coordinator: Option<Coordinator>,

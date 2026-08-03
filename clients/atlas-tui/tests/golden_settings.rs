@@ -1106,10 +1106,18 @@ mod cards {
         client
     }
 
-    /// The row the cursor is on, as an operator sees it.
+    /// The row the cursor is on, as an operator sees it, on single spaces.
+    ///
+    /// Collapsed so a caller can name the whole row rather than a word of it:
+    /// the surface is padded into a column, and half this list carries
+    /// `workforce` while half carries `m19` — a substring of either passes on a
+    /// cursor eight rows from the one the assertion is about.
     fn under_cursor(client: &Client) -> String {
         let frame = client.frame(120, 36);
-        line_with(&frame, "▸").trim().to_string()
+        line_with(&frame, "▸")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// The daemon has gone down: two claude offers and two refusals, where
@@ -1176,7 +1184,7 @@ mod cards {
         let body = content(&client.frame(120, 36));
         assert!(body.contains("▸"), "the box opened with no cursor:\n{body}");
         assert!(
-            under_cursor(&client).contains("m19"),
+            under_cursor(&client).contains("reasoner ollama:m19"),
             "the cursor is not on what the desk is running: {}",
             under_cursor(&client)
         );
@@ -1185,7 +1193,7 @@ mod cards {
         // looking at.
         press(&mut client, KeyCode::Down);
         assert!(
-            under_cursor(&client).contains("workforce"),
+            under_cursor(&client).contains("workforce claude"),
             "one Down skipped the rest of the list: {}",
             under_cursor(&client)
         );

@@ -322,6 +322,112 @@ fn a_desk_that_has_not_probed_says_so_rather_than_claiming_a_fresh_reading() {
 }
 
 #[test]
+fn a_short_column_never_shows_a_tone_the_stamp_has_not_dated() {
+    // The pane's floor is twelve rows; the right column needs twenty-three, so
+    // between those two the card is handed fewer rows than it asked for and a
+    // `Paragraph` stops drawing partway down. What it used to stop drawing was
+    // the stamp, leaving availability tones over a reading nobody could date —
+    // the exact "reads as live" misreading `probed_at` exists to prevent.
+    for height in [26, 24, 20] {
+        let client = models_from(&format!(
+            r#"{{"reasoner": {{"backend": "ollama", "model": "granite3.3:8b"}},
+                 "workforce": {{"backend": "claude", "model": "inherit"}},
+                 "reasoner_enabled": true,
+                 "availability": [{{"name": "ollama", "available": false,
+                                    "reason": "ollama is not running at 127.0.0.1:11434 — start it with `ollama serve`"}}],
+                 "probed_at": "{PROBED}"}}"#
+        ));
+        let body = content(&client.frame(120, height));
+        let toned = body.contains("ollama · granite3.3:8b") || body.contains("claude · tiers");
+        assert!(
+            !toned || body.contains("probed"),
+            "at {height} rows a tone rendered with no stamp to date it:\n{body}"
+        );
+        // And it is a refusal that names what it would take, not a blank. All
+        // three of these heights are short, so this is what *exercises* the
+        // card's own floor rather than merely permitting it.
+        assert!(
+            body.contains("the models card needs"),
+            "at {height} rows the card drew neither the reading nor a refusal:\n{body}"
+        );
+        assert!(
+            !toned,
+            "at {height} rows a partial card still drew a tone:\n{body}"
+        );
+    }
+    // The height where it stops refusing and draws the reading whole, so the
+    // floor is pinned from both sides rather than only from below.
+    let client = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "ollama", "model": "granite3.3:8b"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "ollama", "available": false,
+                                "reason": "ollama is not running at 127.0.0.1:11434 — start it with `ollama serve`"}}],
+             "probed_at": "{PROBED}"}}"#
+    ));
+    let body = content(&client.frame(120, 30));
+    assert!(body.contains("probed"), "{body}");
+    assert!(body.contains("ollama · granite3.3:8b"), "{body}");
+    assert!(!body.contains("the models card needs"), "{body}");
+}
+
+#[test]
+fn a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half() {
+    // The remedy is the last third of the owner's longest sentence, so half of
+    // one is a fix an operator cannot run. `views::desk::fit` makes the same
+    // trade for the same reason.
+    let client = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "ollama", "model": "granite3.3:8b"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "ollama", "available": false,
+                                "reason": "ollama is running at 127.0.0.1:11434 but no models are pulled — pull one with `ollama pull granite3.3:8b`"}}],
+             "probed_at": "{PROBED}"}}"#
+    ));
+    // Whole at the baseline: the remedy is on the frame.
+    assert!(
+        content(&client.frame(120, 36)).contains("ollama pull"),
+        "{}",
+        client.frame(120, 36)
+    );
+    // Counted where it will not fit — and the four rows it qualifies survive,
+    // because the reason is the section that gives way.
+    let short = content(&client.frame(120, 28));
+    if short.contains("probed") {
+        assert!(
+            short.contains("ollama pull") || short.contains("▾ 1 more"),
+            "a clipped remedy is worse than a count:\n{short}"
+        );
+    }
+}
+
+#[test]
+fn a_real_model_id_never_wraps_out_of_its_column() {
+    // The reviewer's exact id. A per-token bound left this at 41 cells against
+    // a 24-cell column, wrapping onto an unindented row and spending the slack
+    // the reasons need.
+    let client = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "claude", "model": "claude-opus-4-5-20260101"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "claude", "available": true, "reason": "claude CLI on PATH"}}],
+             "probed_at": "{PROBED}"}}"#
+    ));
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "reasoner");
+    // The word that says the name changes nothing survives the cut.
+    assert!(row.contains("ignored"), "{frame}");
+    assert!(
+        row.contains('…'),
+        "a silent cut reads as the whole id: {frame}"
+    );
+    // Nothing spilled onto a row of its own: the row under it is still the one
+    // that dates the reading's neighbours.
+    assert!(line_with(&frame, "judgment").contains("on"), "{frame}");
+    assert!(content(&frame).contains("palette"), "{frame}");
+}
+
+#[test]
 fn the_models_card_says_nothing_the_owner_did_not_send() {
     let client = settings_from(r#"{"portfolio": {"equity": 1.0}}"#);
     let body = content(&client.frame(120, 36));

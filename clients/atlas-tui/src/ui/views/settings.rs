@@ -783,6 +783,21 @@ const SYSTEM_H: u16 = 9;
 /// the whole message, which is the class of refusal this pane spends rows to
 /// avoid.
 const MODELS_H: u16 = 10;
+/// The card's own floor: the header, the four rows that may not be split from
+/// one another, and the rule the block reserves.
+///
+/// **Those four are one section**, and the pane's own floor does not protect
+/// them: SETTINGS refuses below twelve rows, but the right column needs
+/// twenty-three, so at 120×26 the column simply handed this card fewer rows and
+/// a `Paragraph` stopped drawing partway down. What it stopped drawing was the
+/// stamp — leaving availability tones over a reading nobody could date, which
+/// is the "reads as live" misreading `probed_at` exists to prevent.
+///
+/// So the card refuses in place below its own floor, the way the login form
+/// does below [`FORM_MIN_H`], and the stamp moved to the top so that even a
+/// clipped draw cannot show a tone the stamp has not already dated. Both, not
+/// either: the ordering is what holds if a later row is ever added below.
+const MODELS_MIN_H: u16 = 6;
 /// Header, the count, the symbol list, and the rule. A floor rather than a
 /// fixed height: this card is the one that takes the column's remainder.
 const UNIVERSE_H: u16 = 4;
@@ -791,13 +806,18 @@ const THEME_H: u16 = 3;
 
 /// The bound every owner sentence on the MODELS card passes.
 ///
-/// Sized to what [`MODELS_H`]'s slack can actually show — four wrapped rows of
-/// a half-width card at the baseline width — so the bound and the card agree
-/// about how much sentence there is room for. Nothing on the wire is guaranteed
-/// to be the owner's, which is the C2 rule now made uniform: an unbounded
-/// `reason` would push UNIVERSE off the column rather than being clipped inside
-/// this card.
-const SAID_MAX: usize = 120;
+/// Sized so a bounded reason still **fits** the slack rather than merely being
+/// shorter than it. [`MODELS_H`] leaves four rows; a 38-cell card wraps at most
+/// 114 cells into three of them plus the row `wrapped_rows` reserves for a word
+/// break; one cell is the leading space and one more is the mark `bounded`
+/// adds. A bound the card could not show would send every long reason to the
+/// `▾ 1 more` count and make the bound itself unreachable.
+///
+/// The longest sentence the owner actually writes — "ollama is running at
+/// 127.0.0.1:11434 but no models are pulled — pull one with `ollama pull
+/// granite3.3:8b`" — is 105 cells and survives uncut. Nothing on the wire is
+/// guaranteed to be the owner's, which is the C2 rule now made uniform.
+const SAID_MAX: usize = 112;
 
 /// The bound a backend or model name passes. A name is a token, not a sentence:
 /// `granite3.3:8b` is thirteen characters and anything past this is not one.
@@ -1022,8 +1042,35 @@ fn draw_models(f: &mut Frame, area: Rect, store: &Store) {
         );
         return;
     };
+    // The value column this card actually has, rather than the one it has at
+    // the baseline. A composed value wider than this wraps onto an unindented
+    // second row and spends a slack row the reasons need.
+    let room = (area.width as usize).saturating_sub(LABEL_W + 1);
+    let reasons = unreachable_reasons(llm);
+    // A reason that exists is either shown whole or counted, and the count
+    // needs a row of its own.
+    let floor = MODELS_MIN_H + u16::from(!reasons.is_empty());
+    if area.height < floor {
+        refuse(
+            f,
+            area,
+            format!(
+                "the models card needs {floor} rows for the reading and the stamp \
+                 that dates it; this column gave it {}.",
+                area.height
+            ),
+        );
+        return;
+    }
     let mut rows = vec![
-        surface_row("reasoner", llm.reasoner.as_ref(), llm),
+        // **First, and that is the point.** This row dates every tone under it,
+        // and a column short of rows used to drop the last one — so a backend
+        // toned `warning` could render over a reading nobody could date, which
+        // is exactly the "reads as live" misreading `probed_at` exists to
+        // prevent. Ordering makes a partial draw unreadable-as-live before
+        // [`MODELS_MIN_H`] even gets to refuse one.
+        kv("probed", probed_row(llm, store.wall), t.text_secondary),
+        surface_row("reasoner", llm.reasoner.as_ref(), llm, room),
         // The flag rather than the choice. A model named for a reasoner nobody
         // switched on is a mind the desk is not using, and the owner refuses to
         // infer the switch from the name — so this row is the one that says
@@ -1040,45 +1087,104 @@ fn draw_models(f: &mut Frame, area: Rect, store: &Store) {
                 _ => t.text_secondary,
             },
         ),
-        surface_row("workforce", llm.workforce.as_ref(), llm),
-        // Never presented as live: the owner refuses to probe on the poll path,
-        // so this block is the *last* reading, and the row saying how old it is
-        // is what keeps an hour-old verdict from reading as current.
-        kv("probed", probed_row(llm, store.wall), t.text_secondary),
+        surface_row("workforce", llm.workforce.as_ref(), llm, room),
     ];
-    // Only for the backends a surface actually runs on. The reason is a
-    // sentence about a desk that cannot do something it was configured to do,
-    // and one about a backend nothing here uses is noise beside it.
-    for name in [
-        surface_backend(llm.reasoner.as_ref()),
-        surface_backend(llm.workforce.as_ref()),
-    ] {
-        let Some(entry) = name.and_then(|name| llm.backend(&name)) else {
-            continue;
-        };
-        if entry.available == Some(false) {
-            if let Some(reason) = format::text(entry.reason.as_ref()) {
+    // Whole sentences or a count, never half of one: the remedy is the last
+    // third of the owner's longest reason, so a clipped one is a fix an
+    // operator cannot run. The marker costs a row, and it is reserved before
+    // anything is dropped rather than after — `views::desk::fit` makes the same
+    // reservation, for the same reason.
+    let mut budget = (area.height - MODELS_MIN_H) as usize;
+    let inner_w = area.width.max(1) as usize;
+    let cost = |reason: &String| wrapped_rows(reason.chars().count() + 1, inner_w);
+    if reasons.iter().map(cost).sum::<usize>() > budget {
+        budget = budget.saturating_sub(1);
+    }
+    let mut hidden = 0usize;
+    for reason in &reasons {
+        match cost(reason) <= budget {
+            true => {
+                budget -= cost(reason);
                 rows.push(Line::from(Span::styled(
-                    format!(" {}", format::bounded(reason, SAID_MAX)),
+                    format!(" {reason}"),
                     // Dim: the reason explains the tone on the row above, and a
                     // second warning-coloured line would compete with it.
                     Style::default().fg(t.text_dim),
                 )));
             }
+            false => hidden += 1,
         }
+    }
+    if hidden > 0 {
+        rows.push(Line::from(Span::styled(
+            format!(" ▾ {hidden} more"),
+            Style::default().fg(t.text_dim),
+        )));
     }
     card(f, area, "models", rows);
 }
 
+/// The owner's reason for every backend a surface runs on and cannot reach.
+///
+/// **Only the backends a surface runs on**, and each of those once. A sentence
+/// about a backend nothing here uses is noise beside one about a desk that
+/// cannot do what it was configured to do — the catalog names every backend the
+/// desk knows, not the two it is using — and a desk with both surfaces on the
+/// same down daemon would otherwise print one sentence twice.
+fn unreachable_reasons(llm: &LlmConfig) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for name in [
+        surface_backend(llm.reasoner.as_ref()),
+        surface_backend(llm.workforce.as_ref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name.clone());
+        let Some(entry) = llm.backend(&name) else {
+            continue;
+        };
+        // `Some(false)` only: a backend nothing has probed has no reason to
+        // explain, and one that answered yes has nothing to explain either.
+        if entry.available != Some(false) {
+            continue;
+        }
+        if let Some(reason) = format::text(entry.reason.as_ref()) {
+            out.push(format::bounded(reason, SAID_MAX));
+        }
+    }
+    out
+}
+
+/// How many rows a line of `width` cells takes when wrapped at `inner`.
+///
+/// Rounds up the way the login form's `wanted` does, and for the same reason:
+/// `Paragraph` breaks at word boundaries, so a line one cell past the width can
+/// cost a whole row more than the division says. Over-reserving costs a blank
+/// row; under-reserving clips the remedy off a sentence, which is the failure
+/// this card is sized to avoid.
+fn wrapped_rows(width: usize, inner: usize) -> usize {
+    width.div_ceil(inner.max(1)).max(1) + usize::from(width > inner)
+}
+
 /// One surface's row, toned by what the last reading said about its backend.
-fn surface_row(label: &str, surface: Option<&LlmSurface>, llm: &LlmConfig) -> Line<'static> {
+fn surface_row(
+    label: &str,
+    surface: Option<&LlmSurface>,
+    llm: &LlmConfig,
+    room: usize,
+) -> Line<'static> {
     let t = theme();
     let available = surface_backend(surface)
         .and_then(|name| llm.backend(&name))
         .and_then(|entry| entry.available);
     kv(
         label,
-        surface_value(surface),
+        surface_value(surface, room),
         match available {
             Some(true) => t.positive,
             Some(false) => t.warning,
@@ -1092,6 +1198,19 @@ fn surface_row(label: &str, surface: Option<&LlmSurface>, llm: &LlmConfig) -> Li
 /// The backend one surface runs on, bounded, or nothing.
 fn surface_backend(surface: Option<&LlmSurface>) -> Option<String> {
     format::text(surface?.backend.as_ref()).map(|name| format::bounded(name, NAME_MAX))
+}
+
+/// `said`, occupying at most `room` cells.
+///
+/// `format::bounded` bounds the *text* and adds a mark, so its result is one
+/// cell longer than its argument; a column is a hard width, and this is the
+/// spelling that counts the mark against it.
+fn to_room(said: &str, room: usize) -> String {
+    match said.chars().count() > room {
+        // One cell of the room is the mark that says it was cut.
+        true => format::bounded(said, room.saturating_sub(1)),
+        false => said.to_string(),
+    }
 }
 
 /// What one surface runs, in the owner's words — except on the claude path.
@@ -1114,7 +1233,15 @@ fn surface_backend(surface: Option<&LlmSurface>) -> Option<String> {
 /// is 31 and wraps onto an unindented second row, spending one of the slack
 /// rows [`MODELS_H`] reserves for the availability reasons — the one thing on
 /// this card that must not be clipped.
-fn surface_value(surface: Option<&LlmSurface>) -> String {
+///
+/// **The composed value is fitted to `room`, not just its tokens.** A per-token
+/// bound is no bound at all here: a real Claude id makes
+/// `claude · claude-opus-4-5-20260101 ignored` — 41 cells past a 24-cell
+/// column, which wraps and spends the reason slack. What goes is the **id's
+/// tail**, never the marker: a value cut to `claude · claude-… ignored` still
+/// says the name changes nothing, while one cut to `claude · claude-opus-4-5…`
+/// has lost the only word that said so, and reads as a setting.
+fn surface_value(surface: Option<&LlmSurface>, room: usize) -> String {
     let Some(surface) = surface else {
         return MISSING.to_string();
     };
@@ -1130,10 +1257,21 @@ fn surface_value(surface: Option<&LlmSurface>) -> String {
         format::bounded(backend, NAME_MAX),
         format::bounded(model, NAME_MAX),
     );
-    match (backend.as_str(), model.as_str()) {
-        ("claude", "inherit") => format!("{backend} · tiers decide"),
-        ("claude", _) => format!("{backend} · {model} ignored"),
-        _ => format!("{backend} · {model}"),
+    // The marker only ever sits beside `claude`, so the head it is measured
+    // against is a known nine cells and cannot itself overflow the room.
+    let marker = match (backend.as_str(), model.as_str()) {
+        ("claude", "inherit") => return to_room(&format!("{backend} · tiers decide"), room),
+        ("claude", _) => " ignored",
+        _ => "",
+    };
+    let head = format!("{backend} · ");
+    let model = to_room(
+        &model,
+        room.saturating_sub(head.chars().count() + marker.chars().count()),
+    );
+    match marker.is_empty() {
+        true => to_room(&format!("{head}{model}"), room),
+        false => format!("{head}{model}{marker}"),
     }
 }
 
@@ -1275,6 +1413,7 @@ fn opt_pct1(value: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::LlmBackend;
 
     #[test]
     fn an_unsent_constraint_never_becomes_a_number() {
@@ -1323,11 +1462,16 @@ mod tests {
         // The A3 fact this row exists to keep visible: on the claude path the
         // tier map owns the model, so a name in this column would read as a
         // choice an operator could make and would change nothing.
+        // The card's value column at the baseline width.
+        const ROOM: usize = 24;
         let claude = |model: &str| {
-            surface_value(Some(&LlmSurface {
-                backend: Some("claude".into()),
-                model: Some(model.into()),
-            }))
+            surface_value(
+                Some(&LlmSurface {
+                    backend: Some("claude".into()),
+                    model: Some(model.into()),
+                }),
+                ROOM,
+            )
         };
         // `inherit` rendered as what it means, never as an editable-looking
         // name for a choice that does nothing.
@@ -1339,24 +1483,111 @@ mod tests {
         assert_eq!(claude("haiku"), "claude · haiku ignored");
         // Every other backend runs the model it names.
         assert_eq!(
-            surface_value(Some(&LlmSurface {
-                backend: Some("ollama".into()),
-                model: Some("granite3.3:8b".into()),
-            })),
+            surface_value(
+                Some(&LlmSurface {
+                    backend: Some("ollama".into()),
+                    model: Some("granite3.3:8b".into()),
+                }),
+                ROOM
+            ),
             "ollama · granite3.3:8b"
         );
         // Absent stays absent, and half a pair is not a pair: a backend with no
         // model is a surface nobody can say what runs on.
-        assert_eq!(surface_value(None), MISSING);
-        assert_eq!(surface_value(Some(&LlmSurface::default())), MISSING);
+        assert_eq!(surface_value(None, ROOM), MISSING);
+        assert_eq!(surface_value(Some(&LlmSurface::default()), ROOM), MISSING);
         assert_eq!(
-            surface_value(Some(&LlmSurface {
-                backend: Some("ollama".into()),
-                // `Some("")` is absent, as everywhere in this client.
-                model: Some(String::new()),
-            })),
+            surface_value(
+                Some(&LlmSurface {
+                    backend: Some("ollama".into()),
+                    // `Some("")` is absent, as everywhere in this client.
+                    model: Some(String::new()),
+                }),
+                ROOM
+            ),
             MISSING
         );
+    }
+
+    #[test]
+    fn a_real_model_id_is_cut_at_its_tail_and_never_at_the_word_that_matters() {
+        // A per-token bound is no bound at all: `claude-opus-4-5-20260101` is
+        // inside `NAME_MAX` and the value it composes is 41 cells against a
+        // 24-cell column, which wraps and spends the reason slack.
+        const ROOM: usize = 24;
+        let long = surface_value(
+            Some(&LlmSurface {
+                backend: Some("claude".into()),
+                model: Some("claude-opus-4-5-20260101".into()),
+            }),
+            ROOM,
+        );
+        assert!(long.chars().count() <= ROOM, "{long} is {}", long.len());
+        // The marker is the honest half and survives the cut: without it the
+        // row reads as a setting an operator could make.
+        assert!(long.ends_with(" ignored"), "{long}");
+        assert!(long.starts_with("claude · claude"), "{long}");
+        assert!(
+            long.contains('…'),
+            "a silent cut reads as the whole id: {long}"
+        );
+        // A narrower card cuts further into the id and still keeps the word.
+        let narrow = surface_value(
+            Some(&LlmSurface {
+                backend: Some("claude".into()),
+                model: Some("claude-opus-4-5-20260101".into()),
+            }),
+            20,
+        );
+        assert!(narrow.chars().count() <= 20, "{narrow}");
+        assert!(narrow.ends_with(" ignored"), "{narrow}");
+    }
+
+    #[test]
+    fn only_the_backends_a_surface_runs_on_get_their_reason_rendered() {
+        // The owner's catalog names every backend this desk knows, not the two
+        // it is using. A sentence about one nothing here runs on is noise
+        // beside one about a desk that cannot do what it was configured to do.
+        let claude = || {
+            Some(LlmSurface {
+                backend: Some("claude".into()),
+                model: Some("inherit".into()),
+            })
+        };
+        let llm = LlmConfig {
+            reasoner: claude(),
+            workforce: claude(),
+            availability: vec![
+                LlmBackend {
+                    name: Some("claude".into()),
+                    available: Some(true),
+                    reason: Some("claude CLI on PATH".into()),
+                },
+                LlmBackend {
+                    name: Some("ollama".into()),
+                    available: Some(false),
+                    reason: Some("ollama is not running at 127.0.0.1:11434".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(
+            unreachable_reasons(&llm).is_empty(),
+            "no surface runs on ollama, so its outage is not this desk's problem"
+        );
+        // And a desk that *is* on it says so once, not once per surface.
+        let ollama = || {
+            Some(LlmSurface {
+                backend: Some("ollama".into()),
+                model: Some("granite3.3:8b".into()),
+            })
+        };
+        let both = LlmConfig {
+            reasoner: ollama(),
+            workforce: ollama(),
+            ..llm
+        };
+        assert_eq!(unreachable_reasons(&both).len(), 1);
     }
 
     #[test]

@@ -3902,6 +3902,12 @@ class QlabTui(App[None]):
                 f"[{AMBER}]! cannot drive[/]  [{DIM}]"
                 f"{escape(str(coordinator.get('reason') or 'unavailable'))} — "
                 f"dispatched work waits for `: workforce`.[/]")
+        if coordinator.get("note"):
+            # The screen where the operator PICKS the backend is the one place
+            # a choice the desk cannot honour must not be inferred from silence.
+            # It rides none of the branches above: the desk can drive, so this
+            # is never the `cannot drive` arm.
+            lines.append(f"[{DIM}]{escape(str(coordinator['note']))}[/]")
         self.query_one("#settings-workforce-copy", Static).update("\n".join(lines))
         self.query_one("#settings-toggle-fast", Button).tooltip = (
             "Turn fast mode off — every role back on its tier" if fast

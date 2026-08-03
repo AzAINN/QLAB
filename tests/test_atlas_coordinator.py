@@ -438,6 +438,14 @@ def test_the_gate_never_reaches_the_harness_even_alone_in_a_graph():
         assert daemon.asked == []
         row = reg.list_model_invocations()[0]
         assert row["role"] == "referee" and row["backend"] == "claude_cli"
+        # The plan's own sentence, which `resolve_route` then overrides with
+        # the identical one — so this branch has no downstream observable and
+        # would drift unnoticed. A 1-phase graph is exactly what the harness
+        # serves; naming the graph here would contradict the row above.
+        from qlab.operator.model_routing import pinned_to_claude_reason
+
+        assert driver._plan(("referee",)).pinned_reason == \
+            pinned_to_claude_reason("referee", "ollama")
     finally:
         reg.close()
 

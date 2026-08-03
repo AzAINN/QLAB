@@ -3776,6 +3776,18 @@ def test_a_workforce_the_desk_cannot_honour_is_said_on_the_atlas_card():
             await pilot.pause(0.15)
             read = str(app.query_one("#atlas-read").content)
             assert "role harness is not built" in read
+            # Dim and last, asserted rather than described: it is a standing
+            # fact about the desk, not a reason this moment is quiet, and a
+            # line that read like the others would claim to be one.
+            lines = [line for line in read.splitlines() if line.strip()]
+            assert "role harness is not built" in lines[-1]
+            assert "deterministic code, not a model" in "\n".join(lines[:-1])
+
+            # And on the screen where the backend is actually chosen.
+            app.action_view("settings")
+            await pilot.pause(0.15)
+            copy = str(app.query_one("#settings-workforce-copy").content)
+            assert "role harness is not built" in copy
 
     asyncio.run(run())
 

@@ -1480,6 +1480,92 @@ mod operator {
     }
 
     #[tokio::test]
+    async fn the_door_can_take_a_book_it_cannot_reach_and_the_warning_rides_its_own_outcome() {
+        // The startup door may now point a desk at the real book with no login
+        // behind it — the gate that used to refuse that was authority the door
+        // never had, and refusing it also removed the one walk that ends at the
+        // login form. The honesty it traded for is *this*: the door's outcome
+        // is the same `Command::DeskMode` every other switch produces, so the
+        // credential warning the test above pins rides it too.
+        //
+        // Driven through the real router rather than hand-built, because the
+        // claim being checked is that the door's command **is** that command.
+        let mut store = atlas::store::Store::default();
+        store.posture = Posture::Operator;
+        store.apply(
+            atlas::bus::AppEvent::Snapshot(Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "desk_mode": {"data": "synthetic", "book": "simulated",
+                                  "label": "SYNTHETIC", "offline": true,
+                                  "credentials": "no ALPACA_API_KEY_ID in the environment",
+                                  "credentials_ok": false}
+                }))
+                .unwrap(),
+            )),
+            std::time::Instant::now(),
+        );
+        store.pick();
+        let mut views = atlas::ui::views::Views::new();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // The runtime draws before its first event, and the door reads its
+        // floor off the frame it was last given.
+        frame_with(&store, &views);
+        // LIVE, then the book the desk cannot reach, then on to the models,
+        // then keep them: the walk the ruling makes reachable.
+        let mut acted = None;
+        for code in [
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Down,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Enter,
+        ] {
+            acted = atlas::ui::shell::on_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &mut store,
+                &mut views,
+            );
+            frame_with(&store, &views);
+        }
+        let cmd = acted.expect("the walk ends by applying the pair");
+        assert_eq!(
+            cmd,
+            Command::DeskMode {
+                data: "live".into(),
+                book: "alpaca".into()
+            }
+        );
+        // And it lands the operator in front of the login, which is the other
+        // half of what the gate's removal bought.
+        assert_eq!(store.nav.view, atlas::store::ViewId::Settings);
+
+        let owner = spawn_owner(
+            200,
+            desk_mode_body(
+                "LIVE · ALPACA BOOK",
+                r#""credentials_ok": false, "credentials": "ALPACA_API_KEY_ID is not set""#,
+            ),
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let outcome = perform(&client, cmd).await;
+        match &outcome {
+            Some(Wrote::Pointed { warning, .. }) => assert_eq!(
+                warning.as_deref(),
+                Some("ALPACA_API_KEY_ID is not set"),
+                "the door's own switch reported a book it cannot trade as a clean one"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.unwrap()))
+            .expect("a box");
+        assert_eq!(toast.level, atlas::ui::widgets::toast::Level::Warn);
+        assert!(toast.message.contains("ALPACA_API_KEY_ID"), "{toast:?}");
+    }
+
+    #[tokio::test]
     async fn the_credential_warning_speaks_only_about_the_book_that_can_trade() {
         // The simulated book needs no login, so a warning beside it would train
         // an operator to read past the one that matters.

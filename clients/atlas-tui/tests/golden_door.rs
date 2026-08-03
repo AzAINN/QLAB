@@ -94,8 +94,20 @@ fn a_terminal_too_small_for_the_door_is_told_what_it_would_take() {
     // operator cannot see is worse than one that says what it would cost.
     let mut client = Client::new(unsaid());
     let frame = client.frame(120, 15);
-    assert!(frame.contains("the startup door needs"), "{frame}");
-    assert!(frame.contains("/mode and /model"), "{frame}");
+    // Both floors and both actual dimensions, in that order — the sentence read
+    // "has 120×15" of a terminal 15 rows tall, which is the pair the two
+    // numbers before it are compared against.
+    assert!(
+        frame.contains("needs 16 rows and 48 columns; this terminal has 15 rows and 120 columns"),
+        "{frame}"
+    );
+    // The remedy, which wraps onto the second of the three rows the refusal
+    // takes — asserted in the piece that survives the wrap, because a fragment
+    // spanning the break would fail on a resize rather than on a regression.
+    assert!(
+        frame.contains("and /model ask the same questions"),
+        "{frame}"
+    );
     // The keystroke that arrives while it does not fit takes it away, rather
     // than being swallowed by a box nobody can see.
     client.press(KeyCode::Down);
@@ -183,20 +195,76 @@ mod armed {
 
     #[test]
     fn the_book_question_is_disclosed_by_the_answer_above_it() {
-        // The frame's half of the two-step disclosure: the fixture desk has no
-        // login the owner can read, so LIVE carries the reason and the books
-        // stay absent — and this is the state the golden above is in.
+        // The frame's half of the two-step disclosure, which is the virtue that
+        // survives: the books do not exist while the door points at synthetic
+        // data, so the pair the owner's `__post_init__` raises on cannot be
+        // composed here however the keys are pressed.
         let mut client = door();
         let frame = client.frame(120, 36);
         assert!(frame.contains("SYNTHETIC"), "{frame}");
         assert!(!frame.contains("ALPACA PAPER"), "{frame}");
         press(&mut client, KeyCode::Down);
         press(&mut client, KeyCode::Enter);
-        let refused = client.frame(120, 36);
-        assert!(!refused.contains("ALPACA PAPER"), "{refused}");
+        let live = client.frame(120, 36);
+        assert!(live.contains("ALPACA PAPER"), "{live}");
+        // And the fixture desk has no login the owner can read, which the row
+        // says without refusing the choice — the gate that used to refuse it
+        // was authority this door never had.
         assert!(
-            refused.contains("no ALPACA_API_KEY_ID"),
-            "the owner's reason is missing:\n{refused}"
+            live.contains("no Alpaca login the desk can read"),
+            "the owner's fact did not survive the gate's removal:\n{live}"
+        );
+        assert!(
+            live.contains("no ALPACA_API_KEY_ID"),
+            "the owner's own description is missing:\n{live}"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_under_the_door_and_from_under_a_confirmation_box() {
+        // The one precedence claim in the router that is *reachable*, and the
+        // behaviour change that came with hoisting it: Ctrl-C used to sit below
+        // the confirmation box, whose challenge field read it as a typed `c`.
+        // Raw mode disables ISIG, so this key arrives as a keystroke or not at
+        // all, and the reflex every operator has must work whatever is up.
+        //
+        // The door and the box together are not a state this client can reach —
+        // a door claims every key while it is up, so no view can open a modal
+        // underneath it — which is exactly why the ordering between *those two*
+        // is defensive and is not claimed as precedence anywhere.
+        let ctrl_c = |client: &mut Client| {
+            atlas::ui::shell::on_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &mut client.store,
+                &mut client.views,
+            )
+        };
+        let open_a_box = |client: &mut Client| {
+            client.store.nav.view = ViewId::Audit;
+            client
+                .views
+                .confirm_mut(ViewId::Audit)
+                .expect("AUDIT owns a modal slot")
+                .open(
+                    atlas::ui::widgets::confirm::Modal::action("HALT", vec![]),
+                    atlas::ui::widgets::confirm::Pending::Approve("a1".into()),
+                );
+        };
+
+        let mut both = door();
+        open_a_box(&mut both);
+        assert!(both.store.door().is_some());
+        assert_eq!(ctrl_c(&mut both), Some(Command::Quit), "under the door");
+
+        // And under the box alone, which is the state an operator does meet —
+        // the door has been answered and BOOK or AUDIT has a question up.
+        let mut boxed = door();
+        boxed.store.settle_door();
+        open_a_box(&mut boxed);
+        assert_eq!(
+            ctrl_c(&mut boxed),
+            Some(Command::Quit),
+            "the challenge field ate the operator's only exit reflex"
         );
     }
 

@@ -4,10 +4,11 @@
 //! is and claiming the keyboard above everything but Ctrl-C. It is the flow the
 //! Textual client has had since the beginning (`qlab/tui/desk_mode_screen.py`),
 //! and the two virtues ported from it are the ones that are easy to lose:
-//! **two-step disclosure**, so `synthetic` + `alpaca` is unreachable by
+//! **two-step disclosure**, so the `synthetic`/`alpaca` pair is unreachable by
 //! construction rather than rejected by a message, and **Esc is
 //! `synthetic · simulated`**, so the key a human presses to get out of the way
-//! can never leave a desk pointed at a real venue.
+//! can never leave a desk pointed at a real venue. A third rule of that screen
+//! is deliberately **not** ported, and the section below says why.
 //!
 //! ## What the owner can and cannot say
 //!
@@ -27,6 +28,24 @@
 //! that did answer. Serving `chosen: bool` from the owner would let the first
 //! arm mean what it was meant to mean; that is an owner-side change and is on
 //! the ledger rather than in this file.
+//!
+//! ## The one rule that did not survive the port
+//!
+//! The Textual screen disables LIVE outright without a credential. This door
+//! does not, and the reason is that the gate was never authority.
+//! `set_desk_mode` validates the *shape* of the pair and nothing else;
+//! `live · alpaca` on dead credentials is already reachable from `/mode` and
+//! from the web client; and a desk pointed at a book it cannot reach fails loud
+//! on every broker call and can produce no fill. What the gate bought was
+//! honesty, and it bought it by removing a choice — which also removed the only
+//! walk that reaches the login this client now has, since a book nobody can
+//! choose is a book nobody is offered a login for.
+//!
+//! So the choice stays and the honesty moves to where it belongs: the row
+//! carries the owner's own account of the credential, the outcome toast carries
+//! its warning (`dispatch::credential_warning`, already the rule for every
+//! desk-mode switch), and the third step offers the login. The virtue's core is
+//! untouched — a live desk is never a *default* here and never a silent one.
 //!
 //! ## What it may do
 //!
@@ -58,9 +77,11 @@ use ratatui::{
 };
 use std::cell::Cell;
 
-/// The box's width. Wide enough for a row's label beside the owner's reason for
-/// refusing it, and for the credential description to wrap in two lines.
-const DOOR_W: u16 = 68;
+/// The box's width. Wide enough for a row's label, the longer of the two
+/// marker words, and the owner's reason beside both — `ASSUMED` is one cell
+/// wider than `CHOSEN`, and at 68 the synthetic row wrapped onto an unindented
+/// second line the moment it was the honest word.
+const DOOR_W: u16 = 70;
 
 /// The door's own floor, in rows of the frame.
 ///
@@ -83,9 +104,16 @@ const DOOR_MIN_W: u16 = 48;
 /// the longest sentence it actually writes survives uncut.
 const SAID_MAX: usize = 112;
 
-/// What the first question's marker says: the pair this door would apply,
-/// which is the desk's own until the operator moves it.
+/// What the first question's marker says when something has actually named
+/// this half of the pair — the owner in its payload, or the operator with a
+/// keystroke.
 const CHOSEN: &str = "chosen";
+
+/// And when nothing has. The door still has to point somewhere, so it falls
+/// back to the safe desk; marking that `chosen` claimed a decision nobody had
+/// made, on the one screen whose whole subject is that nobody has. It is the
+/// armed door's half of the sentence the read-only one says outright.
+const ASSUMED: &str = "assumed";
 
 /// What the second's says: the model that surface is running now. A different
 /// claim from `CHOSEN` — a choice there is sent the moment it is made, so the
@@ -210,6 +238,21 @@ impl Door {
         self.book
             .or_else(|| word(store, |mode| mode.book.as_ref(), [SIMULATED, ALPACA]))
             .unwrap_or(SIMULATED)
+    }
+
+    /// Whether anything has named the data source: the operator with a
+    /// keystroke, or the owner in a payload this client can read. A word the
+    /// owner sent that is neither of the two this client knows names nothing —
+    /// `word` already refuses it, and so does this.
+    fn named_data(&self, store: &Store) -> bool {
+        self.data.is_some() || word(store, |mode| mode.data.as_ref(), [SYNTHETIC, LIVE]).is_some()
+    }
+
+    /// The same question about the book, asked separately because the two
+    /// halves are answered separately: choosing `live` names the data and
+    /// leaves the book still assumed.
+    fn named_book(&self, store: &Store) -> bool {
+        self.book.is_some() || word(store, |mode| mode.book.as_ref(), [SIMULATED, ALPACA]).is_some()
     }
 
     /// Whether the desk reports a login the Alpaca book could be reached with.
@@ -355,20 +398,13 @@ impl Door {
                         self.data = Some(SYNTHETIC);
                         self.book = Some(SIMULATED);
                     }
-                    // The one row that can point this desk at a real account,
-                    // and the gate in front of it is the owner's own reading of
-                    // the credential file. A desk that is *already* live
-                    // arrives with this row current and may keep it — what is
-                    // refused is *newly* pointing a desk at a venue it has no
-                    // login for.
-                    ModeRow::Data(LIVE) => match self.credentials_ok(store) {
-                        true => self.data = Some(LIVE),
-                        false => {
-                            self.note = Some(self.credentials(store).unwrap_or_else(|| {
-                                "the desk reports no usable Alpaca login".to_string()
-                            }))
-                        }
-                    },
+                    // The row that can point this desk at a real account, and
+                    // deliberately ungated — see this module's header. The
+                    // credential is stated on the row and warned about in the
+                    // outcome; it is not a permission this door holds, and
+                    // pretending otherwise cost the operator the one walk that
+                    // ends at a login form.
+                    ModeRow::Data(LIVE) => self.data = Some(LIVE),
                     ModeRow::Data(_) => {}
                     ModeRow::Book(book) => self.book = Some(book),
                     ModeRow::Next => {
@@ -489,11 +525,16 @@ impl Door {
         // fitted could never report that it stopped fitting.
         self.area.set(area);
         if !self.fits() {
+            // Three rows, like the help overlay's own refusal and for the
+            // reason it states: a refusal has to survive its own floor, and at
+            // 120 cells this sentence takes two — a single row would clip the
+            // half that names the two scopes asking the same questions, which
+            // is the only part an operator can act on.
             let row = Rect {
                 x: area.x,
                 y: area.y + area.height / 2,
                 width: area.width,
-                height: 1,
+                height: 3.min(area.height),
             };
             f.render_widget(Clear, row);
             refuse(
@@ -501,9 +542,9 @@ impl Door {
                 row,
                 format!(
                     "the startup door needs {DOOR_MIN_H} rows and {DOOR_MIN_W} columns; \
-                     this terminal has {}×{}. Any key dismisses it — /mode and /model ask \
-                     the same questions.",
-                    area.width, area.height
+                     this terminal has {} rows and {} columns. Any key dismisses it — \
+                     /mode and /model ask the same questions.",
+                    area.height, area.width
                 ),
             );
             return;
@@ -541,18 +582,19 @@ impl Door {
                 ModeRow::Data(SYNTHETIC) => lines.push(self.row(
                     i,
                     "SYNTHETIC",
-                    (!live).then_some(CHOSEN),
+                    (!live).then_some(mark(self.named_data(store))),
                     true,
                     Some("prices this desk makes; no order leaves it"),
                 )),
+                // Choosable whatever the login says, and never silent about
+                // it: the note is a fact on a row an operator may take, not a
+                // refusal of one they may not. The tone tells them apart — a
+                // row the desk cannot serve is dim, and this one is not.
                 ModeRow::Data(LIVE) => lines.push(self.row(
                     i,
                     "LIVE",
-                    live.then_some(CHOSEN),
-                    // The Textual door disables this button outright without a
-                    // credential; here the row stays and carries the reason,
-                    // which is the same discipline the model list is drawn by.
-                    ok || live,
+                    live.then_some(mark(self.named_data(store))),
+                    true,
                     (!ok).then_some("no Alpaca login the desk can read"),
                 )),
                 ModeRow::Data(_) => {}
@@ -561,7 +603,7 @@ impl Door {
                     lines.push(self.row(
                         i,
                         "SIMULATED",
-                        (self.book(store) == SIMULATED).then_some(CHOSEN),
+                        (self.book(store) == SIMULATED).then_some(mark(self.named_book(store))),
                         true,
                         Some("real prices; no order ever sent to Alpaca"),
                     ));
@@ -569,7 +611,7 @@ impl Door {
                 ModeRow::Book(_) => lines.push(self.row(
                     i,
                     "ALPACA PAPER",
-                    (self.book(store) == ALPACA).then_some(CHOSEN),
+                    (self.book(store) == ALPACA).then_some(mark(self.named_book(store))),
                     true,
                     Some("the paper account; a fill still needs you"),
                 )),
@@ -823,6 +865,14 @@ fn word(
         .find(|word| word.eq_ignore_ascii_case(said))
 }
 
+/// Which word a first-question row's marker carries.
+fn mark(named: bool) -> &'static str {
+    match named {
+        true => CHOSEN,
+        false => ASSUMED,
+    }
+}
+
 /// A dim heading inside the box.
 fn section(title: &str) -> Line<'static> {
     Line::from(Span::styled(
@@ -1045,31 +1095,93 @@ mod tests {
         )
     }
 
+    /// One box's lines as an operator reads them.
+    #[cfg(feature = "operator")]
+    fn said(door: &Door, store: &Store) -> String {
+        door.mode_lines(store)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[cfg(feature = "operator")]
     #[test]
-    fn the_live_row_is_refused_in_the_owners_own_words_until_it_can_read_a_login() {
-        // The gate is on the *choice*: this is the one row that can newly point
-        // a desk at a real account, and `Some(true)` is the only answer that
-        // opens it — an owner that did not say is not an owner that said yes.
+    fn the_live_row_is_choosable_whatever_the_login_says_and_never_silent_about_it() {
+        // The gate that used to sit on this row was authority the door never
+        // had — `set_desk_mode` validates the pair's shape only, `/mode` and the
+        // web client both reach the same switch, and a book with no login fails
+        // loud on every broker call. Removing the choice also removed the one
+        // walk that ends at a login form, so the choice stays.
         let mut store = desk(SYNTHETIC, SIMULATED, false);
         armed(&mut store);
         let mut door = cursor_on(1, Step::Mode);
         assert_eq!(press(&mut door, KeyCode::Enter, &mut store), None);
-        assert_eq!(door.data(&store), SYNTHETIC, "a broken login went live");
-        assert_eq!(
-            door.note.as_deref(),
-            Some("no ALPACA_API_KEY_ID in the environment or .env"),
-            "the refusal is the owner's description, not a sentence composed here"
+        assert_eq!(door.data(&store), LIVE, "a broken login blocked the choice");
+        assert!(
+            door.mode_rows(&store).contains(&ModeRow::Book(ALPACA)),
+            "the book question is what makes the login reachable"
         );
-        // And with a login the desk can read, the same keystroke discloses the
-        // book question. Both sides of the guard, because one case that merely
-        // reaches the code proves nothing about the comparison.
+        // What survives is the honesty, and it is said **twice, in two
+        // places**, because they are two statements: the row itself carries
+        // the fact that there is no login, and the line under the rows carries
+        // the owner's own description of what it tried to read. Asserted
+        // separately for the reason a mutation found — deleting either one
+        // leaves the other, and a single assertion passes on the survivor.
+        // The third statement is the outcome's warning, pinned in
+        // `operator_gate` against a stub owner.
+        let refused = said(&door, &store);
+        assert!(
+            refused.contains("no Alpaca login the desk can read"),
+            "the row stopped saying it:\n{refused}"
+        );
+        assert!(
+            refused.contains("no ALPACA_API_KEY_ID"),
+            "the owner's own description stopped being rendered:\n{refused}"
+        );
+        // The other side of that comparison — a desk whose login reads says
+        // nothing about one, so both are about the credential and not about
+        // the row they sit on.
         let mut ok = desk(SYNTHETIC, SIMULATED, true);
         armed(&mut ok);
         let mut door = cursor_on(1, Step::Mode);
         press(&mut door, KeyCode::Enter, &mut ok);
-        assert_eq!(door.data(&ok), LIVE);
-        assert!(door.mode_rows(&ok).contains(&ModeRow::Book(ALPACA)));
+        assert!(!said(&door, &ok).contains("no Alpaca login"));
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_desk_nobody_has_named_is_not_marked_as_though_somebody_had() {
+        // The armed door's half of what the read-only one says outright. With
+        // no `desk_mode` block the door still has to point somewhere, and the
+        // fallback it picks is not a decision anyone made.
+        let mut nothing = Store::default();
+        armed(&mut nothing);
+        nothing.apply(
+            AppEvent::Snapshot(Box::new(
+                serde_json::from_value(serde_json::json!({"portfolio": {"equity": 1.0}})).unwrap(),
+            )),
+            Instant::now(),
+        );
+        let mut door = Door::default();
+        assert!(
+            said(&door, &nothing).contains(ASSUMED),
+            "{}",
+            said(&door, &nothing)
+        );
+        // One keystroke is a decision, and the word changes with it.
+        press(&mut door, KeyCode::Enter, &mut nothing);
+        assert!(said(&door, &nothing).contains(CHOSEN));
+        // And an owner that named the desk has already made it.
+        let mut named = desk(SYNTHETIC, SIMULATED, false);
+        armed(&mut named);
+        assert!(said(&Door::default(), &named).contains(CHOSEN));
+        assert!(!said(&Door::default(), &named).contains(ASSUMED));
     }
 
     #[cfg(feature = "operator")]

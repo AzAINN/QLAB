@@ -150,9 +150,11 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     if store.nav.focus == Focus::Help {
         help::draw(f, area, store.posture, store.help_top);
     }
-    // And over that: the door is the first thing a workstation opens on, and it
-    // claims every key above everything but Ctrl-C, so nothing may be drawn on
-    // top of the question it is asking.
+    // And over that. Last because the door is the first thing a workstation
+    // opens on and claims every key but Ctrl-C while it does — so nothing can
+    // arrive to be drawn over it. Defensive, like its place in the router: the
+    // overlays below cannot be open at the same time, and this is what keeps
+    // that true on screen rather than only in the argument for it.
     if let Some(door) = store.door() {
         door.draw(f, area, store);
     }
@@ -214,9 +216,17 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Command::Quit);
     }
-    // Then the door, which is up before anything else exists to be walked away
-    // from. Taken out of the store because answering it reads the whole desk;
-    // it goes back unless the keystroke finished it, and a door too big for the
+    // Then the door. Its position above the confirmation box is **defensive
+    // rather than a precedence anyone can reach**: a door is up only before it
+    // has been answered once, and while it is up it claims every key, so no
+    // view can open a modal underneath it. Nothing tests the two together
+    // because nothing can produce the two together — deleting this ordering
+    // changes no reachable behaviour, and saying it outranks the box would
+    // claim a rule the client never exercises. What *is* reachable, and is
+    // pinned, is Ctrl-C above both.
+    //
+    // Taken out of the store because answering it reads the whole desk; it goes
+    // back unless the keystroke finished it, and a door too big for the
     // terminal is retired here rather than left armed and invisible — the rule
     // WORKFORCE's picker and SETTINGS' login form are already held to.
     if let Some(mut door) = store.take_door() {

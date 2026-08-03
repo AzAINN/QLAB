@@ -71,11 +71,11 @@ echo
 # costs one screen instead of every screen after it, and each starts from the
 # state an operator actually opens the client in.
 scene() {
-  local label="$1" script="$2"
+  local label="$1" script="$2" more="${3:-}"
   echo
   echo "############ $label"
   "$python" "$capture" "$bin" --port "$port" --size "$size" \
-    --args "$extra" --script "$script" || return 1
+    --args "$extra${more:+ $more}" --script "$script" || return 1
 }
 
 failed=0
@@ -104,6 +104,15 @@ scene "the help overlay" \
 # The refresh key, which is the one keystroke that reaches the network.
 scene "refresh" \
   "wait:2,key:r,wait:2,shot:after r,quit" || failed=1
+
+# The startup door, which is the one scene that needs no owner at all: `--pick`
+# asks whatever the desk says, and a machine with nothing listening still gets
+# the question. An armed run walks it — the first row, the row that moves on,
+# then Esc out of the models; a glass one is a statement any key dismisses.
+scene "the startup door (--pick)" \
+  "wait:2,shot:the first question,down,down,enter,shot:the second question,\
+esc,shot:the desk behind it,quit" \
+  "--pick" || failed=1
 
 echo
 if [[ $failed -eq 0 ]]; then

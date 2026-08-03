@@ -312,6 +312,13 @@ def run(
         elif verb == "esc":
             os.write(master, b"\x1b")
             time.sleep(0.4)
+        # The startup door is the first surface an operator walks with the
+        # arrows and Enter before any view is on screen, so the harness has to
+        # be able to send them.
+        elif verb in ("up", "down", "enter"):
+            os.write(master, {"up": b"\x1b[A", "down": b"\x1b[B",
+                              "enter": b"\r"}[verb])
+            time.sleep(0.4)
         elif verb == "shot":
             with raw_lock:
                 marks.append((len(raw), arg or "screen"))

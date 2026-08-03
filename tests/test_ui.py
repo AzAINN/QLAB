@@ -185,6 +185,33 @@ def test_data_health_endpoint_reports_demo_data_as_research_only(session):
     assert health["permit_id"].startswith("sha256:")
 
 
+def test_an_ineligible_desk_tells_the_operator_why_over_the_api(session):
+    """The live desk served every check PASS, `eligible_for_paper_proposal:
+    false` and `reasons: []`. Invariant 4 says a refusal states its reason,
+    and this is the endpoint an operator actually reads."""
+    _, health = handle_api(
+        session, "GET", "/api/data/health", {"offline": ["1"]}, {})
+    assert health["eligible_for_paper_proposal"] is False
+    assert health["reasons"], "a refusal with no reason is unactionable"
+    assert any("synthetic" in r for r in health["reasons"])
+    # Singular `reason` is what atlas_facts and the TUI read; it must not be
+    # None while `reasons` is populated, or the gate reports an unexplained
+    # refusal to the operator and to Atlas.
+    assert health["reason"]
+    assert health["reason"] in health["reasons"]
+
+
+def test_the_gate_carries_the_data_refusal_reason_not_a_bare_false(session):
+    """`atlas_facts` read `health["reason"]`, which only the *blocked* branch
+    ever set. On the ordinary ineligible path the gate handed Atlas
+    `eligible: false, reason: None` — a refusal with no cause attached."""
+    facts = session.atlas_facts(True)
+    assert facts["data"]["eligible_for_paper_proposal"] is False
+    assert facts["data"]["reason"], (
+        "the gate refuses paper proposals and states no reason to Atlas")
+    assert "synthetic" in facts["data"]["reason"]
+
+
 def test_data_permit_current_returns_recorded_permit(session):
     # Recording happens as a side effect of the health evaluation.
     handle_api(session, "GET", "/api/data/health", {"offline": ["1"]}, {})

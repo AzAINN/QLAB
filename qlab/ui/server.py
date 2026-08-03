@@ -1172,6 +1172,9 @@ class UISession:
             return {
                 "blocked": True, "mode": policy.mode, "provider": policy.provider,
                 "feed": policy.feed, "reason": str(exc),
+                # Both spellings, so a client reading either one sees the
+                # refusal rather than an empty list next to a bare `false`.
+                "reasons": [str(exc)],
                 "eligible_for_paper_proposal": False,
                 "eligible_for_execution": False,
             }
@@ -1183,12 +1186,20 @@ class UISession:
             snapshot_id=snap.content_hash(), purpose=purpose, policy=policy,
             health=health, universe=tickers, as_of=str(snap.as_of))
         self.registry.record_data_permit(permit.to_dict())
+        payload = health.to_dict()
         return {
             "blocked": False, "mode": policy.mode, "feed": policy.feed,
             "permit_id": permit.permit_id,
             "quote_health": (
                 self.market_stream.health() if self.market_stream else None),
-            **health.to_dict(),
+            # Singular `reason` is what `atlas_facts` and the TUI read, and
+            # only the *blocked* branch above ever set it. On the ordinary
+            # ineligible path both surfaces saw `eligible: false` with no
+            # cause, so the desk refused without saying why (invariant 4).
+            # The first reason is the governing one: `_integrity` writes
+            # before the provenance and freshness checks append theirs.
+            "reason": (payload["reasons"][0] if payload["reasons"] else None),
+            **payload,
         }
 
     def quotes(self, symbols: list[str] | None = None) -> dict:

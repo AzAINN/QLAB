@@ -22,6 +22,17 @@ from qlab.core.data import DataPolicy
 _EXECUTION_GRADE_PROVIDERS = frozenset({"alpaca"})
 
 
+def execution_grade_providers() -> frozenset[str]:
+    """Which providers may back a paper proposal, as a fact a client can read.
+
+    This rule silently decided eligibility for every desk while living only in
+    a module-level constant, so an operator whose desk refused to work had to
+    read the source to find out why. Exposed so a refusal can say not just
+    "not execution-grade" but which providers would be.
+    """
+    return _EXECUTION_GRADE_PROVIDERS
+
+
 @dataclass(frozen=True)
 class DataHealth:
     """The integrity verdict on one price panel under one policy."""
@@ -134,6 +145,24 @@ def evaluate_panel_health(
             f"behind the last completed session {reference}")
 
     execution_grade = source in _EXECUTION_GRADE_PROVIDERS and not synthetic
+    if not execution_grade:
+        # Invariant 4. This rule gates paper eligibility and was the one check
+        # that never wrote a reason, so the live desk served
+        # `eligible_for_paper_proposal: false` with `reasons: []` and every
+        # named check passing — a refusal an operator had no way to act on.
+        # Synthetic is reported ahead of the provider because an `alpaca`
+        # panel can still be synthetic, and blaming the provider there would
+        # send the operator to swap one that was already correct.
+        allowed = ", ".join(sorted(_EXECUTION_GRADE_PROVIDERS))
+        if synthetic:
+            reasons.append(
+                f"panel is synthetic, so it is research-grade only and cannot "
+                f"back a paper proposal; execution-grade providers: {allowed}")
+        else:
+            reasons.append(
+                f"provider {source!r} is not execution-grade, so it is "
+                f"research-grade only and cannot back a paper proposal; "
+                f"execution-grade providers: {allowed}")
     integrity_ok = verdict == "PASS"
 
     eligible_research = integrity_ok

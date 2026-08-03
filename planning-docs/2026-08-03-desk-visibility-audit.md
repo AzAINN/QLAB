@@ -1,15 +1,18 @@
 # The desk could not see itself — visibility audit of `feat/atlas-full-desk`
 
-**Date:** 2026-08-03 · **Branch:** `feat/atlas-full-desk` (from `origin/main` 85b04d9) · **Status:** 7 commits, suite green at `764872f` (1282 passed, 10 skipped), not pushed, no PR
+**Date:** 2026-08-03 · **Branch:** `feat/atlas-full-desk` (from `origin/main` 85b04d9) · **Status:** 10 commits, suite green at `c1a9f05` (1293 passed, 10 skipped), not pushed, no PR
 **Method:** every finding below was produced by driving the live desk — a probe owner on port 8791 over a copy of the live registry, plus the rendered page in a real browser — and then reproduced as a failing test before being fixed. Unit tests found none of them.
 
 ## The shape of the failure
 
-Twelve findings across seven commits, and essentially one failure mode. Every layer of this desk *computed* the right thing and then failed to *hand it on*. The algorithms were fine. The reasoner had thirteen context keys and rendered six. The coordinator recorded its agent stream through a filter naming kinds no parser emits. The health gate decided eligibility and dropped the reason. The news pipeline fetched 50 stories and deleted 46 at the next stage, against an explicit comment saying not to. In each case the producing side was correct, the consuming side was correct, and the seam between them silently discarded the payload.
+Thirteen findings across ten commits, and essentially one failure mode. Every layer of this desk *computed* the right thing and then failed to *hand it on*. The algorithms were fine. The reasoner had thirteen context keys and rendered six. The coordinator recorded its agent stream through a filter naming kinds no parser emits. The health gate decided eligibility and dropped the reason. The news pipeline fetched 50 stories and deleted 46 at the next stage, against an explicit comment saying not to. In each case the producing side was correct, the consuming side was correct, and the seam between them silently discarded the payload.
 
 That seam is invisible to unit tests by construction: both sides pass their own tests. It is visible immediately on a live desk, because the desk says something false out loud.
 
 The second pattern, which is the more dangerous one: **almost none of these presented as an error.** They presented as confident, plausible, wrong answers. A refusal with `reasons: []`. A stream saying "no coordinator has published to this desk's bus" while sixty events sat in the registry. Seven stall boxes reading "already decided" about decisions nobody made. A control model filed in the treatment arm. A bar chart drawing +0.324 taller than +0.531. None of these throw. All of them are read by an operator as fact.
+
+The last finding is the one that reframes the rest. Fixing twelve seams made the board's champion fully visible on every surface — and then measurement showed the champion itself was indistinguishable from noise, because 84 of 100 pure-noise panels cleared the same bar. **Visibility is necessary and not sufficient.** A desk can plumb a number faithfully through every layer and still be reporting nothing.
+
 
 ---
 
@@ -89,25 +92,42 @@ Triage: [SEAM] producer/consumer contract broken · [SILENT] absence rendered as
     **Subtle case:** if *every* event was a heartbeat, the honest statement is "a coordinator ran and published only N liveness heartbeats", not "no coordinator has published" — something ran, it just never said anything worth keeping. Reporting that as silence would be a confidently wrong reason. `test_heartbeats_only_is_not_reported_as_the_agents_being_silent` holds the two apart.
     **Live result:** 46 events / 43 reasoning rows / 3 operational, 394 heartbeats set aside and named. The analyst dispatch, the challenger's counter-case, a defend-or-amend round, the optimizer, a referee PASS and the reporter — the whole five-agent pipeline legible for the first time.
 
+13. **[WRONG-ARM] The champion was the argmax over 7 tuned models, judged against a per-model bar.** — `c1a9f05`
+    The board picks a champion by `max()` over 7 models, each already tuned by its own inner-CV grid search, then judges the winner against `IC_ADMISSION_THRESHOLD = 0.03` and `IC_STABILITY_THRESHOLD = 0.5`. Those bars are per-model and never learn that a maximum was taken. No multiplicity adjustment exists anywhere in the path.
+    **Invariant:** a threshold applied to the best of N is a different test from the same threshold applied to one candidate, and only the second is the one the constant was chosen for.
+    **Live evidence, measured on data containing no signal by construction:** 20 pure-noise panels → **60% admitted a champion**, half quantum-mapped, top mean IC to +0.4984. Widened to 100 panels → **66 admitted, 39 quantum-mapped, 84 of 100 cleared the 0.03 bar**, median top mean IC **+0.21 — above the live desk's own admitted champion at +0.178**. Repeated across five different nulls (gaussian, student-t, short history, 12 assets, shuffled-GARCH) → 60–73% admission, median top IC +0.17 to +0.29, so it is not an artifact of one generator. **Mechanism, measured directly:** a 21-day overlapping horizon over 615 rows with 5 folds carries ≈**18.5 effective independent observations**, ≈3.7 per fold.
+    **Fix:** the board re-runs its whole selection procedure — all 7 models, all inner searches, the same argmax — on circularly shifted targets. A circular shift, not a shuffle: shuffling destroys the target's autocorrelation and yields a null far easier to beat than reality, which would flatter every champion. `champion_established` is True/False/**None**, never a bare bool, because "not tested" must not render as "tested and held up".
+    **The p-value ships with its own resolution.** Found empirically: on a deterministic 250-day vol cycle (selected IC +0.86 vs null median +0.21) p came back as exactly 0.080 on six consecutive runs — 2/25, one exceedance, the shift that realigns the cycle. At 24 trials the reachable values near the threshold are 0.04, 0.08, 0.12 and nothing between, so the verdict turns on a single resample. `exceedances` and `p_value_resolution` are reported alongside `p_value`, and the reasoner flags "marginal" when p sits within one step of the floor. A p-value without its resolution is a t-statistic without its n — finding 4's own rule, applied to the fix for finding 4.
+    **Test:** that the p-value is re-derivable from `(exceedances + 1)/(trials + 1)`, so the reported resolution cannot drift from the arithmetic; that a noise champion is never reported as established; that a board predating the null reads None, not False, on every surface.
+
+
 ---
 
 ## The quantum lane, end to end
 
 The specific question this branch was meant to make answerable — *is the quantum feature augmentation earning its place?* — was, before these commits, unanswerable from any surface. The board had no web route at all (`grep predictor qlab/ui/` returned nothing: no route, no panel, no nav entry). Atlas received a summary with the admission bar, the fold count, the per-fold series and the family/variant fields stripped out. And the one classifier deciding which arm a model belonged to put a control in the treatment arm.
 
-It is now answerable, and the answer is **not yet**:
+It is now answerable, and the answer is **no, and the question was being asked wrong**:
 
 | | |
 |---|---|
-| Champion | `kernel:angle` (quantum angle feature map), ADMITTED |
-| Mean IC | 0.178 vs a 0.03 bar — cleared by +0.148 |
-| IC stability | cleared by +0.041 — **scraped** |
-| Paired t vs baseline | 0.237 over **5 folds** — n.s. |
-| Per-fold IC | +0.324, +0.531, +0.471, **−0.239, −0.195** — negative in 2 of 5 |
+| Champion | `groupwise:angle_zz` (quantum angle+ZZ map), ADMITTED |
+| Mean IC | 0.1720 vs a 0.03 bar — cleared by +0.142 |
+| **Null median selected IC** | **0.1722** — the champion is almost exactly the median of noise |
+| **p vs its own selection null** | **0.520** — 12 of 24 null runs matched or beat it |
+| **`champion_established`** | **False** |
+| Paired t vs baseline | n.s. over **5 folds** |
 | `kernel:linear` | **a control**, not a treatment: mean_ic identical to `ridge:none` to 17 digits |
-| Whole board | every model n.s.; the panel says so on each row |
 
-The champion's 0.178 is arithmetic over folds that changed sign, and its t-statistic cannot distinguish it from the baseline. That is a real and useful research result. What matters here is that no surface was previously capable of stating it — the same run, read through the old summary, said "admitted champion, mean IC 0.178 against a 0.03 bar", which an operator would reasonably read as a win.
+The earlier reading of this table — champion admitted, mean IC 0.178 against a 0.03 bar, t n.s. — was already cautious, and still far too generous. The admission threshold is not a weak filter that this model *scraped*; it is a filter **84 of 100 pure-noise panels also cleared**, applied to the best of seven tuned models. So "admitted champion at +0.17" is not a marginal result. It is the expected output of running this procedure on nothing at all.
+
+Two things follow, and they point in opposite directions:
+
+- **For the quantum lane specifically:** no augmented model on this desk has been shown to beat noise. The angle and ZZ maps are not refuted either — they are untested, because the protocol cannot resolve an effect at this size. ≈18.5 effective observations cannot separate 7 candidates.
+- **For the desk generally:** this is exactly the failure the branch was chartered to find. Every surface reported the champion correctly. The *number* was right on every screen and in every prompt. What was missing was the comparison that gives the number meaning, and no amount of faithfully plumbing a meaningless number through more surfaces would have revealed it.
+
+The honest next step is not a better feature map. It is more effective observations — a shorter horizon, a longer history, or a target that is not 21-day overlapping — because no amount of model search fixes a protocol that cannot resolve what it is searching for.
+
 
 ---
 
@@ -116,11 +136,15 @@ The champion's 0.178 is arithmetic over folds that changed sign, and its t-stati
 - **The tests were not wrong; they were testing the wrong side of the seam.** Every producer had tests. Every consumer had tests. Nothing tested that what the producer wrote was what the consumer read. Three tests actively encoded a bug as expected behaviour (`test_news_archive` asserting a macro item was deleted; two startable tests queueing a past-dated task and starting it "today"; the bus test inventing parser kinds).
 - **Where the two are separable, pin the invariant.** Reflecting over the parser's source; parametrising over variant × family; asserting no ineligible verdict anywhere can carry an empty reason list. Each of these would have caught its bug before it was written.
 - **Some claims only exist in the rendering.** The bar chart and the truthiness bug produced correct payloads and false screens. Payload assertions are structurally incapable of seeing them, so the layout mechanism itself is now pinned by test.
-- **"Verify against the live desk" earned its place twelve times out of twelve.** Not one of these was found by reading code or by running the suite.
+- **"Verify against the live desk" earned its place thirteen times out of thirteen.** Not one of these was found by reading code or by running the suite.
+- **The last one needed more than a live desk: it needed a null.** Finding 13 is invisible even to a correct, fully-plumbed, live-verified surface, because the number displayed was accurate. Only running the same procedure on data known to contain nothing showed that the number meant nothing. Where a surface reports the output of a *search*, the honest unit of evidence is the search's own null, not the winner's score.
 
 ## Follow-ups
 
 - Push and open the PR — nothing on this branch has left the worktree.
+- **The protocol, not the model, is the binding constraint.** 615 rows at a 21-day overlapping horizon carry ≈18.5 effective observations. Until that changes, no feature map can be established by this board, and adding candidates makes selection strictly worse. Shorter horizon, longer history, or a non-overlapping target — that is the next real research step.
+- **24 null trials is a resolution floor of 0.04.** Enough to refute a champion (the live one came back p=0.52, unambiguous), marginal for establishing one. The reasoner flags it, but a board that expects to *pass* wants more trials; the cost is linear and the full request measured 9.4s at 24.
 - The 42-per-run `task_progress` heartbeat volume is suppressed at both ends now but still written by the SDK path; consider not recording it at all rather than recording-then-filtering.
 - `qlab/ui/index.html` is approaching the size where the panels want to be separate modules; three of this branch's bugs were in template expressions.
 - Agent stall summaries are carried verbatim and are model-authored prose. That is deliberate, but it means an agent can write anything into an operator-facing amber box; worth a bound.
+

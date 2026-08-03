@@ -31,6 +31,13 @@ def default_price_provider(offline: bool = False, seed: int = 7) -> PriceProvide
         last = px.iloc[-1]
         return {t: float(last[t]) for t in tickers}
 
+    # The provider carries which feed it prices from, because the high-water
+    # mark it feeds is lane-scoped: a synthetic valuation of positions bought
+    # at live prices reads roughly 2x and ratchets a peak the book never
+    # reached, and the next live read turns that into a fabricated drawdown
+    # that trips the kill switch. (Observed: a $10k live-lane book halted at
+    # "59% drawdown" against a $24.6k synthetic-priced mark.)
+    provider.synthetic = offline
     return provider
 
 
@@ -93,7 +100,21 @@ class SimulatedPaperBroker(Broker):
         equity = cash + pos_value
         weights = {t: (holdings[t]["value"] / equity if equity > 0 else 0.0)
                    for t in holdings}
-        self.reg.update_high_water_mark(equity, book=self.name)
+        # The lane rides with the ratchet: this broker is priced from either
+        # feed depending on the caller's offline flag, and a mark set by the
+        # other feed is not a peak in this feed's units (see the registry's
+        # lane rules). An unmarked provider is refused — defaulting it to
+        # either lane would re-open the silent cross-feed ratchet.
+        lane = getattr(self.price_provider, "synthetic", None)
+        if lane is None:
+            raise RuntimeError(
+                "price provider does not declare its lane; the high-water "
+                "mark it feeds is lane-scoped (build it with "
+                "default_price_provider, or set provider.synthetic)")
+        self.reg.update_high_water_mark(
+            equity, book=self.name,
+            lane="synthetic" if lane else "live")
+        acct = self.reg.get_account(self.name)
         return {
             "cash": cash, "equity": equity, "positions": holdings,
             "weights": weights, "high_water_mark": float(acct.get("high_water_mark", equity)),

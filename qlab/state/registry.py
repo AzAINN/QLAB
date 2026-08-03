@@ -375,6 +375,12 @@ class Registry:
         self.con.execute("ALTER TABLE equity_marks ADD COLUMN IF NOT EXISTS book VARCHAR")
         self._widen_equity_mark_identity()
         self._partition_account_by_book()
+        # After the partition, not before: the rekeyed table is created with a
+        # fixed column list, so an earlier ALTER would be dropped by the rename.
+        # NULL means unanchored — the next valuation claims the lane it priced
+        # from, so existing desks anchor to whatever feed they actually run.
+        self.con.execute(
+            "ALTER TABLE account ADD COLUMN IF NOT EXISTS mark_lane VARCHAR")
 
     def _partition_account_by_book(self) -> None:
         """Move a pre-book `account` row onto the book key.
@@ -1096,21 +1102,60 @@ class Registry:
         self.con.execute("DELETE FROM equity_marks WHERE book=?", [str(book)])
         # Resetting one book must not clear another book's halt or reset its
         # peak — that is the same cross-book leak the partitioning exists for.
+        # mark_lane goes back to NULL: a fresh book has no valuation history,
+        # so its first read re-anchors to whichever feed prices it.
         self.con.execute(
-            "UPDATE account SET cash=?, high_water_mark=?, halted=FALSE, updated_at=? "
+            "UPDATE account SET cash=?, high_water_mark=?, halted=FALSE, "
+            "mark_lane=NULL, updated_at=? "
             "WHERE book=?", [cash, cash, _now(), str(book)])
 
-    def update_high_water_mark(self, equity: float,
-                               book: str = DEFAULT_BOOK) -> None:
+    def update_high_water_mark(self, equity: float, book: str = DEFAULT_BOOK,
+                               lane: str | None = None) -> None:
         """Ratchet one book's high-water mark. GREATEST never lowers it.
 
         Scoped to the book because the mark is what drawdown is measured
         against: a mark set by a different venue is not a peak this book ever
         reached, and the difference reads as a loss it never took.
+
+        Scoped to the pricing ``lane`` for the same reason. The simulated book
+        can be valued from the live feed or the synthetic one, and the two
+        price the same positions differently as a matter of course — a
+        synthetic valuation of live-bought positions read ~2.4x and the next
+        live read became a 59% "drawdown" that tripped the kill switch. So the
+        first ratchet anchors the lane, a same-lane ratchet proceeds, and a
+        cross-lane valuation re-anchors: its equity REPLACES the mark rather
+        than competing with a peak priced in different units. ``None`` keeps
+        the historical unscoped behaviour for callers with no lane (Alpaca,
+        whose one venue is its own lane).
         """
+        if lane is None:
+            self.con.execute(
+                "UPDATE account SET high_water_mark = "
+                "GREATEST(high_water_mark, ?), updated_at=? WHERE book=?",
+                [equity, _now(), str(book)])
+            return
+        row = self.get_account(book)
+        anchored = row.get("mark_lane")
+        if anchored is None or anchored == lane:
+            self.con.execute(
+                "UPDATE account SET high_water_mark = "
+                "GREATEST(high_water_mark, ?), mark_lane=?, updated_at=? "
+                "WHERE book=?",
+                [equity, lane, _now(), str(book)])
+            return
+        # Cross-lane: the stored peak is in the other feed's units. Carrying
+        # it forward would manufacture a drawdown (or hide one); the honest
+        # mark for this lane starts at this valuation. The switch goes on the
+        # event bus because it resets drawdown protection, and a protection
+        # reset nobody can see is how the last false halt went unexplained.
+        self.record_event("hwm_lane_reset", {
+            "book": str(book), "from_lane": anchored, "to_lane": lane,
+            "old_mark": float(row.get("high_water_mark") or 0.0),
+            "new_mark": float(equity)})
         self.con.execute(
-            "UPDATE account SET high_water_mark = GREATEST(high_water_mark, ?), "
-            "updated_at=? WHERE book=?", [equity, _now(), str(book)])
+            "UPDATE account SET high_water_mark=?, mark_lane=?, updated_at=? "
+            "WHERE book=?",
+            [equity, lane, _now(), str(book)])
 
     # -- order plans (state machine) ---------------------------------------
     def create_plan(self, plan_id: str, decision_id: str, targets: dict,

@@ -35,6 +35,7 @@ fn store_from(json: &str) -> Store {
         AppEvent::Snapshot(Box::new(serde_json::from_str::<Snapshot>(json).unwrap())),
         now,
     );
+    harness::no_door(&mut store);
     store
 }
 
@@ -49,6 +50,7 @@ fn store_with_threshold(stale_after: Duration, at: Instant) -> Store {
         )),
         at,
     );
+    harness::no_door(&mut store);
     store
 }
 
@@ -938,6 +940,7 @@ fn rail_store() -> Store {
         ),
         now,
     );
+    harness::no_door(&mut store);
     store
 }
 

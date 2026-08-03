@@ -1,0 +1,17 @@
+{
+  "backends": [
+    {
+      "name": "claude",
+      "available": true,
+      "reason": "claude CLI at /Users/azainmac/.local/bin/claude",
+      "models": ["inherit", "sonnet", "opus", "haiku"]
+    },
+    {
+      "name": "ollama",
+      "available": true,
+      "reason": "ollama at 127.0.0.1:11434, 1 model pulled",
+      "models": ["qwen2.5:7b"]
+    }
+  ],
+  "probed_at": "2026-08-03T04:10:08.417505+00:00"
+}

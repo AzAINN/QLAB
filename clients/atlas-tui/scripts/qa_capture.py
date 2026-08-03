@@ -312,12 +312,23 @@ def run(
         elif verb == "esc":
             os.write(master, b"\x1b")
             time.sleep(0.4)
+        # The startup door is the first surface an operator walks with the
+        # arrows and Enter before any view is on screen, so the harness has to
+        # be able to send them.
+        elif verb in ("up", "down", "enter"):
+            os.write(master, {"up": b"\x1b[A", "down": b"\x1b[B",
+                              "enter": b"\r"}[verb])
+            time.sleep(0.4)
         elif verb == "shot":
             with raw_lock:
                 marks.append((len(raw), arg or "screen"))
         elif verb == "quit":
-            os.write(master, b"q")
-            time.sleep(1.0)
+            # A client that has already gone is not a failed quit — the door
+            # scene's Esc can be the last key an unarmed window needs — but a
+            # write that fails while it is still running is.
+            if child.poll() is None:
+                os.write(master, b"q")
+                time.sleep(1.0)
         else:
             print(f"qa_capture: unknown step {step!r}", file=sys.stderr)
             ok = False

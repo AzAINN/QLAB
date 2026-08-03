@@ -11,7 +11,7 @@
 //! the frame loop for the length of a request.
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
-use crate::model::{RegimePanel, Snapshot, Templates};
+use crate::model::{LlmCatalog, RegimePanel, Snapshot, Templates};
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -112,12 +112,19 @@ pub async fn readiness(base: &str) -> Readiness {
 
 /// What the runtime may ask the poller for.
 ///
-/// One variant on purpose. A poller that accepted arbitrary requests would be a
-/// fetch path anything holding the handle could aim anywhere; this one can only
-/// bring the next scheduled poll forward.
+/// Two variants, and still not a fetch path anything can aim anywhere: both
+/// name a request this module already knows how to build, so the handle can
+/// choose *which* of the owner's routes is asked and never *what* is asked for.
+///
+/// `Backends` is the one payload with no beat behind it. The route probes every
+/// backend, so polling it would move a network round trip per daemon onto a
+/// cadence — which is precisely the cost the owner refuses to pay on
+/// `/api/tui`. It is asked for when the palette enters the model scope and at
+/// no other time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refetch {
     Now,
+    Backends,
 }
 
 /// The runtime's end of the poller.
@@ -136,6 +143,13 @@ impl PollerHandle {
     /// the frame loop can act on — it is on its way out too.
     pub fn now(&self) {
         let _ = self.refetch.send(Refetch::Now);
+    }
+
+    /// Ask what the owner's backends serve, once. Not a poll and not a nudge:
+    /// it fetches the one payload the desk cadence deliberately never carries,
+    /// and leaves the snapshot's own beat where it was.
+    pub fn backends(&self) {
+        let _ = self.refetch.send(Refetch::Backends);
     }
 }
 
@@ -175,6 +189,10 @@ async fn poll_loop(
     // module, identical in both lanes, and a query parameter the route does not
     // read would be this client claiming a distinction the owner does not make.
     let templates_url = format!("{base}/api/atlas/templates");
+    // No `offline` lane either, and no `refresh=1`: the owner's own five-second
+    // cache is what keeps a palette opened twice from probing twice, and asking
+    // it to bypass that would make every scope entry a round trip per daemon.
+    let backends_url = format!("{base}/api/llm/backends");
 
     // Two facts, not one. `up` is what the chips read — a payload this client
     // could actually use — and `reachable` is what the socket said.
@@ -291,16 +309,63 @@ async fn poll_loop(
         } else {
             READY_RETRY
         };
-        tokio::select! {
-            _ = tokio::time::sleep(delay) => {}
-            cmd = refetch.recv() => match cmd {
-                // Coalesced the way the frame loop coalesces events: three
-                // nudges that arrived while a fetch was in flight are one fetch,
-                // not three.
-                Some(Refetch::Now) => while refetch.try_recv().is_ok() {},
-                // Every handle is gone, so nothing will ever nudge again — but
-                // the cadence is still owed to the desk.
-                None => tokio::time::sleep(delay).await,
+        // A deadline rather than a sleep, because the two requests the handle
+        // can ask for mean different things to the beat. `Now` *is* the next
+        // poll brought forward; a catalog request is a different route
+        // entirely, and serving it by falling out of the wait would make every
+        // palette entry also poll the desk — a hidden second meaning for a key
+        // that only asked what the backends serve.
+        let due = Instant::now() + delay;
+        loop {
+            let left = due.saturating_duration_since(Instant::now());
+            tokio::select! {
+                _ = tokio::time::sleep(left) => break,
+                cmd = refetch.recv() => match cmd {
+                    Some(first) => {
+                        // Coalesced the way the frame loop coalesces events —
+                        // three nudges that arrived while a fetch was in flight
+                        // are one fetch — but coalesced *by kind*: draining the
+                        // queue wholesale would swallow a catalog request that
+                        // happened to arrive behind a nudge.
+                        let mut jump = first == Refetch::Now;
+                        let mut catalog = first == Refetch::Backends;
+                        while let Ok(next) = refetch.try_recv() {
+                            jump |= next == Refetch::Now;
+                            catalog |= next == Refetch::Backends;
+                        }
+                        if catalog {
+                            match fetch::<LlmCatalog>(&client, &backends_url).await {
+                                Fetched::Decoded(payload) => {
+                                    emit(&tx, AppEvent::Backends(payload))?
+                                }
+                                Fetched::Malformed(error) => emit(
+                                    &tx,
+                                    AppEvent::Http(HttpResult::Malformed {
+                                        url: backends_url.clone(),
+                                        error,
+                                    }),
+                                )?,
+                                // What the backends serve is not whether the
+                                // desk is there: a failure here must not tell
+                                // the operator the owner went away when the
+                                // snapshot that decides that is still arriving.
+                                // Same reasoning as the panel and the templates.
+                                Fetched::Failed(error) => {
+                                    tracing::warn!(%error, "model backend catalog fetch failed")
+                                }
+                            }
+                        }
+                        if jump {
+                            break;
+                        }
+                    }
+                    // Every handle is gone, so nothing will ever ask again — but
+                    // the cadence is still owed to the desk.
+                    None => {
+                        tokio::time::sleep(left).await;
+                        break;
+                    }
+                }
             }
         }
     }

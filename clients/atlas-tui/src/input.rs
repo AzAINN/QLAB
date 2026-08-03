@@ -77,15 +77,27 @@ pub enum Source {
     WorkforceAsk,
     /// WORKFORCE's template picker, while it is open.
     WorkforcePicker,
+    /// SETTINGS' alpaca login form, while it is open.
+    ///
+    /// Its own section for the same reason the two WORKFORCE fields are: the
+    /// keys that *open* it and the keys *inside* it are two routers, and one
+    /// section over both would describe the form with a row about the pane.
+    SettingsLogin,
+    /// SETTINGS' model switcher, while it is open. The third router in that
+    /// file, and the same rule again.
+    SettingsModels,
     /// The confirmation box, which outranks everything but Ctrl-C.
     Confirm,
+    /// The startup door, which outranks even that — it is up before there is
+    /// anything to confirm.
+    Door,
 }
 
 impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 13] = [
+    pub const ALL: [Source; 16] = [
         Source::Shell,
         Source::Command,
         Source::Help,
@@ -98,7 +110,10 @@ impl Source {
         Source::WorkforcePicker,
         Source::View(ViewId::Audit),
         Source::View(ViewId::Settings),
+        Source::SettingsLogin,
+        Source::SettingsModels,
         Source::Confirm,
+        Source::Door,
     ];
 
     /// The section header.
@@ -110,7 +125,10 @@ impl Source {
             Source::View(id) => id.label(),
             Source::WorkforceAsk => "WORK · the question row",
             Source::WorkforcePicker => "WORK · the template picker",
+            Source::SettingsLogin => "SETT · the alpaca login form",
+            Source::SettingsModels => "SETT · the model switcher",
             Source::Confirm => "a confirmation box",
+            Source::Door => "the startup door",
         }
     }
 
@@ -148,14 +166,19 @@ impl Source {
             Source::WorkforceAsk => ("ui/views/workforce.rs", "", "ask_key"),
             Source::WorkforcePicker => ("ui/views/workforce.rs", "", "picker_key"),
             Source::View(ViewId::Audit) => ("ui/views/audit.rs", "", "on_key"),
-            // RSCH and SETT bind nothing: everything on them is read-only and
-            // nothing scrolls, so a key pressed there belongs to whoever claims
-            // it next. Pointed at their own routers rather than at a shared
-            // placeholder, which is what would catch a cursor added to one of
-            // them without a help row.
+            // RSCH binds nothing: everything on it is read-only and nothing
+            // scrolls, so a key pressed there belongs to whoever claims it
+            // next. Pointed at its own router rather than at a shared
+            // placeholder, which is what would catch a cursor added to it
+            // without a help row.
             Source::View(ViewId::Research) => ("ui/views/research.rs", "", "on_key"),
-            Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "on_key"),
+            // SETT's `View::on_key` only forwards; `keys` is the router, and
+            // the form under it is the section below.
+            Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "keys"),
+            Source::SettingsLogin => ("ui/views/settings.rs", "", "form_key"),
+            Source::SettingsModels => ("ui/views/settings.rs", "", "switch_key"),
             Source::Confirm => ("ui/widgets/confirm.rs", "", "on_key"),
+            Source::Door => ("ui/door.rs", "", "on_key"),
         }
     }
 }
@@ -409,6 +432,82 @@ pub const KEYMAP: &[Binding] = &[
         Source::View(ViewId::Audit),
         "reject it — R, because the shell owns lowercase r",
     ),
+    // -- SETT -------------------------------------------------------------
+    //
+    // The three keys below are the *cards'*, not the pane's: each is refused
+    // unless the card that owns it is the one the arrows left the focus on, and
+    // that card's own footer says so on screen.
+    w(
+        "Up",
+        "↑",
+        Source::View(ViewId::Settings),
+        "the card above — the focused card's header is tinted",
+    ),
+    w(
+        "Down",
+        "↓",
+        Source::View(ViewId::Settings),
+        "the card below",
+    ),
+    w(
+        "Char('a')",
+        "a",
+        Source::View(ViewId::Settings),
+        "on DESK: type an Alpaca paper login — the book is unchanged",
+    ),
+    w(
+        "Char('t')",
+        "t",
+        Source::View(ViewId::Settings),
+        "on DESK: ask the venue whether the stored login works",
+    ),
+    w(
+        "Char('m')",
+        "m",
+        Source::View(ViewId::Settings),
+        "on MODELS: choose which mind each surface runs",
+    ),
+    // -- SETT, the alpaca login form --------------------------------------
+    w(
+        "Char(c)",
+        "any key",
+        Source::SettingsLogin,
+        "types into the field — both are masked",
+    ),
+    w(
+        "Backspace",
+        "Backspace",
+        Source::SettingsLogin,
+        "deletes a character",
+    ),
+    w("Tab", "Tab", Source::SettingsLogin, "the other field"),
+    w(
+        "Enter",
+        "Enter",
+        Source::SettingsLogin,
+        "stores the login — or answers the question about replacing one",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::SettingsLogin,
+        "closes the form and clears both fields",
+    ),
+    // -- SETT, the model switcher -----------------------------------------
+    w("Up", "↑", Source::SettingsModels, "the offer above"),
+    w("Down", "↓", Source::SettingsModels, "the offer below"),
+    w(
+        "Enter",
+        "Enter",
+        Source::SettingsModels,
+        "points that surface at that model — a backend the desk cannot reach says why",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::SettingsModels,
+        "closes it — every surface is left as the desk has it",
+    ),
     // -- the confirmation box ---------------------------------------------
     w(
         "Char(c)",
@@ -424,6 +523,27 @@ pub const KEYMAP: &[Binding] = &[
         "answers, once the challenge matches",
     ),
     w("Esc", "Esc", Source::Confirm, "abandons — nothing is sent"),
+    // -- the startup door -------------------------------------------------
+    // Only an armed window is asked. A glass one is shown what the door would
+    // have taken and dismisses it with any key, which claims no `KeyCode` and
+    // therefore owes no row — the box says so itself.
+    w("Up", "↑", Source::Door, "the row above"),
+    w("Down", "↓", Source::Door, "the row below"),
+    w(
+        "Enter",
+        "Enter",
+        Source::Door,
+        "chooses the row — the last one moves on",
+    ),
+    // Both halves in one row, because the row is clipped at the overlay's
+    // width: the first question's Esc is the safe desk and never a live one,
+    // and the second's leaves every surface as the desk has it.
+    w(
+        "Esc",
+        "Esc",
+        Source::Door,
+        "synthetic · simulated, or the models left as they are",
+    ),
 ];
 
 /// The bindings a window in this posture actually has.

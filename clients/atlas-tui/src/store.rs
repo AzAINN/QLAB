@@ -11,10 +11,11 @@ use crate::cmd::CmdLine;
 use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
-    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, Plan, Policy, RegimePanel,
-    Run, Snapshot, System, Template, Workflow,
+    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig, Plan,
+    Policy, RegimePanel, Run, Snapshot, System, Template, Workflow,
 };
 use crate::net::http;
+use crate::ui::door::Door;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -34,6 +35,15 @@ pub const IDLE_FRAME: Duration = Duration::from_millis(100);
 /// the cadences the pacing rule is about, and the two drifting apart is how the
 /// glyph would start stepping between frames that never get drawn.
 pub const TICK: Duration = Duration::from_millis(120);
+
+/// How long a fetched backend catalog is worth reusing.
+///
+/// The owner's own cache window (`_LLM_CATALOG_TTL_SECONDS = 5.0` in
+/// `qlab/ui/server.py`), matched rather than chosen: inside it the route serves
+/// the same reading whatever this client does, so a second request buys nothing
+/// and costs a round trip. Stated here rather than inside the accessor so the
+/// number and its provenance sit together.
+const CATALOG_TTL: Duration = Duration::from_secs(5);
 
 /// Whether the loop owes the terminal a frame.
 ///
@@ -355,6 +365,23 @@ pub struct Store {
     /// not be able to grow a template the owner never registered, and a public
     /// `Vec` is a field anything could push to.
     templates: Vec<Template>,
+    /// What the owner's backends serve, from the palette's own fetch.
+    ///
+    /// Private with one reader for the reason `templates` is: the model strip
+    /// must not be able to offer a pair the owner never said it could run, and
+    /// a public field is one anything could push to.
+    backends: Option<LlmCatalog>,
+    /// When that catalog arrived — this client's own clock, not the owner's
+    /// `probed_at`.
+    ///
+    /// Two stamps for two questions. `probed_at` is when the *daemons* were
+    /// asked, which is what SETTINGS renders an age from; this is when *this
+    /// client* last asked the owner, which is the only one that can say whether
+    /// asking again would learn anything. Time as data, as an `Instant`: the
+    /// comparison is against this machine's own monotonic clock, and the one
+    /// place this client compares two machines' wall clocks stays the one place
+    /// (`format::since`).
+    backends_at: Option<Instant>,
     pub nav: Nav,
     /// What the operator has typed into the command line, and what it said back.
     ///
@@ -391,6 +418,17 @@ pub struct Store {
     /// subtraction the golden frames can pin rather than a clock read buried
     /// in a renderer.
     pub last_snapshot_at: Option<Instant>,
+    /// This machine's wall clock in unix seconds, stamped by the runtime beside
+    /// the frame's `Instant` and never read in a renderer.
+    ///
+    /// An `Instant` is monotonic and says nothing about *when*, so it cannot be
+    /// compared with a stamp the owner wrote. Exactly one row needs that
+    /// comparison — how old the model availability reading is — and
+    /// `format::since` states what measuring across two machines' clocks costs
+    /// and what it refuses rather than guess. Data, so a golden pins the age it
+    /// renders instead of blessing whatever the suite measured; absent before
+    /// the runtime's first iteration, and in every test that does not set one.
+    pub wall: Option<i64>,
     /// The last payload that did not decode, cleared by the next that does.
     pub malformed: Option<Malformed>,
     /// Where this client is looking — the owner base every request goes to.
@@ -445,6 +483,28 @@ pub struct Store {
     /// Private on purpose: `take_dirty` is the only reader, so the flag cannot
     /// be observed by something that then forgets to clear it.
     dirty: bool,
+    /// The startup door, while it is up.
+    ///
+    /// Here beside `cmd` and `help_top` — *where the operator is looking* —
+    /// rather than in the runtime, which is what keeps a frame a pure function
+    /// of (store, effects, instant) and lets a golden pin the door the way it
+    /// pins every other surface.
+    ///
+    /// Private, with `take_door`/`keep_door`/`settle_door` as the whole
+    /// protocol: the door has to be driven against the desk it is asking about,
+    /// which means being taken out of the store that holds it, and a public
+    /// field would let a caller put one back that had already been answered.
+    door: Option<Door>,
+    /// Whether a door has already been up in this run.
+    ///
+    /// The latch is load-bearing rather than tidy: the store-driven condition —
+    /// an owner that answered and never said which desk this is — stays true
+    /// for as long as that owner is up, so without this the door an operator
+    /// just dismissed would be back on the next poll, for ever.
+    door_settled: bool,
+    /// `--pick`: this run was started to choose, so the door opens whatever the
+    /// desk says.
+    door_forced: bool,
 }
 
 impl Default for Store {
@@ -461,12 +521,15 @@ impl Store {
             snapshot: None,
             regime_panel: None,
             templates: Vec::new(),
+            backends: None,
+            backends_at: None,
             nav: Nav::default(),
             cmd: CmdLine::default(),
             help_top: 0,
             conn: Conn::default(),
             stale_after,
             last_snapshot_at: None,
+            wall: None,
             malformed: None,
             base: String::new(),
             posture: Posture::Glass,
@@ -477,7 +540,94 @@ impl Store {
             refusals: HashMap::new(),
             tick: 0,
             dirty: false,
+            door: None,
+            door_settled: false,
+            door_forced: false,
         }
+    }
+
+    // -- the startup door --------------------------------------------------
+
+    /// `--pick`: ask which desk this is, whatever the owner says it already is.
+    ///
+    /// Called by the composition root before the first frame. It considers the
+    /// door itself rather than only setting a flag, so a run started to choose
+    /// opens on the question instead of on one frame of a desk the operator has
+    /// not answered for yet.
+    pub fn pick(&mut self) {
+        self.door_forced = true;
+        self.consider_door();
+    }
+
+    /// Open the door, if this desk needs one and none has been up yet.
+    ///
+    /// The predicate is [`Door::wanted`]; what "unchosen" means on the wire is
+    /// [`Store::desk_unchosen`], directly below.
+    fn consider_door(&mut self) {
+        if self.door_settled || self.door.is_some() {
+            return;
+        }
+        if Door::wanted(
+            self.door_forced,
+            self.last_snapshot_at.is_some(),
+            self.desk_unchosen(),
+        ) {
+            self.door = Some(Door::default());
+            self.dirty = true;
+        }
+    }
+
+    /// Whether the desk on the wire is one nobody has chosen.
+    ///
+    /// Two shapes, and they are two different silences:
+    ///
+    /// * **no `desk_mode` block at all** — an owner too old to serve one, or a
+    ///   payload missing it. The desk this client is watching has not been
+    ///   named to it, which is the arm the door shipped with.
+    /// * **`chosen: false`** — the owner saying, in as many words, that the
+    ///   concrete pair it is serving is the fallback nobody picked. This is the
+    ///   state the door was specified against and could not observe until the
+    ///   owner learned to say it.
+    ///
+    /// **`chosen` absent on a block that *is* there is not unchosen.** That is
+    /// every owner built before the field existed, and guessing would open a
+    /// modal over every desk that has already answered — a regression loud
+    /// enough to make the field unshippable. Silence keeps the old reading.
+    fn desk_unchosen(&self) -> bool {
+        match self.desk_mode() {
+            None => true,
+            Some(mode) => mode.chosen == Some(false),
+        }
+    }
+
+    /// The door, if one is up.
+    pub fn door(&self) -> Option<&Door> {
+        self.door.as_ref()
+    }
+
+    /// The door, out of the store, so it can be driven against the desk it is
+    /// asking about.
+    ///
+    /// Taken rather than borrowed because a keystroke into the door reads the
+    /// whole store — the pair the owner reports, the credential description,
+    /// the catalog — and `&mut self.door` would hold the store hostage for all
+    /// of it. The caller must put it back with [`Store::keep_door`] or settle
+    /// it with [`Store::settle_door`]; a door dropped on the floor would leave
+    /// the latch clear and `consider_door` free to open a second one.
+    pub fn take_door(&mut self) -> Option<Door> {
+        self.door.take()
+    }
+
+    /// Put a door that is still asking back.
+    pub fn keep_door(&mut self, door: Door) {
+        self.door = Some(door);
+    }
+
+    /// The door is answered. One per run, whatever the owner keeps saying.
+    pub fn settle_door(&mut self) {
+        self.door = None;
+        self.door_settled = true;
+        self.dirty = true;
     }
 
     /// Fold one event in and report what changed on the desk.
@@ -486,6 +636,20 @@ impl Store {
     /// arrival with the same instant it paces the frame against, so an age on
     /// screen and the pacing decision behind it cannot disagree.
     pub fn apply(&mut self, ev: AppEvent, now: Instant) -> Vec<Trigger> {
+        let triggers = self.fold(ev, now);
+        // After the fold and on every event, because what opens the door is
+        // what the fold just learned — the owner's first answer, and whether it
+        // named the desk. Here rather than in the runtime's loop for the reason
+        // invariant 10 keeps teaching this crate: `main.rs` is in no test
+        // binary, and a trigger only the binary could reach is a trigger
+        // nothing can pin.
+        self.consider_door();
+        triggers
+    }
+
+    /// One event into the state. Everything the fold decides; nothing it owes
+    /// afterwards — see `apply`, which is the caller and the only one.
+    fn fold(&mut self, ev: AppEvent, now: Instant) -> Vec<Trigger> {
         match ev {
             AppEvent::Snapshot(snap) => return self.apply_snapshot(*snap, now),
             AppEvent::RegimePanel(panel) => {
@@ -497,6 +661,14 @@ impl Store {
             // must stop offering.
             AppEvent::Templates(templates) => {
                 self.templates = templates;
+                self.dirty = true;
+            }
+            // Replaced wholesale for the same reason, and stamped with the
+            // instant it arrived rather than with a clock read here — the fold
+            // is told the instant the frame is paced against.
+            AppEvent::Backends(catalog) => {
+                self.backends = Some(catalog);
+                self.backends_at = Some(now);
                 self.dirty = true;
             }
             // A keystroke may move a selection and a resize moves everything;
@@ -552,10 +724,29 @@ impl Store {
                     // A desk mode is the same: the owner persists the pair and
                     // serves it back in the next snapshot, and a client copy
                     // would be a second account of which desk this is.
-                    Wrote::Decided { .. }
+                    //
+                    // So is a login. `credentials_ok` reflows through the
+                    // snapshot the write brings forward, so the alpaca row
+                    // retones from the owner's own account of the credential
+                    // rather than from this client remembering what it sent —
+                    // and the two answers a form has to act on (a consent
+                    // question, a refusal) belong to the form, which is where
+                    // the pair it would re-send still is.
+                    //
+                    // And so is a model choice: the owner persists it and the
+                    // next snapshot's `llm` block is what SETTINGS draws, so a
+                    // client copy would be a second account of which minds the
+                    // desk is using. Its refusal changes nothing at all.
+                    Wrote::Chose { .. }
+                    | Wrote::ChoiceRefused { .. }
+                    | Wrote::Decided { .. }
                     | Wrote::Asked { .. }
                     | Wrote::Started { .. }
                     | Wrote::Pointed { .. }
+                    | Wrote::LoggedIn { .. }
+                    | Wrote::LoginNeedsConsent { .. }
+                    | Wrote::LoginRefused { .. }
+                    | Wrote::Tested { .. }
                     | Wrote::Failed { .. } => {}
                 }
                 self.dirty = true;
@@ -633,6 +824,34 @@ impl Store {
     /// Health and authority facts, as the owner reports them.
     pub fn system(&self) -> Option<&System> {
         self.snapshot.as_ref()?.system.as_ref()
+    }
+
+    /// Which minds the desk is using, and when it last asked whether they can
+    /// serve. Absent is an owner that sent no routing at all — not a desk
+    /// running on nothing.
+    pub fn llm(&self) -> Option<&LlmConfig> {
+        self.snapshot.as_ref()?.llm.as_ref()
+    }
+
+    /// What each backend serves, as the last fetch found it. Absent is a desk
+    /// this client has not asked yet — which is not a desk with no backends.
+    pub fn backends(&self) -> Option<&LlmCatalog> {
+        self.backends.as_ref()
+    }
+
+    /// Whether asking the owner what its backends serve could learn anything.
+    ///
+    /// The window is the owner's own (`_LLM_CATALOG_TTL_SECONDS = 5.0`): inside
+    /// it the route answers out of its cache, so a second request cannot return
+    /// a different reading and is pure cost — a probe per daemon on the owner's
+    /// side and a round trip on this one. Outside it, the palette asks again,
+    /// because a daemon that has come up since is exactly what an operator
+    /// opening the model scope is looking for.
+    pub fn wants_backends(&self, now: Instant) -> bool {
+        match self.backends_at {
+            None => true,
+            Some(at) => now.saturating_duration_since(at) >= CATALOG_TTL,
+        }
     }
 
     /// The newest ablation, ranked by Sharpe as the owner ranked it.
@@ -1454,6 +1673,36 @@ mod tests {
         assert!(triggers.contains(&Trigger::Halted));
         assert!(triggers.contains(&Trigger::RegimeChanged));
         assert!(triggers.contains(&Trigger::ReadChanged));
+    }
+
+    #[test]
+    fn the_catalog_is_asked_for_again_only_once_the_owners_own_cache_has_lapsed() {
+        // Both sides of the comparison, because one case that merely reaches
+        // the code proves nothing about which way it went.
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        assert!(
+            store.wants_backends(t0),
+            "a desk that has never asked has nothing to reuse"
+        );
+        let catalog: crate::model::LlmCatalog = serde_json::from_value(json!({
+            "backends": [{"name": "ollama", "available": true,
+                          "reason": "ollama at 127.0.0.1:11434, 1 model pulled",
+                          "models": ["qwen2.5:7b"]}],
+            "probed_at": "2026-08-03T04:10:08.417505+00:00"
+        }))
+        .unwrap();
+        store.apply(AppEvent::Backends(catalog), t0);
+        assert_eq!(store.backends().unwrap().backends.len(), 1);
+        assert!(store.take_dirty(), "a new catalog owes the strip a frame");
+        assert!(
+            !store.wants_backends(t0 + CATALOG_TTL - Duration::from_millis(1)),
+            "inside the owner's own cache window the answer cannot have moved"
+        );
+        assert!(
+            store.wants_backends(t0 + CATALOG_TTL),
+            "a daemon that came up since is what the operator is looking for"
+        );
     }
 
     #[test]

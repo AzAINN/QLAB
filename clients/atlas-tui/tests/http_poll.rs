@@ -20,6 +20,7 @@ enum Seen {
     ConnDown,
     Snapshot,
     Regime,
+    Backends,
     Malformed(String),
     Other,
 }
@@ -30,6 +31,7 @@ fn seen(ev: &AppEvent) -> Seen {
         AppEvent::ConnDown(Channel::Owner) => Seen::ConnDown,
         AppEvent::Snapshot(_) => Seen::Snapshot,
         AppEvent::RegimePanel(_) => Seen::Regime,
+        AppEvent::Backends(_) => Seen::Backends,
         AppEvent::Http(HttpResult::Malformed { url, .. }) => Seen::Malformed(url.clone()),
         _ => Seen::Other,
     }
@@ -141,6 +143,13 @@ fn regime_fixture() -> (&'static str, String) {
     (
         "/api/regime/panel",
         include_str!("fixtures/regime_panel.json").to_string(),
+    )
+}
+
+fn backends_fixture() -> (&'static str, String) {
+    (
+        "/api/llm/backends",
+        include_str!("fixtures/llm_backends.json").to_string(),
     )
 }
 
@@ -396,6 +405,124 @@ async fn a_manual_refresh_fetches_ahead_of_the_cadence() {
         jumped < POLL_INTERVAL,
         "this test only means something while the cadence is longer than its budget"
     );
+}
+
+#[tokio::test]
+async fn the_backend_catalog_is_fetched_when_it_is_asked_for_and_never_on_the_beat() {
+    // The route probes every configured daemon, so a cadence here would put a
+    // network round trip per backend behind a beat — the cost the owner refuses
+    // to pay on `/api/tui`, moved rather than avoided. The palette entering the
+    // model scope is the only thing that asks.
+    let owner = spawn_owner(vec![
+        ready(),
+        snapshot_fixture(),
+        regime_fixture(),
+        backends_fixture(),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let poller = spawn_poller(owner.base.clone(), true, tx);
+
+    // Two desk polls' worth of the beat, which is where a fourth `*_INTERVAL`
+    // would have shown up.
+    drain_until_owner(&mut rx, || owner.asked_for("/api/tui").len() >= 2, CEILING).await;
+    assert!(
+        owner.asked_for("/api/llm/backends").is_empty(),
+        "the catalog rode a poll: {:?}",
+        owner.targets()
+    );
+    let polls = owner.asked_for("/api/tui").len();
+
+    poller
+        .refetch
+        .send(Refetch::Backends)
+        .expect("poller alive");
+    let seen = drain_until(&mut rx, |ev| *ev == Seen::Backends, Duration::from_secs(5)).await;
+    assert!(
+        seen.contains(&Seen::Backends),
+        "the catalog has to reach the bus typed: {seen:?}"
+    );
+    assert_eq!(owner.asked_for("/api/llm/backends").len(), 1);
+    // And it did not drag the desk's own beat forward with it. `Refetch::Now`
+    // means "poll the desk"; this one means "ask what the backends serve", and
+    // a client that conflated them would poll on every palette entry.
+    //
+    // Waited out rather than read straight after the event: the bus carries the
+    // catalog before the poll loop reaches its next request, so an assertion
+    // made on arrival would pass whether or not the beat was dragged. The
+    // window is a second — long enough that a loop that fell through to the top
+    // has issued its poll, and short enough to sit well inside the cadence.
+    let window = Duration::from_secs(1);
+    drain_until_owner(
+        &mut rx,
+        || owner.asked_for("/api/tui").len() > polls,
+        window,
+    )
+    .await;
+    assert_eq!(
+        owner.asked_for("/api/tui").len(),
+        polls,
+        "asking what the backends serve also polled the desk: {:?}",
+        owner.targets()
+    );
+    assert!(
+        window < POLL_INTERVAL,
+        "the window has to sit inside the cadence, or the beat itself answers it"
+    );
+}
+
+#[tokio::test]
+async fn a_nudge_and_a_catalog_request_that_arrive_together_are_both_served() {
+    // The queue is drained on every wake so that three nudges in flight are one
+    // fetch. Draining it *wholesale* would coalesce the two kinds into each
+    // other — whichever arrived first would swallow the other, and a palette
+    // opened right after `r` would offer an empty catalog with nothing saying
+    // why. The coalesce is per kind for that reason.
+    // Both orders, because the coalesce has two sides: whichever kind arrives
+    // first is the one a wholesale drain would keep.
+    for (first, second) in [
+        (Refetch::Backends, Refetch::Now),
+        (Refetch::Now, Refetch::Backends),
+    ] {
+        let owner = spawn_owner(vec![
+            ready(),
+            snapshot_fixture(),
+            regime_fixture(),
+            backends_fixture(),
+        ]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let poller = spawn_poller(owner.base.clone(), true, tx);
+
+        drain_until(&mut rx, |ev| *ev == Seen::Snapshot, Duration::from_secs(5)).await;
+        let polls = owner.asked_for("/api/tui").len();
+        poller.refetch.send(first).expect("poller alive");
+        poller.refetch.send(second).expect("poller alive");
+
+        // Inside the cadence, deliberately: waited out to the beat the desk
+        // poll arrives on its own, and the nudge assertion would pass on a
+        // request that was swallowed.
+        let window = Duration::from_secs(1);
+        drain_until_owner(
+            &mut rx,
+            || {
+                !owner.asked_for("/api/llm/backends").is_empty()
+                    && owner.asked_for("/api/tui").len() > polls
+            },
+            window,
+        )
+        .await;
+        assert_eq!(
+            owner.asked_for("/api/llm/backends").len(),
+            1,
+            "{first:?} then {second:?}: the catalog request was swallowed: {:?}",
+            owner.targets()
+        );
+        assert!(
+            owner.asked_for("/api/tui").len() > polls,
+            "{first:?} then {second:?}: the nudge was swallowed: {:?}",
+            owner.targets()
+        );
+        assert!(window < POLL_INTERVAL, "the beat would answer this itself");
+    }
 }
 
 #[tokio::test]

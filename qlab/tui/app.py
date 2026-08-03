@@ -2833,6 +2833,11 @@ class QlabTui(App[None]):
             why.append(f"Atlas cannot drive a run itself: "
                        f"{coordinator['reason']}. Dispatched work waits for you "
                        "to resume it with `: workforce`.")
+        # A workforce the desk cannot honour still lets it drive, so this is
+        # never a `reason` and would go unsaid on a card that renders only
+        # refusals. Dim and last: it is a standing fact about the desk, not
+        # about why this moment is quiet.
+        note = str(coordinator.get("note") or "")
         why.append("Atlas itself is deterministic code, not a model — its own "
                    "decisions have no prose to stream. The judgment runs in the "
                    "coordinator it dispatches; `: workforce GOAL` starts one by "
@@ -2841,6 +2846,7 @@ class QlabTui(App[None]):
             f"[bold {AMBER}]▌ WHY NOTHING IS RUNNING[/]",
             f"[{BORDER_HI}]{'─' * 48}[/]",
             *_bulletin_markup(why, tone=TEXT, max_len=240),
+            *(_bulletin_markup([note], tone=MUTED, max_len=240) if note else []),
         ]
 
     def action_atlas_drawer(self) -> None:
@@ -3940,6 +3946,12 @@ class QlabTui(App[None]):
                 f"[{AMBER}]! cannot drive[/]  [{DIM}]"
                 f"{escape(str(coordinator.get('reason') or 'unavailable'))} — "
                 f"dispatched work waits for `: workforce`.[/]")
+        if coordinator.get("note"):
+            # The screen where the operator PICKS the backend is the one place
+            # a choice the desk cannot honour must not be inferred from silence.
+            # It rides none of the branches above: the desk can drive, so this
+            # is never the `cannot drive` arm.
+            lines.append(f"[{DIM}]{escape(str(coordinator['note']))}[/]")
         self.query_one("#settings-workforce-copy", Static).update("\n".join(lines))
         self.query_one("#settings-toggle-fast", Button).tooltip = (
             "Turn fast mode off — every role back on its tier" if fast

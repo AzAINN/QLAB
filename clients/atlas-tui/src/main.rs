@@ -78,6 +78,14 @@ async fn main() -> Result<()> {
     // names no host and guess which desk it is about.
     store.base = base.clone();
     store.posture = posture(&args);
+    // Parsed in both builds, and acted on in both: a glass window started with
+    // it is shown the door it cannot answer, which is the honest reply to
+    // "let me choose" from a window that cannot. Before the first frame, so a
+    // run started to choose opens on the question rather than on one frame of a
+    // desk the operator has not answered for yet.
+    if args.iter().any(|a| a == "--pick") {
+        store.pick();
+    }
     // Probe before the screen is taken. The first frame is drawn before any
     // event arrives, and a frame that says "no owner" because it has not asked
     // yet has already lied to the operator once.
@@ -204,6 +212,16 @@ async fn run(
         // decides against the instant the caller measured, not against whatever
         // the clock says several statements later.
         let now = Instant::now();
+        // And the one wall-clock read, taken here for the same reason and put
+        // on the store as data. An `Instant` is monotonic — it cannot be
+        // compared with a stamp the owner wrote — and exactly one row needs
+        // that comparison (`format::since`). Every renderer stays a pure
+        // function of the store, and a clock this loop never reached would
+        // leave the model reading's age permanently `--`.
+        store.wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| i64::try_from(since.as_secs()).ok());
         let mut quit = false;
         if let Some(first) = next {
             quit |= ingest(
@@ -313,6 +331,16 @@ fn ingest(
                 // a synchronous fetch in this loop froze the client for its
                 // duration.
                 Some(Command::Refresh) => poller.now(),
+                // A read, and the only one a keystroke asks for. The store
+                // decides whether asking again could learn anything — the
+                // owner's own cache window — so a palette opened twice in a
+                // second does not probe every daemon twice.
+                Some(Command::Backends) if store.wants_backends(now) => poller.backends(),
+                // Inside that window the route can only answer out of its own
+                // cache. Its own arm rather than a guard falling through: the
+                // arm below dispatches to the *writer*, and a read that reached
+                // it would be a request this command never meant.
+                Some(Command::Backends) => {}
                 // The only place a keystroke reaches the network. A view
                 // decided what the key means and handed back a `Command`; the
                 // runtime is what acts on it.
@@ -336,6 +364,15 @@ fn ingest(
     #[cfg(feature = "operator")]
     if atlas::dispatch::refetches(&ev) {
         poller.now();
+    }
+    // And the one surface that is *waiting* for an answer rather than being
+    // told about one. The login form sends and then has to hear what the owner
+    // said — a consent question to put to the operator, a refusal to show under
+    // the fields — and the answer arrives here rather than out of the key that
+    // asked for it, because a write never blocks the frame loop.
+    #[cfg(feature = "operator")]
+    if let AppEvent::Wrote(outcome) = &ev {
+        views.wrote(outcome);
     }
     // Before the fold, because the fold consumes the event. A toast is about the
     // event itself rather than about the state it leaves behind — an approval

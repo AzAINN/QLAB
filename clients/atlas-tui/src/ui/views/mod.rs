@@ -65,6 +65,21 @@ pub trait View {
         None
     }
 
+    /// This pane has just come back on screen.
+    ///
+    /// Called by the registry on the first frame after the nav moved here, and
+    /// not on the frames after it. `&self`, because what it resets is where the
+    /// operator is looking rather than anything the owner said — the same
+    /// interior mutability `draw` already uses to publish a rect.
+    ///
+    /// It exists because a cursor an operator cannot see is a cursor they
+    /// cannot correct: SETTINGS routes its keys by which card has focus, and a
+    /// focus left on MODELS across a trip to BOOK makes `a` silently dead on a
+    /// pane whose desk card is the one being read. A default of nothing, since
+    /// every other view either retains something worth keeping across a switch
+    /// (a blotter page, a crosshair) or retains nothing at all.
+    fn entered(&self) {}
+
     /// Whether this view is holding a text field open, and therefore owns every
     /// keystroke — including the ones the shell claims for the whole
     /// workstation.
@@ -109,6 +124,16 @@ pub struct Views {
     workforce: workforce::WorkforceView,
     audit: audit::AuditView,
     settings: settings::SettingsView,
+    /// The pane the last frame drew, so a view can be told it has been
+    /// re-entered.
+    ///
+    /// Here rather than in the shell because the shell changes the nav from
+    /// seven places — three keys, the command line's `/view`, a ticker
+    /// selection, and the startup door's handoff — and an entry hook wired at
+    /// each of them is one refactor away from missing one. The registry sees
+    /// every switch by construction: it is asked to draw exactly one pane per
+    /// frame, and a different answer than last frame *is* the switch.
+    shown: std::cell::Cell<Option<ViewId>>,
 }
 
 impl Default for Views {
@@ -126,9 +151,44 @@ impl Views {
             research: research::ResearchView,
             workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
-            settings: settings::SettingsView,
+            settings: settings::SettingsView::default(),
+            // `None`, not the first view: the frame that draws the pane a
+            // client opens on is an entry too, and a pane that assumed it was
+            // already showing would skip its own reset exactly once.
+            shown: std::cell::Cell::new(None),
         }
     }
+
+    /// Hand one write outcome to the surface that is waiting for it.
+    ///
+    /// Not routed by `ViewId`, deliberately: the answer arrives on the bus
+    /// while the operator may be looking anywhere, and a form that only heard
+    /// about its own request when SETTINGS happened to be on screen would sit
+    /// in "asking the owner…" forever. SETTINGS is the only view that awaits an
+    /// answer at all — every other outcome is a toast and a refetch — so this
+    /// names it rather than asking seven views a question six of them have no
+    /// state for.
+    #[cfg(feature = "operator")]
+    pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
+        self.settings.wrote(outcome);
+    }
+
+    /// Open the one box in this client a credential is typed into.
+    ///
+    /// Named here rather than reached for, so the startup door's third step is
+    /// a call to SETTINGS' own form instead of a second one built beside it —
+    /// see `settings::SettingsView::open_login`. The caller is responsible for
+    /// putting the operator in front of it; this registry does not move the
+    /// nav, because which pane is on screen is the shell's to decide.
+    #[cfg(feature = "operator")]
+    pub fn open_login(&mut self) {
+        self.settings.open_login();
+    }
+
+    /// The default build's half: there is no form to open, because there is no
+    /// `Command::AlpacaLogin` for it to produce and no writer to carry one.
+    #[cfg(not(feature = "operator"))]
+    pub fn open_login(&mut self) {}
 
     /// The modal the active view is showing, if any.
     ///
@@ -153,6 +213,12 @@ impl Views {
         fx: &FlashTracker,
         now: Instant,
     ) {
+        // The switch, seen the only place it cannot be missed: the registry is
+        // asked for exactly one pane per frame, so an id that differs from the
+        // last one it drew *is* the operator having moved.
+        if self.shown.replace(Some(id)) != Some(id) {
+            self.at(id).entered();
+        }
         self.at(id).draw(f, area, store, fx, now);
     }
 

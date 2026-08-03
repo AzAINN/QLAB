@@ -21,8 +21,8 @@
 #[cfg(feature = "operator")]
 mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
-    use crate::cmd::Command;
-    use crate::net::write::{Execution, WriteClient, WriteError};
+    use crate::cmd::{Command, ModelChoice};
+    use crate::net::write::{Choice, Execution, Login, WriteClient, WriteError};
     use crate::store::Posture;
     use std::sync::Arc;
 
@@ -231,7 +231,93 @@ mod armed {
                     said: err.to_string(),
                 },
             },
-            Command::Quit | Command::Refresh => return None,
+            // A login is not a governance decision either, and it books
+            // nothing: the owner writes the credential file and does not switch
+            // the book. Three answers, and the middle one is a question — the
+            // form is what puts it to the operator, so it travels back as its
+            // own outcome rather than as a failure.
+            Command::AlpacaLogin {
+                key,
+                secret,
+                replace,
+            } => {
+                // `Some(true)` only. The flag is consent, so "not asked" must
+                // not be spelled the same way on the wire as "answered no".
+                let consented = replace.then_some(true);
+                match client
+                    .set_alpaca_credentials(&key, &secret, consented)
+                    .await
+                {
+                    Ok(Login::Stored(said)) => match credentials_of(&said) {
+                        Ok(note) => Wrote::LoggedIn { usable: true, note },
+                        Err(note) => Wrote::LoggedIn {
+                            usable: false,
+                            note,
+                        },
+                    },
+                    Ok(Login::ConsentNeeded(said)) => Wrote::LoginNeedsConsent { said },
+                    Ok(Login::Rejected(said)) => Wrote::LoginRefused { said },
+                    Err(err) => Wrote::Failed {
+                        // Names the action and never the pair: `what` is
+                        // rendered in a toast and in the form's own note.
+                        what: "store the alpaca login".to_string(),
+                        said: err.to_string(),
+                    },
+                }
+            }
+            // Not a governance decision either, and it books nothing: it
+            // chooses which mind answers a question. The owner is the authority
+            // on what its backends can serve — it refuses an unreachable daemon
+            // and a model it does not hold — so what the operator named is sent
+            // and the owner's own sentence comes back either way.
+            Command::SetLlm { surface, choice } => {
+                // Named before the call, because the outcome has to say what it
+                // was about whichever way it goes. Model ids are inert — no
+                // credential is nameable here — so this quotes what was sent,
+                // unlike the login path.
+                let what = match &choice {
+                    ModelChoice::Pair { backend, model } => {
+                        format!("point {surface} at {backend} {model}")
+                    }
+                    ModelChoice::Enabled(on) => {
+                        format!("switch the {surface} {}", if *on { "on" } else { "off" })
+                    }
+                };
+                let (pair, enabled) = match &choice {
+                    ModelChoice::Pair { backend, model } => {
+                        (Some((backend.as_str(), model.as_str())), None)
+                    }
+                    ModelChoice::Enabled(on) => (None, Some(*on)),
+                };
+                match client.set_llm(&surface, pair, enabled).await {
+                    Ok(Choice::Chosen(said)) => Wrote::Chose { said },
+                    // A considered no, not a broken request: the owner's 400
+                    // carries the remedy, and rendering it as a failure would
+                    // bury "start it with `ollama serve`" under a transport
+                    // error nobody can act on.
+                    Ok(Choice::Rejected(said)) => Wrote::ChoiceRefused { said },
+                    Err(err) => Wrote::Failed {
+                        what,
+                        said: err.to_string(),
+                    },
+                }
+            }
+            Command::TestAlpaca => match client.test_alpaca().await {
+                Ok(verdict) => Wrote::Tested {
+                    ok: verdict.ok,
+                    summary: verdict.summary,
+                },
+                Err(err) => Wrote::Failed {
+                    what: "test the alpaca login".to_string(),
+                    said: err.to_string(),
+                },
+            },
+            // The three the runtime handles itself. They cannot arrive here
+            // through the loop; the arm exists because the match is over the
+            // whole type, and `Backends` is a *read* the poller serves — a
+            // write outcome for it would put a row on the bus about a request
+            // that changed nothing.
+            Command::Quit | Command::Refresh | Command::Backends => return None,
         })
     }
 
@@ -251,16 +337,74 @@ mod armed {
         if book != "alpaca" {
             return None;
         }
+        credentials_of(said).err()
+    }
+
+    /// What a `desk_mode_payload()` says about the credentials behind it.
+    ///
+    /// `Ok` is the owner's description of a login it can read; `Err` is its
+    /// description of one it cannot. One definition because two surfaces ask —
+    /// the desk-mode switch, which warns about a book it cannot reach, and the
+    /// login form, which reports what the desk made of what it just stored —
+    /// and two copies of "what counts as a working login" is how the two come
+    /// to disagree.
+    ///
+    /// An owner that does not say at all is an `Err`. `desk_mode_payload`
+    /// always carries the flag, so its absence is a contract this client cannot
+    /// read, and silence about the credential that reaches a real venue must
+    /// not pass as a clean one. Invariant 4: refuse loudly rather than degrade
+    /// quietly.
+    ///
+    /// The description is **bounded**, which the refusal path already was and
+    /// this one was not. It is the 200 body rather than a 400, so C2 read it as
+    /// the owner's own and safe; but nothing on this path is guaranteed to be
+    /// the owner's — a proxy answering 200 with a page of its own reaches the
+    /// same toast — and the rule is cheaper to keep uniform than to reason
+    /// about per call site. `NOTE_MAX` is the toast's own room: two wrapped
+    /// lines of a box that has to stay readable over whatever pane is under it.
+    fn credentials_of(said: &serde_json::Value) -> Result<String, String> {
+        const NOTE_MAX: usize = 160;
+        let described = said
+            .get("credentials")
+            .and_then(|v| v.as_str())
+            // `Some("")` is absent, as everywhere in this client.
+            .filter(|said| !said.is_empty())
+            .map(|said| crate::format::bounded(said, NOTE_MAX));
         match said.get("credentials_ok").and_then(|v| v.as_bool()) {
-            Some(true) => None,
-            Some(false) => Some(
-                said.get("credentials")
-                    .and_then(|v| v.as_str())
-                    .filter(|said| !said.is_empty())
-                    .unwrap_or("the owner reports no usable Alpaca credentials")
-                    .to_string(),
-            ),
-            None => Some("the owner did not say whether the Alpaca credentials work".to_string()),
+            Some(true) => {
+                Ok(described.unwrap_or_else(|| "the owner reports a usable Alpaca login".into()))
+            }
+            Some(false) => Err(described
+                .unwrap_or_else(|| "the owner reports no usable Alpaca credentials".into())),
+            None => Err("the owner did not say whether the Alpaca credentials work".to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_stored_login_reports_the_owners_description_bounded_like_every_other() {
+            // The C2 residual: the 200 path rendered the description straight
+            // into a toast. A 200 is not proof the answer came from the owner.
+            let said = serde_json::json!({
+                "credentials_ok": true,
+                "credentials": "a ".repeat(400),
+            });
+            let note = credentials_of(&said).unwrap();
+            assert!(note.ends_with('…'), "{note}");
+            assert!(note.chars().count() <= 161, "{note}");
+            // And the ordinary sentence is untouched — the bound is a ceiling,
+            // not a reformatting.
+            let said = serde_json::json!({
+                "credentials_ok": false,
+                "credentials": "no ALPACA_API_KEY_ID in the environment or .env",
+            });
+            assert_eq!(
+                credentials_of(&said),
+                Err("no ALPACA_API_KEY_ID in the environment or .env".to_string())
+            );
         }
     }
 }

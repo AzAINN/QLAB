@@ -62,6 +62,9 @@ pub struct Snapshot {
     /// is not the same as a synthetic desk — nothing here defaults.
     #[serde(default)]
     pub desk_mode: Option<DeskMode>,
+    /// Which minds the desk is using, and how fresh that answer is.
+    #[serde(default)]
+    pub llm: Option<LlmConfig>,
     #[serde(default)]
     pub portfolio: Option<Portfolio>,
     #[serde(default)]
@@ -134,6 +137,17 @@ pub struct DeskMode {
     pub offline: Option<bool>,
     pub credentials: Option<String>,
     pub credentials_ok: Option<bool>,
+    /// Whether anything ever *named* the pair above — a launcher flag, the
+    /// state file, or a POST — as against the fallback the owner has to serve
+    /// when nobody has.
+    ///
+    /// **Three states, and the third is an owner rather than a desk.** `None`
+    /// is an owner too old to carry the field, which is every owner before D4;
+    /// reading that silence as `false` would say "nobody chose this desk" about
+    /// desks that had, on the one client that opens a modal over the answer. So
+    /// absence keeps whatever the reader did before the field existed, and only
+    /// `Some(false)` is the owner asserting the negative.
+    pub chosen: Option<bool>,
 }
 
 impl DeskMode {
@@ -150,6 +164,102 @@ impl DeskMode {
     pub fn book_unreachable(&self) -> bool {
         self.book.as_deref() == Some("alpaca") && self.credentials_ok != Some(true)
     }
+}
+
+// -- which minds the desk is using ------------------------------------------
+
+/// `llm_payload()`: one model choice per surface, plus the last thing the owner
+/// learned about whether those backends can serve.
+///
+/// **`availability` is a reading, not a probe.** `/api/tui` runs under the
+/// owner's dispatch lock and is polled every two seconds, so the owner refuses
+/// to probe there and serves whatever the picker's own route last saw, stamped
+/// with `probed_at`. A surface that rendered this as live would be reporting a
+/// daemon's health from an hour ago as current, which is why the stamp travels
+/// with it and why SETTINGS renders the age rather than the reading alone.
+///
+/// `probed_at` absent is "nothing has asked yet" — a different fact from a
+/// reading this client could not read, and the two must not render the same.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmConfig {
+    pub reasoner: Option<LlmSurface>,
+    pub workforce: Option<LlmSurface>,
+    /// Whether Atlas reasons with a model at all. Off is the desk's default, and
+    /// naming a reasoner model does not switch it on — the owner refuses to
+    /// infer one from the other, so nothing here may either.
+    pub reasoner_enabled: Option<bool>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub availability: Vec<LlmBackend>,
+    pub probed_at: Option<String>,
+}
+
+impl LlmConfig {
+    /// What the last reading said about one backend, by the name the owner gave
+    /// it. `None` for a backend nothing has asked about — which is not the same
+    /// fact as one that answered no.
+    pub fn backend(&self, name: &str) -> Option<&LlmBackend> {
+        self.availability
+            .iter()
+            .find(|entry| entry.name.as_deref() == Some(name))
+    }
+}
+
+/// One surface's choice. The pair travels together because neither half means
+/// anything alone: a model with no backend names nothing that can run it, and a
+/// backend with no model is a surface nobody can say what runs on.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmSurface {
+    pub backend: Option<String>,
+    pub model: Option<String>,
+}
+
+/// One backend's entry in the compact summary — the catalog minus its model
+/// lists, which an Ollama host can have dozens of and which do not ride in a
+/// payload polled every two seconds.
+///
+/// The reason is populated on the happy path too: the owner treats a silent
+/// `false` as the bug it once was, and every surface that renders availability
+/// renders the sentence behind it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmBackend {
+    pub name: Option<String>,
+    pub available: Option<bool>,
+    pub reason: Option<String>,
+}
+
+/// `GET /api/llm/backends`: every backend the desk knows, and what each serves
+/// *right now*.
+///
+/// Its own payload rather than a section of the snapshot, because the owner
+/// refuses to probe on the poll path: `/api/tui` runs under the dispatch lock
+/// every two seconds and a hung daemon there would stall every other request,
+/// so the snapshot carries the last reading and this route is the only prober.
+/// It is fetched when the palette enters the model scope and at no other time —
+/// there is no cadence here, deliberately.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmCatalog {
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub backends: Vec<CatalogEntry>,
+    pub probed_at: Option<String>,
+}
+
+/// One backend as the catalog reports it: the summary plus the model list.
+///
+/// Deliberately **not** `LlmBackend` with a `models` field bolted on. The
+/// snapshot's summary is the same three fields with the lists stripped, and one
+/// struct for both would leave `store.llm()` handing out a permanently empty
+/// `models` — a client reading its own silence as "this backend serves
+/// nothing". Two payloads, two types, and the compiler decides which one a
+/// caller is holding.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CatalogEntry {
+    pub name: Option<String>,
+    pub available: Option<bool>,
+    pub reason: Option<String>,
+    /// What this backend can serve now — empty when it cannot serve at all
+    /// (the owner does not ask an unavailable backend for its list).
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub models: Vec<String>,
 }
 
 // -- the policy and its limits ---------------------------------------------

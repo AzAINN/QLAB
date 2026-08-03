@@ -1826,9 +1826,15 @@ mod tests {
                 "/model banana claude:haiku",
                 "no model surface is called banana",
             ),
-            // A backend with no model names nothing that can run.
+            // A backend with no model names nothing that can run — and half a
+            // pair is the same absence with a colon in it, which the owner
+            // would answer with "a model choice needs both a backend and a
+            // model". Answered here instead: it is the form of the line, not a
+            // fact about the desk.
             ("/model reasoner ollama", "names no model"),
             ("/model reasoner claude", "names no model"),
+            ("/model reasoner ollama:", "names no model"),
+            ("/model reasoner :qwen2.5:7b", "names no model"),
         ] {
             match model_line(line, &store) {
                 Resolved::Refused(said) => assert!(said.contains(expected), "{line}: {said}"),
@@ -1959,6 +1965,22 @@ mod tests {
             strip[0].refusal.as_deref(),
             Some("the owner says ollama can serve and never said what")
         );
+        // And the other silence: a backend that cannot serve and did not say
+        // why. The owner populates `reason` on every entry, so this is a
+        // contract failure too — and it says so rather than showing a row with
+        // an empty half. `Some("")` is absent here as everywhere.
+        for quiet in [
+            serde_json::json!({"name": "ollama", "available": false, "models": []}),
+            serde_json::json!({"name": "ollama", "available": false, "reason": "",
+                               "models": []}),
+        ] {
+            let store = desk_with_backends(quiet);
+            let strip = suggestions(&parse("/model reasoner oll"), &store, Posture::Operator);
+            assert_eq!(
+                strip[0].refusal.as_deref(),
+                Some("the owner did not say why ollama cannot serve")
+            );
+        }
     }
 
     #[cfg(feature = "operator")]

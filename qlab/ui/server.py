@@ -280,8 +280,17 @@ class UISession:
         # The operator's explicit choice; the persisted value is authoritative
         # when the caller passes none, and ``offline_default`` only seeds the
         # mode nobody has chosen yet — never a second opinion about it.
-        self.desk_mode = desk_mode or load_desk_mode() or (
+        persisted = load_desk_mode()
+        self.desk_mode = desk_mode or persisted or (
             DEFAULT_DESK_MODE if offline_default else DeskMode("live", "simulated"))
+        # Whether anything *named* that pair, computed here because here is
+        # where the answer stops being visible: past this line a fallback and a
+        # deliberate ``synthetic · simulated`` are the same object. It means
+        # "came from a launcher flag or the state file", never "there is a
+        # file" — a flag-chosen desk is not persisted, and asking again about a
+        # desk the operator just named on the command line would be the same
+        # false question the flag exists to retire.
+        self.desk_mode_chosen = bool(desk_mode or persisted)
         # Derived, never carried alongside: a launcher flag and a persisted (or
         # POSTed) mode used to disagree, and the disagreement reconstructed
         # `synthetic` + `alpaca` — synthetic quotes on the SSE bus and a
@@ -715,6 +724,12 @@ class UISession:
     # -- desk mode ----------------------------------------------------------
     def set_desk_mode(self, mode: DeskMode) -> DeskMode:
         self.desk_mode = mode
+        # Somebody answered. Set here rather than derived from the file, because
+        # the three-way ``or`` above runs once at construction and no POST goes
+        # near it: without this line a desk that was asked and answered would go
+        # on reporting that nobody had, and every client keyed on that would ask
+        # again on the next run.
+        self.desk_mode_chosen = True
         # The mode owns the data lane too: the TUI retunes an owner that was
         # spawned with no flags, so leaving these behind would keep publishing
         # synthetic quotes and pricing a real book off the synthetic feed.
@@ -744,6 +759,11 @@ class UISession:
             "offline": self.desk_mode.offline,
             "credentials": description,
             "credentials_ok": ok,
+            # The one thing the pair cannot say about itself. A desk nobody has
+            # chosen serves the same six fields as one deliberately pointed at
+            # `synthetic · simulated`, so a surface that wants to *ask* which
+            # desk this is has to be told the difference by name.
+            "chosen": self.desk_mode_chosen,
         }
 
     def set_alpaca_credentials(self, api_key: object, api_secret: object,

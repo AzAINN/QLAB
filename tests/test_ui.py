@@ -2424,6 +2424,66 @@ def test_desk_mode_defaults_to_synthetic_and_is_reported(session):
     assert "credentials" in payload          # description string, never a secret
 
 
+def test_a_desk_nobody_chose_is_not_served_as_a_chosen_one(session):
+    """The pair alone cannot tell "chosen synthetic" from "nobody said".
+
+    Six fields of a concrete pair are what a fresh desk and a deliberately
+    synthetic one both serve, byte for byte — so a client asking "has anyone
+    answered?" had to guess, and the startup door's own honesty note said so.
+    ``chosen`` is that seventh fact and nothing more: it does not say the pair
+    is good, only that something named it.
+    """
+    payload = handle_api(session, "GET", "/api/desk_mode", {}, {})[1]
+    assert payload["chosen"] is False
+    # And the fallback is still served in full: an unchosen desk is a working
+    # desk, not an error state.
+    assert (payload["data"], payload["book"]) == ("synthetic", "simulated")
+
+
+def test_a_posted_desk_mode_is_a_choice_from_then_on(session):
+    """Without this the flag would be permanently false on a fresh owner.
+
+    The three-way ``or`` runs once at construction; the POST never goes near
+    it, so a session that was asked and answered would keep reporting that
+    nobody had — and the door would open again on every run.
+    """
+    from qlab.core.desk_mode import DeskMode, load_desk_mode
+
+    assert handle_api(session, "GET", "/api/desk_mode", {}, {})[1]["chosen"] is False
+    status, payload = handle_api(
+        session, "POST", "/api/desk_mode", {},
+        {"data": "synthetic", "book": "simulated"})
+    assert status == 200
+    # The same pair it already had: what changed is that somebody said it.
+    assert (payload["data"], payload["book"]) == ("synthetic", "simulated")
+    assert payload["chosen"] is True
+    assert handle_api(session, "GET", "/api/desk_mode", {}, {})[1]["chosen"] is True
+    # And it is durable, which is the fact the flag is about.
+    assert load_desk_mode() == DeskMode("synthetic", "simulated")
+
+
+def test_a_desk_mode_the_launcher_passed_is_chosen_without_being_persisted():
+    """Flag-chosen and file-unchosen is a real state, and it reads as chosen.
+
+    ``UISession(desk_mode=…)`` is the launcher's own answer and is deliberately
+    not written to disk. The flag means "a flag or the file named this", never
+    "there is a file" — a client that reopened the question here would ask
+    about a desk the operator had just named on the command line.
+    """
+    from qlab.core.desk_mode import DeskMode, load_desk_mode
+
+    assert load_desk_mode() is None
+    live = UISession(offline_default=True, registry=Registry(":memory:"),
+                     desk_mode=DeskMode("live", "simulated"))
+    assert live.desk_mode_payload()["chosen"] is True
+    assert load_desk_mode() is None, "a launcher flag is not a persisted choice"
+    # The file is the other half of the same claim, on its own.
+    from qlab.core.desk_mode import save_desk_mode
+    save_desk_mode(DeskMode("live", "alpaca"))
+    persisted = UISession(offline_default=True, registry=Registry(":memory:"))
+    assert persisted.desk_mode_payload()["chosen"] is True
+
+
 def test_setting_the_desk_mode_switches_the_book(session, monkeypatch):
     from qlab.core import data as market
     from qlab.trader import broker as broker_mod

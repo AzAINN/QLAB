@@ -352,13 +352,27 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
     // A picker with one answer accepts rather than acts. Enter on `/tick` means
     // "that one", and rewriting the buffer to `/ticker ` puts the operator in
     // front of the values instead of guessing which one they meant.
-    if let CmdState::Picker { .. } = state {
+    if let CmdState::Picker { typed, .. } = &state {
         let choices = suggestions(store);
-        if let [only] = choices.as_slice() {
+        // An exact word beats an ambiguous prefix. `model` starts with `mode`,
+        // so once the second scope arrived `/mode` + Enter answered "choose a
+        // scope" about a word the operator had typed in full — and the two are
+        // read off the *offered* list, so a window that is not shown a scope
+        // cannot be accepted into it either.
+        let named = format!("/{typed}");
+        let hit = choices
+            .iter()
+            .find(|choice| choice.value.eq_ignore_ascii_case(&named))
+            .or(match choices.as_slice() {
+                [only] => Some(only),
+                _ => None,
+            });
+        if let Some(hit) = hit {
             // Accepting `/mod` into `/model ` is a scope entry like any other,
             // and `command_key` is the one place that notices — it holds the
             // scope from before the keystroke, so nothing here has to.
-            store.cmd.accept(&only.value);
+            let value = hit.value.clone();
+            store.cmd.accept(&value);
             return None;
         }
     }

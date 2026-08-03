@@ -453,6 +453,40 @@ mod armed {
     }
 
     #[test]
+    fn a_scope_typed_in_full_is_accepted_over_the_longer_word_it_prefixes() {
+        // D2's fold. `model` starts with `mode`, so once the second write scope
+        // arrived, `/mode` + Enter answered "choose a scope" about a word the
+        // operator had typed whole — and the only way out was a space they had
+        // no reason to expect. An exact word wins; a genuine prefix still does
+        // not.
+        let mut client = Client::new(fixture_store());
+        client.store.posture = Posture::Operator;
+        client.press(KeyCode::Char('/'));
+        type_line(&mut client, "mode");
+        client.press(KeyCode::Enter);
+        assert_eq!(client.store.cmd.text(), "/mode ");
+        assert_eq!(client.store.cmd.note(), None);
+        // Case-blind, like every other scope match on this line — and what
+        // lands is the scope's own spelling, because accepting rewrites the
+        // buffer with the word the parser holds.
+        let mut upper = Client::new(fixture_store());
+        upper.store.posture = Posture::Operator;
+        upper.press(KeyCode::Char('/'));
+        type_line(&mut upper, "MODE");
+        upper.press(KeyCode::Enter);
+        assert_eq!(upper.store.cmd.text(), "/mode ");
+        // The inversion: a prefix that is nobody's whole word is still
+        // ambiguous, and the line says so rather than guessing which was meant.
+        let mut short = Client::new(fixture_store());
+        short.store.posture = Posture::Operator;
+        short.press(KeyCode::Char('/'));
+        type_line(&mut short, "mod");
+        short.press(KeyCode::Enter);
+        assert_eq!(short.store.cmd.text(), "/mod");
+        assert_eq!(short.store.cmd.note(), Some("choose a scope"));
+    }
+
+    #[test]
     fn the_armed_overlay_lists_the_keys_that_can_move_money() {
         // Below the fold on the first page, which is the point of the scroll:
         // an operator reaches the keys that book a trade by walking the list

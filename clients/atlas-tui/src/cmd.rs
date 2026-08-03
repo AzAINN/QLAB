@@ -681,7 +681,7 @@ fn model(query: &str, store: &Store, posture: Posture) -> Resolved {
     // What the desk said it can run, which is what the strip offered.
     if let Some(offer) = offers(surface, store)
         .into_iter()
-        .find(|offer| offer.value() == choice)
+        .find(|offer| offer.matches(choice))
     {
         return match offer {
             Offer::Runs { backend, model, .. } => {
@@ -829,6 +829,39 @@ impl Offer {
         match self {
             Offer::Runs { .. } => None,
             Offer::Down { said, .. } => Some(said),
+        }
+    }
+
+    /// Whether a typed word names this offer.
+    ///
+    /// **The backend word is matched case-blind and the model id is not.** A
+    /// backend is a name this client already spells for the operator — it is on
+    /// the strip, in the owner's reason, on the MODELS card — so `OLLAMA`
+    /// naming `ollama` costs nothing and buys the one thing that matters here:
+    /// a down backend typed in the wrong case reaches its own entry and comes
+    /// back with *the owner's reason*, where an exact compare fell through to
+    /// the hand-typed path and answered "OLLAMA names no model" about a daemon
+    /// the desk had already explained.
+    ///
+    /// A model id stays exact. `qwen2.5:7b` and `granite3.3:8b` are tags a
+    /// daemon holds byte for byte, and a client that folded their case would be
+    /// deciding, on the owner's behalf, that two different tags are one.
+    ///
+    /// What is *sent* is always the offer's own spelling, never what was typed.
+    fn matches(&self, typed: &str) -> bool {
+        match self {
+            // A bare backend name, whichever variant carries it: the down entry
+            // names no model, and the workforce's claude entry is the backend
+            // alone because the tier map owns its model.
+            Offer::Down { value, .. } => value.eq_ignore_ascii_case(typed),
+            Offer::Runs {
+                value,
+                backend,
+                model,
+            } => match typed.split_once(':') {
+                Some((named, id)) => backend.eq_ignore_ascii_case(named) && model == id,
+                None => value.eq_ignore_ascii_case(typed),
+            },
         }
     }
 }
@@ -1870,6 +1903,43 @@ mod tests {
                 surface: "reasoner".into(),
                 choice: pair("ollama", "granite3.3:8b"),
             }
+        );
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_backend_named_in_the_wrong_case_still_gets_the_owners_reason_and_a_model_id_does_not() {
+        // D2's fold. The lookup was an exact compare, so `OLLAMA` missed the
+        // catalog entry that had the answer and fell through to the hand-typed
+        // path — which answered "OLLAMA names no model" about a daemon the desk
+        // had already explained. The backend word is one this client spells for
+        // the operator everywhere; folding its case costs nothing.
+        let store = desk_with_backends(ollama_down());
+        assert_eq!(
+            model_line("/model reasoner OLLAMA", &store),
+            model_line("/model reasoner ollama", &store),
+            "the same daemon answered two different ways"
+        );
+        // A model id is not a word this client spells: `qwen2.5:7b` is a tag a
+        // daemon holds byte for byte, so the case stays exact and a mismatched
+        // one goes to the owner to be refused rather than being quietly read as
+        // the tag beside it.
+        let up = desk_with_backends(ollama_up());
+        assert_eq!(
+            model_line("/model reasoner OLLAMA:qwen2.5:7b", &up),
+            Resolved::Model {
+                surface: "reasoner".into(),
+                choice: pair("ollama", "qwen2.5:7b"),
+            },
+            "the offer's own spelling is what gets sent"
+        );
+        assert_eq!(
+            model_line("/model reasoner ollama:QWEN2.5:7B", &up),
+            Resolved::Model {
+                surface: "reasoner".into(),
+                choice: pair("ollama", "QWEN2.5:7B"),
+            },
+            "a model id was folded into one the catalog happened to hold"
         );
     }
 

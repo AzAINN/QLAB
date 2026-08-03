@@ -87,13 +87,20 @@ def owner():
 
 
 class Clock:
-    """A wall clock the script moves, so a deadline test needs no sleep."""
+    """A wall clock the script moves, so a deadline test needs no sleep.
 
-    def __init__(self) -> None:
+    ``step`` advances it on every reading, which is how a test makes time pass
+    *inside* one turn — where a per-turn check cannot see it.
+    """
+
+    def __init__(self, step: float = 0.0) -> None:
         self.now = 0.0
+        self.step = step
 
     def __call__(self) -> float:
-        return self.now
+        value = self.now
+        self.now += self.step
+        return value
 
 
 class ScriptedOllama:
@@ -296,6 +303,34 @@ def test_what_the_owner_says_is_bounded_and_redacted_on_its_way_to_an_event(owne
     assert secret in fed_back and len(fed_back) > 900
 
 
+def test_a_tool_name_the_model_invented_is_bounded_in_the_recorded_row(
+        owner, monkeypatch):
+    """The reviewer's probe, asserted where the string lands: the event row.
+
+    ``CoordinatorDriver._on_event`` copies ``tool`` whole into a durable
+    ``atlas_coordinator_event`` payload, so a field this module leaves
+    unbounded is a 10KB row per call.
+    """
+    monkeypatch.setattr("qlab.tui.claude.resolve_claude_executable",
+                        lambda: "/usr/bin/claude")
+    monkeypatch.delenv("QLAB_ATLAS_DRIVE", raising=False)
+    daemon = ScriptedOllama(
+        _assistant("", ("x" * 10_000, {})), _assistant("Nothing to read."))
+    recorded: list[tuple[str, dict]] = []
+    driver = CoordinatorDriver(
+        runtime_url=owner.url,
+        record_event=lambda kind, payload: recorded.append((kind, payload)),
+        session_factory=session_factory(backend=daemon, model="granite3.3:8b",
+                                        role="news-analyst"))
+    assert driver.drive("wf-1", "read the record")["driving"] is True
+    driver._session.join(timeout=10)
+
+    tools = [p["tool"] for kind, p in recorded
+             if kind == "atlas_coordinator_event" and p["tool"]]
+    assert tools, "the refused call was never recorded"
+    assert all(len(name) <= 241 for name in tools)
+
+
 def test_an_owner_answer_too_large_to_reason_over_is_refused_not_truncated(owner):
     owner.replies["/api/lab/registry.recent_decisions"] = (200, json.dumps(
         {"result": "y" * (ollama_role._MAX_TOOL_RESULT_CHARS + 10)}))
@@ -367,6 +402,117 @@ def test_a_run_that_outlives_its_deadline_fails_loudly(owner):
     # The deadline fired, not the turn cap: fewer turns ran than the cap allows.
     assert len(slow.calls) < MAX_TURNS
     assert [e.kind for e in events][-1] == "error"
+
+
+def test_one_reply_cannot_flood_the_owner_with_five_hundred_writes(owner):
+    """The reviewer's probe: a turn cap bounds turns, not calls inside one."""
+    flood = [("registry_log_decision",
+              {"as_of": "2026-07-31", "kind": "news_analyst",
+               "choice": {"i": n}, "rationale": "because"})
+             for n in range(500)]
+    daemon = ScriptedOllama(_assistant("", *flood), _assistant("Enough."))
+    events: list = []
+    assert "Enough" in _runner(daemon, owner, events).run("Read the week.")
+
+    # Every call is answered — a tool_call with no result is a malformed
+    # history — but only the cap's worth of them reached the owner.
+    results = [m for m in daemon.calls[1]["messages"] if m["role"] == "tool"]
+    assert len(results) == 500
+    assert len(owner.seen) == ollama_role.MAX_CALLS_PER_TURN
+    refused = [m for m in results if m["content"].startswith("REFUSED:")]
+    assert len(refused) == 500 - ollama_role.MAX_CALLS_PER_TURN
+    assert f"{ollama_role.MAX_CALLS_PER_TURN} tool calls" in refused[0]["content"]
+    # And the refusals are on the audit stream, not only in the model's context.
+    assert sum(1 for e in events if e.kind == "tool"
+               and "tool calls" in e.text) == len(refused)
+
+
+def test_the_call_cap_is_a_ceiling_not_a_floor(owner):
+    """Both sides of the comparison: the cap's worth run, the next does not."""
+    call = ("registry_recent_decisions", {"limit": 1})
+    at_cap = ScriptedOllama(
+        _assistant("", *[call] * ollama_role.MAX_CALLS_PER_TURN),
+        _assistant("Read."))
+    _runner(at_cap, owner).run("Read.")
+    assert len(owner.seen) == ollama_role.MAX_CALLS_PER_TURN
+
+    owner.seen.clear()
+    over = ScriptedOllama(
+        _assistant("", *[call] * (ollama_role.MAX_CALLS_PER_TURN + 1)),
+        _assistant("Read."))
+    _runner(over, owner).run("Read.")
+    assert len(owner.seen) == ollama_role.MAX_CALLS_PER_TURN
+    last = [m for m in over.calls[1]["messages"] if m["role"] == "tool"][-1]
+    assert last["content"].startswith("REFUSED:")
+
+
+def test_the_deadline_is_read_between_calls_not_only_between_turns(owner):
+    """Time spent inside one turn ends the session, and ends it loudly."""
+    # Each clock reading costs half the budget: the turn's own reading, then
+    # two calls, and the third call finds nothing left.
+    clock = Clock(step=DEADLINE_S / 4)
+    call = ("registry_recent_decisions", {"limit": 1})
+    daemon = ScriptedOllama(_assistant("", *[call] * 5), _assistant("unreached"))
+    events: list = []
+    with pytest.raises(OllamaRoleError) as exc:
+        _runner(daemon, owner, events, clock=clock).run("Read the week.")
+
+    assert f"{DEADLINE_S:.0f}s" in str(exc.value)
+    # Not the whole turn, and not none of it: what ran before the budget went,
+    # ran — and the rest never reached the owner.
+    assert 0 < len(owner.seen) < ollama_role.MAX_CALLS_PER_TURN
+    assert len(daemon.calls) == 1          # the second turn was never asked for
+    # Each unexecuted call was refused by name, with the reason, on the bus.
+    refusals = [e for e in events if e.kind == "tool"
+                and f"{DEADLINE_S:.0f}s" in e.text]
+    assert len(refusals) == 5 - len(owner.seen)
+    assert [e.kind for e in events][-1] == "error"
+
+
+def test_a_budget_spent_on_the_last_turn_reports_the_deadline_not_the_turn_cap(
+        owner, monkeypatch):
+    """Two caps can be true at once; the reported one must be the one that fired.
+
+    Found by mutation: deleting the end-of-turn raise left every other test
+    green, because on turns 1..N-1 the top-of-turn check re-raises the same
+    sentence one moment later. The one turn where it cannot is the last, and
+    that is the case this pins — a deadline reported as "did not finish in 8
+    turns" sends an operator to raise the wrong number.
+    """
+    monkeypatch.setattr(ollama_role, "MAX_TURNS", 1)
+    clock = Clock(step=DEADLINE_S / 2)
+    daemon = ScriptedOllama(
+        _assistant("", ("registry_recent_decisions", {"limit": 1})))
+    with pytest.raises(OllamaRoleError) as exc:
+        _runner(daemon, owner, clock=clock).run("Read the week.")
+
+    assert f"{DEADLINE_S:.0f}s" in str(exc.value)
+    assert "tool turns" not in str(exc.value)
+    assert owner.seen == []
+
+
+def test_a_stop_mid_turn_refuses_the_calls_that_have_not_run(owner):
+    """The cooperative stop reaches inside a turn, on the threaded path."""
+    call = ("registry_recent_decisions", {"limit": 1})
+    daemon = ScriptedOllama(_assistant("", *[call] * 3), _assistant("unreached"))
+    events: list = []
+    runner = None
+
+    def watch(event):
+        events.append(event)
+        if event.kind == "tool" and event.text.startswith("calling"):
+            runner.stop("the owner is shutting down")
+
+    runner = OllamaRoleRunner(watch, backend=daemon, model="granite3.3:8b",
+                              role="news-analyst", owner_url=owner.url)
+    assert runner.start("Read the week.", governed=True) is True
+    runner.join(timeout=10)
+
+    assert runner.running is False
+    assert "was stopped" in runner.last_error
+    # The call already in flight finished; the two behind it never left.
+    assert len(owner.seen) == 1
+    assert len(daemon.calls) == 1
 
 
 def test_the_backends_deadline_is_the_sessions_remaining_time(owner):

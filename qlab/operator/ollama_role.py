@@ -79,6 +79,15 @@ TURN_TIMEOUT_S = 90.0
 # The owner is in-process-adjacent (loopback) and every route the piloted role
 # reaches is a registry read or one insert.
 OWNER_TIMEOUT_S = 30.0
+# How many tool calls one turn may make. A reply carries a LIST of tool calls
+# and the list is the model's, so a turn cap alone bounds nothing: a single
+# hallucinated reply asking for five hundred `registry.log_decision` calls would
+# have written five hundred rows inside one "turn", each with its own owner
+# timeout — the session's wall budget is checked between turns and could not
+# see it. Five is the number because a news read needs two (read the record,
+# log the judgment) and a schema refusal costs a retry; anything past that is
+# not a judgment role working.
+MAX_CALLS_PER_TURN = 5
 
 # What one tool result may be worth to the model. Past this the answer is not
 # refused silently and not truncated silently: the model is told the size and
@@ -319,11 +328,18 @@ class OllamaRoleRunner:
     def stop(self, reason: str = "operator requested stop") -> None:
         """Ask the run to end. Safe when idle.
 
-        The stop is cooperative: the loop checks between turns, and an in-flight
-        turn is bounded by its own deadline rather than cancelled. There is no
-        process to signal — this harness is HTTP in the owner's own threads —
-        so the honest guarantee is "no further turn and no further tool call",
-        which is the one that matters for authority.
+        The stop is cooperative: the loop checks between turns and before each
+        tool call, and an in-flight call is bounded by its own timeout rather
+        than cancelled. There is no process to signal — this harness is HTTP in
+        the owner's own threads — so the honest guarantee is "no further turn
+        and no further tool call", which is the one that matters for authority.
+
+        The consequence for a caller, named because E3 has to live with it:
+        ``running`` stays True for that in-flight window, so a ``stop()``
+        immediately followed by a ``start()`` is refused as "already running"
+        until the current turn drains. The driver rebuilds a session per
+        dispatch and so never restarts one, but E3's shutdown story should say
+        this out loud rather than discover it.
         """
         if not self._running:
             return
@@ -394,9 +410,33 @@ class OllamaRoleRunner:
                 "tool_calls": [{"function": {"name": name, "arguments": raw}}
                                for name, raw in requested],
             })
-            for name, raw in requested:
+            # The clock is consulted per CALL, not per turn. Every entry still
+            # gets a result — a tool_call the history answers with nothing is a
+            # malformed conversation — but once the budget is gone the results
+            # are refusals and the session ends loudly after them.
+            spent = ""
+            for index, (name, raw) in enumerate(requested):
+                if index >= MAX_CALLS_PER_TURN:
+                    result = self._refuse(name, (
+                        f"one turn may make {MAX_CALLS_PER_TURN} tool calls "
+                        f"and this is number {index + 1}; ask for less in one "
+                        "turn"))
+                elif spent or self._stopped:
+                    spent = spent or (f"the {self.role} session was stopped: "
+                                      f"{self._stopped}")
+                    result = self._refuse(name, spent)
+                else:
+                    try:
+                        self._remaining(started)
+                    except OllamaRoleError as exc:
+                        spent = str(exc)
+                        result = self._refuse(name, spent)
+                    else:
+                        result = self._execute(name, raw)
                 messages.append({"role": "tool", "tool_name": name,
-                                 "content": self._execute(name, raw)})
+                                 "content": result})
+            if spent:
+                raise OllamaRoleError(spent)
         raise OllamaRoleError(
             f"{self.role} did not reach a conclusion in {MAX_TURNS} tool "
             f"turns on {self.model}; a run that keeps calling tools has not "
@@ -431,6 +471,17 @@ class OllamaRoleRunner:
         """
         return self._allowed.get(name)
 
+    def _refuse(self, name: str, reason: str) -> str:
+        """One refusal: recorded on the audit bus AND returned as the result.
+
+        Every "no" this module says is assembled here, so a refusal cannot be
+        recorded in one place and worded differently in another — and so the
+        model always sees the same thing the audit row saw.
+        """
+        refusal = f"REFUSED: {reason}"
+        self._emit("tool", refusal, tool=name)
+        return refusal
+
     def _execute(self, name: str, raw_arguments) -> str:
         """Run one tool call and return what the model should see as its result.
 
@@ -440,24 +491,19 @@ class OllamaRoleRunner:
         """
         lab_name = self._route_for(name)
         if lab_name is None:
-            offered = ", ".join(sorted(self._allowed))
-            refusal = (f"REFUSED: {name!r} is not on {self.role}'s allowlist "
-                       f"and was not executed. This role holds: {offered}.")
-            self._emit("tool", refusal, tool=name)
-            return refusal
+            return self._refuse(name, (
+                f"{name!r} is not on {self.role}'s allowlist and was not "
+                f"executed. This role holds: {', '.join(sorted(self._allowed))}."))
 
         arguments = _arguments(raw_arguments)
         if arguments is None:
-            refusal = (f"REFUSED: {name} takes a JSON object of arguments; "
-                       f"got {type(raw_arguments).__name__}.")
-            self._emit("tool", refusal, tool=name)
-            return refusal
+            return self._refuse(name, (
+                f"{name} takes a JSON object of arguments; got "
+                f"{type(raw_arguments).__name__}."))
         problem = _schema_problem(arguments,
                                   TOOL_SCHEMAS[lab_name]["parameters"])
         if problem is not None:
-            refusal = f"REFUSED: {name} was not called — {problem}"
-            self._emit("tool", refusal, tool=name)
-            return refusal
+            return self._refuse(name, f"{name} was not called — {problem}")
 
         self._emit("tool", f"calling {name}", tool=name)
         payload = dict(arguments)
@@ -466,12 +512,10 @@ class OllamaRoleRunner:
         payload["offline"] = self.offline
         result = self._owner_post(f"/api/lab/{lab_name}", payload)
         if len(result) > _MAX_TOOL_RESULT_CHARS:
-            refusal = (f"REFUSED: {name} answered with {len(result)} "
-                       f"characters, past this session's "
-                       f"{_MAX_TOOL_RESULT_CHARS}; ask for less (a smaller "
-                       "limit) rather than reading it all.")
-            self._emit("tool", refusal, tool=name)
-            return refusal
+            return self._refuse(name, (
+                f"{name} answered with {len(result)} characters, past this "
+                f"session's {_MAX_TOOL_RESULT_CHARS}; ask for less (a smaller "
+                "limit) rather than reading it all."))
         self._emit("tool", f"{name} answered: {_head(result)}", tool=name)
         return result
 
@@ -546,19 +590,23 @@ class OllamaRoleRunner:
 
     def _emit(self, kind: str, text: str, *, tool: str = "",
               agent: str = "") -> None:
-        """One event, bounded and redacted on the way out.
+        """One event, with EVERY field bounded and redacted on the way out.
 
         Everything here is untrusted: a model's prose, an owner's body, a
-        daemon's error. The gate is ``llm_backends._head`` — the same one, not
-        another one — and it runs on the assembled string rather than on the
-        pieces, because the pieces are what previous leaks were reasoned about
-        individually.
+        daemon's error — and a tool *name*, which is the model's string too and
+        which ``CoordinatorDriver._on_event`` copies whole into a durable event
+        row. An earlier version gated ``text`` alone and reasoned that the other
+        fields were safe; a ten-thousand-character tool name went straight
+        through it. So the gate is per-EVENT, not per-field: nothing leaves this
+        method without passing ``llm_backends._head``, including ``agent``,
+        which this module composes itself and which therefore needs no bounding
+        — deciding that per field is the habit that let the last one out.
         """
         if self.on_event is None:
             return
         try:
-            self.on_event(RoleEvent(kind=kind, text=_head(text), tool=tool,
-                                    agent=agent))
+            self.on_event(RoleEvent(kind=kind, text=_head(text),
+                                    tool=_head(tool), agent=_head(agent)))
         except Exception as exc:
             self.render_failures.append(_head(f"{kind}: {exc!r}"))
 

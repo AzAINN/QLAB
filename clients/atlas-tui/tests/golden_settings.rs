@@ -944,8 +944,26 @@ mod cards {
         focus_on(&mut client, "MODELS");
         let body = content(&client.frame(120, 36));
         assert!(body.contains("m switches a model"), "{body}");
-        // Up walks back, and the walk stops at the ends rather than wrapping:
-        // an operator holding an arrow must not find themselves somewhere else.
+        // Both ends of the walk, because the clamp is a comparison and a case
+        // that only reaches it proves nothing: a mutation that wrapped at the
+        // *bottom* survived a version of this test that walked only to the
+        // middle and back. Down past the last card stays on the last card —
+        // an operator holding an arrow must not find themselves back at the
+        // top, which reads as the list having scrolled rather than ended.
+        for _ in 0..12 {
+            press(&mut client, KeyCode::Down);
+        }
+        let body = content(&client.frame(120, 36));
+        assert!(
+            !body.contains("a types a login"),
+            "holding ↓ wrapped round to the first card:\n{body}"
+        );
+        assert_eq!(
+            body_style_of(&client.buffer(120, 36), "UNIVERSE").fg,
+            Some(Theme::truecolor().accent),
+            "the walk did not stop on the last card"
+        );
+        // And the top end, the same way.
         for _ in 0..12 {
             press(&mut client, KeyCode::Up);
         }

@@ -561,8 +561,8 @@ impl Store {
 
     /// Open the door, if this desk needs one and none has been up yet.
     ///
-    /// The predicate is [`Door::wanted`], which is where the honesty about what
-    /// the owner can actually report lives.
+    /// The predicate is [`Door::wanted`]; what "unchosen" means on the wire is
+    /// [`Store::desk_unchosen`], directly below.
     fn consider_door(&mut self) {
         if self.door_settled || self.door.is_some() {
             return;
@@ -570,10 +570,33 @@ impl Store {
         if Door::wanted(
             self.door_forced,
             self.last_snapshot_at.is_some(),
-            self.desk_mode().is_none(),
+            self.desk_unchosen(),
         ) {
             self.door = Some(Door::default());
             self.dirty = true;
+        }
+    }
+
+    /// Whether the desk on the wire is one nobody has chosen.
+    ///
+    /// Two shapes, and they are two different silences:
+    ///
+    /// * **no `desk_mode` block at all** — an owner too old to serve one, or a
+    ///   payload missing it. The desk this client is watching has not been
+    ///   named to it, which is the arm the door shipped with.
+    /// * **`chosen: false`** — the owner saying, in as many words, that the
+    ///   concrete pair it is serving is the fallback nobody picked. This is the
+    ///   state the door was specified against and could not observe until the
+    ///   owner learned to say it.
+    ///
+    /// **`chosen` absent on a block that *is* there is not unchosen.** That is
+    /// every owner built before the field existed, and guessing would open a
+    /// modal over every desk that has already answered — a regression loud
+    /// enough to make the field unshippable. Silence keeps the old reading.
+    fn desk_unchosen(&self) -> bool {
+        match self.desk_mode() {
+            None => true,
+            Some(mode) => mode.chosen == Some(false),
         }
     }
 

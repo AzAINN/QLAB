@@ -137,6 +137,17 @@ pub struct DeskMode {
     pub offline: Option<bool>,
     pub credentials: Option<String>,
     pub credentials_ok: Option<bool>,
+    /// Whether anything ever *named* the pair above — a launcher flag, the
+    /// state file, or a POST — as against the fallback the owner has to serve
+    /// when nobody has.
+    ///
+    /// **Three states, and the third is an owner rather than a desk.** `None`
+    /// is an owner too old to carry the field, which is every owner before D4;
+    /// reading that silence as `false` would say "nobody chose this desk" about
+    /// desks that had, on the one client that opens a modal over the answer. So
+    /// absence keeps whatever the reader did before the field existed, and only
+    /// `Some(false)` is the owner asserting the negative.
+    pub chosen: Option<bool>,
 }
 
 impl DeskMode {

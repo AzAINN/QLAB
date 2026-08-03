@@ -49,6 +49,67 @@ fn a_desk_that_said_what_it_is_pointed_at_opens_no_door() {
 }
 
 #[test]
+fn the_owners_own_word_for_unchosen_is_what_opens_the_door_and_true_is_what_shuts_it() {
+    // The arm this door was specified against, and could not have until the
+    // owner learned to say it: `chosen: false` is a desk serving the fallback
+    // nobody named, which is byte-identical to a chosen `synthetic · simulated`
+    // in every other field.
+    let named = |chosen: &str| {
+        format!(
+            r#", "desk_mode": {{"data": "synthetic", "book": "simulated",
+                                "label": "SYNTHETIC"{chosen}}}"#
+        )
+    };
+    assert!(
+        Client::new(answered(&named(r#", "chosen": false"#)))
+            .frame(120, 36)
+            .contains("THIS DESK"),
+        "the owner said nobody chose this desk and nothing asked"
+    );
+    assert!(
+        !Client::new(answered(&named(r#", "chosen": true"#)))
+            .frame(120, 36)
+            .contains("THIS DESK"),
+        "a desk something named was asked about anyway"
+    );
+    // The third arm, and the one that makes this additive: an owner too old to
+    // carry the field is not an owner reporting an unchosen desk. Reading its
+    // silence as `false` would open a door on every desk that has already
+    // answered, which is the loudest possible regression on an old owner.
+    assert!(
+        !Client::new(answered(&named("")))
+            .frame(120, 36)
+            .contains("THIS DESK"),
+        "an owner that cannot say was read as one saying no"
+    );
+}
+
+#[test]
+fn a_read_only_door_says_whether_the_desk_it_names_was_ever_chosen() {
+    // The glass door's two sentences, which the owner's flag split in two. It
+    // used to have one for a payload with no block at all; a desk that names
+    // itself *and* says nobody chose it would otherwise read as a settled desk
+    // this window had opened a door over for no reason.
+    let unchosen = Client::new(answered(
+        r#", "desk_mode": {"data": "synthetic", "book": "simulated",
+                           "label": "SYNTHETIC", "chosen": false}"#,
+    ))
+    .frame(120, 36);
+    assert!(unchosen.contains("SYNTHETIC"), "{unchosen}");
+    assert!(
+        unchosen.contains("nobody has chosen"),
+        "the door names a desk without saying it is the fallback:\n{unchosen}"
+    );
+    // And the payload that says nothing at all keeps its own sentence.
+    let silent = Client::new(unsaid()).frame(120, 36);
+    assert!(
+        silent.contains("did not say which desk this is"),
+        "{silent}"
+    );
+    assert!(!silent.contains("nobody has chosen"), "{silent}");
+}
+
+#[test]
 fn the_read_only_door_names_the_flag_that_could_answer_it() {
     // A glass window cannot choose, so the door states what it would take
     // rather than offering rows that do nothing.

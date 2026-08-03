@@ -10,24 +10,29 @@
 //! can never leave a desk pointed at a real venue. A third rule of that screen
 //! is deliberately **not** ported, and the section below says why.
 //!
-//! ## What the owner can and cannot say
+//! ## What the owner says, and what it used to be unable to
 //!
 //! The trigger this door was specified against is "the desk has not been
-//! chosen". **The owner cannot report that.** `UISession.__init__` resolves
-//! `desk_mode` as `desk_mode or load_desk_mode() or DEFAULT_DESK_MODE`, and
-//! `desk_mode_payload()` then serves a concrete `data`/`book`/`label` with no
-//! flag saying whether anything was persisted — so a desk nobody has ever
-//! chosen is served, byte for byte, as a desk chosen to be `synthetic ·
-//! simulated`.
+//! chosen", and for one round **the owner could not report that**:
+//! `UISession.__init__` resolved `desk_mode or load_desk_mode() or
+//! DEFAULT_DESK_MODE` and served a concrete `data`/`book`/`label` either way,
+//! so a desk nobody had ever chosen looked byte for byte like one chosen to be
+//! `synthetic · simulated`. The store-driven arm was named for the only thing
+//! it could actually observe — the owner **answered** and said **nothing** —
+//! and `--pick` carried the feature.
 //!
-//! So the store-driven arm is the honest half of that predicate and is named
-//! for what it actually observes: the owner **answered** and said **nothing**
-//! about which desk this is (`last_snapshot_at.is_some() && desk_mode().is_none()`
-//! — an owner too old to serve the block, or a payload missing it). The
-//! operator-driven arm is `--pick`, which is what asks the question on a desk
-//! that did answer. Serving `chosen: bool` from the owner would let the first
-//! arm mean what it was meant to mean; that is an owner-side change and is on
-//! the ledger rather than in this file.
+//! `desk_mode_payload()` now serves `chosen: bool`, computed where the
+//! three-way `or` resolves and set again by `set_desk_mode`, so the arm means
+//! what it was meant to mean. `Store::desk_unchosen` is where the two shapes of
+//! "nobody chose this" are spelled out, including the one that is neither: an
+//! owner too old to carry the field is silent, not negative, and its silence
+//! keeps the reading it had before the field existed.
+//!
+//! The same fact drives the first question's marker. A row is `chosen` only
+//! when something named that half — the operator with a keystroke, or an owner
+//! that says so — and `assumed` otherwise; before the flag, a fallback the
+//! owner had to invent was marked as though somebody had picked it, on the one
+//! screen whose whole subject is that nobody has.
 //!
 //! ## The one rule that did not survive the port
 //!
@@ -192,16 +197,16 @@ impl Door {
     ///
     /// Two arms, and they answer different questions. `forced` is `--pick`: the
     /// operator started this run to choose, so the door opens whatever the desk
-    /// says. The other is the store-driven one — the owner **answered** and
-    /// said **nothing** about which desk this is. See this module's header for
-    /// why that is not the same claim as "nobody has chosen": the owner cannot
-    /// make that one.
+    /// says. The other is the store-driven one, and it now means what it was
+    /// specified to mean — the owner **answered** and this desk is one nobody
+    /// has chosen. `Store::desk_unchosen` owns that word, because which
+    /// payloads count is a fact about the wire rather than about this box.
     ///
     /// `answered` is required on the second arm and not on the first. Without
     /// it every client would open a door in the second before its first poll
     /// lands, on a desk that was about to say exactly which one it is.
-    pub fn wanted(forced: bool, answered: bool, unsaid: bool) -> bool {
-        forced || (answered && unsaid)
+    pub fn wanted(forced: bool, answered: bool, unchosen: bool) -> bool {
+        forced || (answered && unchosen)
     }
 
     /// Which question is up. Public so a test can pin the walk rather than
@@ -244,15 +249,25 @@ impl Door {
     /// keystroke, or the owner in a payload this client can read. A word the
     /// owner sent that is neither of the two this client knows names nothing —
     /// `word` already refuses it, and so does this.
+    ///
+    /// The owner's half is two facts, not one: the word has to be there **and**
+    /// the owner must not be saying that nobody chose it. A concrete
+    /// `synthetic · simulated` with `chosen: false` is the fallback it has to
+    /// serve when the state file is empty, and marking that `chosen` claimed a
+    /// decision nobody had made.
     fn named_data(&self, store: &Store) -> bool {
-        self.data.is_some() || word(store, |mode| mode.data.as_ref(), [SYNTHETIC, LIVE]).is_some()
+        self.data.is_some()
+            || (owner_chose(store)
+                && word(store, |mode| mode.data.as_ref(), [SYNTHETIC, LIVE]).is_some())
     }
 
     /// The same question about the book, asked separately because the two
     /// halves are answered separately: choosing `live` names the data and
     /// leaves the book still assumed.
     fn named_book(&self, store: &Store) -> bool {
-        self.book.is_some() || word(store, |mode| mode.book.as_ref(), [SIMULATED, ALPACA]).is_some()
+        self.book.is_some()
+            || (owner_chose(store)
+                && word(store, |mode| mode.book.as_ref(), [SIMULATED, ALPACA]).is_some())
     }
 
     /// Whether the desk reports a login the Alpaca book could be reached with.
@@ -696,8 +711,17 @@ impl Door {
         let mode = store.desk_mode();
         vec![
             panel_header("this desk"),
+            // Three sentences for the three states, because the middle one is
+            // what the owner's flag made observable and is the reason a window
+            // that named its desk can still be looking at this box: a label
+            // alone would read as a settled desk this door had opened over for
+            // no reason.
             Line::from(Span::styled(
                 match mode {
+                    Some(mode) if !owner_chose(store) => format!(
+                        " The owner reports {}, and says nobody has chosen it.",
+                        format::text(mode.label.as_ref()).unwrap_or(MISSING)
+                    ),
                     Some(mode) => format!(
                         " The owner reports {}.",
                         format::text(mode.label.as_ref()).unwrap_or(MISSING)
@@ -865,6 +889,16 @@ fn word(
         .find(|word| word.eq_ignore_ascii_case(said))
 }
 
+/// Whether the pair the owner is serving is one it says somebody named.
+///
+/// `Some(false)` only is the negative — the same rule `Store::desk_unchosen`
+/// states, read here for the marker rather than for the trigger. An owner too
+/// old to carry the flag is silent, and its silence leaves the marker reading
+/// exactly what it read before the field existed.
+fn owner_chose(store: &Store) -> bool {
+    store.desk_mode().and_then(|mode| mode.chosen) != Some(false)
+}
+
 /// Which word a first-question row's marker carries.
 fn mark(named: bool) -> &'static str {
     match named {
@@ -952,6 +986,18 @@ mod tests {
 
     /// A desk whose owner answered with the `desk_mode` block it always sends.
     fn desk(data: &str, book: &str, credentials_ok: bool) -> Store {
+        desk_said(data, book, credentials_ok, Some(true))
+    }
+
+    /// The same desk, with the owner's `chosen` flag in whichever of its three
+    /// states the caller is asking about. Only the armed tests read the marker
+    /// the flag moves; the glass build has no `mode_lines` to read it from.
+    #[cfg(feature = "operator")]
+    fn desk_chosen(data: &str, book: &str, chosen: Option<bool>) -> Store {
+        desk_said(data, book, false, chosen)
+    }
+
+    fn desk_said(data: &str, book: &str, credentials_ok: bool, chosen: Option<bool>) -> Store {
         let mut store = Store::default();
         store.apply(
             AppEvent::Snapshot(Box::new(
@@ -959,6 +1005,7 @@ mod tests {
                     "desk_mode": {
                         "data": data, "book": book,
                         "label": "SYNTHETIC", "offline": data == SYNTHETIC,
+                        "chosen": chosen,
                         "credentials": match credentials_ok {
                             true => "ALPACA_API_KEY_ID PK…4T2C from the environment",
                             false => "no ALPACA_API_KEY_ID in the environment or .env",
@@ -1182,6 +1229,41 @@ mod tests {
         armed(&mut named);
         assert!(said(&Door::default(), &named).contains(CHOSEN));
         assert!(!said(&Door::default(), &named).contains(ASSUMED));
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_pair_the_owner_says_nobody_chose_is_marked_assumed_however_concrete_it_is() {
+        // The state this marker had to guess at until the owner learned to say
+        // it. `synthetic · simulated` with `chosen: false` is a fallback nobody
+        // named, and the words being present is not the same fact as somebody
+        // having picked them — which is the whole reason this door is up.
+        let mut unchosen = desk_chosen(SYNTHETIC, SIMULATED, Some(false));
+        armed(&mut unchosen);
+        let door = Door::default();
+        assert!(
+            said(&door, &unchosen).contains(ASSUMED),
+            "{}",
+            said(&door, &unchosen)
+        );
+        assert!(!said(&door, &unchosen).contains(CHOSEN));
+        // Both sides of the comparison, and the third state with them: `true`
+        // is a choice, and an owner too old to carry the field leaves the
+        // marker reading exactly what it read before this field existed.
+        for chosen in [Some(true), None] {
+            let mut named = desk_chosen(SYNTHETIC, SIMULATED, chosen);
+            armed(&mut named);
+            assert!(
+                said(&door, &named).contains(CHOSEN),
+                "chosen: {chosen:?} lost the marker"
+            );
+            assert!(!said(&door, &named).contains(ASSUMED));
+        }
+        // And one keystroke is a decision whatever the owner said: the operator
+        // naming the half is the other producer this marker reads.
+        let mut door = Door::default();
+        press(&mut door, KeyCode::Enter, &mut unchosen);
+        assert!(said(&door, &unchosen).contains(CHOSEN));
     }
 
     #[cfg(feature = "operator")]

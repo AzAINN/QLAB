@@ -777,6 +777,7 @@ def _predictors_block(context: Mapping) -> list[str]:
     if isinstance(champion, Mapping):
         out.append("  champion: " + _predictor_line(champion, board))
         out.extend(_champion_caveats(champion, board))
+        out.extend(_selection_null_lines(board))
     else:
         out.append("  champion: no model was admitted. The board ran and "
                    "admitted nothing — that is its result, not a missing value.")
@@ -793,6 +794,68 @@ def _predictors_block(context: Mapping) -> list[str]:
     ranking = list(board.get("ranking") or ())
     if ranking:
         out.append("  ranked: " + ", ".join(str(m) for m in ranking))
+    return out
+
+
+def _selection_null_lines(board: Mapping) -> list[str]:
+    """Where the champion sits against what the same procedure scores on noise.
+
+    The champion is a maximum over seven tuned models judged by a per-model
+    bar, so the bar cannot carry the claim. Measured on 100 pure-noise
+    panels, this procedure admitted a champion 66 times, 39 of them
+    quantum-mapped, with a median top mean IC of +0.21 — above the live
+    desk's admitted champion at +0.178, and 84 of 100 cleared the 0.03 bar.
+    Without the null in front of it, a reader takes `usable: true` for a
+    finding, which is the same over-reading `_champion_caveats` exists to
+    prevent one level down.
+    """
+    established = board.get("champion_established")
+    null = board.get("selection_null")
+    if not isinstance(null, Mapping) or not null:
+        # A board that predates the null. Silence here would leave the
+        # admission reading as established by default.
+        return ["    selection null: NOT RECORDED by this run. Whether noise "
+                "reproduces this champion is unknown, which is not the same "
+                "as it having been tested and held up."]
+
+    p_value = null.get("p_value")
+    if p_value is None:
+        return [f"    selection null: could not be built "
+                f"({_fmt_optional(null.get('reason'), 'no reason recorded')}). "
+                f"The champion is unpositioned, not established."]
+
+    out = [
+        f"    selection null: the same argmax-over-models procedure run on "
+        f"{_fmt_optional(null.get('trials'), 'an unrecorded number of')} null "
+        f"resamples scored a median of "
+        f"{_fmt_optional(null.get('null_median_max_mean_ic'), 'unknown')} "
+        f"(best {_fmt_optional(null.get('null_max_mean_ic'), 'unknown')}) "
+        f"against this run's {_fmt_optional(null.get('observed_max_mean_ic'), 'unknown')}"
+        f" — p={p_value}"
+    ]
+    if established is True:
+        out.append("    the champion beats its own null: the selection is "
+                   "established at the 0.05 level. It is still advisory.")
+        resolution = null.get("p_value_resolution")
+        if isinstance(resolution, (int, float)) and isinstance(
+                p_value, (int, float)) and p_value <= 2 * resolution:
+            # p is on a grid of width 1/(T+1), so a verdict this close to the
+            # floor rests on one or two null draws.
+            out.append(
+                f"    but p is within one step of this null's resolution "
+                f"({resolution}): with "
+                f"{_fmt_optional(null.get('exceedances'), 'an unrecorded number of')}"
+                f" exceedance(s), one more would move the verdict. Treat it "
+                f"as marginal and re-run with more trials before relying on "
+                f"it.")
+    elif established is False:
+        out.append("    NOT ESTABLISHED: noise reproduces a champion this "
+                   "good at least this often, so `usable: true` here is the "
+                   "fixed bar being cleared, not evidence of skill. Do not "
+                   "report the augmentation as working on this board.")
+    else:
+        out.append("    whether the champion beats its null was not recorded "
+                   "by this run — unknown, not established.")
     return out
 
 

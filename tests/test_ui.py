@@ -3779,3 +3779,56 @@ def test_the_control_split_matches_what_the_kernel_code_actually_does():
         assert not np.allclose(mapped, raw), (
             f"{kind} is classified as augmented but added nothing to the "
             "raw Gram")
+
+
+def test_the_summary_carries_whether_the_champion_beat_its_own_null(session):
+    """`usable` is a fixed per-model bar applied to a selected maximum.
+
+    Measured: on 100 noise panels the board's own procedure admitted a
+    champion 66 times and 84 cleared the 0.03 mean_ic bar. So the bar cannot
+    carry the claim, and a summary that ships `usable: true` without the
+    null ships the same over-reading this file already fixed once for the
+    missing admission bar.
+    """
+    _board_run(session, champion_established=False,
+               selection_null={"trials": 24, "p_value": 0.36,
+                               "observed_max_mean_ic": 0.178,
+                               "null_median_max_mean_ic": 0.139,
+                               "reason": "noise reproduces this routinely"})
+    summary = session.predictor_board_summary()
+    assert summary["champion_established"] is False
+    assert summary["selection_null"]["p_value"] == 0.36
+
+
+def test_a_board_predating_the_null_says_so_rather_than_claiming_established(session):
+    """Absent must not read as either established or refuted."""
+    _board_run(session)  # no champion_established key at all
+    summary = session.predictor_board_summary()
+    assert summary["champion_established"] is None
+    assert summary["selection_null"] is None
+
+
+def test_the_panel_reason_does_not_call_a_noise_champion_admitted_and_stop(session):
+    """The operator-facing reason is the one sentence most likely to be read.
+
+    "kernel:angle was admitted: it cleared both admission thresholds" is true
+    and, on its own, misleading: 84 of 100 pure-noise panels cleared that
+    same mean_ic bar. If the null refuted the champion, the reason has to
+    say so in the same breath, not leave it to a field further down.
+    """
+    _board_run(session, champion_established=False,
+               selection_null={"trials": 24, "p_value": 0.36, "exceedances": 8,
+                               "p_value_resolution": 0.04,
+                               "observed_max_mean_ic": 0.178,
+                               "null_median_max_mean_ic": 0.139})
+    detail = session.predictor_board_detail()
+    assert detail["champion_established"] is False
+    assert "not established" in detail["reason"].lower()
+    assert "0.36" in detail["reason"]
+
+
+def test_the_panel_says_when_no_null_was_run_rather_than_implying_one_held(session):
+    _board_run(session)
+    detail = session.predictor_board_detail()
+    assert detail["champion_established"] is None
+    assert "not" in detail["reason"].lower()

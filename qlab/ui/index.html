@@ -530,16 +530,50 @@ async function loadResearch(){
     $('#resBody').innerHTML=lane;return;}
   const bar=b.admission&&b.admission.mean_ic_strictly_above;
   $('#resStatus').className='';
+  // The admission badge is the loudest claim on this panel. 66 of 100 pure
+  // noise panels produced an admitted champion, so green-on-admitted alone
+  // reads as a result where there may be none. Establishment sets the colour.
+  const est=b.champion_established;
+  const nul=b.selection_null||{};
+  const estBadge=b.admitted_any
+    ? (est===true ? badge('null-tested: p='+num(nul.p_value,3),'good')
+     : est===false ? badge('NOT established vs noise: p='+num(nul.p_value,3),'bad')
+     : badge('never null-tested','warn'))
+    : '';
   $('#resStatus').innerHTML=`${badge(b.admitted_any?'admitted: '+b.champion:'nothing admitted',
-      b.admitted_any?'good':'warn')}
+      b.admitted_any?(est===false?'warn':'good'):'warn')}
+    ${estBadge}
     ${badge((b.source||'?')+' · '+(b.as_of||'?'),'')}
     ${badge(b.n_obs+' obs · '+b.n_folds+' folds','')}
     <div class="muted" style="font-size:12.5px;margin-top:6px">${b.reason||''}</div>`;
+
   const all=b.models.flatMap(m=>m.per_fold||[]).map(Math.abs);
   const mx=all.length?Math.max(...all):1;
   const order=b.ranking&&b.ranking.length
     ? b.ranking.map(id=>b.models.find(m=>m.model_id===id)).filter(Boolean) : b.models;
-  $('#resBody').innerHTML=lane+`
+  // Selection null. The admission bar is per-model but the champion is the
+  // argmax over 7 tuned models, so the bar alone says nothing about the
+  // winner. This card shows the winner against its own selection procedure.
+  const nullCard = nul && nul.trials
+    ? `<div class="card" style="margin-top:14px"><h3>Selection null — could noise do this?</h3>
+       ${[['Method',nul.method||'—'],
+          ['Null trials',nul.trials],
+          ['This run&rsquo;s selected IC',num(nul.observed_max_mean_ic,4)],
+          ['Null median selected IC',num(nul.null_median_max_mean_ic,4)],
+          ['Null best selected IC',num(nul.null_max_mean_ic,4)],
+          ['Runs matching or beating it',
+            (nul.exceedances??'?')+' of '+nul.trials],
+          ['p-value',num(nul.p_value,3)+(nul.p_value_resolution
+             ? ` (grid of ${num(nul.p_value_resolution,3)} — no finer p exists at ${nul.trials} trials)` : '')],
+          ['Established at 0.05',
+            est===true?'yes':est===false?'NO':'not tested']]
+         .map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('')}
+       <div class="note-line" style="margin-top:8px">${nul.reason||''}</div></div>`
+    : `<div class="card" style="margin-top:14px"><h3>Selection null</h3>
+       <div class="note-line">This board carries no selection null, so whether
+       noise reproduces its champion is unknown — which is not the same as it
+       having been tested and held up.${nul&&nul.reason?' '+nul.reason:''}</div></div>`;
+  $('#resBody').innerHTML=lane+nullCard+`
   <div class="card" style="margin-top:14px"><h3>Target &amp; protocol</h3>
     ${[['Target',b.target||'—'],['Horizon',(b.horizon_days??'—')+' d'],
        ['Embargo',(b.embargo_days??'—')+' d'],['Baseline (control)',b.baseline||'—'],

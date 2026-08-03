@@ -1364,6 +1364,14 @@ class UISession:
             # rather than trusted, and the sample it was measured on, so a
             # t-statistic arrives with its n.
             "admission": board.get("admission"),
+            # Admission is a fixed per-model bar applied to a maximum over
+            # seven tuned models. Measured on 100 noise panels, that
+            # procedure admitted a champion 66 times and 84 cleared the 0.03
+            # bar, so `usable` alone cannot carry the claim. `.get` returns
+            # None for a board that predates the null, which is neither
+            # established nor refuted and must not read as either.
+            "champion_established": board.get("champion_established"),
+            "selection_null": board.get("selection_null"),
             "n_obs": board.get("n_obs"),
             "n_folds": board.get("n_folds"),
             "target": board.get("target"),
@@ -1488,12 +1496,38 @@ class UISession:
 
         rows = [_row(e) for e in models if isinstance(e, dict)]
         admitted = bool(board.get("admitted_any"))
+        established = board.get("champion_established")
+        null = board.get("selection_null")
+        p_value = null.get("p_value") if isinstance(null, dict) else None
         if admitted and champion_id:
             reason = (
                 f"{champion_id} was admitted: it cleared both admission "
                 f"thresholds. Admitted is not promoted — the authority gate "
                 f"never reads this board."
             )
+            # The admission bar is a per-model threshold applied to the best
+            # of seven tuned models. Measured on 100 pure-noise panels, 84
+            # cleared the 0.03 mean_ic bar and 66 produced an admitted
+            # champion. So "cleared the bar" cannot stand alone in the one
+            # sentence most likely to be read.
+            if established is False:
+                reason += (
+                    f" NOT ESTABLISHED: the same selection procedure run on "
+                    f"null resamples reproduces a champion this good "
+                    f"about as often (p={p_value}), so this is the fixed bar "
+                    f"being cleared, not evidence of skill."
+                )
+            elif established is True:
+                reason += (
+                    f" It also beat its own selection null (p={p_value}), so "
+                    f"the ranking is not obviously luck."
+                )
+            else:
+                reason += (
+                    " Whether noise reproduces it was NOT tested by this run,"
+                    " which is not the same as it having been tested and"
+                    " held up."
+                )
         else:
             reason = (
                 "the board ran and admitted no model. That is its result, "
@@ -1508,6 +1542,10 @@ class UISession:
             "lane": lane,
             "reason": reason,
             "admitted_any": admitted,
+            # None means no null was built, and must stay distinguishable from
+            # False: "not tested" is not "tested and refuted".
+            "champion_established": established,
+            "selection_null": null,
             "champion": champion_id,
             "baseline": baseline_id,
             "admission": board.get("admission"),

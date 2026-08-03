@@ -24,7 +24,7 @@ from qlab.operator.reasoner import (ANSWER_MAX_COLS, ANSWER_MAX_LINES,
                                     ArchiveEvidence, ParsedView, ReasonerRefused,
                                     answer, compose_reasoner_prompt, fit_answer,
                                     offer_for, parse_view, reason)
-from qlab.operator.reasoner import _startable_block
+from qlab.operator.reasoner import _predictors_block, _startable_block
 from qlab.operator.templates import TEMPLATES, TemplateNotAllowed
 
 AS_OF = "2026-07-31T09:00:00+00:00"
@@ -1466,3 +1466,83 @@ def test_the_queued_block_says_stale_rather_than_implying_a_permit_problem():
          "reason": "stale: this trigger fired on 2026-07-19, 15 days before"}]}))
     assert "stale" in text.lower()
     assert "2026-07-19" in text
+
+
+def test_the_prompt_positions_the_champion_against_its_own_null():
+    """An admitted champion that noise reproduces routinely is not a finding.
+
+    Measured on 100 pure-noise panels: the board's selection procedure
+    admitted a champion 66 times, 39 of them quantum-mapped, median top
+    mean_ic +0.21 against the live desk's admitted +0.178. If the prompt
+    renders `usable: true` and the admission bar without the null, Atlas
+    reads a selected maximum as a result -- the exact over-reading the
+    admission-bar work in this file was meant to end.
+    """
+    board = {
+        "status": "ok", "as_of": "2026-07-31", "admitted_any": True,
+        "n_obs": 671, "n_folds": 5,
+        "admission": {"mean_ic_strictly_above": 0.03,
+                      "ic_stability_strictly_above": 0.5},
+        "champion_established": False,
+        "selection_null": {"trials": 24, "p_value": 0.36,
+                           "observed_max_mean_ic": 0.178,
+                           "null_median_max_mean_ic": 0.139,
+                           "null_max_mean_ic": 0.51},
+        "champion": {"model_id": "kernel:angle", "family": "kernel",
+                     "variant": "angle", "mean_ic": 0.178,
+                     "ic_stability": 0.54, "usable": True,
+                     "paired_t_vs_baseline": 0.237, "per_fold": []},
+        "baseline": {"model_id": "ridge:none", "mean_ic": 0.110,
+                     "usable": False, "per_fold": []},
+        "ranking": ["kernel:angle", "ridge:none"],
+    }
+    text = "\n".join(_predictors_block({"predictors": board}))
+    assert "0.36" in text, "the null p-value never reaches Atlas"
+    low = text.lower()
+    assert "not established" in low or "not distinguishable" in low
+    # The null median must be there: "p=0.36" alone does not convey that
+    # noise scores about the same as the champion.
+    assert "0.139" in text
+
+
+def test_a_board_with_no_null_is_not_described_as_established():
+    """Absent is not refuted and is certainly not established."""
+    board = {
+        "status": "ok", "admitted_any": True, "n_obs": 671, "n_folds": 5,
+        "champion": {"model_id": "kernel:angle", "mean_ic": 0.178,
+                     "usable": True, "per_fold": []},
+        "baseline": {"model_id": "ridge:none", "mean_ic": 0.110,
+                     "usable": False, "per_fold": []},
+        "ranking": ["kernel:angle"],
+    }
+    text = "\n".join(_predictors_block({"predictors": board}))
+    low = text.lower()
+    assert "not recorded" in low or "did not run" in low or "no null" in low
+    assert "established: true" not in low
+
+
+def test_a_p_value_at_the_null_resolution_is_flagged_as_marginal():
+    """`established: true` at p=0.04 from 24 trials rests on zero exceedances.
+
+    One more null draw over the line and the verdict flips. Measured: with
+    24 trials the achievable p-values are 0.04, 0.08, 0.12 and nothing
+    between. A reader shown a bare "established" cannot see that it turned
+    on a single resample.
+    """
+    board = {
+        "status": "ok", "admitted_any": True, "n_obs": 671, "n_folds": 5,
+        "champion_established": True,
+        "selection_null": {"trials": 24, "p_value": 0.04, "exceedances": 0,
+                           "p_value_resolution": 0.04,
+                           "observed_max_mean_ic": 0.31,
+                           "null_median_max_mean_ic": 0.088,
+                           "null_max_mean_ic": 0.29},
+        "champion": {"model_id": "kernel:angle", "mean_ic": 0.31,
+                     "usable": True, "per_fold": []},
+        "baseline": {"model_id": "ridge:none", "mean_ic": 0.11,
+                     "usable": False, "per_fold": []},
+        "ranking": ["kernel:angle"],
+    }
+    text = "\n".join(_predictors_block({"predictors": board}))
+    assert "marginal" in text.lower()
+    assert "resolution" in text.lower()

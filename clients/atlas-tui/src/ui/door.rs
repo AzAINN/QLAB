@@ -65,7 +65,7 @@
 //! the same rule as every other operator affordance here. It is a statement,
 //! not a question, so any key dismisses it, exactly as the help overlay does.
 
-use crate::cmd::{self, Command, ModelChoice, Offer};
+use crate::cmd::{self, Command, ModelChoice};
 use crate::format::{self, MISSING};
 use crate::model::DeskMode;
 use crate::store::{Store, ViewId};
@@ -331,7 +331,7 @@ impl Door {
             for offer in cmd::offers(surface, store) {
                 rows.push(ModelRow::Offer {
                     surface,
-                    current: is_current(store, surface, &offer),
+                    current: offer.running(store, surface),
                     value: offer.value().to_string(),
                     refusal: offer.refusal().map(str::to_string),
                     choice: offer.choice(),
@@ -862,27 +862,6 @@ enum ModelRow {
     },
     /// Leave every surface as the desk has it.
     Keep,
-}
-
-/// Whether one offer is what a surface is already pointed at.
-fn is_current(store: &Store, surface: &str, offer: &Offer) -> bool {
-    let Some(ModelChoice::Pair { backend, model }) = offer.choice() else {
-        return false;
-    };
-    let Some(llm) = store.llm() else {
-        return false;
-    };
-    let held = match surface {
-        cmd::WORKFORCE => llm.workforce.as_ref(),
-        _ => llm.reasoner.as_ref(),
-    };
-    let Some(held) = held else {
-        return false;
-    };
-    // The owner's own spelling on both sides — this compares two answers it
-    // gave, not an answer against something typed here.
-    format::text(held.backend.as_ref()) == Some(backend.as_str())
-        && format::text(held.model.as_ref()) == Some(model.as_str())
 }
 
 /// A desk mode word the owner sent, matched against the two this client knows.

@@ -193,6 +193,45 @@ fn a_window_that_cannot_switch_the_desk_does_not_offer_the_way_to() {
     assert!(content(&frame).contains("read-only"), "{frame}");
 }
 
+#[test]
+fn every_card_answers_for_itself_and_no_card_is_marked_as_listening() {
+    // The pane-level footer retired: one line under the desk card used to speak
+    // for six cards, and once each card had its own keys that line was either
+    // wrong about five of them or silent about all six. Each card now carries
+    // its own, on the rule its block already reserves — a footer competing for
+    // *rows* would be the first thing a short column dropped, which is the
+    // failure the MODELS stamp was moved to the top over.
+    let frame = settings().frame(120, 36);
+    let body = content(&frame);
+    // Six cards, six statements, and the desk's is the specific one: a glass
+    // window's whole answer is that it points the desk nowhere.
+    assert!(
+        body.contains("read-only — this window cannot switch the desk"),
+        "{body}"
+    );
+    assert_eq!(
+        body.matches("read-only").count(),
+        6,
+        "one footer per card, and this pane draws six:\n{body}"
+    );
+    // And nothing is tinted. Focus is where a key would land, so a window with
+    // no keys marks no card — a highlight that never moves under the arrows
+    // reads as a hung client, which is why AUDIT's arrows decline rather than
+    // swallow.
+    // Read off the title rather than the bar: every panel on the workstation
+    // opens with an accent `▌`, so the bar cannot say which card is listening.
+    // Uppercase titles the nav rail does not also spell, or the rail's own
+    // `DESK` would answer for the card's.
+    let buf = settings().buffer(120, 36);
+    for card in ["POLICY", "SYSTEM", "MODELS"] {
+        assert_eq!(
+            body_style_of(&buf, card).fg,
+            Some(Theme::truecolor().text_primary),
+            "{card} is marked as listening in a window that hears nothing"
+        );
+    }
+}
+
 // -- the models card --------------------------------------------------------
 //
 // The clock these read against is passed in, never read here: `Store::wall` is
@@ -816,5 +855,246 @@ mod armed {
             Some(Theme::truecolor().text_secondary),
             "a login the owner can read is not a warning"
         );
+    }
+}
+
+// -- the cards an armed window can reach ------------------------------------
+
+#[cfg(feature = "operator")]
+mod cards {
+    use super::*;
+    use atlas::bus::AppEvent;
+    use atlas::cmd::{Command, ModelChoice};
+    use atlas::model::LlmCatalog;
+    use atlas::store::Posture;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    /// SETTINGS on the captured desk, armed, with the catalog the picker reads
+    /// already folded in — and one frame drawn, because every floor on this
+    /// pane is read off the area the last frame published.
+    fn armed() -> Client {
+        let mut store = super::harness::fixture_store();
+        store.posture = Posture::Operator;
+        store.apply(
+            AppEvent::Backends(
+                serde_json::from_str::<LlmCatalog>(include_str!("fixtures/llm_backends.json"))
+                    .unwrap(),
+            ),
+            std::time::Instant::now(),
+        );
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('7'));
+        client.frame(120, 36);
+        client
+    }
+
+    fn press(client: &mut Client, code: KeyCode) -> Option<Command> {
+        let acted = atlas::ui::shell::on_key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        );
+        client.frame(120, 36);
+        acted
+    }
+
+    /// Walk the focus down to the card whose title this names.
+    fn focus_on(client: &mut Client, title: &str) {
+        for _ in 0..8 {
+            if body_style_of(&client.buffer(120, 36), title).fg == Some(Theme::truecolor().accent) {
+                return;
+            }
+            press(client, KeyCode::Down);
+        }
+        panic!(
+            "the focus never reached {title}:\n{}",
+            client.frame(120, 36)
+        );
+    }
+
+    #[test]
+    fn the_arrows_walk_the_cards_and_each_one_answers_for_its_own_keys() {
+        // The footer is on the card that is *listening*, never on the five that
+        // are not: a line naming `a` under a card where `a` does nothing is an
+        // instruction with nothing behind it, which is the same fault as
+        // offering an operator key to a glass window.
+        let mut client = armed();
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("a types a login"),
+            "the desk card opens listening:\n{body}"
+        );
+        assert_eq!(body.matches("types a login").count(), 1, "{body}");
+
+        // One card down, and the footer moves with the focus. POLICY has no
+        // keys at all, and says so rather than going quiet — silence and "there
+        // is nothing here" are the two readings this pane spends rows to keep
+        // apart.
+        press(&mut client, KeyCode::Down);
+        let body = content(&client.frame(120, 36));
+        assert!(!body.contains("types a login"), "{body}");
+        assert!(body.contains("no keys on this card"), "{body}");
+        assert_eq!(
+            body_style_of(&client.buffer(120, 36), "POLICY").fg,
+            Some(Theme::truecolor().accent),
+            "the header did not follow the focus"
+        );
+
+        // And the card the picker lives on names the key that opens it.
+        focus_on(&mut client, "MODELS");
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("m switches a model"), "{body}");
+        // Up walks back, and the walk stops at the ends rather than wrapping:
+        // an operator holding an arrow must not find themselves somewhere else.
+        for _ in 0..12 {
+            press(&mut client, KeyCode::Up);
+        }
+        assert!(content(&client.frame(120, 36)).contains("a types a login"));
+    }
+
+    #[test]
+    fn a_key_reaches_the_card_that_owns_it_and_no_other() {
+        // Both sides of the routing, because a pane that answered every key
+        // from every card would pass a test that only pressed them where they
+        // work — and the footers would be describing a rule the router does not
+        // have.
+        let mut client = armed();
+        assert_eq!(
+            press(&mut client, KeyCode::Char('m')),
+            None,
+            "m is not the desk card's"
+        );
+        assert!(!content(&client.frame(120, 36)).contains("WHICH MINDS"));
+
+        focus_on(&mut client, "MODELS");
+        assert_eq!(
+            press(&mut client, KeyCode::Char('a')),
+            None,
+            "a opened the login form from a card that does not own it"
+        );
+        assert!(!content(&client.frame(120, 36)).contains("ALPACA LOGIN"));
+        assert_eq!(
+            press(&mut client, KeyCode::Char('t')),
+            None,
+            "t probed the venue from a card that does not own it"
+        );
+    }
+
+    #[test]
+    fn opening_the_switcher_asks_the_owner_what_it_can_run_and_shows_what_it_said() {
+        // The catalog is a *reading*, and the one on the store may be an hour
+        // old — so the key that opens the box refetches on the way in, exactly
+        // as the door's first question does on its transition and as the
+        // command line does when it enters the model scope.
+        let mut client = armed();
+        focus_on(&mut client, "MODELS");
+        assert_eq!(
+            press(&mut client, KeyCode::Char('m')),
+            Some(Command::Backends)
+        );
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("WHICH MINDS"), "{body}");
+        // The workforce is offered `claude` and no tier beside it: the tier map
+        // owns that model, so `claude · haiku` would be a choice that changed
+        // nothing. Inherited from `cmd::offers` rather than restated here.
+        assert!(body.contains("reasoner"), "{body}");
+        assert!(body.contains("workforce"), "{body}");
+        assert!(!body.contains("workforce  claude:haiku"), "{body}");
+        // Esc leaves every surface as the desk has it.
+        press(&mut client, KeyCode::Esc);
+        assert!(!content(&client.frame(120, 36)).contains("WHICH MINDS"));
+    }
+
+    #[test]
+    fn choosing_a_row_sends_the_pair_the_owner_named_and_a_down_backend_sends_nothing() {
+        let mut client = armed();
+        focus_on(&mut client, "MODELS");
+        press(&mut client, KeyCode::Char('m'));
+        // The cursor opens on what the surface is running, so Enter with no
+        // arrows at all sends the desk's own pair — an operator who opens the
+        // box and changes their mind changes nothing.
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::SetLlm {
+                surface: "reasoner".into(),
+                choice: ModelChoice::Pair {
+                    backend: "ollama".into(),
+                    model: "qwen2.5:7b".into()
+                }
+            }),
+            "the cursor did not open on what the desk is using"
+        );
+        // And the box stays up, because both surfaces are chosen from it.
+        assert!(content(&client.frame(120, 36)).contains("WHICH MINDS"));
+    }
+
+    #[test]
+    fn a_backend_the_desk_cannot_reach_stays_on_the_list_with_the_owners_reason() {
+        // Shown, never hidden, and refused in the owner's own sentence — the
+        // rule `/model` and the startup door both submit to, held here because
+        // all three read one producer.
+        let mut store = super::harness::fixture_store();
+        store.posture = Posture::Operator;
+        store.apply(
+            AppEvent::Backends(
+                serde_json::from_value(serde_json::json!({
+                    "backends": [
+                        {"name": "claude", "available": true, "reason": "claude CLI on PATH",
+                         "models": ["inherit", "haiku"]},
+                        {"name": "ollama", "available": false,
+                         "reason": "ollama is not running at http://127.0.0.1:11434 — start it \
+                                    with `ollama serve`",
+                         "models": []}
+                    ],
+                    "probed_at": PROBED
+                }))
+                .unwrap(),
+            ),
+            std::time::Instant::now(),
+        );
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('7'));
+        client.frame(120, 36);
+        focus_on(&mut client, "MODELS");
+        press(&mut client, KeyCode::Char('m'));
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("ollama"), "a down backend vanished:\n{body}");
+        // The cursor opens at the top here — this desk runs a model the down
+        // daemon can no longer serve, so no row is the one it is running — and
+        // the reasoner's third offer is the daemon itself.
+        press(&mut client, KeyCode::Down);
+        press(&mut client, KeyCode::Down);
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            None,
+            "a backend the desk cannot reach was chosen"
+        );
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("ollama serve"),
+            "the owner's reason never showed:\n{body}"
+        );
+        // Both sides of that guard, in the same box: the row above is one the
+        // desk can run, and Enter there sends rather than refusing.
+        press(&mut client, KeyCode::Up);
+        assert!(
+            press(&mut client, KeyCode::Enter).is_some(),
+            "the refusal swallowed a choice the owner can serve"
+        );
+    }
+
+    #[test]
+    fn the_focused_models_card_renders_at_120x36() {
+        let mut client = armed();
+        focus_on(&mut client, "MODELS");
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn the_model_switcher_renders_at_120x36() {
+        let mut client = armed();
+        focus_on(&mut client, "MODELS");
+        press(&mut client, KeyCode::Char('m'));
+        insta::assert_snapshot!(client.frame(120, 36));
     }
 }

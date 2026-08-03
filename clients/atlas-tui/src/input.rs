@@ -83,6 +83,9 @@ pub enum Source {
     /// keys that *open* it and the keys *inside* it are two routers, and one
     /// section over both would describe the form with a row about the pane.
     SettingsLogin,
+    /// SETTINGS' model switcher, while it is open. The third router in that
+    /// file, and the same rule again.
+    SettingsModels,
     /// The confirmation box, which outranks everything but Ctrl-C.
     Confirm,
     /// The startup door, which outranks even that — it is up before there is
@@ -94,7 +97,7 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 15] = [
+    pub const ALL: [Source; 16] = [
         Source::Shell,
         Source::Command,
         Source::Help,
@@ -108,6 +111,7 @@ impl Source {
         Source::View(ViewId::Audit),
         Source::View(ViewId::Settings),
         Source::SettingsLogin,
+        Source::SettingsModels,
         Source::Confirm,
         Source::Door,
     ];
@@ -122,6 +126,7 @@ impl Source {
             Source::WorkforceAsk => "WORK · the question row",
             Source::WorkforcePicker => "WORK · the template picker",
             Source::SettingsLogin => "SETT · the alpaca login form",
+            Source::SettingsModels => "SETT · the model switcher",
             Source::Confirm => "a confirmation box",
             Source::Door => "the startup door",
         }
@@ -171,6 +176,7 @@ impl Source {
             // the form under it is the section below.
             Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "keys"),
             Source::SettingsLogin => ("ui/views/settings.rs", "", "form_key"),
+            Source::SettingsModels => ("ui/views/settings.rs", "", "switch_key"),
             Source::Confirm => ("ui/widgets/confirm.rs", "", "on_key"),
             Source::Door => ("ui/door.rs", "", "on_key"),
         }
@@ -427,17 +433,39 @@ pub const KEYMAP: &[Binding] = &[
         "reject it — R, because the shell owns lowercase r",
     ),
     // -- SETT -------------------------------------------------------------
+    //
+    // The three keys below are the *cards'*, not the pane's: each is refused
+    // unless the card that owns it is the one the arrows left the focus on, and
+    // that card's own footer says so on screen.
+    w(
+        "Up",
+        "↑",
+        Source::View(ViewId::Settings),
+        "the card above — the focused card's header is tinted",
+    ),
+    w(
+        "Down",
+        "↓",
+        Source::View(ViewId::Settings),
+        "the card below",
+    ),
     w(
         "Char('a')",
         "a",
         Source::View(ViewId::Settings),
-        "type an Alpaca paper login — the desk stores it, the book is unchanged",
+        "on DESK: type an Alpaca paper login — the book is unchanged",
     ),
     w(
         "Char('t')",
         "t",
         Source::View(ViewId::Settings),
-        "ask the venue whether the stored login works",
+        "on DESK: ask the venue whether the stored login works",
+    ),
+    w(
+        "Char('m')",
+        "m",
+        Source::View(ViewId::Settings),
+        "on MODELS: choose which mind each surface runs",
     ),
     // -- SETT, the alpaca login form --------------------------------------
     w(
@@ -464,6 +492,21 @@ pub const KEYMAP: &[Binding] = &[
         "Esc",
         Source::SettingsLogin,
         "closes the form and clears both fields",
+    ),
+    // -- SETT, the model switcher -----------------------------------------
+    w("Up", "↑", Source::SettingsModels, "the offer above"),
+    w("Down", "↓", Source::SettingsModels, "the offer below"),
+    w(
+        "Enter",
+        "Enter",
+        Source::SettingsModels,
+        "points that surface at that model — a backend the desk cannot reach says why",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::SettingsModels,
+        "closes it — every surface is left as the desk has it",
     ),
     // -- the confirmation box ---------------------------------------------
     w(

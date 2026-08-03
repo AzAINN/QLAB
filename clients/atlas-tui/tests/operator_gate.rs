@@ -253,6 +253,42 @@ fn there_is_one_box_a_credential_is_typed_into_however_it_was_opened() {
     );
 }
 
+#[test]
+fn every_surface_that_offers_a_model_reads_the_one_producer() {
+    // Three surfaces now put the same list in front of an operator — the
+    // `/model` strip, the startup door's second question, and SETTINGS' model
+    // switcher — and the honesty rules on that list are not obvious ones: a
+    // backend the desk cannot reach stays *on* it with the owner's own
+    // sentence and no choice behind it, and the workforce is offered `claude`
+    // alone because the tier map owns its model.
+    //
+    // Pinned by module path rather than by behaviour, for the reason the login
+    // form is: a surface that built its own list would render identically on
+    // the day it was written and would drift on the first rule that changed —
+    // and it would drift *quietly*, because each surface's own tests would keep
+    // passing against its own copy.
+    assert_eq!(
+        production_files_mentioning("fn offers("),
+        vec!["cmd.rs".to_string()],
+        "the offers list is produced in one place"
+    );
+    assert_eq!(
+        production_files_mentioning("cmd::offers("),
+        vec!["ui/door.rs".to_string(), "ui/views/settings.rs".to_string()],
+        "a surface is drawing a model list it built itself"
+    );
+    // And the mark that says which row a surface is already running, which is
+    // the other half of the same list: two copies of "which held pair equals
+    // this offer" is two chances for one of them to mark the wrong row.
+    assert_eq!(
+        production_files_mentioning(".running(store"),
+        vec!["ui/door.rs".to_string(), "ui/views/settings.rs".to_string()],
+    );
+    // The searches really ran: a walker that could not read the tree returns
+    // nothing, which would read as a crate with no model surfaces at all.
+    assert!(production_files_mentioning("ModelChoice::Pair").contains(&"cmd.rs".to_string()));
+}
+
 // -- the glass build --------------------------------------------------------
 
 #[cfg(not(feature = "operator"))]

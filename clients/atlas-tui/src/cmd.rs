@@ -852,6 +852,34 @@ impl Offer {
         }
     }
 
+    /// Whether this offer is what a surface is already pointed at.
+    ///
+    /// Here rather than beside either caller: the startup door and SETTINGS'
+    /// switcher both mark the row a surface is running, and two copies of
+    /// "which held pair equals this offer" is two chances for one of them to
+    /// start marking the wrong one — the same reason `offers` itself is one
+    /// producer for three surfaces.
+    ///
+    /// The owner's own spelling on both sides. This compares two answers it
+    /// gave, never an answer against something typed here, so nothing is folded.
+    pub(crate) fn running(&self, store: &Store, surface: &str) -> bool {
+        let Some(ModelChoice::Pair { backend, model }) = self.choice() else {
+            return false;
+        };
+        let held = match store.llm() {
+            Some(llm) => match surface {
+                WORKFORCE => llm.workforce.as_ref(),
+                _ => llm.reasoner.as_ref(),
+            },
+            None => return false,
+        };
+        let Some(held) = held else {
+            return false;
+        };
+        crate::format::text(held.backend.as_ref()) == Some(backend.as_str())
+            && crate::format::text(held.model.as_ref()) == Some(model.as_str())
+    }
+
     /// Whether a typed word names this offer.
     ///
     /// **The backend word is matched case-blind and the model id is not.** A

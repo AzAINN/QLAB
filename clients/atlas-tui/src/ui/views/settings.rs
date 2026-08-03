@@ -5,11 +5,20 @@
 //! `/mode` did. Everything on the pane is the owner's own answer; nothing here
 //! is composed, defaulted, or inferred.
 //!
-//! **MODELS is read-only too, and deliberately so for now.** It says which
-//! minds the desk is using and how fresh that answer is; changing them is the
-//! owner's own route, and the keys that reach it arrive with D4. Until then
-//! this pane claims no key for it — an affordance that looked like a control
-//! and did nothing would be worse than none.
+//! **The cards are the routing.** Six of them, and the two that carry keys
+//! carry different ones, so a pane-level key list was either wrong about four
+//! cards or silent about all six. The arrows move a focus between cards, the
+//! focused card's header is tinted, and a key means whatever *that* card says
+//! it means — which is why each card states its own keys on the rule its block
+//! already reserves rather than in a row it would have to win from its content.
+//! A footer competing for rows is the first thing a short column drops, and
+//! what it would drop here is the sentence that says whether there is a key at
+//! all.
+//!
+//! Focus is a fact about an armed window. A glass one marks no card — a
+//! highlight that never moves under the arrows reads as a hung client, which is
+//! the reason AUDIT's arrows decline rather than swallow — and every card there
+//! says `read-only` instead, which is the pane-level line the cards inherited.
 //!
 //! Absence is the rule this view is mostly about. A `max_weight` rendered as
 //! `0.0%` because the owner did not send one is a mandate that forbids holding
@@ -39,6 +48,8 @@
 //! row is the status display it has always been.
 
 use crate::cmd::Command;
+#[cfg(feature = "operator")]
+use crate::cmd::{self, ModelChoice};
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
 use crate::model::{Constraints, DeskMode, LlmConfig, LlmSurface, System};
@@ -53,7 +64,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Block, Paragraph, Wrap},
     Frame,
 };
 use std::time::Instant;
@@ -88,6 +99,24 @@ const FORM_MIN_H: u16 = 14;
 #[cfg(feature = "operator")]
 const FORM_W: u16 = 60;
 
+/// The switcher's own floor, in rows of the view's area.
+///
+/// Lower than [`FORM_MIN_H`] because it holds less: a header, a blank, at least
+/// one offer, the reasoner's switch, and the key line. Below this the box would
+/// have room for a header and nothing else while still taking every keystroke,
+/// which is the armed-and-invisible state every box on this client refuses at.
+#[cfg(feature = "operator")]
+const SWITCH_MIN_H: u16 = 12;
+
+/// Its width. Wide enough for the surface column, the longest `backend:model`
+/// pair the owner serves, and the `now` marker beside it.
+#[cfg(feature = "operator")]
+const SWITCH_W: u16 = 58;
+
+/// How many offers the box lists at once, before the `▾ n more` marker.
+#[cfg(feature = "operator")]
+const SWITCH_ROWS: usize = 8;
+
 /// The word a login that would destroy another one asks for.
 ///
 /// Static, unlike the execution modal's six characters of a `targets_hash`.
@@ -100,11 +129,66 @@ const FORM_W: u16 = 60;
 #[cfg(feature = "operator")]
 const CONFIRM: &str = "CONFIRM";
 
+/// One card of this pane, as a thing a key can be aimed at.
+///
+/// The order is the order they are drawn — the full-width card, then the left
+/// column, then the right — because an operator walking the arrows is walking
+/// what they can see. Up and Down rather than a grid walk: the pane is two
+/// columns of *different* cards rather than a table, so Left and Right would
+/// promise a geometry the layout does not keep (POLICY's neighbour is SYSTEM at
+/// one height and UNIVERSE at another).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Card {
+    #[default]
+    Desk,
+    Policy,
+    Theme,
+    System,
+    Models,
+    Universe,
+}
+
+impl Card {
+    /// The walk order, and only the walk has one: the glass build has no focus
+    /// to move, so nothing there reads this.
+    #[cfg(feature = "operator")]
+    const ALL: [Card; 6] = [
+        Card::Desk,
+        Card::Policy,
+        Card::Theme,
+        Card::System,
+        Card::Models,
+        Card::Universe,
+    ];
+
+    /// What this card offers the operator, in its own words.
+    ///
+    /// The posture, never the build: a featured binary the human did not arm
+    /// reads GLASS and may not be told about keys it would refuse. Every card
+    /// answers, including the four that have nothing — "there is nothing here"
+    /// and a card that has gone quiet are two readings this pane spends a row
+    /// of chrome to keep apart.
+    fn footer(self, writes: bool) -> &'static str {
+        match (writes, self) {
+            // Named beside the command that is *not* one of this card's keys:
+            // a login does not switch the desk, and the line reads as one
+            // sentence about which is which.
+            (true, Card::Desk) => "a types a login · t tests it · /mode switches the desk",
+            (true, Card::Models) => "m switches a model",
+            (true, _) => "no keys on this card",
+            // The pane-level line the cards inherited, kept whole on the card
+            // it was always about.
+            (false, Card::Desk) => "read-only — this window cannot switch the desk",
+            (false, _) => "read-only",
+        }
+    }
+}
+
 /// Where the operator is looking, and what they have typed. Never what the desk
 /// says — that is the `Store`'s.
 ///
-/// The cards retain nothing: no cursor, no page. The form is the one thing on
-/// this pane an operator can be inside.
+/// The cards retain no cursor and no page of their own; what this holds is
+/// which card is listening, and whichever box the operator opened on it.
 #[derive(Default)]
 pub struct SettingsView {
     /// The login form, while the operator is asking for it.
@@ -115,6 +199,19 @@ pub struct SettingsView {
     /// box that is armed and invisible.
     #[cfg(feature = "operator")]
     form: Option<Form>,
+    /// The model switcher, while it is open. Same discipline as the form: below
+    /// its floor the pane refuses to draw the box and the next keystroke
+    /// retires it, so there is no armed-and-invisible state.
+    #[cfg(feature = "operator")]
+    switch: Option<Switch>,
+    /// Which card the keys are aimed at.
+    ///
+    /// Gated with the keys it routes: the glass build has no card that answers
+    /// anything, so it holds no focus rather than holding one that never moves.
+    /// `Card::Desk` is where it opens, which is the card an operator arriving
+    /// on this pane is already reading.
+    #[cfg(feature = "operator")]
+    focus: Card,
     /// The view's area at the last frame, published by `draw`.
     ///
     /// Interior mutability for the reason WORKFORCE's height has it: `draw` is
@@ -157,8 +254,11 @@ impl View for SettingsView {
         // is, and whether it can reach the book it is pointed at — and the
         // credential description under it is a sentence the owner wrote, which
         // a half-width card would clip mid-word.
+        // Which card is listening, if any. Read once and handed down, so six
+        // cards cannot disagree about it.
+        let at = self.focused(store);
         let bands = Layout::vertical([Constraint::Length(DESK_H), Constraint::Min(0)]).split(area);
-        draw_desk(f, bands[0], store);
+        draw_desk(f, bands[0], store, at);
 
         let cols = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
             .spacing(1)
@@ -180,9 +280,9 @@ impl View for SettingsView {
             Constraint::Length(THEME_H),
         ])
         .split(cols[0]);
-        draw_policy(f, left[0], store);
+        draw_policy(f, left[0], store, at);
         draw_rationale(f, left[1], store);
-        draw_theme(f, left[2]);
+        draw_theme(f, left[2], at);
 
         // MODELS sits directly under SYSTEM rather than growing SYSTEM a row.
         // The two answer the same question — what this desk is made of — and
@@ -202,30 +302,35 @@ impl View for SettingsView {
             Constraint::Min(UNIVERSE_H),
         ])
         .split(cols[1]);
-        draw_system(f, right[0], store);
-        draw_models(f, right[1], store);
-        draw_universe(f, right[2], store);
+        draw_system(f, right[0], store, at);
+        draw_models(f, right[1], store, at);
+        draw_universe(f, right[2], store, at);
 
-        // Over the view rather than over the frame: the question it asks is
+        // Over the view rather than over the frame: the questions they ask are
         // about this pane's own controls, unlike the confirm box, which asks
         // about an order and belongs to the whole workstation.
         self.draw_form(f, area, store);
+        self.draw_switch(f, area, store);
     }
 
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         self.keys(k, store)
     }
 
-    /// Whether the login form currently owns the keyboard.
+    /// Whether a box on this pane currently owns the keyboard.
     ///
-    /// True only while a form an operator can actually see is open. A form too
-    /// tall for the pane is drawn as a refusal, not as a box, so it holds no
-    /// keyboard — without that half the fields would swallow every key, and
-    /// Enter would still store a credential, against a box nobody can see.
+    /// True only while one an operator can actually see is open. A box too tall
+    /// for the pane is drawn as a refusal, not as a box, so it holds no
+    /// keyboard — without that half the login fields would swallow every key
+    /// and Enter would still store a credential against a box nobody can see.
+    ///
+    /// The switcher needs the claim as much as the form does, and for a
+    /// different key: `Esc` is the shell's quit, so a picker that did not own
+    /// the keyboard would be closed by the operator quitting the workstation.
     fn typing(&self) -> bool {
         #[cfg(feature = "operator")]
         {
-            self.form.is_some() && self.form_fits()
+            (self.form.is_some() && self.form_fits()) || (self.switch.is_some() && self.box_fits())
         }
         #[cfg(not(feature = "operator"))]
         false
@@ -381,14 +486,39 @@ impl SettingsView {
         area.height >= FORM_MIN_H && area.width >= TWO_COL
     }
 
+    /// The same question for the switcher, which needs fewer rows: it has one
+    /// list and no field, where the form has two fields, a note, a key line and
+    /// whatever the desk last said under them.
+    fn box_fits(&self) -> bool {
+        let area = self.area.get();
+        area.height >= SWITCH_MIN_H && area.width >= TWO_COL
+    }
+
     fn publish(&self, area: Rect) {
         self.area.set(area);
     }
 
+    /// Which card the keys are aimed at, or `None` in a window that has none.
+    ///
+    /// The posture rather than the build, exactly as `keys` gates on it: a
+    /// featured binary the human did not arm hears nothing, so marking a card
+    /// as listening there would be the greyed-affordance claim this client
+    /// refuses everywhere.
+    fn focused(&self, store: &Store) -> Option<Card> {
+        store.posture.writes().then_some(self.focus)
+    }
+
     /// Every key this pane claims, gated on the posture rather than the build.
     ///
-    /// The order is load-bearing: an open form outranks the two keys that reach
-    /// the desk, or `t` would be untypeable inside a secret.
+    /// The order is load-bearing twice over. An open box outranks the keys that
+    /// reach the desk, or `t` would be untypeable inside a secret; and the card
+    /// walk sits under both, or an arrow would move the focus out from under
+    /// the picker the operator is looking at.
+    ///
+    /// Under that, a key means whatever the **focused** card says it means.
+    /// `a` and `t` do exactly what C2 built them to do; what changed is that
+    /// they are the desk card's rather than the pane's, which is what lets each
+    /// card state its own keys without describing four cards it is not.
     // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
     // this function to check it. That module's header lists what the check
     // cannot see — including why a comment in here may not spell a key variant.
@@ -399,29 +529,60 @@ impl SettingsView {
             // swallows, and the keys stay free for whoever claims them next.
             return None;
         }
-        // A terminal that shrank under an open form retires it, on the first
-        // key after the resize — and the fields go with it, so growing back
-        // cannot restore a half-typed credential the operator has not seen
-        // since. The box is already refusing to draw and already holding no
-        // keyboard by then; this is what keeps the *state* from outliving it.
+        // A terminal that shrank under an open box retires it, on the first key
+        // after the resize — and the fields go with it, so growing back cannot
+        // restore a half-typed credential the operator has not seen since. The
+        // box is already refusing to draw and already holding no keyboard by
+        // then; this is what keeps the *state* from outliving it.
         if self.form.is_some() && !self.form_fits() {
             self.close();
+            return None;
+        }
+        if self.switch.is_some() && !self.box_fits() {
+            self.switch = None;
             return None;
         }
         if self.form.is_some() {
             return self.form_key(k);
         }
+        if self.switch.is_some() {
+            return self.switch_key(k, store);
+        }
         match k.code {
-            KeyCode::Char('a') => self.form = Some(Form::default()),
+            KeyCode::Up => self.walk(-1),
+            KeyCode::Down => self.walk(1),
+            KeyCode::Char('a') if self.focus == Card::Desk => self.form = Some(Form::default()),
             // No client-side gate on there being a login to test. A desk that
             // has never logged in is one of the answers the route is built to
             // give ("no credentials are configured"), and a client that
             // pre-empted it would be a second, drifting copy of the owner's
             // own account of what it can read.
-            KeyCode::Char('t') => return Some(Command::TestAlpaca),
+            KeyCode::Char('t') if self.focus == Card::Desk => return Some(Command::TestAlpaca),
+            // The catalog on the store is a *reading* and may be an hour old —
+            // `/api/tui` refuses to probe under the dispatch lock — so the key
+            // that opens the box asks for a fresh one on the way in, exactly as
+            // the door's first question does on its transition.
+            KeyCode::Char('m') if self.focus == Card::Models => {
+                self.switch = Some(Switch::opened_on(store));
+                return Some(Command::Backends);
+            }
             _ => {}
         }
         None
+    }
+
+    /// Move the focus, and stop at the ends.
+    ///
+    /// Clamped rather than wrapped: an operator holding an arrow to reach the
+    /// last card must not find themselves back at the first one, which is the
+    /// rule every cursor on this client walks by.
+    fn walk(&mut self, by: isize) {
+        let last = Card::ALL.len() - 1;
+        let at = Card::ALL
+            .iter()
+            .position(|card| *card == self.focus)
+            .unwrap_or(0);
+        self.focus = Card::ALL[at.saturating_add_signed(by).min(last)];
     }
 
     /// The form's own keys. One match over both stages, because they are one
@@ -573,6 +734,110 @@ impl SettingsView {
         }
     }
 
+    /// One keystroke into the model switcher.
+    ///
+    /// Its own router, and its own help section, for the reason WORKFORCE's two
+    /// fields have theirs: the keys that *open* a box and the keys *inside* it
+    /// are two sets, and one section over both would describe the picker with a
+    /// row about the card.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
+    fn switch_key(&mut self, k: KeyEvent, store: &Store) -> Option<Command> {
+        let rows = choices(store);
+        let switch = self.switch.as_mut()?;
+        switch.note = None;
+        match k.code {
+            KeyCode::Up => switch.at = switch.at.saturating_sub(1),
+            KeyCode::Down => switch.at = (switch.at + 1).min(rows.len().saturating_sub(1)),
+            // Leaves every surface as the desk has it. Nothing is staged here,
+            // so there is nothing to discard: a choice is sent the moment it is
+            // made, which is what the `now` marker on the rows is about.
+            KeyCode::Esc => self.switch = None,
+            KeyCode::Enter => {
+                let Some(row) = rows.get(switch.at) else {
+                    // An empty catalog. Stated rather than silent: a box that
+                    // swallowed Enter would read as a desk refusing a choice it
+                    // was never offered.
+                    switch.note = Some("nothing has said what this desk can run".to_string());
+                    return None;
+                };
+                return match (&row.refusal, &row.choice) {
+                    // Shown on the list and refused here, in the owner's own
+                    // sentence rather than a second opinion composed by this
+                    // client — the rule `/model` and the door both submit to.
+                    (Some(said), _) => {
+                        switch.note = Some(said.clone());
+                        None
+                    }
+                    (None, Some(choice)) => Some(Command::SetLlm {
+                        surface: row.surface.to_string(),
+                        choice: choice.clone(),
+                    }),
+                    // Cannot happen — `cmd::Offer` carries a choice for
+                    // everything it does not refuse — and saying so is cheaper
+                    // than a branch that silently does nothing.
+                    (None, None) => {
+                        switch.note = Some("the desk offered a model it cannot name".to_string());
+                        None
+                    }
+                };
+            }
+            _ => {}
+        }
+        // The window follows the cursor, so a walk cannot leave the selection
+        // off the box — the same failure the floor above refuses, one row down.
+        let switch = self.switch.as_mut()?;
+        let cap = cap(self.area.get());
+        if switch.at < switch.top {
+            switch.top = switch.at;
+        } else if switch.at >= switch.top + cap {
+            switch.top = switch.at + 1 - cap;
+        }
+        None
+    }
+
+    /// The switcher, drawn over the pane that opened it.
+    fn draw_switch(&self, f: &mut Frame, area: Rect, store: &Store) {
+        use ratatui::widgets::{Block, Borders, Clear};
+        let Some(switch) = &self.switch else {
+            return;
+        };
+        // Refuse rather than open invisible, exactly as the form does: below
+        // the floor the box would have room for a header and nothing else, and
+        // `typing` declines the keyboard for the same frame.
+        if !self.box_fits() {
+            let row = Rect {
+                x: area.x,
+                y: area.y + area.height / 2,
+                width: area.width,
+                height: 1,
+            };
+            f.render_widget(Clear, row);
+            refuse(
+                f,
+                row,
+                format!(
+                    "the model switcher needs {SWITCH_MIN_H} rows; this pane has {}.",
+                    area.height
+                ),
+            );
+            return;
+        }
+        let t = theme();
+        let w = SWITCH_W.min(area.width.saturating_sub(4)).max(3);
+        let lines = switch.lines(store, cap(area));
+        let rect = centred(area, w, wanted(&lines, w - 2));
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.accent))
+            .style(Style::default().bg(t.bg_raised));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+
     /// The form, drawn over the pane that opened it.
     fn draw_form(&self, f: &mut Frame, area: Rect, store: &Store) {
         use ratatui::widgets::{Block, Borders, Clear};
@@ -627,6 +892,183 @@ impl SettingsView {
         // about why a login cannot be stored is worse than one that took two
         // lines.
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+}
+
+// -- the model switcher -----------------------------------------------------
+
+/// Where the cursor is in the switcher, and what it last said back.
+///
+/// No staged choice: a row is sent the moment Enter is pressed on it, so there
+/// is nothing here for `Esc` to discard and nothing that can disagree with what
+/// the desk reports. That is also why the marker on a row says what the surface
+/// is running **now** rather than what the box would apply — the same split the
+/// startup door had to make after a pty run caught it claiming otherwise.
+#[cfg(feature = "operator")]
+#[derive(Default)]
+struct Switch {
+    at: usize,
+    top: usize,
+    /// The owner's sentence about a row that cannot be chosen. Retired by the
+    /// next keystroke, like the command line's own note.
+    note: Option<String>,
+}
+
+/// One row of the switcher: an offer, and what choosing it would send.
+///
+/// Built from `cmd::offers`, which is the producer the `/model` strip and the
+/// startup door both read. Nothing here restates its rules — a backend the desk
+/// cannot reach stays on the list with the owner's own sentence and no choice
+/// behind it, and the workforce is offered `claude` alone because the tier map
+/// owns its model — because a second copy of them is a second thing to keep
+/// true.
+#[cfg(feature = "operator")]
+struct Choice {
+    surface: &'static str,
+    value: String,
+    /// Whether this is what the surface runs now, per the owner's own answer.
+    running: bool,
+    refusal: Option<String>,
+    choice: Option<ModelChoice>,
+}
+
+#[cfg(feature = "operator")]
+fn choices(store: &Store) -> Vec<Choice> {
+    let mut rows = Vec::new();
+    for surface in cmd::SURFACES {
+        for offer in cmd::offers(surface, store) {
+            rows.push(Choice {
+                surface,
+                running: offer.running(store, surface),
+                value: offer.value().to_string(),
+                refusal: offer.refusal().map(str::to_string),
+                choice: offer.choice(),
+            });
+        }
+    }
+    rows
+}
+
+/// How many rows of the list the box shows at once.
+///
+/// Bounded by a constant as well as by the pane: a desk holding thirty models
+/// would otherwise compose a box taller than the area, and `centred` clamps the
+/// rect — so the rows past the bottom would be clipped silently, with the `▾ n
+/// more` marker claiming they were merely below.
+#[cfg(feature = "operator")]
+fn cap(area: Rect) -> usize {
+    SWITCH_ROWS
+        .min((area.height as usize).saturating_sub(8))
+        .max(1)
+}
+
+#[cfg(feature = "operator")]
+impl Switch {
+    /// A box opened on the row the surface is already running.
+    ///
+    /// The default is the current config, so an operator who opens the picker
+    /// and presses Enter changes nothing — and one who does not recognise their
+    /// own choice on the list is being told something true about it. Falls back
+    /// to the top when nothing matches, which is the state an empty catalog and
+    /// a desk on a model the owner has stopped serving both reach.
+    fn opened_on(store: &Store) -> Self {
+        let at = choices(store)
+            .iter()
+            .position(|row| row.running)
+            .unwrap_or(0);
+        Self {
+            at,
+            top: 0,
+            note: None,
+        }
+    }
+
+    /// The box's lines: the header, a window onto the offers, and the footer.
+    fn lines(&self, store: &Store, cap: usize) -> Vec<Line<'static>> {
+        let t = theme();
+        let rows = choices(store);
+        let mut lines = vec![panel_header("which minds"), Line::from("")];
+        if rows.is_empty() {
+            // Absence, stated. The catalog is fetched by the key that opened
+            // this box, so an empty list is a desk that has not answered yet or
+            // an owner that is not there — never a desk with no models.
+            lines.push(Line::from(Span::styled(
+                " the desk has not said what it can run",
+                Style::default().fg(t.text_dim),
+            )));
+        }
+        if self.top > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" ▴ {} above", self.top),
+                Style::default().fg(t.text_dim),
+            )));
+        }
+        for (i, row) in rows.iter().enumerate().skip(self.top).take(cap) {
+            let on = i == self.at;
+            let mut spans = vec![
+                // A glyph and not only a colour: on a 256-colour terminal the
+                // highlight is a shade, and a shade is not an answer to "which
+                // row am I about to choose".
+                Span::styled(
+                    if on { " ▸ " } else { "   " },
+                    Style::default().fg(t.accent),
+                ),
+                Span::styled(
+                    format!("{:<10}{}", row.surface, row.value),
+                    match (row.refusal.is_none(), on) {
+                        (false, _) => Style::default().fg(t.text_dim),
+                        (true, true) => Style::default()
+                            .fg(t.accent)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                        (true, false) => Style::default().fg(t.text_primary),
+                    },
+                ),
+            ];
+            if row.running {
+                spans.push(Span::styled(
+                    "  now",
+                    Style::default()
+                        .fg(t.positive)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        let hidden = rows.len().saturating_sub(self.top + cap);
+        if hidden > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" ▾ {hidden} more"),
+                Style::default().fg(t.text_dim),
+            )));
+        }
+        // Stated rather than offered, exactly as the door's second question
+        // states it: pointing the reasoner at a model does not switch it on —
+        // the owner refuses to infer one from the other — so a box that said
+        // nothing would leave an operator with a choice that changed nothing.
+        lines.push(Line::from(Span::styled(
+            match store.llm().and_then(|llm| llm.reasoner_enabled) {
+                Some(true) => " judgment on — the reasoner uses the model chosen here",
+                Some(false) => " judgment off — /model reasoner on is what puts a choice to work",
+                None => " the owner did not say whether the reasoner is switched on",
+            },
+            Style::default().fg(t.text_dim),
+        )));
+        // The note outranks the key list, as the command line's does: an
+        // operator who has just been refused needs the reason, not a reminder
+        // of which arrow moves.
+        lines.push(match &self.note {
+            Some(note) => Line::from(Span::styled(
+                format!(" {}", format::bounded(note, SAID_MAX)),
+                Style::default()
+                    .fg(t.warning)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )),
+            None => Line::from(Span::styled(
+                " Enter chooses · ↑↓ moves · Esc leaves them as they are",
+                Style::default().fg(t.text_dim),
+            )),
+        });
+        lines
     }
 }
 
@@ -773,20 +1215,27 @@ fn consent_lines(said: &str, typed: &str) -> Vec<Line<'static>> {
     ]
 }
 
-/// The default build's half: no form, and no branch that could grow one — the
-/// commands it would send are not in this build.
+/// The default build's half: no form, no switcher, and no branch that could
+/// grow one — the commands they would send are not in this build, and neither
+/// is a focus for a key to be aimed by.
 #[cfg(not(feature = "operator"))]
 impl SettingsView {
     fn publish(&self, _area: Rect) {}
     fn draw_form(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
+    fn draw_switch(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
+
+    fn focused(&self, _store: &Store) -> Option<Card> {
+        None
+    }
 
     fn keys(&mut self, _k: KeyEvent, _store: &mut Store) -> Option<Command> {
         None
     }
 }
 
-/// Header, five rows, a blank, the posture line, one row of slack for a value
-/// long enough to wrap, and the rule the block reserves.
+/// Header, five rows, and three of slack for a credential description long
+/// enough to wrap — the one value on this card that is a sentence — plus the
+/// rule the block reserves, which is where the card's own footer is drawn.
 const DESK_H: u16 = 10;
 /// Header, eight rows, and the rule.
 const POLICY_H: u16 = 10;
@@ -843,10 +1292,17 @@ const SAID_MAX: usize = 112;
 const NAME_MAX: usize = 36;
 
 /// What the desk is pointed at, and whether it can reach it.
-fn draw_desk(f: &mut Frame, area: Rect, store: &Store) {
+fn draw_desk(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     let t = theme();
     let Some(mode) = store.desk_mode() else {
-        card(f, area, "desk", vec![absent("the owner sent no desk mode")]);
+        card(
+            f,
+            area,
+            Card::Desk,
+            "desk",
+            at,
+            vec![absent("the owner sent no desk mode")],
+        );
         return;
     };
     let mut rows = vec![
@@ -867,21 +1323,11 @@ fn draw_desk(f: &mut Frame, area: Rect, store: &Store) {
             t.text_secondary
         },
     ));
-    rows.push(Line::from(""));
-    rows.push(Line::from(Span::styled(
-        // Posture, not the build: a featured binary the human did not arm reads
-        // GLASS on the status line and must not be told about keys it would
-        // refuse. The two the armed window has are named beside the command
-        // that is *not* one of them — a login does not switch the desk, and the
-        // line reads as one sentence about which is which.
-        if store.posture.writes() {
-            " /mode switches the desk · a types a login · t tests it"
-        } else {
-            " read-only — this window cannot switch the desk"
-        },
-        Style::default().fg(t.text_dim),
-    )));
-    card(f, area, "desk", rows);
+    // The posture line that used to end this card is now the card's own footer,
+    // on the rule below it — see `card`. It spoke for six cards from under one
+    // of them, and once each card had different keys it was either wrong about
+    // five or silent about all six.
+    card(f, area, Card::Desk, "desk", at, rows);
 }
 
 /// Which lane the data comes down. Absent stays absent: a desk whose owner did
@@ -895,10 +1341,17 @@ fn lane(mode: &DeskMode) -> String {
 }
 
 /// The policy every paper solve runs under, and the four limits it is held to.
-fn draw_policy(f: &mut Frame, area: Rect, store: &Store) {
+fn draw_policy(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     let t = theme();
     let Some(policy) = store.policy() else {
-        card(f, area, "policy", vec![absent("the owner sent no policy")]);
+        card(
+            f,
+            area,
+            Card::Policy,
+            "policy",
+            at,
+            vec![absent("the owner sent no policy")],
+        );
         return;
     };
     let limits = policy.constraints.clone().unwrap_or_default();
@@ -928,7 +1381,7 @@ fn draw_policy(f: &mut Frame, area: Rect, store: &Store) {
         // and 0% is a real floor rather than an absent one.
         kv("per asset", weight_band(&limits), t.text_primary),
     ];
-    card(f, area, "policy", rows);
+    card(f, area, Card::Policy, "policy", at, rows);
 }
 
 fn weight_band(limits: &Constraints) -> String {
@@ -960,13 +1413,15 @@ fn draw_rationale(f: &mut Frame, area: Rect, store: &Store) {
 }
 
 /// Health and authority, as the owner reports them.
-fn draw_system(f: &mut Frame, area: Rect, store: &Store) {
+fn draw_system(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     let t = theme();
     let Some(system) = store.system() else {
         card(
             f,
             area,
+            Card::System,
             "system",
+            at,
             vec![absent("the owner sent no system status")],
         );
         return;
@@ -1006,7 +1461,7 @@ fn draw_system(f: &mut Frame, area: Rect, store: &Store) {
             t.accent,
         ),
     ];
-    card(f, area, "system", rows);
+    card(f, area, Card::System, "system", at, rows);
 }
 
 /// Where the cached panel came from and how old it is. Cache-only on the
@@ -1050,13 +1505,15 @@ fn availability(flag: Option<bool>) -> String {
 /// owner's own route, and D4 brings the keys that reach it; until then this
 /// pane claims none, so a key pressed on it falls through to whoever claims it
 /// next.
-fn draw_models(f: &mut Frame, area: Rect, store: &Store) {
+fn draw_models(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     let t = theme();
     let Some(llm) = store.llm() else {
         card(
             f,
             area,
+            Card::Models,
             "models",
+            at,
             vec![absent("the owner sent no model routing")],
         );
         return;
@@ -1140,7 +1597,7 @@ fn draw_models(f: &mut Frame, area: Rect, store: &Store) {
             Style::default().fg(t.text_dim),
         )));
     }
-    card(f, area, "models", rows);
+    card(f, area, Card::Models, "models", at, rows);
 }
 
 /// The owner's reason for every backend a surface runs on and cannot reach.
@@ -1322,25 +1779,27 @@ fn probed_row(llm: &LlmConfig, now: Option<i64>) -> String {
 /// market section the owner built from that whitelist, plus anything the book
 /// holds outside it, and a client that labelled that "the mandate universe"
 /// would be asserting a configuration it cannot see.
-fn draw_universe(f: &mut Frame, area: Rect, store: &Store) {
+fn draw_universe(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     let t = theme();
     let symbols = store.universe();
     if symbols.is_empty() {
         card(
             f,
             area,
+            Card::Universe,
             "universe",
+            at,
             vec![absent("no universe in the last snapshot")],
         );
         return;
     }
-    let block = panel_block();
+    let (block, header) = chrome(Card::Universe, "universe", at);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
     f.render_widget(
         Paragraph::new(vec![
-            panel_header("universe"),
+            header,
             kv(
                 "watching",
                 format!("{} symbols", symbols.len()),
@@ -1361,12 +1820,14 @@ fn draw_universe(f: &mut Frame, area: Rect, store: &Store) {
     );
 }
 
-fn draw_theme(f: &mut Frame, area: Rect) {
+fn draw_theme(f: &mut Frame, area: Rect, at: Option<Card>) {
     let t = theme();
     card(
         f,
         area,
+        Card::Theme,
         "theme",
+        at,
         vec![kv("palette", palette().to_string(), t.text_primary)],
     );
 }
@@ -1379,13 +1840,63 @@ fn draw_theme(f: &mut Frame, area: Rect) {
 /// about why the desk cannot log in is worse than a row that took two lines.
 /// `trim: false`, so a wrapped continuation keeps the indentation that says it
 /// belongs to the row above rather than starting a new one.
-fn card(f: &mut Frame, area: Rect, title: &str, rows: Vec<Line<'static>>) {
-    let block = panel_block();
+fn card(
+    f: &mut Frame,
+    area: Rect,
+    which: Card,
+    title: &str,
+    at: Option<Card>,
+    rows: Vec<Line<'static>>,
+) {
+    let (block, header) = chrome(which, title, at);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let mut lines = vec![panel_header(title)];
+    let mut lines = vec![header];
     lines.extend(rows);
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// One card's block and its header line — the two halves that say whether this
+/// card is listening and what it would do about it.
+///
+/// Split out because UNIVERSE cannot use [`card`]: its symbol list is a second
+/// wrapped region under the fixed rows, so it lays out its own inner rect. It
+/// still owes the operator the same two statements, and a card that built its
+/// own chrome would be the one that quietly stopped making them.
+///
+/// **The footer goes on the rule, not into a row.** The block already reserves
+/// that line, so a card states its keys without spending content on it — and a
+/// footer that had to win a row would be the first thing a short column
+/// dropped, which is the one thing it must never be silent about (the same
+/// lesson that moved the MODELS stamp to the top of its card).
+///
+/// Drawn on **every** card in a glass window and on the **focused** card only
+/// in an armed one. With no focus there is nothing to point at and every card's
+/// answer is the same sentence; with a focus, a key list under a card that
+/// would not act on it is an instruction with nothing behind it.
+fn chrome(which: Card, title: &str, at: Option<Card>) -> (Block<'static>, Line<'static>) {
+    let t = theme();
+    let focused = at == Some(which);
+    let mut block = panel_block();
+    if focused || at.is_none() {
+        block = block.title_bottom(Line::from(Span::styled(
+            format!(" {} ", which.footer(at.is_some())),
+            Style::default().fg(match focused {
+                true => t.accent,
+                false => t.text_dim,
+            }),
+        )));
+    }
+    // The title carries the focus, never the bar: every panel on this
+    // workstation opens with an accent `▌`, so a bar that changed colour would
+    // be one shade against another rather than an answer.
+    let mut header = panel_header(title);
+    if focused {
+        if let Some(span) = header.spans.get_mut(1) {
+            span.style = span.style.fg(t.accent);
+        }
+    }
+    (block, header)
 }
 
 /// A label/value row, aligned so a column of them reads as a column.

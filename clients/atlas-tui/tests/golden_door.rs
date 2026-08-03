@@ -282,6 +282,27 @@ mod armed {
     }
 
     #[test]
+    fn the_first_question_with_the_real_book_chosen_renders_at_120x36() {
+        // The state no golden reached, and the one the box's width is set by:
+        // `ALPACA PAPER  chosen  — the paper account; a fill still needs you`
+        // fills the inner width exactly, so a cell more anywhere in it wraps
+        // the row that says a fill still needs a human. Two keystrokes past the
+        // frame the door opens on, which is why the line-level pins alone never
+        // saw it.
+        let mut client = door();
+        for code in [
+            KeyCode::Down,  // the LIVE row
+            KeyCode::Enter, // choose it — the two books are disclosed by it
+            KeyCode::Down,  // SIMULATED
+            KeyCode::Down,  // ALPACA PAPER
+            KeyCode::Enter,
+        ] {
+            press(&mut client, code);
+        }
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
     fn ctrl_c_quits_from_under_the_door_and_from_under_a_confirmation_box() {
         // The one precedence claim in the router that is *reachable*, and the
         // behaviour change that came with hoisting it: Ctrl-C used to sit below

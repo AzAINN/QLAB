@@ -82,10 +82,22 @@ use ratatui::{
 };
 use std::cell::Cell;
 
-/// The box's width. Wide enough for a row's label, the longer of the two
-/// marker words, and the owner's reason beside both — `ASSUMED` is one cell
-/// wider than `CHOSEN`, and at 68 the synthetic row wrapped onto an unindented
-/// second line the moment it was the honest word.
+/// The box's width, and it is set by one row.
+///
+/// **`ALPACA PAPER  chosen  — the paper account; a fill still needs you` is 68
+/// cells, which is exactly the inner width this constant leaves.** Zero margin:
+/// one more cell in that label, that marker or that sentence wraps it onto an
+/// unindented second line, and the row that says a fill still needs a human is
+/// the last one this box may lose half of. `tests` pins the equality and
+/// `golden_door` renders the state, because a line-level pin alone never
+/// reached it — the door opens on the synthetic rows, and the alpaca row is two
+/// keystrokes further in.
+///
+/// It is not the row that moved this from 68: the *synthetic* one did, at 67
+/// cells the moment [`ASSUMED`] became the honest word for a desk nobody had
+/// chosen (one cell wider than [`CHOSEN`], which is what it had been marked
+/// with). Both facts are here because they are two different rows and only one
+/// of them binds today.
 const DOOR_W: u16 = 70;
 
 /// The door's own floor, in rows of the frame.
@@ -1264,6 +1276,38 @@ mod tests {
         let mut door = Door::default();
         press(&mut door, KeyCode::Enter, &mut unchosen);
         assert!(said(&door, &unchosen).contains(CHOSEN));
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn the_row_that_sets_the_boxs_width_fills_it_exactly_and_is_the_alpaca_one() {
+        // [`DOOR_W`]'s own claim, asserted rather than counted by hand. The
+        // alpaca row is the widest thing this question draws and fits with
+        // nothing to spare, so a cell added to its label, its marker or the
+        // sentence beside it wraps the one row that says a fill still needs a
+        // human — and would do it two keystrokes deep, where the frame the door
+        // opens on cannot show it.
+        let mut store = desk(LIVE, ALPACA, false);
+        armed(&mut store);
+        let lines = Door::default().mode_lines(&store);
+        let widest = lines.iter().map(|line| line.width()).max().unwrap();
+        assert_eq!(
+            widest,
+            (DOOR_W - 2) as usize,
+            "the widest row no longer fills the box exactly:\n{}",
+            said(&Door::default(), &store)
+        );
+        // And it is that row rather than some other one that happens to tie,
+        // which is what makes the constant's doc a fact about the alpaca row.
+        let alpaca = lines
+            .iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("ALPACA PAPER"))
+            })
+            .expect("a live desk discloses the alpaca row");
+        assert_eq!(alpaca.width(), widest);
     }
 
     #[cfg(feature = "operator")]

@@ -597,6 +597,15 @@ mod armed {
             taken.fg, down.fg,
             "an entry that cannot be chosen is drawn like one that can"
         );
+        // The accent, by name rather than by "different from its neighbour":
+        // with the highlight stuck on the first entry *drawn*, the taken one
+        // would still differ from the dim row beside it and the pin would pass
+        // on the bug it is about.
+        assert_eq!(
+            taken.fg,
+            Some(atlas::theme::theme().accent),
+            "the accent is not on the entry the key takes"
+        );
         client.press(KeyCode::Tab);
         assert_eq!(
             client.store.cmd.text(),

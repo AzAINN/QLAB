@@ -1465,7 +1465,12 @@ class UISession:
                 mcp_error = f"{type(exc).__name__}: {exc}"[:200]
         proxy_available = importlib.util.find_spec("fastmcp") is not None
         # Cache-only provenance: never a network fetch from a status poll.
-        provenance = data.cached_provenance(self.mandate.universe_whitelist)
+        # Read the cache namespace of the provider the desk actually runs
+        # under — defaulting the namespace left SETTINGS saying "yfinance"
+        # while every fetch, permit and workflow ran on alpaca.
+        provenance = data.cached_provenance(
+            self.mandate.universe_whitelist,
+            provider=self.data_policy(offline).provider)
         events = self.registry.read_events(500)
         last_daily_ops = next(
             (

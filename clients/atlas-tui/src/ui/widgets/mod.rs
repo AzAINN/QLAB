@@ -20,5 +20,5 @@ pub mod ticker;
 pub mod toast;
 pub mod tristate_spark;
 
-pub use panel_header::{panel_block, panel_header};
+pub use panel_header::{header_keys, panel_block, panel_header};
 pub use refusal::refuse;

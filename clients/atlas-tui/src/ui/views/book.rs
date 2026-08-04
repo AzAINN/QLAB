@@ -41,7 +41,9 @@ use crate::ui::widgets::confirm;
 // four amber bars across one band would read as four panels.
 use crate::ui::widgets::table_cell::{cell, head, LEFT, RIGHT};
 use crate::ui::widgets::tristate_spark::{self, SPARK_W};
-use crate::ui::widgets::{braille_chart, heat_cell, panel_block, panel_header, refuse};
+use crate::ui::widgets::{
+    braille_chart, header_keys, heat_cell, panel_block, panel_header, refuse,
+};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -1838,22 +1840,6 @@ impl BookView {
             Span::styled(self.heat.label(), Style::default().fg(t.text_primary)),
         ]
     }
-}
-
-/// A panel header with the keys that drive it pushed to the far side.
-///
-/// The keys go whole or not at all: a `Paragraph` clips from the right, and
-/// `ALL 1Y 3` is a control an operator reads as broken rather than as absent.
-fn header_keys(title: &str, keys: Vec<Span<'static>>, width: u16) -> Line<'static> {
-    let title = panel_header(title);
-    let title_w = title.width();
-    let keys_w: usize = keys.iter().map(|s| s.content.width()).sum();
-    let mut spans = title.spans;
-    if let Some(gap) = (width as usize).checked_sub(title_w + keys_w) {
-        spans.push(Span::raw(" ".repeat(gap)));
-        spans.extend(keys);
-    }
-    Line::from(spans)
 }
 
 /// Every holding as a shaded tile, two to a row.

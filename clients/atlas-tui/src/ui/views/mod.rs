@@ -375,6 +375,33 @@ mod tests {
     }
 
     #[test]
+    fn the_markets_sort_survives_a_switch_away_and_back() {
+        // The same regression as the cursor, on the order the operator chose:
+        // a registry that rebuilt the view would hand back a grid in the
+        // payload's order, silently discarding the column the operator sorted
+        // by. And the cursor goes home on a re-sort — row 2 of the new order
+        // is a different asset, and carrying the index would leave the marker
+        // on a row the operator did not choose.
+        let mut store = store_with_three_assets();
+        let mut views = Views::new();
+        views.on_key(ViewId::Markets, key(KeyCode::Down), &mut store);
+        views.on_key(ViewId::Markets, key(KeyCode::Char('s')), &mut store);
+        let chosen = views.markets.sort();
+        assert_ne!(chosen, markets::Sort::default(), "the sort did not move");
+        assert_eq!(views.markets.selected(), 0, "a re-sort kept a stale cursor");
+
+        store.nav.view = ViewId::Book;
+        draw_once(&views, &store);
+        store.nav.view = ViewId::Markets;
+        draw_once(&views, &store);
+        assert_eq!(
+            views.markets.sort(),
+            chosen,
+            "the sort did not survive a view switch"
+        );
+    }
+
+    #[test]
     fn everything_the_book_retains_survives_a_switch_away_and_back() {
         // The same regression as the markets cursor, on the four things BOOK
         // retains. A registry that rebuilt the view would hand back a blotter

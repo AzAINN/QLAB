@@ -376,6 +376,12 @@ pub const KEYMAP: &[Binding] = &[
         Source::View(ViewId::Markets),
         "the crosshair, one bar forward",
     ),
+    b(
+        "Char('s')",
+        "s",
+        Source::View(ViewId::Markets),
+        "cycle the grid's order — desk, change, vol, name",
+    ),
     // -- BOOK -------------------------------------------------------------
     b("Up", "↑", Source::View(ViewId::Book), "the position above"),
     b(

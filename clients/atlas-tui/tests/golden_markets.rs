@@ -337,15 +337,18 @@ fn a_terminal_below_the_grids_floor_refuses_rather_than_drawing_wrong_numbers() 
     // Read off the body rather than one line: the refusal is longer than the
     // pane that could not hold the grid, so it wraps — which is the whole
     // reason it is a wrapped `Paragraph` and not a `Line`.
-    assert!(body.contains("markets grid needs 55 columns"), "{body}");
+    assert!(body.contains("markets grid needs 56 columns"), "{body}");
     assert!(
         body.contains("widen the terminal"),
         "the remedy has to be nameable, not implied:\n{body}"
     );
     // And not one digit-bearing row of the grid survives beside the refusal: a
     // half-drawn grid is exactly the reading the refusal exists to prevent.
+    // The grid's arrow is `▼ ` with the cell's own space — the breadth strip
+    // above the refusal still draws its `▲1▼4` and movers, which is the point:
+    // the strip survives a grid that cannot.
     assert!(
-        !body.contains('▼') && !body.contains('▲'),
+        !body.contains("▼ ") && !body.contains("▲ "),
         "a CHG% cell survived below the floor:\n{body}"
     );
     for number in ["152.47", "729.46", "661.73", "-10.1", "6.3%"] {
@@ -362,24 +365,24 @@ fn a_terminal_below_the_grids_floor_refuses_rather_than_drawing_wrong_numbers() 
 fn the_floor_is_the_grids_allocation_and_not_the_pane_it_was_split_from() {
     // One cell, and it is the whole finding: the pane is not the grid — the cell
     // of spacing that keeps the hero's gutter off `TGT` sits between them — so a
-    // guard on the pane admits a grid one short of its own floor. At 98 columns
+    // guard on the pane admits a grid one short of its own floor. At 99 columns
     // the pane is exactly `GRID_W` and the grid is `GRID_W - 1`, which drops the
     // leading bar off an eight-value spark whose colour is still computed from
     // all eight. A cell that draws seven bars and colours nine is the same
     // silently-wrong-number class the refusal exists for, one column narrower.
     let client = markets();
 
-    // 99: the grid gets its floor exactly, and the spark is all eight bars.
-    let admitted = body(&client.frame(99, 30));
+    // 100: the grid gets its floor exactly, and the spark is all eight bars.
+    let admitted = body(&client.frame(100, 30));
     assert!(
         line_with(&admitted, "152.47").contains("▅██▄▄▅▅▁"),
         "the spark lost a bar off its head at the boundary:\n{admitted}"
     );
 
-    // 98: one cell less, and the pane says so instead of drawing seven bars.
-    let refused = body(&client.frame(98, 30));
+    // 99: one cell less, and the pane says so instead of drawing seven bars.
+    let refused = body(&client.frame(99, 30));
     assert!(
-        refused.contains("markets grid needs 55 columns"),
+        refused.contains("markets grid needs 56 columns"),
         "a pane at exactly GRID_W admitted a grid one cell short:\n{refused}"
     );
     assert!(
@@ -503,7 +506,9 @@ fn a_number_wider_than_its_column_keeps_its_sign_and_loses_its_tail() {
 fn an_asset_the_book_does_not_hold_shows_no_weight_rather_than_zero() {
     // The fixture's book holds ACWI and not SPY. A `0.0%` target would read as
     // a deliberate exclusion, which is a decision nobody made.
-    let body = body(&markets().frame(120, 36));
+    // Through `content`, not `body`: the pulse rail's `gross 100.0%` chip can
+    // share a row with the grid, and a `0.0%` found there is not this view's.
+    let body = content(&markets().frame(120, 36));
     let acwi = line_with(&body, "152.47");
     assert!(acwi.contains("6.3%"), "the held weight is missing: {acwi}");
     let spy = line_with(&body, "729.46");

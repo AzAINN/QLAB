@@ -801,6 +801,91 @@ const fn blotter_w() -> u16 {
     w - 1
 }
 
+/// The two columns a wide pane earns, in the order a widening pane adds them.
+///
+/// Appended past the nine rather than folded into `BLOTTER_COLS`: the nine
+/// take 75 of the workstation's 77-cell baseline pane, so a tenth column in
+/// the floor would make the blotter refuse on every terminal anyone actually
+/// opens. A wider terminal earns them instead — the bar first, because a P&L
+/// an operator can compare at a glance is worth more than a drift most books
+/// have no targets for.
+const PNL_BAR_COL: (&str, u16, bool) = ("P&L BAR", 8, LEFT);
+const DRIFT_COL: (&str, u16, bool) = ("DRIFT", 6, RIGHT);
+
+/// Which of the earned columns this frame's allocation admits.
+///
+/// Each is the previous floor plus the column and its cell of spacing, whole
+/// or not at all — a bar column squeezed under its own width would scale its
+/// runs to a ruler that is not there.
+fn earned_cols(width: u16, targets: bool) -> (bool, bool) {
+    let bar = width >= BLOTTER_W + PNL_BAR_COL.1 + 1;
+    let drift = targets && width >= BLOTTER_W + PNL_BAR_COL.1 + 1 + DRIFT_COL.1 + 1;
+    (bar, drift)
+}
+
+/// The largest absolute P&L in the book — the bar column's full scale.
+///
+/// The book's own outlier rather than a fixed money scale, because the bar
+/// answers a *relative* question — which position is the P&L story — and a
+/// desk's P&L has no natural unit the way a drawdown has its breaker. `None`
+/// when nothing measured is nonzero: a ruler of zero scales nothing.
+fn largest_pnl(rows: &[BlotterRow<'_>]) -> Option<f64> {
+    let largest = rows
+        .iter()
+        .filter_map(|row| row.pnl)
+        .filter(|pnl| pnl.is_finite())
+        .map(f64::abs)
+        .fold(0.0, f64::max);
+    (largest > 0.0).then_some(largest)
+}
+
+/// One position's P&L bar: a `▰` run scaled to the book's largest, in the
+/// track the desk's weight bars run in.
+///
+/// The sign lives in the colour beside this, exactly as every other magnitude
+/// on the workstation — a `-▰▰` would carry the sign twice. `ceil`, not
+/// `round`: a P&L the column beside it prints as nonzero must show a cell.
+fn pnl_bar(pnl: Option<f64>, largest: Option<f64>, width: u16) -> String {
+    let (Some(pnl), Some(largest)) = (pnl, largest) else {
+        return String::new();
+    };
+    if !pnl.is_finite() || format::zero_at(pnl, 2) {
+        return String::new();
+    }
+    let cells = ((pnl.abs() / largest) * width as f64).ceil() as usize;
+    let filled = cells.clamp(1, width as usize);
+    format!(
+        "{}{}",
+        "▰".repeat(filled),
+        "▱".repeat(width as usize - filled)
+    )
+}
+
+/// A position's drift off its target: held minus wanted, signed.
+///
+/// Absent unless both halves exist — a drift against a target nobody set is a
+/// rebalance nobody asked for.
+fn drift(weight: Option<f64>, target: Option<f64>) -> Option<f64> {
+    Some(weight? - target?)
+}
+
+/// The drift cell's tone, at the one decimal the cell prints.
+///
+/// Over target is the direction that costs money to fix, so it is the loud
+/// one — the same rule the desk's weight bars state. Under is the dim accent,
+/// and a drift that rounds away is neither.
+fn drift_tone(drift: f64) -> Color {
+    let t = theme();
+    let printed = drift * 100.0;
+    if format::zero_at(printed, 1) {
+        t.text_secondary
+    } else if format::negative_at(printed, 1) {
+        t.accent_dim
+    } else {
+        t.negative
+    }
+}
+
 /// The pane a view is handed at the workstation's baseline width: 120 cells,
 /// less both rails and the rule the content column reserves.
 const BASELINE_PANE: u16 = 120 - crate::ui::shell::NAV_W - crate::ui::shell::PULSE_W - 1;
@@ -888,6 +973,10 @@ struct BlotterRow<'a> {
     value: Option<f64>,
     pnl: Option<f64>,
     pnl_pct: Option<f64>,
+    /// The mandate's target for this name, from the registry's book — the one
+    /// section of `portfolio` this view reads, because the live book carries
+    /// no targets and a drift needs both halves from somewhere.
+    target: Option<f64>,
     /// The asset's closes, or `None` for a ticker the market section does not
     /// carry at all. The two are different facts; see `tristate_spark`.
     history: Option<&'a [f64]>,
@@ -919,6 +1008,11 @@ fn blotter_rows(store: &Store) -> Vec<BlotterRow<'_>> {
         .and_then(|s| s.live_portfolio.as_ref())
         .map(|b| b.positions.as_slice())
         .unwrap_or_default();
+    let targets = store
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.portfolio.as_ref())
+        .map(|b| &b.target_weights);
 
     positions
         .iter()
@@ -941,6 +1035,9 @@ fn blotter_rows(store: &Store) -> Vec<BlotterRow<'_>> {
                 value: p.value,
                 pnl: p.unrealized_pnl,
                 pnl_pct: p.unrealized_pnl_pct,
+                target: ticker
+                    .and_then(|t| targets.and_then(|targets| targets.get(t)))
+                    .copied(),
                 history: ticker
                     .and_then(|t| facts.iter().find(|a| a.ticker == t).map(|a| a.history)),
             }
@@ -1081,14 +1178,32 @@ impl BookView {
         }
 
         let cursor = self.cursor(all.len());
+        // A pane past the floor earns the bar and drift columns, whole or not
+        // at all. Decided off the allocation, exactly as the floor is; the
+        // drift also needs targets in the payload, or the column is `--` down
+        // a book that has nothing to drift from.
+        let (bar, drift) = earned_cols(area.width, all.iter().any(|row| row.target.is_some()));
+        let largest = bar.then(|| largest_pnl(&all)).flatten();
+        let mut widths: Vec<Constraint> = BLOTTER_COLS
+            .iter()
+            .map(|(_, w, _)| Constraint::Length(*w))
+            .collect();
+        if bar {
+            widths.push(Constraint::Length(PNL_BAR_COL.1));
+        }
+        if drift {
+            widths.push(Constraint::Length(DRIFT_COL.1));
+        }
         let table = Table::new(
             all[top..(top + page).min(all.len())]
                 .iter()
                 .enumerate()
-                .map(|(i, row)| self.draw_row(row, top + i == cursor, fx, now)),
-            BLOTTER_COLS.map(|(_, w, _)| Constraint::Length(w)),
+                .map(|(i, row)| {
+                    self.draw_row(row, top + i == cursor, fx, now, (bar, drift, largest))
+                }),
+            widths,
         )
-        .header(self.header())
+        .header(self.header(bar, drift))
         .column_spacing(1);
         f.render_widget(table, rows[1]);
     }
@@ -1099,24 +1214,27 @@ impl BookView {
     /// an operator stops trusting. The glyphs are `▴`/`▾` rather than the
     /// `▲`/`▼` the change columns use: a sort direction and a price direction
     /// are different claims and must not share a mark.
-    fn header(&self) -> Row<'static> {
+    fn header(&self, bar: bool, drift: bool) -> Row<'static> {
         let live = self.sort.column();
         let arrow = if self.sort.descending() { "▾" } else { "▴" };
-        Row::new(
-            BLOTTER_COLS
-                .iter()
-                .enumerate()
-                .map(|(i, (name, width, right))| {
-                    let title = if i == live {
-                        format!("{name}{arrow}")
-                    } else {
-                        name.to_string()
-                    };
-                    cell(title, Style::default(), *right, *width)
-                })
-                .collect::<Vec<_>>(),
-        )
-        .style(Style::default().fg(theme().text_secondary))
+        let mut cells: Vec<_> = BLOTTER_COLS
+            .iter()
+            .enumerate()
+            .map(|(i, (name, width, right))| {
+                let title = if i == live {
+                    format!("{name}{arrow}")
+                } else {
+                    name.to_string()
+                };
+                cell(title, Style::default(), *right, *width)
+            })
+            .collect();
+        for (earned, (name, width, right)) in [(bar, PNL_BAR_COL), (drift, DRIFT_COL)] {
+            if earned {
+                cells.push(cell(name.to_string(), Style::default(), right, width));
+            }
+        }
+        Row::new(cells).style(Style::default().fg(theme().text_secondary))
     }
 
     /// One position.
@@ -1126,6 +1244,7 @@ impl BookView {
         selected: bool,
         fx: &FlashTracker,
         now: Instant,
+        (bar, drift_on, largest): (bool, bool, Option<f64>),
     ) -> Row<'static> {
         let t = theme();
         // One decision, one input. Both money cells answer "did this position
@@ -1196,13 +1315,35 @@ impl BookView {
             (trend, trend_style),
         ];
 
-        let row = Row::new(
-            cells
-                .into_iter()
-                .zip(BLOTTER_COLS)
-                .map(|((text, style), (_, width, right))| cell(text, style, right, width))
-                .collect::<Vec<_>>(),
-        );
+        let mut cells: Vec<_> = cells
+            .into_iter()
+            .zip(BLOTTER_COLS)
+            .map(|((text, style), (_, width, right))| cell(text, style, right, width))
+            .collect();
+        // The earned columns, in the order the header added them. The bar's
+        // sign is its colour — the P&L tone the two money cells already wear —
+        // so the three cells that state this position's P&L cannot disagree.
+        if bar {
+            cells.push(cell(
+                pnl_bar(row.pnl, largest, PNL_BAR_COL.1),
+                Style::default().fg(pnl_tone),
+                PNL_BAR_COL.2,
+                PNL_BAR_COL.1,
+            ));
+        }
+        if drift_on {
+            let drift = drift(row.weight, row.target);
+            cells.push(cell(
+                drift
+                    .map(format::signed_pct1)
+                    .unwrap_or_else(|| MISSING.to_string()),
+                Style::default().fg(drift.map(drift_tone).unwrap_or(t.text_secondary)),
+                DRIFT_COL.2,
+                DRIFT_COL.1,
+            ));
+        }
+
+        let row = Row::new(cells);
         if selected {
             // A marker *and* a shade: on a 256-colour terminal the shade alone
             // is one step of a ramp, which is not an answer to "which row".
@@ -2372,6 +2513,7 @@ mod tests {
             value: key,
             pnl: key,
             pnl_pct: key,
+            target: None,
             history: None,
         }
     }
@@ -2553,6 +2695,83 @@ mod tests {
     // -- the footer ---------------------------------------------------------
 
     #[test]
+    fn the_pnl_bar_scales_to_the_books_own_outlier_and_never_to_zero() {
+        // The ruler is the largest absolute P&L, so the outlier fills its
+        // column and everything else is a visible fraction of it. All-negative
+        // books are the case the magnitude rule exists for.
+        let rows = |pnls: Vec<Option<f64>>| -> Vec<BlotterRow<'static>> {
+            pnls.into_iter()
+                .map(|pnl| BlotterRow {
+                    ticker: Some("X"),
+                    qty: None,
+                    last: None,
+                    avg: None,
+                    weight: None,
+                    value: None,
+                    pnl,
+                    pnl_pct: None,
+                    target: None,
+                    history: None,
+                })
+                .collect()
+        };
+        let book = rows(vec![Some(-200.0), Some(-50.0), Some(100.0)]);
+        let largest = largest_pnl(&book);
+        assert_eq!(largest, Some(200.0), "the scale is the biggest loss");
+        assert_eq!(pnl_bar(Some(-200.0), largest, 8), "▰▰▰▰▰▰▰▰");
+        assert_eq!(pnl_bar(Some(100.0), largest, 8), "▰▰▰▰▱▱▱▱");
+        // The smallest measurable P&L still shows a cell — ceil, not round.
+        assert_eq!(pnl_bar(Some(-1.0), largest, 8), "▰▱▱▱▱▱▱▱");
+        // Flat at the two decimals the money cell prints is an empty track,
+        // and a P&L nobody sent is nothing at all.
+        assert_eq!(pnl_bar(Some(-1e-13), largest, 8), "");
+        assert_eq!(pnl_bar(None, largest, 8), "");
+        assert_eq!(pnl_bar(Some(f64::NAN), largest, 8), "");
+        // A book with no measured nonzero P&L has no ruler: empty, one flat
+        // row, and one absent row all decline to scale.
+        assert_eq!(largest_pnl(&rows(vec![])), None);
+        assert_eq!(largest_pnl(&rows(vec![Some(0.0)])), None);
+        assert_eq!(largest_pnl(&rows(vec![None])), None);
+        assert_eq!(pnl_bar(Some(5.0), None, 8), "");
+    }
+
+    #[test]
+    fn a_drift_needs_both_halves_and_over_target_is_the_loud_side() {
+        let t = theme();
+        let over = drift(Some(0.45), Some(0.40)).unwrap();
+        assert!((over - 0.05).abs() < 1e-12, "{over}");
+        assert_eq!(drift(Some(0.40), None), None, "no target, no drift");
+        assert_eq!(drift(None, Some(0.40)), None);
+        // Over target costs money to fix, so it is the loud tone; under is the
+        // dim accent, and a drift that rounds away at the printed decimal is
+        // neither — the desk's weight-bar rule, stated in a cell.
+        assert_eq!(drift_tone(0.05), t.negative);
+        assert_eq!(drift_tone(-0.05), t.accent_dim);
+        assert_eq!(drift_tone(0.0), t.text_secondary);
+        assert_eq!(drift_tone(-0.0004), t.text_secondary, "rounds to +0.0%");
+        assert_eq!(drift_tone(0.0006), t.negative);
+    }
+
+    #[test]
+    fn the_earned_columns_arrive_one_at_a_time_and_the_drift_needs_targets() {
+        // The nine-column floor earns nothing; the bar needs its own width and
+        // spacing; the drift needs the same again plus a target to drift from.
+        assert_eq!(earned_cols(BLOTTER_W, true), (false, false));
+        let with_bar = BLOTTER_W + PNL_BAR_COL.1 + 1;
+        assert_eq!(earned_cols(with_bar - 1, true), (false, false));
+        assert_eq!(earned_cols(with_bar, true), (true, false));
+        let with_both = with_bar + DRIFT_COL.1 + 1;
+        assert_eq!(earned_cols(with_both - 1, true), (true, false));
+        assert_eq!(earned_cols(with_both, true), (true, true));
+        // No targets in the payload is no drift column at any width.
+        assert_eq!(earned_cols(500, false), (true, false));
+        // Both earned headers fit their own columns.
+        for (name, width, _) in [PNL_BAR_COL, DRIFT_COL] {
+            assert!(name.chars().count() <= width as usize, "{name}");
+        }
+    }
+
+    #[test]
     fn a_drawdown_is_measured_from_the_running_peak_and_never_a_later_one() {
         // The peak runs forward only: a fall measured against a high the book
         // had not reached yet would be a loss from money it never held.
@@ -2681,6 +2900,7 @@ mod tests {
                 value: None,
                 pnl: None,
                 pnl_pct: Some(pct),
+                target: None,
                 history: None,
             };
             mover("best", &row).spans[0].content.trim().to_string()
@@ -2813,6 +3033,7 @@ mod tests {
                     value: None,
                     pnl: None,
                     pnl_pct: pct,
+                    target: None,
                     history: None,
                 })
                 .collect()
@@ -2848,6 +3069,7 @@ mod tests {
             value: None,
             pnl: None,
             pnl_pct: Some(-1.2345),
+            target: None,
             history: None,
         };
         let text = |row: &BlotterRow, mode| heat_tile(row, mode).content.to_string();
@@ -2874,6 +3096,7 @@ mod tests {
             value: None,
             pnl: None,
             pnl_pct: Some(f64::NAN),
+            target: None,
             history: None,
         };
         let unmeasured = Style::default().fg(t.text_secondary);

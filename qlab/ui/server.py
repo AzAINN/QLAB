@@ -672,7 +672,7 @@ class UISession:
         from qlab.core import data as market
         from qlab.trader.broker import get_broker
 
-        policy = market.policy_for(offline, seed=self.seed)
+        policy = self.data_policy(offline)
         universe = self.mandate.universe_whitelist
         try:
             broker = get_broker(
@@ -852,10 +852,37 @@ class UISession:
         with self._market_lock:
             self._market_events.append(event)
 
+    def data_policy(self, offline: bool):
+        """The one data policy this desk runs under, desk-mode aware.
+
+        ``policy_for(offline)`` alone answers from the environment
+        (``QLAB_DATA_PROVIDER``, default yfinance) and never from the desk —
+        so a LIVE desk with a working Alpaca login still priced itself from
+        yfinance, every permit said "research-grade only", and no workflow
+        was ever startable. The screenshot of that dead end is why this
+        method exists: on a live desk with resolvable Alpaca credentials the
+        provider is alpaca (execution-grade); an explicit env override still
+        wins, because an operator who set one said something.
+        """
+        from qlab.core import data as market
+
+        if offline:
+            return market.policy_for(True, seed=self.seed)
+        if os.environ.get("QLAB_DATA_PROVIDER", "").strip():
+            return market.policy_for(False, seed=self.seed)
+        from qlab.trader.alpaca_auth import (
+            AlpacaAuthError, resolve_alpaca_credentials)
+        try:
+            creds = resolve_alpaca_credentials()
+        except AlpacaAuthError:
+            creds = None
+        if creds is not None:
+            return market.policy_for(False, provider="alpaca", seed=self.seed)
+        return market.policy_for(False, seed=self.seed)
+
     def desk_mode_payload(self) -> dict:
         from qlab.trader.alpaca_auth import (
             AlpacaAuthError, describe_credentials, resolve_alpaca_credentials)
-
         try:
             creds = resolve_alpaca_credentials()
             description, ok = describe_credentials(creds), creds is not None
@@ -1490,7 +1517,7 @@ class UISession:
         from qlab.data.permit import build_permit
 
         tickers = self.mandate.universe_whitelist
-        policy = market.policy_for(offline, seed=self.seed)
+        policy = self.data_policy(offline)
         try:
             snap = market.snapshot(
                 tickers, date.today().isoformat(), lookback_days=252,
@@ -3423,7 +3450,7 @@ class UISession:
         # Operational execution additionally revalidates data at submission.
         from qlab.core import data as market
 
-        policy = market.policy_for(offline, seed=self.seed)
+        policy = self.data_policy(offline)
         if policy.execution_eligible:
             health = self.data_health(offline, purpose="execution")
             if health.get("blocked") or not health.get("eligible_for_execution"):

@@ -1738,7 +1738,12 @@ impl BookView {
 
     /// The equity curve over the slice `p` last chose.
     fn draw_curve(&self, f: &mut Frame, area: Rect, store: &Store) {
-        let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
         f.render_widget(
             Paragraph::new(header_keys("equity", self.period_keys(), rows[0].width)),
             rows[0],
@@ -1783,8 +1788,108 @@ impl BookView {
                 label: format::money,
             },
         );
+        draw_drawdown_ribbon(f, rows[2], &equity);
     }
+}
 
+/// The eight levels of the drawdown ribbon, shallow to deep: a blank cell at a
+/// peak, then the spark ramp's own block glyphs — the one bar vocabulary this
+/// workstation draws, and the one every terminal it runs on can render. The
+/// bar's height is the *depth*, and the dim-red tone is what says the quantity
+/// is a loss; an upper-block ramp that grew down from the row's top would say
+/// it twice, in glyphs half the fonts in the field do not carry.
+const DD_GLYPHS: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '█'];
+
+/// How deep a drawdown paints the ribbon's full cell, as a fraction.
+///
+/// Ten percent, because that is BOOK's own catastrophe scale — the owner's
+/// default breaker sits inside it — and a ribbon scaled to the window's own
+/// worst would repaint the same history deeper every time a new low printed.
+/// Past it the ribbon saturates, exactly as every ramp on this workstation.
+const DD_FULL_SCALE: f64 = 0.10;
+
+/// The drawdown at each mark: how far the curve sits under its running peak,
+/// as a fraction of that peak. Zero at every new high.
+fn drawdowns(equity: &[f64]) -> Vec<f64> {
+    let mut peak = f64::NEG_INFINITY;
+    equity
+        .iter()
+        .map(|&value| {
+            peak = peak.max(value);
+            // A peak at or below zero is a book this arithmetic cannot state a
+            // fraction of; the ribbon reads it as no drawdown rather than as a
+            // division that flips sign.
+            if peak > 0.0 {
+                ((peak - value) / peak).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// One mark's ribbon glyph: its depth against the ten-percent full scale,
+/// quantized into the eight down-growing levels.
+fn dd_glyph(depth: f64) -> char {
+    if !depth.is_finite() {
+        // A depth nobody computed must not render as the deepest cell.
+        return DD_GLYPHS[0];
+    }
+    let top = DD_GLYPHS.len() - 1;
+    let level = ((depth / DD_FULL_SCALE).clamp(0.0, 1.0) * top as f64).ceil() as usize;
+    DD_GLYPHS[level.min(top)]
+}
+
+/// The drawdown-from-peak ribbon: one row under the curve, aligned to its plot.
+///
+/// The x-axis is the curve's own — one cell per plot column, each cell the
+/// worst drawdown of the marks that land on it — so a trough on the line and
+/// the dark cell under it are the same mark. `max` per cell rather than the
+/// mean, because the question a ribbon answers is "how bad did it get", and
+/// averaging a spike away would say it did not.
+fn draw_drawdown_ribbon(f: &mut Frame, area: Rect, equity: &[f64]) {
+    let t = theme();
+    if area.width == 0 || area.height == 0 || equity.len() < 2 {
+        return;
+    }
+    let gutter = braille_chart::scale_gutter_w(equity, format::money);
+    let label = "dd";
+    // The gutter carries the ribbon's own name where the curve carries money.
+    // Silent when the scale would not fit — the chart above has already
+    // refused, and a ribbon under a refusal would decorate a sentence.
+    if area.width <= gutter || (gutter as usize) < label.len() + 1 {
+        return;
+    }
+    let plot_w = (area.width - gutter) as usize;
+    let depths = drawdowns(equity);
+    let per_cell = depths.len() as f64 / plot_w as f64;
+    let cells: String = (0..plot_w)
+        .map(|x| {
+            let from = (x as f64 * per_cell) as usize;
+            let to = (((x + 1) as f64 * per_cell) as usize).max(from + 1);
+            let worst = depths[from.min(depths.len() - 1)..to.min(depths.len())]
+                .iter()
+                .copied()
+                .fold(0.0, f64::max);
+            dd_glyph(worst)
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{label:>width$} ", width = gutter as usize - 1),
+                Style::default().fg(t.text_tertiary),
+            ),
+            // The dim half of the loss pair: the ribbon is context under the
+            // curve, and the bright red is reserved for a loss stated in
+            // numbers an operator acts on.
+            Span::styled(cells, Style::default().fg(t.negative_dim)),
+        ])),
+        area,
+    );
+}
+
+impl BookView {
     /// The period strip, with the live slice lit.
     fn period_keys(&self) -> Vec<Span<'static>> {
         let t = theme();
@@ -2446,6 +2551,45 @@ mod tests {
     }
 
     // -- the footer ---------------------------------------------------------
+
+    #[test]
+    fn a_drawdown_is_measured_from_the_running_peak_and_never_a_later_one() {
+        // The peak runs forward only: a fall measured against a high the book
+        // had not reached yet would be a loss from money it never held.
+        let depths = drawdowns(&[100.0, 110.0, 99.0, 110.0, 121.0]);
+        assert_eq!(depths[0], 0.0, "the first mark is its own peak");
+        assert_eq!(depths[1], 0.0, "a new high is no drawdown");
+        assert!((depths[2] - 0.1).abs() < 1e-12, "11 off a 110 peak");
+        assert_eq!(depths[3], 0.0, "a full recovery is back at zero");
+        assert_eq!(depths[4], 0.0);
+        // A monotone rise never leaves zero, and a monotone fall deepens.
+        assert!(drawdowns(&[1.0, 2.0, 3.0]).iter().all(|d| *d == 0.0));
+        let falling = drawdowns(&[100.0, 90.0, 80.0]);
+        assert!(falling[1] < falling[2]);
+        // Empty and one-mark inputs are their own honest shapes.
+        assert!(drawdowns(&[]).is_empty());
+        assert_eq!(drawdowns(&[42.0]), vec![0.0]);
+        // A peak at zero is not a divisor: an all-negative or zero book reads
+        // as no drawdown rather than as a fraction with a flipped sign.
+        assert!(drawdowns(&[0.0, -5.0]).iter().all(|d| *d == 0.0));
+        assert!(drawdowns(&[-10.0, -20.0]).iter().all(|d| *d == 0.0));
+    }
+
+    #[test]
+    fn the_ribbon_bands_at_a_tenth_and_a_peak_is_a_blank_cell() {
+        // Zero is the one depth that must render as nothing at all: a `▁` at
+        // every peak would say the book is always a little under water.
+        assert_eq!(dd_glyph(0.0), ' ');
+        // The shallowest measurable fall is already a cell — `ceil`, not
+        // `round`, because a drawdown the curve visibly took must not vanish
+        // into the peak's own glyph.
+        assert_eq!(dd_glyph(0.0001), '▁');
+        assert_eq!(dd_glyph(0.05), '▄');
+        assert_eq!(dd_glyph(0.10), '█');
+        assert_eq!(dd_glyph(0.50), '█', "the ramp did not clamp");
+        // A depth nobody computed is not the deepest cell on the row.
+        assert_eq!(dd_glyph(f64::NAN), ' ');
+    }
 
     #[test]
     fn the_holdings_ramp_bands_at_a_twentieth_of_its_full_scale() {

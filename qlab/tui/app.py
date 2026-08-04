@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import shlex
-import shutil
 import subprocess
 import threading
 import time
@@ -1541,7 +1540,12 @@ class QlabTui(App[None]):
         a back door: it is the ordinary CLI, with no qlab authority of its own
         beyond what the MCP config already grants.
         """
-        binary = shutil.which("claude")
+        # The one resolver, not a bare which(): on Windows shutil.which can
+        # return npm's extensionless shim, which CreateProcess rejects with
+        # WinError 193 — claude.py already solved this once.
+        from qlab.tui.claude import resolve_claude_executable
+
+        binary = resolve_claude_executable()
         if binary is None:
             self._write_local_event("claude.cli_missing", {})
             self._set_selected_work(

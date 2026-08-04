@@ -712,7 +712,8 @@ def save_selection(sel: ModelSelection) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
+        from qlab.paths import replace_file
+        replace_file(tmp_name, path)
     except BaseException:
         # A leftover temp file in the state root is a second parseable
         # selection nobody chose; take it with us.

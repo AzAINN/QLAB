@@ -88,7 +88,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import threading
 import time
 import uuid
@@ -387,9 +386,14 @@ class UISession:
         # proposal authority in Observe mode.
         from qlab.operator.atlas import AtlasSupervisor
 
+        from qlab.tui.claude import resolve_claude_executable
+
+        # The resolver, not a bare which(): on Windows the extensionless npm
+        # shim resolves but does not run (WinError 193), so a bare which()
+        # would report a coordinator the dispatcher then cannot start.
         self.atlas = AtlasSupervisor(
             self.registry,
-            coordinator_available=lambda: bool(shutil.which("claude")))
+            coordinator_available=lambda: bool(resolve_claude_executable()))
         # A dispatched workflow can reach a terminal state while no owner is
         # running, and the restart above has just interrupted anything that was
         # still live. Either way the bound task must be resolved now rather than
@@ -1489,18 +1493,22 @@ class UISession:
             "last_run_at": last_daily_ops.get("ts") if last_daily_ops else None,
             "triggers_fired": len(triggers) if isinstance(triggers, list) else 0,
         }
+        from qlab.tui.claude import resolve_claude_executable
+
+        # One resolver for every "is claude here" answer (Windows shims).
+        claude_available = bool(resolve_claude_executable())
         return {
             "mode": "paper",
             "offline": offline,
-            "claude_available": bool(shutil.which("claude")),
+            "claude_available": claude_available,
             "mcp_configured": bool(servers),
             "mcp_servers": servers,
             "mcp_config_error": mcp_error,
             "mcp_proxy_available": proxy_available,
-            "governed_available": proxy_available and bool(shutil.which("claude")),
+            "governed_available": proxy_available and claude_available,
             "governed_authority": "propose_only",
             "claude_role": "workforce_orchestrator",
-            "workforce_available": proxy_available and bool(shutil.which("claude")),
+            "workforce_available": proxy_available and claude_available,
             "governed_lock_reason": (
                 "agent authority is intentionally propose-only; paper execution "
                 "requires explicit human confirmation"
@@ -4857,6 +4865,16 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
     session settles on is what the banner reports.
     """
     try:
+        # The bind IS the one-writer guard, so it must be exclusive on every
+        # platform. ThreadingHTTPServer sets allow_reuse_address (SO_REUSEADDR),
+        # which on Windows lets a SECOND process bind the same live port — a
+        # second registry writer admitted by the exact mechanism that exists to
+        # refuse it. Windows' own default is already exclusive; keep REUSEADDR
+        # only where it means "skip TIME_WAIT" (POSIX), never where it means
+        # "share the port" (nt). Set the class before construction rather than
+        # wrapping it, because tests monkeypatch this constructor to prove the
+        # refusal happens before any registry is opened.
+        setattr(ThreadingHTTPServer, "allow_reuse_address", os.name != "nt")
         httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     except Exception:
         # Resolve ownership before opening DuckDB or recovering workflows. A

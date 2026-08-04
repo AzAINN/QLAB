@@ -261,23 +261,31 @@ mod tests {
     /// widget as in a view, and this survives the file moves Task 5 makes.
     #[test]
     fn no_hardcoded_rgb_outside_theme() {
-        let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-        let out = std::process::Command::new("grep")
-            .args(["-rl", "Color::Rgb", src])
-            .output()
-            .unwrap();
-        let found: Vec<String> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect();
+        fn collect_rgb_paths(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("source directory is readable") {
+                let path = entry.expect("source entry is readable").path();
+                if path.is_dir() {
+                    collect_rgb_paths(&path, found);
+                } else if path.extension() == Some(std::ffi::OsStr::new("rs")) {
+                    let body = std::fs::read_to_string(&path).expect("source file is readable");
+                    if body.contains("Color::Rgb") {
+                        found.push(path);
+                    }
+                }
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        collect_rgb_paths(&src, &mut found);
+        found.sort();
         // Asserting the exact list rather than "nothing found" also proves the
-        // search ran: a grep that could not read the tree returns no matches,
-        // which would otherwise read as a clean crate.
+        // search ran: an unreadable tree returns no matches, which would
+        // otherwise read as a clean crate.
         assert_eq!(
             found,
-            vec![format!("{src}/theme.rs")],
-            "every Color::Rgb belongs in theme.rs; grep said: {}",
-            String::from_utf8_lossy(&out.stderr)
+            vec![src.join("theme.rs")],
+            "every Color::Rgb belongs in theme.rs"
         );
     }
 }

@@ -337,7 +337,14 @@ def _atlas_binary() -> str:
     installed = shutil.which("atlas")
     if installed:
         return installed
-    return str(workspace_root().joinpath(*_ATLAS_RELATIVE))
+    binary = workspace_root().joinpath(*_ATLAS_RELATIVE)
+    # Cargo names the artifact atlas.exe on Windows; the extensionless check
+    # would report "not built" over a binary sitting right there.
+    if os.name == "nt" and not binary.exists():
+        exe = binary.with_suffix(".exe")
+        if exe.exists():
+            return str(exe)
+    return str(binary)
 
 
 def atlas_client_argv(binary: str, *, operator: bool, offline: bool) -> list[str]:
@@ -426,6 +433,15 @@ def _cmd_tui(args) -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            # Its own process group: the owner must outlive the client, and on
+            # Windows a child in the launcher's group receives the console's
+            # Ctrl-C — so quitting the workstation would kill the runtime the
+            # banner just promised keeps running. POSIX inherits no such
+            # coupling for a detached-intent daemon, but the same isolation is
+            # what claude.py uses for its trees; imitate it.
+            **({"creationflags":
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+               if os.name == "nt" else {"start_new_session": True}),
         )
         # The pipe is kept (rather than DEVNULL) because failures are diagnosed
         # from it — but a pipe nobody reads is a 64 KB fuse: once the owner has
@@ -434,7 +450,7 @@ def _cmd_tui(args) -> int:
         stderr_tail = _OwnerStderrTail(owner)
         print(
             f"Starting the qlab runtime on port {args.port} "
-            "(first launch compiles imports; this can take up to a minute)…",
+            "(first launch compiles imports; this can take up to a minute)...",
             flush=True,
         )
 
@@ -556,7 +572,16 @@ def _cmd_tui(args) -> int:
     # `_publish_owner_port` already put the port in this environment; passing it
     # explicitly is what makes the handover a statement rather than an
     # inheritance nobody can see.
-    os.execvpe(binary, argv, dict(os.environ, QLAB_UI_PORT=str(args.port)))
+    env = dict(os.environ, QLAB_UI_PORT=str(args.port))
+    if os.name == "nt":
+        # exec* on Windows is spawn-then-exit-parent: the shell sees the
+        # launcher die and prints its prompt INTO the fullscreen client, and
+        # console Ctrl-C plumbing goes to a process that no longer exists.
+        # A plain child + wait is the faithful translation; the exit code is
+        # carried so a supervisor reads the client's, not the launcher's.
+        completed = subprocess.run([binary] + argv[1:], env=env)
+        raise SystemExit(completed.returncode)
+    os.execvpe(binary, argv, env)
     raise SystemExit(f"could not exec the Atlas workstation at {binary}")
 
 

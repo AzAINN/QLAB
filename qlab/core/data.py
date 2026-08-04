@@ -939,8 +939,9 @@ def _write_cache(path: Path, df: pd.DataFrame, provider: str) -> None:
                 encoding="utf-8",
             )
 
-            payload_temp.replace(payload_path)
-            metadata_temp.replace(metadata_path)
+            from qlab.paths import replace_file
+            replace_file(payload_temp, payload_path)
+            replace_file(metadata_temp, metadata_path)
             stale_payload.unlink(missing_ok=True)
         finally:
             for temporary_path in temporary_paths:

@@ -65,3 +65,32 @@ def state_root() -> Path:
 
 def state_path(*parts: str) -> Path:
     return state_root().joinpath(*parts)
+
+
+def replace_file(src: "Path | str", dst: "Path | str", *,
+                 attempts: int = 5, delay_s: float = 0.05) -> None:
+    """``os.replace`` that survives Windows' open-handle window.
+
+    POSIX rename replaces an open destination atomically; Windows refuses with
+    PermissionError while ANY reader holds the destination open — and this
+    codebase's atomic-write pattern (temp file, then replace) is exactly the
+    shape that collides with a concurrent status poll reading the old file. A
+    short bounded retry converts that platform difference back into the
+    atomicity the call sites already reason about. On POSIX the first attempt
+    succeeds and the loop is free.
+    """
+    import time as _time
+
+    last: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:
+            if os.name != "nt":
+                raise
+            last = exc
+            _time.sleep(delay_s * (attempt + 1))
+    if last is not None:
+        raise last
+    raise PermissionError(f"could not replace {dst}; no attempts were made")

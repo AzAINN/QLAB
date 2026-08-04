@@ -191,6 +191,32 @@ def test_an_unreadable_profile_is_refused_without_leaking(tmp_path, monkeypatch)
     assert caught.value.__suppress_context__
 
 
+def test_windows_profile_write_refuses_a_config_dir_outside_the_user_profile(
+        tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "shared" / "alpaca" / "profiles"
+
+    monkeypatch.setattr(alpaca_auth.os, "name", "nt", raising=False)
+    monkeypatch.setattr(alpaca_auth.Path, "home", classmethod(lambda cls: home))
+
+    with pytest.raises(AlpacaAuthError, match="outside your user profile"):
+        alpaca_auth._ensure_private_dir(outside)
+
+
+def test_windows_profile_write_allows_a_config_dir_under_the_user_profile(
+        tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    inside = home / "AppData" / "Roaming" / "alpaca" / "profiles"
+
+    monkeypatch.setattr(alpaca_auth.os, "name", "nt", raising=False)
+    monkeypatch.setattr(alpaca_auth.Path, "home", classmethod(lambda cls: home))
+
+    alpaca_auth._ensure_private_dir(inside)
+
+    assert inside.is_dir()
+
+
 def test_a_live_profile_is_refused(tmp_path, monkeypatch):
     _write_profile(tmp_path, body="access_token: tok-live\nlive: true\n")
     monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path))

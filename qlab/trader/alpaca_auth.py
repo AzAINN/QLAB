@@ -244,11 +244,31 @@ def _ensure_private_dir(path: Path) -> None:
     permissions) accepts the call and keeps the old mode, and writing a secret
     into a world-readable directory because the syscall returned zero is
     exactly the silent fallback this codebase refuses.
+
+    On Windows the POSIX bits are decorative (chmod toggles read-only and
+    ``st_mode`` reads back 0o777-ish regardless of the real ACL), so the check
+    above would refuse every profile and the desk could never store a login.
+    The honest equivalent there is inheritance: a directory under the user's
+    profile inherits %USERPROFILE%'s owner-only ACL. That containment is what
+    gets checked — a config dir pointed OUTSIDE the profile (a share, a
+    world-readable data drive) is refused loudly rather than trusted.
     """
     try:
         path.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            resolved = path.resolve()
+            home = Path.home().resolve()
+            if not resolved.is_relative_to(home):
+                raise AlpacaAuthError(
+                    f"{path} is outside your user profile; on Windows a "
+                    "credential directory must live under it to inherit a "
+                    "private ACL. Set ALPACA_CONFIG_DIR to a folder inside "
+                    f"{home}")
+            return
         os.chmod(path, 0o700)
         mode = stat.S_IMODE(path.stat().st_mode)
+    except AlpacaAuthError:
+        raise
     except OSError:
         # Re-rendered from the path: an OSError's own message is not worth the
         # risk of interpolating something that carries more than it should.
@@ -379,17 +399,22 @@ def write_credentials(api_key: str, api_secret: str,
         raise AlpacaAuthError(f"{path} could not be written") from None
     written = False
     try:
-        mode = stat.S_IMODE(os.fstat(fd).st_mode)
-        if mode != 0o600:
-            # A umask can only clear bits, so this is the unusual filesystem
-            # again. Fix it and re-read: the secret is written only once the
-            # file it goes into is private, never before.
-            os.fchmod(fd, 0o600)
+        # POSIX only: on Windows st_mode is decorative and fchmod cannot make
+        # the file private — the containment check in _ensure_private_dir is
+        # the ACL story there, so a decorative 0o666 read-back must not refuse
+        # a write the directory already guards.
+        if os.name != "nt":
             mode = stat.S_IMODE(os.fstat(fd).st_mode)
-        if mode != 0o600:
-            raise AlpacaAuthError(
-                f"{tmp} cannot be made private (its mode is {mode:04o}); "
-                "refusing to write a credential to it")
+            if mode != 0o600:
+                # A umask can only clear bits, so this is the unusual
+                # filesystem again. Fix it and re-read: the secret is written
+                # only once the file it goes into is private, never before.
+                os.fchmod(fd, 0o600)
+                mode = stat.S_IMODE(os.fstat(fd).st_mode)
+            if mode != 0o600:
+                raise AlpacaAuthError(
+                    f"{tmp} cannot be made private (its mode is {mode:04o}); "
+                    "refusing to write a credential to it")
         # Buffered writer rather than ``os.write``: the raw call may write
         # fewer bytes than it was given, and a truncated profile is the worst
         # possible outcome here — it still parses as a mapping, just one whose
@@ -406,16 +431,18 @@ def write_credentials(api_key: str, api_secret: str,
             # Nothing half-written survives a refusal, on any exit from here.
             tmp.unlink(missing_ok=True)
     try:
-        os.replace(tmp, path)
+        from qlab.paths import replace_file
+        replace_file(tmp, path)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise AlpacaAuthError(f"{path} could not be written") from None
 
-    final = stat.S_IMODE(path.stat().st_mode)
-    if final != 0o600:
-        raise AlpacaAuthError(
-            f"{path} is mode {final:04o} after writing, not 0600 — this "
-            "filesystem cannot keep a credential private")
+    if os.name != "nt":
+        final = stat.S_IMODE(path.stat().st_mode)
+        if final != 0o600:
+            raise AlpacaAuthError(
+                f"{path} is mode {final:04o} after writing, not 0600 — this "
+                "filesystem cannot keep a credential private")
 
 
 # ---------------------------------------------------------------------------

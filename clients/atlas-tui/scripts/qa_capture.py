@@ -62,8 +62,16 @@ from __future__ import annotations
 
 import argparse
 import codecs
-import fcntl
 import os
+
+if os.name == "nt":
+    raise SystemExit(
+        "qa_capture.py requires a POSIX pseudo-terminal (pty/fcntl/termios); "
+        "run the cargo golden tests on Windows and this manual QA capture on "
+        "macOS or Linux."
+    )
+
+import fcntl
 import pty
 import select
 import signal

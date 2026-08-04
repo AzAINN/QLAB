@@ -61,6 +61,22 @@ impl Client {
         self
     }
 
+    /// One mouse event, routed exactly as the runtime routes it — through
+    /// `shell::on_mouse`, so a test exercises the nav guard and the view
+    /// routing rather than a view method it called directly.
+    pub fn mouse(&mut self, kind: crossterm::event::MouseEventKind, column: u16, row: u16) {
+        atlas::ui::shell::on_mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut self.store,
+            &mut self.views,
+        );
+    }
+
     pub fn keys(&mut self, codes: &[KeyCode]) -> &mut Self {
         for code in codes {
             self.press(*code);

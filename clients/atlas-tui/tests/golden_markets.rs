@@ -20,7 +20,7 @@ use atlas::fx::{FlashKey, Fx};
 use atlas::model::Snapshot;
 use atlas::store::Store;
 use atlas::theme::Theme;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use harness::{body, body_style_of, content, line_with, Client};
 use std::time::{Duration, Instant};
 
@@ -155,6 +155,51 @@ fn a_desk_with_no_sector_etfs_says_what_to_prewarm_instead_of_nothing() {
     assert!(
         narrow.contains("candidates"),
         "the remedy was clipped rather than wrapped:\n{narrow}"
+    );
+}
+
+#[test]
+fn a_wheel_and_a_click_move_the_selection_through_the_real_shell() {
+    // End to end: the frame publishes the grid's rect, the shell routes the
+    // event, and the next frame draws the marker the mouse chose. A draw
+    // happens first exactly as the runtime's loop orders it, because the rect
+    // a click is read against is the last frame's.
+    let mut client = markets();
+    let _ = client.frame(120, 36);
+    client.mouse(MouseEventKind::ScrollDown, 0, 0);
+    assert!(
+        client.frame(120, 36).contains("▌ SPY"),
+        "the wheel did not move the selection:\n{}",
+        client.frame(120, 36)
+    );
+
+    // The grid starts one column past the nav rail's rule; the header sits on
+    // the frame's row 3 (tape, breadth header, breadth facts above it), so
+    // QQQ — the third asset — is at row 6.
+    client.mouse(MouseEventKind::Down(MouseButton::Left), 12, 6);
+    assert!(
+        client.frame(120, 36).contains("▌ QQQ"),
+        "the click did not land on QQQ:\n{}",
+        client.frame(120, 36)
+    );
+
+    // A click on the nav rail is the shell's, not this view's: it switches
+    // panes rather than moving the grid's cursor.
+    client.mouse(MouseEventKind::Down(MouseButton::Left), 2, 4);
+    assert!(
+        client.frame(120, 36).contains("PORTFOLIO VALUE"),
+        "the nav click did not reach the shell:\n{}",
+        client.frame(120, 36)
+    );
+
+    // BOOK's blotter takes the wheel through the same seam. `▌ACWI` is the
+    // blotter's own marker+ticker cell — the tape spells ACWI without one.
+    let _ = client.frame(120, 36);
+    client.mouse(MouseEventKind::ScrollDown, 0, 0);
+    let frame = client.frame(120, 36);
+    assert!(
+        frame.contains("▌ACWI"),
+        "BOOK's wheel did not move its cursor:\n{frame}"
     );
 }
 

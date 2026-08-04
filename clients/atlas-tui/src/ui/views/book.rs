@@ -44,7 +44,7 @@ use crate::ui::widgets::tristate_spark::{self, SPARK_W};
 use crate::ui::widgets::{
     braille_chart, header_keys, heat_cell, panel_block, panel_header, refuse,
 };
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -153,6 +153,11 @@ pub struct BookView {
     /// records the same number, which is what keeps a repaint from moving the
     /// cursor.
     page_rows: Cell<usize>,
+    /// Where the last frame drew the blotter's grid — its column header and
+    /// the rows under it — so a click can be read back as a row. The same
+    /// geometry-only contract as `page_rows`, and a `Cell` for the same
+    /// reason.
+    blotter: Cell<Rect>,
     /// Which plan card `x` is aimed at.
     ///
     /// Only in the operator build: a glass window has no key that acts on a
@@ -242,6 +247,38 @@ impl View for BookView {
             KeyCode::Up => self.select(self.cursor(rows).saturating_sub(1), page),
             KeyCode::Down => self.select((self.cursor(rows) + 1).min(rows.saturating_sub(1)), page),
             _ => return None,
+        }
+        None
+    }
+
+    /// The wheel walks the blotter's cursor and a click plants it — the mouse
+    /// spelling of the arrow keys, with the same walls at both ends.
+    fn on_mouse(&mut self, m: MouseEvent, store: &mut Store) -> Option<Command> {
+        let rows = row_count(store);
+        let page = self.page_rows.get().max(1);
+        match m.kind {
+            MouseEventKind::ScrollUp => self.select(self.cursor(rows).saturating_sub(1), page),
+            MouseEventKind::ScrollDown => {
+                self.select((self.cursor(rows) + 1).min(rows.saturating_sub(1)), page)
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                // The published rect's first row is the column header, so a
+                // click's row is its offset past it, plus the page the scroll
+                // is holding. Only a row the frame actually drew: a click in
+                // the blank under a short book selects nothing.
+                let grid = self.blotter.get();
+                if grid.height > 0
+                    && m.row > grid.y
+                    && m.column >= grid.x
+                    && m.column < grid.x.saturating_add(grid.width)
+                {
+                    let row = self.scroll(rows, page) + (m.row - grid.y - 1) as usize;
+                    if row < rows {
+                        self.select(row, page);
+                    }
+                }
+            }
+            _ => {}
         }
         None
     }
@@ -818,8 +855,8 @@ const DRIFT_COL: (&str, u16, bool) = ("DRIFT", 6, RIGHT);
 /// or not at all — a bar column squeezed under its own width would scale its
 /// runs to a ruler that is not there.
 fn earned_cols(width: u16, targets: bool) -> (bool, bool) {
-    let bar = width >= BLOTTER_W + PNL_BAR_COL.1 + 1;
-    let drift = targets && width >= BLOTTER_W + PNL_BAR_COL.1 + 1 + DRIFT_COL.1 + 1;
+    let bar = width > BLOTTER_W + PNL_BAR_COL.1;
+    let drift = targets && width > BLOTTER_W + PNL_BAR_COL.1 + 1 + DRIFT_COL.1;
     (bar, drift)
 }
 
@@ -1104,6 +1141,7 @@ impl BookView {
         now: Instant,
     ) {
         if area.height < BLOTTER_H {
+            self.blotter.set(Rect::default());
             refuse(
                 f,
                 area,
@@ -1121,6 +1159,7 @@ impl BookView {
         // spent against the declared width, and the allocation is what shrank.
         // So the blotter refuses rather than drawing numbers that are wrong.
         if area.width < BLOTTER_W {
+            self.blotter.set(Rect::default());
             refuse(
                 f,
                 area,
@@ -1148,6 +1187,7 @@ impl BookView {
         // size.
         let page = rows[1].height.saturating_sub(1) as usize;
         self.page_rows.set(page);
+        self.blotter.set(rows[1]);
 
         // Built from the store each frame rather than cached: a cached list is
         // a second account of the book, and it would go stale between the poll
@@ -2693,6 +2733,69 @@ mod tests {
     }
 
     // -- the footer ---------------------------------------------------------
+
+    #[test]
+    fn the_wheel_walks_the_blotter_and_a_click_lands_on_the_scrolled_page() {
+        use crate::ui::views::View;
+        // The mouse spelling of the arrow keys, plus the half the keys do not
+        // have: a click's row is read against the page the scroll is holding,
+        // so row 2 of page two is position 7 and not position 2.
+        let mut store = store_with_a_book(12);
+        let mut view = BookView::default();
+        view.page_rows.set(5);
+        let mouse = |kind, column, row| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        view.on_mouse(mouse(MouseEventKind::ScrollDown, 0, 0), &mut store);
+        assert_eq!(view.selected, 1);
+        for _ in 0..20 {
+            view.on_mouse(mouse(MouseEventKind::ScrollDown, 0, 0), &mut store);
+        }
+        assert_eq!(view.selected, 11, "the wheel ran past the last position");
+        for _ in 0..20 {
+            view.on_mouse(mouse(MouseEventKind::ScrollUp, 0, 0), &mut store);
+        }
+        assert_eq!(view.selected, 0, "the wheel ran past the first position");
+
+        // Page two, then a click on its third visible row: the header is the
+        // rect's first row, so y+3 is the page's third position.
+        view.page_to(5, 12, 5);
+        view.blotter.set(Rect::new(9, 6, 75, 6));
+        let click = MouseEventKind::Down(MouseButton::Left);
+        view.on_mouse(mouse(click, 12, 9), &mut store);
+        assert_eq!(view.selected, 7, "the click ignored the scroll");
+        view.on_mouse(mouse(click, 12, 6), &mut store);
+        assert_eq!(view.selected, 7, "the header row moved the cursor");
+        view.on_mouse(mouse(click, 90, 9), &mut store);
+        assert_eq!(view.selected, 7, "a click outside the grid selected");
+        // A refused blotter publishes no rect, and a click lands nowhere.
+        view.blotter.set(Rect::default());
+        view.on_mouse(mouse(click, 12, 9), &mut store);
+        assert_eq!(view.selected, 7);
+    }
+
+    /// A store carrying a live book of `n` positions, weights descending.
+    fn store_with_a_book(n: usize) -> Store {
+        let positions: Vec<String> = (0..n)
+            .map(|i| format!(r#"{{"ticker": "P{i:02}", "weight": {}}}"#, (n - i) as f64))
+            .collect();
+        let mut store = Store::default();
+        store.apply(
+            crate::bus::AppEvent::Snapshot(Box::new(
+                serde_json::from_str(&format!(
+                    r#"{{"live_portfolio": {{"positions": [{}]}}}}"#,
+                    positions.join(",")
+                ))
+                .unwrap(),
+            )),
+            std::time::Instant::now(),
+        );
+        store
+    }
 
     #[test]
     fn the_pnl_bar_scales_to_the_books_own_outlier_and_never_to_zero() {

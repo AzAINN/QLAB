@@ -932,6 +932,53 @@ mod tests {
     }
 
     #[test]
+    fn the_wheel_walks_the_cursor_and_a_click_plants_it() {
+        // The mouse spelling of the arrow keys: walls at both ends, and a
+        // click reads a row back off the rect the last draw published — the
+        // header row and the blank under a short universe select nothing.
+        let store_json = serde_json::json!([
+            {"ticker": "AAA", "change_1d": 0.01},
+            {"ticker": "BBB", "change_1d": 0.02},
+            {"ticker": "CCC", "change_1d": 0.03}
+        ]);
+        let mut store = store_with(store_json);
+        let mut view = MarketsView::default();
+        let mouse = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        view.on_mouse(mouse(MouseEventKind::ScrollDown, 0, 0), &mut store);
+        assert_eq!(view.selected(), 1);
+        for _ in 0..5 {
+            view.on_mouse(mouse(MouseEventKind::ScrollDown, 0, 0), &mut store);
+        }
+        assert_eq!(view.selected(), 2, "the wheel ran past the last row");
+        for _ in 0..5 {
+            view.on_mouse(mouse(MouseEventKind::ScrollUp, 0, 0), &mut store);
+        }
+        assert_eq!(view.selected(), 0, "the wheel ran past the first row");
+
+        // The grid the last frame published: header at y=3, rows under it.
+        view.grid.set(Rect::new(9, 3, 56, 10));
+        let click = MouseEventKind::Down(MouseButton::Left);
+        view.on_mouse(mouse(click, 12, 5), &mut store);
+        assert_eq!(view.selected(), 1, "a click on the second row missed");
+        view.on_mouse(mouse(click, 12, 3), &mut store);
+        assert_eq!(view.selected(), 1, "the header row moved the cursor");
+        view.on_mouse(mouse(click, 12, 9), &mut store);
+        assert_eq!(view.selected(), 1, "a click past the universe selected");
+        view.on_mouse(mouse(click, 80, 5), &mut store);
+        assert_eq!(view.selected(), 1, "a click outside the grid selected");
+        // A refused grid publishes no rect, and a click lands nowhere.
+        view.grid.set(Rect::default());
+        view.on_mouse(mouse(click, 12, 5), &mut store);
+        assert_eq!(view.selected(), 1);
+    }
+
+    #[test]
     fn the_dispersion_is_the_gap_between_the_days_two_ends() {
         let store = store_with(serde_json::json!([
             {"ticker": "UP", "change_1d": 0.0124},

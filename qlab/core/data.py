@@ -492,7 +492,14 @@ def _fetch_alpaca(tickers: list[str], start: str, end: str) -> pd.DataFrame | No
             symbol_or_symbols=tickers,
             timeframe=TimeFrame.Day,
             start=pd.Timestamp(start).to_pydatetime(),
-            end=pd.Timestamp(end).to_pydatetime(),
+            # A bare date parses to MIDNIGHT AT THE START of `end`, and the
+            # session's daily bar is stamped inside the day — so an inclusive
+            # `end` at 00:00 silently excluded the end date's own bar, the
+            # panel was forever "1 session stale", and paper-proposal
+            # eligibility could never be earned. Fetch through the end of the
+            # day; the snapshot still truncates to `as_of` after, so this adds
+            # no look-ahead.
+            end=(pd.Timestamp(end) + pd.Timedelta(days=1)).to_pydatetime(),
             adjustment=Adjustment.ALL,
         )
         raw = client.get_stock_bars(request).df

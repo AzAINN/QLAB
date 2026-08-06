@@ -72,6 +72,23 @@ async fn main() -> Result<()> {
     install_hooks()?;
     theme::init(theme::detect());
 
+    // Before anything reads a flag. The build that removed `--operator` removed
+    // the `exit(2)` that refused it too, so `atlas --operator` — and every typo
+    // of every flag below — became a silent no-op, which is the mechanism that
+    // let the original `--operator` bug go unseen. Invariant 4: refuse loudly.
+    if let Err(unknown) = unknown_args(&args) {
+        eprintln!(
+            "atlas: unrecognised argument{} {}\n\
+             accepted: {}\n\
+             the desk's armed/read-only posture is the owner's, not a flag's — \
+             `--glass` only declines it for this window.",
+            if unknown.len() == 1 { "" } else { "s" },
+            unknown.join(", "),
+            KNOWN_ARGS.join(" "),
+        );
+        std::process::exit(2);
+    }
+
     let offline = !args.iter().any(|a| a == "--live");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let base = http::base_from_env();
@@ -413,6 +430,31 @@ fn ingest(
     quit
 }
 
+// -- argv ------------------------------------------------------------------
+
+/// Every argument this client understands. A whitelist rather than a blacklist:
+/// the point is that anything *not* here is refused, so a flag retired later
+/// cannot quietly become a no-op the way `--operator` did.
+const KNOWN_ARGS: [&str; 4] = ["--live", "--glass", "--pick", "-v"];
+
+/// The arguments that are not [`KNOWN_ARGS`], or `Ok(())` when there are none.
+///
+/// `argv[0]` is skipped; it is the path this binary was invoked by, not a flag.
+/// Pure so the rule can be tested without a process — the refusal itself is the
+/// caller's, because a library function that called `exit` could not be.
+fn unknown_args(args: &[String]) -> Result<(), Vec<String>> {
+    let unknown: Vec<String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !KNOWN_ARGS.contains(&a.as_str()))
+        .cloned()
+        .collect();
+    match unknown.is_empty() {
+        true => Ok(()),
+        false => Err(unknown),
+    }
+}
+
 // -- producers -------------------------------------------------------------
 
 /// Keys and resizes onto the bus, so the loop has exactly one drain point.
@@ -594,4 +636,46 @@ fn init_tracing(verbose: bool) -> io::Result<()> {
         }))
         .init();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{unknown_args, KNOWN_ARGS};
+
+    fn argv(rest: &[&str]) -> Vec<String> {
+        std::iter::once("atlas")
+            .chain(rest.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn every_accepted_flag_is_accepted_together() {
+        assert_eq!(unknown_args(&argv(&KNOWN_ARGS)), Ok(()));
+        assert_eq!(unknown_args(&argv(&[])), Ok(()));
+    }
+
+    #[test]
+    fn a_retired_flag_is_named_rather_than_ignored() {
+        // The regression this exists for: `--operator` used to exit(2) with a
+        // rebuild line, and deleting the flag deleted the refusal with it. A
+        // silent no-op is how the original bug stayed invisible.
+        assert_eq!(
+            unknown_args(&argv(&["--operator"])),
+            Err(vec!["--operator".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_typo_is_not_the_flag_it_nearly_is() {
+        assert_eq!(
+            unknown_args(&argv(&["--glas", "--live", "--Pick"])),
+            Err(vec!["--glas".to_string(), "--Pick".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_binarys_own_path_is_never_a_flag() {
+        assert_eq!(unknown_args(&["/opt/bin/--operator".to_string()]), Ok(()));
+    }
 }

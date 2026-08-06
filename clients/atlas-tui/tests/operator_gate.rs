@@ -929,6 +929,11 @@ mod operator {
                 "workflow",
                 serde_json::json!({"kind": "portfolio_review", "goal": "review the book"}),
             ),
+            (
+                "/api/desk/posture",
+                "posture",
+                serde_json::json!({"armed": true}),
+            ),
         ];
 
         for (path, which, want) in cases {
@@ -949,6 +954,7 @@ mod operator {
                     .start_workflow("portfolio_review", "review the book")
                     .await
                     .unwrap(),
+                "posture" => client.set_posture(true).await.unwrap(),
                 other => panic!("untested verb {other}"),
             };
             let seen = owner.only();
@@ -1267,6 +1273,70 @@ mod operator {
             owner.seen.lock().unwrap().is_empty(),
             "an unarmed window reached the owner"
         );
+    }
+
+    #[tokio::test]
+    async fn the_arming_answer_is_the_one_write_an_unarmed_window_may_make() {
+        // The exception the gate above has to carry, and the reason it is not
+        // a second dispatch path: every window that can arm a desk is, by
+        // definition, one the desk has not armed yet, so a chokepoint with no
+        // exemption would make the arming question unanswerable. It grants
+        // nothing on its own — the owner records a posture and the *next*
+        // snapshot is what widens this window.
+        let owner = spawn_owner(200, r#"{"armed": true, "chosen": true}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
+        writes.dispatch(Command::Posture { armed: true }, Posture::Glass);
+        match rx.recv().await {
+            Some(AppEvent::Wrote(Wrote::Armed { armed })) => assert!(armed),
+            other => panic!("the arming answer never landed: {:?}", other.is_some()),
+        }
+        let seen = owner.only();
+        assert_eq!(seen.path, "/api/desk/posture");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({"armed": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_the_operator_vetoed_cannot_arm_the_desk_either() {
+        // The gate below the exemption, which the exemption must not step
+        // past: `--glass` holds no writer, and a window that vetoed its own
+        // authority may not vote itself back into it.
+        let owner = spawn_owner(200, r#"{"armed": true, "chosen": true}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, true, tx).unwrap();
+        writes.dispatch(Command::Posture { armed: true }, Posture::Glass);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        match rx.try_recv() {
+            Ok(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert_eq!(what, "arm this desk");
+                assert!(said.contains("--glass"), "{said}");
+            }
+            Ok(other) => panic!("a vetoed window sent something else: {}", debug(&other)),
+            Err(err) => panic!("a vetoed window was silently dropped: {err}"),
+        }
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "a vetoed window reached the owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_owner_that_does_not_say_what_it_armed_is_a_failure_and_not_a_receipt() {
+        // `set_posture` answers with `posture_payload()`, so a 200 without
+        // `armed` is a broken contract — and this client will not report an
+        // arming it cannot read back, any more than it invents a desk label.
+        let owner = spawn_owner(200, r#"{"chosen": true}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::Posture { armed: true }).await {
+            Some(Wrote::Failed { what, said }) => {
+                assert_eq!(what, "arm this desk");
+                assert!(said.contains("armed"), "{said}");
+            }
+            other => panic!("an unreadable answer became {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -121,6 +121,12 @@ pub enum Wrote {
     /// `summary` is what to show either way — the masked account and its buying
     /// power, or the reason it was refused.
     Tested { ok: bool, summary: String },
+    /// The desk recorded an arming answer. `armed` is the owner's own account
+    /// of what it now holds (`posture_payload`), never this client's echo of
+    /// what it sent: the answer that decides whether the next keystroke can
+    /// place an order is the one the owner persisted, and a receipt composed
+    /// from the request would report an arming a failed write never made.
+    Armed { armed: bool },
     /// The request itself failed: no owner, a timeout, a non-2xx. `said` is the
     /// owner's words verbatim when there were any.
     Failed { what: String, said: String },

@@ -364,6 +364,18 @@ impl Posture {
         Posture::Glass
     }
 
+    /// Whether an answer of "armed" could widen this window at all.
+    ///
+    /// Asked of [`Posture::from_desk`] rather than of a second copy of its
+    /// first two conjuncts, so the door cannot come to disagree with the
+    /// derivation about what a `--glass` window or a read-only build is. It is
+    /// the question the arming step has to ask before it offers itself: a row
+    /// that changes nothing about what this window may do is exactly the
+    /// affordance the glass door refuses to draw.
+    pub fn armable(featured: bool, forced_glass: bool) -> bool {
+        Posture::from_desk(featured, forced_glass, Some(true)).writes()
+    }
+
     /// The word on the status line. Not `Display`: this is a fixed badge with a
     /// fixed width, and a formatting impl invites a caller to pad it.
     pub fn label(self) -> &'static str {
@@ -619,11 +631,18 @@ impl Store {
         if self.door_settled || self.door.is_some() {
             return;
         }
-        if Door::wanted(
-            self.door_forced,
-            self.last_snapshot_at.is_some(),
-            self.desk_unchosen(),
-        ) {
+        let answered = self.last_snapshot_at.is_some();
+        // Two questions, one door. The arming one has its own trigger because
+        // a desk can have named itself long ago and never have been asked
+        // whether a window may write to it — which is every desk upgraded onto
+        // an owner that serves a posture — and a door that only opened for an
+        // unchosen *desk mode* would leave those with no way to arm at all.
+        //
+        // `answered` gates it for the reason it gates the other: absence
+        // before the first poll is not an owner saying nobody chose.
+        if Door::wanted(self.door_forced, answered, self.desk_unchosen())
+            || (answered && self.asking_posture())
+        {
             self.door = Some(Door::default());
             self.dirty = true;
         }
@@ -791,7 +810,13 @@ impl Store {
                     // next snapshot's `llm` block is what SETTINGS draws, so a
                     // client copy would be a second account of which minds the
                     // desk is using. Its refusal changes nothing at all.
-                    Wrote::Chose { .. }
+                    // And so is the posture, emphatically: what this window may
+                    // do is derived from the owner's own `posture` block on
+                    // every snapshot, so a store that armed itself on its own
+                    // write outcome would be the client-side latch
+                    // `Posture::from_desk` exists to prevent.
+                    Wrote::Armed { .. }
+                    | Wrote::Chose { .. }
                     | Wrote::ChoiceRefused { .. }
                     | Wrote::Decided { .. }
                     | Wrote::Asked { .. }
@@ -902,6 +927,31 @@ impl Store {
     /// Task 3's door asks about.
     pub fn posture_chosen(&self) -> Option<bool> {
         self.snapshot.as_ref()?.posture.as_ref()?.chosen
+    }
+
+    /// Whether the startup door still owes this desk the arming question.
+    ///
+    /// Three conjuncts, and each one removes a window the question would be a
+    /// lie to:
+    ///
+    /// * `!posture.writes()` — a window the desk has already armed is not one
+    ///   that has to be asked, and asking it would be a modal over a desk that
+    ///   answered.
+    /// * [`Posture::armable`] — a read-only artifact and a `--glass` window
+    ///   are both windows an answer of "armed" would change nothing about.
+    ///   Offering the row anyway is the claim the glass door exists to refuse.
+    /// * `posture_chosen() != Some(true)` — the rule the door is specified by,
+    ///   and the one reader of the owner's `chosen` flag. `Some(false)` is a
+    ///   desk nobody answered for; `None` is an owner too old to say, and
+    ///   asking it is harmless — its answer is what teaches it.
+    ///
+    /// Read live rather than latched, which is what makes the answer the
+    /// owner's: the question is up until a snapshot says somebody answered it,
+    /// so the keystroke that sends the answer is not the thing that closes it.
+    pub fn asking_posture(&self) -> bool {
+        !self.posture.writes()
+            && Posture::armable(cfg!(feature = "operator"), self.forced_glass)
+            && self.posture_chosen() != Some(true)
     }
 
     /// The allocation policy the paper book is run under.

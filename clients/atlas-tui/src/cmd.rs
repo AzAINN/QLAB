@@ -137,6 +137,24 @@ pub enum Command {
         surface: String,
         choice: ModelChoice,
     },
+    /// Answer the desk's arming question: may a window like this one write?
+    ///
+    /// The one write verb a window the desk has *not* armed may still send,
+    /// and the reason the dispatch seam carries an exemption for it: every
+    /// window that can answer this question is by construction one the desk
+    /// has not armed, so a chokepoint with no exception would make the
+    /// question unanswerable and the posture unreachable.
+    ///
+    /// It grants nothing by itself. The owner records the answer and this
+    /// window widens only when a later snapshot says the desk is armed —
+    /// which is what keeps the posture the owner's fact rather than a latch
+    /// this client sets on its own keystroke. Every gate downstream is
+    /// unmoved: an armed window still needs a persisted approval and a typed
+    /// hash before anything books.
+    #[cfg(feature = "operator")]
+    Posture {
+        armed: bool,
+    },
     /// Ask the owner what its backends serve.
     ///
     /// A read, and the only one a keystroke asks for: the route probes daemons,
@@ -232,6 +250,8 @@ impl PartialEq for Command {
                     choice: y,
                 },
             ) => a == b && x == y,
+            #[cfg(feature = "operator")]
+            (Command::Posture { armed: a }, Command::Posture { armed: b }) => a == b,
             (Command::Backends, Command::Backends) => true,
             _ => false,
         }

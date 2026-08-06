@@ -491,6 +491,17 @@ impl WriteClient {
             .await
     }
 
+    /// Answer the desk's arming question.
+    ///
+    /// A `bool` and nothing else: the owner refuses anything that is not one
+    /// (`armed must be true or false`), because "yes", `1` and `[]` are not
+    /// consent. The answer it returns is `posture_payload()` — its own account
+    /// of what it now holds, which is the only thing worth reporting back.
+    pub async fn set_posture(&self, armed: bool) -> Wrote {
+        self.post("/api/desk/posture", json!({ "armed": armed }))
+            .await
+    }
+
     /// Start a governed workforce run.
     ///
     /// `kind` and `goal` only. The owner reads `as_of`, `universe`, and

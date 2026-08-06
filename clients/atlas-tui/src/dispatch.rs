@@ -116,7 +116,7 @@ mod armed {
         /// the operator. A key that silently did nothing is the failure mode
         /// invariant 4 exists for.
         pub fn dispatch(&self, cmd: Command, posture: Posture) {
-            if !posture.writes() {
+            if !posture.writes() && !arms(&cmd) {
                 let what = names(&cmd);
                 tracing::error!(
                     command = %what,
@@ -149,6 +149,22 @@ mod armed {
         }
     }
 
+    /// The one command a window the desk has not armed may still send.
+    ///
+    /// Not a second dispatch path, and not a hole in the chokepoint: it is the
+    /// *answer to the question the chokepoint is about*. Every window that can
+    /// arm a desk is by construction one the desk has not armed, so a gate
+    /// with no exemption here would make the door's arming question
+    /// unanswerable and the posture unreachable from this client at all.
+    ///
+    /// It widens nothing by itself. The owner records the answer; this window
+    /// keeps whatever posture the *next snapshot* derives, and the `--glass`
+    /// veto below still refuses it — a window that declined its own authority
+    /// may not vote itself back into it.
+    fn arms(cmd: &Command) -> bool {
+        matches!(cmd, Command::Posture { .. })
+    }
+
     /// What a refused command was, in the same words `perform` names it by, so
     /// a refusal at the gate and a refusal from the owner read alike.
     ///
@@ -170,6 +186,11 @@ mod armed {
             Command::AlpacaLogin { .. } => "store the alpaca login".to_string(),
             Command::TestAlpaca => "test the alpaca login".to_string(),
             Command::SetLlm { surface, .. } => format!("point {surface} at a model"),
+            // One name for both answers. What failed is the act of recording
+            // the desk's posture, and a refusal that read "leave this desk
+            // read-only — refused" would be a sentence an operator has to
+            // parse twice to see nothing changed.
+            Command::Posture { .. } => "arm this desk".to_string(),
         }
     }
 
@@ -369,6 +390,24 @@ mod armed {
                     },
                 }
             }
+            // The desk's own posture, and the only write a window the desk has
+            // not armed may send. What comes back is the owner's account of
+            // what it now holds — a 200 that does not say is a broken contract
+            // and says so, rather than this client reporting the arming it
+            // asked for as the arming that happened.
+            Command::Posture { armed } => match client.set_posture(armed).await {
+                Ok(said) => match said.get("armed").and_then(|v| v.as_bool()) {
+                    Some(armed) => Wrote::Armed { armed },
+                    None => Wrote::Failed {
+                        what: "arm this desk".to_string(),
+                        said: format!("the owner answered without saying whether it armed: {said}"),
+                    },
+                },
+                Err(err) => Wrote::Failed {
+                    what: "arm this desk".to_string(),
+                    said: err.to_string(),
+                },
+            },
             Command::TestAlpaca => match client.test_alpaca().await {
                 Ok(verdict) => Wrote::Tested {
                     ok: verdict.ok,

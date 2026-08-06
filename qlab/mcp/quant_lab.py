@@ -966,6 +966,7 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         alphas: list[float] | None = None,
         map_weights: list[float] | None = None,
         n_splits: int | None = None,
+        null_trials: int | None = None,
     ) -> dict:
         """Run the paired predictor board: baseline vs group-wise and kernels.
 
@@ -1003,6 +1004,12 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                 ("map_weights",
                  tuple(map_weights) if map_weights is not None else None),
                 ("n_splits", n_splits),
+                # The trial count decides whether a verdict is reachable at
+                # all: below 19 trials the smallest p available is above the
+                # 0.05 bar, so `champion_established` can never be True and
+                # the board withholds it. Tunable for the same reason the
+                # other search knobs are.
+                ("null_trials", null_trials),
             )
             if value is not None
         }

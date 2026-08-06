@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import itertools
 import threading
 
@@ -714,3 +715,23 @@ def test_a_task_with_an_unparsable_dedupe_key_is_not_silently_called_fresh(reg):
     assert entry["stale"] is None
     assert entry["startable"] is False
     assert "unknown" in entry["reason"].lower()
+
+
+def test_the_null_trial_count_is_reachable_from_the_tool_that_runs_the_board():
+    """Every other search knob is tunable; this one decides if a verdict exists.
+
+    `run_predictor_board` takes `null_trials`, and below 19 the test cannot
+    reach alpha at all, so the trial count is the difference between a board
+    that can establish a champion and one that structurally cannot. Exposing
+    models/alphas/map_weights/n_splits but not this leaves a caller able to
+    tune everything except whether the answer is obtainable.
+    """
+    import inspect
+    from qlab.research.board import run_predictor_board
+
+    assert "null_trials" in inspect.signature(run_predictor_board).parameters
+    for module_name in ("qlab.mcp.quant_lab", "qlab.mcp.tui_proxy"):
+        module = importlib.import_module(module_name)
+        source = inspect.getsource(module)
+        assert "null_trials" in source, (
+            f"{module_name} runs the board but cannot set null_trials")

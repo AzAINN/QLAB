@@ -259,3 +259,34 @@ def test_the_null_reports_its_own_resolution():
     assert null["p_value"] == pytest.approx(
         (null["exceedances"] + 1) / (null["trials"] + 1))
     assert "of 9" in null["reason"] or "9 null" in null["reason"]
+
+
+@pytest.mark.parametrize("trials", [1, 4, 9, 18])
+def test_a_null_too_small_to_ever_establish_says_so_instead_of_reporting_false(
+        trials):
+    """Below 19 trials, `p <= 0.05` is arithmetically unreachable.
+
+    p is (exceedances + 1)/(trials + 1), so the smallest value a T-trial null
+    can produce is 1/(T+1) -- 0.100 at T=9, 0.200 at T=4. Against alpha=0.05
+    that is not a strict test, it is an impossible one: `champion_established`
+    would be False for every panel ever passed, however strong the signal,
+    and the caller would read that as "the champion was tested and refuted".
+
+    A verdict that cannot come out True is not evidence, and reporting it as
+    False is the exact confusion `established=None` exists to prevent. The
+    board must refuse the claim and name the arithmetic.
+    """
+    board = run_predictor_board(_persistent_vol_panel(), null_trials=trials)
+    null = board["selection_null"]
+    assert board["champion_established"] is None
+    assert null["underpowered_for_alpha"] is True
+    # The reason has to name the floor, not just assert weakness.
+    assert str(round(1 / (trials + 1), 3)) in null["reason"] \
+        or f"{1 / (trials + 1):.3f}" in null["reason"]
+
+
+def test_a_null_large_enough_to_establish_is_not_flagged_underpowered():
+    board = run_predictor_board(_persistent_vol_panel(), null_trials=24)
+    assert board["selection_null"]["underpowered_for_alpha"] is False
+    # And the verdict is a real True/False, not a refusal.
+    assert board["champion_established"] in (True, False)

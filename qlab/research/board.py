@@ -326,12 +326,18 @@ def _selection_null(
     # exceedance, the shift that realigns the cycle. `established` therefore
     # turns on one null draw, and a bare p hides that completely.
     resolution = 1.0 / (len(arr) + 1)
+    # Below 1/alpha - 1 trials, `p <= alpha` is arithmetically unreachable: the
+    # smallest p a T-trial null can produce is 1/(T+1), which is 0.100 at T=9.
+    # A verdict that cannot come out True is not a strict test, it is a broken
+    # instrument, and reporting it as False would read as "tested and refuted".
+    underpowered = bool(resolution > _NULL_ALPHA)
     return {
         "trials": int(len(arr)),
         "method": "circular_shift_of_target",
         "p_value": p_value,
         "exceedances": exceedances,
         "p_value_resolution": float(resolution),
+        "underpowered_for_alpha": underpowered,
         "observed_max_mean_ic": float(observed_max_ic),
         "null_median_max_mean_ic": float(np.median(arr)),
         "null_p90_max_mean_ic": float(np.percentile(arr, 90)),
@@ -344,6 +350,13 @@ def _selection_null(
             f"null runs matched or beat it, so p={p_value:.3f} "
             f"(resolution {resolution:.3f} — no finer p is available from "
             f"{len(arr)} trials)"
+            + (
+                f". {len(arr)} trials cannot establish anything at "
+                f"alpha={_NULL_ALPHA}: the smallest p reachable is "
+                f"{resolution:.3f}, so no result could clear the bar and the "
+                f"verdict is withheld rather than reported as a refutation"
+                if underpowered else ""
+            )
         ),
     }
 
@@ -445,6 +458,11 @@ def run_predictor_board(
         established = False
     elif p_value is None:
         # The null could not be built. Unknown must not read as established.
+        established = None
+    elif null.get("underpowered_for_alpha"):
+        # The null was built but cannot reach alpha at this trial count, so
+        # False here would mean "no null could ever pass", not "this champion
+        # failed". Withhold the claim rather than manufacture a refutation.
         established = None
     else:
         established = bool(p_value <= _NULL_ALPHA)

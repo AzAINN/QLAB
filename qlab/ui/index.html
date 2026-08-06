@@ -538,7 +538,11 @@ async function loadResearch(){
   const estBadge=b.admitted_any
     ? (est===true ? badge('null-tested: p='+num(nul.p_value,3),'good')
      : est===false ? badge('NOT established vs noise: p='+num(nul.p_value,3),'bad')
-     : badge('never null-tested','warn'))
+     // `null` has two causes and they are different facts: a null that never
+     // ran, and one that ran but whose trial count cannot reach alpha at all.
+     : nul.underpowered_for_alpha
+       ? badge('verdict withheld: '+nul.trials+' trials cannot reach 0.05','warn')
+       : badge('never null-tested','warn'))
     : '';
   $('#resStatus').innerHTML=`${badge(b.admitted_any?'admitted: '+b.champion:'nothing admitted',
       b.admitted_any?(est===false?'warn':'good'):'warn')}
@@ -566,7 +570,10 @@ async function loadResearch(){
           ['p-value',num(nul.p_value,3)+(nul.p_value_resolution
              ? ` (grid of ${num(nul.p_value_resolution,3)} — no finer p exists at ${nul.trials} trials)` : '')],
           ['Established at 0.05',
-            est===true?'yes':est===false?'NO':'not tested']]
+            est===true?'yes':est===false?'NO'
+              :nul.underpowered_for_alpha
+                ?`withheld — ${nul.trials} trials cannot reach 0.05`
+                :'not tested']]
          .map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('')}
        <div class="note-line" style="margin-top:8px">${nul.reason||''}</div></div>`
     : `<div class="card" style="margin-top:14px"><h3>Selection null</h3>

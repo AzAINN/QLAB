@@ -3924,6 +3924,28 @@ def test_the_panel_says_when_no_null_was_run_rather_than_implying_one_held(sessi
     assert "not" in detail["reason"].lower()
 
 
+def test_the_panel_separates_a_withheld_verdict_from_a_null_that_never_ran(session):
+    """Both are `champion_established: None` and they are different facts.
+
+    "never null-tested" is true of a board predating the null. It is false of
+    a board that ran a 9-trial null, where the test happened and simply could
+    not reach alpha. An operator told "never tested" would go looking for a
+    missing run instead of raising the trial count.
+    """
+    _board_run(session, champion_established=None,
+               selection_null={"trials": 9, "p_value": 0.10, "exceedances": 0,
+                               "p_value_resolution": 0.10,
+                               "underpowered_for_alpha": True,
+                               "observed_max_mean_ic": 0.31,
+                               "null_median_max_mean_ic": 0.088})
+    detail = session.predictor_board_detail()
+    assert detail["champion_established"] is None
+    reason = detail["reason"].lower()
+    assert "not tested" not in reason
+    assert "withheld" in reason or "cannot" in reason
+    assert "9" in detail["reason"]
+
+
 def test_tui_snapshot_carries_the_predictor_board(session):
     """The workstation renders what the reasoner reads, or the operator is
     the one party at the desk who cannot see the quantum lane's evidence."""

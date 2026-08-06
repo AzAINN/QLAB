@@ -3956,3 +3956,45 @@ def test_tui_snapshot_carries_the_atlas_conversation_unflooded(session):
     assert texts == ["what do we hold?", "Seven ETFs, long only."]
     assert [row["payload"]["actor"] for row in snap["atlas_chat"]] == [
         "operator", "atlas"]
+
+
+# -- the remembered posture ------------------------------------------------
+def test_a_posture_nobody_chose_is_read_only_and_says_so(session):
+    """Unasked and deliberately read-only serve the same ``armed``; only
+    ``chosen`` separates them, and a client's startup question keys on it."""
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert snap["posture"] == {"armed": False, "chosen": False}
+
+
+def test_the_posture_route_records_and_reflows(session):
+    status, body = handle_api(
+        session, "POST", "/api/desk/posture", {}, {"armed": True})
+    assert status == 200
+    assert body == {"armed": True, "chosen": True}
+    snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})[1]
+    assert snap["posture"] == {"armed": True, "chosen": True}
+    kinds = [e["kind"] for e in session.registry.read_events(20)]
+    assert "desk.posture_chosen" in kinds
+    # And it outlives this owner: a fresh session reads the same choice.
+    from qlab.state.registry import Registry
+    revived = UISession(offline_default=True, registry=Registry(":memory:"))
+    assert revived.posture_payload() == {"armed": True, "chosen": True}
+
+
+def test_posting_read_only_is_a_choice_not_a_reset(session):
+    """The other side of the boolean: false is recorded, not treated as unset."""
+    handle_api(session, "POST", "/api/desk/posture", {}, {"armed": True})
+    status, body = handle_api(
+        session, "POST", "/api/desk/posture", {}, {"armed": False})
+    assert status == 200
+    assert body == {"armed": False, "chosen": True}
+
+
+@pytest.mark.parametrize("value", ["yes", 1, [], None])
+def test_a_posture_that_is_not_a_boolean_is_refused(session, value):
+    status, body = handle_api(
+        session, "POST", "/api/desk/posture", {}, {"armed": value})
+    assert status == 400 and "true or false" in body["error"]
+    # Nothing was recorded: a refused arming must not half-arm the desk.
+    assert session.posture_payload() == {"armed": False, "chosen": False}

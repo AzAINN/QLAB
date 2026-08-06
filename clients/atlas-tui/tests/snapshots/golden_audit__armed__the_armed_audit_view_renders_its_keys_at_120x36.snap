@@ -1,16 +1,17 @@
 ---
 source: tests/golden_audit.rs
+assertion_line: 270
 expression: "queue().frame(120, 36)"
 ---
 " no market assets in the last snapshot                                                                                  "
-" 1 DESK │▌ APPROVALS              a approve  R reject ▌ EVENT STREAM      newest first│▌ PULSE                          "
-" 2 MKTS │▌aaaa1111222 pppp1111   pending     19:12:18 nothing on the bus yet          │ desk stress  …                  "
-" 3 BOOK │ bbbb4444555 pppp2222   approved    --                                       │ regime --  robust --            "
-" 4 RSCH │                                                                             │ drawdown --  tier --            "
-" 5 WORK │                                                                             │ gross --                        "
-"▌6 AUDIT│                                                                             │                                 "
-" 7 SETT │                                                                             │▌ BREADTH                        "
-"        │                                                                             │ --                              "
+" 1 ATLAS│▌ APPROVALS              a approve  R reject ▌ EVENT STREAM      newest first│▌ PULSE                          "
+" 2 DESK │▌aaaa1111222 pppp1111   pending     19:12:18 nothing on the bus yet          │ desk stress  …                  "
+" 3 MKTS │ bbbb4444555 pppp2222   approved    --                                       │ regime --  robust --            "
+" 4 BOOK │                                                                             │ drawdown --  tier --            "
+" 5 RSCH │                                                                             │ gross --                        "
+" 6 WORK │                                                                             │                                 "
+"▌7 AUDIT│                                                                             │▌ BREADTH                        "
+" 8 SETT │                                                                             │ --                              "
 "        │                                                                             │ adv -- / dec --                 "
 "        │                                                                             │                                 "
 "        │                                                                             │▌ MOVERS                         "

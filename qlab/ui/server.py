@@ -14,6 +14,10 @@ GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
 GET  /api/desk_mode            the chosen data source and book + credential status
 POST /api/desk_mode            choose the data source and the book
+POST /api/alpaca/credentials   store an Alpaca paper login (never switches book)
+POST /api/alpaca/test          ask the venue whether the stored login works
+GET  /api/llm/backends         model backends, availability, and what they serve
+POST /api/llm                  point a surface at a model, or switch the reasoner
 GET  /api/data/health          data-policy provenance, freshness, eligibility
 GET  /api/data/permit/current  the latest recorded data permit for a purpose
 GET  /api/quotes               latest cached quotes + live market-stream health
@@ -42,7 +46,8 @@ POST /api/atlas/observe          run one deterministic Atlas observe tick
 POST /api/atlas/mode             set Atlas mode (observe|research|propose|paused)
 POST /api/atlas/pause            pause Atlas's autonomous work
 POST /api/atlas/resume           resume Atlas into a mode
-POST /api/atlas/message          ask Atlas a question (never grants authority)
+POST /api/atlas/message          ask Atlas a question; the configured reasoner
+                                 answers on the bus (never grants authority)
 GET  /api/events               event stream with cursor and limit
 GET  /api/plans                recent order plans
 GET  /api/orders               recent orders
@@ -83,7 +88,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import threading
 import time
 import uuid
@@ -96,6 +100,7 @@ from urllib.parse import parse_qs, urlparse
 
 from qlab.core.desk_mode import (
     DEFAULT_DESK_MODE, DeskMode, load_desk_mode, save_desk_mode)
+from qlab.core.llm_config import SurfaceModel, save_llm_config, startup_llm_config
 from qlab.core.types import _jsonable
 from qlab.paths import workspace_root
 
@@ -124,6 +129,60 @@ _STREAM_LOCK_WAIT_SECONDS = 2.0
 # changes when this desk trades. Any mutation drops the cache, so a fill shows
 # up at once rather than up to this long later.
 _VALUATION_TTL_SECONDS = 15.0
+# How long a backend availability probe may be reused. Probing Ollama costs a
+# round trip per backend, and a picker that re-reads on every keystroke (or a
+# client that asked on every /api/tui poll) would turn an idle settings panel
+# into a steady load on the daemon. Five seconds is short enough that an
+# `ollama pull` finishing is visible almost at once, and long enough that a
+# burst of clicks costs one probe.
+_LLM_CATALOG_TTL_SECONDS = 5.0
+# The chat surface's budget. A desk brief, not an essay: enough for a read with
+# its numbers and a recommendation, short enough that an operator gets an answer
+# rather than a wall.
+_ATLAS_REPLY_TOKENS = 700
+# And its ceiling. Far below the backends' own batch defaults (300s for Ollama,
+# 600s for the CLI) because a human is watching this one, and the thread it
+# holds is an owner worker.
+_ATLAS_REPLY_TIMEOUT_S = 60.0
+# What a single bus row may carry of an answer. `max_tokens` bounds a backend
+# that honours it; the claude CLI has no such flag, so the ceiling is enforced
+# here too — an unbounded model row rides the SSE bus to every client.
+_ATLAS_REPLY_CHARS = 4000
+# How many template judgments one observe tick will pay for. Triggers are
+# already deduplicated before they get here, so this bites only when several
+# distinct conditions appear at once — and a tick that turned into a batch of
+# model calls would stall the desk's own loop for their sum. The rest fall back
+# to the table, which is exactly why the table is still here.
+_REASONER_MAX_PER_TICK = 2
+
+# The desk manager's role, in qlab's own voice. This is the *judgment* half of
+# planning-docs/2026-07-31-atlas-as-llm.md:28-47 stated to the model, and the
+# refusals it names are not instructions the model is trusted to follow — they
+# are code it cannot reach. `check_startable`, the workflow budget, the
+# referee's targets_hash binding and human confirmation on every fill refuse it
+# whether or not it has read this. Saying so anyway is what keeps a reply
+# arguing inside the desk's authority instead of proposing work that will
+# simply be refused.
+_ATLAS_DESK_MANAGER_PROMPT = """\
+You are Atlas, the desk manager of qlab — a governed, single-operator quant \
+research desk. You are answering your operator directly.
+
+You decide: what is worth investigating and why now rather than later; which \
+registered workflow template fits the situation; how the qualitative record \
+and the quantitative panel relate, especially where they disagree; what the \
+operator needs told, and when silence is the right answer.
+
+You never execute. You hold no order path, no approval, and no way to create a \
+plan. The mode gate, the daily workflow budget, the referee's hash binding and \
+the human confirmation on every fill are deterministic code and refuse you as \
+written. Propose only work the `startable` list already shows as startable; \
+when nothing is, say so and say what would have to change.
+
+Answer in conclusions, not process. No preamble, no restating the question, no \
+reading the context back. Cite the numbers you actually used — a level, a \
+percentile, a headline — and name the ones that disagree with you. If the \
+context does not support an answer, say what is missing; an invented reading \
+is worse than none. Keep it to what fits on a desk card."""
 
 _MARKET_EVENT_LIMIT = 500
 # How many approvals of *each* actionable status ride in one /api/tui payload.
@@ -230,8 +289,17 @@ class UISession:
         # The operator's explicit choice; the persisted value is authoritative
         # when the caller passes none, and ``offline_default`` only seeds the
         # mode nobody has chosen yet — never a second opinion about it.
-        self.desk_mode = desk_mode or load_desk_mode() or (
+        persisted = load_desk_mode()
+        self.desk_mode = desk_mode or persisted or (
             DEFAULT_DESK_MODE if offline_default else DeskMode("live", "simulated"))
+        # Whether anything *named* that pair, computed here because here is
+        # where the answer stops being visible: past this line a fallback and a
+        # deliberate ``synthetic · simulated`` are the same object. It means
+        # "came from a launcher flag or the state file", never "there is a
+        # file" — a flag-chosen desk is not persisted, and asking again about a
+        # desk the operator just named on the command line would be the same
+        # false question the flag exists to retire.
+        self.desk_mode_chosen = bool(desk_mode or persisted)
         # Derived, never carried alongside: a launcher flag and a persisted (or
         # POSTed) mode used to disagree, and the disagreement reconstructed
         # `synthetic` + `alpaca` — synthetic quotes on the SSE bus and a
@@ -285,6 +353,16 @@ class UISession:
         # Seeded from the same env var ClaudeSession reads, so one switch
         # governs both an owner-driven coordinator and a hand-started one.
         self.fast_mode = os.environ.get("QLAB_LLM_FAST", "0") == "1"
+        # Which model answers for which surface. The persisted choice wins over
+        # the environment, which only seeds a desk that has never chosen.
+        self.llm_config = startup_llm_config()
+        # (monotonic stamp, payload) for the backend availability probe. The
+        # owner is threaded and the heartbeat is a second writer of shared
+        # state, so this cache takes a lock like every other mutable field here
+        # (invariant 9) — an unguarded one hands two callers two readings and
+        # makes "when was this probed" unanswerable.
+        self._llm_catalog: tuple[float, dict] | None = None
+        self._llm_catalog_lock = threading.Lock()
         self._driver = None
         # The owner is a ThreadingHTTPServer and the heartbeat is another
         # thread. Without this, a lazy build races and hands out one driver per
@@ -308,9 +386,14 @@ class UISession:
         # proposal authority in Observe mode.
         from qlab.operator.atlas import AtlasSupervisor
 
+        from qlab.tui.claude import resolve_claude_executable
+
+        # The resolver, not a bare which(): on Windows the extensionless npm
+        # shim resolves but does not run (WinError 193), so a bare which()
+        # would report a coordinator the dispatcher then cannot start.
         self.atlas = AtlasSupervisor(
             self.registry,
-            coordinator_available=lambda: bool(shutil.which("claude")))
+            coordinator_available=lambda: bool(resolve_claude_executable()))
         # A dispatched workflow can reach a terminal state while no owner is
         # running, and the restart above has just interrupted anything that was
         # still live. Either way the bound task must be resolved now rather than
@@ -593,7 +676,7 @@ class UISession:
         from qlab.core import data as market
         from qlab.trader.broker import get_broker
 
-        policy = market.policy_for(offline, seed=self.seed)
+        policy = self.data_policy(offline)
         universe = self.mandate.universe_whitelist
         try:
             broker = get_broker(
@@ -665,6 +748,12 @@ class UISession:
     # -- desk mode ----------------------------------------------------------
     def set_desk_mode(self, mode: DeskMode) -> DeskMode:
         self.desk_mode = mode
+        # Somebody answered. Set here rather than derived from the file, because
+        # the three-way ``or`` above runs once at construction and no POST goes
+        # near it: without this line a desk that was asked and answered would go
+        # on reporting that nobody had, and every client keyed on that would ask
+        # again on the next run.
+        self.desk_mode_chosen = True
         # The mode owns the data lane too: the TUI retunes an owner that was
         # spawned with no flags, so leaving these behind would keep publishing
         # synthetic quotes and pricing a real book off the synthetic feed.
@@ -767,10 +856,37 @@ class UISession:
         with self._market_lock:
             self._market_events.append(event)
 
+    def data_policy(self, offline: bool):
+        """The one data policy this desk runs under, desk-mode aware.
+
+        ``policy_for(offline)`` alone answers from the environment
+        (``QLAB_DATA_PROVIDER``, default yfinance) and never from the desk —
+        so a LIVE desk with a working Alpaca login still priced itself from
+        yfinance, every permit said "research-grade only", and no workflow
+        was ever startable. The screenshot of that dead end is why this
+        method exists: on a live desk with resolvable Alpaca credentials the
+        provider is alpaca (execution-grade); an explicit env override still
+        wins, because an operator who set one said something.
+        """
+        from qlab.core import data as market
+
+        if offline:
+            return market.policy_for(True, seed=self.seed)
+        if os.environ.get("QLAB_DATA_PROVIDER", "").strip():
+            return market.policy_for(False, seed=self.seed)
+        from qlab.trader.alpaca_auth import (
+            AlpacaAuthError, resolve_alpaca_credentials)
+        try:
+            creds = resolve_alpaca_credentials()
+        except AlpacaAuthError:
+            creds = None
+        if creds is not None:
+            return market.policy_for(False, provider="alpaca", seed=self.seed)
+        return market.policy_for(False, seed=self.seed)
+
     def desk_mode_payload(self) -> dict:
         from qlab.trader.alpaca_auth import (
             AlpacaAuthError, describe_credentials, resolve_alpaca_credentials)
-
         try:
             creds = resolve_alpaca_credentials()
             description, ok = describe_credentials(creds), creds is not None
@@ -784,6 +900,239 @@ class UISession:
             "offline": self.desk_mode.offline,
             "credentials": description,
             "credentials_ok": ok,
+            # The one thing the pair cannot say about itself. A desk nobody has
+            # chosen serves the same six fields as one deliberately pointed at
+            # `synthetic · simulated`, so a surface that wants to *ask* which
+            # desk this is has to be told the difference by name.
+            "chosen": self.desk_mode_chosen,
+        }
+
+    def set_alpaca_credentials(self, api_key: object, api_secret: object,
+                               *, replace: bool = False) -> dict:
+        """Store a login the operator typed, and report what the desk can see.
+
+        The write itself belongs to ``alpaca_auth`` and stays there: it is the
+        single secrets authority, so no surface — this one included — learns
+        what a profile looks like, what mode it needs, or when overwriting one
+        would destroy something. ``replace`` is carried through unread: this
+        method decides nothing about it.
+
+        The book is NOT switched. Mode is explicit-never-inferred
+        (``desk_mode.py``), so a login makes LIVE·ALPACA *choosable* and
+        nothing more; ``credentials_ok`` in the response is how the client
+        learns that.
+        """
+        from qlab.trader.alpaca_auth import write_credentials
+
+        write_credentials(api_key, api_secret, replace=replace)
+        # Names nothing else. An event row replays forever, so neither the key,
+        # nor the secret, nor a mask of either, nor the path they went to
+        # belongs on the bus — "a login was stored, from the desk" is the whole
+        # auditable fact.
+        self.registry.record_event(
+            "alpaca.credentials_updated", {"source": "tui"})
+        return self.desk_mode_payload()
+
+    def probe_alpaca_credentials(self) -> dict:
+        """Ask the venue whether the resolved credentials work.
+
+        Does network I/O: callers must NOT hold the owner dispatch lock — the
+        same rule as ``llm_backends_catalog``, and do_POST routes it outside
+        for exactly that reason.
+
+        Every outcome is a result rather than a rejection, including a broken
+        credential source. This route takes no body, so there is no input for a
+        400 to be about, and a client that has to render "did it work?" should
+        read one shape however the answer turned out.
+        """
+        from qlab.trader.alpaca_auth import (
+            AlpacaAuthError, probe_credentials, resolve_alpaca_credentials)
+
+        try:
+            creds = resolve_alpaca_credentials()
+        except AlpacaAuthError as exc:
+            return {"ok": False, "reason": str(exc)}
+        return probe_credentials(creds).to_dict()
+
+    # -- model routing ------------------------------------------------------
+    def llm_backends_catalog(self, refresh: bool = False) -> dict:
+        """Every backend, whether it can serve now, and what it serves.
+
+        Does network I/O: callers must NOT hold the owner dispatch lock (the
+        same rule that keeps the news fetch off `/api/tui`). The HTTP handler
+        runs this route outside the lock for exactly that reason.
+
+        `available()` and `models()` raise when a backend is present but
+        answers wrongly — a misconfiguration the operator has to see. It
+        belongs in the entry's own reason, not in a 500 on the one route the
+        picker needs to render itself.
+        """
+        with self._llm_catalog_lock:
+            cached = self._llm_catalog
+        if not refresh and cached is not None:
+            stamped, payload = cached
+            if time.monotonic() - stamped < _LLM_CATALOG_TTL_SECONDS:
+                return payload
+        payload = self._probe_llm_backends()
+        with self._llm_catalog_lock:
+            self._llm_catalog = (time.monotonic(), payload)
+        return payload
+
+    def _probe_llm_backends(self) -> dict:
+        """The uncached probe. Deliberately outside `_llm_catalog_lock`.
+
+        Two concurrent callers may both probe; that costs a duplicate round
+        trip and nothing else. Holding the lock across the network instead
+        would serialize every reader behind a daemon that can take
+        `PROBE_TIMEOUT_S` to answer.
+        """
+        from qlab.operator.llm_backends import (
+            BACKENDS, LlmBackendError, build_backend)
+
+        entries = []
+        for name in sorted(BACKENDS):
+            try:
+                backend = build_backend(name)
+                available, reason = backend.available()
+                # A backend that cannot serve reports no models anyway, so
+                # asking is a second round trip for a known empty list.
+                models = list(backend.models()) if available else []
+            except LlmBackendError as exc:
+                entries.append({"name": name, "available": False,
+                                "reason": str(exc), "models": []})
+                continue
+            entries.append({"name": name, "available": bool(available),
+                            "reason": str(reason), "models": models})
+        return {"backends": entries, "probed_at": self._now_iso()}
+
+    def _refuse_unservable(self, choice: SurfaceModel) -> None:
+        """Raise unless the live catalog says this choice can serve right now.
+
+        The refusal carries the catalog's own sentence rather than a second
+        opinion composed here, so "why can't I pick this" has one answer.
+        Reads the catalog the picker has just fetched to render itself, so it
+        normally lands on the warm cache rather than probing again.
+        """
+        entries = {entry["name"]: entry
+                   for entry in self.llm_backends_catalog()["backends"]}
+        entry = entries.get(choice.backend)
+        if entry is None:
+            raise ValueError(
+                f"unknown LLM backend {choice.backend!r}; this desk serves "
+                f"{', '.join(sorted(entries)) or 'no backend at all'}")
+        if not entry["available"]:
+            raise ValueError(entry["reason"])
+        if choice.model not in entry["models"]:
+            raise ValueError(
+                f"the {choice.backend} backend cannot serve {choice.model!r} "
+                f"right now; it serves {', '.join(entry['models'])}")
+
+    def set_llm_config(self, surface: str, backend: str | None = None,
+                       model: str | None = None,
+                       enabled: bool | None = None) -> dict:
+        """Point one surface at a model, switch the reasoner, or refuse and say why.
+
+        The owner is the single validator: a client may offer whatever it likes
+        — a stale catalog, a hand-typed model name — and this is where it is
+        checked.
+
+        Turning a surface ON validates the pair it turns on; turning it OFF
+        validates nothing; changing an enabled surface's pair validates the new
+        pair. An off-switch that required the daemon to be reachable stranded
+        an operator whose Ollama had just died with a reasoner they could not
+        turn off — the gate blocked the one action that fixed the situation,
+        and guarded a surface on its way to being unused. Watching pair changes
+        alone was the mirror mistake: choosing while off and enabling
+        afterwards changes one thing at a time and slipped an unservable pair
+        onto a live surface.
+
+        `backend`/`model` are optional together: sending neither leaves the
+        pair alone, which is what makes `{surface, enabled}` a usable switch.
+        """
+        from qlab.core.llm_config import SURFACES
+
+        if surface not in SURFACES:
+            raise ValueError(
+                f"unknown model surface {surface!r}; the desk has "
+                f"{' and '.join(SURFACES)}")
+        if enabled is not None and surface != "reasoner":
+            # The workforce is what the desk already is. Accepting a switch
+            # here and dropping it would report a change that never happened.
+            raise ValueError(
+                "only the reasoner surface can be switched on or off")
+        if (backend is None) != (model is None):
+            raise ValueError(
+                "a model choice needs both a backend and a model; send both, "
+                "or send enabled alone to switch the reasoner")
+        if backend is None and enabled is None:
+            raise ValueError(
+                "nothing to change: send a backend and a model, or enabled")
+
+        current = getattr(self.llm_config, surface)
+        chosen = current if backend is None else SurfaceModel(backend, model)
+        # Only the reasoner has an off state; the workforce IS the desk, so a
+        # workforce choice is always one that will be used.
+        was_in_use = surface != "reasoner" or self.llm_config.reasoner_enabled
+        in_use = was_in_use if enabled is None else bool(enabled)
+        # Turning a surface ON validates the pair it turns on; turning it OFF
+        # validates nothing; changing an enabled surface's pair validates the
+        # new pair.
+        if in_use and (chosen != current or not was_in_use):
+            self._refuse_unservable(chosen)
+
+        updated = self.llm_config.with_surface(surface, chosen, enabled)
+        # Disk before memory: a write that fails must not leave the desk
+        # running on a choice that will not survive a restart, and must not
+        # announce one either.
+        save_llm_config(updated)
+        self.llm_config = updated
+        self.registry.record_event(
+            "llm.config_changed",
+            # Names only: a backend's URL may carry a credential, and the
+            # audit bus is exactly where that must never land.
+            {"surface": surface, "backend": chosen.backend,
+             "model": chosen.model, "enabled": enabled})
+        return {
+            "surface": surface,
+            **self.llm_config.to_dict(),
+            "effect": (
+                # Not "off, so nothing happens": the chat surface reads the
+                # pair regardless of the switch, and a sentence saying
+                # otherwise would describe a desk that is already answering as
+                # silent. What the switch buys is the template judgment.
+                f"Atlas answers you on {chosen.backend} {chosen.model}; enable "
+                f"the reasoner to let it choose templates too"
+                if surface == "reasoner" and not self.llm_config.reasoner_enabled
+                else f"Atlas reasons with {chosen.backend} {chosen.model}"
+                if surface == "reasoner"
+                else f"the workforce roles run on "
+                     f"{chosen.backend} {chosen.model}"),
+        }
+
+    def llm_payload(self) -> dict:
+        """The config plus the LAST availability reading — never a probe.
+
+        `tui_snapshot` runs under the owner dispatch lock and the TUI polls it
+        every two seconds; probing here would block every other request on a
+        daemon that may be a network hop away. The picker's own route is the
+        only prober, so this reports what was last seen and when, and says so
+        plainly when nothing has been probed yet.
+        """
+        with self._llm_catalog_lock:
+            cached = self._llm_catalog
+        payload = self.llm_config.to_dict()
+        if cached is None:
+            return {**payload, "availability": None, "probed_at": None}
+        _, catalog = cached
+        return {
+            **payload,
+            # The catalog minus the model lists: an Ollama host can hold
+            # dozens, and this rides in a payload polled every two seconds.
+            "availability": [
+                {"name": entry["name"], "available": entry["available"],
+                 "reason": entry["reason"]}
+                for entry in catalog["backends"]],
+            "probed_at": catalog["probed_at"],
         }
 
     # -- realized performance ----------------------------------------------
@@ -1120,7 +1469,12 @@ class UISession:
                 mcp_error = f"{type(exc).__name__}: {exc}"[:200]
         proxy_available = importlib.util.find_spec("fastmcp") is not None
         # Cache-only provenance: never a network fetch from a status poll.
-        provenance = data.cached_provenance(self.mandate.universe_whitelist)
+        # Read the cache namespace of the provider the desk actually runs
+        # under — defaulting the namespace left SETTINGS saying "yfinance"
+        # while every fetch, permit and workflow ran on alpaca.
+        provenance = data.cached_provenance(
+            self.mandate.universe_whitelist,
+            provider=self.data_policy(offline).provider)
         events = self.registry.read_events(500)
         last_daily_ops = next(
             (
@@ -1139,18 +1493,22 @@ class UISession:
             "last_run_at": last_daily_ops.get("ts") if last_daily_ops else None,
             "triggers_fired": len(triggers) if isinstance(triggers, list) else 0,
         }
+        from qlab.tui.claude import resolve_claude_executable
+
+        # One resolver for every "is claude here" answer (Windows shims).
+        claude_available = bool(resolve_claude_executable())
         return {
             "mode": "paper",
             "offline": offline,
-            "claude_available": bool(shutil.which("claude")),
+            "claude_available": claude_available,
             "mcp_configured": bool(servers),
             "mcp_servers": servers,
             "mcp_config_error": mcp_error,
             "mcp_proxy_available": proxy_available,
-            "governed_available": proxy_available and bool(shutil.which("claude")),
+            "governed_available": proxy_available and claude_available,
             "governed_authority": "propose_only",
             "claude_role": "workforce_orchestrator",
-            "workforce_available": proxy_available and bool(shutil.which("claude")),
+            "workforce_available": proxy_available and claude_available,
             "governed_lock_reason": (
                 "agent authority is intentionally propose-only; paper execution "
                 "requires explicit human confirmation"
@@ -1172,7 +1530,7 @@ class UISession:
         from qlab.data.permit import build_permit
 
         tickers = self.mandate.universe_whitelist
-        policy = market.policy_for(offline, seed=self.seed)
+        policy = self.data_policy(offline)
         try:
             snap = market.snapshot(
                 tickers, date.today().isoformat(), lookback_days=252,
@@ -1717,7 +2075,7 @@ class UISession:
         return {"events": events, "reason": reason,
                 "suppressed_liveness": suppressed}
 
-    def atlas_context(self, offline: bool) -> dict:
+    def atlas_context(self, offline: bool, *, facts: dict | None = None) -> dict:
         """The rich, abstract surface a reasoning Atlas forms a view from.
 
         Deliberately NOT `atlas_facts`. That surface feeds `check_startable`,
@@ -1734,8 +2092,17 @@ class UISession:
         past decisions arrive with what actually happened. Nothing here is
         summarised down to a verdict, because summarising to a verdict is the
         judgment the reasoner is supposed to be doing.
+
+        ``facts`` is accepted rather than always recomputed because
+        ``atlas_facts`` is not idempotent within a tick: ``_atlas_regime_facts``
+        records the robust state it saw, so a second call reports ``flip:
+        False`` and a context composed that way would tell the reasoner nothing
+        happened on the very tick something did.
         """
-        facts = self.atlas_facts(offline)
+        from qlab.operator.templates import startable_templates
+
+        if facts is None:
+            facts = self.atlas_facts(offline)
         read = self.desk_read(offline)
         try:
             panel = self.regime_panel(offline)
@@ -1826,6 +2193,12 @@ class UISession:
             # so the reasoner argues within its authority rather than proposing
             # work that will simply be refused.
             "startable": self.atlas.startable_tasks(facts),
+            # And the menu itself: every registered template the gate permits
+            # right now, keyed by id. `startable` above is about the QUEUED
+            # tasks; this is about the templates, which is the set a template
+            # choice has to come from. Derived from `check_startable`, never
+            # written down beside it.
+            "startable_templates": startable_templates(self.atlas.mode, facts),
             # The agents Atlas actually directs. Without this the manager
             # could describe the market in detail and not its own desk.
             "workforce": self.workforce_summary(),
@@ -1911,19 +2284,179 @@ class UISession:
             self._last_robust_state = state
         return {"robust_state": state, "flip": flip}
 
-    def atlas_observe(self, offline: bool) -> dict:
+    def atlas_observe(self, offline: bool, *, facts: dict | None = None,
+                      judgments: dict | None = None) -> dict:
         """Run one deterministic Atlas observe tick against current owner facts.
 
         Reconciliation runs first: a dispatched workflow may have reached a
         terminal state since the last tick (or while this process was down), and
         its task must be resolved from that state before new work is considered.
+
+        ``facts`` and ``judgments`` are the reasoner's two-phase tick handing
+        back what it took. ``facts`` MUST be the same dict the judgment was
+        made against — not because recomputing is slow but because
+        ``atlas_facts`` consumes a regime flip, so a second assembly in one tick
+        reports no flip and the observe would refuse to act on the very change
+        the reasoner was just asked about.
+
+        Both default to absent, which is this method exactly as it was: the
+        `/api/atlas/observe` route passes neither, deliberately. That route runs
+        inside the dispatch lock, where a model call cannot go, so a manual tick
+        is deterministic and the desk's own heartbeat is the one loop that
+        carries judgment.
         """
         reconciled = self.atlas.reconcile_tasks()
-        facts = self.atlas_facts(offline)
-        observed = self.atlas.observe(facts, trading_date=date.today().isoformat())
+        if facts is None:
+            facts = self.atlas_facts(offline)
+        observed = self.atlas.observe(facts, trading_date=date.today().isoformat(),
+                                      judgments=judgments)
         if reconciled:
             observed = {**observed, "reconciled_tasks": reconciled}
         return observed
+
+    def atlas_judgment_request(self, offline: bool) -> dict:
+        """The facts and the triggers whose template the reasoner may choose.
+
+        Registry-only and cheap — no model call — because the caller holds the
+        dispatch lock here. Empty when the flag is off, and empty is the whole
+        of the off state: nothing else in this path runs, so a desk that never
+        turned the reasoner on takes exactly the code it took before.
+
+        The facts come back with the request because the observe phase must use
+        these and not its own (see ``atlas_observe``). The context is composed
+        only when something is actually pending, since it costs a regime panel.
+        """
+        if not self.llm_config.reasoner_enabled:
+            return {}
+        facts = self.atlas_facts(offline)
+        # The facts are in the request before anything that can fail, and they
+        # stay there on every path out. `atlas_facts` has already CONSUMED this
+        # tick's regime flip by the time the composition below runs, so a
+        # failure that dropped them would hand `observe` a second assembly
+        # reporting `flip: False` — the desk quietly missing the very change it
+        # was about to reason about. Losing the judgment is acceptable; losing
+        # the flip is not.
+        request: dict = {"facts": facts, "triggers": []}
+        try:
+            pending = self.atlas.pending_judgments(
+                facts, trading_date=date.today().isoformat())
+            if pending:
+                # Composing the context costs a regime panel, a desk read and a
+                # news payload — every one of them a surface with its own way
+                # of failing, none of them the reasoner's fault, and all of them
+                # running before the deterministic observe on this path.
+                request["context"] = self.atlas_context(offline, facts=facts)
+                request["triggers"] = pending
+        except Exception as exc:
+            self.note_reasoner_fallback(
+                None, f"the desk could not be composed for the reasoner: {exc!r}")
+        return request
+
+    def note_reasoner_fallback(self, trigger: str | None, reason: str) -> None:
+        """Record one reason the table stood in for the reasoner.
+
+        Takes NO lock, deliberately, because its callers hold different ones.
+        ``atlas_judge`` runs outside the dispatch lock and takes ``_LOCK``
+        around its whole batch; ``atlas_judgment_request`` and the heartbeat's
+        guard run *inside* it, where a second acquire would deadlock — ``_LOCK``
+        is a plain ``threading.Lock``. Putting the acquire in here would be the
+        kind of convenience that hangs the owner.
+        """
+        choice = self.llm_config.reasoner
+        self.registry.record_event("reasoner.fallback", {
+            "trigger": trigger, "backend": choice.backend,
+            "model": choice.model, "reason": self._bounded(reason, 500)})
+
+    def atlas_judge(self, request: dict) -> dict:
+        """Ask the reasoner which template fits each pending trigger.
+
+        **Must not be called while the dispatch lock is held.** This makes
+        model calls — the same rule and the same reason as ``atlas_message``,
+        and here it is load-bearing rather than polite: the observe tick holds
+        the lock for its whole body, so a completion inside it would freeze the
+        snapshot poll, the SSE poll and every approval behind them for up to
+        ``REASONER_TIMEOUT_S``. It takes ``_LOCK`` itself, briefly, only to
+        record what it could not do.
+
+        Returns the choices that were made; a trigger absent from the map falls
+        back to the table in ``observe``. Every failure is one of those
+        absences, because the deterministic path has to complete regardless of
+        what the reasoner did.
+        """
+        triggers = request.get("triggers") or []
+        if not triggers:
+            return {}
+        # (trigger kind or None, why) — recorded once, at the end, under a
+        # brief lock this method takes for itself.
+        notes: list[tuple[str | None, str]] = []
+        chosen: dict = {}
+
+        try:
+            # Inside the guard with everything else it feeds. Reading the
+            # persisted config is not obviously fallible, which is exactly how
+            # it sat above the try being called bare from the heartbeat.
+            choice = self.llm_config.reasoner
+            # Deliberately broad, against this file's usual rule, and it starts
+            # at the PROBE rather than at the completion. A reasoner bug must
+            # degrade the desk to the lookup, not stop the heartbeat: the
+            # observe that follows this line is what keeps the drawdown tiers
+            # and the approval expiry moving, and it is the deterministic half.
+            # The catalog turns a misbehaving backend into a reason but lets
+            # anything that is not an `LlmBackendError` straight through, and
+            # on this path — unlike the picker route, where it becomes one
+            # failed render — that would skip the whole tick, every tick, for
+            # as long as the condition lasted. The reason is recorded, so a
+            # desk that has quietly stopped judging is visible on the bus
+            # rather than merely quiet.
+            #
+            # The catalog is the one place availability is asked, so a refusal
+            # here carries the picker's own sentence rather than a second
+            # opinion.
+            entries = {entry["name"]: entry
+                       for entry in self.llm_backends_catalog()["backends"]}
+            entry = entries.get(choice.backend)
+            if entry is None or not entry["available"]:
+                # `trigger: null` — this refusal is about the desk, not about
+                # one trigger, and a wildcard string in a field that otherwise
+                # holds a trigger kind would read as one.
+                notes.append((None, entry["reason"] if entry else
+                              f"this desk has no {choice.backend!r} backend"))
+            else:
+                from qlab.operator.llm_backends import build_backend
+                from qlab.operator.template_judge import choose_template
+
+                backend = build_backend(choice.backend)
+                for trig in triggers[:_REASONER_MAX_PER_TICK]:
+                    picked = choose_template(
+                        request.get("context") or {}, trig, backend,
+                        choice.model,
+                        note=lambda why, kind=trig.kind: notes.append((kind, why)))
+                    if picked is not None:
+                        chosen[trig.kind] = picked
+                for trig in triggers[_REASONER_MAX_PER_TICK:]:
+                    # The cap was the last exemption that took the table's
+                    # answer without saying so. Every other fallback on this
+                    # path is on the bus; a budget is not a reason to be the
+                    # one that is not.
+                    notes.append((trig.kind, "past this tick's reasoner budget "
+                                             f"of {_REASONER_MAX_PER_TICK}"))
+        except Exception as exc:
+            notes.append((None, f"the reasoner could not be asked: {exc!r}"))
+
+        if notes:
+            try:
+                with _LOCK:
+                    for trigger_kind, why in notes:
+                        self.note_reasoner_fallback(trigger_kind, why)
+            except Exception:
+                # A recorder that throws must not do what it guards. This block
+                # sat outside the try above, so a failing `record_event` — the
+                # write that exists to keep a degraded reasoner VISIBLE — was
+                # itself enough to abort the tick, since `atlas_judge` is called
+                # bare from the heartbeat. Losing the note is a lost note;
+                # losing the tick is a desk that stopped observing.
+                pass
+        return chosen
 
     def desk_read(self, offline: bool, *, refresh: bool = False) -> dict:
         """Atlas's composed qualitative read across signals, news, and research.
@@ -2509,6 +3042,7 @@ class UISession:
         """
         from qlab.operator.atlas import Dispatched
         from qlab.operator.templates import get_template
+        from qlab.state.registry import agent_for_phase
 
         template = get_template(template_id)
         if not template.needs_coordinator:
@@ -2539,9 +3073,13 @@ class UISession:
         # Registering the workflow is not running it. Its phases advance only
         # when a coordinator walks them, so dispatch alone left the run parked at
         # phase one forever. Drive it here.
+        # The graph's roles, not its phases: which provider serves a dispatch
+        # is a per-role route, and `agent_for_phase` is the one place a phase
+        # becomes a role.
         driven = self.drive_workflow(
             str(workflow_id),
-            f"[{template_id}] {template.purpose}")
+            f"[{template_id}] {template.purpose}",
+            roles=tuple(agent_for_phase(phase) for phase in template.phases))
         # A workflow row is not a finding. Report the dispatch and let
         # AtlasSupervisor.reconcile_tasks resolve the task from the workflow's
         # own terminal state.
@@ -2566,14 +3104,15 @@ class UISession:
                 if self._driver is None:
                     self._driver = self._build_driver()
         self._driver.fast = self.fast_mode
+        self._driver.workforce = self.llm_config.workforce
         return self._driver
 
     def _build_driver(self):
         """Construct the driver. Called once, under `_driver_lock`.
 
-        `fast` is deliberately not passed here: the property re-reads it on each
-        access so a Settings toggle lands on the next dispatch rather than the
-        next owner restart.
+        `fast` and `workforce` are deliberately not passed here: the property
+        re-reads them on each access so a Settings change lands on the next
+        dispatch rather than the next owner restart.
         """
         from qlab.operator.coordinator import CoordinatorDriver
         from qlab.paths import workspace_root
@@ -2583,22 +3122,57 @@ class UISession:
             cwd=workspace_root(),
             record_event=self.registry.record_event,
             offline=self.offline_default,
+            # The owner IS the single writer, and the driver runs inside it, so
+            # this is the same handle rather than a second one.
+            registry=self.registry,
+            backend_status=self._last_backend_reading,
         )
 
-    def drive_workflow(self, workflow_id: str, goal: str) -> dict:
+    def _last_backend_reading(self, name: str) -> tuple[bool | None, str]:
+        """The last availability reading for one backend — never a probe.
+
+        `coordinator_status()` runs on the snapshot path, under the dispatch
+        lock, every tick. `llm_payload` reports the same way and for the same
+        reason: probing here would block every other request behind a daemon
+        that may be a network hop away. `None` means nothing has been probed
+        yet, which is not a refusal — the run itself fails with the daemon's
+        own sentence, which beats a pre-flight guess.
+        """
+        with self._llm_catalog_lock:
+            cached = self._llm_catalog
+        if cached is None:
+            return None, ""
+        _, catalog = cached
+        for entry in catalog["backends"]:
+            if entry["name"] == name:
+                return bool(entry["available"]), str(entry["reason"])
+        return None, ""
+
+    def drive_workflow(self, workflow_id: str, goal: str,
+                       roles: tuple[str, ...] = ()) -> dict:
         """Spawn a coordinator for a workflow this owner just registered."""
-        return self.coordinator_driver.drive(workflow_id, goal)
+        return self.coordinator_driver.drive(workflow_id, goal, roles=roles)
 
     def coordinator_status(self) -> dict:
         """What the desk should say about unattended coordination."""
         driver = self.coordinator_driver
         ok, reason = driver.available()
-        return {
+        status = {
             "driving": driver.busy,
             "workflow_id": driver.current_workflow_id,
             "can_drive": ok,
             "reason": reason or driver.last_reason,
         }
+        # A configured workforce the desk cannot honour is not a refusal any
+        # more, so it would otherwise be visible only on invocation rows. Every
+        # client renders `reason` only when `can_drive` is False, and this desk
+        # CAN drive — so the fact needs its own field or it is silent. Carried
+        # only when there is one: an absent key is what old clients already
+        # tolerate, and an empty string would render as a blank line.
+        note = driver.workforce_note()
+        if note:
+            status["note"] = note
+        return status
 
     def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
         """Start the queued work Atlas's current mode already permits.
@@ -2629,24 +3203,145 @@ class UISession:
         return self.atlas.start_task(task_id, facts,
                                    runner=self.atlas_workflow_runner)
 
-    def atlas_message(self, body: dict) -> dict:
-        """Accept a human question or explicit workflow request.
+    @staticmethod
+    def _bounded(text: str, limit: int) -> str:
+        """`text` capped at `limit`, saying so when the cap bites.
 
-        This never grants authority. The message is recorded; a substantive
-        answer needs the coordinator, so when Claude is absent Atlas acknowledges
-        and reports itself degraded rather than fabricating an answer.
+        An audit row that silently ends mid-sentence reads as what was said.
+        The model receives the operator's question whole, so a row that cut it
+        without a mark would be a record disagreeing with the prompt it
+        produced, with nothing to show which one was short.
+        """
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]} …[truncated from {len(text)} chars]"
+
+    def _record_atlas_reply(self, text: str, error: str | None = None) -> None:
+        """Put the desk's own words on the bus as a second `atlas_message` row.
+
+        The existing kind, deliberately. Both clients already render it — the
+        Rust console keys `atlas_message` in `CONSOLE_KINDS` and reads `text` as
+        the row's subject, the Textual timeline prints the payload — so a reply
+        arrives in front of the operator with no client change at all. A new
+        kind would have been an answer nothing displays.
+        """
+        payload = {"actor": "atlas",
+                   "text": self._bounded(text, _ATLAS_REPLY_CHARS)}
+        if error is not None:
+            payload["error"] = self._bounded(error, 500)
+        self.registry.record_event("atlas_message", payload)
+
+    def atlas_message(self, body: dict, offline: bool) -> dict:
+        """Answer the operator through the configured reasoner.
+
+        This never grants authority. The reply is words on a bus: no tool, no
+        plan, no approval, and no path to one. What makes that safe is not
+        instruction but absence — the model is handed a context and a question
+        and its answer is recorded, exactly as `atlas_context`'s own docstring
+        splits the reasoning surface from the gate's nine booleans.
+
+        Which model answers is `llm_config.reasoner`, and it answers whenever
+        its backend can serve. `reasoner_enabled` is NOT consulted: that flag
+        gates Atlas's template judgment (what the desk starts unattended), and
+        gating a question the operator typed behind it would withhold an answer
+        to protect an authority the answer does not carry.
+
+        **Must not be called while the dispatch lock is held.** The model call
+        is the longest network wait the owner makes on a request — up to
+        `_ATLAS_REPLY_TIMEOUT_S` — and it runs outside the lock, which is taken
+        twice and briefly around the registry work instead. `_Handler.do_POST`
+        routes this path accordingly; `_LOCK` is not reentrant.
         """
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("message text is required")
-        self.registry.record_event("atlas_message", {"text": text[:500]})
-        available = bool(shutil.which("claude"))
+        choice = self.llm_config.reasoner
+
+        # The question goes on the record before anything can fail. The model
+        # gets it whole; the row is bounded and says when it was cut, because a
+        # record that quietly disagrees with the prompt it produced is worse
+        # than a long one.
+        with _LOCK:
+            self.registry.record_event(
+                "atlas_message",
+                {"actor": "operator", "text": self._bounded(text, 500)})
+
+        # Outside the lock: the catalog probes the network, and it is the one
+        # place availability is asked, so the refusal carries the same sentence
+        # the picker shows rather than a second opinion composed here.
+        entries = {entry["name"]: entry
+                   for entry in self.llm_backends_catalog()["backends"]}
+        entry = entries.get(choice.backend)
+        if entry is None or not entry["available"]:
+            reason = (entry["reason"] if entry else
+                      f"this desk has no {choice.backend!r} backend")
+            return self._atlas_refusal(choice, reason)
+
+        from qlab.operator.llm_backends import LlmBackendError, build_backend
+
+        # Composed only once a model exists to read it. `atlas_context` costs a
+        # regime panel under the dispatch lock, and paying that for a desk whose
+        # reasoner is down would make the one unanswerable question the most
+        # expensive request the owner serves.
+        with _LOCK:
+            context = self.atlas_context(offline)
+        user = (
+            "The desk right now, as JSON:\n\n"
+            # Compact: this is ~12KB of context and every separator is a token.
+            f"{json.dumps(context, default=str, separators=(',', ':'))}\n\n"
+            f"The operator asks:\n\n{text}")
+        try:
+            reply = build_backend(choice.backend).complete(
+                system=_ATLAS_DESK_MANAGER_PROMPT, user=user,
+                model=choice.model, max_tokens=_ATLAS_REPLY_TOKENS,
+                timeout=_ATLAS_REPLY_TIMEOUT_S)
+        except LlmBackendError as exc:
+            # A model that was asked and could not answer is a desk event, not
+            # a 500: the operator asked a question, and "I could not answer,
+            # here is why" is an answer. Only LlmBackendError — a bug in this
+            # method must still surface as one.
+            return self._atlas_refusal(choice, str(exc), asked=True)
+
+        with _LOCK:
+            self._record_atlas_reply(reply)
         return {
             "received": True,
-            "coordinator_available": available,
-            "note": ("queued for the interpreting agent" if available
-                     else "coordinator unavailable; Atlas is degraded and cannot "
-                          "answer, but the owner, data, and book remain usable"),
+            "answered": True,
+            "backend": choice.backend,
+            "model": choice.model,
+            # The same bound and the same marker as the row this mirrors: an
+            # HTTP caller and the bus must not be shown two different cuts of
+            # one answer, one of them silent.
+            "reply": self._bounded(reply, _ATLAS_REPLY_CHARS),
+            "note": f"{choice.backend} {choice.model} answered on the console",
+        }
+
+    def _atlas_refusal(self, choice: SurfaceModel, reason: str, *,
+                       asked: bool = False) -> dict:
+        """Record and report that the desk could not answer, and why.
+
+        Never a fabricated reply: what lands on the bus is the desk's own
+        sentence about its own failure, carrying the backend's reason verbatim.
+
+        Both notes say "unavailable" because the Rust client reads that word to
+        raise its toast from Info to Warn — a degraded desk must not render as
+        a receipt (`toast.rs`), and a backend that was asked and failed is as
+        unable to answer as one that was never reachable.
+        """
+        note = (f"the reasoner is unavailable: {choice.backend} "
+                f"{choice.model} was asked and failed — {reason}"
+                if asked else
+                f"the reasoner is unavailable; Atlas is degraded and cannot "
+                f"answer, but the owner, data, and book remain usable — "
+                f"{reason}")
+        with _LOCK:
+            self._record_atlas_reply(note, error=reason)
+        return {
+            "received": True,
+            "answered": False,
+            "backend": choice.backend,
+            "model": choice.model,
+            "note": note,
         }
 
     # -- human approvals (the persisted execution gate) ---------------------
@@ -2779,7 +3474,7 @@ class UISession:
         # Operational execution additionally revalidates data at submission.
         from qlab.core import data as market
 
-        policy = market.policy_for(offline, seed=self.seed)
+        policy = self.data_policy(offline)
         if policy.execution_eligible:
             health = self.data_health(offline, purpose="execution")
             if health.get("blocked") or not health.get("eligible_for_execution"):
@@ -2949,6 +3644,7 @@ class UISession:
         self.registry.expire_due_approvals(self._now_iso())
         return {
             "desk_mode": self.desk_mode_payload(),
+            "llm": self.llm_payload(),
             "portfolio": portfolio,
             "live_portfolio": self.live_portfolio(offline),
             "market": market_snapshot,
@@ -2982,6 +3678,17 @@ class UISession:
             "leaderboard": self.leaderboard(),
             "performance": self.performance(offline),
             "workflows": self.registry.list_workflows(10),
+            # The same summary the reasoner is handed (atlas_context), so the
+            # operator can see the evidence base the desk reasons from — the
+            # quantum-augmented lane against its ridge control. Reads only
+            # persisted run rows; never triggers a board run.
+            "predictors": self.predictor_board_summary(),
+            # The conversation, selected by kind at the store. The general
+            # `events` window above cannot carry it: a news-archive poll writes
+            # a row every 30s, so an hour of idling floods any fixed window and
+            # the chat a client renders would silently end an hour back.
+            "atlas_chat": self.registry.read_events_of_kind(
+                "atlas_message", limit=60),
         }
 
     def read_market_events(
@@ -3283,6 +3990,56 @@ def handle_api(session: UISession, method: str, path: str,
         session.set_desk_mode(mode)
         return 200, session.desk_mode_payload()
 
+    if method == "POST" and path == "/api/alpaca/credentials":
+        from qlab.trader.alpaca_auth import AlpacaAuthError, AlpacaConsentRequired
+
+        # Destroying an existing login takes an explicit true, so a client that
+        # sends "yes" or 1 is refused rather than read as consent.
+        replace = body.get("replace", False)
+        if not isinstance(replace, bool):
+            return 400, {"error": "replace must be true or false"}
+        try:
+            return 200, session.set_alpaca_credentials(
+                body.get("api_key"), body.get("api_secret"), replace=replace)
+        except AlpacaConsentRequired as exc:
+            # The one refusal a client can act on: show the sentence, and
+            # re-POST with replace:true if the operator agrees. `confirm` is
+            # what makes that a check rather than a substring sniff — the
+            # message above says what would be lost and nothing about how,
+            # and the validation refusal below deliberately has no such key.
+            return 400, {"error": str(exc), "confirm": "replace"}
+        except AlpacaAuthError as exc:
+            # The module's own sentence, which never quotes what was typed.
+            return 400, {"error": str(exc)}
+
+    if method == "POST" and path == "/api/alpaca/test":
+        # Network I/O. do_POST runs this one outside the dispatch lock; it
+        # touches no registry state, so it does not need it.
+        return 200, session.probe_alpaca_credentials()
+
+    if method == "GET" and path == "/api/llm/backends":
+        # Network I/O. do_GET runs this one outside the dispatch lock; nothing
+        # here touches the registry, so it does not need it.
+        return 200, session.llm_backends_catalog(
+            refresh=_qbool(query, "refresh", False))
+
+    if method == "POST" and path == "/api/llm":
+        enabled = body.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            return 400, {"error": "enabled must be true or false"}
+        # An absent backend/model means "leave the pair alone", which is what
+        # makes {surface, enabled} a switch. Absent is not the same as empty:
+        # an empty string is a choice of nothing and is refused below.
+        backend, model = body.get("backend"), body.get("model")
+        try:
+            return 200, session.set_llm_config(
+                str(body.get("surface") or ""),
+                None if backend is None else str(backend),
+                None if model is None else str(model),
+                enabled)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+
     if method == "GET" and path == "/api/data/health":
         offline = _qbool(query, "offline", session.offline_default)
         purpose = query.get("purpose", ["paper_proposal"])[0]
@@ -3444,7 +4201,7 @@ def handle_api(session: UISession, method: str, path: str,
 
     if method == "POST" and path == "/api/atlas/message":
         try:
-            return 200, session.atlas_message(body)
+            return 200, session.atlas_message(body, off)
         except ValueError as exc:
             return 400, {"error": str(exc)}
 
@@ -3815,6 +4572,13 @@ class _Handler(BaseHTTPRequestHandler):
                             prefetched_news=prefetched_news,
                         )
                     status = 200
+                elif parsed.path == "/api/llm/backends":
+                    # Probing a backend is network I/O, and this route reads no
+                    # registry state at all, so it takes no dispatch lock —
+                    # otherwise a settings panel opened against an unreachable
+                    # daemon would freeze the whole desk for the probe timeout.
+                    status, obj = handle_api(
+                        self.session, "GET", parsed.path, query, {})
                 else:
                     with _LOCK:
                         status, obj = handle_api(
@@ -4008,9 +4772,47 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "request body must be a JSON object"})
             return
         try:
-            with _LOCK:
+            if parsed.path == "/api/llm" and (
+                    body.get("enabled") is True
+                    or (body.get("backend") is not None
+                        and body.get("enabled") is not False)):
+                # Validation probes a backend, and both a new pair and an
+                # enable are validated. The GET catalog route avoids the
+                # dispatch lock entirely; this one needs it for the registry
+                # write, so the probe is warmed here instead — a cold cache
+                # plus an unreachable daemon would otherwise freeze every other
+                # request for the probe timeout. A disable is skipped because
+                # set_llm_config validates nothing for it, and an off-switch
+                # must not wait on the daemon that is probably the reason it
+                # was sent.
+                #
+                # This is a hint, not the check: set_llm_config re-reads the
+                # catalog and remains the authority. If the TTL lapses in
+                # between it probes again under the lock — slower, never a
+                # different answer, and the accepted trade for the same reason
+                # the GET route accepts serving a cached catalog at all.
+                self.session.llm_backends_catalog()
+            if parsed.path in ("/api/atlas/message", "/api/alpaca/test"):
+                # The whole route runs outside the lock, not just a warm-up: an
+                # answer is a model call, up to _ATLAS_REPLY_TIMEOUT_S of it,
+                # and one operator question must not freeze the snapshot poll,
+                # the SSE poll and every approval behind it. `atlas_message`
+                # takes the dispatch lock itself, twice and briefly, around the
+                # registry work at either end — which is why it must not be
+                # reached from inside it (`_LOCK` is not reentrant).
+                #
+                # The credential probe is here for the same reason and a
+                # simpler one: it is a socket to a venue with a PROBE_TIMEOUT_S
+                # deadline, and it touches no registry state at all, so it has
+                # no business holding the book while an operator waits on
+                # Alpaca. Storing a login does take the lock — that one writes
+                # an event row.
                 status, obj = handle_api(self.session, "POST", parsed.path,
                                          parse_qs(parsed.query), body)
+            else:
+                with _LOCK:
+                    status, obj = handle_api(self.session, "POST", parsed.path,
+                                             parse_qs(parsed.query), body)
         except Exception as exc:
             status, obj = 500, {"error": repr(exc)}
         self._json(status, obj)
@@ -4074,6 +4876,16 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
     session settles on is what the banner reports.
     """
     try:
+        # The bind IS the one-writer guard, so it must be exclusive on every
+        # platform. ThreadingHTTPServer sets allow_reuse_address (SO_REUSEADDR),
+        # which on Windows lets a SECOND process bind the same live port — a
+        # second registry writer admitted by the exact mechanism that exists to
+        # refuse it. Windows' own default is already exclusive; keep REUSEADDR
+        # only where it means "skip TIME_WAIT" (POSIX), never where it means
+        # "share the port" (nt). Set the class before construction rather than
+        # wrapping it, because tests monkeypatch this constructor to prove the
+        # refusal happens before any registry is opened.
+        setattr(ThreadingHTTPServer, "allow_reuse_address", os.name != "nt")
         httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     except Exception:
         # Resolve ownership before opening DuckDB or recovering workflows. A

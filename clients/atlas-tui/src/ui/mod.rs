@@ -6,6 +6,7 @@
 //! property of the composition root rather than a rule every view has to
 //! remember.
 
+pub mod door;
 pub mod shell;
 pub mod views;
 pub mod widgets;

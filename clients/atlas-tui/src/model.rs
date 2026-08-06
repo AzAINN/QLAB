@@ -62,6 +62,9 @@ pub struct Snapshot {
     /// is not the same as a synthetic desk — nothing here defaults.
     #[serde(default)]
     pub desk_mode: Option<DeskMode>,
+    /// Which minds the desk is using, and how fresh that answer is.
+    #[serde(default)]
+    pub llm: Option<LlmConfig>,
     #[serde(default)]
     pub portfolio: Option<Portfolio>,
     #[serde(default)]
@@ -92,6 +95,20 @@ pub struct Snapshot {
     pub atlas_read: Option<AtlasRead>,
     #[serde(default, deserialize_with = "null_or_default")]
     pub events: Vec<Event>,
+    /// The conversation with the desk manager, oldest first as the owner
+    /// serves it (`read_events_of_kind("atlas_message", limit=60)`).
+    ///
+    /// Its own key rather than a filter over `events`, because the general
+    /// window floods: a news-archive poll writes a row every 30 s, so an hour
+    /// of idling pushes the chat out of any fixed window and the conversation
+    /// a client renders would silently end an hour back.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub atlas_chat: Vec<Event>,
+    /// The newest persisted predictor board, summarised — the same summary the
+    /// reasoner is handed, so the operator can see the evidence base the desk
+    /// reasons from.
+    #[serde(default)]
+    pub predictors: Option<Predictors>,
     /// The allocation policy the paper book is run under, with the mandate's
     /// constraints attached by the owner.
     #[serde(default)]
@@ -134,6 +151,17 @@ pub struct DeskMode {
     pub offline: Option<bool>,
     pub credentials: Option<String>,
     pub credentials_ok: Option<bool>,
+    /// Whether anything ever *named* the pair above — a launcher flag, the
+    /// state file, or a POST — as against the fallback the owner has to serve
+    /// when nobody has.
+    ///
+    /// **Three states, and the third is an owner rather than a desk.** `None`
+    /// is an owner too old to carry the field, which is every owner before D4;
+    /// reading that silence as `false` would say "nobody chose this desk" about
+    /// desks that had, on the one client that opens a modal over the answer. So
+    /// absence keeps whatever the reader did before the field existed, and only
+    /// `Some(false)` is the owner asserting the negative.
+    pub chosen: Option<bool>,
 }
 
 impl DeskMode {
@@ -150,6 +178,102 @@ impl DeskMode {
     pub fn book_unreachable(&self) -> bool {
         self.book.as_deref() == Some("alpaca") && self.credentials_ok != Some(true)
     }
+}
+
+// -- which minds the desk is using ------------------------------------------
+
+/// `llm_payload()`: one model choice per surface, plus the last thing the owner
+/// learned about whether those backends can serve.
+///
+/// **`availability` is a reading, not a probe.** `/api/tui` runs under the
+/// owner's dispatch lock and is polled every two seconds, so the owner refuses
+/// to probe there and serves whatever the picker's own route last saw, stamped
+/// with `probed_at`. A surface that rendered this as live would be reporting a
+/// daemon's health from an hour ago as current, which is why the stamp travels
+/// with it and why SETTINGS renders the age rather than the reading alone.
+///
+/// `probed_at` absent is "nothing has asked yet" — a different fact from a
+/// reading this client could not read, and the two must not render the same.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmConfig {
+    pub reasoner: Option<LlmSurface>,
+    pub workforce: Option<LlmSurface>,
+    /// Whether Atlas reasons with a model at all. Off is the desk's default, and
+    /// naming a reasoner model does not switch it on — the owner refuses to
+    /// infer one from the other, so nothing here may either.
+    pub reasoner_enabled: Option<bool>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub availability: Vec<LlmBackend>,
+    pub probed_at: Option<String>,
+}
+
+impl LlmConfig {
+    /// What the last reading said about one backend, by the name the owner gave
+    /// it. `None` for a backend nothing has asked about — which is not the same
+    /// fact as one that answered no.
+    pub fn backend(&self, name: &str) -> Option<&LlmBackend> {
+        self.availability
+            .iter()
+            .find(|entry| entry.name.as_deref() == Some(name))
+    }
+}
+
+/// One surface's choice. The pair travels together because neither half means
+/// anything alone: a model with no backend names nothing that can run it, and a
+/// backend with no model is a surface nobody can say what runs on.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmSurface {
+    pub backend: Option<String>,
+    pub model: Option<String>,
+}
+
+/// One backend's entry in the compact summary — the catalog minus its model
+/// lists, which an Ollama host can have dozens of and which do not ride in a
+/// payload polled every two seconds.
+///
+/// The reason is populated on the happy path too: the owner treats a silent
+/// `false` as the bug it once was, and every surface that renders availability
+/// renders the sentence behind it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmBackend {
+    pub name: Option<String>,
+    pub available: Option<bool>,
+    pub reason: Option<String>,
+}
+
+/// `GET /api/llm/backends`: every backend the desk knows, and what each serves
+/// *right now*.
+///
+/// Its own payload rather than a section of the snapshot, because the owner
+/// refuses to probe on the poll path: `/api/tui` runs under the dispatch lock
+/// every two seconds and a hung daemon there would stall every other request,
+/// so the snapshot carries the last reading and this route is the only prober.
+/// It is fetched when the palette enters the model scope and at no other time —
+/// there is no cadence here, deliberately.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LlmCatalog {
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub backends: Vec<CatalogEntry>,
+    pub probed_at: Option<String>,
+}
+
+/// One backend as the catalog reports it: the summary plus the model list.
+///
+/// Deliberately **not** `LlmBackend` with a `models` field bolted on. The
+/// snapshot's summary is the same three fields with the lists stripped, and one
+/// struct for both would leave `store.llm()` handing out a permanently empty
+/// `models` — a client reading its own silence as "this backend serves
+/// nothing". Two payloads, two types, and the compiler decides which one a
+/// caller is holding.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CatalogEntry {
+    pub name: Option<String>,
+    pub available: Option<bool>,
+    pub reason: Option<String>,
+    /// What this backend can serve now — empty when it cannot serve at all
+    /// (the owner does not ask an unavailable backend for its list).
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub models: Vec<String>,
 }
 
 // -- the policy and its limits ---------------------------------------------
@@ -288,6 +412,64 @@ pub struct BoardModel {
     pub mean_ic: Option<f64>,
     pub usable: Option<bool>,
     pub delta_mean_ic_vs_baseline: Option<f64>,
+}
+
+/// The `predictors` section: `predictor_board_summary()` as `/api/tui` serves
+/// it.
+///
+/// Deliberately **not** `BoardSpec` widened. That struct is the one-line
+/// readout's subset of a *run row's* spec; this is the owner's own summary of
+/// the newest board, with the baseline/champion rows expanded into full
+/// metrics. One struct for both would leave whichever surface reads the other
+/// shape decoding absent fields forever.
+///
+/// `status` is the only field the owner always sends: `never_ran` and
+/// `unreadable` payloads carry nothing else worth a name, and every metric is
+/// optional because a zero where a measurement is missing is a claim nobody
+/// made.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Predictors {
+    pub status: Option<String>,
+    pub run_id: Option<String>,
+    pub as_of: Option<String>,
+    pub age_days: Option<i64>,
+    pub admitted_any: Option<bool>,
+    /// Whether the champion's edge survives the owner's selection null.
+    /// `None` is a board that predates the null — neither established nor
+    /// refuted, and it must not render as either.
+    pub champion_established: Option<bool>,
+    pub n_obs: Option<i64>,
+    pub n_folds: Option<i64>,
+    pub champion: Option<PredictorMetrics>,
+    pub baseline: Option<PredictorMetrics>,
+    pub best_delta_vs_baseline: Option<f64>,
+}
+
+/// One evaluated model's full metrics row on the board summary.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PredictorMetrics {
+    pub model_id: Option<String>,
+    pub family: Option<String>,
+    /// The quantum feature augmentation, or `"none"` for a classical lane.
+    /// What earns the `q` badge — the same rule as the web UI's.
+    pub variant: Option<String>,
+    pub mean_ic: Option<f64>,
+    pub ic_std: Option<f64>,
+    pub ic_stability: Option<f64>,
+    pub usable: Option<bool>,
+    pub paired_t_vs_baseline: Option<f64>,
+    pub wins_vs_baseline: Option<i64>,
+    pub delta_mean_ic_vs_baseline: Option<f64>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub per_fold: Vec<PredictorFold>,
+}
+
+/// One purged walk-forward fold's IC. The folds are what make a mean
+/// interpretable: folds that change sign are not a skill estimate.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PredictorFold {
+    pub fold: Option<i64>,
+    pub ic: Option<f64>,
 }
 
 /// The admission gate a prediction run states about itself.

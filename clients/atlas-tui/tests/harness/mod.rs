@@ -61,6 +61,22 @@ impl Client {
         self
     }
 
+    /// One mouse event, routed exactly as the runtime routes it — through
+    /// `shell::on_mouse`, so a test exercises the nav guard and the view
+    /// routing rather than a view method it called directly.
+    pub fn mouse(&mut self, kind: crossterm::event::MouseEventKind, column: u16, row: u16) {
+        atlas::ui::shell::on_mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut self.store,
+            &mut self.views,
+        );
+    }
+
     pub fn keys(&mut self, codes: &[KeyCode]) -> &mut Self {
         for code in codes {
             self.press(*code);
@@ -142,6 +158,27 @@ pub fn body_style_of(buf: &Buffer, needle: &str) -> Style {
     panic!("no rendered cell run matches {needle:?}:\n{buf:?}");
 }
 
+/// A store this test is not asking the startup door about.
+///
+/// The door opens on a desk whose owner **answered and said nothing about which
+/// desk it is** (`ui::door::Door::wanted`), and almost every fixture below is a
+/// snapshot carrying only the sections the view under test reads — so without
+/// this each of them would draw a modal over the frame it is pinning. Settling
+/// is what the first keystroke into the door would do, and it changes nothing
+/// else about the frame.
+///
+/// Deliberately **not** folded into `frame_to_string` or `Client::new`: a
+/// suppression inside the render path would hide a door that opened when it
+/// should not have from every golden in the suite at once. It is a per-fixture
+/// statement, and `tests/golden_door.rs` builds its stores without it.
+///
+/// The captured payload (`fixture_store`) needs none of this: it carries the
+/// `desk_mode` block a real owner always sends, which is the state that opens
+/// no door.
+pub fn no_door(store: &mut Store) {
+    store.settle_door();
+}
+
 /// The captured owner payload, folded in the way the runtime folds it.
 ///
 /// Through `Store::apply` rather than by assigning the field: a fixture that
@@ -154,6 +191,11 @@ pub fn fixture_store() -> Store {
     // address instead of whichever `QLAB_UI_PORT` the test binary happened to
     // see. The default port every qlab surface agrees on.
     store.base = "http://127.0.0.1:8765".to_string();
+    // The mocked clock: twelve seconds after the fixture's own `llm.probed_at`.
+    // Set here for the reason `base` is — the runtime reads a wall clock once
+    // per iteration and puts it on the store, so an age on a golden is a fact
+    // about the fixture rather than about how long the suite took to reach it.
+    store.wall = Some(1_785_696_869);
     let now = Instant::now();
     store.apply(AppEvent::ConnUp(Channel::Owner), now);
     store.apply(AppEvent::Snapshot(Box::new(snapshot)), now);

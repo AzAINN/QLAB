@@ -1,0 +1,851 @@
+//! ATLAS — the conversation with the desk manager, beside the evidence it reasons from.
+//!
+//! Chat first, deliberately. Every other pane renders what the desk *is*; this
+//! one is where an operator asks what it *means*, and the answer arrives on the
+//! same bus the question went out on (`atlas_message` rows, served whole in the
+//! snapshot's `atlas_chat` key). The sidebar is the predictor board — the same
+//! summary the reasoner itself is handed — so the words on the left can be read
+//! against the numbers they were reasoned from on the right.
+//!
+//! The input row has no mode key: in an armed window a printable character goes
+//! straight into the ask row. The cost of that is stated where it is paid — see
+//! [`AtlasView::typing`] — and the posture decides everything, as on WORKFORCE:
+//! a glass window renders the conversation read-only and draws no row at all.
+
+use crate::cmd::Command;
+use crate::format::{self, MISSING};
+use crate::fx::FlashTracker;
+use crate::model::{Event, PredictorMetrics, Predictors};
+use crate::store::Store;
+use crate::theme::theme;
+use crate::ui::views::View;
+use crate::ui::widgets::{panel_block, panel_header, refuse};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::{
+    layout::{Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+    Frame,
+};
+use std::time::Instant;
+
+/// The sidebar's fixed width: a model id (`krr:quantum_gram` is 16), its badge,
+/// and metric pairs at the widths the board serves. The chat takes the rest,
+/// because sentences compress and numbers do not.
+const SIDEBAR_W: u16 = 32;
+/// Under this the chat cannot hold a clock, an actor and a readable clause.
+const CHAT_MIN: u16 = 30;
+/// A page of chat, for the paging keys.
+const CHAT_PAGE: i64 = 10;
+/// One wheel notch, matching what a terminal emulator usually scrolls.
+const WHEEL: i64 = 3;
+/// The clock, the actor column and the separator in front of every message.
+const PREFIX_W: usize = 8 + 1 + 5 + 3;
+
+/// Where the operator is looking and what they have typed. Never what the desk
+/// says — that is the `Store`'s.
+#[derive(Default)]
+pub struct AtlasView {
+    /// How far up the conversation the operator has scrolled, in rendered
+    /// lines from the bottom. Zero is pinned-to-bottom, which is where a new
+    /// answer must land without being asked for.
+    offset: usize,
+    /// The highest offset the last frame could honour, published by `draw` the
+    /// way WORKFORCE publishes its height: a key handler is never told a
+    /// geometry, and clamping against a guess would let the scroll run off the
+    /// top of the log.
+    max_scroll: std::cell::Cell<usize>,
+    /// What is typed into the ask row.
+    #[cfg(feature = "operator")]
+    ask: String,
+    /// Whether the ask row holds the keyboard even while empty — set by a
+    /// click on the row or by its focus key, cleared by Esc and by sending.
+    ///
+    /// Separate from the text on purpose: an empty unfocused row yields the
+    /// shell's own keys, and this flag is what an operator uses to say "no,
+    /// the next `q` is the start of a question".
+    #[cfg(feature = "operator")]
+    focused: bool,
+    /// The ask row's rect on the last frame, published for the click test.
+    #[cfg(feature = "operator")]
+    input_row: std::cell::Cell<Rect>,
+}
+
+impl View for AtlasView {
+    fn draw(&self, f: &mut Frame, area: Rect, store: &Store, _fx: &FlashTracker, _now: Instant) {
+        if area.width < CHAT_MIN || area.height < 4 {
+            refuse(
+                f,
+                area,
+                format!(
+                    "ATLAS needs {CHAT_MIN} columns for a clock, an actor and a readable \
+                     clause; this pane has {}.",
+                    area.width
+                ),
+            );
+            return;
+        }
+        // The sidebar is dropped whole before the chat is squeezed: a board
+        // clipped to half its metrics misreads as a different board, while a
+        // narrower chat is the same conversation in shorter lines.
+        let boarded = area.width > CHAT_MIN + SIDEBAR_W;
+        let cols = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(if boarded { SIDEBAR_W } else { 0 }),
+        ])
+        .spacing(1)
+        .split(area);
+        self.draw_chat(f, cols[0], store);
+        if boarded {
+            draw_board(f, cols[1], store);
+        }
+    }
+
+    fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
+        self.keys(k, store)
+    }
+
+    /// Whether the ask row currently owns the keyboard.
+    ///
+    /// **The tradeoff this view chose, stated where it is paid.** There is no
+    /// mode key: a printable character in an armed window goes straight into
+    /// the row, which is what "chat first" costs. But an always-true claim
+    /// would take `q`, `r` and the digits from the whole workstation for a
+    /// field nobody is using — so the claim is made only once the row holds
+    /// text, or once the operator focused it deliberately (a click, or its
+    /// focus key). The corner that leaves: the *first* character of a question
+    /// cannot be one the shell claims (`q`, `r`, a digit, and the reserved
+    /// pair), because with the row empty and unfocused those still navigate.
+    /// Focus first when the question starts with one.
+    fn typing(&self) -> bool {
+        #[cfg(feature = "operator")]
+        {
+            self.focused || !self.ask.is_empty()
+        }
+        #[cfg(not(feature = "operator"))]
+        false
+    }
+
+    fn on_mouse(&mut self, m: MouseEvent, store: &mut Store) -> Option<Command> {
+        #[cfg(not(feature = "operator"))]
+        let _ = store;
+        match m.kind {
+            MouseEventKind::ScrollUp => self.scroll(WHEEL),
+            MouseEventKind::ScrollDown => self.scroll(-WHEEL),
+            MouseEventKind::Down(MouseButton::Left) => {
+                // A click on the ask row focuses it — the mouse's answer to
+                // the focus key. Armed windows only: a glass frame publishes
+                // an empty rect, so the branch is unreachable there.
+                #[cfg(feature = "operator")]
+                {
+                    let row = self.input_row.get();
+                    if store.posture.writes()
+                        && row.height > 0
+                        && m.row == row.y
+                        && m.column >= row.x
+                        && m.column < row.x.saturating_add(row.width)
+                    {
+                        self.focused = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+// -- the keys ---------------------------------------------------------------
+
+impl AtlasView {
+    /// The scroll keys, live in every posture — reading is what a glass window
+    /// is for — and everything else to the ask row, which only an armed window
+    /// has.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
+    fn keys(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
+        #[cfg(not(feature = "operator"))]
+        let _ = store;
+        match k.code {
+            KeyCode::Up => {
+                self.scroll(1);
+                None
+            }
+            KeyCode::Down => {
+                self.scroll(-1);
+                None
+            }
+            KeyCode::PageUp => {
+                self.scroll(CHAT_PAGE);
+                None
+            }
+            KeyCode::PageDown => {
+                self.scroll(-CHAT_PAGE);
+                None
+            }
+            _ => {
+                #[cfg(feature = "operator")]
+                if store.posture.writes() {
+                    return self.ask_key(k);
+                }
+                None
+            }
+        }
+    }
+
+    /// Move the conversation window, walls at both ends like every other
+    /// cursor on this workstation. Positive is towards older messages.
+    fn scroll(&mut self, delta: i64) {
+        let next = self.offset as i64 + delta;
+        self.offset = next.clamp(0, self.max_scroll.get() as i64) as usize;
+    }
+}
+
+#[cfg(feature = "operator")]
+impl AtlasView {
+    /// The ask row's keys. Everything printable types; Enter sends; Esc gives
+    /// the keyboard back.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
+    fn ask_key(&mut self, k: KeyEvent) -> Option<Command> {
+        match k.code {
+            // The focus key, for a question whose first character the shell
+            // would otherwise claim. Only an empty unfocused row treats it as
+            // focus; a row being typed into needs the letter itself.
+            KeyCode::Char('i') if self.ask.is_empty() && !self.focused => self.focused = true,
+            KeyCode::Char(c) => self.ask.push(c),
+            KeyCode::Backspace => {
+                self.ask.pop();
+            }
+            KeyCode::Esc => {
+                self.ask.clear();
+                self.focused = false;
+            }
+            KeyCode::Enter => {
+                let text = self.ask.trim().to_string();
+                // An empty question is not a question: the owner would refuse
+                // it ("message text is required") and the refusal would reach
+                // the operator as a failed write rather than as a slip.
+                if text.is_empty() {
+                    return None;
+                }
+                self.ask.clear();
+                self.focused = false;
+                return Some(Command::Message(text));
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+// -- the conversation -------------------------------------------------------
+
+impl AtlasView {
+    fn draw_chat(&self, f: &mut Frame, area: Rect, store: &Store) {
+        let t = theme();
+        let block = panel_block();
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        // The input row is a *row*, taken out of the layout before the log
+        // claims it, and absent whole in a glass window — a prompt that cannot
+        // be typed into is a client that looks broken. The hint row is always
+        // there: it is where this pane says what the keys do, and, unarmed,
+        // why there is no row to type into.
+        let input = u16::from(self.input_row_shown(store));
+        let rows = Layout::vertical([
+            Constraint::Length(1), // header
+            Constraint::Min(0),    // the conversation
+            Constraint::Length(input),
+            Constraint::Length(1), // the hint row
+        ])
+        .split(inner);
+
+        let chip = match store.atlas_chat().len() {
+            0 => "no conversation yet".to_string(),
+            n => format!("{n} messages"),
+        };
+        f.render_widget(Paragraph::new(head("ATLAS", &chip, rows[0].width)), rows[0]);
+
+        let lines = chat_lines(store.atlas_chat(), rows[1].width);
+        let room = rows[1].height as usize;
+        // Publish what the keys may clamp against, then window from the
+        // bottom: zero offset is the newest line on the last row.
+        self.max_scroll.set(lines.len().saturating_sub(room));
+        let offset = self.offset.min(self.max_scroll.get());
+        let end = lines.len() - offset;
+        let start = end.saturating_sub(room);
+        f.render_widget(Paragraph::new(lines[start..end].to_vec()), rows[1]);
+
+        self.draw_input(f, rows[2], store);
+        let hint = if self.input_row_shown(store) {
+            "Enter sends · Esc clears · ↑↓ wheel scroll"
+        } else {
+            "read-only in this posture — asking needs an operator window"
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(t.text_dim),
+            ))),
+            rows[3],
+        );
+    }
+
+    #[cfg(feature = "operator")]
+    fn input_row_shown(&self, store: &Store) -> bool {
+        store.posture.writes()
+    }
+
+    #[cfg(not(feature = "operator"))]
+    fn input_row_shown(&self, _store: &Store) -> bool {
+        false
+    }
+
+    #[cfg(feature = "operator")]
+    fn draw_input(&self, f: &mut Frame, area: Rect, store: &Store) {
+        // Published on every frame, including the ones that draw no row: the
+        // click test reads it, and a rect left over from an armed frame would
+        // let a click focus a row a glass frame is not drawing.
+        self.input_row.set(if self.input_row_shown(store) {
+            area
+        } else {
+            Rect::default()
+        });
+        if !self.input_row_shown(store) || area.height == 0 {
+            return;
+        }
+        let t = theme();
+        let line = if self.focused || !self.ask.is_empty() {
+            Line::from(vec![
+                Span::styled("ask › ", Style::default().fg(t.accent)),
+                Span::styled(
+                    self.ask.clone(),
+                    Style::default()
+                        .fg(t.text_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("▏", Style::default().fg(t.accent)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("ask › ", Style::default().fg(t.accent)),
+                Span::styled(
+                    "Ask Atlas — type to ask, Enter sends",
+                    Style::default().fg(t.text_dim),
+                ),
+            ])
+        };
+        f.render_widget(Paragraph::new(line), area);
+    }
+
+    #[cfg(not(feature = "operator"))]
+    fn draw_input(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
+}
+
+/// The whole conversation as rendered lines, oldest first, wrapped to `width`.
+///
+/// Built whole and windowed by the caller, because the scroll offset is in
+/// *rendered* lines: a message is as many lines as its wrap needed, and an
+/// offset counted in messages would jump by paragraphs.
+fn chat_lines(chat: &[Event], width: u16) -> Vec<Line<'static>> {
+    let t = theme();
+    if chat.is_empty() {
+        return vec![Line::from(Span::styled(
+            "nothing has been asked on this desk yet",
+            Style::default().fg(t.text_dim),
+        ))];
+    }
+    let room = (width as usize).saturating_sub(PREFIX_W).max(8);
+    let mut out = Vec::new();
+    for event in chat {
+        let payload = event.payload.as_ref();
+        let actor = payload
+            .and_then(|p| p.get("actor"))
+            .and_then(|a| a.as_str())
+            .unwrap_or("");
+        let text = payload
+            .and_then(|p| p.get("text"))
+            .and_then(|x| x.as_str())
+            .unwrap_or(MISSING);
+        let error = payload
+            .and_then(|p| p.get("error"))
+            .and_then(|e| e.as_str());
+        let stamp = format::clock(event.ts.as_ref()).unwrap_or_else(|| MISSING.to_string());
+        // The operator's rows read as their own voice, the desk's as the
+        // desk's, and a failed answer is neither — it is a refusal, in the
+        // refusal's colour, with the owner's own error under it.
+        let (name, name_tone) = match actor {
+            "operator" => ("YOU", t.accent),
+            _ => ("ATLAS", t.positive),
+        };
+        let body_tone = if error.is_some() {
+            t.negative
+        } else if actor == "operator" {
+            t.text_primary
+        } else {
+            t.text_secondary
+        };
+        for (i, chunk) in wrap(text, room).into_iter().enumerate() {
+            let lead = if i == 0 {
+                vec![
+                    Span::styled(format!("{stamp} "), Style::default().fg(t.text_tertiary)),
+                    Span::styled(
+                        format!("{name:>5} "),
+                        Style::default().fg(name_tone).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("› ", Style::default().fg(t.text_dim)),
+                ]
+            } else {
+                vec![Span::raw(" ".repeat(PREFIX_W))]
+            };
+            let mut spans = lead;
+            spans.push(Span::styled(chunk, Style::default().fg(body_tone)));
+            out.push(Line::from(spans));
+        }
+        if let Some(error) = error {
+            for chunk in wrap(error, room) {
+                out.push(Line::from(vec![
+                    Span::raw(" ".repeat(PREFIX_W)),
+                    Span::styled(chunk, Style::default().fg(t.text_dim)),
+                ]));
+            }
+        }
+    }
+    out
+}
+
+/// Word wrap at `width` cells, hard-breaking a word longer than the line.
+///
+/// Hand-rolled rather than `Paragraph`'s own `Wrap`, because the scroll offset
+/// is counted in rendered lines and the renderer's wrap happens after the
+/// window has already been cut — a pane that let the widget wrap would scroll
+/// by an amount that disagrees with what moved.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut used = 0usize;
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        // A word longer than the line is cut rather than looping forever;
+        // URLs and hashes are the words this actually happens to.
+        while !word.is_empty() {
+            let sep = usize::from(used > 0);
+            if used + sep + word.len() <= width {
+                if sep == 1 {
+                    line.push(' ');
+                }
+                line.extend(word.iter());
+                used += sep + word.len();
+                word.clear();
+            } else if used == 0 {
+                line.extend(word.drain(..width));
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            } else {
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            }
+        }
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+// -- the predictor board ----------------------------------------------------
+
+fn draw_board(f: &mut Frame, area: Rect, store: &Store) {
+    let t = theme();
+    let block = panel_block();
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines = vec![panel_header("predictor board")];
+    match store.predictors() {
+        // Absence is named, exactly as the owner names it: a desk that never
+        // ran the board and one whose newest row cannot be read are different
+        // facts with different remedies.
+        None => lines.push(dim("the owner served no predictor summary")),
+        Some(board) => match board.status.as_deref() {
+            Some("never_ran") => {
+                lines.push(dim("board never ran — /api docs name"));
+                lines.push(dim("research.predictor_board"));
+            }
+            Some("unreadable") => {
+                lines.push(Line::from(Span::styled(
+                    "newest board row is unreadable",
+                    Style::default().fg(t.negative),
+                )));
+                lines.push(dim(&format!(
+                    "run {}",
+                    short_id(board.run_id.as_deref(), 12)
+                )));
+            }
+            _ => board_lines(&mut lines, board, inner.width),
+        },
+    }
+
+    // The tiny status: what the manager itself is doing, under the evidence
+    // it would reason from. Two or three lines, not a second DESK.
+    lines.push(Line::from(""));
+    lines.push(panel_header("atlas"));
+    let atlas = store.snapshot.as_ref().and_then(|s| s.atlas.as_ref());
+    lines.push(kv(
+        "state",
+        format::upper(atlas.and_then(|a| format::text(a.state.as_ref()))),
+    ));
+    lines.push(kv(
+        "mode",
+        format::or_missing(atlas.and_then(|a| a.mode.as_ref())).to_string(),
+    ));
+    if let Some(blocked) = atlas.and_then(|a| format::text(a.blocked_reason.as_ref())) {
+        for chunk in wrap(blocked, (inner.width as usize).saturating_sub(2)) {
+            lines.push(Line::from(Span::styled(
+                format!("  {chunk}"),
+                Style::default().fg(t.warning),
+            )));
+        }
+    }
+
+    f.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .take(inner.height as usize)
+                .collect::<Vec<_>>(),
+        ),
+        inner,
+    );
+}
+
+/// The readable board: champion against baseline, every number the verdict
+/// was derived from, and the per-fold bars that say whether a mean is a skill
+/// estimate or an average over folds that changed sign.
+fn board_lines(lines: &mut Vec<Line<'static>>, board: &Predictors, width: u16) {
+    let t = theme();
+    // One scale across both models, so two fold rows are comparable bars
+    // rather than two separately-stretched pictures of the same axis.
+    let folds: Vec<f64> = [&board.champion, &board.baseline]
+        .into_iter()
+        .flatten()
+        .flat_map(|m| m.per_fold.iter().filter_map(|f| f.ic))
+        .collect();
+    let lo = folds.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = folds.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    model_lines(lines, "CHAMPION", board.champion.as_ref(), lo, hi, width);
+    model_lines(lines, "BASELINE", board.baseline.as_ref(), lo, hi, width);
+
+    let age = board
+        .age_days
+        .map(|d| format!("{d}d old"))
+        .unwrap_or_else(|| MISSING.to_string());
+    lines.push(Line::from(vec![
+        Span::styled(format!("board {age}"), Style::default().fg(t.text_tertiary)),
+        Span::styled(
+            format!(" · run {}", short_id(board.run_id.as_deref(), 8)),
+            Style::default().fg(t.text_dim),
+        ),
+    ]));
+    // `None` is a board that predates the null — neither established nor
+    // refuted, and it must not render as either.
+    if let Some(established) = board.champion_established {
+        lines.push(match established {
+            true => Line::from(Span::styled(
+                "edge survives selection null",
+                Style::default().fg(t.positive),
+            )),
+            false => Line::from(Span::styled(
+                "edge not established vs null",
+                Style::default().fg(t.warning),
+            )),
+        });
+    }
+}
+
+/// One model's block: who it is, what it measured, and how it compares.
+fn model_lines(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    metrics: Option<&PredictorMetrics>,
+    lo: f64,
+    hi: f64,
+    width: u16,
+) {
+    let t = theme();
+    let Some(m) = metrics else {
+        lines.push(dim(&format!("{label}: absent from the board")));
+        return;
+    };
+    let id = format::or_missing(m.model_id.as_ref());
+    // The quantum badge, by the web UI's own rule: an augmented variant or the
+    // quantum gram family wears `q`, everything classical wears nothing.
+    let quantum = m.variant.as_deref().is_some_and(|v| v != "none")
+        || m.family.as_deref() == Some("quantum_gram");
+    let mut head = vec![
+        Span::styled(
+            format!("{label:<9}"),
+            Style::default()
+                .fg(t.text_secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            clip(id, (width as usize).saturating_sub(12)),
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if quantum {
+        head.push(Span::styled(
+            " q",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        ));
+    }
+    lines.push(Line::from(head));
+
+    lines.push(Line::from(vec![
+        Span::styled("  IC ", Style::default().fg(t.text_tertiary)),
+        Span::styled(num4(m.mean_ic), Style::default().fg(t.text_primary)),
+        Span::styled(
+            format!(" ±{}", num4(m.ic_std)),
+            Style::default().fg(t.text_secondary),
+        ),
+        Span::styled("  stab ", Style::default().fg(t.text_tertiary)),
+        Span::styled(num2(m.ic_stability), Style::default().fg(t.text_primary)),
+    ]));
+
+    let usable = match m.usable {
+        Some(true) => Span::styled("✓ usable", Style::default().fg(t.positive)),
+        Some(false) => Span::styled("✗ not usable", Style::default().fg(t.negative)),
+        None => Span::styled(MISSING, Style::default().fg(t.text_dim)),
+    };
+    let mut verdict = vec![Span::raw("  "), usable];
+    if let Some(delta) = m.delta_mean_ic_vs_baseline {
+        // The baseline's own delta is identically zero and says nothing.
+        if delta != 0.0 {
+            let tone = if delta > 0.0 { t.positive } else { t.negative };
+            verdict.push(Span::styled(
+                format!("  Δ{delta:+.4}"),
+                Style::default().fg(tone),
+            ));
+        }
+    }
+    lines.push(Line::from(verdict));
+    // Its own line: beside the verdict the three ran past the sidebar's width
+    // and the t-statistic was clipped mid-number — a truncated number is a
+    // different number.
+    let mut versus = Vec::new();
+    if let Some(wins) = m.wins_vs_baseline.filter(|w| *w > 0) {
+        versus.push(Span::styled(
+            format!("  wins {wins}"),
+            Style::default().fg(t.text_secondary),
+        ));
+    }
+    if let Some(paired) = m.paired_t_vs_baseline {
+        versus.push(Span::styled(
+            format!("  t {paired:.2}"),
+            Style::default().fg(t.text_secondary),
+        ));
+    }
+    if !versus.is_empty() {
+        lines.push(Line::from(versus));
+    }
+
+    if !m.per_fold.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  folds ", Style::default().fg(t.text_tertiary)),
+            Span::styled(spark(m, lo, hi), Style::default().fg(t.accent)),
+        ]));
+    }
+}
+
+/// The per-fold ICs as unicode bars on one shared scale.
+fn spark(m: &PredictorMetrics, lo: f64, hi: f64) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    m.per_fold
+        .iter()
+        .map(|fold| match fold.ic {
+            None => '·',
+            Some(_) if hi <= lo => BLOCKS[3],
+            Some(ic) => {
+                let at = ((ic - lo) / (hi - lo) * 7.0).round().clamp(0.0, 7.0) as usize;
+                BLOCKS[at]
+            }
+        })
+        .collect()
+}
+
+// -- small helpers ----------------------------------------------------------
+
+fn num4(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{v:.4}"))
+        .unwrap_or_else(|| MISSING.to_string())
+}
+
+fn num2(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or_else(|| MISSING.to_string())
+}
+
+fn short_id(id: Option<&str>, len: usize) -> String {
+    match id {
+        Some(id) => id.chars().take(len).collect(),
+        None => MISSING.to_string(),
+    }
+}
+
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
+fn dim(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(theme().text_dim),
+    ))
+}
+
+fn kv(label: &str, value: String) -> Line<'static> {
+    let t = theme();
+    Line::from(vec![
+        Span::styled(format!("{label:<11}"), Style::default().fg(t.text_tertiary)),
+        Span::styled(value, Style::default().fg(t.text_primary)),
+    ])
+}
+
+/// A header with a right-aligned chip, exactly as WORKFORCE draws its own.
+fn head(title: &str, chip: &str, width: u16) -> Line<'static> {
+    let t = theme();
+    let title_span = panel_header(title);
+    let used: usize = title_span
+        .spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum();
+    let pad = (width as usize)
+        .saturating_sub(used + chip.chars().count())
+        .max(1);
+    let mut spans = title_span.spans;
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(
+        chip.to_string(),
+        Style::default().fg(t.text_tertiary),
+    ));
+    Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_text_wraps_at_the_width_and_loses_nothing() {
+        let text = "The regime read is fragile calm with two of five detectors disagreeing, \
+                    so the operational policy holds the defensive tilt.";
+        let lines = wrap(text, 30);
+        assert!(lines.len() > 2, "{lines:?}");
+        for line in &lines {
+            assert!(line.chars().count() <= 30, "{line:?}");
+        }
+        assert_eq!(
+            lines.join(" ").split_whitespace().collect::<Vec<_>>(),
+            text.split_whitespace().collect::<Vec<_>>(),
+            "wrapping changed the words"
+        );
+    }
+
+    #[test]
+    fn a_word_longer_than_the_line_is_cut_rather_than_looping() {
+        let lines = wrap("targets_hash=0123456789abcdef0123456789abcdef", 10);
+        assert!(lines.iter().all(|l| l.chars().count() <= 10), "{lines:?}");
+        assert_eq!(
+            lines.concat(),
+            "targets_hash=0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn empty_text_is_one_empty_line_not_zero_lines() {
+        // A message with no text still occupies a row: a rendered offset that
+        // skipped it would disagree with the log the owner holds.
+        assert_eq!(wrap("", 20), vec![String::new()]);
+    }
+
+    #[test]
+    fn the_unfocused_empty_input_yields_the_digits_to_the_shell() {
+        // The routing half of the tradeoff `typing` documents: with nothing
+        // typed and no focus, a digit is the shell's and switches views.
+        use crate::store::{Store, ViewId};
+        use crate::ui::views::Views;
+        use crossterm::event::KeyModifiers;
+
+        let mut store = Store::default();
+        store.settle_door();
+        store.nav.view = ViewId::Atlas;
+        let mut views = Views::new();
+        atlas_key(&mut store, &mut views, KeyCode::Char('3'));
+        assert_eq!(store.nav.view, ViewId::Markets, "a digit did not navigate");
+
+        fn atlas_key(store: &mut Store, views: &mut Views, code: KeyCode) {
+            crate::ui::shell::on_key(
+                crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
+                store,
+                views,
+            );
+        }
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_focused_or_non_empty_row_claims_the_keyboard_and_esc_gives_it_back() {
+        let mut view = AtlasView::default();
+        assert!(!view.typing(), "an idle view claimed the keyboard");
+        view.focused = true;
+        assert!(view.typing(), "the focus flag did not claim it");
+        view.focused = false;
+        view.ask.push('w');
+        assert!(view.typing(), "typed text did not claim it");
+        view.ask_key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!view.typing(), "the escape key did not give it back");
+        assert!(view.ask.is_empty());
+    }
+
+    #[test]
+    fn the_wheel_scrolls_and_walls_at_both_ends() {
+        let mut view = AtlasView::default();
+        view.max_scroll.set(5);
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: 10,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let mut store = Store::default();
+        view.on_mouse(mouse(MouseEventKind::ScrollUp), &mut store);
+        assert_eq!(view.offset, 3);
+        view.on_mouse(mouse(MouseEventKind::ScrollUp), &mut store);
+        assert_eq!(view.offset, 5, "the scroll ran past the oldest line");
+        for _ in 0..3 {
+            view.on_mouse(mouse(MouseEventKind::ScrollDown), &mut store);
+        }
+        assert_eq!(view.offset, 0, "the scroll ran past the newest line");
+    }
+}

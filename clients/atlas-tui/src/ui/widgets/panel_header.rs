@@ -11,6 +11,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders},
 };
+use unicode_width::UnicodeWidthStr;
 
 /// `▌ TITLE` — amber bar, bold uppercase title.
 ///
@@ -37,6 +38,26 @@ pub fn panel_block() -> Block<'static> {
     Block::default()
         .borders(Borders::BOTTOM)
         .border_style(Style::default().fg(theme().border_dim))
+}
+
+/// A panel header with the keys that drive it pushed to the far side.
+///
+/// The keys go whole or not at all: a `Paragraph` clips from the right, and
+/// `ALL 1Y 3` is a control an operator reads as broken rather than as absent.
+///
+/// Promoted out of `views/book.rs` when MARKETS grew its own key hints, by the
+/// rule this module's parent states: two spellings of "the keys on the far
+/// side" is two chances to disagree about when they are dropped.
+pub fn header_keys(title: &str, keys: Vec<Span<'static>>, width: u16) -> Line<'static> {
+    let title = panel_header(title);
+    let title_w = title.width();
+    let keys_w: usize = keys.iter().map(|s| s.content.width()).sum();
+    let mut spans = title.spans;
+    if let Some(gap) = (width as usize).checked_sub(title_w + keys_w) {
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.extend(keys);
+    }
+    Line::from(spans)
 }
 
 #[cfg(test)]

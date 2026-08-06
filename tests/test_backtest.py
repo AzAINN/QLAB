@@ -425,9 +425,11 @@ def test_plan_pre_trade_reports_decomposed_expected_cost():
     from qlab.trader.plan import build_plan
 
     registry = Registry(":memory:")
+    fixed = lambda tickers: {ticker: 100.0 for ticker in tickers}
+    fixed.synthetic = True  # a provider must declare its lane (fail-loud)
     broker = SimulatedPaperBroker(
         registry,
-        lambda tickers: {ticker: 100.0 for ticker in tickers},
+        fixed,
         starting_cash=10_000.0,
         universe=["AAA", "BBB"],
     )

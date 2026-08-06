@@ -19,7 +19,7 @@
 //! the frame is still a pure function of (store, effects, instant), and the
 //! effect pass that reads those rects runs after `draw` returns.
 
-use crate::cmd::{self, CmdState, Command, Edit, Resolved};
+use crate::cmd::{self, CmdState, Command, Edit, Resolved, Scope};
 use crate::format::{self, MISSING};
 use crate::fx::{Fx, ShellRects};
 use crate::glyph;
@@ -28,7 +28,7 @@ use crate::theme::theme;
 use crate::theme::Theme;
 use crate::ui::views::{book::PlanAt, Selected, Views};
 use crate::ui::widgets::{help, panel_block, panel_header, pulse, ticker};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -150,6 +150,14 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     if store.nav.focus == Focus::Help {
         help::draw(f, area, store.posture, store.help_top);
     }
+    // And over that. Last because the door is the first thing a workstation
+    // opens on and claims every key but Ctrl-C while it does — so nothing can
+    // arrive to be drawn over it. Defensive, like its place in the router: the
+    // overlays below cannot be open at the same time, and this is what keeps
+    // that true on screen rather than only in the argument for it.
+    if let Some(door) = store.door() {
+        door.draw(f, area, store);
+    }
 
     fx.rects.frame.set(area);
     fx.rects.content.set(content);
@@ -198,24 +206,50 @@ fn stale_for(store: &Store, now: Instant) -> Option<Duration> {
 // this function to check it. That module's header lists what the check
 // cannot see — including why a comment in here may not spell a key variant.
 pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
-    // Before everything, including `q` and the digits. A modal is a blocking
-    // question, and a global key that walked away from it would leave a human
-    // having half-answered a question about an order — worse, `3` and `q` are
-    // both characters the challenge field has to be able to accept.
+    // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at all —
+    // and the reflex every operator has has to work. First, above every surface
+    // that takes the keyboard, because this is the one key that must reach the
+    // runtime whatever is on screen: a field, a modal, or the door the
+    // workstation opens on. It sat under the confirmation box, where the
+    // challenge field read it as a typed `c` — the box's own arm still swallows
+    // every other key it is handed, which is what it is for.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(Command::Quit);
+    }
+    // Then the door. Its position above the confirmation box is **defensive
+    // rather than a precedence anyone can reach**: a door is up only before it
+    // has been answered once, and while it is up it claims every key, so no
+    // view can open a modal underneath it. Nothing tests the two together
+    // because nothing can produce the two together — deleting this ordering
+    // changes no reachable behaviour, and saying it outranks the box would
+    // claim a rule the client never exercises. What *is* reachable, and is
+    // pinned, is Ctrl-C above both.
+    //
+    // Taken out of the store because answering it reads the whole desk; it goes
+    // back unless the keystroke finished it, and a door too big for the
+    // terminal is retired here rather than left armed and invisible — the rule
+    // WORKFORCE's picker and SETTINGS' login form are already held to.
+    if let Some(mut door) = store.take_door() {
+        if !door.fits() {
+            store.settle_door();
+            return None;
+        }
+        let acted = door.on_key(key, store, views);
+        match door.standing() {
+            true => store.keep_door(door),
+            false => store.settle_door(),
+        }
+        return acted;
+    }
+    // Before everything else, including `q` and the digits. A modal is a
+    // blocking question, and a global key that walked away from it would leave
+    // a human having half-answered a question about an order — worse, `3` and
+    // `q` are both characters the challenge field has to be able to accept.
     #[cfg(feature = "operator")]
     if let Some(host) = views.confirm_mut(store.nav.view) {
         if host.showing().is_some() {
             return host.on_key(key);
         }
-    }
-    // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at all —
-    // and the reflex every operator has has to work. Above the typing check
-    // rather than inside the match below it, because this is the one key that
-    // must reach the runtime even while a field owns the keyboard: a text field
-    // that swallowed it would leave the operator's only exit reflex dead in a
-    // fullscreen client.
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return Some(Command::Quit);
     }
     // The two surfaces that take the keyboard outright, before anything a view
     // or the shell claims. Both are things an operator opened deliberately, and
@@ -281,6 +315,36 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
     views.on_key(store.nav.view, key, store)
 }
 
+/// One mouse event: the nav rail's rows select views, everything else goes to
+/// the active view.
+///
+/// Deliberately behind every surface that owns the keyboard: a door, a modal,
+/// the command line and the help overlay all take the whole terminal, and a
+/// click that switched views under one would move a pane the operator cannot
+/// see. Minimal on purpose — wheel and click, no drag, no hover.
+pub fn on_mouse(m: MouseEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
+    if store.door().is_some() || store.nav.focus != Focus::Content {
+        return None;
+    }
+    #[cfg(feature = "operator")]
+    if let Some(host) = views.confirm(store.nav.view) {
+        if host.showing().is_some() {
+            return None;
+        }
+    }
+    // The nav rail's geometry, restated from `draw`'s own constants rather
+    // than published: the tape is one row and the rail starts under it, and
+    // both facts are pinned by the goldens that pin the layout itself.
+    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) && m.column < NAV_W {
+        let row = m.row as usize;
+        if (1..=ViewId::ALL.len()).contains(&row) {
+            store.nav.view = ViewId::ALL[row - 1];
+            return None;
+        }
+    }
+    views.on_mouse(store.nav.view, m, store)
+}
+
 // -- the command line -------------------------------------------------------
 
 /// One keystroke while the line has focus.
@@ -289,7 +353,11 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
 /// the suggestions and the store are the shell's to read and the field is a
 /// pure text model by design.
 fn command_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
-    match store.cmd.edit(key) {
+    // Which scope the line was pointed at before this keystroke. Entering one
+    // is a transition rather than a state: a fetch fired on the scope itself
+    // would ask the owner once per character typed inside it.
+    let before = scope_of(store.cmd.text());
+    let acted = match store.cmd.edit(key) {
         Edit::Idle => None,
         Edit::Close => {
             store.cmd.clear();
@@ -297,18 +365,44 @@ fn command_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Co
             None
         }
         Edit::Accept => {
-            if let Some(first) = suggestions(store).first() {
-                store.cmd.accept(first);
+            // The first suggestion the desk can actually serve. The model strip
+            // shows backends it cannot reach — hiding them would read as a desk
+            // that never had one — and a Tab that pasted one would hand the
+            // operator a line already refused.
+            if let Some(first) = suggestions(store).iter().find(|s| s.choosable()) {
+                store.cmd.accept(&first.value);
             }
             None
         }
         Edit::Submit => submit(store, views),
-    }
+    };
+    acted.or_else(|| entered_model_scope(before, store).then_some(Command::Backends))
 }
 
 /// What the line could become from here, for this window.
-fn suggestions(store: &Store) -> Vec<String> {
+fn suggestions(store: &Store) -> Vec<cmd::Suggestion> {
     cmd::suggestions(&cmd::parse(store.cmd.text()), store, store.posture)
+}
+
+/// Which scope the line is pointed at, if it has been accepted into one.
+fn scope_of(text: &str) -> Option<Scope> {
+    match cmd::parse(text) {
+        CmdState::Scoped { scope, .. } => Some(scope),
+        _ => None,
+    }
+}
+
+/// Whether this keystroke is what put the line into the model scope.
+///
+/// The catalog behind that scope is the one payload with no cadence: the route
+/// probes every configured daemon, so it is asked for on the way in and not on
+/// a beat. Only for a window that can choose — an unarmed one is offered
+/// nothing there, and a request for a list it will never be shown is a round
+/// trip nobody asked for.
+fn entered_model_scope(before: Option<Scope>, store: &Store) -> bool {
+    store.posture.writes()
+        && before != Some(Scope::Model)
+        && scope_of(store.cmd.text()) == Some(Scope::Model)
 }
 
 /// Act on the line, or say why it cannot be acted on.
@@ -322,10 +416,27 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
     // A picker with one answer accepts rather than acts. Enter on `/tick` means
     // "that one", and rewriting the buffer to `/ticker ` puts the operator in
     // front of the values instead of guessing which one they meant.
-    if let CmdState::Picker { .. } = state {
+    if let CmdState::Picker { typed, .. } = &state {
         let choices = suggestions(store);
-        if let [only] = choices.as_slice() {
-            store.cmd.accept(only);
+        // An exact word beats an ambiguous prefix. `model` starts with `mode`,
+        // so once the second scope arrived `/mode` + Enter answered "choose a
+        // scope" about a word the operator had typed in full — and the two are
+        // read off the *offered* list, so a window that is not shown a scope
+        // cannot be accepted into it either.
+        let named = format!("/{typed}");
+        let hit = choices
+            .iter()
+            .find(|choice| choice.value.eq_ignore_ascii_case(&named))
+            .or(match choices.as_slice() {
+                [only] => Some(only),
+                _ => None,
+            });
+        if let Some(hit) = hit {
+            // Accepting `/mod` into `/model ` is a scope entry like any other,
+            // and `command_key` is the one place that notices — it holds the
+            // scope from before the keystroke, so nothing here has to.
+            let value = hit.value.clone();
+            store.cmd.accept(&value);
             return None;
         }
     }
@@ -379,6 +490,11 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
         Resolved::Mode { data, book } => {
             done(store);
             Some(Command::DeskMode { data, book })
+        }
+        #[cfg(feature = "operator")]
+        Resolved::Model { surface, choice } => {
+            done(store);
+            Some(Command::SetLlm { surface, choice })
         }
     }
 }
@@ -691,17 +807,29 @@ fn draw_suggestions(f: &mut Frame, area: Rect, store: &Store) {
             Style::default().fg(t.text_dim),
         ));
     }
+    // The one Tab and a lone Enter accept — which is the first *choosable* one,
+    // not the first one drawn. The model strip shows backends the desk cannot
+    // reach, and a highlight on one of those would point the accept key at a
+    // line that is already refused.
+    let accepts = choices.iter().position(cmd::Suggestion::choosable);
     for (i, choice) in choices.iter().enumerate() {
-        spans.push(Span::styled(
-            format!(" {choice}"),
-            if i == 0 {
-                // The one Tab and a lone Enter accept, so it cannot look like
-                // the rest of the list.
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(t.text_secondary)
-            },
-        ));
+        match &choice.refusal {
+            // Dim, and carrying the owner's own sentence: an entry the desk
+            // cannot serve is shown rather than hidden, and the reason is the
+            // half an operator can act on.
+            Some(said) => spans.push(Span::styled(
+                format!(" {} — {said}", choice.value),
+                Style::default().fg(t.text_dim),
+            )),
+            None => spans.push(Span::styled(
+                format!(" {}", choice.value),
+                if Some(i) == accepts {
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.text_secondary)
+                },
+            )),
+        }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

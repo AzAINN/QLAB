@@ -3,10 +3,40 @@
 //! Fixtures only — a client test that reached the owner would pass or fail on
 //! whatever the desk happened to be holding, and would not run offline.
 
-use atlas::model::{RegimePanel, Snapshot};
+use atlas::model::{LlmCatalog, RegimePanel, Snapshot};
 
 fn snapshot() -> Snapshot {
     serde_json::from_str(include_str!("fixtures/tui_snapshot.json")).unwrap()
+}
+
+#[test]
+fn the_catalog_is_the_shape_the_backends_route_actually_serves() {
+    // Captured from a live worktree owner, so the model lists are the owner's
+    // own vocabulary rather than a guess: `CLAUDE_MODELS` is the routing
+    // vocabulary (`inherit` first, and it is what "the tiers decide" is
+    // spelled), and ollama reports whatever is pulled.
+    let catalog: LlmCatalog =
+        serde_json::from_str(include_str!("fixtures/llm_backends.json")).unwrap();
+    assert_eq!(catalog.backends.len(), 2);
+    assert_eq!(catalog.backends[0].name.as_deref(), Some("claude"));
+    assert_eq!(catalog.backends[0].available, Some(true));
+    assert_eq!(catalog.backends[0].models[0], "inherit");
+    assert_eq!(catalog.backends[1].models, vec!["qwen2.5:7b"]);
+    assert!(catalog.probed_at.is_some());
+
+    // A backend that cannot serve is asked for no list at all, so `models` is
+    // absent-or-empty on exactly the entries whose reason matters most — and
+    // `null` may not reject the payload the strip is drawn from.
+    let down: LlmCatalog = serde_json::from_str(
+        r#"{"backends": [{"name": "ollama", "available": false,
+                          "reason": "ollama is not running at http://127.0.0.1:11499 — start it with `ollama serve`",
+                          "models": null}], "probed_at": null}"#,
+    )
+    .unwrap();
+    assert!(down.backends[0].models.is_empty());
+    assert_eq!(down.probed_at, None);
+    let empty: LlmCatalog = serde_json::from_str(r#"{"backends": null}"#).unwrap();
+    assert!(empty.backends.is_empty());
 }
 
 #[test]
@@ -39,9 +69,53 @@ fn every_modeled_section_is_present_in_the_fixture() {
     assert!(s.desk_mode.is_some(), "desk_mode");
     assert!(s.policy.is_some(), "policy");
     assert!(s.system.is_some(), "system");
+    assert!(s.llm.is_some(), "llm");
     assert!(!s.leaderboard.is_empty(), "leaderboard");
     assert!(!s.runs.is_empty(), "runs");
     assert!(!s.algorithms.is_empty(), "algorithms");
+    assert!(!s.atlas_chat.is_empty(), "atlas_chat");
+    assert!(s.predictors.is_some(), "predictors");
+}
+
+#[test]
+fn the_chat_and_the_board_decode_the_shapes_the_owner_serves() {
+    let s = snapshot();
+    // The conversation, oldest first, with both voices and the failure shape.
+    let chat = &s.atlas_chat;
+    let actor = |i: usize| {
+        chat[i]
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("actor"))
+            .and_then(|a| a.as_str())
+    };
+    assert_eq!(actor(0), Some("operator"));
+    assert_eq!(actor(1), Some("atlas"));
+    assert!(
+        chat.last()
+            .and_then(|e| e.payload.as_ref())
+            .and_then(|p| p.get("error"))
+            .is_some(),
+        "the failed answer lost its error"
+    );
+
+    // The board: the champion's metrics arrive whole, per-fold included, and
+    // the tri-state null verdict stays a tri-state.
+    let board = s.predictors.as_ref().unwrap();
+    assert_eq!(board.status.as_deref(), Some("ok"));
+    let champion = board.champion.as_ref().unwrap();
+    assert_eq!(champion.variant.as_deref(), Some("quantum_gram"));
+    assert_eq!(champion.mean_ic, Some(0.1412));
+    assert_eq!(champion.per_fold.len(), 5);
+    assert_eq!(board.champion_established, Some(false));
+    // A payload the owner serves for a desk with no board yet must not reject
+    // the whole snapshot, and its absent metrics must stay absent.
+    let bare: Snapshot =
+        serde_json::from_str(r#"{"predictors": {"status": "never_ran"}}"#).unwrap();
+    let bare_board = bare.predictors.unwrap();
+    assert_eq!(bare_board.status.as_deref(), Some("never_ran"));
+    assert!(bare_board.champion.is_none());
+    assert!(bare_board.age_days.is_none(), "missing age is not day zero");
 }
 
 #[test]
@@ -53,6 +127,20 @@ fn absent_sections_decode_as_none_not_zero() {
     assert!(s.market.is_none());
     assert!(s.performance.is_none());
     assert!(s.events.is_empty());
+
+    // The owner serves `availability: null` from startup until the picker's own
+    // route probes once, and a bare `#[serde(default)]` would reject the whole
+    // snapshot over it — the `null_or_default` rule, which is why every desk
+    // that has not yet asked its backends still renders.
+    let s: Snapshot =
+        serde_json::from_str(r#"{"llm": {"availability": null, "probed_at": null}}"#).unwrap();
+    let llm = s.llm.unwrap();
+    assert!(llm.availability.is_empty());
+    assert_eq!(llm.probed_at, None);
+    assert!(
+        llm.reasoner_enabled.is_none(),
+        "an owner that did not say is not a reasoner that is switched off"
+    );
 
     let s: Snapshot = serde_json::from_str(r#"{"live_portfolio": {}}"#).unwrap();
     let live = s.live_portfolio.unwrap();

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 /// The fixture desk, already switched to BOOK.
 fn book() -> Client {
     let mut client = Client::fixture();
-    client.press(KeyCode::Char('3'));
+    client.press(KeyCode::Char('4'));
     client
 }
 
@@ -40,12 +40,13 @@ fn store_from(json: &str) -> Store {
         AppEvent::Snapshot(Box::new(serde_json::from_str::<Snapshot>(json).unwrap())),
         now,
     );
+    harness::no_door(&mut store);
     store
 }
 
 fn book_from(json: &str) -> Client {
     let mut client = Client::new(store_from(json));
-    client.press(KeyCode::Char('3'));
+    client.press(KeyCode::Char('4'));
     client
 }
 
@@ -1691,7 +1692,7 @@ mod armed {
             store.posture = Posture::Operator;
             store
         });
-        client.press(KeyCode::Char('3'));
+        client.press(KeyCode::Char('4'));
         // The cursor opens on the newest card, which here cannot execute.
         assert_eq!(press(&mut client, KeyCode::Char('x')), None);
         assert!(!client.frame(120, 36).contains("EXECUTE PLAN"));

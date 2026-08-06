@@ -433,14 +433,10 @@ def _fetch_yfinance(tickers: list[str], start: str, end: str) -> pd.DataFrame | 
 # Alpaca adapter (lazy import — trader extra)
 # ---------------------------------------------------------------------------
 def _alpaca_dependencies() -> tuple[object, object, object, object]:
-    missing = [
-        name
-        for name in ("ALPACA_API_KEY", "ALPACA_API_SECRET")
-        if not os.environ.get(name, "").strip()
-    ]
-    if missing:
-        raise RuntimeError(f"alpaca provider requires {' and '.join(missing)}")
-
+    # Credentials are resolved by _alpaca_client_kwargs (env pair OR the
+    # `alpaca profile login` session — the same resolver the trading half
+    # uses). Requiring the env pair here meant a browser-logged-in desk
+    # could trade on Alpaca but never price from it.
     try:
         from alpaca.data.enums import Adjustment  # noqa: PLC0415
         from alpaca.data.historical import StockHistoricalDataClient  # noqa: PLC0415
@@ -454,6 +450,29 @@ def _alpaca_dependencies() -> tuple[object, object, object, object]:
     return Adjustment, StockHistoricalDataClient, StockBarsRequest, TimeFrame
 
 
+def _alpaca_client_kwargs() -> dict:
+    """Credentials for the data client, from wherever the desk holds them.
+
+    This used to read only ``ALPACA_API_KEY``/``ALPACA_API_SECRET``, which is
+    one of the three places a login lives — the browser-login profile the TUI
+    writes was invisible here, so a desk whose *trading* half was logged in
+    had a *data* half that always failed and fell back to research-grade
+    providers, and every permit refused paper proposals. One resolver for
+    both halves, so "logged in" means the same thing everywhere.
+    """
+    from qlab.trader.alpaca_auth import resolve_alpaca_credentials
+
+    creds = resolve_alpaca_credentials()
+    if creds is None:
+        raise RuntimeError(
+            "the alpaca data provider needs credentials: set "
+            "ALPACA_API_KEY/ALPACA_API_SECRET or run `alpaca profile login` "
+            "(the TUI's DESK card offers the same login)")
+    if creds.kind == "oauth":
+        return {"oauth_token": creds.oauth_token}
+    return {"api_key": creds.api_key, "secret_key": creds.secret_key}
+
+
 def _fetch_alpaca(tickers: list[str], start: str, end: str) -> pd.DataFrame | None:
     (
         Adjustment,
@@ -461,17 +480,26 @@ def _fetch_alpaca(tickers: list[str], start: str, end: str) -> pd.DataFrame | No
         StockBarsRequest,
         TimeFrame,
     ) = _alpaca_dependencies()
+    # Outside the try: a missing login is a setup fact the operator must see,
+    # not a fetch hiccup to degrade through — the except below is for the
+    # network, and catching the credential refusal there would turn "you are
+    # not logged in" into a silent fallback to a research-grade provider.
+    client_kwargs = _alpaca_client_kwargs()
 
     try:
-        client = StockHistoricalDataClient(
-            os.environ["ALPACA_API_KEY"],
-            os.environ["ALPACA_API_SECRET"],
-        )
+        client = StockHistoricalDataClient(**client_kwargs)
         request = StockBarsRequest(
             symbol_or_symbols=tickers,
             timeframe=TimeFrame.Day,
             start=pd.Timestamp(start).to_pydatetime(),
-            end=pd.Timestamp(end).to_pydatetime(),
+            # A bare date parses to MIDNIGHT AT THE START of `end`, and the
+            # session's daily bar is stamped inside the day — so an inclusive
+            # `end` at 00:00 silently excluded the end date's own bar, the
+            # panel was forever "1 session stale", and paper-proposal
+            # eligibility could never be earned. Fetch through the end of the
+            # day; the snapshot still truncates to `as_of` after, so this adds
+            # no look-ahead.
+            end=(pd.Timestamp(end) + pd.Timedelta(days=1)).to_pydatetime(),
             adjustment=Adjustment.ALL,
         )
         raw = client.get_stock_bars(request).df
@@ -651,6 +679,10 @@ def _resolve_provider(provider: str | None) -> tuple[str, ProviderFetch]:
 def _validate_provider_setup(provider: str) -> None:
     if provider == "alpaca":
         _alpaca_dependencies()
+        # Credentials too, and up front: a warm cache can serve the panel
+        # without a fetch, and a desk that only ever reads its cache would
+        # discover its broken login the day the cache went stale — mid-outage.
+        _alpaca_client_kwargs()
 
 
 def _recorded_source(df: pd.DataFrame) -> str:
@@ -907,8 +939,9 @@ def _write_cache(path: Path, df: pd.DataFrame, provider: str) -> None:
                 encoding="utf-8",
             )
 
-            payload_temp.replace(payload_path)
-            metadata_temp.replace(metadata_path)
+            from qlab.paths import replace_file
+            replace_file(payload_temp, payload_path)
+            replace_file(metadata_temp, metadata_path)
             stale_payload.unlink(missing_ok=True)
         finally:
             for temporary_path in temporary_paths:

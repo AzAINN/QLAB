@@ -1,16 +1,17 @@
 ---
 source: tests/golden_shell.rs
+assertion_line: 783
 expression: "frame_with_toasts(&store, &toast_queue(now), 120, 36, now +\nDuration::from_millis(1_500))"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
-"▌1 DESK │▌ THE READ  2026-07-30         ▌ EQUITY                                ┌──────────────────────────────────────┐"
-" 2 MKTS │▮ 84.0% CONVICTION             ▗█▄ ▗█  ▟▀▜▖    ▟▀▜▖▟▀▜▖▟▀▜▖    ▟▀▜▖▟▀▜▖│● STREAM FRAME DROPPED              1s│"
-" 3 BOOK │ALIGNED · STRESS               ▜▄▖  █  █▗█▌    █▗█▌█▗█▌█▗█▌    █▗█▌█▗█▌│could not read {oops                  │"
-" 4 RSCH │                               ▄▄▛  █  █▛▐▌ ▄  █▛▐▌█▛▐▌█▛▐▌ ▄  █▛▐▌█▛▐▌└──────────────────────────────────────┘"
-" 5 WORK │WOULD CHANGE THIS               ▀  ▀▀▀ ▝▀▀ ▗▛  ▝▀▀ ▝▀▀ ▝▀▀  ▀  ▝▀▀ ▝▀▀ ┌──────────────────────────────────────┐"
-" 6 AUDIT│▌ Absorption falling back      ────────────────────────────────────────│● APPROVAL REQUESTED                1s│"
-" 7 SETT │  below its threshold for five ▌ REGIME                ▌ ALERTS        │pl-42 is waiting on a human           │"
-"        │  sessions.                    STATE    UNCERTAIN      TIER     NONE   └──────────────────────────────────────┘"
+" 1 ATLAS│▌ THE READ  2026-07-30         ▌ EQUITY                                ┌──────────────────────────────────────┐"
+"▌2 DESK │▮ 84.0% CONVICTION             ▗█▄ ▗█  ▟▀▜▖    ▟▀▜▖▟▀▜▖▟▀▜▖    ▟▀▜▖▟▀▜▖│● STREAM FRAME DROPPED              1s│"
+" 3 MKTS │ALIGNED · STRESS               ▜▄▖  █  █▗█▌    █▗█▌█▗█▌█▗█▌    █▗█▌█▗█▌│could not read {oops                  │"
+" 4 BOOK │                               ▄▄▛  █  █▛▐▌ ▄  █▛▐▌█▛▐▌█▛▐▌ ▄  █▛▐▌█▛▐▌└──────────────────────────────────────┘"
+" 5 RSCH │WOULD CHANGE THIS               ▀  ▀▀▀ ▝▀▀ ▗▛  ▝▀▀ ▝▀▀ ▝▀▀  ▀  ▝▀▀ ▝▀▀ ┌──────────────────────────────────────┐"
+" 6 WORK │▌ Absorption falling back      ────────────────────────────────────────│● APPROVAL REQUESTED                1s│"
+" 7 AUDIT│  below its threshold for five ▌ REGIME                ▌ ALERTS        │pl-42 is waiting on a human           │"
+" 8 SETT │  sessions.                    STATE    UNCERTAIN      TIER     NONE   └──────────────────────────────────────┘"
 "        │                               DETECTOR CALM           HEADROOM 0.0%   ┌──────────────────────────────────────┐"
 "        │OBSERVATIONS                   SIG/THR  9.2% / 11.1%   VOL/LIM  10.1% /│● DESK HALTED                       1s│"
 "        │▌ Indicator panel reads stress CONF     66.7%          GATE     1 REFUS│the live book is halted: tool         │"

@@ -96,6 +96,74 @@ pub enum Command {
         data: String,
         book: String,
     },
+    /// Store an Alpaca paper login the operator typed.
+    ///
+    /// The two values are `Secret`s, so this variant — which `Command` derives
+    /// `Debug` for, and which the dispatcher hands to a tracing-capable layer —
+    /// cannot print what it carries. See `crate::secret`.
+    ///
+    /// `replace` is consent and nothing else. It is `false` on every login the
+    /// operator has not been asked about, and `true` only on the re-send that
+    /// follows a confirmable refusal the owner raised for this exact pair: the
+    /// owner destroys a stored browser login on that flag, and the flag is
+    /// therefore never a default and never a retry's convenience.
+    ///
+    /// It authorises no trade. A stored credential makes the Alpaca book
+    /// *choosable*; the desk is switched by `/mode`, every gate downstream is
+    /// unmoved, and a fill still needs a persisted approval and a typed hash.
+    #[cfg(feature = "operator")]
+    AlpacaLogin {
+        key: crate::secret::Secret,
+        secret: crate::secret::Secret,
+        replace: bool,
+    },
+    /// Ask the owner to put the stored login to the venue. Reads nothing back
+    /// into the desk and changes nothing — the answer is a sentence.
+    #[cfg(feature = "operator")]
+    TestAlpaca,
+    /// Point one surface at a model, or switch the reasoner.
+    ///
+    /// It grants no authority and books nothing: which mind answers a question
+    /// is not permission to trade on the answer. Every gate downstream is
+    /// unmoved — the referee is pinned to claude in the owner's own routing
+    /// whatever this says, and a fill still needs a persisted approval and a
+    /// typed hash.
+    ///
+    /// The surface is a word out of this client's own grammar; the choice is
+    /// whatever the operator named, and the owner validates it. See
+    /// [`ModelChoice`].
+    #[cfg(feature = "operator")]
+    SetLlm {
+        surface: String,
+        choice: ModelChoice,
+    },
+    /// Ask the owner what its backends serve.
+    ///
+    /// A read, and the only one a keystroke asks for: the route probes daemons,
+    /// so it may not ride a poll (`net::http::Refetch`). Produced when the
+    /// palette enters the model scope — which only an armed window can do, the
+    /// same way `Scope::Mode`'s value list is compiled into a glass build and
+    /// never reached there.
+    Backends,
+}
+
+/// What one `/model` line asks for.
+///
+/// Two shapes because the owner's route takes two: a pair, or the reasoner's
+/// switch. They are one type rather than three optional fields for the reason
+/// `LlmSurface` gives — `backend`/`model` are optional *together*, and a
+/// signature able to express half a choice is one that invites the owner's 400.
+///
+/// Not gated, unlike the command that carries it: this is what a line *means*,
+/// and the grammar is one grammar in both builds. What is gated is the variant
+/// that reaches a writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelChoice {
+    /// A backend and the model it should run, as the operator named them.
+    Pair { backend: String, model: String },
+    /// The reasoner's own switch. Naming a model does not turn it on — the
+    /// owner refuses to infer one from the other, so nothing here may either.
+    Enabled(bool),
 }
 
 /// Hand-written rather than derived, and neither `Eq` nor `Clone`.
@@ -134,6 +202,37 @@ impl PartialEq for Command {
             (Command::DeskMode { data: a, book: x }, Command::DeskMode { data: b, book: y }) => {
                 a == b && x == y
             }
+            // Compared, unlike a confirmation, because there is nothing to
+            // substitute: a login is the pair itself rather than a capability
+            // minted for one plan, and a test that could not read back what a
+            // keystroke built could not pin the form at all.
+            #[cfg(feature = "operator")]
+            (
+                Command::AlpacaLogin {
+                    key: a,
+                    secret: x,
+                    replace: p,
+                },
+                Command::AlpacaLogin {
+                    key: b,
+                    secret: y,
+                    replace: q,
+                },
+            ) => a == b && x == y && p == q,
+            #[cfg(feature = "operator")]
+            (Command::TestAlpaca, Command::TestAlpaca) => true,
+            #[cfg(feature = "operator")]
+            (
+                Command::SetLlm {
+                    surface: a,
+                    choice: x,
+                },
+                Command::SetLlm {
+                    surface: b,
+                    choice: y,
+                },
+            ) => a == b && x == y,
+            (Command::Backends, Command::Backends) => true,
             _ => false,
         }
     }
@@ -143,7 +242,7 @@ impl PartialEq for Command {
 
 /// What the command line can be pointed at.
 ///
-/// Four, and the two that are missing are the point: the plan's Part IV lists
+/// Five, and the two that are missing are the point: the plan's Part IV lists
 /// `/halt` and `/resume`, and `qlab/ui/server.py` serves no HTTP route for
 /// either — `set_halt` is reachable only from the MCP tools and the autopilot's
 /// own kill switch (the gated writer module carries the same note). A scope
@@ -158,17 +257,29 @@ pub enum Scope {
     Plan,
     /// Which data source and which book the desk is pointed at.
     ///
-    /// The one scope that writes. It is in the grammar in both builds so the
+    /// The first scope that writes. It is in the grammar in both builds so the
     /// parser table is one table — a grammar that changed shape with a Cargo
     /// feature would be two grammars, and only one of them ever tested — while
     /// what it *resolves to* is gated with the writer, and what it offers is
     /// gated on the posture.
     Mode,
+    /// Which model each surface runs on, and whether Atlas reasons at all.
+    ///
+    /// Gated exactly like `Mode`, and for a narrower reason than it looks:
+    /// choosing a model changes *who answers a question*, never what may be
+    /// executed. The owner pins the referee to claude whatever this says.
+    Model,
 }
 
 impl Scope {
-    /// Picker order: the three a glass window can use, then the one it cannot.
-    pub const ALL: [Scope; 4] = [Scope::View, Scope::Ticker, Scope::Plan, Scope::Mode];
+    /// Picker order: the three a glass window can use, then the two it cannot.
+    pub const ALL: [Scope; 5] = [
+        Scope::View,
+        Scope::Ticker,
+        Scope::Plan,
+        Scope::Mode,
+        Scope::Model,
+    ];
 
     /// The word an operator types, and the word the suggestions show. One
     /// spelling, so the strip cannot offer something the parser will not accept.
@@ -178,6 +289,7 @@ impl Scope {
             Scope::Ticker => "ticker",
             Scope::Plan => "plan",
             Scope::Mode => "mode",
+            Scope::Model => "model",
         }
     }
 
@@ -188,13 +300,14 @@ impl Scope {
             Scope::Ticker => "a symbol this desk is watching",
             Scope::Plan => "a plan id, or enough of one to be unambiguous",
             Scope::Mode => "a data source and a book",
+            Scope::Model => "a surface, and the model it should run",
         }
     }
 
     /// Whether using this scope changes the desk. Offered only to a window that
     /// can, exactly as every other operator affordance on this workstation.
     pub fn writes(self) -> bool {
-        matches!(self, Scope::Mode)
+        matches!(self, Scope::Mode | Scope::Model)
     }
 
     fn from_word(word: &str) -> Option<Scope> {
@@ -327,6 +440,12 @@ pub enum Resolved {
     /// Point the desk somewhere. Only in a build that has a writer to carry it.
     #[cfg(feature = "operator")]
     Mode { data: String, book: String },
+    /// Point one surface at a model, or switch the reasoner.
+    #[cfg(feature = "operator")]
+    Model {
+        surface: String,
+        choice: ModelChoice,
+    },
     /// The line cannot be acted on, and this is the sentence that says why.
     Refused(String),
 }
@@ -342,6 +461,46 @@ const DESK_MODES: [(&str, &str); 3] = [
     ("live", "simulated"),
     ("live", "alpaca"),
 ];
+
+/// The surfaces a model can be chosen for, in the owner's own order and
+/// spelling (`qlab/core/llm_config.py::SURFACES`).
+///
+/// Refused here rather than sent, unlike a desk-mode pair: which surfaces exist
+/// is the *grammar* of this scope — the same kind of fixed vocabulary as the
+/// nav rail's view labels, which `/view` also answers from a list this client
+/// holds — while which model a surface can run is a fact about the desk, and
+/// that stays the owner's.
+///
+/// `pub(crate)` because the startup door offers the same two surfaces: one
+/// vocabulary, so the door cannot ask about a surface the line would refuse.
+pub(crate) const SURFACES: [&str; 2] = [REASONER, WORKFORCE];
+const REASONER: &str = "reasoner";
+pub(crate) const WORKFORCE: &str = "workforce";
+
+/// The reasoner's switch, spelled the way an operator says it out loud. The
+/// owner's route takes a boolean; these are the two words that become one.
+const SWITCH: [&str; 2] = ["on", "off"];
+
+/// The backend whose model the workforce's routing ignores.
+const CLAUDE: &str = "claude";
+
+/// What the claude backend calls "let the tiers decide" — the first entry of
+/// its own `CLAUDE_MODELS`, and the desk's default.
+///
+/// Named here rather than read off the catalog's ordering: if the owner ever
+/// stops serving it, this client sends a model by name and gets the owner's own
+/// refusal back, where taking "whatever is first" would silently pick a tier
+/// nobody chose.
+const CLAUDE_INHERIT: &str = "inherit";
+
+/// How much of an owner sentence the one-row strip and the line's note can
+/// carry.
+///
+/// The bound is D1's `SAID_MAX` and for the same reason: nothing on the wire is
+/// guaranteed to be the owner's, and the longest sentence it actually writes
+/// (the `ollama pull` remedy, 105 cells) survives uncut. Bounded here, at the
+/// boundary, so both surfaces that render it inherit it.
+const REASON_MAX: usize = 112;
 
 /// One parsed line against one desk. Pure: the store is read, never touched.
 pub fn resolve(state: &CmdState, store: &Store, posture: Posture) -> Resolved {
@@ -379,6 +538,7 @@ fn scoped(scope: Scope, query: &str, store: &Store, posture: Posture) -> Resolve
         Scope::Ticker => ticker(query, store),
         Scope::Plan => plan(query, store),
         Scope::Mode => mode(query, posture),
+        Scope::Model => model(query, store, posture),
     }
 }
 
@@ -481,6 +641,279 @@ fn mode(query: &str, posture: Posture) -> Resolved {
     }
 }
 
+/// One `/model` line: a surface, and a model or a switch.
+///
+/// The posture first, exactly as `/mode`: an unarmed window is refused for
+/// being unarmed whatever it typed.
+fn model(query: &str, store: &Store, posture: Posture) -> Resolved {
+    if !posture.writes() {
+        return Resolved::Refused(format!(
+            "/model changes the desk; this window is {} — start it with --operator",
+            posture.label()
+        ));
+    }
+    let mut words = query.split_whitespace();
+    let (Some(surface), Some(choice)) = (words.next(), words.next()) else {
+        return Resolved::Refused(
+            "a model choice is a surface and a model: /model reasoner ollama:granite3.3:8b".into(),
+        );
+    };
+    if words.next().is_some() {
+        return Resolved::Refused("a model choice is two words, not three".into());
+    }
+    let Some(surface) = SURFACES
+        .into_iter()
+        .find(|known| known.eq_ignore_ascii_case(surface))
+    else {
+        return Resolved::Refused(format!(
+            "no model surface is called {surface}; the desk has {}",
+            SURFACES.join(" and ")
+        ));
+    };
+    // The switch, whichever surface it was typed against. The owner refuses it
+    // on the workforce in its own words — "only the reasoner surface can be
+    // switched on or off" — and a second copy of that rule here would be this
+    // client deciding which surfaces have an off state, which is the same
+    // reason `/mode` sends the pair `DeskMode` forbids.
+    if let Some(flag) = SWITCH
+        .into_iter()
+        .find(|word| word.eq_ignore_ascii_case(choice))
+    {
+        return chose(surface, ModelChoice::Enabled(flag == SWITCH[0]));
+    }
+    // What the desk said it can run, which is what the strip offered.
+    if let Some(offer) = offers(surface, store)
+        .into_iter()
+        .find(|offer| offer.matches(choice))
+    {
+        return match offer {
+            Offer::Runs { backend, model, .. } => {
+                chose(surface, ModelChoice::Pair { backend, model })
+            }
+            // Shown in the strip and refused here, in the owner's own sentence
+            // rather than a second opinion composed by this client. It is not
+            // an availability check either: the entry names no model *because*
+            // the owner could not ask for one, so there is no pair to send.
+            Offer::Down { said, .. } => Resolved::Refused(said),
+        };
+    }
+    // Typed by hand, and sent. The owner is the authority on what it can serve
+    // — a model pulled since the last fetch is one this client has never heard
+    // of — so anything naming both halves goes, and the owner's refusal is what
+    // comes back. Split on the *first* colon: a model id carries its own
+    // (`qwen2.5:7b`, `granite3.3:8b`), and splitting on the last would name a
+    // backend called `ollama:qwen2.5`.
+    match choice.split_once(':') {
+        Some((backend, model)) if !backend.is_empty() && !model.is_empty() => chose(
+            surface,
+            ModelChoice::Pair {
+                backend: backend.to_string(),
+                model: model.to_string(),
+            },
+        ),
+        _ => Resolved::Refused(format!(
+            "{choice} names no model — a choice is a backend and a model, like \
+             ollama:granite3.3:8b"
+        )),
+    }
+}
+
+/// The parsed choice, in the build that has somewhere to send it.
+fn chose(surface: &str, choice: ModelChoice) -> Resolved {
+    #[cfg(feature = "operator")]
+    return Resolved::Model {
+        surface: surface.to_string(),
+        choice,
+    };
+    // Unreachable: `posture.writes()` is false for every `Posture` this build
+    // has, so `model` refused above. The arm exists because the function is
+    // total, which is what keeps the grammar one grammar in both builds.
+    #[cfg(not(feature = "operator"))]
+    {
+        let _ = (surface, choice);
+        Resolved::Refused("this build has no write path".into())
+    }
+}
+
+/// What one surface can be pointed at, out of the last catalog this client
+/// fetched.
+///
+/// Values come off that catalog and nowhere else, so the strip cannot offer a
+/// pair the owner never said it could run. Absent — nothing fetched yet — is an
+/// empty list rather than a guess.
+pub(crate) fn offers(surface: &str, store: &Store) -> Vec<Offer> {
+    let Some(catalog) = store.backends() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in &catalog.backends {
+        let Some(name) = crate::format::text(entry.name.as_ref()) else {
+            continue;
+        };
+        // `None` is not `true`. A backend the owner did not vouch for is one
+        // this client may not offer a pair on.
+        let models: Vec<&str> = match entry.available {
+            Some(true) => entry
+                .models
+                .iter()
+                .filter_map(|model| crate::format::text(Some(model)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if models.is_empty() {
+            out.push(Offer::Down {
+                value: name.to_string(),
+                said: unservable(entry, name),
+            });
+            continue;
+        }
+        // The workforce's claude model is ignored by the owner's own routing —
+        // the tier map owns it, and `("claude", "haiku")` routes exactly as
+        // `("claude", "inherit")` does. Offering the four tiers here would be
+        // offering three choices the desk would not make.
+        if name == CLAUDE && surface == WORKFORCE {
+            out.push(Offer::Runs {
+                value: CLAUDE.to_string(),
+                backend: CLAUDE.to_string(),
+                model: CLAUDE_INHERIT.to_string(),
+            });
+            continue;
+        }
+        out.extend(models.into_iter().map(|model| Offer::Runs {
+            value: format!("{name}:{model}"),
+            backend: name.to_string(),
+            model: model.to_string(),
+        }));
+    }
+    out
+}
+
+/// Why a backend has nothing to offer, in the owner's own words where it gave
+/// any.
+///
+/// The owner populates `reason` on every entry, the happy path included, so the
+/// two fallbacks are contract failures rather than ordinary states — and each
+/// says which one it is instead of reading as a backend that answered.
+fn unservable(entry: &crate::model::CatalogEntry, name: &str) -> String {
+    match (entry.available, crate::format::text(entry.reason.as_ref())) {
+        (Some(true), _) => format!("the owner says {name} can serve and never said what"),
+        (_, Some(said)) => crate::format::bounded(said, REASON_MAX),
+        (_, None) => format!("the owner did not say why {name} cannot serve"),
+    }
+}
+
+/// One thing `/model` can be pointed at, or one backend it cannot.
+///
+/// `pub(crate)` because the startup door draws the same list. One producer for
+/// both surfaces, so a rule the strip keeps — a down backend shown with the
+/// owner's reason, the workforce offered `claude` alone — cannot hold in one
+/// place and be quietly dropped in the other.
+pub(crate) enum Offer {
+    /// A pair the desk said it can run. `value` is what an operator types or
+    /// accepts; the pair is what gets sent.
+    Runs {
+        value: String,
+        backend: String,
+        model: String,
+    },
+    /// A backend the last reading says cannot serve, and the owner's reason.
+    ///
+    /// Kept in the list rather than filtered out of it: a backend that vanishes
+    /// from the strip reads as a desk that never had one, and "why not" is
+    /// exactly the question the reason answers.
+    Down { value: String, said: String },
+}
+
+impl Offer {
+    pub(crate) fn value(&self) -> &str {
+        match self {
+            Offer::Runs { value, .. } | Offer::Down { value, .. } => value,
+        }
+    }
+
+    /// The owner's sentence about why this cannot be chosen — `None` for one
+    /// the desk can run.
+    pub(crate) fn refusal(&self) -> Option<&str> {
+        match self {
+            Offer::Runs { .. } => None,
+            Offer::Down { said, .. } => Some(said),
+        }
+    }
+
+    /// What choosing this sends, or `None` for a backend the desk cannot serve
+    /// — which names no model, so there is no pair to send.
+    pub(crate) fn choice(&self) -> Option<ModelChoice> {
+        match self {
+            Offer::Runs { backend, model, .. } => Some(ModelChoice::Pair {
+                backend: backend.clone(),
+                model: model.clone(),
+            }),
+            Offer::Down { .. } => None,
+        }
+    }
+
+    /// Whether this offer is what a surface is already pointed at.
+    ///
+    /// Here rather than beside either caller: the startup door and SETTINGS'
+    /// switcher both mark the row a surface is running, and two copies of
+    /// "which held pair equals this offer" is two chances for one of them to
+    /// start marking the wrong one — the same reason `offers` itself is one
+    /// producer for three surfaces.
+    ///
+    /// The owner's own spelling on both sides. This compares two answers it
+    /// gave, never an answer against something typed here, so nothing is folded.
+    pub(crate) fn running(&self, store: &Store, surface: &str) -> bool {
+        let Some(ModelChoice::Pair { backend, model }) = self.choice() else {
+            return false;
+        };
+        let held = match store.llm() {
+            Some(llm) => match surface {
+                WORKFORCE => llm.workforce.as_ref(),
+                _ => llm.reasoner.as_ref(),
+            },
+            None => return false,
+        };
+        let Some(held) = held else {
+            return false;
+        };
+        crate::format::text(held.backend.as_ref()) == Some(backend.as_str())
+            && crate::format::text(held.model.as_ref()) == Some(model.as_str())
+    }
+
+    /// Whether a typed word names this offer.
+    ///
+    /// **The backend word is matched case-blind and the model id is not.** A
+    /// backend is a name this client already spells for the operator — it is on
+    /// the strip, in the owner's reason, on the MODELS card — so `OLLAMA`
+    /// naming `ollama` costs nothing and buys the one thing that matters here:
+    /// a down backend typed in the wrong case reaches its own entry and comes
+    /// back with *the owner's reason*, where an exact compare fell through to
+    /// the hand-typed path and answered "OLLAMA names no model" about a daemon
+    /// the desk had already explained.
+    ///
+    /// A model id stays exact. `qwen2.5:7b` and `granite3.3:8b` are tags a
+    /// daemon holds byte for byte, and a client that folded their case would be
+    /// deciding, on the owner's behalf, that two different tags are one.
+    ///
+    /// What is *sent* is always the offer's own spelling, never what was typed.
+    fn matches(&self, typed: &str) -> bool {
+        match self {
+            // A bare backend name, whichever variant carries it: the down entry
+            // names no model, and the workforce's claude entry is the backend
+            // alone because the tier map owns its model.
+            Offer::Down { value, .. } => value.eq_ignore_ascii_case(typed),
+            Offer::Runs {
+                value,
+                backend,
+                model,
+            } => match typed.split_once(':') {
+                Some((named, id)) => backend.eq_ignore_ascii_case(named) && model == id,
+                None => value.eq_ignore_ascii_case(typed),
+            },
+        }
+    }
+}
+
 // -- the strip --------------------------------------------------------------
 
 /// What the line could become from here — the one-line strip above the input.
@@ -489,13 +922,13 @@ fn mode(query: &str, posture: Posture) -> Resolved {
 /// surface. Values come off the store rather than out of a list this file
 /// keeps, so the strip can never offer a symbol the desk is not watching or a
 /// plan the owner is not serving.
-pub fn suggestions(state: &CmdState, store: &Store, posture: Posture) -> Vec<String> {
+pub fn suggestions(state: &CmdState, store: &Store, posture: Posture) -> Vec<Suggestion> {
     match state {
         CmdState::Empty => scopes(posture),
         CmdState::Picker { matches, .. } => matches
             .iter()
             .filter(|scope| !scope.writes() || posture.writes())
-            .map(|scope| format!("/{}", scope.word()))
+            .map(|scope| Suggestion::offered(format!("/{}", scope.word())))
             .collect(),
         CmdState::Scoped { scope, query } => values(*scope, query.trim(), store, posture),
         CmdState::Verb(Verb::Ticker(symbol)) => values(Scope::Ticker, symbol, store, posture),
@@ -503,20 +936,51 @@ pub fn suggestions(state: &CmdState, store: &Store, posture: Posture) -> Vec<Str
     }
 }
 
-fn scopes(posture: Posture) -> Vec<String> {
+/// One thing the line could become, and why it could not.
+///
+/// A type rather than a string because one scope has something to say about a
+/// value it is still going to show. A backend the desk cannot reach is left in
+/// the strip — hiding it reads as a desk that never had one — and the sentence
+/// beside it is the owner's own, which is also the sentence submitting it gets
+/// back. Every other scope offers nothing but choices, so `refusal` is `None`
+/// everywhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Suggestion {
+    /// What the line becomes when this one is accepted.
+    pub value: String,
+    /// Why it cannot be chosen — `None` for everything the desk can serve.
+    pub refusal: Option<String>,
+}
+
+impl Suggestion {
+    pub fn offered(value: impl Into<String>) -> Suggestion {
+        Suggestion {
+            value: value.into(),
+            refusal: None,
+        }
+    }
+
+    /// Whether accepting it can lead anywhere. Tab takes the first one this is
+    /// true of, so a key can never paste a line the desk has already refused.
+    pub fn choosable(&self) -> bool {
+        self.refusal.is_none()
+    }
+}
+
+fn scopes(posture: Posture) -> Vec<Suggestion> {
     Scope::ALL
         .into_iter()
         .filter(|scope| !scope.writes() || posture.writes())
-        .map(|scope| format!("/{}", scope.word()))
+        .map(|scope| Suggestion::offered(format!("/{}", scope.word())))
         .collect()
 }
 
-fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<String> {
+fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Suggestion> {
     match scope {
         Scope::View => ViewId::ALL
             .into_iter()
             .filter(|id| starts_with_fold(id.label(), query))
-            .map(|id| id.label().to_string())
+            .map(|id| Suggestion::offered(id.label()))
             .collect(),
         Scope::Ticker => {
             let wanted = query.to_ascii_uppercase();
@@ -524,7 +988,7 @@ fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Str
                 .universe()
                 .into_iter()
                 .filter(|t| starts_with_fold(t, &wanted))
-                .map(str::to_string)
+                .map(Suggestion::offered)
                 .collect()
         }
         Scope::Plan => {
@@ -534,7 +998,7 @@ fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Str
                 .iter()
                 .filter_map(|plan| crate::format::text(plan.plan_id.as_ref()))
                 .filter(|id| id.to_ascii_lowercase().starts_with(&wanted))
-                .map(str::to_string)
+                .map(Suggestion::offered)
                 .collect()
         }
         // Hidden rather than shown-and-refused: an operator affordance is
@@ -543,9 +1007,33 @@ fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Str
         Scope::Mode if !posture.writes() => Vec::new(),
         Scope::Mode => DESK_MODES
             .into_iter()
-            .map(|(data, book)| format!("{data} {book}"))
-            .filter(|pair| starts_with_fold(pair, query))
+            .map(|(data, book)| Suggestion::offered(format!("{data} {book}")))
+            .filter(|pair| starts_with_fold(&pair.value, query))
             .collect(),
+        Scope::Model if !posture.writes() => Vec::new(),
+        // The whole argument, both words, exactly as `Scope::Mode` offers both
+        // halves of a desk mode: accepting a value replaces everything after
+        // the scope word, so a suggestion that carried only the second half
+        // would rewrite the line without the surface it was about.
+        Scope::Model => {
+            let mut out = Vec::new();
+            for surface in SURFACES {
+                for offer in offers(surface, store) {
+                    out.push(Suggestion {
+                        value: format!("{surface} {}", offer.value()),
+                        refusal: offer.refusal().map(str::to_string),
+                    });
+                }
+                // The flag, and only where the desk has one: the owner refuses
+                // `enabled` on the workforce, so offering it there would be
+                // this client advertising a switch that does not exist.
+                if surface == REASONER {
+                    out.extend(SWITCH.map(|flag| Suggestion::offered(format!("{surface} {flag}"))));
+                }
+            }
+            out.retain(|choice| starts_with_fold(&choice.value, query));
+            out
+        }
     }
 }
 
@@ -1210,17 +1698,27 @@ mod tests {
 
     // -- the strip --------------------------------------------------------
 
+    /// The strip's values, without the sentences one scope attaches to them.
+    fn offered(state: &CmdState, store: &Store, posture: Posture) -> Vec<String> {
+        suggestions(state, store, posture)
+            .into_iter()
+            .map(|choice| choice.value)
+            .collect()
+    }
+
     #[test]
-    fn the_picker_offers_the_write_scope_only_to_a_window_that_can_use_it() {
+    fn the_picker_offers_the_write_scopes_only_to_a_window_that_can_use_them() {
         let store = desk();
-        let glass = suggestions(&parse("/"), &store, Posture::Glass);
+        let glass = offered(&parse("/"), &store, Posture::Glass);
         assert!(glass.contains(&"/view".to_string()), "{glass:?}");
         assert!(glass.contains(&"/ticker".to_string()), "{glass:?}");
         assert!(glass.contains(&"/plan".to_string()), "{glass:?}");
-        assert!(
-            !glass.contains(&"/mode".to_string()),
-            "an operator affordance is hidden on glass: {glass:?}"
-        );
+        for hidden in ["/mode", "/model"] {
+            assert!(
+                !glass.contains(&hidden.to_string()),
+                "an operator affordance is hidden on glass: {glass:?}"
+            );
+        }
         // And the two scopes the owner serves no route for are absent from the
         // grammar entirely — see `Scope::ALL`.
         for absent in ["/halt", "/resume"] {
@@ -1230,46 +1728,409 @@ mod tests {
 
     #[cfg(feature = "operator")]
     #[test]
-    fn an_armed_picker_offers_the_write_scope() {
+    fn an_armed_picker_offers_the_write_scopes() {
         let store = desk();
-        let armed = suggestions(&parse("/"), &store, Posture::Operator);
+        let armed = offered(&parse("/"), &store, Posture::Operator);
         assert!(armed.contains(&"/mode".to_string()), "{armed:?}");
+        assert!(armed.contains(&"/model".to_string()), "{armed:?}");
     }
 
     #[test]
     fn the_strip_offers_what_the_desk_actually_holds() {
         let store = desk();
         assert_eq!(
-            suggestions(&parse("/ticker S"), &store, Posture::Glass),
+            offered(&parse("/ticker S"), &store, Posture::Glass),
             vec!["SPY".to_string(), "SOXX".to_string()]
         );
         // The book's own holding is offered too, after the quoted universe.
-        assert!(
-            suggestions(&parse("/ticker "), &store, Posture::Glass).contains(&"TLT".to_string())
-        );
+        assert!(offered(&parse("/ticker "), &store, Posture::Glass).contains(&"TLT".to_string()));
         assert_eq!(
-            suggestions(&parse("/view b"), &store, Posture::Glass),
+            offered(&parse("/view b"), &store, Posture::Glass),
             vec!["BOOK".to_string()]
         );
         assert_eq!(
-            suggestions(&parse("/plan 9"), &store, Posture::Glass),
+            offered(&parse("/plan 9"), &store, Posture::Glass),
             vec!["9f3ac1d20b7e4a51".to_string()]
         );
-        assert!(suggestions(&parse("/mode "), &store, Posture::Glass).is_empty());
+        assert!(offered(&parse("/mode "), &store, Posture::Glass).is_empty());
+        assert!(offered(&parse("/model "), &store, Posture::Glass).is_empty());
     }
 
     #[cfg(feature = "operator")]
     #[test]
     fn the_mode_strip_offers_the_pairs_the_owner_can_make() {
         let store = desk();
-        let pairs = suggestions(&parse("/mode "), &store, Posture::Operator);
         assert_eq!(
-            pairs,
+            offered(&parse("/mode "), &store, Posture::Operator),
             vec![
                 "synthetic simulated".to_string(),
                 "live simulated".to_string(),
                 "live alpaca".to_string()
             ]
         );
+    }
+
+    // -- the model scope --------------------------------------------------
+
+    /// A desk that has fetched a catalog: claude serving its four tiers, and
+    /// one ollama daemon holding one model. The live shape, verbatim — see
+    /// `tests/fixtures/llm_backends.json`.
+    fn desk_with_backends(ollama: serde_json::Value) -> Store {
+        let mut store = desk();
+        let catalog = serde_json::from_value(serde_json::json!({
+            "backends": [
+                {"name": "claude", "available": true,
+                 "reason": "claude CLI at /Users/azainmac/.local/bin/claude",
+                 "models": ["inherit", "sonnet", "opus", "haiku"]},
+                ollama
+            ],
+            "probed_at": "2026-08-03T04:10:08.417505+00:00"
+        }))
+        .unwrap();
+        store.apply(AppEvent::Backends(catalog), Instant::now());
+        store
+    }
+
+    /// The daemon as it answers when it is running and holding one model.
+    fn ollama_up() -> serde_json::Value {
+        serde_json::json!({"name": "ollama", "available": true,
+                           "reason": "ollama at 127.0.0.1:11434, 1 model pulled",
+                           "models": ["qwen2.5:7b"]})
+    }
+
+    /// And as it answers when it is not. The owner's own sentence, captured
+    /// from a live desk pointed at a port with nothing on it.
+    ///
+    /// Only the armed leg has a scope to offer it to — a glass window resolves
+    /// `/model` to the posture sentence before the catalog is ever consulted.
+    #[cfg(feature = "operator")]
+    fn ollama_down() -> serde_json::Value {
+        serde_json::json!({"name": "ollama", "available": false,
+                           "reason": "ollama is not running at http://127.0.0.1:11499 — \
+                                      start it with `ollama serve`",
+                           "models": []})
+    }
+
+    #[cfg(feature = "operator")]
+    fn model_line(line: &str, store: &Store) -> Resolved {
+        resolve(&parse(line), store, Posture::Operator)
+    }
+
+    #[cfg(feature = "operator")]
+    fn pair(backend: &str, model: &str) -> ModelChoice {
+        ModelChoice::Pair {
+            backend: backend.into(),
+            model: model.into(),
+        }
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_model_line_reads_as_a_surface_and_a_pair_split_at_the_first_colon() {
+        // The whole grammar of the scope, as a table. The colon rule is the one
+        // that would look right and be wrong: a granite or qwen id carries its
+        // own colon, so splitting anywhere but the first would name a backend
+        // called `ollama:qwen2.5`.
+        let store = desk_with_backends(ollama_up());
+        let cases: Vec<(&str, &str, ModelChoice)> = vec![
+            (
+                "/model reasoner ollama:qwen2.5:7b",
+                "reasoner",
+                pair("ollama", "qwen2.5:7b"),
+            ),
+            // Not in this desk's catalog, and sent anyway: the owner is the
+            // authority on what it can serve, and a model pulled since the last
+            // fetch is one this client has never heard of.
+            (
+                "/model reasoner ollama:granite3.3:8b",
+                "reasoner",
+                pair("ollama", "granite3.3:8b"),
+            ),
+            (
+                "/model reasoner claude:haiku",
+                "reasoner",
+                pair("claude", "haiku"),
+            ),
+            // The A3 honesty rule, from the other end: the workforce's own
+            // spelling of claude is the bare word, and it sends `inherit` —
+            // which is what "the tiers decide" is called.
+            (
+                "/model workforce claude",
+                "workforce",
+                pair("claude", "inherit"),
+            ),
+            ("/model reasoner on", "reasoner", ModelChoice::Enabled(true)),
+            (
+                "/model reasoner off",
+                "reasoner",
+                ModelChoice::Enabled(false),
+            ),
+            // The surface word is matched case-blind and comes back in the
+            // owner's spelling; a model id is never touched.
+            (
+                "/model REASONER OFF",
+                "reasoner",
+                ModelChoice::Enabled(false),
+            ),
+            // The switch on the surface that has none is still sent: only the
+            // owner may say which surfaces can be switched off, and it does.
+            (
+                "/model workforce off",
+                "workforce",
+                ModelChoice::Enabled(false),
+            ),
+        ];
+        for (line, surface, choice) in cases {
+            assert_eq!(
+                model_line(line, &store),
+                Resolved::Model {
+                    surface: surface.to_string(),
+                    choice,
+                },
+                "{line}"
+            );
+        }
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_model_line_that_names_nothing_the_desk_has_says_which_half_is_wrong() {
+        let store = desk_with_backends(ollama_up());
+        for (line, expected) in [
+            ("/model ", "surface and a model"),
+            ("/model reasoner", "surface and a model"),
+            ("/model reasoner ollama:qwen2.5:7b extra", "two words"),
+            // The surfaces are the grammar of this scope, like the nav rail's
+            // labels are `/view`'s — a fixed vocabulary this client holds — so
+            // an unknown one is answered here rather than sent.
+            (
+                "/model banana claude:haiku",
+                "no model surface is called banana",
+            ),
+            // A backend with no model names nothing that can run — and half a
+            // pair is the same absence with a colon in it, which the owner
+            // would answer with "a model choice needs both a backend and a
+            // model". Answered here instead: it is the form of the line, not a
+            // fact about the desk.
+            ("/model reasoner ollama", "names no model"),
+            ("/model reasoner claude", "names no model"),
+            ("/model reasoner ollama:", "names no model"),
+            ("/model reasoner :qwen2.5:7b", "names no model"),
+        ] {
+            match model_line(line, &store) {
+                Resolved::Refused(said) => assert!(said.contains(expected), "{line}: {said}"),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_backend_the_desk_cannot_reach_is_refused_in_the_owners_own_sentence() {
+        // The bare backend name is what the strip offers for a daemon that is
+        // down — it has no models to pair with — and submitting it gets back
+        // the catalog's own reason rather than a second opinion composed here.
+        let store = desk_with_backends(ollama_down());
+        match model_line("/model reasoner ollama", &store) {
+            Resolved::Refused(said) => {
+                assert_eq!(
+                    said,
+                    "ollama is not running at http://127.0.0.1:11499 — start it with \
+                     `ollama serve`"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // And naming a pair on that same backend is still *sent*: the owner
+        // accepts a choice staged for a surface that is switched off, and a
+        // client that refused it would block the one way to set a daemon up
+        // before starting it.
+        assert_eq!(
+            model_line("/model reasoner ollama:granite3.3:8b", &store),
+            Resolved::Model {
+                surface: "reasoner".into(),
+                choice: pair("ollama", "granite3.3:8b"),
+            }
+        );
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_backend_named_in_the_wrong_case_still_gets_the_owners_reason_and_a_model_id_does_not() {
+        // D2's fold. The lookup was an exact compare, so `OLLAMA` missed the
+        // catalog entry that had the answer and fell through to the hand-typed
+        // path — which answered "OLLAMA names no model" about a daemon the desk
+        // had already explained. The backend word is one this client spells for
+        // the operator everywhere; folding its case costs nothing.
+        let store = desk_with_backends(ollama_down());
+        assert_eq!(
+            model_line("/model reasoner OLLAMA", &store),
+            model_line("/model reasoner ollama", &store),
+            "the same daemon answered two different ways"
+        );
+        // A model id is not a word this client spells: `qwen2.5:7b` is a tag a
+        // daemon holds byte for byte, so the case stays exact and a mismatched
+        // one goes to the owner to be refused rather than being quietly read as
+        // the tag beside it.
+        let up = desk_with_backends(ollama_up());
+        assert_eq!(
+            model_line("/model reasoner OLLAMA:qwen2.5:7b", &up),
+            Resolved::Model {
+                surface: "reasoner".into(),
+                choice: pair("ollama", "qwen2.5:7b"),
+            },
+            "the offer's own spelling is what gets sent"
+        );
+        assert_eq!(
+            model_line("/model reasoner ollama:QWEN2.5:7B", &up),
+            Resolved::Model {
+                surface: "reasoner".into(),
+                choice: pair("ollama", "QWEN2.5:7B"),
+            },
+            "a model id was folded into one the catalog happened to hold"
+        );
+    }
+
+    #[test]
+    fn an_unarmed_window_refuses_the_model_scope_rather_than_ignoring_it() {
+        let store = desk_with_backends(ollama_up());
+        match resolve(&parse("/model reasoner on"), &store, Posture::Glass) {
+            Resolved::Refused(said) => assert!(said.contains("GLASS"), "{said}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn the_model_strip_offers_the_catalog_and_never_a_tier_the_workforce_would_ignore() {
+        let store = desk_with_backends(ollama_up());
+        assert_eq!(
+            offered(&parse("/model "), &store, Posture::Operator),
+            vec![
+                "reasoner claude:inherit".to_string(),
+                "reasoner claude:sonnet".to_string(),
+                "reasoner claude:opus".to_string(),
+                "reasoner claude:haiku".to_string(),
+                "reasoner ollama:qwen2.5:7b".to_string(),
+                "reasoner on".to_string(),
+                "reasoner off".to_string(),
+                // One entry for claude, not four: the tier map owns the model
+                // on the workforce path, so `claude:haiku` would be a choice
+                // the desk would not make.
+                "workforce claude".to_string(),
+                "workforce ollama:qwen2.5:7b".to_string(),
+            ]
+        );
+        // And the switch is offered only where the desk has one.
+        assert!(
+            !offered(&parse("/model workforce "), &store, Posture::Operator)
+                .iter()
+                .any(|value| value.ends_with(" on") || value.ends_with(" off"))
+        );
+        // A model this desk never pulled is not on the strip, whatever the
+        // owner would make of it: the client offers only what the catalog
+        // serves.
+        assert!(offered(
+            &parse("/model reasoner ollama:g"),
+            &store,
+            Posture::Operator
+        )
+        .is_empty());
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_backend_that_cannot_serve_stays_on_the_strip_carrying_its_reason() {
+        // Never hidden. A backend that vanished from the strip would read as a
+        // desk that never had one, and the operator's next question — why not —
+        // is exactly what the sentence answers.
+        let store = desk_with_backends(ollama_down());
+        // `oll` rather than `o`, which the reasoner's own `on`/`off` also
+        // answer to — the pin is about the backend row, not about the switch.
+        let strip = suggestions(&parse("/model reasoner oll"), &store, Posture::Operator);
+        let down = strip
+            .iter()
+            .find(|choice| choice.value == "reasoner ollama")
+            .unwrap_or_else(|| panic!("the down backend left the strip: {strip:?}"));
+        assert_eq!(
+            down.refusal.as_deref(),
+            Some(
+                "ollama is not running at http://127.0.0.1:11499 — start it with \
+                 `ollama serve`"
+            )
+        );
+        assert!(!down.choosable(), "a key must not accept it: {down:?}");
+        // No pair is offered on it either — the owner asks an unavailable
+        // backend for no model list, so there is nothing to pair.
+        assert_eq!(strip.len(), 1, "{strip:?}");
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_backend_that_says_it_serves_and_names_nothing_is_a_contract_failure_not_a_gap() {
+        // `available: true` with an empty list is a shape the owner does not
+        // produce — a daemon with nothing pulled reports *unavailable*, with
+        // the pull command in its reason. If it ever does, the backend still
+        // occupies a row and says which kind of silence it is, rather than
+        // disappearing or borrowing the happy-path sentence beside it.
+        let store = desk_with_backends(serde_json::json!({
+            "name": "ollama", "available": true,
+            "reason": "ollama at 127.0.0.1:11434, 1 model pulled", "models": []
+        }));
+        let strip = suggestions(&parse("/model reasoner oll"), &store, Posture::Operator);
+        assert_eq!(strip.len(), 1, "{strip:?}");
+        assert_eq!(
+            strip[0].refusal.as_deref(),
+            Some("the owner says ollama can serve and never said what")
+        );
+        // And the other silence: a backend that cannot serve and did not say
+        // why. The owner populates `reason` on every entry, so this is a
+        // contract failure too — and it says so rather than showing a row with
+        // an empty half. `Some("")` is absent here as everywhere.
+        for quiet in [
+            serde_json::json!({"name": "ollama", "available": false, "models": []}),
+            serde_json::json!({"name": "ollama", "available": false, "reason": "",
+                               "models": []}),
+        ] {
+            let store = desk_with_backends(quiet);
+            let strip = suggestions(&parse("/model reasoner oll"), &store, Posture::Operator);
+            assert_eq!(
+                strip[0].refusal.as_deref(),
+                Some("the owner did not say why ollama cannot serve")
+            );
+        }
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_desk_that_has_not_asked_what_it_serves_offers_nothing_rather_than_guessing() {
+        // The catalog is fetched when the palette enters this scope; until it
+        // arrives there is nothing to offer, and inventing `claude:sonnet` from
+        // a constant would be this client asserting a backend the owner never
+        // mentioned.
+        let store = desk();
+        assert!(store.backends().is_none());
+        let strip = offered(&parse("/model "), &store, Posture::Operator);
+        assert_eq!(
+            strip,
+            vec!["reasoner on".to_string(), "reasoner off".to_string()],
+            "only the switch, which is the desk's own grammar and not a backend"
+        );
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn an_owner_sentence_on_the_strip_is_bounded_like_every_other() {
+        // Nothing on the wire is guaranteed to be the owner's: a proxy in front
+        // of the desk answers with a page of its own, and a one-row strip is
+        // not where that should be discovered.
+        let store = desk_with_backends(serde_json::json!({
+            "name": "ollama", "available": false,
+            "reason": "a ".repeat(400), "models": []
+        }));
+        let strip = suggestions(&parse("/model reasoner oll"), &store, Posture::Operator);
+        let said = strip[0].refusal.clone().unwrap();
+        assert!(said.ends_with('…'), "{said}");
+        assert!(said.chars().count() <= REASON_MAX + 1, "{said}");
     }
 }

@@ -40,7 +40,9 @@ use atlas::{theme, ui};
 use color_eyre::eyre::Result;
 use crossterm::{
     cursor,
-    event::{Event, EventStream, KeyEventKind},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -78,6 +80,14 @@ async fn main() -> Result<()> {
     // names no host and guess which desk it is about.
     store.base = base.clone();
     store.posture = posture(&args);
+    // Parsed in both builds, and acted on in both: a glass window started with
+    // it is shown the door it cannot answer, which is the honest reply to
+    // "let me choose" from a window that cannot. Before the first frame, so a
+    // run started to choose opens on the question rather than on one frame of a
+    // desk the operator has not answered for yet.
+    if args.iter().any(|a| a == "--pick") {
+        store.pick();
+    }
     // Probe before the screen is taken. The first frame is drawn before any
     // event arrives, and a frame that says "no owner" because it has not asked
     // yet has already lied to the operator once.
@@ -148,7 +158,21 @@ fn posture(args: &[String]) -> atlas::store::Posture {
 }
 
 #[cfg(not(feature = "operator"))]
-fn posture(_args: &[String]) -> atlas::store::Posture {
+fn posture(args: &[String]) -> atlas::store::Posture {
+    // A glass build cannot arm — but an operator who typed `--operator` asked
+    // for a write path this binary does not contain, and running anyway would
+    // hand them a workstation that looks like the one they asked for with the
+    // chat, the pickers and every write silently missing. That is exactly the
+    // downgrade "fail loud" exists to prevent: refuse with the rebuild line
+    // rather than let the absence be discovered one dead keystroke at a time.
+    if args.iter().any(|a| a == "--operator") {
+        eprintln!(
+            "this atlas binary was built without the operator feature, so \
+             --operator has nothing to arm.\n    cd clients/atlas-tui && \
+             cargo build --release --features operator"
+        );
+        std::process::exit(2);
+    }
     atlas::store::Posture::Glass
 }
 
@@ -204,6 +228,16 @@ async fn run(
         // decides against the instant the caller measured, not against whatever
         // the clock says several statements later.
         let now = Instant::now();
+        // And the one wall-clock read, taken here for the same reason and put
+        // on the store as data. An `Instant` is monotonic — it cannot be
+        // compared with a stamp the owner wrote — and exactly one row needs
+        // that comparison (`format::since`). Every renderer stays a pure
+        // function of the store, and a clock this loop never reached would
+        // leave the model reading's age permanently `--`.
+        store.wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| i64::try_from(since.as_secs()).ok());
         let mut quit = false;
         if let Some(first) = next {
             quit |= ingest(
@@ -313,6 +347,16 @@ fn ingest(
                 // a synchronous fetch in this loop froze the client for its
                 // duration.
                 Some(Command::Refresh) => poller.now(),
+                // A read, and the only one a keystroke asks for. The store
+                // decides whether asking again could learn anything — the
+                // owner's own cache window — so a palette opened twice in a
+                // second does not probe every daemon twice.
+                Some(Command::Backends) if store.wants_backends(now) => poller.backends(),
+                // Inside that window the route can only answer out of its own
+                // cache. Its own arm rather than a guard falling through: the
+                // arm below dispatches to the *writer*, and a read that reached
+                // it would be a request this command never meant.
+                Some(Command::Backends) => {}
                 // The only place a keystroke reaches the network. A view
                 // decided what the key means and handed back a `Command`; the
                 // runtime is what acts on it.
@@ -329,6 +373,23 @@ fn ingest(
             }
         }
     }
+    // The mouse rides the same seam the keys do: the shell decides what it
+    // means, the runtime dispatches whatever `Command` comes back. Today no
+    // view produces one from a click, and the arm is here so the first that
+    // does is dispatched rather than dropped.
+    if let AppEvent::Mouse(m) = &ev {
+        let before = store.nav.view;
+        match ui::shell::on_mouse(*m, store, views) {
+            #[cfg(feature = "operator")]
+            Some(cmd) => writes.dispatch(cmd),
+            #[cfg(not(feature = "operator"))]
+            Some(_) => {}
+            None => {}
+        }
+        if store.nav.view != before {
+            fx.on_view_switch();
+        }
+    }
     // What a write outcome owes the poller is `dispatch::refetches`, which is
     // where it can be pinned per variant. The rule is not obvious enough to
     // live as a `matches!` in a loop nothing tests: a *failed* write is the
@@ -336,6 +397,15 @@ fn ingest(
     #[cfg(feature = "operator")]
     if atlas::dispatch::refetches(&ev) {
         poller.now();
+    }
+    // And the one surface that is *waiting* for an answer rather than being
+    // told about one. The login form sends and then has to hear what the owner
+    // said — a consent question to put to the operator, a refusal to show under
+    // the fields — and the answer arrives here rather than out of the key that
+    // asked for it, because a write never blocks the frame loop.
+    #[cfg(feature = "operator")]
+    if let AppEvent::Wrote(outcome) = &ev {
+        views.wrote(outcome);
     }
     // Before the fold, because the fold consumes the event. A toast is about the
     // event itself rather than about the state it leaves behind — an approval
@@ -384,6 +454,20 @@ fn spawn_terminal_events(tx: Tx) {
         while let Some(next) = stream.next().await {
             let ev = match next {
                 Ok(Event::Key(key)) => AppEvent::Key(key),
+                // Wheel and press only. Move and drag arrive dozens per
+                // second under capture, and nothing downstream reads them —
+                // forwarding them would wake the loop for events every view
+                // declines.
+                Ok(Event::Mouse(m))
+                    if matches!(
+                        m.kind,
+                        MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::Down(_)
+                    ) =>
+                {
+                    AppEvent::Mouse(m)
+                }
                 Ok(Event::Resize(_, _)) => AppEvent::Resize,
                 Ok(_) => continue,
                 // A terminal that stopped producing events cannot be recovered
@@ -467,7 +551,15 @@ fn restore() {
     if let Err(err) = disable_raw_mode() {
         tracing::error!(%err, "could not leave raw mode");
     }
-    if let Err(err) = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show) {
+    // Mouse capture off before the screen goes back: releasing the alternate
+    // screen first would leave one report's worth of mouse escapes printing
+    // into the shell the operator just got back.
+    if let Err(err) = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        cursor::Show
+    ) {
         tracing::error!(%err, "could not leave the alternate screen");
     }
 }
@@ -477,7 +569,10 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+        // Capture after the screen is taken, mirroring `restore`'s reverse
+        // order: a capture enabled on the primary screen would spray mouse
+        // escapes into the scrollback if the next call failed.
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
         ENTERED.store(true, Ordering::SeqCst);
         Ok(Self)
     }

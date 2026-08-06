@@ -423,15 +423,12 @@ def test_snapshot_forwards_explicit_provider(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("credentials", "expected"),
     [
-        ({}, "alpaca provider requires ALPACA_API_KEY and ALPACA_API_SECRET"),
-        (
-            {"ALPACA_API_KEY": "key"},
-            "alpaca provider requires ALPACA_API_SECRET",
-        ),
-        (
-            {"ALPACA_API_SECRET": "secret"},
-            "alpaca provider requires ALPACA_API_KEY",
-        ),
+        # No login anywhere: the one sentence that names both fixes.
+        ({}, "needs credentials"),
+        # A half-set env pair is a broken setup, refused by the auth module
+        # by name — never fallen through to a profile nobody asked for.
+        ({"ALPACA_API_KEY": "key"}, "ALPACA_API_SECRET is not set"),
+        ({"ALPACA_API_SECRET": "secret"}, "ALPACA_API_KEY is not set"),
     ],
 )
 def test_alpaca_missing_credentials_fail_loud(
@@ -439,11 +436,14 @@ def test_alpaca_missing_credentials_fail_loud(
 ):
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    # The data lane now honors `alpaca profile login`; point the profile
+    # store at an empty dir so a developer's real session cannot leak in.
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(tmp_path / "no-profiles"))
     for name, value in credentials.items():
         monkeypatch.setenv(name, value)
     _warm_alpaca_cache(tmp_path, monkeypatch)
 
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(RuntimeError, match=expected):
         market.get_prices(
             ["AAA"],
             "2024-01-01",
@@ -452,14 +452,18 @@ def test_alpaca_missing_credentials_fail_loud(
             cache_dir=tmp_path,
         )
 
-    assert str(exc_info.value) == expected
-
 
 def test_alpaca_missing_package_fails_loud(tmp_path, monkeypatch):
     monkeypatch.setenv("ALPACA_API_KEY", "key")
     monkeypatch.setenv("ALPACA_API_SECRET", "secret")
     _warm_alpaca_cache(tmp_path, monkeypatch)
-    monkeypatch.setitem(sys.modules, "alpaca", None)
+    # The whole family, not just the root: an earlier test's validation may
+    # have imported the real submodules, and a cached `alpaca.data.enums`
+    # satisfies a from-import without ever consulting the stubbed root.
+    for name in ("alpaca", "alpaca.data", "alpaca.data.enums",
+                 "alpaca.data.historical", "alpaca.data.requests",
+                 "alpaca.data.timeframe"):
+        monkeypatch.setitem(sys.modules, name, None)
 
     with pytest.raises(RuntimeError, match="'alpaca-py' package"):
         market.get_prices(
@@ -495,8 +499,9 @@ def test_alpaca_requests_adjusted_daily_closes(monkeypatch):
             requests.append(self)
 
     class StockHistoricalDataClient:
-        def __init__(self, key, secret):
-            assert (key, secret) == ("key", "secret")
+        def __init__(self, api_key=None, secret_key=None, oauth_token=None):
+            assert (api_key, secret_key) == ("key", "secret")
+            assert oauth_token is None
 
         def get_stock_bars(self, request):
             assert request is requests[-1]
@@ -698,3 +703,39 @@ def test_synthetic_cache_identity_includes_the_seed(tmp_path):
     again = get_prices(["ACWI", "BNDW"], "2008-01-01", offline=True, seed=7,
                        cache_dir=tmp_path)
     assert np.allclose(first.to_numpy(), again.to_numpy())
+
+
+def test_alpaca_data_client_uses_the_profile_login(tmp_path, monkeypatch):
+    """The data lane honors `alpaca profile login`, not only the env pair.
+
+    This is the seam that kept a browser-logged-in desk on research-grade
+    yfinance forever: the trading half resolved the profile, the data half
+    demanded env vars, and every permit refused paper proposals.
+    """
+    from qlab.core.data import _alpaca_client_kwargs
+
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    config = tmp_path / "alpaca-config"
+    (config / "profiles").mkdir(parents=True)
+    (config / "profiles" / "paper.yaml").write_text(
+        "api_key: pk\nsecret_key: sk\n", encoding="utf-8")
+    (config / "config.yaml").write_text("profile: paper\n", encoding="utf-8")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(config))
+
+    assert _alpaca_client_kwargs() == {"api_key": "pk", "secret_key": "sk"}
+
+
+def test_alpaca_data_client_carries_an_oauth_login(tmp_path, monkeypatch):
+    from qlab.core.data import _alpaca_client_kwargs
+
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    config = tmp_path / "alpaca-config"
+    (config / "profiles").mkdir(parents=True)
+    (config / "profiles" / "paper.yaml").write_text(
+        "access_token: tok\n", encoding="utf-8")
+    (config / "config.yaml").write_text("profile: paper\n", encoding="utf-8")
+    monkeypatch.setenv("ALPACA_CONFIG_DIR", str(config))
+
+    assert _alpaca_client_kwargs() == {"oauth_token": "tok"}

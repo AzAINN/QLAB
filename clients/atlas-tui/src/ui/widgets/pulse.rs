@@ -500,7 +500,11 @@ fn as_printed(score: f64) -> f64 {
 /// How many assets rose and how many fell. Flat is neither: a day that did not
 /// move is not an advance, and counting it as one would tilt every quiet tape
 /// green.
-fn breadth(store: &Store) -> (usize, usize) {
+///
+/// `pub` because MARKETS' breadth strip draws the same fact one pane over, and
+/// two counts of one universe is how a rail and a strip come to disagree about
+/// what kind of day it is.
+pub fn breadth(store: &Store) -> (usize, usize) {
     store
         .asset_views()
         .iter()
@@ -515,7 +519,11 @@ fn breadth(store: &Store) -> (usize, usize) {
 }
 
 /// The two segments of a `width`-wide breadth bar.
-fn segments(advancing: usize, declining: usize, width: u16) -> (u16, u16) {
+///
+/// `pub` with `breadth`, for the same strip: the rounding rule — a side with
+/// rows in it must occupy a cell — is part of what the two surfaces must agree
+/// on, or one bar says nothing advanced while the other shows a green cell.
+pub fn segments(advancing: usize, declining: usize, width: u16) -> (u16, u16) {
     let total = advancing + declining;
     if total == 0 || width == 0 {
         return (0, 0);
@@ -534,7 +542,10 @@ fn segments(advancing: usize, declining: usize, width: u16) -> (u16, u16) {
 }
 
 /// The best and worst rows of the universe by the change they carry.
-fn movers(store: &Store) -> Option<(AssetView<'_>, AssetView<'_>)> {
+///
+/// `pub` with `breadth`: MARKETS' strip names the same two ends, and two
+/// definitions of "best" is how one surface crowns a different asset.
+pub fn movers(store: &Store) -> Option<(AssetView<'_>, AssetView<'_>)> {
     let marked: Vec<AssetView> = store
         .asset_views()
         .into_iter()

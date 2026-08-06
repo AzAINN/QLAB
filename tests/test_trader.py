@@ -732,8 +732,10 @@ def test_non_liquidation_refused_under_halt(reg_and_broker):
 
 def test_simulated_positions_carry_unrealized_pl():
     reg = Registry(":memory:")
+    fixed = lambda tickers: {t: 110.0 for t in tickers}
+    fixed.synthetic = True  # a provider must declare its lane (fail-loud)
     broker = SimulatedPaperBroker(
-        reg, price_provider=lambda tickers: {t: 110.0 for t in tickers},
+        reg, price_provider=fixed,
         starting_cash=10_000.0)
     reg.apply_fill("ACWI", 10.0, 100.0, -1_000.0)  # bought at 100, marked 110
     state = broker.portfolio_state(["ACWI"])
@@ -874,3 +876,66 @@ def test_oauth_credentials_build_the_clients_with_a_token(monkeypatch):
     assert seen["trading"]["paper"] is True      # never configurable
     assert seen["data"]["oauth_token"] == "tok-123"
     assert "api_key" not in seen["trading"] or seen["trading"]["api_key"] is None
+
+
+def test_a_cross_lane_valuation_cannot_ratchet_a_phantom_high_water_mark():
+    """The observed incident, as a test: a live-lane book valued once from the
+    synthetic feed must not carry the synthetic peak into the next live read
+    as a fabricated drawdown that trips the kill switch."""
+    reg = Registry(":memory:")
+
+    def live(tickers):
+        return {t: 100.0 for t in tickers}
+    live.synthetic = False
+
+    def synthetic(tickers):
+        return {t: 240.0 for t in tickers}  # the feed disagreement, ~2.4x
+    synthetic.synthetic = True
+
+    broker = SimulatedPaperBroker(reg, live, starting_cash=10_000.0)
+    reg.apply_fill("ACWI", 100.0, 100.0, -10_000.0)
+    state = broker.portfolio_state(["ACWI"])
+    assert state["high_water_mark"] == pytest.approx(10_000.0)
+
+    # An offline surface values the same book from the synthetic feed.
+    off = SimulatedPaperBroker(reg, synthetic, starting_cash=10_000.0)
+    off.portfolio_state(["ACWI"])  # would have ratcheted HWM to 24_000
+
+    # Back on live data: the mark must be in live units, drawdown ~0.
+    after = SimulatedPaperBroker(reg, live, starting_cash=10_000.0)
+    state = after.portfolio_state(["ACWI"])
+    assert state["high_water_mark"] == pytest.approx(10_000.0), (
+        "a synthetic-feed valuation ratcheted the live lane's high-water "
+        "mark; this is the phantom-halt bug")
+    # And the protection reset is on the record, twice (there and back).
+    kinds = [e["kind"] for e in reg.read_events(50)]
+    assert kinds.count("hwm_lane_reset") == 2
+
+
+def test_a_same_lane_ratchet_still_ratchets_and_never_lowers():
+    reg = Registry(":memory:")
+
+    def live(tickers):
+        return {t: 100.0 for t in tickers}
+    live.synthetic = False
+
+    broker = SimulatedPaperBroker(reg, live, starting_cash=10_000.0)
+    reg.apply_fill("ACWI", 100.0, 100.0, -10_000.0)
+    broker.portfolio_state(["ACWI"])
+
+    def down(tickers):
+        return {t: 90.0 for t in tickers}
+    down.synthetic = False
+    lower = SimulatedPaperBroker(reg, down, starting_cash=10_000.0)
+    state = lower.portfolio_state(["ACWI"])
+    assert state["high_water_mark"] == pytest.approx(10_000.0)
+    assert not any(e["kind"] == "hwm_lane_reset" for e in reg.read_events(50))
+
+
+def test_an_unmarked_price_provider_is_refused_not_defaulted():
+    """Defaulting the lane would re-open the silent cross-feed ratchet."""
+    reg = Registry(":memory:")
+    broker = SimulatedPaperBroker(
+        reg, price_provider=lambda tickers: {t: 100.0 for t in tickers})
+    with pytest.raises(RuntimeError, match="lane"):
+        broker.portfolio_state(["ACWI"])

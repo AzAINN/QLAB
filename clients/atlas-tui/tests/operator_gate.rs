@@ -45,6 +45,49 @@ fn files_mentioning(needle: &str) -> Vec<String> {
     found
 }
 
+/// Every file under `src` whose *production* source contains `literal`, as
+/// paths relative to `src`.
+///
+/// The test modules are cut off, exactly as `input`'s keymap scrape cuts them
+/// and for the same reason: a module's own tests read back what the module
+/// holds, and a check that counted those would either be permanently wrong or
+/// would push the tests into spelling the accessor some other way — which is
+/// gaming the pin rather than passing it. Cut at the test *module* rather than
+/// at the first `#[cfg(test)]`, because several files carry test-only helpers
+/// above it.
+fn production_files_mentioning(literal: &str) -> Vec<String> {
+    fn walk(dir: &std::path::Path, literal: &str, found: &mut Vec<String>) {
+        let entries = std::fs::read_dir(dir).unwrap_or_else(|err| panic!("{dir:?}: {err}"));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, literal, found);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let whole = std::fs::read_to_string(&path).unwrap_or_default();
+            let source = match whole.find("#[cfg(test)]\nmod tests") {
+                Some(at) => &whole[..at],
+                None => &whole[..],
+            };
+            if source.contains(literal) {
+                found.push(
+                    path.to_string_lossy()
+                        .trim_start_matches(SRC)
+                        .trim_start_matches('/')
+                        .to_string(),
+                );
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(std::path::Path::new(SRC), literal, &mut found);
+    found.sort();
+    found
+}
+
 /// The files that may never perform IO, by path prefix.
 ///
 /// `ui/` renders and returns `Command`s. `cmd.rs` is the other half of that
@@ -150,6 +193,102 @@ fn no_view_or_widget_can_reach_the_writer() {
     );
 }
 
+#[test]
+fn the_plaintext_of_a_typed_credential_is_readable_in_exactly_one_file() {
+    // The same shape as the `.post(` pin above, for the other thing this crate
+    // must not spread around: a credential an operator typed is unwrapped in
+    // the file that puts it on the wire and nowhere else. Everywhere between —
+    // the form, the `Command`, the dispatcher — holds a `Secret`, whose `Debug`
+    // is the redaction, so no tracing line, panic message or toast can render
+    // one however it is worded.
+    //
+    // Asserting the exact list rather than "nothing found": a grep that cannot
+    // read the tree returns no matches, which would read as a clean crate.
+    assert_eq!(
+        production_files_mentioning(".expose("),
+        vec!["net/write.rs".to_string()],
+        "a credential's plaintext may only be read where it is sent"
+    );
+    // And the owner's own field names, which are the other spelling of the same
+    // reach: a second module building this body would be a second place that
+    // has to be reasoned about.
+    assert_eq!(
+        production_files_mentioning("api_secret"),
+        vec!["net/write.rs".to_string()],
+        "the credential body is built in one place"
+    );
+    // The search really ran, and the walker really reaches the deep files: a
+    // reader that could not open the tree returns nothing, which would read as
+    // a crate with no secrets in it at all.
+    assert!(production_files_mentioning("Secret").contains(&"ui/views/settings.rs".to_string()));
+}
+
+#[test]
+fn there_is_one_box_a_credential_is_typed_into_however_it_was_opened() {
+    // The startup door's third step is a *call* to SETTINGS' own login form,
+    // never a second form beside it. Pinned by module path rather than by
+    // behaviour because that is the thing that can go wrong quietly: a door
+    // that grew two masked fields of its own would draw identically, pass every
+    // frame test, and give this crate a second answer to each of the rules the
+    // one form carries — the masking, the `Drop` that wipes the buffers, the
+    // owner's consent question about destroying a stored profile, and the
+    // single file the plaintext is readable in above.
+    for owned in ["Stage::Consent", "field_row", "secret::wipe"] {
+        assert_eq!(
+            production_files_mentioning(owned),
+            vec!["ui/views/settings.rs".to_string()],
+            "{owned} belongs to the one login form"
+        );
+    }
+    // And the door reaches it by name, holding nothing itself: the handoff is
+    // one call, so there is no state in which the door is carrying a pair.
+    let door = source("ui/door.rs");
+    assert!(
+        door.contains("views.open_login()"),
+        "the door opens no form"
+    );
+    assert!(
+        !door.contains("Secret"),
+        "the door holds something it should have handed over"
+    );
+}
+
+#[test]
+fn every_surface_that_offers_a_model_reads_the_one_producer() {
+    // Three surfaces now put the same list in front of an operator — the
+    // `/model` strip, the startup door's second question, and SETTINGS' model
+    // switcher — and the honesty rules on that list are not obvious ones: a
+    // backend the desk cannot reach stays *on* it with the owner's own
+    // sentence and no choice behind it, and the workforce is offered `claude`
+    // alone because the tier map owns its model.
+    //
+    // Pinned by module path rather than by behaviour, for the reason the login
+    // form is: a surface that built its own list would render identically on
+    // the day it was written and would drift on the first rule that changed —
+    // and it would drift *quietly*, because each surface's own tests would keep
+    // passing against its own copy.
+    assert_eq!(
+        production_files_mentioning("fn offers("),
+        vec!["cmd.rs".to_string()],
+        "the offers list is produced in one place"
+    );
+    assert_eq!(
+        production_files_mentioning("cmd::offers("),
+        vec!["ui/door.rs".to_string(), "ui/views/settings.rs".to_string()],
+        "a surface is drawing a model list it built itself"
+    );
+    // And the mark that says which row a surface is already running, which is
+    // the other half of the same list: two copies of "which held pair equals
+    // this offer" is two chances for one of them to mark the wrong row.
+    assert_eq!(
+        production_files_mentioning(".running(store"),
+        vec!["ui/door.rs".to_string(), "ui/views/settings.rs".to_string()],
+    );
+    // The searches really ran: a walker that could not read the tree returns
+    // nothing, which would read as a crate with no model surfaces at all.
+    assert!(production_files_mentioning("ModelChoice::Pair").contains(&"cmd.rs".to_string()));
+}
+
 // -- the glass build --------------------------------------------------------
 
 #[cfg(not(feature = "operator"))]
@@ -193,7 +332,7 @@ mod glass {
 #[cfg(feature = "operator")]
 mod operator {
     use atlas::model::Snapshot;
-    use atlas::net::write::{Execution, WriteClient};
+    use atlas::net::write::{Choice, Execution, WriteClient};
     use atlas::store::Posture;
     use atlas::ui::widgets::confirm::Modal;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -333,13 +472,18 @@ mod operator {
     }
 
     fn frame(store: &atlas::store::Store) -> String {
+        frame_with(store, &atlas::ui::views::Views::new())
+    }
+
+    /// One frame drawn from views a test has already pressed keys into — the
+    /// only way to read what a *surface* did with an outcome, rather than what
+    /// the outcome said.
+    fn frame_with(store: &atlas::store::Store, views: &atlas::ui::views::Views) -> String {
         use atlas::fx::Fx;
-        use atlas::ui::views::Views;
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
-        let views = Views::new();
         let fx = Fx::default();
         let now = std::time::Instant::now();
-        term.draw(|f| atlas::ui::shell::draw(f, store, &views, &fx, now))
+        term.draw(|f| atlas::ui::shell::draw(f, store, views, &fx, now))
             .unwrap();
         term.backend()
             .buffer()
@@ -962,12 +1106,16 @@ mod operator {
     }
 
     #[tokio::test]
-    async fn the_two_commands_the_runtime_handles_itself_send_nothing() {
+    async fn the_three_commands_the_runtime_handles_itself_send_nothing() {
         // A stray `Quit` reaching the writer must not put a meaningless row on
-        // the bus — every `Wrote` raises a toast and refetches the desk.
+        // the bus — every `Wrote` raises a toast and refetches the desk. The
+        // catalog fetch is here for a second reason: it is a *read*, served by
+        // the poller, and a write outcome for it would announce a request that
+        // changed nothing.
         let client = WriteClient::new("http://127.0.0.1:1").unwrap();
         assert_eq!(perform(&client, Command::Quit).await, None);
         assert_eq!(perform(&client, Command::Refresh).await, None);
+        assert_eq!(perform(&client, Command::Backends).await, None);
     }
 
     #[tokio::test]
@@ -1046,11 +1194,213 @@ mod operator {
                 template: "regime_review".into(),
                 workflow_id: "805e0729cfec4d67".into(),
             },
+            // A model choice is persisted by the owner and served back in the
+            // next snapshot's `llm` block, which is what SETTINGS' MODELS card
+            // draws. Without the refetch that card would keep naming the old
+            // backend for a whole poll interval after the operator moved it.
+            Wrote::Chose {
+                said: "Atlas reasons with ollama qwen2.5:7b".into(),
+            },
+            // And the refusal, for the reason the failures are here: nothing
+            // moved, but the reading the operator is about to act on is the one
+            // on screen, and the catalog behind the refusal is what changed
+            // under it.
+            Wrote::ChoiceRefused {
+                said: "ollama is not running at http://127.0.0.1:11499".into(),
+            },
         ] {
             assert!(
                 refetches(&AppEvent::Wrote(outcome.clone())),
                 "{outcome:?} must bring the next poll forward"
             );
+        }
+    }
+
+    // -- the model choice --------------------------------------------------
+    //
+    // Bodies and outcomes pinned against `POST /api/llm` as the owner actually
+    // answers it — every sentence below was captured from a live worktree owner
+    // rather than copied from a note that can rot.
+
+    #[tokio::test]
+    async fn a_model_choice_lands_on_the_route_in_the_two_shapes_the_owner_takes() {
+        // The pair and the switch are one route with two bodies, and the
+        // difference is load-bearing: an absent `backend`/`model` means "leave
+        // the pair alone", which is what makes `{surface, enabled}` a switch. A
+        // client that sent the current pair alongside `enabled: false` would
+        // re-validate a daemon that is probably the reason it was sent.
+        let owner = spawn_owner(
+            200,
+            r#"{"surface": "reasoner", "reasoner": {"backend": "ollama", "model": "qwen2.5:7b"},
+                "workforce": {"backend": "claude", "model": "inherit"},
+                "reasoner_enabled": false,
+                "effect": "Atlas answers you on ollama qwen2.5:7b; enable the reasoner to let it choose templates too"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let said = match client
+            .set_llm("reasoner", Some(("ollama", "qwen2.5:7b")), None)
+            .await
+            .unwrap()
+        {
+            Choice::Chosen(said) => said,
+            other => panic!("{other:?}"),
+        };
+        // The owner's own account of what it did, which is not what an operator
+        // would assume: naming a reasoner model does not switch the reasoner on,
+        // and only this sentence says so.
+        assert!(said.contains("enable the reasoner"), "{said}");
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/llm");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({"surface": "reasoner", "backend": "ollama",
+                               "model": "qwen2.5:7b"}),
+            "a pair choice carries no `enabled` nobody asked for"
+        );
+
+        let owner = spawn_owner(
+            200,
+            r#"{"surface": "reasoner", "reasoner": {"backend": "ollama", "model": "qwen2.5:7b"},
+                "workforce": {"backend": "claude", "model": "inherit"},
+                "reasoner_enabled": true, "effect": "Atlas reasons with ollama qwen2.5:7b"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(matches!(
+            client.set_llm("reasoner", None, Some(true)).await.unwrap(),
+            Choice::Chosen(_)
+        ));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&owner.only().body).unwrap(),
+            serde_json::json!({"surface": "reasoner", "enabled": true}),
+            "the switch names no pair, which is what leaves the pair alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_way_the_owner_says_no_to_a_model_is_a_refusal_and_not_a_failure() {
+        // All four are 400s with a sentence written for a human, and all four
+        // are considered answers to a well-formed request. Folded into `Err`
+        // they would arrive as "the owner refused with 400: {…}" — the remedy
+        // buried inside a transport error nobody can act on.
+        for said in [
+            "ollama is not running at http://127.0.0.1:11499 — start it with `ollama serve`",
+            "the ollama backend cannot serve 'granite3.3:8b' right now; it serves qwen2.5:7b",
+            "only the reasoner surface can be switched on or off",
+            "unknown model surface 'banana'; the desk has reasoner and workforce",
+        ] {
+            let owner = spawn_owner(400, serde_json::json!({"error": said}).to_string());
+            let client = WriteClient::new(&owner.base).unwrap();
+            match client
+                .set_llm("workforce", Some(("ollama", "granite3.3:8b")), None)
+                .await
+            {
+                Ok(Choice::Rejected(back)) => assert_eq!(back, said),
+                other => panic!("{said}: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_answer_the_owner_did_not_explain_is_a_failure_and_a_broken_owner_is_an_error()
+    {
+        // `set_llm_config` always returns its `effect`. A 200 without one is a
+        // broken contract, and inventing a receipt out of the two words just
+        // sent is the shape `desk_mode`'s label and `start_workflow`'s handle
+        // already refuse.
+        for body in [
+            r#"{"surface": "reasoner", "reasoner_enabled": true}"#,
+            r#"{"surface": "reasoner", "effect": ""}"#,
+        ] {
+            let owner = spawn_owner(200, body);
+            let client = WriteClient::new(&owner.base).unwrap();
+            match client.set_llm("reasoner", None, Some(true)).await {
+                Err(err) => assert!(
+                    err.to_string().contains("without saying what it did"),
+                    "{err}"
+                ),
+                other => panic!("{body}: {other:?}"),
+            }
+        }
+        // And a status that is not a considered answer stays an error: a 502 is
+        // something in front of the desk, not the desk saying no, and offering
+        // it as a refusal would put a proxy's page where the owner's remedy goes.
+        let owner = spawn_owner(502, "<html>bad gateway</html>");
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(client.set_llm("reasoner", None, Some(false)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_model_command_reaches_the_owner_and_comes_back_in_its_own_words() {
+        // The dispatch routing: which method a `Command` lands on, and which
+        // `Wrote` each answer becomes.
+        let owner = spawn_owner(
+            200,
+            r#"{"surface": "workforce", "effect": "the workforce roles run on claude inherit"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(
+                &client,
+                Command::SetLlm {
+                    surface: "workforce".into(),
+                    choice: atlas::cmd::ModelChoice::Pair {
+                        backend: "claude".into(),
+                        model: "inherit".into(),
+                    },
+                }
+            )
+            .await,
+            Some(Wrote::Chose {
+                said: "the workforce roles run on claude inherit".into(),
+            })
+        );
+        assert_eq!(owner.only().path, "/api/llm");
+
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "only the reasoner surface can be switched on or off"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let outcome = perform(
+            &client,
+            Command::SetLlm {
+                surface: "workforce".into(),
+                choice: atlas::cmd::ModelChoice::Enabled(false),
+            },
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            Some(Wrote::ChoiceRefused {
+                said: "only the reasoner surface can be switched on or off".into(),
+            })
+        );
+        // And both reach the operator. A `Wrote` variant with no toast arm is a
+        // write nobody is told about; the refusal is `Warn` because the desk
+        // considered it and nothing moved.
+        let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.unwrap()))
+            .expect("a refused choice owes the operator a box");
+        assert_eq!(toast.level, atlas::ui::widgets::toast::Level::Warn);
+        assert!(toast.message.contains("only the reasoner"), "{toast:?}");
+
+        // A request that never landed names the action it was about — and names
+        // the switch as a switch, not as a pair it never sent.
+        let client = WriteClient::new("http://127.0.0.1:1").unwrap();
+        match perform(
+            &client,
+            Command::SetLlm {
+                surface: "reasoner".into(),
+                choice: atlas::cmd::ModelChoice::Enabled(false),
+            },
+        )
+        .await
+        {
+            Some(Wrote::Failed { what, said }) => {
+                assert_eq!(what, "switch the reasoner off");
+                assert!(!said.is_empty());
+            }
+            other => panic!("{other:?}"),
         }
     }
 
@@ -1166,6 +1516,92 @@ mod operator {
     }
 
     #[tokio::test]
+    async fn the_door_can_take_a_book_it_cannot_reach_and_the_warning_rides_its_own_outcome() {
+        // The startup door may now point a desk at the real book with no login
+        // behind it — the gate that used to refuse that was authority the door
+        // never had, and refusing it also removed the one walk that ends at the
+        // login form. The honesty it traded for is *this*: the door's outcome
+        // is the same `Command::DeskMode` every other switch produces, so the
+        // credential warning the test above pins rides it too.
+        //
+        // Driven through the real router rather than hand-built, because the
+        // claim being checked is that the door's command **is** that command.
+        let mut store = atlas::store::Store::default();
+        store.posture = Posture::Operator;
+        store.apply(
+            atlas::bus::AppEvent::Snapshot(Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "desk_mode": {"data": "synthetic", "book": "simulated",
+                                  "label": "SYNTHETIC", "offline": true,
+                                  "credentials": "no ALPACA_API_KEY_ID in the environment",
+                                  "credentials_ok": false}
+                }))
+                .unwrap(),
+            )),
+            std::time::Instant::now(),
+        );
+        store.pick();
+        let mut views = atlas::ui::views::Views::new();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // The runtime draws before its first event, and the door reads its
+        // floor off the frame it was last given.
+        frame_with(&store, &views);
+        // LIVE, then the book the desk cannot reach, then on to the models,
+        // then keep them: the walk the ruling makes reachable.
+        let mut acted = None;
+        for code in [
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Down,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Enter,
+        ] {
+            acted = atlas::ui::shell::on_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &mut store,
+                &mut views,
+            );
+            frame_with(&store, &views);
+        }
+        let cmd = acted.expect("the walk ends by applying the pair");
+        assert_eq!(
+            cmd,
+            Command::DeskMode {
+                data: "live".into(),
+                book: "alpaca".into()
+            }
+        );
+        // And it lands the operator in front of the login, which is the other
+        // half of what the gate's removal bought.
+        assert_eq!(store.nav.view, atlas::store::ViewId::Settings);
+
+        let owner = spawn_owner(
+            200,
+            desk_mode_body(
+                "LIVE · ALPACA BOOK",
+                r#""credentials_ok": false, "credentials": "ALPACA_API_KEY_ID is not set""#,
+            ),
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let outcome = perform(&client, cmd).await;
+        match &outcome {
+            Some(Wrote::Pointed { warning, .. }) => assert_eq!(
+                warning.as_deref(),
+                Some("ALPACA_API_KEY_ID is not set"),
+                "the door's own switch reported a book it cannot trade as a clean one"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.unwrap()))
+            .expect("a box");
+        assert_eq!(toast.level, atlas::ui::widgets::toast::Level::Warn);
+        assert!(toast.message.contains("ALPACA_API_KEY_ID"), "{toast:?}");
+    }
+
+    #[tokio::test]
     async fn the_credential_warning_speaks_only_about_the_book_that_can_trade() {
         // The simulated book needs no login, so a warning beside it would train
         // an operator to read past the one that matters.
@@ -1276,6 +1712,463 @@ mod operator {
             }
             other => panic!("a refused pair must not read as a switch: {other:?}"),
         }
+    }
+
+    // -- the alpaca login --------------------------------------------------
+    //
+    // C1's settled contract, driven against a canned owner rather than read off
+    // its report: `POST /api/alpaca/credentials` answers 200 with
+    // `desk_mode_payload()`, **400 carrying `confirm`** when a stored login
+    // would be destroyed, and 400 without it when the request itself is wrong.
+    // The two 400s are told apart by that field and never by the sentence — the
+    // validation refusal ("replace must be true or false") contains the word.
+
+    use atlas::net::write::{Login, WriteError};
+    use atlas::secret::Secret;
+
+    /// A plausible pair, in the shapes the owner's own patterns admit.
+    fn pair() -> (Secret, Secret) {
+        (
+            Secret::new("PKTEST0123456789".into()),
+            Secret::new("s3cret/abcdefghijklmnopqrstuv".into()),
+        )
+    }
+
+    /// The owner's answer to a login it accepted.
+    const STORED: &str = r#"{"data": "live", "book": "alpaca", "label": "LIVE · ALPACA BOOK",
+        "offline": false, "credentials_ok": true, "credentials": "paper key ending 4f21"}"#;
+
+    /// The consent refusal, in the owner's own words (`AlpacaConsentRequired`).
+    const CONSENT: &str = r#"{"error": "the active alpaca profile holds a browser login; storing a key pair discards its access token and refresh token, and they cannot be recovered without logging in again", "confirm": "replace"}"#;
+
+    #[tokio::test]
+    async fn a_login_carries_the_pair_and_never_a_replace_nobody_asked_for() {
+        let owner = spawn_owner(200, STORED);
+        let client = WriteClient::new(&owner.base).unwrap();
+        let (key, secret) = pair();
+        let out = client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap();
+        assert!(matches!(out, Login::Stored(_)), "{out:?}");
+
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/alpaca/credentials");
+        // `replace` is absent, not `false`: the owner defaults it, and a client
+        // that sent the flag on every login would be one edit away from sending
+        // `true` on every login.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({
+                "api_key": "PKTEST0123456789",
+                "api_secret": "s3cret/abcdefghijklmnopqrstuv"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_two_four_hundreds_are_told_apart_by_the_confirm_field_and_not_by_the_words() {
+        // The consentable one, rendered verbatim: the sentence names what would
+        // be lost, and this client owns none of that wording.
+        let owner = spawn_owner(400, CONSENT);
+        let client = WriteClient::new(&owner.base).unwrap();
+        let (key, secret) = pair();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::ConsentNeeded(said) => {
+                assert!(said.contains("refresh token"), "{said}");
+                assert!(!said.contains("confirm"), "the field is not the sentence");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // The trap. This refusal *contains the word* `replace` and is not
+        // confirmable — a client sniffing the sentence would offer to destroy a
+        // profile over a body the operator should fix instead.
+        let owner = spawn_owner(400, r#"{"error": "replace must be true or false"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::Rejected(said) => assert!(said.contains("true or false"), "{said}"),
+            other => panic!("a validation refusal must not offer consent: {other:?}"),
+        }
+
+        // A field this client cannot act on is not a question either. The value
+        // names *which* flag would grant the request, and there is exactly one
+        // this form knows how to set — offering to confirm anything else would
+        // be sending `replace: true` at a refusal that never asked for it.
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "the desk is not configured for that", "confirm": "force"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::Rejected(said) => assert!(said.contains("not configured"), "{said}"),
+            other => panic!("an unknown confirm flag is not consent: {other:?}"),
+        }
+
+        // And consent, once given, is the only thing that sets the flag.
+        let owner = spawn_owner(200, STORED);
+        let client = WriteClient::new(&owner.base).unwrap();
+        client
+            .set_alpaca_credentials(&key, &secret, Some(true))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&owner.only().body).unwrap();
+        assert_eq!(body["replace"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn only_a_four_hundred_can_ask_this_client_to_overwrite_a_stored_login() {
+        // A 500 carrying the field is a broken owner, not an invitation to
+        // discard a browser login. It stays an error, and the form never puts
+        // the consent question up.
+        let owner = spawn_owner(500, CONSENT);
+        let client = WriteClient::new(&owner.base).unwrap();
+        let (key, secret) = pair();
+        match client.set_alpaca_credentials(&key, &secret, None).await {
+            Err(WriteError::Refused { status, .. }) => assert_eq!(status, 500),
+            other => panic!("a 500 must not become a consent prompt: {other:?}"),
+        }
+
+        // A 400 that is not JSON at all is still a refusal to fix — never a
+        // consent prompt, and never an error that loses what the owner said.
+        let owner = spawn_owner(400, "the desk is not answering json today");
+        let client = WriteClient::new(&owner.base).unwrap();
+        match client
+            .set_alpaca_credentials(&key, &secret, None)
+            .await
+            .unwrap()
+        {
+            Login::Rejected(said) => assert!(said.contains("not answering json"), "{said}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A reply that hands back exactly what was sent — the shape an interposing
+    /// proxy produces, at whichever status it likes.
+    const ECHOED: &str = r#"{"error": "cannot POST api_key=PKTEST0123456789 api_secret=s3cret/abcdefghijklmnopqrstuv to upstream"}"#;
+
+    /// What the login form's own box says after one outcome.
+    ///
+    /// The third surface, and the one with no length of its own: `Form::note`
+    /// wraps into whatever room the box has. Driven through the real shell,
+    /// because the question is what a *renderer* did with the outcome rather
+    /// than what the outcome said.
+    fn form_note_after(outcome: &Wrote) -> String {
+        use atlas::store::{Store, ViewId};
+        use atlas::ui::views::Views;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut store = Store::default();
+        store.posture = Posture::Operator;
+        store.nav.view = ViewId::Settings;
+        let _ = store.apply(
+            AppEvent::Snapshot(Box::new(snapshot())),
+            std::time::Instant::now(),
+        );
+        let mut views = Views::new();
+        fn press(store: &mut Store, views: &mut Views, code: KeyCode) {
+            atlas::ui::shell::on_key(KeyEvent::new(code, KeyModifiers::NONE), store, views);
+        }
+        // A frame first: the pane publishes the area the form's floor is read
+        // off, exactly as the runtime draws one before its first event.
+        frame_with(&store, &views);
+        press(&mut store, &mut views, KeyCode::Char('a'));
+        for c in "PKTEST0123456789".chars() {
+            press(&mut store, &mut views, KeyCode::Char(c));
+        }
+        press(&mut store, &mut views, KeyCode::Tab);
+        for c in "s3cret/abcdefghijklmnopqrstuv".chars() {
+            press(&mut store, &mut views, KeyCode::Char(c));
+        }
+        press(&mut store, &mut views, KeyCode::Enter);
+        views.wrote(outcome);
+        frame_with(&store, &views)
+    }
+
+    #[tokio::test]
+    async fn a_refusal_at_any_status_cannot_hand_the_pair_to_the_screen() {
+        // The owner never quotes what was typed, and C1 pins that at every one
+        // of its refusals. Nothing on this path is *guaranteed* to be the
+        // owner: a proxy in front of the desk answers with a page of its own,
+        // and 401, 413, 502 and 504 are far likelier from one than 400.
+        //
+        // The first version of this guard scrubbed inside the 400 arm, and the
+        // first version of this test asserted the pair was absent from
+        // sentences that never contained it — a tautology. So the fixture
+        // carries both values upstream, and the statuses swept are the ones
+        // that fall through to `Wrote::Failed`.
+        let (key, secret) = pair();
+        for typed in [key.expose(), secret.expose()] {
+            assert!(
+                ECHOED.contains(typed),
+                "the fixture must carry {typed} upstream or absence proves nothing"
+            );
+        }
+        for status in [400, 401, 502] {
+            let owner = spawn_owner(status, ECHOED);
+            let client = WriteClient::new(&owner.base).unwrap();
+            let outcome = perform(&client, login_cmd(false))
+                .await
+                .expect("a login always answers");
+            // Three surfaces, because the pair reaches an operator through
+            // three different renderers and the first fix covered one of them:
+            // the outcome a log line would carry, the toast, and the form's
+            // own note.
+            let printed = format!("{outcome:?}");
+            let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.clone()))
+                .expect("a refused login owes the operator a box");
+            let note = form_note_after(&outcome);
+            // The positive control. A frame with no box drawn in it would pass
+            // every absence assertion below for the wrong reason — the way a
+            // pin of this shape dies quietly.
+            assert!(note.contains("ALPACA LOGIN"), "{status}: no form drawn");
+            for surface in [&printed, &format!("{toast:?}"), &note] {
+                for typed in [key.expose(), secret.expose()] {
+                    assert!(!surface.contains(typed), "{status}: {surface}");
+                }
+            }
+            // And it says why there is nothing to read, rather than going
+            // blank: a refusal an operator cannot act on is bad enough without
+            // also being unexplained.
+            assert!(
+                printed.contains("quoted what was typed"),
+                "{status}: {printed}"
+            );
+            // One word, because the note is read off a rendered frame and the
+            // sentence wraps across rows inside the box.
+            assert!(note.contains("quoted"), "{status}: {note}");
+        }
+    }
+
+    #[tokio::test]
+    async fn testing_a_login_is_a_verdict_and_a_venue_that_says_no_is_one_too() {
+        // `/api/alpaca/test` always answers 200 — a rejected key, a silent
+        // venue and a missing profile are all results with a sentence, which is
+        // why this reads `ok` rather than the status code.
+        let owner = spawn_owner(
+            200,
+            r#"{"ok": true, "account_masked": "…7788", "status": "ACTIVE",
+                "buying_power": 200000.0, "currency": "USD"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let verdict = client.test_alpaca().await.unwrap();
+        assert!(verdict.ok);
+        assert!(verdict.summary.contains("7788"), "{verdict:?}");
+        assert!(verdict.summary.contains("$200,000.00"), "{verdict:?}");
+        assert_eq!(owner.only().path, "/api/alpaca/test");
+
+        let owner = spawn_owner(
+            200,
+            r#"{"ok": false, "reason": "rejected by alpaca — that key and secret are not a valid paper login"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let verdict = client.test_alpaca().await.unwrap();
+        assert!(!verdict.ok);
+        assert!(
+            verdict.summary.contains("rejected by alpaca"),
+            "{verdict:?}"
+        );
+
+        // `Some("")` is absent, exactly as everywhere else: a verdict with a
+        // blank line under it says less than the fallback sentence does.
+        let owner = spawn_owner(200, r#"{"ok": false, "reason": ""}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(!client.test_alpaca().await.unwrap().summary.is_empty());
+
+        // And a 200 that will not say whether it worked is a broken contract,
+        // for the same reason an execution without `executed` is: both guesses
+        // are indefensible.
+        let owner = spawn_owner(200, r#"{"account_masked": "…7788"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(client.test_alpaca().await.is_err());
+    }
+
+    /// One login command, built the way the form builds it.
+    fn login_cmd(replace: bool) -> Command {
+        let (key, secret) = pair();
+        Command::AlpacaLogin {
+            key,
+            secret,
+            replace,
+        }
+    }
+
+    #[tokio::test]
+    async fn each_credential_command_reports_what_the_owner_said_and_nothing_it_invented() {
+        let owner = spawn_owner(200, STORED);
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, login_cmd(false)).await,
+            Some(Wrote::LoggedIn {
+                usable: true,
+                note: "paper key ending 4f21".into(),
+            })
+        );
+        // Driven through the seam rather than through the client, because this
+        // is where "not asked" becomes a wire body: a `false` sent on every
+        // login is one edit away from a `true` sent on every login, and the
+        // route-level pin above cannot see the conversion at all.
+        let seen: serde_json::Value = serde_json::from_str(&owner.only().body).unwrap();
+        assert_eq!(
+            seen.get("replace"),
+            None,
+            "a login nobody was asked about carried the consent flag"
+        );
+
+        // A login the owner stored and then reports it cannot read is the
+        // "succeeded and did nothing" shape this client refuses to draw as a
+        // receipt.
+        let owner = spawn_owner(
+            200,
+            r#"{"data": "live", "book": "alpaca", "label": "LIVE · ALPACA BOOK",
+                "credentials_ok": false, "credentials": "ALPACA_API_KEY_ID is set in the environment"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, login_cmd(false)).await {
+            Some(Wrote::LoggedIn { usable, note }) => {
+                assert!(!usable);
+                assert!(note.contains("environment"), "{note}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let owner = spawn_owner(400, CONSENT);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, login_cmd(false)).await {
+            Some(Wrote::LoginNeedsConsent { said }) => {
+                assert!(said.contains("refresh token"), "{said}")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "that does not look like an alpaca key id"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, login_cmd(false)).await {
+            Some(Wrote::LoginRefused { said }) => assert!(said.contains("key id"), "{said}"),
+            other => panic!("{other:?}"),
+        }
+
+        // The consented re-POST is the same command with the flag set.
+        let owner = spawn_owner(200, STORED);
+        let client = WriteClient::new(&owner.base).unwrap();
+        perform(&client, login_cmd(true)).await;
+        let body: serde_json::Value = serde_json::from_str(&owner.only().body).unwrap();
+        assert_eq!(body["replace"], serde_json::json!(true));
+
+        let owner = spawn_owner(
+            200,
+            r#"{"ok": true, "account_masked": "…7788", "status": "ACTIVE",
+                "buying_power": 200000.0, "currency": "USD"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::TestAlpaca).await {
+            Some(Wrote::Tested { ok, summary }) => {
+                assert!(ok);
+                assert!(summary.contains("7788"), "{summary}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(owner.only().path, "/api/alpaca/test");
+    }
+
+    #[test]
+    fn every_credential_outcome_reaches_the_operator_with_the_level_it_deserves() {
+        // Invariant 10 at the toast seam: a `Wrote` variant with no arm is a
+        // write nobody is told about. The levels are the content — a stored
+        // login the owner cannot read is `Warn`, because a file that changed
+        // and a desk that cannot trade is the "succeeded and did nothing" shape
+        // this client refuses to draw as a receipt.
+        //
+        // The secrecy claim is *not* here. These sentences are hand-written and
+        // never contained a credential, so asserting one is absent from them
+        // proves nothing about the path that could carry one — that is
+        // `a_refusal_at_any_status_cannot_hand_the_pair_to_the_screen`, which
+        // drives an echoing owner.
+        use atlas::ui::widgets::toast::Level;
+        let cases = [
+            (
+                Wrote::LoggedIn {
+                    usable: true,
+                    note: "paper key ending 4f21".into(),
+                },
+                Level::Info,
+            ),
+            (
+                Wrote::LoggedIn {
+                    usable: false,
+                    note: "ALPACA_API_KEY_ID is set in the environment".into(),
+                },
+                Level::Warn,
+            ),
+            (
+                Wrote::LoginNeedsConsent {
+                    said: "the active alpaca profile holds a browser login".into(),
+                },
+                Level::Warn,
+            ),
+            (
+                Wrote::LoginRefused {
+                    said: "that does not look like an alpaca key id".into(),
+                },
+                Level::Warn,
+            ),
+            (
+                Wrote::Tested {
+                    ok: true,
+                    summary: "…7788 · ACTIVE · $200,000.00 USD".into(),
+                },
+                Level::Info,
+            ),
+            (
+                Wrote::Tested {
+                    ok: false,
+                    summary: "rejected by alpaca".into(),
+                },
+                Level::Warn,
+            ),
+        ];
+        for (outcome, level) in cases {
+            let toast = atlas::ui::widgets::toast::for_event(&AppEvent::Wrote(outcome.clone()))
+                .expect("every write outcome owes the operator a box");
+            assert_eq!(toast.level, level, "{outcome:?}");
+            assert!(!toast.message.is_empty(), "{outcome:?}");
+            assert!(
+                refetches(&AppEvent::Wrote(outcome.clone())),
+                "{outcome:?} must bring the next poll forward"
+            );
+        }
+    }
+
+    #[test]
+    fn a_typed_credential_cannot_be_printed_by_anything_that_prints() {
+        // `Command` derives `Debug`, the dispatcher traces, and a panic message
+        // formats whatever it was given. The value therefore travels wrapped in
+        // a type whose `Debug` is the redaction — not in a `String` that every
+        // one of those would render in full.
+        let (key, secret) = pair();
+        assert_eq!(format!("{key:?}"), "Secret(<redacted>)");
+        let printed = format!("{:?}", login_cmd(true));
+        for typed in ["PKTEST0123456789", "s3cret/abcdefghijklmnopqrstuv"] {
+            assert!(!printed.contains(typed), "{printed}");
+        }
+        // And the value is still there to be sent — a redaction that lost it
+        // would pass this test and store nothing.
+        assert_eq!(secret.expose(), "s3cret/abcdefghijklmnopqrstuv");
     }
 
     #[test]

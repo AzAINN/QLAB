@@ -1,16 +1,17 @@
 ---
 source: tests/golden_research.rs
+assertion_line: 50
 expression: "research().frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
-" 1 DESK │ vol forecast  IC -0.121  stability -0.424 (unstable)  —  not usable         │▌ PULSE                          "
-" 2 MKTS │ predictors    no admitted model  vs ridge:none                              │ desk stress  …                  "
-" 3 BOOK │▌ LEADERBOARD                                        newest ablation · 4 arms│ regime CALM  robust UNCERTAIN   "
-"▌4 RSCH │METHOD                         SHARPE     RET   MAXDD  CVAR95   DSR          │ drawdown 0.0%  tier NONE        "
-" 5 WORK │HRP                      ★       0.84   +7.1%  -11.3%  -1.89%  0.61          │ gross 100.0%                    "
-" 6 AUDIT│Equal weight             BENCH   0.77   +6.8%  -12.6%  -2.03%  0.54          │                                 "
-" 7 SETT │MVSK                            -0.12   -0.9%  -24.2%  -3.11%  0.00          │▌ BREADTH                        "
-"        │Scenario CVaR                      --      --      --      --    --          │ ███████████████████████████████ "
+" 1 ATLAS│ vol forecast  IC -0.121  stability -0.424 (unstable)  —  not usable         │▌ PULSE                          "
+" 2 DESK │ predictors    no admitted model  vs ridge:none                              │ desk stress  …                  "
+" 3 MKTS │▌ LEADERBOARD                                        newest ablation · 4 arms│ regime CALM  robust UNCERTAIN   "
+" 4 BOOK │METHOD                         SHARPE     RET   MAXDD  CVAR95   DSR          │ drawdown 0.0%  tier NONE        "
+"▌5 RSCH │HRP                      ★       0.84   +7.1%  -11.3%  -1.89%  0.61          │ gross 100.0%                    "
+" 6 WORK │Equal weight             BENCH   0.77   +6.8%  -12.6%  -2.03%  0.54          │                                 "
+" 7 AUDIT│MVSK                            -0.12   -0.9%  -24.2%  -3.11%  0.00          │▌ BREADTH                        "
+" 8 SETT │Scenario CVaR                      --      --      --      --    --          │ ███████████████████████████████ "
 "        │─────────────────────────────────────────────────────────────────────────────│ adv 1 / dec 4                   "
 "        │▌ RUNS                newest first ▌ CATALOG               3 of 6 operational│                                 "
 "        │board7c2f9 predictor_b 09:12:03    equal_weight                  OPERATIONAL │▌ MOVERS                         "

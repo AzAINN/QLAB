@@ -220,6 +220,21 @@ fn gutter_w(labels: &[String; LABELS]) -> u16 {
     labels.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 1
 }
 
+/// The gutter width `draw` would use for `series` under `label` — for a caller
+/// aligning a second row (BOOK's drawdown ribbon) under the same plot.
+///
+/// Derived from the same labels the chart derives its own from, so the two
+/// cannot drift: a ribbon offset by a constant would slide off the plot the
+/// day the book grows a digit. Zero for an empty series, which draws no gutter.
+pub fn scale_gutter_w(series: &[f64], label: fn(f64) -> String) -> u16 {
+    if series.is_empty() {
+        return 0;
+    }
+    let lo = series.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = series.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    gutter_w(&labels(lo, hi, label))
+}
+
 /// The label the gutter is sized by, for the refusal to quote.
 ///
 /// The *first* of the widest rather than the last, which is the top of the

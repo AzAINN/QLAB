@@ -20,14 +20,14 @@ use atlas::fx::{FlashKey, Fx};
 use atlas::model::Snapshot;
 use atlas::store::Store;
 use atlas::theme::Theme;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use harness::{body, body_style_of, content, line_with, Client};
 use std::time::{Duration, Instant};
 
 /// The fixture desk, already switched to MARKETS.
 fn markets() -> Client {
     let mut client = Client::fixture();
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     client
 }
 
@@ -39,6 +39,7 @@ fn store_from(json: &str) -> Store {
         AppEvent::Snapshot(Box::new(serde_json::from_str::<Snapshot>(json).unwrap())),
         now,
     );
+    harness::no_door(&mut store);
     store
 }
 
@@ -136,7 +137,7 @@ fn a_desk_with_no_sector_etfs_says_what_to_prewarm_instead_of_nothing() {
               "history": [750.72, 743.29, 742.09, 729.46]}
            ]}}"#,
     ));
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     let frame = client.frame(120, 36);
     assert!(
         frame.contains("sector map needs the extended universe"),
@@ -154,6 +155,51 @@ fn a_desk_with_no_sector_etfs_says_what_to_prewarm_instead_of_nothing() {
     assert!(
         narrow.contains("candidates"),
         "the remedy was clipped rather than wrapped:\n{narrow}"
+    );
+}
+
+#[test]
+fn a_wheel_and_a_click_move_the_selection_through_the_real_shell() {
+    // End to end: the frame publishes the grid's rect, the shell routes the
+    // event, and the next frame draws the marker the mouse chose. A draw
+    // happens first exactly as the runtime's loop orders it, because the rect
+    // a click is read against is the last frame's.
+    let mut client = markets();
+    let _ = client.frame(120, 36);
+    client.mouse(MouseEventKind::ScrollDown, 0, 0);
+    assert!(
+        client.frame(120, 36).contains("▌ SPY"),
+        "the wheel did not move the selection:\n{}",
+        client.frame(120, 36)
+    );
+
+    // The grid starts one column past the nav rail's rule; the header sits on
+    // the frame's row 3 (tape, breadth header, breadth facts above it), so
+    // QQQ — the third asset — is at row 6.
+    client.mouse(MouseEventKind::Down(MouseButton::Left), 12, 6);
+    assert!(
+        client.frame(120, 36).contains("▌ QQQ"),
+        "the click did not land on QQQ:\n{}",
+        client.frame(120, 36)
+    );
+
+    // A click on the nav rail is the shell's, not this view's: it switches
+    // panes rather than moving the grid's cursor.
+    client.mouse(MouseEventKind::Down(MouseButton::Left), 2, 4);
+    assert!(
+        client.frame(120, 36).contains("PORTFOLIO VALUE"),
+        "the nav click did not reach the shell:\n{}",
+        client.frame(120, 36)
+    );
+
+    // BOOK's blotter takes the wheel through the same seam. `▌ACWI` is the
+    // blotter's own marker+ticker cell — the tape spells ACWI without one.
+    let _ = client.frame(120, 36);
+    client.mouse(MouseEventKind::ScrollDown, 0, 0);
+    let frame = client.frame(120, 36);
+    assert!(
+        frame.contains("▌ACWI"),
+        "BOOK's wheel did not move its cursor:\n{frame}"
     );
 }
 
@@ -186,14 +232,14 @@ fn the_selection_survives_a_trip_through_another_view() {
     client.keys(&[KeyCode::Down, KeyCode::Down]);
     assert!(client.frame(120, 36).contains("▌ QQQ"));
 
-    client.press(KeyCode::Char('3'));
+    client.press(KeyCode::Char('4'));
     // BOOK's own headline, which only that view renders: until Task 11 this
     // read `▌ BOOK` off the placeholder that used to stand there.
     assert!(
         client.frame(120, 36).contains("PORTFOLIO VALUE"),
         "left MARKETS"
     );
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     assert!(
         client.frame(120, 36).contains("▌ QQQ"),
         "the selection was rebuilt away:\n{}",
@@ -336,15 +382,18 @@ fn a_terminal_below_the_grids_floor_refuses_rather_than_drawing_wrong_numbers() 
     // Read off the body rather than one line: the refusal is longer than the
     // pane that could not hold the grid, so it wraps — which is the whole
     // reason it is a wrapped `Paragraph` and not a `Line`.
-    assert!(body.contains("markets grid needs 55 columns"), "{body}");
+    assert!(body.contains("markets grid needs 56 columns"), "{body}");
     assert!(
         body.contains("widen the terminal"),
         "the remedy has to be nameable, not implied:\n{body}"
     );
     // And not one digit-bearing row of the grid survives beside the refusal: a
     // half-drawn grid is exactly the reading the refusal exists to prevent.
+    // The grid's arrow is `▼ ` with the cell's own space — the breadth strip
+    // above the refusal still draws its `▲1▼4` and movers, which is the point:
+    // the strip survives a grid that cannot.
     assert!(
-        !body.contains('▼') && !body.contains('▲'),
+        !body.contains("▼ ") && !body.contains("▲ "),
         "a CHG% cell survived below the floor:\n{body}"
     );
     for number in ["152.47", "729.46", "661.73", "-10.1", "6.3%"] {
@@ -361,24 +410,24 @@ fn a_terminal_below_the_grids_floor_refuses_rather_than_drawing_wrong_numbers() 
 fn the_floor_is_the_grids_allocation_and_not_the_pane_it_was_split_from() {
     // One cell, and it is the whole finding: the pane is not the grid — the cell
     // of spacing that keeps the hero's gutter off `TGT` sits between them — so a
-    // guard on the pane admits a grid one short of its own floor. At 98 columns
+    // guard on the pane admits a grid one short of its own floor. At 99 columns
     // the pane is exactly `GRID_W` and the grid is `GRID_W - 1`, which drops the
     // leading bar off an eight-value spark whose colour is still computed from
     // all eight. A cell that draws seven bars and colours nine is the same
     // silently-wrong-number class the refusal exists for, one column narrower.
     let client = markets();
 
-    // 99: the grid gets its floor exactly, and the spark is all eight bars.
-    let admitted = body(&client.frame(99, 30));
+    // 100: the grid gets its floor exactly, and the spark is all eight bars.
+    let admitted = body(&client.frame(100, 30));
     assert!(
         line_with(&admitted, "152.47").contains("▅██▄▄▅▅▁"),
         "the spark lost a bar off its head at the boundary:\n{admitted}"
     );
 
-    // 98: one cell less, and the pane says so instead of drawing seven bars.
-    let refused = body(&client.frame(98, 30));
+    // 99: one cell less, and the pane says so instead of drawing seven bars.
+    let refused = body(&client.frame(99, 30));
     assert!(
-        refused.contains("markets grid needs 55 columns"),
+        refused.contains("markets grid needs 56 columns"),
         "a pane at exactly GRID_W admitted a grid one cell short:\n{refused}"
     );
     assert!(
@@ -424,7 +473,7 @@ fn a_strip_too_narrow_for_its_sectors_says_so_rather_than_clipping_one_away() {
              {"ticker": "SOXX", "price": 312.66, "change_1d": -0.0295}
            ]}}"#,
     ));
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
 
     // Every cell rendered, and only the strip renders a signed percent — the
     // grid spells the same move as `▼ 2.08` under a `CHG%` header.
@@ -485,7 +534,7 @@ fn a_number_wider_than_its_column_keeps_its_sign_and_loses_its_tail() {
            "portfolio": {"weights": {"SPY": -0.125},
                          "target_weights": {"SPY": -0.125}}}"#,
     ));
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     let body = body(&client.frame(120, 36));
     let row = line_with(&body, "729.46");
     assert!(
@@ -502,7 +551,9 @@ fn a_number_wider_than_its_column_keeps_its_sign_and_loses_its_tail() {
 fn an_asset_the_book_does_not_hold_shows_no_weight_rather_than_zero() {
     // The fixture's book holds ACWI and not SPY. A `0.0%` target would read as
     // a deliberate exclusion, which is a decision nobody made.
-    let body = body(&markets().frame(120, 36));
+    // Through `content`, not `body`: the pulse rail's `gross 100.0%` chip can
+    // share a row with the grid, and a `0.0%` found there is not this view's.
+    let body = content(&markets().frame(120, 36));
     let acwi = line_with(&body, "152.47");
     assert!(acwi.contains("6.3%"), "the held weight is missing: {acwi}");
     let spy = line_with(&body, "729.46");
@@ -513,7 +564,7 @@ fn an_asset_the_book_does_not_hold_shows_no_weight_rather_than_zero() {
 #[test]
 fn an_empty_universe_says_so_rather_than_drawing_an_empty_grid() {
     let mut client = Client::new(store_from(r#"{"atlas": {"mode": "research"}}"#));
-    client.press(KeyCode::Char('2'));
+    client.press(KeyCode::Char('3'));
     let frame = client.frame(120, 36);
     assert!(frame.contains("no market assets"), "{frame}");
 }

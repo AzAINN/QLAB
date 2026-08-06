@@ -305,9 +305,7 @@ fn draw_predictors(f: &mut Frame, area: Rect, store: &Store) {
             ));
             spans.push(Span::styled(
                 champion.to_string(),
-                Style::default()
-                    .fg(t.positive)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.positive).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 "  Δ IC ",
@@ -318,18 +316,13 @@ fn draw_predictors(f: &mut Frame, area: Rect, store: &Store) {
                     signed3(delta),
                     Style::default().fg(format::change_tone(delta, 3)),
                 ),
-                None => Span::styled(
-                    MISSING.to_string(),
-                    Style::default().fg(t.text_tertiary),
-                ),
+                None => Span::styled(MISSING.to_string(), Style::default().fg(t.text_tertiary)),
             });
         }
         None => {
             spans.push(Span::styled(
                 "no admitted model",
-                Style::default()
-                    .fg(t.negative)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.negative).add_modifier(Modifier::BOLD),
             ));
         }
     }

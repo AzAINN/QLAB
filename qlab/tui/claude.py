@@ -28,6 +28,9 @@ from typing import Callable, Literal
 import yaml
 
 from qlab.operator import model_routing as _routing
+# The desk's one bounding+redaction gate. A tool name and a subagent name are
+# the model's strings, and this module is where they are first believed.
+from qlab.operator.llm_backends import _head
 
 
 EventKind = Literal[
@@ -695,10 +698,18 @@ class ClaudeEvent:
 
 
 def _agent_from_tool_block(block: dict) -> str:
+    """The subagent a dispatch names — the model's string, so bounded here.
+
+    Bounded at the producer, and again where the driver writes it to a durable
+    row. Two layers on purpose: this one keeps a hostile name out of every
+    renderer that reads a ClaudeEvent, and the sink's keeps the row safe
+    whatever a producer forgot (B1's dual-layer argument, one module over).
+    """
     if block.get("name") != "Agent":
         return ""
     tool_input = block.get("input") or {}
-    return str(tool_input.get("subagent_type") or tool_input.get("agent_type") or "")
+    return _head(str(tool_input.get("subagent_type")
+                     or tool_input.get("agent_type") or ""))
 
 
 def parse_stream_line(line: str) -> list[ClaudeEvent]:
@@ -727,7 +738,7 @@ def parse_stream_line(line: str) -> list[ClaudeEvent]:
         elif event_type == "content_block_start":
             block = event.get("content_block") or {}
             if block.get("type") == "tool_use":
-                name = str(block.get("name", "tool"))
+                name = _head(str(block.get("name", "tool")))
                 out.append(ClaudeEvent(
                     "tool_start", f"calling {name}", name, payload,
                     _agent_from_tool_block(block),
@@ -743,7 +754,7 @@ def parse_stream_line(line: str) -> list[ClaudeEvent]:
             if block_type == "text" and block.get("text"):
                 out.append(ClaudeEvent("text", str(block["text"]), raw=payload))
             elif block_type == "tool_use":
-                name = str(block.get("name", "tool"))
+                name = _head(str(block.get("name", "tool")))
                 out.append(ClaudeEvent(
                     "tool_start", f"calling {name}", name, payload,
                     _agent_from_tool_block(block),

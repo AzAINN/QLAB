@@ -1,13 +1,12 @@
 ---
 source: tests/golden_workforce.rs
-assertion_line: 366
 expression: "desk().frame(120, 36)"
 ---
 " no market assets in the last snapshot                                                                                  "
 " 1 ATLAS│▌ WORKFLOWS                                                  driving 805e0729│▌ PULSE                          "
 " 2 DESK │▌805e0729 running     Review the current portfolio and market read.     29m  │ desk stress  …                  "
 " 3 MKTS │  ●───●───●•──◉───○  referee     Regime NEUTRAL (fragile calm, 2 of 5…       │ regime --  robust --            "
-" 4 BOOK │                                                                             │ drawdown --  tier --            "
+" 4 BOOK │  ↳ no progress yet                                                          │ drawdown --  tier --            "
 " 5 RSCH │                                                                             │ gross --                        "
 "▌6 WORK │                                                                             │                                 "
 " 7 AUDIT│                                                                             │▌ BREADTH                        "

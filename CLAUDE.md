@@ -30,8 +30,22 @@ cd clients/atlas-tui && cargo run   # run it against the owner on QLAB_UI_PORT
 ```
 
 `clients/atlas-tui` is a second client for the same owner runtime, not a
-replacement. Both read `/api/tui`. It is read-only by construction — no order
-path, no registry handle — so invariant 3 holds there by absence.
+replacement. Both read `/api/tui`, and neither ever holds a registry handle.
+Its default build now ships armed, so the by-construction claim narrows to the
+`--no-default-features` monitoring artifact: that binary contains no
+`net::write`, no confirm modal and no `Posture::Operator`, so invariant 3 holds
+there by absence. The armed build is protected the way the Textual TUI is —
+`human_confirmed` comes from a modal bound to the last six of the plan's own
+`targets_hash`, the referee PASS is pinned to that same hash, and the owner
+re-validates every write and refuses without a persisted approval. What the
+armed build may *do* is not a launch flag: the owner persists a posture, serves
+it on `/api/tui`, and the client re-derives its scope from every snapshot.
+`POST /api/desk/posture` is exactly as unauthenticated as every other owner
+route — `/api/desk_mode`, the approval decisions and the execute path all
+predate this branch and are equally open to anyone who can reach the port. The
+posture is an operator's stated intent, not a security boundary, and must never
+be read as one: what protects a fill is the hash-bound confirm, the referee pin,
+and the owner's own re-validation.
 
 Quantum research is an isolated offline lane: `pip install -e
 ".[offline-quantum]"` then `python -m pytest tests/test_quantum.py`. It is

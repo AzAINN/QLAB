@@ -46,7 +46,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The kinds the console shows: everything a governed run emits, plus the
 /// questions a human put to the desk.
@@ -56,14 +56,27 @@ use std::time::Instant;
 /// record lives, and a console carrying approvals and fills would be a second,
 /// worse copy of it. `atlas_message` is here because a question and the phase it
 /// provoked are one story, and reading them in two places loses the order.
-pub const CONSOLE_KINDS: [&str; 6] = [
+/// `atlas_coordinator_event` is here for the reason the pane exists: a phase
+/// moving is the desk's account of a run, and the agent's own sentence is the
+/// run's. Reading only the first is how a governed session became a status word.
+pub const CONSOLE_KINDS: [&str; 7] = [
     "workflow_started",
     "workflow_phase",
     "workflow_interrupted",
     "workflow_resumed",
     "workflow_abandoned",
     "atlas_message",
+    "atlas_coordinator_event",
 ];
+
+/// How long a driving coordinator may say nothing before the pane says so.
+///
+/// Long enough that a single long tool call is not reported as silence — the
+/// owner's own dispatches routinely run tens of seconds — and short enough that
+/// a wedged run is named while an operator is still watching. The number is the
+/// whole contract of this line: SILENCE IS REPORTED, NOT ANIMATED. A spinner
+/// that spun regardless would claim progress the desk cannot observe.
+pub const SILENCE_AFTER: Duration = Duration::from_secs(45);
 
 /// The workflow id, as a prefix plus its space. Eight characters of a
 /// sixteen-character digest is far past what distinguishes two runs on any desk.
@@ -171,7 +184,7 @@ impl View for WorkforceView {
         ])
         .split(area);
 
-        self.draw_pipelines(f, rows[0], store);
+        self.draw_pipelines(f, rows[0], store, now);
         draw_console(f, rows[1], store, fx, now);
         self.draw_input(f, rows[2], store);
         // Over the view rather than over the frame: the question it asks is
@@ -350,7 +363,7 @@ impl WorkforceView {
 // -- the pipelines ----------------------------------------------------------
 
 impl WorkforceView {
-    fn draw_pipelines(&self, f: &mut Frame, area: Rect, store: &Store) {
+    fn draw_pipelines(&self, f: &mut Frame, area: Rect, store: &Store, now: Instant) {
         let block = panel_block();
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -366,9 +379,47 @@ impl WorkforceView {
         // different account of the same ten rows every poll. Two lines each, so
         // what fits is counted in pairs rather than in rows.
         let driving = driving_id(store);
+        // Derived here rather than inside the loop so the pane cannot draw two
+        // different accounts of one desk, and computed against the frame's own
+        // instant — the age is data, not a clock read in a renderer.
+        // `driving` is the owner's own claim, not "this pane found a row to put
+        // a marker on": a coordinator that reports no workflow id is still
+        // driving, and asking the marker would quietly answer a different
+        // question than the one the line is about.
+        let said = activity(is_driving(store), store.last_agent_event_at(), now);
+        // Which run the line goes under, asked of the coordinator rather than
+        // of the marker, so the two questions stay separate.
+        //
+        // `Some("")` is absent here as everywhere: an empty coordinator id must
+        // never match an empty flow id, which `format::text` would otherwise
+        // make it do by turning both into `None`.
+        let at = store
+            .coordinator()
+            .and_then(|c| format::text(c.workflow_id.as_ref()));
+        // A driving coordinator that reports no workflow id is a real state —
+        // `driver.busy` and `current_workflow_id` are read separately
+        // (`qlab/ui/server.py`), so a dispatch can be seen between them — and
+        // the derived fact must not be dropped because there is no row to hang
+        // it on. It goes under the header instead, belonging to no run.
+        if at.is_none() && lines.len() <= room {
+            if let Some((silence, text)) = &said {
+                lines.push(activity_row(*silence, text));
+            }
+        }
         for flow in flows.iter().take(room / 2) {
             lines.push(headline(flow, driving, inner.width));
             lines.push(graph(flow, store.tick, inner.width));
+            // Placement only. *Whether* there is anything to say is
+            // `activity`'s decision and nothing else's — a second opinion here
+            // is how a pane comes to report liveness the derivation refused.
+            // The row check is the pane's floor: a line pushed past it would
+            // silently displace another run's pipeline.
+            let on_this = at.is_some() && at == format::text(flow.workflow_id.as_ref());
+            if on_this && lines.len() <= room {
+                if let Some((silence, text)) = &said {
+                    lines.push(activity_row(*silence, text));
+                }
+            }
         }
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -483,6 +534,87 @@ fn status_tone(status: &str) -> ratatui::style::Color {
         "abandoned" | "failed" | "blocked" => t.negative,
         _ => t.text_dim,
     }
+}
+
+/// What the desk can honestly say about a live run's activity, if anything.
+///
+/// A pure function of three facts, none of them a clock read: whether a
+/// coordinator is walking anything, when this client last heard the workforce
+/// speak, and the instant the frame is being drawn at. `None` is the common
+/// answer — a desk nobody is driving has no activity to report, and the age of
+/// the last thing a finished run said is not liveness.
+///
+/// Past `SILENCE_AFTER` the line names the silence rather than dressing it up.
+/// That is the whole design: an operator has to be able to tell a run that is
+/// thinking from one that has stopped, and only the desk's own record can say.
+///
+/// *Progress*, not *word*, and the distinction is the point rather than a
+/// rewrite. Liveness is stamped by `tool_start` and `text` alone (see
+/// `Store::is_agent_word`), so an erroring run keeps producing prose in the
+/// console directly above this line while the clock stands still — and "no word
+/// for 45s" printed under visible words is a claim the frame itself disproves.
+/// "No progress" is true in both cases.
+/// Test-only, and marked so: production renders from `activity` directly,
+/// because it needs the `Silence` half to tone the row. A `pub` wrapper nothing
+/// called is the seam invariant 10 is about.
+#[cfg(test)]
+fn activity_line(driving: bool, last: Option<Instant>, now: Instant) -> Option<String> {
+    activity(driving, last, now).map(|(_, said)| said)
+}
+
+/// What a run's activity is, and whether it is silence.
+///
+/// One decision, made once. The tone was briefly re-derived by the renderer
+/// reading `"no word for"` off the front of this function's own output, which
+/// is a second decision made from a formatted string — rewording the line there
+/// would have silently reverted silence to the dim tone of ordinary progress.
+fn activity(driving: bool, last: Option<Instant>, now: Instant) -> Option<(Silence, String)> {
+    if !driving {
+        return None;
+    }
+    // Driving with nothing heard is a distinct fact from silence: the run may
+    // be seconds old, and "no progress for 0s" would read as a stall at startup.
+    let Some(last) = last else {
+        return Some((Silence::No, "no progress yet".to_string()));
+    };
+    // Saturating: `now` is the frame's instant and `last` an arrival stamped on
+    // another thread, so the two can cross by a hair. A negative age here would
+    // be a panic behind the alternate screen.
+    let age = now.saturating_duration_since(last);
+    Some(if age >= SILENCE_AFTER {
+        (Silence::Yes, format!("no progress for {}s", age.as_secs()))
+    } else {
+        (Silence::No, format!("spoke {}s ago", age.as_secs()))
+    })
+}
+
+/// Whether an activity line is reporting silence. Carried beside the words
+/// rather than recovered from them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Silence {
+    Yes,
+    No,
+}
+
+/// The activity line as it is drawn: under the phase node, in the tone of what
+/// it says. Silence is a warning colour because it is one.
+fn activity_row(silence: Silence, text: &str) -> Line<'static> {
+    let t = theme();
+    let tone = match silence {
+        Silence::Yes => t.warning,
+        Silence::No => t.text_dim,
+    };
+    Line::from(vec![
+        Span::styled("  ↳ ", Style::default().fg(t.text_tertiary)),
+        Span::styled(text.to_string(), Style::default().fg(tone)),
+    ])
+}
+
+/// Whether the owner says a coordinator is walking anything at all.
+fn is_driving(store: &Store) -> bool {
+    store
+        .coordinator()
+        .is_some_and(|c| c.driving.unwrap_or(false))
 }
 
 /// The workflow the owner's coordinator is actually walking, if any.
@@ -808,6 +940,63 @@ mod tests {
         assert_eq!(status_tone("interrupted"), t.warning);
         assert_eq!(status_tone("abandoned"), t.negative);
         assert_eq!(status_tone("something-new"), t.text_dim);
+    }
+
+    #[test]
+    fn silence_is_reported_rather_than_animated() {
+        let t0 = Instant::now();
+        let secs = std::time::Duration::from_secs;
+        // Parked says nothing: an age with nobody walking the run is not
+        // liveness, it is the age of the last thing a finished run said.
+        assert_eq!(activity_line(false, Some(t0), t0), None);
+        assert_eq!(
+            activity_line(true, Some(t0), t0 + secs(3)).unwrap(),
+            "spoke 3s ago"
+        );
+        assert_eq!(
+            activity_line(true, Some(t0), t0 + secs(47)).unwrap(),
+            "no progress for 47s"
+        );
+        // Both sides of the threshold, because the threshold is a comparison
+        // and a comparison with one case is an untested one.
+        assert!(activity_line(true, Some(t0), t0 + secs(44))
+            .unwrap()
+            .starts_with("spoke"));
+        assert!(activity_line(true, Some(t0), t0 + secs(45))
+            .unwrap()
+            .starts_with("no progress"));
+        // Driving with nothing heard yet is its own fact, and it is not silence
+        // measured from a clock read this function was never given.
+        assert_eq!(
+            activity_line(true, None, t0).unwrap(),
+            "no progress yet",
+            "a run that has said nothing is not a run that went quiet"
+        );
+        // A stamp from the future is a monotonic clock and a store that raced,
+        // not a negative age.
+        assert_eq!(
+            activity_line(true, Some(t0 + secs(9)), t0).unwrap(),
+            "spoke 0s ago"
+        );
+    }
+
+    #[test]
+    fn silence_is_drawn_in_the_colour_of_a_warning_and_progress_is_not() {
+        // The tone is carried beside the words rather than recovered from them.
+        // While it was parsed back off the rendered string, rewording the line
+        // would have quietly turned silence into ordinary progress.
+        let t = theme();
+        let t0 = Instant::now();
+        let secs = std::time::Duration::from_secs;
+        let tone_of = |driving, last, now| {
+            let (silence, text) = activity(driving, last, now).unwrap();
+            activity_row(silence, &text).spans[1].style.fg.unwrap()
+        };
+        assert_eq!(tone_of(true, Some(t0), t0 + secs(3)), t.text_dim);
+        assert_eq!(tone_of(true, Some(t0), t0 + SILENCE_AFTER), t.warning);
+        // A run that has said nothing *yet* has not gone quiet, and must not
+        // wear the colour of a desk that has.
+        assert_eq!(tone_of(true, None, t0), t.text_dim);
     }
 
     #[test]

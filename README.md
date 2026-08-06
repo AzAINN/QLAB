@@ -115,15 +115,20 @@ broken sweep, not a strong result.
 
 | Surface | What it is |
 |---|---|
-| `qlab tui` | the Atlas workstation (`clients/atlas-tui`) — Ratatui, read-only by construction ([README](clients/atlas-tui/README.md)) |
-| `qlab tui --classic` | Textual workstation — the complete surface, and the only one that can confirm a trade |
+| `qlab tui` | the Atlas workstation (`clients/atlas-tui`) — Ratatui, armed by default; read-only by construction only in the `--no-default-features` build ([README](clients/atlas-tui/README.md)) |
+| `qlab tui --classic` | Textual workstation — the complete surface |
 | `qlab ui` | same owner runtime, local web client |
 | `qlab desk` / `qlab workforce` / `qlab events` | one-shot CLI verbs over the owner's HTTP and event stream |
 
 Both workstations read the same `/api/tui`, so there is no window where the desk
 has two faces that disagree. The Textual client stays reachable behind
-`--classic` until the Ratatui one has been soaked on a real desk; confirming a
-paper trade still lives there.
+`--classic` until the Ratatui one has been soaked on a real desk. Either
+workstation can confirm a paper trade, and both are held to the same rule: the
+fill needs the last six of the plan's own `targets_hash` typed into a confirm
+modal, a referee PASS pinned to that same hash, and an owner that re-validates
+the request and refuses it without a persisted approval. Whether the Ratatui
+window may write at all is the owner's persisted posture, asked once at startup
+— not a launch flag.
 
 ## Commands
 

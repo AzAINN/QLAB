@@ -1791,7 +1791,7 @@ impl BookView {
         // The header states this window's posture, read off the store rather
         // than off `cfg!(feature = "operator")`. The feature says what the
         // binary can do; the flag says whether the human armed it, and a
-        // featured build started without `--operator` must offer no key — its
+        // featured build on an unarmed desk must offer no key — its
         // status line says GLASS, and the two may not disagree.
         let keys = vec![Span::styled(
             if store.posture.writes() {

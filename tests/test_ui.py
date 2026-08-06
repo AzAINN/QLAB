@@ -682,7 +682,7 @@ def _tui_args(**overrides):
 
     return SimpleNamespace(**{
         "port": 8765, "online": False, "refresh": 2.0, "claude": "offer",
-        "classic": False, "operator": False, **overrides,
+        "classic": False, "glass": False, "operator": False, **overrides,
     })
 
 
@@ -754,11 +754,12 @@ def test_tui_launches_the_ratatui_workstation_and_tells_it_the_port(
     assert seen["env"]["QLAB_UI_PORT"] == "8899"
 
 
-def test_tui_operator_flag_reaches_the_workstation(monkeypatch, tmp_path):
-    """--operator is a passthrough, not a second authority.
+def test_tui_glass_flag_reaches_the_workstation(monkeypatch, tmp_path):
+    """--glass is the one posture word a launcher may still say.
 
-    The launcher does not decide what the client may do; it forwards the word
-    and the binary decides whether it was built with anything behind it.
+    It only ever takes authority away, so forwarding it is safe in a way that
+    forwarding an arming word never was: arming is the owner's persisted answer
+    to the startup door and no launcher flag can grant it.
     """
     import qlab.autopilot.cli as cli_module
 
@@ -774,8 +775,8 @@ def test_tui_operator_flag_reaches_the_workstation(monkeypatch, tmp_path):
         lambda path, argv, env: seen.update(argv=argv) or (_ for _ in ()).throw(SystemExit(0)))
 
     with pytest.raises(SystemExit):
-        cli_module._cmd_tui(_tui_args(operator=True))
-    assert seen["argv"] == [str(binary), "--operator"]
+        cli_module._cmd_tui(_tui_args(glass=True))
+    assert seen["argv"] == [str(binary), "--glass"]
 
 
 def test_tui_without_a_built_workstation_says_how_to_build_it(monkeypatch, tmp_path):
@@ -827,12 +828,16 @@ def test_tui_classic_without_textual_names_the_extra_to_install(monkeypatch):
     assert "pip install -e '.[operator]'" in message
 
 
-def test_tui_refuses_classic_and_operator_together(monkeypatch):
-    """--operator is a word only the Ratatui client understands.
+@pytest.mark.parametrize("classic", [False, True])
+def test_tui_refuses_the_retired_operator_flag(monkeypatch, classic):
+    """`--operator` grants nothing now, so it must not parse quietly.
 
-    Dropping it silently would leave an operator believing they had asked for
-    something. The Textual client has no posture to arm — it is the complete
-    surface and already reaches the confirm gate.
+    Arming became the owner's persisted answer to the startup door in this
+    branch. A flag that survives as a no-op is exactly the silence invariant 4
+    forbids: the operator asks for an armed window, is told nothing, and gets
+    whatever posture the desk happened to hold. Refused on either client, and
+    the refusal has to name where arming went and what the surviving one-session
+    override is.
     """
     import qlab.autopilot.cli as cli_module
 
@@ -846,10 +851,46 @@ def test_tui_refuses_classic_and_operator_together(monkeypatch):
         lambda *_a: pytest.fail("a refused invocation must not exec"))
 
     with pytest.raises(SystemExit) as exit_info:
-        cli_module._cmd_tui(_tui_args(classic=True, operator=True))
+        cli_module._cmd_tui(_tui_args(classic=classic, operator=True))
     message = str(exit_info.value)
-    assert "--operator" in message and "--classic" in message
-    assert "no operator posture" in message
+    assert "--operator is retired" in message
+    assert "--glass" in message
+
+
+def test_tui_refuses_glass_with_the_classic_client(monkeypatch):
+    """A posture word the chosen client cannot honour is refused, not dropped.
+
+    `--glass` is Ratatui vocabulary. The Textual client has no posture to
+    decline, so forwarding it nowhere would leave an operator believing this
+    window had been made read-only when it still reaches the confirm gate.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module.subprocess, "Popen",
+        lambda *_a, **_k: pytest.fail("a refused invocation must not spawn"))
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("a refused invocation must not exec"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(classic=True, glass=True))
+    message = str(exit_info.value)
+    assert "--glass" in message and "--classic" in message
+
+
+def test_tui_parser_still_accepts_the_retired_word_so_it_can_be_refused():
+    """argparse's "unrecognized arguments" names no remedy.
+
+    The word stays registered — hidden from --help — for one reason: so the
+    operator with the old command in a script gets the sentence that says where
+    arming moved to rather than a bare parse error.
+    """
+    from qlab.autopilot.cli import build_parser
+
+    args = build_parser().parse_args(["tui", "--operator"])
+    assert args.operator is True
+    assert args.glass is False
 
 
 def test_tui_classic_runs_the_textual_client_against_the_same_owner(monkeypatch):
@@ -3978,3 +4019,73 @@ def test_tui_snapshot_carries_the_atlas_conversation_unflooded(session):
     assert texts == ["what do we hold?", "Seven ETFs, long only."]
     assert [row["payload"]["actor"] for row in snap["atlas_chat"]] == [
         "operator", "atlas"]
+
+
+# -- the remembered posture ------------------------------------------------
+def test_a_posture_nobody_chose_is_read_only_and_says_so(session):
+    """Unasked and deliberately read-only serve the same ``armed``; only
+    ``chosen`` separates them, and a client's startup question keys on it."""
+    status, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    assert status == 200
+    assert snap["posture"] == {"armed": False, "chosen": False}
+
+
+def test_the_posture_route_records_and_reflows(session):
+    status, body = handle_api(
+        session, "POST", "/api/desk/posture", {}, {"armed": True})
+    assert status == 200
+    assert body == {"armed": True, "chosen": True}
+    snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})[1]
+    assert snap["posture"] == {"armed": True, "chosen": True}
+    kinds = [e["kind"] for e in session.registry.read_events(20)]
+    assert "desk.posture_chosen" in kinds
+    # And it outlives this owner: a fresh session reads the same choice.
+    from qlab.state.registry import Registry
+    revived = UISession(offline_default=True, registry=Registry(":memory:"))
+    assert revived.posture_payload() == {"armed": True, "chosen": True}
+
+
+def test_posting_read_only_is_a_choice_not_a_reset(session):
+    """The other side of the boolean: false is recorded, not treated as unset."""
+    handle_api(session, "POST", "/api/desk/posture", {}, {"armed": True})
+    status, body = handle_api(
+        session, "POST", "/api/desk/posture", {}, {"armed": False})
+    assert status == 200
+    assert body == {"armed": False, "chosen": True}
+
+
+def test_the_posture_is_persisted_under_the_lock_that_guards_it(session, monkeypatch):
+    """Invariant 9: this runtime is threaded, so the disk write and the memory
+    write are one critical section. Outside the lock, two concurrent POSTs can
+    interleave and leave ``posture.json`` and ``self._posture`` disagreeing —
+    a desk that restarts into the posture the *other* operator chose."""
+    import qlab.ui.server as server_mod
+
+    held = []
+    real = server_mod.save_posture
+
+    def watched(posture):
+        # ``threading.Lock`` is not reentrant: if the caller holds it, a
+        # non-blocking acquire from this same thread fails. Released again
+        # immediately when it does succeed — a probe that kept the lock would
+        # deadlock the very call it is reporting on.
+        got = session._posture_lock.acquire(blocking=False)
+        if got:
+            session._posture_lock.release()
+        held.append(not got)
+        real(posture)
+
+    monkeypatch.setattr(server_mod, "save_posture", watched)
+    status, _ = handle_api(
+        session, "POST", "/api/desk/posture", {}, {"armed": True})
+    assert status == 200
+    assert held == [True], "the disk write happened outside the posture lock"
+
+
+@pytest.mark.parametrize("value", ["yes", 1, [], None])
+def test_a_posture_that_is_not_a_boolean_is_refused(session, value):
+    status, body = handle_api(
+        session, "POST", "/api/desk/posture", {}, {"armed": value})
+    assert status == 400 and "true or false" in body["error"]
+    # Nothing was recorded: a refused arming must not half-arm the desk.
+    assert session.posture_payload() == {"armed": False, "chosen": False}

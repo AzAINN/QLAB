@@ -1,4 +1,8 @@
 {
+  "posture": {
+    "armed": false,
+    "chosen": true
+  },
   "desk_mode": {
     "data": "synthetic",
     "book": "simulated",

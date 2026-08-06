@@ -257,7 +257,7 @@ pub struct TestVerdict {
 /// Holds a base URL and an HTTP client and nothing else — no registry handle, no
 /// broker, no plan. Every method below is one POST.
 ///
-/// Constructed by the composition root when `--operator` is passed, and reached
+/// Constructed by the composition root unless `--glass` vetoes it, and reached
 /// only from there: `tests/operator_gate.rs` asserts that nothing under `ui/`
 /// names this type. AUDIT's `a`/`R` and BOOK's `x` return `Command`s that
 /// `main::Writes` dispatches here.
@@ -488,6 +488,17 @@ impl WriteClient {
     /// the wrong place to decide which half of a desk mode a word belongs to.
     pub async fn desk_mode(&self, data: &str, book: &str) -> Wrote {
         self.post("/api/desk_mode", json!({ "data": data, "book": book }))
+            .await
+    }
+
+    /// Answer the desk's arming question.
+    ///
+    /// A `bool` and nothing else: the owner refuses anything that is not one
+    /// (`armed must be true or false`), because "yes", `1` and `[]` are not
+    /// consent. The answer it returns is `posture_payload()` — its own account
+    /// of what it now holds, which is the only thing worth reporting back.
+    pub async fn set_posture(&self, armed: bool) -> Wrote {
+        self.post("/api/desk/posture", json!({ "armed": armed }))
             .await
     }
 

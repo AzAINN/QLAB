@@ -390,6 +390,17 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
             },
             summary.clone(),
         ),
+        // The owner's answer, not the request's. `Info` for both words: arming
+        // a desk is a choice an operator just made deliberately, and a `Warn`
+        // on the read-only answer would tone the safe one as the mistake.
+        Wrote::Armed { armed } => Toast::new(
+            Level::Info,
+            "desk posture",
+            match armed {
+                true => "the desk is armed — this window may write to it".to_string(),
+                false => "the desk is read-only — no window writes to it".to_string(),
+            },
+        ),
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

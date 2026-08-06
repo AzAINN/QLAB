@@ -1922,11 +1922,14 @@ def test_tui_cli_entry_is_registered():
     # cannot write. Both are defaults an operator relies on being the safe one,
     # so they are asserted rather than assumed.
     assert args.classic is False
+    assert args.glass is False
+    # Retired, and false by default: the parser still knows the word only so
+    # `_cmd_tui` can refuse it by name instead of argparse refusing it by
+    # number. Arming is the desk's persisted answer, not a launcher flag.
     assert args.operator is False
 
-    armed = build_parser().parse_args(["tui", "--classic", "--operator"])
-    assert armed.classic is True
-    assert armed.operator is True
+    glass = build_parser().parse_args(["tui", "--glass"])
+    assert glass.glass is True
 
 
 def test_operator_mcp_proxy_is_propose_only_and_never_executes():

@@ -14,6 +14,7 @@ GET  /api/market               provenance-tagged daily market snapshot
 GET  /api/system               runtime health and authority state
 GET  /api/desk_mode            the chosen data source and book + credential status
 POST /api/desk_mode            choose the data source and the book
+POST /api/desk/posture         arm the desk, or put it back to read-only
 POST /api/alpaca/credentials   store an Alpaca paper login (never switches book)
 POST /api/alpaca/test          ask the venue whether the stored login works
 GET  /api/llm/backends         model backends, availability, and what they serve
@@ -100,6 +101,8 @@ from urllib.parse import parse_qs, urlparse
 
 from qlab.core.desk_mode import (
     DEFAULT_DESK_MODE, DeskMode, load_desk_mode, save_desk_mode)
+from qlab.core.posture import (
+    DEFAULT_POSTURE, Posture, load_posture, save_posture)
 from qlab.core.llm_config import SurfaceModel, save_llm_config, startup_llm_config
 from qlab.core.types import _jsonable
 from qlab.paths import workspace_root
@@ -300,6 +303,11 @@ class UISession:
         # desk the operator just named on the command line would be the same
         # false question the flag exists to retire.
         self.desk_mode_chosen = bool(desk_mode or persisted)
+        # Posture is never seeded from a launcher flag: the operator says it or
+        # nobody has. ``None`` here is "not chosen yet", which reads as
+        # read-only without claiming anyone chose read-only.
+        self._posture_lock = threading.Lock()
+        self._posture: Posture | None = load_posture()
         # Derived, never carried alongside: a launcher flag and a persisted (or
         # POSTed) mode used to disagree, and the disagreement reconstructed
         # `synthetic` + `alpaca` — synthetic quotes on the SSE bus and a
@@ -766,6 +774,38 @@ class UISession:
         save_desk_mode(mode)
         self.retune_market_stream()
         return mode
+
+    # -- posture -------------------------------------------------------------
+    def posture_payload(self) -> dict:
+        """Armed or not, and whether anyone has said so.
+
+        The two facts are separate for the same reason ``chosen`` exists on the
+        desk mode: an unasked desk and a deliberately read-only desk serve the
+        same ``armed``, and a client that must ask the question needs to tell
+        them apart.
+        """
+        with self._posture_lock:
+            posture = self._posture
+        chosen = posture is not None
+        # Both booleans, always: a client reads an absent block as an owner too
+        # old to serve one, and that is a different fact from "nobody chose".
+        return {"armed": (posture or DEFAULT_POSTURE).armed, "chosen": chosen}
+
+    def set_posture(self, armed: bool) -> dict:
+        """Record the operator's choice. Persists before memory changes.
+
+        A failed write must not leave the running owner believing it is armed
+        when nothing on disk says so — the next start would silently disarm.
+        The disk write is inside the lock for invariant 9: this runtime is
+        threaded, and two concurrent POSTs whose disk and memory writes
+        interleaved would leave the file and ``self._posture`` disagreeing.
+        """
+        posture = Posture(bool(armed))
+        with self._posture_lock:
+            save_posture(posture)
+            self._posture = posture
+        self.registry.record_event("desk.posture_chosen", {"armed": posture.armed})
+        return self.posture_payload()
 
     # -- live quote stream ---------------------------------------------------
     def attach_market_stream_runner(self, runner) -> None:
@@ -3644,6 +3684,7 @@ class UISession:
         self.registry.expire_due_approvals(self._now_iso())
         return {
             "desk_mode": self.desk_mode_payload(),
+            "posture": self.posture_payload(),
             "llm": self.llm_payload(),
             "portfolio": portfolio,
             "live_portfolio": self.live_portfolio(offline),
@@ -3989,6 +4030,14 @@ def handle_api(session: UISession, method: str, path: str,
             return 400, {"error": str(exc)}
         session.set_desk_mode(mode)
         return 200, session.desk_mode_payload()
+
+    if method == "POST" and path == "/api/desk/posture":
+        # Arming a desk takes an explicit true: "yes", 1 and [] are refused
+        # rather than read as consent (the ``replace`` precedent above).
+        armed = body.get("armed")
+        if not isinstance(armed, bool):
+            return 400, {"error": "armed must be true or false"}
+        return 200, session.set_posture(armed)
 
     if method == "POST" and path == "/api/alpaca/credentials":
         from qlab.trader.alpaca_auth import AlpacaAuthError, AlpacaConsentRequired

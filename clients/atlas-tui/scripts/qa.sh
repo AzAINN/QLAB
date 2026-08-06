@@ -9,9 +9,18 @@
 # script means "it ran under a terminal and cleaned up after itself", which is
 # precisely the half `cargo test` cannot reach.
 #
-#   usage:  scripts/qa.sh [--operator] [--size WxH] [--port N] [--debug]
+#   usage:  scripts/qa.sh [--armed|--glass] [--size WxH] [--port N] [--debug]
 #
-#   --operator  drive the armed build (needs a binary built with the feature)
+#   --armed     capture the armed scenes. Arming is no longer something the
+#               command line can grant — it is the owner's persisted answer to
+#               the startup door — so this flag passes NOTHING to the binary.
+#               It picks the door script that walks an armed window, and it
+#               CHECKS the claim: the owner on --port is asked for its
+#               persisted posture and a desk that is not armed stops the run
+#               (exit 2). No owner at all is a loud warning, since nothing
+#               listening cannot be told apart from listening-and-not-armed.
+#   --glass     pass --glass: this window declines authority for one session.
+#   --operator  retired; refused loudly rather than silently mis-capturing.
 #   --size      terminal size to emulate; default 120x40
 #   --port      owner port; defaults to $QLAB_UI_PORT, then 8765
 #   --debug     use target/debug/atlas instead of target/release/atlas
@@ -37,17 +46,33 @@ profile="release"
 size="120x40"
 port="${QLAB_UI_PORT:-8765}"
 extra=""
+armed=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --operator) extra="--operator"; shift ;;
+    --armed)    armed="yes"; shift ;;
+    --glass)    extra="--glass"; shift ;;
+    # A silent no-op would be the worst outcome here: the harness would keep
+    # printing "armed" screens taken from whatever posture the desk happened to
+    # hold. Refuse, and name what replaced it.
+    --operator) echo "qa.sh: --operator is retired; arming is the desk's persisted answer to the startup door, not a flag." >&2
+                echo "  --armed  capture the armed scenes against a desk that is already armed" >&2
+                echo "  --glass  drive a window that declines authority for one session" >&2
+                exit 2 ;;
     --debug)    profile="debug"; shift ;;
     --size)     size="$2"; shift 2 ;;
     --port)     port="$2"; shift 2 ;;
-    -h|--help)  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)          echo "qa.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "$armed" && -n "$extra" ]]; then
+  # --glass is this window declining authority; --armed claims it has some.
+  # Together they would capture a glass window under an "armed" heading.
+  echo "qa.sh: --armed and --glass are opposite postures; pick one" >&2
+  exit 2
+fi
 
 bin="${ATLAS_BIN:-$root/target/$profile/atlas}"
 if [[ ! -x "$bin" ]]; then
@@ -55,12 +80,62 @@ if [[ ! -x "$bin" ]]; then
   # built would hide which binary the screens below came from, which is the one
   # thing a QA pass has to be certain of.
   echo "qa.sh: no atlas binary at $bin" >&2
-  echo "  build it first:  cd $root && cargo build --$profile${extra:+ --features operator}" >&2
+  echo "  build it first:  cd $root && cargo build --$profile${armed:+ --features operator}" >&2
   exit 1
 fi
 
 python="${PYTHON:-python3}"
 capture="$here/qa_capture.py"
+
+# --armed is a claim about the desk, and a claim a QA harness makes about its
+# own captures has to be checked or it is worth nothing. Arming is the owner's
+# persisted answer, so ask the owner: /api/tui carries {"posture": {"armed",
+# "chosen"}}. A read-only desk driven under an "armed" heading is precisely the
+# silent mis-capture this flag replaced, so it stops here rather than producing
+# a tape the next person reads without reading this file first.
+#
+# No owner is a warning, not a refusal: nothing listening is indistinguishable
+# from listening-and-not-armed, and the no-owner scenes are themselves a real
+# state this pass covers.
+if [[ -n "$armed" ]]; then
+  posture="$("$python" - "$port" <<'PY'
+import json, sys, urllib.error, urllib.request
+
+try:
+    with urllib.request.urlopen(
+            f"http://127.0.0.1:{sys.argv[1]}/api/tui", timeout=4) as response:
+        block = json.load(response).get("posture")
+except (urllib.error.URLError, OSError, TimeoutError):
+    print("unreachable")
+    raise SystemExit(0)
+except (ValueError, AttributeError) as exc:
+    print(f"unreadable {exc}")
+    raise SystemExit(0)
+if not isinstance(block, dict):
+    # An owner that answers without a posture block is an owner from before
+    # this branch. Naming that is more useful than guessing which side it is.
+    print("absent")
+elif block.get("armed"):
+    print("armed")
+else:
+    print("chosen-glass" if block.get("chosen") else "unanswered")
+PY
+)" || posture="unreachable"
+  case "$posture" in
+    armed)
+      echo "posture  armed (per the owner on port $port)" ;;
+    unreachable)
+      echo "qa.sh: WARNING — no owner on port $port, so --armed could not be" >&2
+      echo "  verified. The scenes below claim a posture nothing confirmed." >&2 ;;
+    *)
+      echo "qa.sh: --armed, but the desk on port $port is not armed ($posture)." >&2
+      echo "  Arming is the desk's persisted answer to the startup door, not a" >&2
+      echo "  flag: open the workstation, answer the door armed, then re-run." >&2
+      echo "  Capturing 'armed' scenes from a read-only desk is the mis-capture" >&2
+      echo "  this check exists to prevent." >&2
+      exit 2 ;;
+  esac
+fi
 
 echo "== atlas QA =================================================="
 echo "commit  $(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -118,7 +193,7 @@ scene "refresh" \
 # key greyed out. An armed window is walked — the data row, the row that moves
 # on, then Esc out of the models — while a glass one is a statement, and the
 # first key it is handed dismisses it.
-if [[ -n "$extra" ]]; then
+if [[ -n "$armed" ]]; then
   door="wait:2,shot:the first question,down,down,enter,shot:the second question,esc,shot:the desk behind it,quit"
 else
   door="wait:2,shot:the read-only door,key:x,shot:the desk behind it,quit"

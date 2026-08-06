@@ -1,16 +1,20 @@
 //! atlas-tui — a Ratatui client for the qlab owner runtime.
 //!
-//! Read-only by construction, in the build that ships by default. It talks to
-//! the owner over HTTP and has no registry handle and no way to acquire one, and
-//! in the default build no order path either — invariant 3 is preserved by
-//! absence rather than by a check that could be removed.
+//! It talks to the owner over HTTP and has no registry handle and no way to
+//! acquire one. Whether it has an order path is a build question: the
+//! `operator` feature is the only thing that compiles one into this crate at
+//! all, and it is on by default because the desk this client serves is a desk
+//! an operator works. Built with `--no-default-features` there is no
+//! `net::write` module, no POST call site, and no `Posture::Operator` for the
+//! status line to hold — a monitoring box builds that artifact and cannot be
+//! argued, configured, or flagged into writing.
 //!
-//! "By absence" stays literal under the `operator` feature, which is the only
-//! thing that compiles a write path into this crate at all: without it there is
-//! no `net::write` module, no POST call site, and no `Posture::Operator` for the
-//! status line to hold. A monitoring box builds the default and cannot be
-//! argued, configured, or flagged into writing. `--operator` then decides
-//! whether the human armed the build they have.
+//! In the shipped build, what this window may do is the *desk's* answer, not an
+//! argument's: the owner persists a posture, serves it on `/api/tui`, and
+//! `store::Posture::from_desk` re-derives the scope from every snapshot. A desk
+//! nobody has armed offers nothing, and a desk disarmed from another window
+//! disarms this one at the next poll. `--glass` is the operator's own veto on
+//! top of that, and it is the only posture fact a launch still carries.
 //!
 //! What the write path can reach is still the owner's governed API and nothing
 //! else: an approval decision, a plan execution that consumes a persisted
@@ -68,6 +72,23 @@ async fn main() -> Result<()> {
     install_hooks()?;
     theme::init(theme::detect());
 
+    // Before anything reads a flag. The build that removed `--operator` removed
+    // the `exit(2)` that refused it too, so `atlas --operator` — and every typo
+    // of every flag below — became a silent no-op, which is the mechanism that
+    // let the original `--operator` bug go unseen. Invariant 4: refuse loudly.
+    if let Err(unknown) = unknown_args(&args) {
+        eprintln!(
+            "atlas: unrecognised argument{} {}\n\
+             accepted: {}\n\
+             the desk's armed/read-only posture is the owner's, not a flag's — \
+             `--glass` only declines it for this window.",
+            if unknown.len() == 1 { "" } else { "s" },
+            unknown.join(", "),
+            KNOWN_ARGS.join(" "),
+        );
+        std::process::exit(2);
+    }
+
     let offline = !args.iter().any(|a| a == "--live");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let base = http::base_from_env();
@@ -79,7 +100,15 @@ async fn main() -> Result<()> {
     // owner on a port they did not choose — otherwise has to read a chip that
     // names no host and guess which desk it is about.
     store.base = base.clone();
-    store.posture = posture(&args);
+    // The one posture fact a launch still carries. The desk's own answer is
+    // what arms this window — see `store::Posture::from_desk` — and it arrives
+    // with the first snapshot, so the client starts glass and stays glass until
+    // an owner says otherwise. `--glass` is this window declining an authority
+    // the desk may be offering, and it is sticky: no later snapshot revokes it.
+    store.forced_glass = args.iter().any(|a| a == "--glass");
+    if store.forced_glass {
+        tracing::info!("--glass: this window will stay read-only whatever the desk says");
+    }
     // Parsed in both builds, and acted on in both: a glass window started with
     // it is shown the door it cannot answer, which is the honest reply to
     // "let me choose" from a window that cannot. Before the first frame, so a
@@ -105,10 +134,11 @@ async fn main() -> Result<()> {
     );
 
     // The write half, built here and only here. Fallibly, and before the screen
-    // is taken: a client armed with `--operator` whose writer could not be
-    // built would run looking armed and refuse every key at the moment it
-    // mattered. Invariant 4 — refuse loudly rather than degrade quietly.
-    let writes = Writes::new(&base, store.posture, tx.clone())?;
+    // is taken: a client whose writer could not be built would run looking
+    // capable and refuse every key at the moment it mattered. Invariant 4 —
+    // refuse loudly rather than degrade quietly. What it may be *used* for is
+    // still the desk's answer, re-derived on every snapshot.
+    let writes = Writes::new(&base, store.forced_glass, tx.clone())?;
 
     let poller = http::spawn_poller(base.clone(), offline, tx.clone());
     // The stream holds the poller so the two feeds are one story: an event that
@@ -126,54 +156,6 @@ async fn main() -> Result<()> {
     spawn_terminal_events(tx);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     run(&mut terminal, &mut store, &mut rx, &poller, &writes).await
-}
-
-/// What this window may do to the desk, decided once and never re-read.
-///
-/// Two gates in series, and they answer different questions. The `operator`
-/// Cargo feature decides whether a write path exists in this binary at all — a
-/// monitoring box builds the default and has no `net::write` to reach, whatever
-/// it is passed. `--operator` then decides whether the human armed the build
-/// they have: a featured binary started without it runs as glass, so an operator
-/// who wants to watch does not have to find a different executable, and the
-/// status chip answers "can the next keystroke place an order" rather than
-/// "which binary is this".
-///
-/// The flag is parsed under `cfg` too, not just acted on under it. In the
-/// default build the string `--operator` means nothing at all, which is the
-/// property CLAUDE.md's "read-only by construction" claim rests on: there is no
-/// argument, environment variable, or config file that can widen what a glass
-/// binary does, because the code that would widen it was never compiled.
-#[cfg(feature = "operator")]
-fn posture(args: &[String]) -> atlas::store::Posture {
-    if args.iter().any(|a| a == "--operator") {
-        // On the record before the screen is taken. A fill found in the audit
-        // log later should be traceable to a client that said, in its own log,
-        // that it was armed and against which owner.
-        tracing::warn!("operator posture armed: this client can write to the desk");
-        atlas::store::Posture::Operator
-    } else {
-        atlas::store::Posture::Glass
-    }
-}
-
-#[cfg(not(feature = "operator"))]
-fn posture(args: &[String]) -> atlas::store::Posture {
-    // A glass build cannot arm — but an operator who typed `--operator` asked
-    // for a write path this binary does not contain, and running anyway would
-    // hand them a workstation that looks like the one they asked for with the
-    // chat, the pickers and every write silently missing. That is exactly the
-    // downgrade "fail loud" exists to prevent: refuse with the rebuild line
-    // rather than let the absence be discovered one dead keystroke at a time.
-    if args.iter().any(|a| a == "--operator") {
-        eprintln!(
-            "this atlas binary was built without the operator feature, so \
-             --operator has nothing to arm.\n    cd clients/atlas-tui && \
-             cargo build --release --features operator"
-        );
-        std::process::exit(2);
-    }
-    atlas::store::Posture::Glass
 }
 
 async fn run(
@@ -360,8 +342,11 @@ fn ingest(
                 // The only place a keystroke reaches the network. A view
                 // decided what the key means and handed back a `Command`; the
                 // runtime is what acts on it.
+                // The chokepoint. The posture travels with the command so the
+                // runtime — not the 33 places in `ui/` that decide whether to
+                // offer a key — has the last word on whether it may happen.
                 #[cfg(feature = "operator")]
-                Some(cmd) => writes.dispatch(cmd),
+                Some(cmd) => writes.dispatch(cmd, store.posture),
                 None => {}
             }
             // A view switch is not a desk transition and so is not a `Trigger`:
@@ -381,7 +366,7 @@ fn ingest(
         let before = store.nav.view;
         match ui::shell::on_mouse(*m, store, views) {
             #[cfg(feature = "operator")]
-            Some(cmd) => writes.dispatch(cmd),
+            Some(cmd) => writes.dispatch(cmd, store.posture),
             #[cfg(not(feature = "operator"))]
             Some(_) => {}
             None => {}
@@ -443,6 +428,31 @@ fn ingest(
         }
     }
     quit
+}
+
+// -- argv ------------------------------------------------------------------
+
+/// Every argument this client understands. A whitelist rather than a blacklist:
+/// the point is that anything *not* here is refused, so a flag retired later
+/// cannot quietly become a no-op the way `--operator` did.
+const KNOWN_ARGS: [&str; 4] = ["--live", "--glass", "--pick", "-v"];
+
+/// The arguments that are not [`KNOWN_ARGS`], or `Ok(())` when there are none.
+///
+/// `argv[0]` is skipped; it is the path this binary was invoked by, not a flag.
+/// Pure so the rule can be tested without a process — the refusal itself is the
+/// caller's, because a library function that called `exit` could not be.
+fn unknown_args(args: &[String]) -> Result<(), Vec<String>> {
+    let unknown: Vec<String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !KNOWN_ARGS.contains(&a.as_str()))
+        .cloned()
+        .collect();
+    match unknown.is_empty() {
+        true => Ok(()),
+        false => Err(unknown),
+    }
 }
 
 // -- producers -------------------------------------------------------------
@@ -626,4 +636,46 @@ fn init_tracing(verbose: bool) -> io::Result<()> {
         }))
         .init();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{unknown_args, KNOWN_ARGS};
+
+    fn argv(rest: &[&str]) -> Vec<String> {
+        std::iter::once("atlas")
+            .chain(rest.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn every_accepted_flag_is_accepted_together() {
+        assert_eq!(unknown_args(&argv(&KNOWN_ARGS)), Ok(()));
+        assert_eq!(unknown_args(&argv(&[])), Ok(()));
+    }
+
+    #[test]
+    fn a_retired_flag_is_named_rather_than_ignored() {
+        // The regression this exists for: `--operator` used to exit(2) with a
+        // rebuild line, and deleting the flag deleted the refusal with it. A
+        // silent no-op is how the original bug stayed invisible.
+        assert_eq!(
+            unknown_args(&argv(&["--operator"])),
+            Err(vec!["--operator".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_typo_is_not_the_flag_it_nearly_is() {
+        assert_eq!(
+            unknown_args(&argv(&["--glas", "--live", "--Pick"])),
+            Err(vec!["--glas".to_string(), "--Pick".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_binarys_own_path_is_never_a_flag() {
+        assert_eq!(unknown_args(&["/opt/bin/--operator".to_string()]), Ok(()));
+    }
 }

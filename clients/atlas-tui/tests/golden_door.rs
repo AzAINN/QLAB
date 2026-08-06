@@ -13,11 +13,20 @@ use crossterm::event::KeyCode;
 use harness::Client;
 use std::time::Instant;
 
-/// A desk that has answered, carrying whatever `desk_mode` block is given.
+/// A desk that has answered, carrying whatever `desk_mode` block is given —
+/// watched by a window that declined its authority.
+///
+/// `--glass` rather than a bare featured window, because the two are no longer
+/// the same door: a window that *could* be armed and is watching a desk nobody
+/// has answered the arming question for is asked it, and these are the tests
+/// about the door for a window that cannot be armed at all. The vetoed window
+/// is that door in both legs, which is what keeps these pins one pair of eyes
+/// rather than two.
 fn answered(desk_mode: &str) -> Store {
     let json = format!(r#"{{"portfolio": {{"equity": 1.0}}{desk_mode}}}"#);
     let mut store = Store::default();
     let now = Instant::now();
+    store.forced_glass = true;
     store.apply(AppEvent::ConnUp(Channel::Owner), now);
     store.apply(
         AppEvent::Snapshot(Box::new(serde_json::from_str::<Snapshot>(&json).unwrap())),
@@ -110,12 +119,19 @@ fn a_read_only_door_says_whether_the_desk_it_names_was_ever_chosen() {
 }
 
 #[test]
-fn the_read_only_door_names_the_flag_that_could_answer_it() {
+fn the_read_only_door_names_what_could_answer_it() {
     // A glass window cannot choose, so the door states what it would take
-    // rather than offering rows that do nothing.
+    // rather than offering rows that do nothing. What it would take is no
+    // longer a launch flag: the desk's own arming answer is, and a door that
+    // still named `--operator` would send an operator after a flag that no
+    // longer exists.
     let mut client = Client::new(unsaid());
     let frame = client.frame(120, 36);
-    assert!(frame.contains("--operator"), "{frame}");
+    assert!(frame.contains("arms a window"), "{frame}");
+    assert!(
+        !frame.contains("--operator"),
+        "a retired flag survives:\n{frame}"
+    );
     // And any key dismisses it, the way the help overlay does.
     client.press(KeyCode::Char('x'));
     assert!(!client.frame(120, 36).contains("THIS DESK"));
@@ -431,10 +447,12 @@ mod armed {
         // The third step, end to end and through the shell: the door hands the
         // keyboard to SETTINGS' own box rather than drawing one of its own.
         let mut store = harness::fixture_store();
-        store.posture = Posture::Operator;
         store.apply(
             AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({
+                    // The desk arms this window; the posture is re-derived from
+                    // every snapshot, so setting it before one would be undone.
+                    "posture": {"armed": true, "chosen": true},
                     "desk_mode": {"data": "live", "book": "alpaca",
                                   "label": "LIVE · ALPACA BOOK", "offline": false,
                                   "credentials": "no ALPACA_API_KEY_ID in the environment or .env",
@@ -475,6 +493,157 @@ mod armed {
         assert!(!frame.contains("THIS DESK"), "{frame}");
     }
 
+    /// A desk that has named itself, watched by a window that could be armed,
+    /// with the arming question in whichever state the caller is asking about.
+    ///
+    /// Deliberately not `door()`: that window is already armed, and the whole
+    /// subject here is the one that is not. The desk mode is `chosen` so the
+    /// only question left on this door is the arming one.
+    fn asked_about(posture: &str) -> Client {
+        let mut store = Store::default();
+        let now = Instant::now();
+        store.apply(AppEvent::ConnUp(Channel::Owner), now);
+        store.apply(
+            AppEvent::Snapshot(Box::new(
+                serde_json::from_str::<Snapshot>(&format!(
+                    r#"{{"portfolio": {{"equity": 1.0}},
+                         "desk_mode": {{"data": "synthetic", "book": "simulated",
+                                        "label": "SYNTHETIC", "chosen": true}}{posture}}}"#
+                ))
+                .unwrap(),
+            )),
+            now,
+        );
+        let client = Client::new(store);
+        client.frame(120, 36);
+        client
+    }
+
+    /// The three states of the owner's `posture` block, as it serves them.
+    const NEVER_ASKED: &str = r#", "posture": {"armed": false, "chosen": false}"#;
+    const READ_ONLY: &str = r#", "posture": {"armed": false, "chosen": true}"#;
+
+    #[test]
+    fn a_desk_never_asked_about_posture_is_asked_once() {
+        let frame = asked_about(NEVER_ASKED).frame(120, 36);
+        assert!(frame.contains("ARM THIS DESK"), "{frame}");
+        assert!(
+            frame.contains("read-only"),
+            "the safe answer is named, not implied:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn escape_leaves_the_desk_read_only() {
+        // The door's own rule, one question further in: the key a human presses
+        // to get out of the way can never be the one that arms a workstation.
+        let mut client = asked_about(NEVER_ASKED);
+        assert_eq!(
+            press(&mut client, KeyCode::Esc),
+            Some(Command::Posture { armed: false })
+        );
+        assert!(client.store.door().is_none(), "Esc left the door up");
+    }
+
+    #[test]
+    fn a_desk_that_answered_is_not_asked_again() {
+        // `chosen: true` with `armed: false` is a desk somebody deliberately
+        // left read-only. It gets the statement every unarmable window gets,
+        // and never the question again.
+        let frame = asked_about(READ_ONLY).frame(120, 36);
+        assert!(!frame.contains("ARM THIS DESK"), "{frame}");
+        assert!(frame.contains("GLASS"), "{frame}");
+    }
+
+    #[test]
+    fn arming_the_desk_sends_the_answer_and_waits_for_the_owner_to_say_so() {
+        // No client-side latch: the answer goes to the owner, the owner
+        // records it, and the *next snapshot* is what arms this window. A door
+        // that closed on its own keystroke would be claiming an authority
+        // nothing had granted yet.
+        let mut client = asked_about(NEVER_ASKED);
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::Posture { armed: true })
+        );
+        assert!(
+            client.frame(120, 36).contains("ARM THIS DESK"),
+            "the door answered for the owner"
+        );
+        // And when the owner says so, the same door moves on to the questions
+        // the window may now answer.
+        client.store.apply(
+            AppEvent::Snapshot(Box::new(
+                serde_json::from_str::<Snapshot>(
+                    r#"{"portfolio": {"equity": 1.0},
+                        "posture": {"armed": true, "chosen": true},
+                        "desk_mode": {"data": "synthetic", "book": "simulated",
+                                      "label": "SYNTHETIC", "chosen": true}}"#,
+                )
+                .unwrap(),
+            )),
+            Instant::now(),
+        );
+        let frame = client.frame(120, 36);
+        assert!(!frame.contains("ARM THIS DESK"), "{frame}");
+        // The panel, not the status-line badge: `SYNTHETIC` is in the chip of
+        // every frame this store draws, so it pinned nothing. `THIS DESK` is
+        // the mode question's own header, and it is only there because the
+        // door walked on to it.
+        assert!(frame.contains("THIS DESK"), "{frame}");
+    }
+
+    #[test]
+    fn an_owner_too_old_to_serve_a_posture_is_never_shown_the_door() {
+        // Absence is not `chosen: false`. `posture_payload` always emits both
+        // booleans, so a snapshot with no posture block is an owner that
+        // predates the block — and therefore predates `POST
+        // /api/desk/posture`. A door there is a modal whose every answer 404s
+        // and whose Enter re-asks: unanswerable, and blocking.
+        let client = asked_about("");
+        assert_eq!(client.store.posture_chosen(), None);
+        assert!(!client.store.asking_posture());
+        let frame = client.frame(120, 36);
+        assert!(!frame.contains("ARM THIS DESK"), "{frame}");
+        assert!(
+            client.store.door().is_none(),
+            "an owner that cannot answer was asked"
+        );
+    }
+
+    #[test]
+    fn a_window_that_vetoed_its_own_authority_is_told_rather_than_asked() {
+        // The other conjunct: `--glass` is this window declining an authority
+        // the desk may be offering, so asking it to arm the desk would be
+        // offering a row that changes nothing about what it may do.
+        let mut client = asked_about(NEVER_ASKED);
+        client.store.forced_glass = true;
+        let frame = client.frame(120, 36);
+        assert!(!frame.contains("ARM THIS DESK"), "{frame}");
+        assert!(frame.contains("GLASS"), "{frame}");
+    }
+
+    #[test]
+    fn a_window_the_desk_has_already_armed_is_never_asked_to_arm_it() {
+        // The third conjunct, which is not implied by the flag beside it: an
+        // owner can serve `armed: true` with a `chosen` this client cannot
+        // read as an answer, and a door that asked anyway would put a modal
+        // over a workstation that is already writing — asking an operator to
+        // grant authority they are visibly holding.
+        let client = asked_about(r#", "posture": {"armed": true, "chosen": false}"#);
+        assert!(client.store.posture.writes(), "the desk armed this window");
+        assert!(
+            client.store.door().is_none(),
+            "an armed window was asked to arm itself"
+        );
+        assert!(!client.frame(120, 36).contains("ARM THIS DESK"));
+    }
+
+    #[test]
+    fn the_arming_question_renders_at_120x36() {
+        insta::assert_snapshot!(asked_about(NEVER_ASKED).frame(120, 36));
+    }
+
     #[test]
     fn escape_out_of_the_first_question_never_lands_in_the_login() {
         // The inversion of the walk above, and the reason the third step's
@@ -482,10 +651,12 @@ mod armed {
         // the desk arrived with: Esc points this desk at the simulated book,
         // which has no login to be broken.
         let mut store = harness::fixture_store();
-        store.posture = Posture::Operator;
         store.apply(
             AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({
+                    // The desk arms this window; the posture is re-derived from
+                    // every snapshot, so setting it before one would be undone.
+                    "posture": {"armed": true, "chosen": true},
                     "desk_mode": {"data": "live", "book": "alpaca",
                                   "label": "LIVE · ALPACA BOOK", "offline": false,
                                   "credentials": "no ALPACA_API_KEY_ID in the environment or .env",

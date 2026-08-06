@@ -1,6 +1,6 @@
-//! The startup door: which desk, which minds, and the login the first two may need.
+//! The startup door: whether this window may write, which desk, which minds, and the login those may need.
 //!
-//! Three steps over one modal, drawn over the shell the way a confirmation box
+//! Four steps over one modal, drawn over the shell the way a confirmation box
 //! is and claiming the keyboard above everything but Ctrl-C. It is the flow the
 //! Textual client has had since the beginning (`qlab/tui/desk_mode_screen.py`),
 //! and the two virtues ported from it are the ones that are easy to lose:
@@ -33,6 +33,37 @@
 //! that says so — and `assumed` otherwise; before the flag, a fallback the
 //! owner had to invent was marked as though somebody had picked it, on the one
 //! screen whose whole subject is that nobody has.
+//!
+//! ## The question in front of the other three
+//!
+//! The desk's posture is the owner's fact and is asked here first, because
+//! the other three questions *are* writes: the pair and the models both reach
+//! the owner through the dispatch seam, which refuses every command from a
+//! window the desk has not armed. Asking them of an unarmed window would be
+//! offering rows whose answers are refused one layer down.
+//!
+//! It is deliberately not the placement the plan sketched — after the models,
+//! since arming is about *this client* and the credential is about the book —
+//! and the reason is that ordering cannot exist without a client-side latch:
+//! a keystroke carries one `Command`, the arming answer only takes effect
+//! through the owner's next snapshot, and a door that arrived at the arming
+//! question last would have spent the two questions before it emitting writes
+//! nothing could accept.
+//!
+//! Answered by the *owner*, never here. `Store::asking_posture` reads the
+//! question live off `posture.chosen`, so the keystroke that sends the answer
+//! does not retire it — a door that closed on its own key would be this
+//! client deciding it is armed, which is exactly the latch `Posture::from_desk`
+//! exists to make impossible. Esc is `read-only`, the same rule that makes Esc
+//! `synthetic · simulated` one question later.
+//!
+//! One consequence of that, stated because it is not obvious from the walk: a
+//! `read-only` answer sets `closed`, so a desk that has *never chosen a desk
+//! mode* and answers read-only is never asked the mode question at all. That is
+//! the same behaviour a `--glass` window already gets — a window that cannot
+//! write is shown a statement rather than three questions whose answers would be
+//! refused — and the desk keeps serving whatever pair it was already serving
+//! until somebody arms a window or uses `/mode`.
 //!
 //! ## The one rule that did not survive the port
 //!
@@ -147,6 +178,14 @@ const ALPACA: &str = "alpaca";
 /// Which question the door is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
+    /// May a window like this one write to this desk at all?
+    ///
+    /// First, and not by taste. The other two questions *are* writes — the
+    /// pair and the models both reach the owner through the dispatch seam —
+    /// so on a desk nobody has armed they are two questions this window may
+    /// not answer. Asking them first would be offering rows whose answers the
+    /// chokepoint refuses.
+    Posture,
     /// Which data, and whose book.
     Mode,
     /// Which model each surface runs.
@@ -223,8 +262,17 @@ impl Door {
 
     /// Which question is up. Public so a test can pin the walk rather than
     /// infer it from what was drawn.
-    pub fn step(&self) -> Step {
-        self.step
+    /// **Derived, not held.** The arming question is up for exactly as long as
+    /// the owner has not said somebody answered it ([`Store::asking_posture`]),
+    /// which is what keeps this client from latching an authority it has only
+    /// requested: the keystroke that sends the answer does not retire the
+    /// question, the owner's next snapshot does. `self.step` is where the walk
+    /// is once that question is behind it.
+    pub fn step(&self, store: &Store) -> Step {
+        match store.asking_posture() {
+            true => Step::Posture,
+            false => self.step,
+        }
     }
 
     /// Whether the door is still asking. `false` once a keystroke finished it.
@@ -344,7 +392,8 @@ impl Door {
 
     /// How many rows the cursor may walk on this step.
     fn len(&self, store: &Store) -> usize {
-        match self.step {
+        match self.step(store) {
+            Step::Posture => POSTURE_ROWS.len(),
             Step::Mode => self.mode_rows(store).len(),
             Step::Model => self.model_rows(store).len(),
         }
@@ -368,7 +417,13 @@ impl Door {
     // cannot see — including why a comment in here may not spell a key variant.
     pub fn on_key(&mut self, k: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
         self.note = None;
-        if !store.posture.writes() {
+        // Two conjuncts, because there are now two kinds of window that cannot
+        // write. One the desk has not *asked* yet is being asked here and its
+        // keys mean something; one that can never be armed — a read-only
+        // artifact, a `--glass` window, a desk deliberately left read-only — is
+        // shown a statement, and any key retires it exactly as the help overlay
+        // does.
+        if !store.posture.writes() && !store.asking_posture() {
             self.closed = true;
             return None;
         }
@@ -414,7 +469,24 @@ impl Door {
 
     /// What Enter does on the row the cursor is on.
     fn enter(&mut self, store: &mut Store, views: &mut Views) -> Option<Command> {
-        match self.step {
+        match self.step(store) {
+            // The answer goes to the owner and nothing here changes: the door
+            // stays up on this question until a snapshot says the desk
+            // recorded one. A step that advanced on its own keystroke would be
+            // this client deciding it is armed, which is the latch
+            // `Posture::from_desk` exists to make impossible.
+            //
+            // Except on `read-only`, which is an operator saying no to the
+            // whole workstation — there is nothing further to ask, so it is
+            // the end of the door as much as Esc is.
+            Step::Posture => {
+                let armed = *POSTURE_ROWS.get(self.at)?;
+                if !armed {
+                    self.closed = true;
+                }
+                self.at = 0;
+                posture(armed)
+            }
             Step::Mode => {
                 match *self.mode_rows(store).get(self.at)? {
                     ModeRow::Data(SYNTHETIC) => {
@@ -487,6 +559,16 @@ impl Door {
     /// On the second it is the skip: the models stay as the desk has them, and
     /// the pair from the first question is applied on the way out.
     fn escape(&mut self, store: &mut Store, views: &mut Views) -> Option<Command> {
+        // The same rule one question earlier, and the safe answer there is
+        // read-only: a human pressing Escape to get out of the way must never
+        // be what arms a workstation. It is *sent* rather than skipped, for
+        // the reason the pair is — the POST is what makes the answer durable,
+        // and a door that skipped it would leave the desk as unasked as it
+        // found it and open again on the next run.
+        if self.step(store) == Step::Posture {
+            self.closed = true;
+            return posture(false);
+        }
         if self.step == Step::Mode {
             self.data = Some(SYNTHETIC);
             self.book = Some(SIMULATED);
@@ -578,12 +660,15 @@ impl Door {
         }
         let t = theme();
         let w = DOOR_W.min(area.width.saturating_sub(4)).max(3);
-        let lines = match store.posture.writes() {
-            true => match self.step {
-                Step::Mode => self.mode_lines(store),
-                Step::Model => self.model_lines(store),
-            },
-            false => self.glass_lines(store),
+        let lines = match self.step(store) {
+            // A question this window may answer whatever its posture is — it
+            // is the question about that posture.
+            Step::Posture => self.posture_lines(),
+            Step::Mode if store.posture.writes() => self.mode_lines(store),
+            Step::Model if store.posture.writes() => self.model_lines(store),
+            // Everything else a window that cannot write is shown: a
+            // statement, never an affordance.
+            _ => self.glass_lines(store),
         };
         let rect = centred(area, w, wanted(&lines, w - 2));
         f.render_widget(Clear, rect);
@@ -594,6 +679,41 @@ impl Door {
         let inner = block.inner(rect);
         f.render_widget(block, rect);
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+
+    /// The arming question: two answers, and what each one means in a
+    /// sentence.
+    ///
+    /// It takes no `Store`, which is the point: what this window may do is not
+    /// a fact about the desk it is watching, and a row toned by the owner's
+    /// current posture would be describing the state the operator is being
+    /// asked to leave.
+    fn posture_lines(&self) -> Vec<Line<'static>> {
+        let t = theme();
+        let mut lines = vec![panel_header("arm this desk"), section("which posture")];
+        lines.push(self.row(
+            0,
+            &format!("{:<10}", "ARMED"),
+            None,
+            true,
+            // 51 cells, which is exactly what [`DOOR_W`] leaves beside a
+            // ten-cell label: one more wraps the row onto an unindented
+            // second line, as the alpaca row's constant says of its own.
+            Some("approvals, /mode, and a fill behind the confirm box"),
+        ));
+        lines.push(self.row(
+            1,
+            &format!("{:<10}", "READ-ONLY"),
+            None,
+            true,
+            Some("the same desk, and this window writes nothing to it"),
+        ));
+        lines.push(Line::from(Span::styled(
+            " The owner remembers the answer; a fill still needs you either way.",
+            Style::default().fg(t.text_dim),
+        )));
+        lines.push(self.footer("Enter chooses · ↑↓ moves · Esc — read-only"));
+        lines
     }
 
     /// The first question: which data, and — once that answer allows one —
@@ -750,12 +870,16 @@ impl Door {
                 " This window is GLASS — it watches the desk and points it nowhere.",
                 Style::default().fg(t.text_secondary),
             )),
+            // What it would take, and it is no longer a flag this window was
+            // started with: the desk's own arming answer is what widens a
+            // window, and a door still naming `--operator` would send an
+            // operator after something that does not exist.
             Line::from(Span::styled(
-                " --operator arms a window to choose the data, the book and the",
+                " The desk's own posture arms a window to choose the data, the",
                 Style::default().fg(t.text_secondary),
             )),
             Line::from(Span::styled(
-                " models; --pick asks again on a desk that has already answered.",
+                " book and the models; --pick asks the desk questions again.",
                 Style::default().fg(t.text_secondary),
             )),
             Line::from(""),
@@ -837,6 +961,11 @@ impl Door {
         }
     }
 }
+
+/// The arming question's two rows, in the order they are drawn, as the answer
+/// each one sends. Two `bool`s rather than an enum: there is no third posture
+/// on the wire, and the owner refuses anything that is not one of these.
+const POSTURE_ROWS: [bool; 2] = [true, false];
 
 /// One row of the first question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -925,6 +1054,21 @@ fn pointed(data: &str, book: &str) -> Option<Command> {
     #[cfg(not(feature = "operator"))]
     {
         let _ = (data, book);
+        None
+    }
+}
+
+/// The arming answer, in the build that has somewhere to send it.
+///
+/// Unreachable in the default build for a second reason on top of `pointed`'s:
+/// `Store::asking_posture` is false there — an artifact an answer could not
+/// widen is never asked — so no keystroke reaches this step at all.
+fn posture(armed: bool) -> Option<Command> {
+    #[cfg(feature = "operator")]
+    return Some(Command::Posture { armed });
+    #[cfg(not(feature = "operator"))]
+    {
+        let _ = armed;
         None
     }
 }
@@ -1199,13 +1343,15 @@ mod tests {
         // no `desk_mode` block the door still has to point somewhere, and the
         // fallback it picks is not a decision anyone made.
         let mut nothing = Store::default();
-        armed(&mut nothing);
         nothing.apply(
             AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({"portfolio": {"equity": 1.0}})).unwrap(),
             )),
             Instant::now(),
         );
+        // After the snapshot: the posture is derived from every payload now, so
+        // a store armed before one is applied would be disarmed by it.
+        armed(&mut nothing);
         let mut door = Door::default();
         assert!(
             said(&door, &nothing).contains(ASSUMED),
@@ -1320,7 +1466,7 @@ mod tests {
             Some(Command::Backends),
             "the catalog is asked for on the transition, not on a beat"
         );
-        assert_eq!(door.step(), Step::Model);
+        assert_eq!(door.step(&store), Step::Model);
         // The default is the current config: this desk runs claude · inherit on
         // the reasoner, which is the first row.
         let rows = door.model_rows(&store);

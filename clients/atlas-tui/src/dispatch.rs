@@ -60,24 +60,30 @@ mod armed {
     impl Writes {
         /// Build the write half for one window.
         ///
-        /// Fallible rather than degrading: a client armed with `--operator`
-        /// whose writer could not be built would run *looking* armed and refuse
-        /// every key at the moment it mattered. Invariant 4 — refuse loudly.
+        /// Fallible rather than degrading, and built before the screen is
+        /// taken: a client whose writer could not be built would run *looking*
+        /// capable and refuse every key at the moment it mattered. Invariant 4
+        /// — refuse loudly.
         ///
-        /// A featured binary the human did not arm holds no writer at all, so
-        /// the posture chip's claim — "this window cannot place an order" — is
-        /// true of the runtime and not only of the status line.
-        pub fn new(base: &str, posture: Posture, tx: Tx) -> Result<Self, WriteError> {
-            let client = match posture {
-                Posture::Operator => Some(Arc::new(WriteClient::new(base)?)),
-                Posture::Glass => None,
+        /// Built on `forced_glass` rather than on the posture, because the
+        /// posture is no longer known at startup: it arrives with the owner's
+        /// first snapshot. A window the *operator* vetoed with `--glass` holds
+        /// no writer at all; a window that merely has not been armed by the
+        /// desk yet holds one it never reaches, because `Posture::from_desk`
+        /// keeps every modal and every write scope shut until the owner says
+        /// the desk is armed.
+        pub fn new(base: &str, forced_glass: bool, tx: Tx) -> Result<Self, WriteError> {
+            let client = match forced_glass {
+                true => None,
+                false => Some(Arc::new(WriteClient::new(base)?)),
             };
             Ok(Self { client, tx })
         }
 
-        /// Whether this window can write at all. The runtime never asks; a test
-        /// does, because "armed" and "featured" are the two gates in series that
-        /// this crate has already confused once.
+        /// Whether this window holds a writer at all. The runtime never asks; a
+        /// test does, because the artifact gate, the operator's veto and the
+        /// desk's answer are gates in series this crate has already confused
+        /// once.
         pub fn armed(&self) -> bool {
             self.client.is_some()
         }
@@ -89,12 +95,49 @@ mod armed {
         /// how an operator ends up pressing it again. The answer comes back on
         /// the bus, which is the one place that owns the store, the toasts and
         /// the poller — and every outcome comes back, refusals included.
-        pub fn dispatch(&self, cmd: Command) {
+        ///
+        /// The posture is checked *here*, at the one chokepoint every write
+        /// passes through, and not only at the 33 places in `src/ui/` that
+        /// decide whether to offer a key. Two reasons, and both are about the
+        /// posture now being a value that can change mid-session:
+        ///
+        /// * A view gates on the posture when it *opens* a modal. A desk
+        ///   disarmed between opening the confirm box and typing the last six
+        ///   of the hash would otherwise still dispatch, because the keystroke
+        ///   that emits `Command::Execute` is not the keystroke that was
+        ///   checked.
+        /// * "Every one of 33 call sites is correct, forever" is not a
+        ///   guarantee, it is a hope. This restores the gate in series that the
+        ///   old `client: None` gave for free when the posture was known at
+        ///   startup: the runtime, not the renderer, has the last word.
+        ///
+        /// Refused loudly rather than dropped — the log line and a `Failed` row
+        /// on the bus, which is how every other refusal in this crate reaches
+        /// the operator. A key that silently did nothing is the failure mode
+        /// invariant 4 exists for.
+        pub fn dispatch(&self, cmd: Command, posture: Posture) {
+            if !posture.writes() && !arms(&cmd) {
+                let what = names(&cmd);
+                tracing::error!(
+                    command = %what,
+                    "a write was requested by a window the desk has not armed"
+                );
+                let _ = self.tx.send(AppEvent::Wrote(Wrote::Failed {
+                    what,
+                    said: "this window is not armed — the desk's posture is read-only".to_string(),
+                }));
+                return;
+            }
             let Some(client) = self.client.clone() else {
-                // Unreachable through the key path — a glass window has no view
-                // that opens a modal, because `confirm` is gated too — and loud
+                // `--glass`: the operator's own veto, which holds no writer at
+                // all. Unreachable through the key path, because a vetoed
+                // window can never derive a writing posture either — and loud
                 // rather than silent if that ever stops being true.
                 tracing::error!("a write was requested by a window holding no writer");
+                let _ = self.tx.send(AppEvent::Wrote(Wrote::Failed {
+                    what: names(&cmd),
+                    said: "this window was started with --glass and holds no writer".to_string(),
+                }));
                 return;
             };
             let tx = self.tx.clone();
@@ -103,6 +146,51 @@ mod armed {
                     let _ = tx.send(AppEvent::Wrote(outcome));
                 }
             });
+        }
+    }
+
+    /// The one command a window the desk has not armed may still send.
+    ///
+    /// Not a second dispatch path, and not a hole in the chokepoint: it is the
+    /// *answer to the question the chokepoint is about*. Every window that can
+    /// arm a desk is by construction one the desk has not armed, so a gate
+    /// with no exemption here would make the door's arming question
+    /// unanswerable and the posture unreachable from this client at all.
+    ///
+    /// It widens nothing by itself. The owner records the answer; this window
+    /// keeps whatever posture the *next snapshot* derives, and the `--glass`
+    /// veto below still refuses it — a window that declined its own authority
+    /// may not vote itself back into it.
+    fn arms(cmd: &Command) -> bool {
+        matches!(cmd, Command::Posture { .. })
+    }
+
+    /// What a refused command was, in the same words `perform` names it by, so
+    /// a refusal at the gate and a refusal from the owner read alike.
+    ///
+    /// Written out rather than derived from `Debug`: `AlpacaLogin` carries a
+    /// typed credential, and a formatter that walked the whole value would put
+    /// whatever `Secret`'s `Debug` happens to do today into a log line and a
+    /// toast. The one thing this crate never renders is what was typed.
+    fn names(cmd: &Command) -> String {
+        match cmd {
+            Command::Quit => "quit".to_string(),
+            Command::Refresh => "refresh".to_string(),
+            Command::Backends => "read the backends".to_string(),
+            Command::Approve(id) => format!("approve {id}"),
+            Command::Reject(id) => format!("reject {id}"),
+            Command::Execute(token) => format!("execute {}", token.plan_id()),
+            Command::Message(_) => "ask the desk".to_string(),
+            Command::StartWorkflow { template, .. } => format!("start {template}"),
+            Command::DeskMode { data, book } => format!("point the desk at {data} · {book}"),
+            Command::AlpacaLogin { .. } => "store the alpaca login".to_string(),
+            Command::TestAlpaca => "test the alpaca login".to_string(),
+            Command::SetLlm { surface, .. } => format!("point {surface} at a model"),
+            // One name for both answers. What failed is the act of recording
+            // the desk's posture, and a refusal that read "leave this desk
+            // read-only — refused" would be a sentence an operator has to
+            // parse twice to see nothing changed.
+            Command::Posture { .. } => "arm this desk".to_string(),
         }
     }
 
@@ -302,6 +390,24 @@ mod armed {
                     },
                 }
             }
+            // The desk's own posture, and the only write a window the desk has
+            // not armed may send. What comes back is the owner's account of
+            // what it now holds — a 200 that does not say is a broken contract
+            // and says so, rather than this client reporting the arming it
+            // asked for as the arming that happened.
+            Command::Posture { armed } => match client.set_posture(armed).await {
+                Ok(said) => match said.get("armed").and_then(|v| v.as_bool()) {
+                    Some(armed) => Wrote::Armed { armed },
+                    None => Wrote::Failed {
+                        what: "arm this desk".to_string(),
+                        said: format!("the owner answered without saying whether it armed: {said}"),
+                    },
+                },
+                Err(err) => Wrote::Failed {
+                    what: "arm this desk".to_string(),
+                    said: err.to_string(),
+                },
+            },
             Command::TestAlpaca => match client.test_alpaca().await {
                 Ok(verdict) => Wrote::Tested {
                     ok: verdict.ok,
@@ -425,7 +531,7 @@ pub struct Writes;
 impl Writes {
     pub fn new(
         _base: &str,
-        _posture: crate::store::Posture,
+        _forced_glass: bool,
         _tx: crate::bus::Tx,
     ) -> Result<Self, std::convert::Infallible> {
         Ok(Self)

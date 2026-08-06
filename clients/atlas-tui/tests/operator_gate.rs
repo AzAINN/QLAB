@@ -471,6 +471,66 @@ mod operator {
         assert!(!armed.contains("GLASS"), "{armed}");
     }
 
+    /// A store that has heard one snapshot, carrying the posture the owner
+    /// persisted — the only way this client learns what it may do.
+    fn store_with_posture(armed: Option<bool>) -> atlas::store::Store {
+        let mut store = atlas::store::Store::default();
+        let posture = match armed {
+            Some(armed) => serde_json::json!({"armed": armed, "chosen": true}),
+            None => serde_json::Value::Null,
+        };
+        store.apply(
+            atlas::bus::AppEvent::Snapshot(Box::new(
+                serde_json::from_value(serde_json::json!({"posture": posture})).unwrap(),
+            )),
+            std::time::Instant::now(),
+        );
+        // The desk-mode door would otherwise be up — this payload names no
+        // desk — and a door swallows the keystroke that opens the palette.
+        store.settle_door();
+        store
+    }
+
+    /// The palette's scope strip, which is where a write scope is advertised.
+    fn scopes_of(mut store: atlas::store::Store) -> String {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut views = atlas::ui::views::Views::new();
+        atlas::ui::shell::on_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut store,
+            &mut views,
+        );
+        frame_with(&store, &views)
+    }
+
+    #[test]
+    fn an_unarmed_desk_offers_nothing_even_in_a_capable_binary() {
+        // The consequence, not the enum. This binary has every write path
+        // compiled in; a desk the operator answered "read-only" for must still
+        // read GLASS and must not advertise a scope it will refuse.
+        let frame = frame(&store_with_posture(Some(false)));
+        assert!(frame.contains("GLASS"), "{frame}");
+        let offered = scopes_of(store_with_posture(Some(false)));
+        assert!(
+            !offered.contains("/mode"),
+            "an unarmed desk must not advertise a write scope:\n{offered}"
+        );
+        // A desk nobody has been asked about is the same refusal for a
+        // different reason — absence is not consent.
+        let unasked = scopes_of(store_with_posture(None));
+        assert!(!unasked.contains("/mode"), "{unasked}");
+    }
+
+    #[test]
+    fn an_armed_desk_is_what_puts_the_write_scope_on_the_strip() {
+        // The other side of the pin above: without this the negative assertion
+        // would pass on a frame that never offers `/mode` to anyone.
+        let frame = frame(&store_with_posture(Some(true)));
+        assert!(frame.contains("OPERATOR"), "{frame}");
+        let offered = scopes_of(store_with_posture(Some(true)));
+        assert!(offered.contains("/mode"), "{offered}");
+    }
+
     fn frame(store: &atlas::store::Store) -> String {
         frame_with(store, &atlas::ui::views::Views::new())
     }
@@ -729,6 +789,15 @@ mod operator {
     }
 
     /// An armed token, for the outcome tests below.
+    /// `AppEvent` has no `Debug` — the bus carries a typed credential — so a
+    /// failing assertion names the variant rather than dumping the value.
+    fn debug(ev: &AppEvent) -> &'static str {
+        match ev {
+            AppEvent::Wrote(_) => "a write outcome that is not a refusal",
+            _ => "some other bus event",
+        }
+    }
+
     fn armed_token() -> atlas::ui::widgets::confirm::ConfirmToken {
         let (plan, approval) = checked_plan();
         let mut modal = Modal::for_plan(&plan, &approval).unwrap();
@@ -860,6 +929,11 @@ mod operator {
                 "workflow",
                 serde_json::json!({"kind": "portfolio_review", "goal": "review the book"}),
             ),
+            (
+                "/api/desk/posture",
+                "posture",
+                serde_json::json!({"armed": true}),
+            ),
         ];
 
         for (path, which, want) in cases {
@@ -880,6 +954,7 @@ mod operator {
                     .start_workflow("portfolio_review", "review the book")
                     .await
                     .unwrap(),
+                "posture" => client.set_posture(true).await.unwrap(),
                 other => panic!("untested verb {other}"),
             };
             let seen = owner.only();
@@ -1125,9 +1200,12 @@ mod operator {
         // pressed and heard nothing back from.
         let owner = spawn_owner(200, r#"{"status": "approved"}"#);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let writes = Writes::new(&owner.base, Posture::Operator, tx).unwrap();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
         assert!(writes.armed());
-        writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()));
+        writes.dispatch(
+            Command::Approve("1a2b3c4d5e6f7081".into()),
+            Posture::Operator,
+        );
         match rx.recv().await {
             Some(AppEvent::Wrote(Wrote::Decided { decision, .. })) => {
                 assert_eq!(decision, "approved")
@@ -1137,23 +1215,157 @@ mod operator {
     }
 
     #[tokio::test]
-    async fn a_window_the_human_did_not_arm_holds_no_writer_and_sends_nothing() {
-        // The flag arms the build, not the feature. A featured binary started
-        // without `--operator` reads GLASS on the status line, and the runtime
-        // has to agree with it rather than merely the renderer.
+    async fn a_window_the_operator_vetoed_holds_no_writer_and_sends_nothing() {
+        // `--glass` is the operator declining an authority the desk may be
+        // offering, and the runtime has to agree with the status line rather
+        // than merely the renderer: a vetoed window holds no client at all.
         let owner = spawn_owner(200, r#"{"status": "approved"}"#);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let writes = Writes::new(&owner.base, Posture::Glass, tx).unwrap();
+        let writes = Writes::new(&owner.base, true, tx).unwrap();
         assert!(!writes.armed());
-        writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()));
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(
-            rx.try_recv().is_err(),
-            "an unarmed window wrote to the desk"
+        // Posture::Operator on purpose: this pins the *writer* gate, not the
+        // posture gate above it. A vetoed window that somehow derived a writing
+        // posture must still reach nobody, and must say so.
+        writes.dispatch(
+            Command::Approve("1a2b3c4d5e6f7081".into()),
+            Posture::Operator,
         );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        match rx.try_recv() {
+            Ok(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert_eq!(what, "approve 1a2b3c4d5e6f7081");
+                assert!(said.contains("--glass"), "{said}");
+            }
+            Ok(other) => panic!("a vetoed window sent something else: {}", debug(&other)),
+            Err(err) => panic!("a vetoed window was silently dropped: {err}"),
+        }
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "a vetoed window reached the owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unarmed_posture_is_refused_at_the_dispatch_seam_and_never_reaches_the_owner() {
+        // The chokepoint, and the reason it exists one level above the views:
+        // this window holds a live writer — it was not started with `--glass` —
+        // and the *only* thing between the command and the owner is the posture
+        // the desk last reported. Both sides of that guard are witnessed here
+        // and in `a_dispatched_command_puts_its_outcome_on_the_bus` above.
+        let owner = spawn_owner(200, r#"{"status": "approved"}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
+        assert!(writes.armed(), "the writer exists; the posture is the gate");
+        writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()), Posture::Glass);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Loud, not dropped: a refusal on the bus is what puts a toast in front
+        // of the operator, and a key that silently did nothing is the failure
+        // mode invariant 4 exists for.
+        match rx.try_recv() {
+            Ok(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert_eq!(what, "approve 1a2b3c4d5e6f7081");
+                assert!(said.contains("not armed"), "{said}");
+            }
+            Ok(other) => panic!("an unarmed window sent something else: {}", debug(&other)),
+            Err(err) => panic!("an unarmed window was silently dropped: {err}"),
+        }
         assert!(
             owner.seen.lock().unwrap().is_empty(),
             "an unarmed window reached the owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_arming_answer_is_the_one_write_an_unarmed_window_may_make() {
+        // The exception the gate above has to carry, and the reason it is not
+        // a second dispatch path: every window that can arm a desk is, by
+        // definition, one the desk has not armed yet, so a chokepoint with no
+        // exemption would make the arming question unanswerable. It grants
+        // nothing on its own — the owner records a posture and the *next*
+        // snapshot is what widens this window.
+        let owner = spawn_owner(200, r#"{"armed": true, "chosen": true}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
+        writes.dispatch(Command::Posture { armed: true }, Posture::Glass);
+        match rx.recv().await {
+            Some(AppEvent::Wrote(Wrote::Armed { armed })) => assert!(armed),
+            other => panic!("the arming answer never landed: {:?}", other.is_some()),
+        }
+        let seen = owner.only();
+        assert_eq!(seen.path, "/api/desk/posture");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({"armed": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_the_operator_vetoed_cannot_arm_the_desk_either() {
+        // The gate below the exemption, which the exemption must not step
+        // past: `--glass` holds no writer, and a window that vetoed its own
+        // authority may not vote itself back into it.
+        let owner = spawn_owner(200, r#"{"armed": true, "chosen": true}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, true, tx).unwrap();
+        writes.dispatch(Command::Posture { armed: true }, Posture::Glass);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        match rx.try_recv() {
+            Ok(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert_eq!(what, "arm this desk");
+                assert!(said.contains("--glass"), "{said}");
+            }
+            Ok(other) => panic!("a vetoed window sent something else: {}", debug(&other)),
+            Err(err) => panic!("a vetoed window was silently dropped: {err}"),
+        }
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "a vetoed window reached the owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_owner_that_does_not_say_what_it_armed_is_a_failure_and_not_a_receipt() {
+        // `set_posture` answers with `posture_payload()`, so a 200 without
+        // `armed` is a broken contract — and this client will not report an
+        // arming it cannot read back, any more than it invents a desk label.
+        let owner = spawn_owner(200, r#"{"chosen": true}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::Posture { armed: true }).await {
+            Some(Wrote::Failed { what, said }) => {
+                assert_eq!(what, "arm this desk");
+                assert!(said.contains("armed"), "{said}");
+            }
+            other => panic!("an unreadable answer became {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_desk_disarmed_while_the_confirm_modal_was_open_books_nothing() {
+        // The mid-session flip. The view gated `x` on the posture when the modal
+        // was *opened*; the keystroke that mints the token and emits
+        // `Command::Execute` is a different keystroke, and by then the desk may
+        // have been disarmed from another window. The token is real — minted by
+        // the real modal against the owner's own hash — so what refuses this is
+        // the seam and nothing else.
+        let token = armed_token();
+
+        let owner = spawn_owner(200, r#"{"executed": true}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
+        // The desk went read-only between the open and the last keystroke.
+        writes.dispatch(Command::Execute(token), Posture::Glass);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        match rx.try_recv() {
+            Ok(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert!(what.starts_with("execute "), "{what}");
+                assert!(said.contains("not armed"), "{said}");
+            }
+            Ok(other) => panic!("a disarmed desk sent something else: {}", debug(&other)),
+            Err(err) => panic!("a disarmed desk was silently dropped: {err}"),
+        }
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "a disarmed desk reached the owner"
         );
     }
 
@@ -1527,10 +1739,12 @@ mod operator {
         // Driven through the real router rather than hand-built, because the
         // claim being checked is that the door's command **is** that command.
         let mut store = atlas::store::Store::default();
-        store.posture = Posture::Operator;
         store.apply(
             atlas::bus::AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({
+                    // The desk arms this window, not the test: the posture is
+                    // re-derived from every snapshot.
+                    "posture": {"armed": true, "chosen": true},
                     "desk_mode": {"data": "synthetic", "book": "simulated",
                                   "label": "SYNTHETIC", "offline": true,
                                   "credentials": "no ALPACA_API_KEY_ID in the environment",
@@ -1871,12 +2085,14 @@ mod operator {
         use atlas::ui::views::Views;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut store = Store::default();
-        store.posture = Posture::Operator;
         store.nav.view = ViewId::Settings;
         let _ = store.apply(
             AppEvent::Snapshot(Box::new(snapshot())),
             std::time::Instant::now(),
         );
+        // After the snapshot: the fixture carries no posture block, and every
+        // payload re-derives the scope.
+        store.posture = Posture::Operator;
         let mut views = Views::new();
         fn press(store: &mut Store, views: &mut Views, code: KeyCode) {
             atlas::ui::shell::on_key(KeyEvent::new(code, KeyModifiers::NONE), store, views);

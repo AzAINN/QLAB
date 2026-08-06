@@ -554,7 +554,11 @@ fn status_tone(status: &str) -> ratatui::style::Color {
 /// console directly above this line while the clock stands still — and "no word
 /// for 45s" printed under visible words is a claim the frame itself disproves.
 /// "No progress" is true in both cases.
-pub fn activity_line(driving: bool, last: Option<Instant>, now: Instant) -> Option<String> {
+/// Test-only, and marked so: production renders from `activity` directly,
+/// because it needs the `Silence` half to tone the row. A `pub` wrapper nothing
+/// called is the seam invariant 10 is about.
+#[cfg(test)]
+fn activity_line(driving: bool, last: Option<Instant>, now: Instant) -> Option<String> {
     activity(driving, last, now).map(|(_, said)| said)
 }
 

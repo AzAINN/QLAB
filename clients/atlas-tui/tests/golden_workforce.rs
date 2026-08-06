@@ -292,7 +292,7 @@ fn silence_is_reported_rather_than_animated_on_the_pane() {
 
     client.now += SILENCE_AFTER;
     let quiet = content(&client.frame(160, 36));
-    assert!(quiet.contains("no word for 45s"), "{quiet}");
+    assert!(quiet.contains("no progress for 45s"), "{quiet}");
     assert!(!quiet.contains("spoke"), "{quiet}");
 }
 
@@ -309,7 +309,7 @@ fn a_parked_desk_claims_no_activity_at_all() {
     agent_event(&mut client, "live-coord-1", "text", "referee", "PASS");
     let body = content(&client.frame(160, 36));
     assert!(!body.contains("spoke"), "{body}");
-    assert!(!body.contains("no word for"), "{body}");
+    assert!(!body.contains("no progress for"), "{body}");
 }
 
 #[test]
@@ -323,7 +323,7 @@ fn a_driving_coordinator_with_no_run_id_still_reports_its_activity() {
             "atlas_heartbeat": {"coordinator": {"driving": true, "workflow_id": ""}}}"#,
     );
     let body = content(&client.frame(160, 36));
-    assert!(body.contains("no word yet"), "{body}");
+    assert!(body.contains("no progress yet"), "{body}");
     // And `Some("")` is absent: an absent coordinator id must not *match* a
     // flow whose own id is empty. Both become `None` under `format::text`, so
     // an equality test alone would hang the line under a run the coordinator
@@ -335,7 +335,7 @@ fn a_driving_coordinator_with_no_run_id_still_reports_its_activity() {
     );
     let once = content(&orphan.frame(160, 36));
     assert_eq!(
-        once.matches("no word yet").count(),
+        once.matches("no progress yet").count(),
         1,
         "the activity line was drawn against a run the coordinator did not name:\n{once}"
     );

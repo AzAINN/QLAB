@@ -547,6 +547,13 @@ fn status_tone(status: &str) -> ratatui::style::Color {
 /// Past `SILENCE_AFTER` the line names the silence rather than dressing it up.
 /// That is the whole design: an operator has to be able to tell a run that is
 /// thinking from one that has stopped, and only the desk's own record can say.
+///
+/// *Progress*, not *word*, and the distinction is the point rather than a
+/// rewrite. Liveness is stamped by `tool_start` and `text` alone (see
+/// `Store::is_agent_word`), so an erroring run keeps producing prose in the
+/// console directly above this line while the clock stands still — and "no word
+/// for 45s" printed under visible words is a claim the frame itself disproves.
+/// "No progress" is true in both cases.
 pub fn activity_line(driving: bool, last: Option<Instant>, now: Instant) -> Option<String> {
     activity(driving, last, now).map(|(_, said)| said)
 }
@@ -562,16 +569,16 @@ fn activity(driving: bool, last: Option<Instant>, now: Instant) -> Option<(Silen
         return None;
     }
     // Driving with nothing heard is a distinct fact from silence: the run may
-    // be seconds old, and "no word for 0s" would read as a stall at startup.
+    // be seconds old, and "no progress for 0s" would read as a stall at startup.
     let Some(last) = last else {
-        return Some((Silence::No, "no word yet".to_string()));
+        return Some((Silence::No, "no progress yet".to_string()));
     };
     // Saturating: `now` is the frame's instant and `last` an arrival stamped on
     // another thread, so the two can cross by a hair. A negative age here would
     // be a panic behind the alternate screen.
     let age = now.saturating_duration_since(last);
     Some(if age >= SILENCE_AFTER {
-        (Silence::Yes, format!("no word for {}s", age.as_secs()))
+        (Silence::Yes, format!("no progress for {}s", age.as_secs()))
     } else {
         (Silence::No, format!("spoke {}s ago", age.as_secs()))
     })
@@ -944,7 +951,7 @@ mod tests {
         );
         assert_eq!(
             activity_line(true, Some(t0), t0 + secs(47)).unwrap(),
-            "no word for 47s"
+            "no progress for 47s"
         );
         // Both sides of the threshold, because the threshold is a comparison
         // and a comparison with one case is an untested one.
@@ -953,12 +960,12 @@ mod tests {
             .starts_with("spoke"));
         assert!(activity_line(true, Some(t0), t0 + secs(45))
             .unwrap()
-            .starts_with("no word"));
+            .starts_with("no progress"));
         // Driving with nothing heard yet is its own fact, and it is not silence
         // measured from a clock read this function was never given.
         assert_eq!(
             activity_line(true, None, t0).unwrap(),
-            "no word yet",
+            "no progress yet",
             "a run that has said nothing is not a run that went quiet"
         );
         // A stamp from the future is a monotonic clock and a store that raced,

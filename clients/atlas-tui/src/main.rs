@@ -1,16 +1,20 @@
 //! atlas-tui — a Ratatui client for the qlab owner runtime.
 //!
-//! Read-only by construction, in the build that ships by default. It talks to
-//! the owner over HTTP and has no registry handle and no way to acquire one, and
-//! in the default build no order path either — invariant 3 is preserved by
-//! absence rather than by a check that could be removed.
+//! It talks to the owner over HTTP and has no registry handle and no way to
+//! acquire one. Whether it has an order path is a build question: the
+//! `operator` feature is the only thing that compiles one into this crate at
+//! all, and it is on by default because the desk this client serves is a desk
+//! an operator works. Built with `--no-default-features` there is no
+//! `net::write` module, no POST call site, and no `Posture::Operator` for the
+//! status line to hold — a monitoring box builds that artifact and cannot be
+//! argued, configured, or flagged into writing.
 //!
-//! "By absence" stays literal under the `operator` feature, which is the only
-//! thing that compiles a write path into this crate at all: without it there is
-//! no `net::write` module, no POST call site, and no `Posture::Operator` for the
-//! status line to hold. A monitoring box builds the default and cannot be
-//! argued, configured, or flagged into writing. `--operator` then decides
-//! whether the human armed the build they have.
+//! In the shipped build, what this window may do is the *desk's* answer, not an
+//! argument's: the owner persists a posture, serves it on `/api/tui`, and
+//! `store::Posture::from_desk` re-derives the scope from every snapshot. A desk
+//! nobody has armed offers nothing, and a desk disarmed from another window
+//! disarms this one at the next poll. `--glass` is the operator's own veto on
+//! top of that, and it is the only posture fact a launch still carries.
 //!
 //! What the write path can reach is still the owner's governed API and nothing
 //! else: an approval decision, a plan execution that consumes a persisted
@@ -79,7 +83,15 @@ async fn main() -> Result<()> {
     // owner on a port they did not choose — otherwise has to read a chip that
     // names no host and guess which desk it is about.
     store.base = base.clone();
-    store.posture = posture(&args);
+    // The one posture fact a launch still carries. The desk's own answer is
+    // what arms this window — see `store::Posture::from_desk` — and it arrives
+    // with the first snapshot, so the client starts glass and stays glass until
+    // an owner says otherwise. `--glass` is this window declining an authority
+    // the desk may be offering, and it is sticky: no later snapshot revokes it.
+    store.forced_glass = args.iter().any(|a| a == "--glass");
+    if store.forced_glass {
+        tracing::info!("--glass: this window will stay read-only whatever the desk says");
+    }
     // Parsed in both builds, and acted on in both: a glass window started with
     // it is shown the door it cannot answer, which is the honest reply to
     // "let me choose" from a window that cannot. Before the first frame, so a
@@ -105,10 +117,11 @@ async fn main() -> Result<()> {
     );
 
     // The write half, built here and only here. Fallibly, and before the screen
-    // is taken: a client armed with `--operator` whose writer could not be
-    // built would run looking armed and refuse every key at the moment it
-    // mattered. Invariant 4 — refuse loudly rather than degrade quietly.
-    let writes = Writes::new(&base, store.posture, tx.clone())?;
+    // is taken: a client whose writer could not be built would run looking
+    // capable and refuse every key at the moment it mattered. Invariant 4 —
+    // refuse loudly rather than degrade quietly. What it may be *used* for is
+    // still the desk's answer, re-derived on every snapshot.
+    let writes = Writes::new(&base, store.forced_glass, tx.clone())?;
 
     let poller = http::spawn_poller(base.clone(), offline, tx.clone());
     // The stream holds the poller so the two feeds are one story: an event that
@@ -126,54 +139,6 @@ async fn main() -> Result<()> {
     spawn_terminal_events(tx);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     run(&mut terminal, &mut store, &mut rx, &poller, &writes).await
-}
-
-/// What this window may do to the desk, decided once and never re-read.
-///
-/// Two gates in series, and they answer different questions. The `operator`
-/// Cargo feature decides whether a write path exists in this binary at all — a
-/// monitoring box builds the default and has no `net::write` to reach, whatever
-/// it is passed. `--operator` then decides whether the human armed the build
-/// they have: a featured binary started without it runs as glass, so an operator
-/// who wants to watch does not have to find a different executable, and the
-/// status chip answers "can the next keystroke place an order" rather than
-/// "which binary is this".
-///
-/// The flag is parsed under `cfg` too, not just acted on under it. In the
-/// default build the string `--operator` means nothing at all, which is the
-/// property CLAUDE.md's "read-only by construction" claim rests on: there is no
-/// argument, environment variable, or config file that can widen what a glass
-/// binary does, because the code that would widen it was never compiled.
-#[cfg(feature = "operator")]
-fn posture(args: &[String]) -> atlas::store::Posture {
-    if args.iter().any(|a| a == "--operator") {
-        // On the record before the screen is taken. A fill found in the audit
-        // log later should be traceable to a client that said, in its own log,
-        // that it was armed and against which owner.
-        tracing::warn!("operator posture armed: this client can write to the desk");
-        atlas::store::Posture::Operator
-    } else {
-        atlas::store::Posture::Glass
-    }
-}
-
-#[cfg(not(feature = "operator"))]
-fn posture(args: &[String]) -> atlas::store::Posture {
-    // A glass build cannot arm — but an operator who typed `--operator` asked
-    // for a write path this binary does not contain, and running anyway would
-    // hand them a workstation that looks like the one they asked for with the
-    // chat, the pickers and every write silently missing. That is exactly the
-    // downgrade "fail loud" exists to prevent: refuse with the rebuild line
-    // rather than let the absence be discovered one dead keystroke at a time.
-    if args.iter().any(|a| a == "--operator") {
-        eprintln!(
-            "this atlas binary was built without the operator feature, so \
-             --operator has nothing to arm.\n    cd clients/atlas-tui && \
-             cargo build --release --features operator"
-        );
-        std::process::exit(2);
-    }
-    atlas::store::Posture::Glass
 }
 
 async fn run(

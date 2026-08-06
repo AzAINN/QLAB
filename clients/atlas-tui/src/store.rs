@@ -319,9 +319,10 @@ pub struct AssetFacts<'a> {
 /// could be assigned by a bug, a config read, or a stray `..Default::default()`
 /// — the amber word is unreachable because the variant is not in the type.
 ///
-/// Which one is held is decided once, in `main`, from the `--operator` flag: the
-/// feature says what the binary is capable of, the flag says whether the human
-/// armed it. A featured build that was not armed reads `GLASS`, because the
+/// Which one is held is derived from the owner's own posture on every snapshot
+/// ([`Posture::from_desk`]): the feature says what the binary is capable of, the
+/// desk says whether the operator armed it, and `--glass` lets this window
+/// decline. A featured build on an unarmed desk reads `GLASS`, because the
 /// question the chip answers is "can the next keystroke place an order", not
 /// "which binary is this".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -333,6 +334,36 @@ pub enum Posture {
 }
 
 impl Posture {
+    /// What this window may do, derived from the desk rather than declared at
+    /// launch. The one place the decision is made.
+    ///
+    /// Three conjuncts, in this order, and the order is the argument:
+    ///
+    /// 1. `featured` — the Cargo gate, outermost because it is the only one a
+    ///    running process cannot influence. It is passed in rather than read
+    ///    from `cfg!` here so both sides of it are testable in one leg; the
+    ///    composition root supplies `cfg!(feature = "operator")`. The `cfg`
+    ///    below is what makes it structural: in a `--no-default-features`
+    ///    artifact `Posture::Operator` is not a value that exists, so no
+    ///    argument to this function can return it.
+    /// 2. `forced_glass` — `--glass`, the operator's own veto. It is *this*
+    ///    window declining an authority the desk offers, so it must beat the
+    ///    desk's answer, not lose to it.
+    /// 3. `armed == Some(true)` — the owner's persisted posture. `Some(false)`
+    ///    and `None` are both glass, but for different reasons: the first is an
+    ///    answered desk, the second an unasked one, and arming on absence would
+    ///    make an owner that lost the field into an armed workstation.
+    pub fn from_desk(featured: bool, forced_glass: bool, armed: Option<bool>) -> Posture {
+        let armed_desk = featured && !forced_glass && armed == Some(true);
+        #[cfg(feature = "operator")]
+        if armed_desk {
+            return Posture::Operator;
+        }
+        #[cfg(not(feature = "operator"))]
+        let _ = armed_desk;
+        Posture::Glass
+    }
+
     /// The word on the status line. Not `Display`: this is a fixed badge with a
     /// fixed width, and a formatting impl invites a caller to pad it.
     pub fn label(self) -> &'static str {
@@ -347,10 +378,10 @@ impl Posture {
     ///
     /// The question every surface actually asks, and the reason it is asked of
     /// the *posture* rather than of `cfg!(feature = "operator")`. The feature
-    /// says what the binary is capable of; the flag says whether the human
-    /// armed it. A pane that keyed its hints or its branches off the feature
+    /// says what the binary is capable of; the desk's posture says whether the
+    /// operator armed it. A pane that keyed its hints or its branches off the feature
     /// alone would offer the execute key in a featured binary started without
-    /// `--operator` — which is precisely the window the status line is
+    /// on an unarmed desk — which is precisely the window the status line is
     /// promising reads GLASS.
     ///
     /// In the default build this is `false` for the only value that exists, so
@@ -449,13 +480,24 @@ pub struct Store {
     /// Empty means nothing set it, and renders as absent like every other unset
     /// string in this client.
     pub base: String,
-    /// What this window may do to the desk, set once by the composition root.
+    /// What this window may do to the desk, re-derived from every snapshot.
     ///
     /// Here beside `base` — the store's other composition-root fact — rather
     /// than read by the renderer, for the same reason: a status line that
     /// consulted a flag or a `cfg!` directly would be a frame that is not a pure
     /// function of the store, and no golden test could then pin either word.
+    ///
+    /// Derived rather than set once, because the authority is the owner's and
+    /// the owner can withdraw it: a desk disarmed from another window must not
+    /// leave this one holding a write scope it no longer has. It starts `Glass`
+    /// and stays there until a snapshot says otherwise.
     pub posture: Posture,
+    /// `--glass`: this window declining an authority the desk may be offering.
+    ///
+    /// A composition-root fact, and the reason [`Posture::from_desk`] takes it
+    /// as an argument rather than reading a flag: an operator who wants to
+    /// watch an armed desk should not have to disarm it for everyone else.
+    pub forced_glass: bool,
     /// Live prices, by ticker — read through `asset_view`, never rendered from
     /// directly. See `QuoteMark` for why this is an overlay and not a merge.
     pub quote_overlay: HashMap<String, QuoteMark>,
@@ -542,6 +584,7 @@ impl Store {
             malformed: None,
             base: String::new(),
             posture: Posture::Glass,
+            forced_glass: false,
             quote_overlay: HashMap::new(),
             stream_malformed_count: 0,
             events_ring: VecDeque::new(),
@@ -839,6 +882,26 @@ impl Store {
     /// SETTINGS card — so they cannot disagree about which desk this is.
     pub fn desk_mode(&self) -> Option<&DeskMode> {
         self.snapshot.as_ref()?.desk_mode.as_ref()
+    }
+
+    /// Whether the owner says this desk is armed.
+    ///
+    /// `None` is absence, not "no": an owner too old to serve a posture block,
+    /// a payload that lost it, or a field the owner left null. The decision
+    /// table in [`Posture::from_desk`] treats absence and `Some(false)` the
+    /// same way — glass — but they are different facts, and the door needs to
+    /// tell them apart via [`Store::posture_chosen`].
+    pub fn posture_armed(&self) -> Option<bool> {
+        self.snapshot.as_ref()?.posture.as_ref()?.armed
+    }
+
+    /// Whether anyone has ever answered the posture question on this desk.
+    ///
+    /// `Some(false)` is the owner saying, in as many words, that the read-only
+    /// posture it is serving is the default nobody picked — which is what
+    /// Task 3's door asks about.
+    pub fn posture_chosen(&self) -> Option<bool> {
+        self.snapshot.as_ref()?.posture.as_ref()?.chosen
     }
 
     /// The allocation policy the paper book is run under.
@@ -1308,6 +1371,15 @@ impl Store {
 
         self.snapshot = Some(next);
         self.last_snapshot_at = Some(now);
+        // Once per snapshot, from the payload just installed. The owner is the
+        // authority on the desk's posture, so this window's scope follows it in
+        // both directions — a desk disarmed from another client disarms this
+        // frame at the next poll rather than at the next restart.
+        self.posture = Posture::from_desk(
+            cfg!(feature = "operator"),
+            self.forced_glass,
+            self.posture_armed(),
+        );
         // A payload that decodes retires the last one that did not. Leaving it
         // set would leave a recovered owner accused on every later frame.
         self.malformed = None;
@@ -1481,6 +1553,91 @@ mod tests {
         // Through the real decoder, not a hand-built struct: a diff that reads a
         // field the owner never fills is a bug the fixture path would hide.
         AppEvent::Snapshot(Box::new(serde_json::from_value::<Snapshot>(value).unwrap()))
+    }
+
+    // -- the posture decision table ----------------------------------------
+
+    /// Both sides of every conjunct in [`Posture::from_desk`].
+    ///
+    /// Only in the featured leg: `Posture::Operator` is not a value that exists
+    /// in a glass build, so the row that says "armed" cannot even be written
+    /// there. The glass leg pins the same function from the other end, below.
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_desk_arms_only_when_the_binary_can_and_the_operator_said_so() {
+        use Posture::*;
+        assert_eq!(Posture::from_desk(true, false, Some(true)), Operator);
+        assert_eq!(Posture::from_desk(true, false, Some(false)), Glass); // owner says no
+        assert_eq!(Posture::from_desk(true, false, None), Glass); // never asked
+        assert_eq!(Posture::from_desk(true, true, Some(true)), Glass); // --glass wins
+        assert_eq!(Posture::from_desk(false, false, Some(true)), Glass); // cargo gate wins
+    }
+
+    /// A glass artifact has one answer whatever the desk says.
+    #[cfg(not(feature = "operator"))]
+    #[test]
+    fn a_glass_artifact_cannot_be_armed_by_any_desk() {
+        assert_eq!(Posture::from_desk(true, false, Some(true)), Posture::Glass);
+        assert_eq!(Posture::from_desk(false, true, None), Posture::Glass);
+    }
+
+    #[test]
+    fn the_posture_block_is_read_from_the_snapshot_and_absence_is_not_a_no() {
+        let mut store = Store::default();
+        assert_eq!(store.posture_armed(), None);
+        assert_eq!(store.posture_chosen(), None);
+
+        apply(
+            &mut store,
+            snap(json!({"posture": {"armed": true, "chosen": true}})),
+        );
+        assert_eq!(store.posture_armed(), Some(true));
+        assert_eq!(store.posture_chosen(), Some(true));
+
+        apply(
+            &mut store,
+            snap(json!({"posture": {"armed": false, "chosen": false}})),
+        );
+        assert_eq!(store.posture_armed(), Some(false));
+        assert_eq!(store.posture_chosen(), Some(false));
+
+        // An owner that serves no block at all is absence, not a denial.
+        apply(&mut store, snap(json!({})));
+        assert_eq!(store.posture_armed(), None);
+    }
+
+    /// The posture is re-derived from every snapshot, not decided at startup.
+    #[test]
+    fn a_snapshot_that_disarms_the_desk_disarms_this_window() {
+        let mut store = Store::default();
+        assert_eq!(store.posture, Posture::Glass);
+
+        apply(
+            &mut store,
+            snap(json!({"posture": {"armed": true, "chosen": true}})),
+        );
+        assert_eq!(store.posture.writes(), cfg!(feature = "operator"));
+
+        apply(
+            &mut store,
+            snap(json!({"posture": {"armed": false, "chosen": true}})),
+        );
+        assert_eq!(store.posture, Posture::Glass);
+    }
+
+    /// `--glass` is the operator's own veto, and it survives a desk that says
+    /// otherwise on every subsequent snapshot.
+    #[test]
+    fn a_window_started_glass_stays_glass_however_the_desk_answers() {
+        let mut store = Store {
+            forced_glass: true,
+            ..Default::default()
+        };
+        apply(
+            &mut store,
+            snap(json!({"posture": {"armed": true, "chosen": true}})),
+        );
+        assert_eq!(store.posture, Posture::Glass);
     }
 
     #[test]

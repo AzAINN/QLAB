@@ -471,6 +471,66 @@ mod operator {
         assert!(!armed.contains("GLASS"), "{armed}");
     }
 
+    /// A store that has heard one snapshot, carrying the posture the owner
+    /// persisted — the only way this client learns what it may do.
+    fn store_with_posture(armed: Option<bool>) -> atlas::store::Store {
+        let mut store = atlas::store::Store::default();
+        let posture = match armed {
+            Some(armed) => serde_json::json!({"armed": armed, "chosen": true}),
+            None => serde_json::Value::Null,
+        };
+        store.apply(
+            atlas::bus::AppEvent::Snapshot(Box::new(
+                serde_json::from_value(serde_json::json!({"posture": posture})).unwrap(),
+            )),
+            std::time::Instant::now(),
+        );
+        // The desk-mode door would otherwise be up — this payload names no
+        // desk — and a door swallows the keystroke that opens the palette.
+        store.settle_door();
+        store
+    }
+
+    /// The palette's scope strip, which is where a write scope is advertised.
+    fn scopes_of(mut store: atlas::store::Store) -> String {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut views = atlas::ui::views::Views::new();
+        atlas::ui::shell::on_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut store,
+            &mut views,
+        );
+        frame_with(&store, &views)
+    }
+
+    #[test]
+    fn an_unarmed_desk_offers_nothing_even_in_a_capable_binary() {
+        // The consequence, not the enum. This binary has every write path
+        // compiled in; a desk the operator answered "read-only" for must still
+        // read GLASS and must not advertise a scope it will refuse.
+        let frame = frame(&store_with_posture(Some(false)));
+        assert!(frame.contains("GLASS"), "{frame}");
+        let offered = scopes_of(store_with_posture(Some(false)));
+        assert!(
+            !offered.contains("/mode"),
+            "an unarmed desk must not advertise a write scope:\n{offered}"
+        );
+        // A desk nobody has been asked about is the same refusal for a
+        // different reason — absence is not consent.
+        let unasked = scopes_of(store_with_posture(None));
+        assert!(!unasked.contains("/mode"), "{unasked}");
+    }
+
+    #[test]
+    fn an_armed_desk_is_what_puts_the_write_scope_on_the_strip() {
+        // The other side of the pin above: without this the negative assertion
+        // would pass on a frame that never offers `/mode` to anyone.
+        let frame = frame(&store_with_posture(Some(true)));
+        assert!(frame.contains("OPERATOR"), "{frame}");
+        let offered = scopes_of(store_with_posture(Some(true)));
+        assert!(offered.contains("/mode"), "{offered}");
+    }
+
     fn frame(store: &atlas::store::Store) -> String {
         frame_with(store, &atlas::ui::views::Views::new())
     }
@@ -1125,7 +1185,7 @@ mod operator {
         // pressed and heard nothing back from.
         let owner = spawn_owner(200, r#"{"status": "approved"}"#);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let writes = Writes::new(&owner.base, Posture::Operator, tx).unwrap();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
         assert!(writes.armed());
         writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()));
         match rx.recv().await {
@@ -1137,23 +1197,20 @@ mod operator {
     }
 
     #[tokio::test]
-    async fn a_window_the_human_did_not_arm_holds_no_writer_and_sends_nothing() {
-        // The flag arms the build, not the feature. A featured binary started
-        // without `--operator` reads GLASS on the status line, and the runtime
-        // has to agree with it rather than merely the renderer.
+    async fn a_window_the_operator_vetoed_holds_no_writer_and_sends_nothing() {
+        // `--glass` is the operator declining an authority the desk may be
+        // offering, and the runtime has to agree with the status line rather
+        // than merely the renderer: a vetoed window holds no client at all.
         let owner = spawn_owner(200, r#"{"status": "approved"}"#);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let writes = Writes::new(&owner.base, Posture::Glass, tx).unwrap();
+        let writes = Writes::new(&owner.base, true, tx).unwrap();
         assert!(!writes.armed());
         writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(
-            rx.try_recv().is_err(),
-            "an unarmed window wrote to the desk"
-        );
+        assert!(rx.try_recv().is_err(), "a vetoed window wrote to the desk");
         assert!(
             owner.seen.lock().unwrap().is_empty(),
-            "an unarmed window reached the owner"
+            "a vetoed window reached the owner"
         );
     }
 
@@ -1527,10 +1584,12 @@ mod operator {
         // Driven through the real router rather than hand-built, because the
         // claim being checked is that the door's command **is** that command.
         let mut store = atlas::store::Store::default();
-        store.posture = Posture::Operator;
         store.apply(
             atlas::bus::AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({
+                    // The desk arms this window, not the test: the posture is
+                    // re-derived from every snapshot.
+                    "posture": {"armed": true, "chosen": true},
                     "desk_mode": {"data": "synthetic", "book": "simulated",
                                   "label": "SYNTHETIC", "offline": true,
                                   "credentials": "no ALPACA_API_KEY_ID in the environment",
@@ -1871,12 +1930,14 @@ mod operator {
         use atlas::ui::views::Views;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut store = Store::default();
-        store.posture = Posture::Operator;
         store.nav.view = ViewId::Settings;
         let _ = store.apply(
             AppEvent::Snapshot(Box::new(snapshot())),
             std::time::Instant::now(),
         );
+        // After the snapshot: the fixture carries no posture block, and every
+        // payload re-derives the scope.
+        store.posture = Posture::Operator;
         let mut views = Views::new();
         fn press(store: &mut Store, views: &mut Views, code: KeyCode) {
             atlas::ui::shell::on_key(KeyEvent::new(code, KeyModifiers::NONE), store, views);

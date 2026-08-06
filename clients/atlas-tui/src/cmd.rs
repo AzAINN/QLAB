@@ -608,11 +608,11 @@ fn plan(query: &str, store: &Store) -> Resolved {
 }
 
 fn mode(query: &str, posture: Posture) -> Resolved {
-    // The posture, not the feature. A featured binary the human did not arm
+    // The posture, not the feature. A window on a desk the owner has not armed
     // reads GLASS on the status line, and this may not disagree with it.
     if !posture.writes() {
         return Resolved::Refused(format!(
-            "/mode changes the desk; this window is {} — start it with --operator",
+            "/mode changes the desk; this window is {} — the desk is not armed",
             posture.label()
         ));
     }
@@ -648,7 +648,7 @@ fn mode(query: &str, posture: Posture) -> Resolved {
 fn model(query: &str, store: &Store, posture: Posture) -> Resolved {
     if !posture.writes() {
         return Resolved::Refused(format!(
-            "/model changes the desk; this window is {} — start it with --operator",
+            "/model changes the desk; this window is {} — the desk is not armed",
             posture.label()
         ));
     }

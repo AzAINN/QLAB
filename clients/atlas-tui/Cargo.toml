@@ -12,21 +12,30 @@ license = "MIT"
 name = "atlas"
 path = "src/lib.rs"
 
-# The operator posture is a build, not a setting.
+# Two artifacts, and the default is the one an operator works at.
 #
-# CLAUDE.md invariant 3 forbids an agent-reachable execution path, and this
-# client's claim has always been the stronger one: "read-only by construction —
-# no order path, no registry handle — so invariant 3 holds there by absence".
-# A runtime `Option<WriteClient>` would demote that to a branch, and a branch
-# can be flipped by a flag, a config file, or a bug. Under this feature the
-# write half does not exist in the artifact: the default build has no POST call
-# site to reach, mis-set, or exploit.
+# The `operator` feature decides whether a write path is compiled into the
+# binary at all: without it there is no `net::write`, no confirm modal, and no
+# `Posture::Operator` — the read-only guarantee holds by absence, and no
+# argument, environment variable, config file or bug can widen it, because the
+# code that would widen it was never built. That guarantee is real, and it is
+# now the property of the `--no-default-features` *monitoring* artifact
+# specifically, not of every atlas binary in existence.
 #
-# `--operator` gates *activation* on top of it. The feature says what the binary
-# is capable of; the flag says whether the operator armed it. A monitoring box
-# runs the default build and cannot be talked into writing at all.
+# The default ships armed because the desk this client serves is a desk a human
+# works, and a workstation whose default build cannot approve, reject, or
+# execute is a workstation the operator has to rebuild before they can act. What
+# protects the armed artifact is not absence but the same three things that
+# protect the Textual TUI: a confirm modal bound to the last six of the plan's
+# own `targets_hash`, a referee PASS pinned to that hash, and an owner that
+# re-validates every write and refuses without a persisted approval on record.
+#
+# The *posture* is no longer a build or a flag either — the owner persists it
+# and serves it on `/api/tui`, and `store::Posture::from_desk` derives the scope
+# from that snapshot. `--glass` remains as the operator's own veto: a window
+# that declines an authority the desk is offering.
 [features]
-default = []
+default = ["operator"]
 operator = []
 
 [[bin]]

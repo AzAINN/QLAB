@@ -22,7 +22,7 @@
 //! compiled at all — there is no `confirm::Host`, no `Command::Approve`, and no
 //! writer for either to reach — so that artifact's read-only claim is absence
 //! rather than a check. In a featured build the *posture* decides, because a
-//! binary the human did not arm with `--operator` reads GLASS on the status
+//! binary on a desk nobody armed reads GLASS on the status
 //! line, and a pane offering `a` there would contradict it.
 
 use crate::cmd::Command;

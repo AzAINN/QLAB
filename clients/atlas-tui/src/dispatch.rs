@@ -23,7 +23,6 @@ mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
     use crate::net::write::{Choice, Execution, Login, WriteClient, WriteError};
-    use crate::store::Posture;
     use std::sync::Arc;
 
     /// Whether one bus event means the desk moved and the next poll should not
@@ -60,24 +59,30 @@ mod armed {
     impl Writes {
         /// Build the write half for one window.
         ///
-        /// Fallible rather than degrading: a client armed with `--operator`
-        /// whose writer could not be built would run *looking* armed and refuse
-        /// every key at the moment it mattered. Invariant 4 — refuse loudly.
+        /// Fallible rather than degrading, and built before the screen is
+        /// taken: a client whose writer could not be built would run *looking*
+        /// capable and refuse every key at the moment it mattered. Invariant 4
+        /// — refuse loudly.
         ///
-        /// A featured binary the human did not arm holds no writer at all, so
-        /// the posture chip's claim — "this window cannot place an order" — is
-        /// true of the runtime and not only of the status line.
-        pub fn new(base: &str, posture: Posture, tx: Tx) -> Result<Self, WriteError> {
-            let client = match posture {
-                Posture::Operator => Some(Arc::new(WriteClient::new(base)?)),
-                Posture::Glass => None,
+        /// Built on `forced_glass` rather than on the posture, because the
+        /// posture is no longer known at startup: it arrives with the owner's
+        /// first snapshot. A window the *operator* vetoed with `--glass` holds
+        /// no writer at all; a window that merely has not been armed by the
+        /// desk yet holds one it never reaches, because `Posture::from_desk`
+        /// keeps every modal and every write scope shut until the owner says
+        /// the desk is armed.
+        pub fn new(base: &str, forced_glass: bool, tx: Tx) -> Result<Self, WriteError> {
+            let client = match forced_glass {
+                true => None,
+                false => Some(Arc::new(WriteClient::new(base)?)),
             };
             Ok(Self { client, tx })
         }
 
-        /// Whether this window can write at all. The runtime never asks; a test
-        /// does, because "armed" and "featured" are the two gates in series that
-        /// this crate has already confused once.
+        /// Whether this window holds a writer at all. The runtime never asks; a
+        /// test does, because the artifact gate, the operator's veto and the
+        /// desk's answer are gates in series this crate has already confused
+        /// once.
         pub fn armed(&self) -> bool {
             self.client.is_some()
         }
@@ -425,7 +430,7 @@ pub struct Writes;
 impl Writes {
     pub fn new(
         _base: &str,
-        _posture: crate::store::Posture,
+        _forced_glass: bool,
         _tx: crate::bus::Tx,
     ) -> Result<Self, std::convert::Infallible> {
         Ok(Self)

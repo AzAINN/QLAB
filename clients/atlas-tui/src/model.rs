@@ -62,6 +62,11 @@ pub struct Snapshot {
     /// is not the same as a synthetic desk — nothing here defaults.
     #[serde(default)]
     pub desk_mode: Option<DeskMode>,
+    /// Whether the operator has armed this desk, and whether anyone has ever
+    /// been asked. Absent is an owner that does not serve a posture, which is
+    /// not the same as a desk answered "read-only" — see `Store::posture_armed`.
+    #[serde(default)]
+    pub posture: Option<PostureBlock>,
     /// Which minds the desk is using, and how fresh that answer is.
     #[serde(default)]
     pub llm: Option<LlmConfig>,
@@ -129,6 +134,20 @@ pub struct Snapshot {
     /// re-capture of the payload.
     #[serde(flatten)]
     pub extra: Value,
+}
+
+/// The desk's posture, as `posture_payload` serves it.
+///
+/// Both halves are `Option` like every other decoded field: the owner is the
+/// authority on its own posture, and a client that defaulted a missing `armed`
+/// to `false` would be indistinguishable from an owner that answered "no" —
+/// which is the difference Task 3's door is built on. `chosen: false` is a desk
+/// nobody has answered for; it is served alongside `armed: false` because the
+/// safe default and the chosen read-only posture look identical otherwise.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PostureBlock {
+    pub armed: Option<bool>,
+    pub chosen: Option<bool>,
 }
 
 // -- what the desk is pointed at -------------------------------------------

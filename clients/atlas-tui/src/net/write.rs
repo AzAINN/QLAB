@@ -257,7 +257,7 @@ pub struct TestVerdict {
 /// Holds a base URL and an HTTP client and nothing else — no registry handle, no
 /// broker, no plan. Every method below is one POST.
 ///
-/// Constructed by the composition root when `--operator` is passed, and reached
+/// Constructed by the composition root unless `--glass` vetoes it, and reached
 /// only from there: `tests/operator_gate.rs` asserts that nothing under `ui/`
 /// names this type. AUDIT's `a`/`R` and BOOK's `x` return `Command`s that
 /// `main::Writes` dispatches here.

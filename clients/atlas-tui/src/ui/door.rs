@@ -1199,13 +1199,15 @@ mod tests {
         // no `desk_mode` block the door still has to point somewhere, and the
         // fallback it picks is not a decision anyone made.
         let mut nothing = Store::default();
-        armed(&mut nothing);
         nothing.apply(
             AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({"portfolio": {"equity": 1.0}})).unwrap(),
             )),
             Instant::now(),
         );
+        // After the snapshot: the posture is derived from every payload now, so
+        // a store armed before one is applied would be disarmed by it.
+        armed(&mut nothing);
         let mut door = Door::default();
         assert!(
             said(&door, &nothing).contains(ASSUMED),

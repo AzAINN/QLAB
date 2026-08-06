@@ -431,10 +431,12 @@ mod armed {
         // The third step, end to end and through the shell: the door hands the
         // keyboard to SETTINGS' own box rather than drawing one of its own.
         let mut store = harness::fixture_store();
-        store.posture = Posture::Operator;
         store.apply(
             AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({
+                    // The desk arms this window; the posture is re-derived from
+                    // every snapshot, so setting it before one would be undone.
+                    "posture": {"armed": true, "chosen": true},
                     "desk_mode": {"data": "live", "book": "alpaca",
                                   "label": "LIVE · ALPACA BOOK", "offline": false,
                                   "credentials": "no ALPACA_API_KEY_ID in the environment or .env",
@@ -482,10 +484,12 @@ mod armed {
         // the desk arrived with: Esc points this desk at the simulated book,
         // which has no login to be broken.
         let mut store = harness::fixture_store();
-        store.posture = Posture::Operator;
         store.apply(
             AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({
+                    // The desk arms this window; the posture is re-derived from
+                    // every snapshot, so setting it before one would be undone.
+                    "posture": {"armed": true, "chosen": true},
                     "desk_mode": {"data": "live", "book": "alpaca",
                                   "label": "LIVE · ALPACA BOOK", "offline": false,
                                   "credentials": "no ALPACA_API_KEY_ID in the environment or .env",

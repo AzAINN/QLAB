@@ -40,6 +40,12 @@ there by absence. The armed build is protected the way the Textual TUI is —
 re-validates every write and refuses without a persisted approval. What the
 armed build may *do* is not a launch flag: the owner persists a posture, serves
 it on `/api/tui`, and the client re-derives its scope from every snapshot.
+`POST /api/desk/posture` is exactly as unauthenticated as every other owner
+route — `/api/desk_mode`, the approval decisions and the execute path all
+predate this branch and are equally open to anyone who can reach the port. The
+posture is an operator's stated intent, not a security boundary, and must never
+be read as one: what protects a fill is the hash-bound confirm, the referee pin,
+and the owner's own re-validation.
 
 Quantum research is an isolated offline lane: `pip install -e
 ".[offline-quantum]"` then `python -m pytest tests/test_quantum.py`. It is

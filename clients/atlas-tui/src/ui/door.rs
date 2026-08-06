@@ -57,6 +57,14 @@
 //! exists to make impossible. Esc is `read-only`, the same rule that makes Esc
 //! `synthetic · simulated` one question later.
 //!
+//! One consequence of that, stated because it is not obvious from the walk: a
+//! `read-only` answer sets `closed`, so a desk that has *never chosen a desk
+//! mode* and answers read-only is never asked the mode question at all. That is
+//! the same behaviour a `--glass` window already gets — a window that cannot
+//! write is shown a statement rather than three questions whose answers would be
+//! refused — and the desk keeps serving whatever pair it was already serving
+//! until somebody arms a window or uses `/mode`.
+//!
 //! ## The one rule that did not survive the port
 //!
 //! The Textual screen disables LIVE outright without a credential. This door

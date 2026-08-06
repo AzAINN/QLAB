@@ -25,11 +25,12 @@ class Posture:
         if not isinstance(self.armed, bool):
             raise ValueError(f"armed must be true or false, not {self.armed!r}")
 
-    @property
-    def label(self) -> str:
-        return "ARMED" if self.armed else "READ-ONLY"
 
-
+#: What an unasked desk is served as. Named rather than open-coded so the one
+#: place that answers for absence — ``UISession.posture_payload`` — says which
+#: default it is falling back to. There was a ``Posture.label`` here too; it had
+#: no caller in any client (both render their own words) and was deleted rather
+#: than kept as a seam nothing walks (invariant 10).
 DEFAULT_POSTURE = Posture(armed=False)
 
 

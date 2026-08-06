@@ -4032,6 +4032,34 @@ def test_posting_read_only_is_a_choice_not_a_reset(session):
     assert body == {"armed": False, "chosen": True}
 
 
+def test_the_posture_is_persisted_under_the_lock_that_guards_it(session, monkeypatch):
+    """Invariant 9: this runtime is threaded, so the disk write and the memory
+    write are one critical section. Outside the lock, two concurrent POSTs can
+    interleave and leave ``posture.json`` and ``self._posture`` disagreeing —
+    a desk that restarts into the posture the *other* operator chose."""
+    import qlab.ui.server as server_mod
+
+    held = []
+    real = server_mod.save_posture
+
+    def watched(posture):
+        # ``threading.Lock`` is not reentrant: if the caller holds it, a
+        # non-blocking acquire from this same thread fails. Released again
+        # immediately when it does succeed — a probe that kept the lock would
+        # deadlock the very call it is reporting on.
+        got = session._posture_lock.acquire(blocking=False)
+        if got:
+            session._posture_lock.release()
+        held.append(not got)
+        real(posture)
+
+    monkeypatch.setattr(server_mod, "save_posture", watched)
+    status, _ = handle_api(
+        session, "POST", "/api/desk/posture", {}, {"armed": True})
+    assert status == 200
+    assert held == [True], "the disk write happened outside the posture lock"
+
+
 @pytest.mark.parametrize("value", ["yes", 1, [], None])
 def test_a_posture_that_is_not_a_boolean_is_refused(session, value):
     status, body = handle_api(

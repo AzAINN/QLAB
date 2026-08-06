@@ -101,7 +101,8 @@ from urllib.parse import parse_qs, urlparse
 
 from qlab.core.desk_mode import (
     DEFAULT_DESK_MODE, DeskMode, load_desk_mode, save_desk_mode)
-from qlab.core.posture import Posture, load_posture, save_posture
+from qlab.core.posture import (
+    DEFAULT_POSTURE, Posture, load_posture, save_posture)
 from qlab.core.llm_config import SurfaceModel, save_llm_config, startup_llm_config
 from qlab.core.types import _jsonable
 from qlab.paths import workspace_root
@@ -785,18 +786,23 @@ class UISession:
         """
         with self._posture_lock:
             posture = self._posture
-        return {"armed": bool(posture and posture.armed),
-                "chosen": posture is not None}
+        chosen = posture is not None
+        # Both booleans, always: a client reads an absent block as an owner too
+        # old to serve one, and that is a different fact from "nobody chose".
+        return {"armed": (posture or DEFAULT_POSTURE).armed, "chosen": chosen}
 
     def set_posture(self, armed: bool) -> dict:
         """Record the operator's choice. Persists before memory changes.
 
         A failed write must not leave the running owner believing it is armed
         when nothing on disk says so — the next start would silently disarm.
+        The disk write is inside the lock for invariant 9: this runtime is
+        threaded, and two concurrent POSTs whose disk and memory writes
+        interleaved would leave the file and ``self._posture`` disagreeing.
         """
         posture = Posture(bool(armed))
-        save_posture(posture)
         with self._posture_lock:
+            save_posture(posture)
             self._posture = posture
         self.registry.record_event("desk.posture_chosen", {"armed": posture.armed})
         return self.posture_payload()

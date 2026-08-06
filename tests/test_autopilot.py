@@ -623,9 +623,11 @@ def test_the_workstation_argv_carries_the_data_lane():
     # offline view.
     from qlab.autopilot.cli import atlas_client_argv
 
-    assert atlas_client_argv("/x/atlas", operator=False, offline=True) == \
+    assert atlas_client_argv("/x/atlas", glass=False, offline=True) == \
         ["/x/atlas"]
-    assert atlas_client_argv("/x/atlas", operator=False, offline=False) == \
+    assert atlas_client_argv("/x/atlas", glass=False, offline=False) == \
         ["/x/atlas", "--live"]
-    assert atlas_client_argv("/x/atlas", operator=True, offline=False) == \
-        ["/x/atlas", "--operator", "--live"]
+    # Only the posture word that takes authority away survives; there is no
+    # arming word to forward, because arming is the owner's persisted answer.
+    assert atlas_client_argv("/x/atlas", glass=True, offline=False) == \
+        ["/x/atlas", "--glass", "--live"]

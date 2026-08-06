@@ -389,7 +389,7 @@ def main() -> int:
     ap.add_argument(
         "--args",
         default="",
-        help="arguments passed to the binary, space separated (e.g. --operator)",
+        help="arguments passed to the binary, space separated (e.g. --glass)",
     )
     args = ap.parse_args()
     width, height = (int(part) for part in args.size.lower().split("x"))

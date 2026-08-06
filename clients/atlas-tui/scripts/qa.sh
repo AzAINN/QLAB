@@ -9,9 +9,17 @@
 # script means "it ran under a terminal and cleaned up after itself", which is
 # precisely the half `cargo test` cannot reach.
 #
-#   usage:  scripts/qa.sh [--operator] [--size WxH] [--port N] [--debug]
+#   usage:  scripts/qa.sh [--armed|--glass] [--size WxH] [--port N] [--debug]
 #
-#   --operator  drive the armed build (needs a binary built with the feature)
+#   --armed     capture the armed scenes. Arming is no longer something the
+#               command line can grant — it is the owner's persisted answer to
+#               the startup door — so this flag passes NOTHING to the binary.
+#               It asserts a precondition (operator-feature build, armed desk)
+#               and picks the door script that walks an armed window. Run it
+#               against a desk that is actually armed, or the door scene will
+#               show a read-only question and the capture is worthless.
+#   --glass     pass --glass: this window declines authority for one session.
+#   --operator  retired; refused loudly rather than silently mis-capturing.
 #   --size      terminal size to emulate; default 120x40
 #   --port      owner port; defaults to $QLAB_UI_PORT, then 8765
 #   --debug     use target/debug/atlas instead of target/release/atlas
@@ -37,17 +45,33 @@ profile="release"
 size="120x40"
 port="${QLAB_UI_PORT:-8765}"
 extra=""
+armed=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --operator) extra="--operator"; shift ;;
+    --armed)    armed="yes"; shift ;;
+    --glass)    extra="--glass"; shift ;;
+    # A silent no-op would be the worst outcome here: the harness would keep
+    # printing "armed" screens taken from whatever posture the desk happened to
+    # hold. Refuse, and name what replaced it.
+    --operator) echo "qa.sh: --operator is retired; arming is the desk's persisted answer to the startup door, not a flag." >&2
+                echo "  --armed  capture the armed scenes against a desk that is already armed" >&2
+                echo "  --glass  drive a window that declines authority for one session" >&2
+                exit 2 ;;
     --debug)    profile="debug"; shift ;;
     --size)     size="$2"; shift 2 ;;
     --port)     port="$2"; shift 2 ;;
-    -h|--help)  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)          echo "qa.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "$armed" && -n "$extra" ]]; then
+  # --glass is this window declining authority; --armed claims it has some.
+  # Together they would capture a glass window under an "armed" heading.
+  echo "qa.sh: --armed and --glass are opposite postures; pick one" >&2
+  exit 2
+fi
 
 bin="${ATLAS_BIN:-$root/target/$profile/atlas}"
 if [[ ! -x "$bin" ]]; then
@@ -55,7 +79,7 @@ if [[ ! -x "$bin" ]]; then
   # built would hide which binary the screens below came from, which is the one
   # thing a QA pass has to be certain of.
   echo "qa.sh: no atlas binary at $bin" >&2
-  echo "  build it first:  cd $root && cargo build --$profile${extra:+ --features operator}" >&2
+  echo "  build it first:  cd $root && cargo build --$profile${armed:+ --features operator}" >&2
   exit 1
 fi
 
@@ -118,7 +142,7 @@ scene "refresh" \
 # key greyed out. An armed window is walked — the data row, the row that moves
 # on, then Esc out of the models — while a glass one is a statement, and the
 # first key it is handed dismisses it.
-if [[ -n "$extra" ]]; then
+if [[ -n "$armed" ]]; then
   door="wait:2,shot:the first question,down,down,enter,shot:the second question,esc,shot:the desk behind it,quit"
 else
   door="wait:2,shot:the read-only door,key:x,shot:the desk behind it,quit"

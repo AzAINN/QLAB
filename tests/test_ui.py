@@ -682,7 +682,7 @@ def _tui_args(**overrides):
 
     return SimpleNamespace(**{
         "port": 8765, "online": False, "refresh": 2.0, "claude": "offer",
-        "classic": False, "operator": False, **overrides,
+        "classic": False, "glass": False, "operator": False, **overrides,
     })
 
 
@@ -754,11 +754,12 @@ def test_tui_launches_the_ratatui_workstation_and_tells_it_the_port(
     assert seen["env"]["QLAB_UI_PORT"] == "8899"
 
 
-def test_tui_operator_flag_reaches_the_workstation(monkeypatch, tmp_path):
-    """--operator is a passthrough, not a second authority.
+def test_tui_glass_flag_reaches_the_workstation(monkeypatch, tmp_path):
+    """--glass is the one posture word a launcher may still say.
 
-    The launcher does not decide what the client may do; it forwards the word
-    and the binary decides whether it was built with anything behind it.
+    It only ever takes authority away, so forwarding it is safe in a way that
+    forwarding an arming word never was: arming is the owner's persisted answer
+    to the startup door and no launcher flag can grant it.
     """
     import qlab.autopilot.cli as cli_module
 
@@ -774,8 +775,8 @@ def test_tui_operator_flag_reaches_the_workstation(monkeypatch, tmp_path):
         lambda path, argv, env: seen.update(argv=argv) or (_ for _ in ()).throw(SystemExit(0)))
 
     with pytest.raises(SystemExit):
-        cli_module._cmd_tui(_tui_args(operator=True))
-    assert seen["argv"] == [str(binary), "--operator"]
+        cli_module._cmd_tui(_tui_args(glass=True))
+    assert seen["argv"] == [str(binary), "--glass"]
 
 
 def test_tui_without_a_built_workstation_says_how_to_build_it(monkeypatch, tmp_path):
@@ -827,12 +828,16 @@ def test_tui_classic_without_textual_names_the_extra_to_install(monkeypatch):
     assert "pip install -e '.[operator]'" in message
 
 
-def test_tui_refuses_classic_and_operator_together(monkeypatch):
-    """--operator is a word only the Ratatui client understands.
+@pytest.mark.parametrize("classic", [False, True])
+def test_tui_refuses_the_retired_operator_flag(monkeypatch, classic):
+    """`--operator` grants nothing now, so it must not parse quietly.
 
-    Dropping it silently would leave an operator believing they had asked for
-    something. The Textual client has no posture to arm — it is the complete
-    surface and already reaches the confirm gate.
+    Arming became the owner's persisted answer to the startup door in this
+    branch. A flag that survives as a no-op is exactly the silence invariant 4
+    forbids: the operator asks for an armed window, is told nothing, and gets
+    whatever posture the desk happened to hold. Refused on either client, and
+    the refusal has to name where arming went and what the surviving one-session
+    override is.
     """
     import qlab.autopilot.cli as cli_module
 
@@ -846,10 +851,46 @@ def test_tui_refuses_classic_and_operator_together(monkeypatch):
         lambda *_a: pytest.fail("a refused invocation must not exec"))
 
     with pytest.raises(SystemExit) as exit_info:
-        cli_module._cmd_tui(_tui_args(classic=True, operator=True))
+        cli_module._cmd_tui(_tui_args(classic=classic, operator=True))
     message = str(exit_info.value)
-    assert "--operator" in message and "--classic" in message
-    assert "no operator posture" in message
+    assert "--operator is retired" in message
+    assert "--glass" in message
+
+
+def test_tui_refuses_glass_with_the_classic_client(monkeypatch):
+    """A posture word the chosen client cannot honour is refused, not dropped.
+
+    `--glass` is Ratatui vocabulary. The Textual client has no posture to
+    decline, so forwarding it nowhere would leave an operator believing this
+    window had been made read-only when it still reaches the confirm gate.
+    """
+    import qlab.autopilot.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module.subprocess, "Popen",
+        lambda *_a, **_k: pytest.fail("a refused invocation must not spawn"))
+    monkeypatch.setattr(
+        cli_module.os, "execvpe",
+        lambda *_a: pytest.fail("a refused invocation must not exec"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(classic=True, glass=True))
+    message = str(exit_info.value)
+    assert "--glass" in message and "--classic" in message
+
+
+def test_tui_parser_still_accepts_the_retired_word_so_it_can_be_refused():
+    """argparse's "unrecognized arguments" names no remedy.
+
+    The word stays registered — hidden from --help — for one reason: so the
+    operator with the old command in a script gets the sentence that says where
+    arming moved to rather than a bare parse error.
+    """
+    from qlab.autopilot.cli import build_parser
+
+    args = build_parser().parse_args(["tui", "--operator"])
+    assert args.operator is True
+    assert args.glass is False
 
 
 def test_tui_classic_runs_the_textual_client_against_the_same_owner(monkeypatch):

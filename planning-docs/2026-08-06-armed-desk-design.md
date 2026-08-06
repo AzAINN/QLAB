@@ -102,6 +102,9 @@ them out (`workforce.rs:59-66` `CONSOLE_KINDS`). `coordinator_status()`
 - **Silence is reported.** Driving with no event for ~45s renders
   `no word for 45s`, not an animation implying activity. A spinner that spins
   regardless is the failure this design refuses.
+  > **Superseded 2026-08-06 (wording only).** The string shipped as
+  > `no progress for 45s` — a user-approved rewording landed in 13372d5. The
+  > design point above is unchanged; only the sentence on screen differs.
 - **The suppressed kinds stay suppressed.** `session`/`task_progress` were
   removed from the durable bus deliberately (42 of 60 rows were liveness noise
   that buried real reasoning). Liveness here is derived from `tool_start`/`text`

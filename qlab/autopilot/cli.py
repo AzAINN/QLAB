@@ -347,18 +347,20 @@ def _atlas_binary() -> str:
     return str(binary)
 
 
-def atlas_client_argv(binary: str, *, operator: bool, offline: bool) -> list[str]:
-    """The workstation's argv: the launcher forwards posture and data lane.
+def atlas_client_argv(binary: str, *, glass: bool, offline: bool) -> list[str]:
+    """The workstation's argv: the launcher forwards a veto and the data lane.
 
-    Passthroughs, not a second authority: this launcher does not decide what
-    the client may do — a binary built without the operator feature refuses
-    the flag itself, and the lane only chooses which view of the owner the
-    client polls. Dropping the lane here meant a live owner drawn by a client
-    that only ever asked for the offline view.
+    Passthroughs, not a second authority. Arming is no longer expressible here
+    at all — it is the owner's persisted answer to the startup door, so no
+    launcher flag can grant it. What survives is the direction that only ever
+    takes authority away: ``--glass`` is this one window declining whatever the
+    desk says. The lane only chooses which view of the owner the client polls;
+    dropping it here meant a live owner drawn by a client that only ever asked
+    for the offline view.
     """
     argv = [binary]
-    if operator:
-        argv.append("--operator")
+    if glass:
+        argv.append("--glass")
     if not offline:
         argv.append("--live")
     return argv
@@ -378,16 +380,30 @@ def _cmd_tui(args) -> int:
     screen.
     """
     classic = bool(getattr(args, "classic", False))
-    if classic and getattr(args, "operator", False):
-        # Loud, not silent. `--operator` is a word only the Ratatui client
-        # understands, and the Textual client has no posture to arm — it is the
-        # complete surface and already reaches the confirm gate. Dropping the
-        # flag would leave an operator believing they had asked for something.
+    if getattr(args, "operator", False):
+        # Retired, and refused rather than dropped. Arming is the owner's
+        # persisted answer to the startup door, so no launcher flag can grant
+        # it — and a flag that parses but grants nothing is the silent no-op
+        # invariant 4 exists to forbid. The word is still *registered* only so
+        # this message can be printed instead of argparse's "unrecognized
+        # arguments", which names no remedy to the operator holding the old
+        # command in their shell history or in a script.
         raise SystemExit(
-            "--operator is a Ratatui-workstation flag and --classic is the "
-            "Textual client, which has no operator posture to arm.\n"
-            "    qlab tui --operator     the armed workstation\n"
-            "    qlab tui --classic      the Textual client (already complete)"
+            "--operator is retired. Arming is the desk's own answer, not a "
+            "launcher flag.\n"
+            "    qlab tui                the desk asks once at startup, and "
+            "remembers the answer\n"
+            "    qlab tui --glass        this one window stays read-only "
+            "whatever the desk says"
+        )
+    if classic and getattr(args, "glass", False):
+        # The same silence, in the other direction. `--glass` is a Ratatui
+        # posture word; the Textual client has no posture to decline, so
+        # forwarding it nowhere would leave an operator believing this window
+        # had been made read-only when it still reaches the confirm gate.
+        raise SystemExit(
+            "--glass is a Ratatui-workstation flag and --classic is the "
+            "Textual client, which has no posture to decline."
         )
     try:
         from qlab.tui.client import ApiClient
@@ -554,7 +570,7 @@ def _cmd_tui(args) -> int:
             "($QLAB_ATLAS_BIN overrides where this looks.)"
         )
     argv = atlas_client_argv(
-        binary, operator=getattr(args, "operator", False), offline=offline)
+        binary, glass=getattr(args, "glass", False), offline=offline)
     if owner is not None:
         # `execvpe` replaces this process, so nothing is left to terminate the
         # owner when the client quits — say so rather than leaving an operator
@@ -706,18 +722,18 @@ def build_parser() -> argparse.ArgumentParser:
     tui.add_argument(
         "--classic", action="store_true",
         help="use the Textual client instead of the Ratatui workstation")
-    # Passthrough. The word reaches the workstation and that is all this
-    # launcher does with it.
-    #
-    # A binary built without the feature does *not* refuse it: the flag parses,
-    # the posture compiles to Glass, and the window is read-only with nothing to
-    # arm. That is safe by construction rather than by check — there is no write
-    # path in the artifact — and the mitigation for the operator who expected
-    # otherwise is the GLASS chip the status line carries on every frame.
+    # Passthrough, and the only posture word a launcher may still say. It can
+    # only take authority away: the window stays read-only whatever the desk
+    # answered. A binary built without the operator feature is glass already,
+    # so the flag is a no-op there in the one direction where a no-op is safe.
     tui.add_argument(
-        "--operator", action="store_true",
-        help="arm the workstation's write affordances (Ratatui client only; a "
-             "binary built without the feature stays GLASS and says so)")
+        "--glass", action="store_true",
+        help="keep this window read-only for one session, whatever the desk says")
+    # Retired. Registered without help text purely so `_cmd_tui` can refuse it
+    # by name; argparse's "unrecognized arguments" names no remedy, and an
+    # operator with the old command in a script deserves the sentence that
+    # tells them where arming moved to.
+    tui.add_argument("--operator", action="store_true", help=argparse.SUPPRESS)
     tui.set_defaults(func=_cmd_tui)
 
     from qlab.desk_cli import register_subcommands

@@ -234,6 +234,84 @@ fn the_console_is_the_workforce_slice_of_the_bus_and_not_a_second_audit() {
     );
 }
 
+/// One coordinator row, delivered over the stream exactly as the owner writes
+/// it (`qlab/operator/coordinator.py::_on_event`).
+fn agent_event(client: &mut Client, id: &str, event_kind: &str, agent: &str, text: &str) {
+    client.store.apply(
+        AppEvent::Sse(SseEvent {
+            kind: "atlas_coordinator_event".into(),
+            payload: serde_json::json!({
+                "workflow_id": "805e0729cfec4d67", "event_kind": event_kind,
+                "agent": agent, "tool": "", "text": text}),
+            ts: Some("2026-07-30T18:44:02+00:00".into()),
+            id: Some(id.into()),
+        }),
+        client.now,
+    );
+}
+
+#[test]
+fn the_console_carries_the_agents_own_words() {
+    // The whole point of the pane: an operator watching a governed run reads
+    // what the agent said, not a status word the desk inferred.
+    let mut client = workforce_from(running());
+    agent_event(
+        &mut client,
+        "live-coord-1",
+        "tool_start",
+        "moments-analyst",
+        "calling moments_estimate",
+    );
+    let frame = client.frame(160, 36);
+    let row = line_with(&frame, "moments-analyst");
+    assert!(row.contains("calling moments_estimate"), "{row}");
+    // The payload's own id must not win the subject: a coordinator row keyed to
+    // its workflow would render every agent's turn as the same eight hex
+    // characters, which is the pane saying nothing at all.
+    assert!(!row.contains("805e0729"), "{row}");
+    assert!(!row.contains("{\"agent\""), "{row}");
+}
+
+#[test]
+fn silence_is_reported_rather_than_animated_on_the_pane() {
+    // Pinned at the rendered surface, not at the constructor: the frame is what
+    // an operator reads, and a spinner that spun regardless is the failure this
+    // line exists to refuse.
+    use atlas::ui::views::workforce::SILENCE_AFTER;
+
+    let mut client = workforce_from(running());
+    agent_event(
+        &mut client,
+        "live-coord-1",
+        "text",
+        "moments-analyst",
+        "the window is fragile calm",
+    );
+    let heard = content(&client.frame(160, 36));
+    assert!(heard.contains("spoke 0s ago"), "{heard}");
+
+    client.now += SILENCE_AFTER;
+    let quiet = content(&client.frame(160, 36));
+    assert!(quiet.contains("no word for 45s"), "{quiet}");
+    assert!(!quiet.contains("spoke"), "{quiet}");
+}
+
+#[test]
+fn a_parked_desk_claims_no_activity_at_all() {
+    // Derived from `driving`, so a run nobody is walking says nothing rather
+    // than reporting the age of the last thing it said as if it were live.
+    let mut client = workforce_from(
+        r#"{"workflows": [{"workflow_id": "805e0729cfec4d67", "status": "running",
+             "steps": [{"step_id": "s1", "phase": "analyst", "status": "queued"}]}],
+            "atlas_heartbeat": {"coordinator": {"driving": false, "reason": "nothing to do",
+             "workflow_id": "805e0729cfec4d67"}}}"#,
+    );
+    agent_event(&mut client, "live-coord-1", "text", "referee", "PASS");
+    let body = content(&client.frame(160, 36));
+    assert!(!body.contains("spoke"), "{body}");
+    assert!(!body.contains("no word for"), "{body}");
+}
+
 #[test]
 fn an_arriving_console_row_lights_and_the_log_under_it_does_not() {
     // The AUDIT flash, reused rather than re-derived: keyed on the owner's own

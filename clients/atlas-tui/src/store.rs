@@ -470,6 +470,18 @@ pub struct Store {
     /// subtraction the golden frames can pin rather than a clock read buried
     /// in a renderer.
     pub last_snapshot_at: Option<Instant>,
+    /// When this client last heard the workforce itself speak. Absent means it
+    /// never has.
+    ///
+    /// Arrival-stamped like `last_snapshot_at`, and from the *stream* only: a
+    /// poll's rows are history the owner is re-serving (see `apply_snapshot`),
+    /// and a liveness clock seeded from history would report a run as live
+    /// because a five-minute-old row arrived in a fresh snapshot.
+    ///
+    /// Private, because the one thing it is for is an age, and an age is only
+    /// honest against a `now` the caller was given. `last_agent_event_at` is
+    /// the reader; `activity_line` does the subtraction.
+    last_agent_event_at: Option<Instant>,
     /// This machine's wall clock in unix seconds, stamped by the runtime beside
     /// the frame's `Instant` and never read in a renderer.
     ///
@@ -592,6 +604,7 @@ impl Store {
             conn: Conn::default(),
             stale_after,
             last_snapshot_at: None,
+            last_agent_event_at: None,
             wall: None,
             malformed: None,
             base: String::new(),
@@ -832,6 +845,15 @@ impl Store {
             }
         }
         Vec::new()
+    }
+
+    /// When the workforce itself was last heard, if it ever has been.
+    ///
+    /// The one input to the activity line beyond `driving`. Time as data: this
+    /// hands back the stamp and nothing else, so the age is computed against a
+    /// `now` the frame was given rather than against a clock read in a view.
+    pub fn last_agent_event_at(&self) -> Option<Instant> {
+        self.last_agent_event_at
     }
 
     /// The recent audit bus, **newest first** — the order a log is read in.
@@ -1201,12 +1223,19 @@ impl Store {
             }
             _ => {
                 let id = event.id.clone();
+                let spoke = Self::is_agent_word(&event);
                 let landed = self.record_audit(AuditEvent {
                     id: event.id,
                     ts: event.ts,
                     kind: event.kind,
                     payload: event.payload,
                 });
+                // A row that is not new is not a sign of life either: a replay
+                // after a reconnect would otherwise report a dead run as having
+                // just spoken.
+                if landed && spoke {
+                    self.last_agent_event_at = Some(now);
+                }
                 // Only a row that is actually new lights up. A replay after a
                 // reconnect delivers events this client already holds, and
                 // flashing those would announce old news as it arrived.
@@ -1216,6 +1245,23 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// Whether one stream row is the workforce speaking, rather than the desk
+    /// recording something about it.
+    ///
+    /// `tool_start` and `text` only, and that is a deliberate floor rather than
+    /// an oversight. The coordinator's `session` and `task_progress` kinds were
+    /// removed from the durable bus because forty-two of sixty rows were
+    /// liveness noise burying the reasoning; deriving liveness from a heartbeat
+    /// would re-admit exactly that, one layer down, and a run that pinged
+    /// forever while saying nothing would read as a working desk.
+    fn is_agent_word(event: &SseEvent) -> bool {
+        event.kind == "atlas_coordinator_event"
+            && matches!(
+                event.payload.get("event_kind").and_then(Value::as_str),
+                Some("tool_start" | "text")
+            )
     }
 
     /// Merge a quote frame into the overlay, and say which rows actually moved.
@@ -2577,6 +2623,56 @@ mod tests {
         );
         assert!(!triggers.iter().any(|t| matches!(t, Trigger::AuditEvent(_))));
         assert_eq!(store.audit_events().count(), 1);
+    }
+
+    #[test]
+    fn only_an_agents_own_word_stamps_the_liveness_clock() {
+        let coord = |id: &str, event_kind: &str, at: Instant| {
+            (
+                AppEvent::Sse(SseEvent {
+                    kind: "atlas_coordinator_event".into(),
+                    payload: json!({"event_kind": event_kind, "agent": "referee", "text": "PASS"}),
+                    ts: Some("2026-07-30T12:00:00+00:00".into()),
+                    id: Some(id.into()),
+                }),
+                at,
+            )
+        };
+        let mut store = Store::default();
+        let t0 = Instant::now();
+        assert_eq!(store.last_agent_event_at(), None, "nothing has been heard");
+
+        // An unrelated bus row is not the workforce speaking.
+        store.apply(audit("approval_created", "e0"), t0);
+        assert_eq!(store.last_agent_event_at(), None);
+
+        let (ev, at) = coord("c1", "text", t0);
+        store.apply(ev, at);
+        assert_eq!(store.last_agent_event_at(), Some(t0));
+
+        // `tool_start` counts — the other half of what liveness is derived from.
+        let t1 = t0 + Duration::from_secs(5);
+        let (ev, at) = coord("c2", "tool_start", t1);
+        store.apply(ev, at);
+        assert_eq!(store.last_agent_event_at(), Some(t1));
+
+        // And the kinds that were deliberately kept off the durable bus stay
+        // off the liveness clock too: a progress ping is not a word.
+        let t2 = t1 + Duration::from_secs(5);
+        let (ev, at) = coord("c3", "task_progress", t2);
+        store.apply(ev, at);
+        assert_eq!(
+            store.last_agent_event_at(),
+            Some(t1),
+            "noise moved the clock"
+        );
+
+        // A replay after a reconnect is not new news, so it cannot restart the
+        // clock — the same rule the flash already obeys.
+        let t3 = t2 + Duration::from_secs(5);
+        let (ev, at) = coord("c2", "tool_start", t3);
+        store.apply(ev, at);
+        assert_eq!(store.last_agent_event_at(), Some(t1));
     }
 
     #[test]

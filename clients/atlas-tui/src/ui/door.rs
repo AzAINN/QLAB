@@ -1,6 +1,6 @@
-//! The startup door: which desk, which minds, and the login the first two may need.
+//! The startup door: whether this window may write, which desk, which minds, and the login those may need.
 //!
-//! Three steps over one modal, drawn over the shell the way a confirmation box
+//! Four steps over one modal, drawn over the shell the way a confirmation box
 //! is and claiming the keyboard above everything but Ctrl-C. It is the flow the
 //! Textual client has had since the beginning (`qlab/tui/desk_mode_screen.py`),
 //! and the two virtues ported from it are the ones that are easy to lose:
@@ -33,6 +33,29 @@
 //! that says so — and `assumed` otherwise; before the flag, a fallback the
 //! owner had to invent was marked as though somebody had picked it, on the one
 //! screen whose whole subject is that nobody has.
+//!
+//! ## The question in front of the other three
+//!
+//! The desk's posture is the owner's fact and is asked here first, because
+//! the other three questions *are* writes: the pair and the models both reach
+//! the owner through the dispatch seam, which refuses every command from a
+//! window the desk has not armed. Asking them of an unarmed window would be
+//! offering rows whose answers are refused one layer down.
+//!
+//! It is deliberately not the placement the plan sketched — after the models,
+//! since arming is about *this client* and the credential is about the book —
+//! and the reason is that ordering cannot exist without a client-side latch:
+//! a keystroke carries one `Command`, the arming answer only takes effect
+//! through the owner's next snapshot, and a door that arrived at the arming
+//! question last would have spent the two questions before it emitting writes
+//! nothing could accept.
+//!
+//! Answered by the *owner*, never here. `Store::asking_posture` reads the
+//! question live off `posture.chosen`, so the keystroke that sends the answer
+//! does not retire it — a door that closed on its own key would be this
+//! client deciding it is armed, which is exactly the latch `Posture::from_desk`
+//! exists to make impossible. Esc is `read-only`, the same rule that makes Esc
+//! `synthetic · simulated` one question later.
 //!
 //! ## The one rule that did not survive the port
 //!

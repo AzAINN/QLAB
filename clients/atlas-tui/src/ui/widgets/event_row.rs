@@ -2,7 +2,7 @@
 //!
 //! Extracted from `views::audit` once WORKFORCE grew a console pane over the
 //! same ring. The two panes read the same events for different reasons — AUDIT
-//! shows the whole bus, the console shows the six kinds a workforce run
+//! shows the whole bus, the console shows the kinds a workforce run
 //! produces — and a second spelling of "which colour is a governance event" or
 //! "what is this row about" is how the two come to disagree about one desk.
 //!
@@ -222,6 +222,83 @@ mod tests {
         assert_eq!(
             subject(&event("x", serde_json::json!({"plan_id": ""}))),
             "{\"plan_id\":\"\"}"
+        );
+    }
+
+    /// One coordinator row as the owner writes it
+    /// (`qlab/operator/coordinator.py::_on_event` — every field always present).
+    fn coordinator(event_kind: &str, agent: &str, tool: &str, text: &str) -> AuditEvent {
+        event(
+            COORDINATOR,
+            serde_json::json!({"workflow_id": "805e0729cfec4d67", "event_kind": event_kind,
+                               "agent": agent, "tool": tool, "text": text}),
+        )
+    }
+
+    #[test]
+    fn a_coordinator_row_reads_as_who_spoke_and_what_they_said() {
+        // Prose wins, because prose is what a reader wants.
+        assert_eq!(
+            subject(&coordinator(
+                "text",
+                "referee",
+                "",
+                "PASS on the targets hash"
+            )),
+            "referee  PASS on the targets hash"
+        );
+        // A `tool_start` usually carries no text at all, and "referee" alone
+        // would say nothing about what the referee is doing.
+        assert_eq!(
+            subject(&coordinator("tool_start", "referee", "backtest_run", "")),
+            "referee  backtest_run"
+        );
+        // Neither: the agent is still a fact, and a blank row is not a record.
+        assert_eq!(
+            subject(&coordinator("result", "reporter", "", "")),
+            "reporter"
+        );
+        // `Some("")` is absent here too, so an unnamed agent is named as what
+        // it is rather than rendered as an empty column.
+        assert_eq!(subject(&coordinator("text", "", "", "")), "coordinator");
+        // And the ids-first rule must not reach these rows: every agent's turn
+        // would otherwise render as the same eight hex characters.
+        assert!(!subject(&coordinator("text", "referee", "", "PASS")).contains("805e0729"));
+    }
+
+    #[test]
+    fn a_coordinator_rows_colour_comes_from_what_happened_not_from_the_bus_kind() {
+        // They all share one bus kind, so `kind_tone` would paint an error and
+        // a tool call identically — and reading a run as it happens would
+        // become a scan of prose.
+        let t = theme();
+        assert_eq!(
+            tone(&coordinator("error", "referee", "", "boom")),
+            t.negative
+        );
+        assert_eq!(
+            tone(&coordinator("tool_start", "referee", "backtest_run", "")),
+            t.accent
+        );
+        assert_eq!(
+            tone(&coordinator("text", "referee", "", "PASS")),
+            t.text_primary
+        );
+        assert_eq!(
+            tone(&coordinator("result", "referee", "", "done")),
+            t.text_primary
+        );
+        // A row the owner wrote without an `event_kind` is still readable
+        // rather than invisible.
+        assert_eq!(
+            tone(&event(COORDINATOR, serde_json::json!({"agent": "referee"}))),
+            t.text_primary
+        );
+        // Every other kind still routes to the family table.
+        assert_eq!(tone(&event("halt", serde_json::Value::Null)), t.negative);
+        assert_eq!(
+            tone(&event("workflow_phase", serde_json::Value::Null)),
+            t.accent
         );
     }
 

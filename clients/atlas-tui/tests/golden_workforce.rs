@@ -313,6 +313,35 @@ fn a_parked_desk_claims_no_activity_at_all() {
 }
 
 #[test]
+fn a_driving_coordinator_with_no_run_id_still_reports_its_activity() {
+    // The owner reads `driver.busy` and `current_workflow_id` separately, so a
+    // dispatch can be seen between them. A derived fact dropped because there
+    // was no row to hang it on is the desk going quiet about itself.
+    let client = workforce_from(
+        r#"{"workflows": [{"workflow_id": "805e0729cfec4d67", "status": "running",
+             "steps": [{"step_id": "s1", "phase": "analyst", "status": "working"}]}],
+            "atlas_heartbeat": {"coordinator": {"driving": true, "workflow_id": ""}}}"#,
+    );
+    let body = content(&client.frame(160, 36));
+    assert!(body.contains("no word yet"), "{body}");
+    // And `Some("")` is absent: an absent coordinator id must not *match* a
+    // flow whose own id is empty. Both become `None` under `format::text`, so
+    // an equality test alone would hang the line under a run the coordinator
+    // never named — and, since the header already carries it, say it twice.
+    let orphan = workforce_from(
+        r#"{"workflows": [{"workflow_id": "", "status": "running",
+             "steps": [{"step_id": "s1", "phase": "analyst", "status": "working"}]}],
+            "atlas_heartbeat": {"coordinator": {"driving": true}}}"#,
+    );
+    let once = content(&orphan.frame(160, 36));
+    assert_eq!(
+        once.matches("no word yet").count(),
+        1,
+        "the activity line was drawn against a run the coordinator did not name:\n{once}"
+    );
+}
+
+#[test]
 fn an_arriving_console_row_lights_and_the_log_under_it_does_not() {
     // The AUDIT flash, reused rather than re-derived: keyed on the owner's own
     // event id, so the row that arrived is the row that lights.

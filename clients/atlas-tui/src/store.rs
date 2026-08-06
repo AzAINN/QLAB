@@ -2667,6 +2667,25 @@ mod tests {
             "noise moved the clock"
         );
 
+        // The three kinds the owner really does publish beside the two above.
+        // The floor is a choice, not an oversight: an error is a run failing
+        // and a result is it having finished, and neither is the workforce
+        // working — widening `is_agent_word` to any of them would let a run
+        // that only errors read as a live desk.
+        for (i, kind) in ["error", "result", "tool_result"].iter().enumerate() {
+            let (ev, at) = coord(
+                &format!("c-{kind}"),
+                kind,
+                t2 + Duration::from_secs(5 * (i as u64 + 1)),
+            );
+            store.apply(ev, at);
+            assert_eq!(
+                store.last_agent_event_at(),
+                Some(t1),
+                "{kind} moved the liveness clock"
+            );
+        }
+
         // A replay after a reconnect is not new news, so it cannot restart the
         // clock — the same rule the flash already obeys.
         let t3 = t2 + Duration::from_secs(5);

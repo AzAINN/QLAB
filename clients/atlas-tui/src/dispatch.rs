@@ -23,6 +23,7 @@ mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
     use crate::net::write::{Choice, Execution, Login, WriteClient, WriteError};
+    use crate::store::Posture;
     use std::sync::Arc;
 
     /// Whether one bus event means the desk moved and the next poll should not
@@ -94,12 +95,49 @@ mod armed {
         /// how an operator ends up pressing it again. The answer comes back on
         /// the bus, which is the one place that owns the store, the toasts and
         /// the poller — and every outcome comes back, refusals included.
-        pub fn dispatch(&self, cmd: Command) {
+        ///
+        /// The posture is checked *here*, at the one chokepoint every write
+        /// passes through, and not only at the 33 places in `src/ui/` that
+        /// decide whether to offer a key. Two reasons, and both are about the
+        /// posture now being a value that can change mid-session:
+        ///
+        /// * A view gates on the posture when it *opens* a modal. A desk
+        ///   disarmed between opening the confirm box and typing the last six
+        ///   of the hash would otherwise still dispatch, because the keystroke
+        ///   that emits `Command::Execute` is not the keystroke that was
+        ///   checked.
+        /// * "Every one of 33 call sites is correct, forever" is not a
+        ///   guarantee, it is a hope. This restores the gate in series that the
+        ///   old `client: None` gave for free when the posture was known at
+        ///   startup: the runtime, not the renderer, has the last word.
+        ///
+        /// Refused loudly rather than dropped — the log line and a `Failed` row
+        /// on the bus, which is how every other refusal in this crate reaches
+        /// the operator. A key that silently did nothing is the failure mode
+        /// invariant 4 exists for.
+        pub fn dispatch(&self, cmd: Command, posture: Posture) {
+            if !posture.writes() {
+                let what = names(&cmd);
+                tracing::error!(
+                    command = %what,
+                    "a write was requested by a window the desk has not armed"
+                );
+                let _ = self.tx.send(AppEvent::Wrote(Wrote::Failed {
+                    what,
+                    said: "this window is not armed — the desk's posture is read-only".to_string(),
+                }));
+                return;
+            }
             let Some(client) = self.client.clone() else {
-                // Unreachable through the key path — a glass window has no view
-                // that opens a modal, because `confirm` is gated too — and loud
+                // `--glass`: the operator's own veto, which holds no writer at
+                // all. Unreachable through the key path, because a vetoed
+                // window can never derive a writing posture either — and loud
                 // rather than silent if that ever stops being true.
                 tracing::error!("a write was requested by a window holding no writer");
+                let _ = self.tx.send(AppEvent::Wrote(Wrote::Failed {
+                    what: names(&cmd),
+                    said: "this window was started with --glass and holds no writer".to_string(),
+                }));
                 return;
             };
             let tx = self.tx.clone();
@@ -108,6 +146,30 @@ mod armed {
                     let _ = tx.send(AppEvent::Wrote(outcome));
                 }
             });
+        }
+    }
+
+    /// What a refused command was, in the same words `perform` names it by, so
+    /// a refusal at the gate and a refusal from the owner read alike.
+    ///
+    /// Written out rather than derived from `Debug`: `AlpacaLogin` carries a
+    /// typed credential, and a formatter that walked the whole value would put
+    /// whatever `Secret`'s `Debug` happens to do today into a log line and a
+    /// toast. The one thing this crate never renders is what was typed.
+    fn names(cmd: &Command) -> String {
+        match cmd {
+            Command::Quit => "quit".to_string(),
+            Command::Refresh => "refresh".to_string(),
+            Command::Backends => "read the backends".to_string(),
+            Command::Approve(id) => format!("approve {id}"),
+            Command::Reject(id) => format!("reject {id}"),
+            Command::Execute(token) => format!("execute {}", token.plan_id()),
+            Command::Message(_) => "ask the desk".to_string(),
+            Command::StartWorkflow { template, .. } => format!("start {template}"),
+            Command::DeskMode { data, book } => format!("point the desk at {data} · {book}"),
+            Command::AlpacaLogin { .. } => "store the alpaca login".to_string(),
+            Command::TestAlpaca => "test the alpaca login".to_string(),
+            Command::SetLlm { surface, .. } => format!("point {surface} at a model"),
         }
     }
 

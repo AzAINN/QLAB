@@ -325,8 +325,11 @@ fn ingest(
                 // The only place a keystroke reaches the network. A view
                 // decided what the key means and handed back a `Command`; the
                 // runtime is what acts on it.
+                // The chokepoint. The posture travels with the command so the
+                // runtime — not the 33 places in `ui/` that decide whether to
+                // offer a key — has the last word on whether it may happen.
                 #[cfg(feature = "operator")]
-                Some(cmd) => writes.dispatch(cmd),
+                Some(cmd) => writes.dispatch(cmd, store.posture),
                 None => {}
             }
             // A view switch is not a desk transition and so is not a `Trigger`:
@@ -346,7 +349,7 @@ fn ingest(
         let before = store.nav.view;
         match ui::shell::on_mouse(*m, store, views) {
             #[cfg(feature = "operator")]
-            Some(cmd) => writes.dispatch(cmd),
+            Some(cmd) => writes.dispatch(cmd, store.posture),
             #[cfg(not(feature = "operator"))]
             Some(_) => {}
             None => {}

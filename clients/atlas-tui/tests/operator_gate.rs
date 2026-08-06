@@ -789,6 +789,15 @@ mod operator {
     }
 
     /// An armed token, for the outcome tests below.
+    /// `AppEvent` has no `Debug` — the bus carries a typed credential — so a
+    /// failing assertion names the variant rather than dumping the value.
+    fn debug(ev: &AppEvent) -> &'static str {
+        match ev {
+            AppEvent::Wrote(_) => "a write outcome that is not a refusal",
+            _ => "some other bus event",
+        }
+    }
+
     fn armed_token() -> atlas::ui::widgets::confirm::ConfirmToken {
         let (plan, approval) = checked_plan();
         let mut modal = Modal::for_plan(&plan, &approval).unwrap();
@@ -1187,7 +1196,10 @@ mod operator {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let writes = Writes::new(&owner.base, false, tx).unwrap();
         assert!(writes.armed());
-        writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()));
+        writes.dispatch(
+            Command::Approve("1a2b3c4d5e6f7081".into()),
+            Posture::Operator,
+        );
         match rx.recv().await {
             Some(AppEvent::Wrote(Wrote::Decided { decision, .. })) => {
                 assert_eq!(decision, "approved")
@@ -1205,12 +1217,85 @@ mod operator {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let writes = Writes::new(&owner.base, true, tx).unwrap();
         assert!(!writes.armed());
-        writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()));
+        // Posture::Operator on purpose: this pins the *writer* gate, not the
+        // posture gate above it. A vetoed window that somehow derived a writing
+        // posture must still reach nobody, and must say so.
+        writes.dispatch(
+            Command::Approve("1a2b3c4d5e6f7081".into()),
+            Posture::Operator,
+        );
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(rx.try_recv().is_err(), "a vetoed window wrote to the desk");
+        match rx.try_recv() {
+            Ok(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert_eq!(what, "approve 1a2b3c4d5e6f7081");
+                assert!(said.contains("--glass"), "{said}");
+            }
+            Ok(other) => panic!("a vetoed window sent something else: {}", debug(&other)),
+            Err(err) => panic!("a vetoed window was silently dropped: {err}"),
+        }
         assert!(
             owner.seen.lock().unwrap().is_empty(),
             "a vetoed window reached the owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unarmed_posture_is_refused_at_the_dispatch_seam_and_never_reaches_the_owner() {
+        // The chokepoint, and the reason it exists one level above the views:
+        // this window holds a live writer — it was not started with `--glass` —
+        // and the *only* thing between the command and the owner is the posture
+        // the desk last reported. Both sides of that guard are witnessed here
+        // and in `a_dispatched_command_puts_its_outcome_on_the_bus` above.
+        let owner = spawn_owner(200, r#"{"status": "approved"}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
+        assert!(writes.armed(), "the writer exists; the posture is the gate");
+        writes.dispatch(Command::Approve("1a2b3c4d5e6f7081".into()), Posture::Glass);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Loud, not dropped: a refusal on the bus is what puts a toast in front
+        // of the operator, and a key that silently did nothing is the failure
+        // mode invariant 4 exists for.
+        match rx.try_recv() {
+            Ok(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert_eq!(what, "approve 1a2b3c4d5e6f7081");
+                assert!(said.contains("not armed"), "{said}");
+            }
+            Ok(other) => panic!("an unarmed window sent something else: {}", debug(&other)),
+            Err(err) => panic!("an unarmed window was silently dropped: {err}"),
+        }
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "an unarmed window reached the owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_desk_disarmed_while_the_confirm_modal_was_open_books_nothing() {
+        // The mid-session flip. The view gated `x` on the posture when the modal
+        // was *opened*; the keystroke that mints the token and emits
+        // `Command::Execute` is a different keystroke, and by then the desk may
+        // have been disarmed from another window. The token is real — minted by
+        // the real modal against the owner's own hash — so what refuses this is
+        // the seam and nothing else.
+        let token = armed_token();
+
+        let owner = spawn_owner(200, r#"{"executed": true}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
+        // The desk went read-only between the open and the last keystroke.
+        writes.dispatch(Command::Execute(token), Posture::Glass);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        match rx.try_recv() {
+            Ok(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert!(what.starts_with("execute "), "{what}");
+                assert!(said.contains("not armed"), "{said}");
+            }
+            Ok(other) => panic!("a disarmed desk sent something else: {}", debug(&other)),
+            Err(err) => panic!("a disarmed desk was silently dropped: {err}"),
+        }
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "a disarmed desk reached the owner"
         );
     }
 

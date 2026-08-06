@@ -128,7 +128,10 @@ fn the_read_only_door_names_what_could_answer_it() {
     let mut client = Client::new(unsaid());
     let frame = client.frame(120, 36);
     assert!(frame.contains("arms a window"), "{frame}");
-    assert!(!frame.contains("--operator"), "a retired flag survives:\n{frame}");
+    assert!(
+        !frame.contains("--operator"),
+        "a retired flag survives:\n{frame}"
+    );
     // And any key dismisses it, the way the help overlay does.
     client.press(KeyCode::Char('x'));
     assert!(!client.frame(120, 36).contains("THIS DESK"));
@@ -596,6 +599,22 @@ mod armed {
         let frame = client.frame(120, 36);
         assert!(!frame.contains("ARM THIS DESK"), "{frame}");
         assert!(frame.contains("GLASS"), "{frame}");
+    }
+
+    #[test]
+    fn a_window_the_desk_has_already_armed_is_never_asked_to_arm_it() {
+        // The third conjunct, which is not implied by the flag beside it: an
+        // owner can serve `armed: true` with a `chosen` this client cannot
+        // read as an answer, and a door that asked anyway would put a modal
+        // over a workstation that is already writing — asking an operator to
+        // grant authority they are visibly holding.
+        let client = asked_about(r#", "posture": {"armed": true, "chosen": false}"#);
+        assert!(client.store.posture.writes(), "the desk armed this window");
+        assert!(
+            client.store.door().is_none(),
+            "an armed window was asked to arm itself"
+        );
+        assert!(!client.frame(120, 36).contains("ARM THIS DESK"));
     }
 
     #[test]

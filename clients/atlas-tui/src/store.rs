@@ -962,10 +962,14 @@ impl Store {
     /// * [`Posture::armable`] — a read-only artifact and a `--glass` window
     ///   are both windows an answer of "armed" would change nothing about.
     ///   Offering the row anyway is the claim the glass door exists to refuse.
-    /// * `posture_chosen() != Some(true)` — the rule the door is specified by,
+    /// * `posture_chosen() == Some(false)` — the rule the door is specified by,
     ///   and the one reader of the owner's `chosen` flag. `Some(false)` is a
-    ///   desk nobody answered for; `None` is an owner too old to say, and
-    ///   asking it is harmless — its answer is what teaches it.
+    ///   desk nobody answered for, which is the only case the question can be
+    ///   answered in. `None` is *not* that: `posture_payload` always emits both
+    ///   booleans, so absence means an owner too old to serve the block — which
+    ///   is the same owner too old to serve `POST /api/desk/posture`. Asking it
+    ///   is not harmless: the answer 404s, the door is kept because nothing set
+    ///   `closed`, and the modal repeats the failure on every Enter.
     ///
     /// Read live rather than latched, which is what makes the answer the
     /// owner's: the question is up until a snapshot says somebody answered it,
@@ -973,7 +977,7 @@ impl Store {
     pub fn asking_posture(&self) -> bool {
         !self.posture.writes()
             && Posture::armable(cfg!(feature = "operator"), self.forced_glass)
-            && self.posture_chosen() != Some(true)
+            && self.posture_chosen() == Some(false)
     }
 
     /// The allocation policy the paper book is run under.

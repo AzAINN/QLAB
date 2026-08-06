@@ -586,7 +586,29 @@ mod armed {
         );
         let frame = client.frame(120, 36);
         assert!(!frame.contains("ARM THIS DESK"), "{frame}");
-        assert!(frame.contains("SYNTHETIC"), "{frame}");
+        // The panel, not the status-line badge: `SYNTHETIC` is in the chip of
+        // every frame this store draws, so it pinned nothing. `THIS DESK` is
+        // the mode question's own header, and it is only there because the
+        // door walked on to it.
+        assert!(frame.contains("THIS DESK"), "{frame}");
+    }
+
+    #[test]
+    fn an_owner_too_old_to_serve_a_posture_is_never_shown_the_door() {
+        // Absence is not `chosen: false`. `posture_payload` always emits both
+        // booleans, so a snapshot with no posture block is an owner that
+        // predates the block — and therefore predates `POST
+        // /api/desk/posture`. A door there is a modal whose every answer 404s
+        // and whose Enter re-asks: unanswerable, and blocking.
+        let client = asked_about("");
+        assert_eq!(client.store.posture_chosen(), None);
+        assert!(!client.store.asking_posture());
+        let frame = client.frame(120, 36);
+        assert!(!frame.contains("ARM THIS DESK"), "{frame}");
+        assert!(
+            client.store.door().is_none(),
+            "an owner that cannot answer was asked"
+        );
     }
 
     #[test]

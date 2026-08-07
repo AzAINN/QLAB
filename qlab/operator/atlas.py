@@ -312,9 +312,15 @@ class AtlasSupervisor:
                 str(task.get("trigger_kind")))
             if not template_id:
                 continue
+            # NULL is a pre-column row, and those are all trigger work. Only
+            # NULL: `or` would fold `""` in with it, and an empty origin must
+            # not read as the one value the heartbeat is allowed to start.
+            # Everything else passes through verbatim, so anything that is not
+            # exactly "trigger" is refused downstream rather than normalised
+            # into a permit.
+            origin = task.get("origin")
             entry = {"task_id": task["task_id"], "template_id": template_id,
-                     # NULL is a pre-column row, and those are all trigger work.
-                     "origin": str(task.get("origin") or "trigger")}
+                     "origin": "trigger" if origin is None else str(origin)}
             entry.update(self._task_age(task, today))
             if entry["stale"] is not False:
                 # Stale, or of unknown age. Either way it is refused, and the
@@ -653,6 +659,14 @@ class AtlasSupervisor:
         # does not, so counting by created_at would silently drop the budget
         # for any task recorded after midnight UTC. Task volume per day is
         # tiny, so a bounded scan is fine.
+        #
+        # `origin` is deliberately not consulted: this bounds UNATTENDED
+        # launches, and proposals are minted as `proposal:<template_id>`, which
+        # is outside _WORKFLOW_TRIGGERS and so never counted. That is the whole
+        # reason this is safe. Give a proposal a kind that IS in that set and it
+        # starts consuming the autonomous budget while sitting unapproved — the
+        # desk's own autonomy starved by work no one approved. A proposal kind
+        # inside _WORKFLOW_TRIGGERS must skip non-"trigger" origins here.
         day = trading_date[:10]
         used = sum(
             1 for task in self.registry.list_atlas_tasks(200)

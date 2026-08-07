@@ -1902,7 +1902,14 @@ class Registry:
         ``origin`` says who may start it: ``"trigger"`` is unattended work the
         heartbeat starts, anything else is attended and waits for the operator.
         Keyword-only and defaulted, because every existing caller is a trigger.
+
+        An empty ``origin`` is refused rather than stored. The reader must tell
+        a pre-column NULL (trigger work, by definition) from a value that was
+        written, and `""` is the one input that reads as neither — silently
+        landing on the permissive side of the envelope.
         """
+        if not isinstance(origin, str) or not origin.strip():
+            raise ValueError("origin must be a non-empty string")
         existing = self._rows(
             "SELECT task_id FROM atlas_tasks WHERE dedupe_key = ?", [dedupe_key])
         if existing:

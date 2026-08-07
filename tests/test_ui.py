@@ -3080,6 +3080,15 @@ def test_the_heartbeat_never_starts_a_proposal(session):
         {"why": "asked"}, "regime_review", origin="proposal")
     session.atlas.set_mode("research")
 
+    # The premise, asserted rather than assumed: this task is startable on every
+    # axis except its origin. Without this, the day `regime_review` stops being
+    # startable in Research mode, `started == []` goes true for the wrong reason
+    # and the envelope stops being what this test measures.
+    entry = next(e for e in session.atlas.startable_tasks(session.atlas_facts(True))
+                 if e["task_id"] == "task-proposal")
+    assert entry["startable"] is True, entry.get("reason")
+    assert entry["origin"] == "proposal"
+
     started = session.atlas_run_startable(True, limit=5)
 
     assert started == []
@@ -3115,6 +3124,27 @@ def test_a_task_written_before_this_column_reads_as_a_trigger(session):
     started = session.atlas_run_startable(True, limit=5)
 
     assert [entry["task_id"] for entry in started] == ["task-old"]
+
+
+def test_an_empty_origin_is_not_read_as_a_trigger(session):
+    """The falsy-but-not-NULL case, which is the only one that separates
+    `is None` from `or`. The writer refuses `""`, so this row is written
+    raw — the point is that the reader does not hand the beat a permit if
+    an empty origin ever reaches the column by another route."""
+    today = date.today().isoformat()
+    session.registry.con.execute(
+        "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
+        "trigger_payload, template_id, status, attempt_count, origin, "
+        "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ["task-empty", f"regime_shift|{today}|SPY|e", "regime_shift", "{}",
+         "regime_review", "queued", 0, "", "2026-08-06T00:00:00Z",
+         "2026-08-06T00:00:00Z"])
+    session.atlas.set_mode("research")
+
+    started = session.atlas_run_startable(True, limit=5)
+
+    assert started == []
+    assert session.registry.get_atlas_task("task-empty")["status"] == "queued"
 
 
 def test_the_observe_tick_reconciles_dispatched_tasks():

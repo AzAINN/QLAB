@@ -907,6 +907,64 @@ def test_equity_marks_gains_the_book_column_on_an_existing_table(tmp_path):
         reg.close()
 
 
+# --- a task's origin decides who may start it --------------------------------
+
+def test_an_empty_origin_is_refused_at_the_writer(reg):
+    """`origin` decides whether the heartbeat may start a task unattended, so
+    the one value that reads as neither NULL nor a written choice must never
+    reach the column. Refuse it at the writer instead of resolving it later.
+    """
+    with pytest.raises(ValueError, match="origin must be a non-empty string"):
+        reg.create_atlas_task("t-empty", "k|2026-08-06|SPY|a", "regime_shift",
+                              {}, "regime_review", origin="")
+    with pytest.raises(ValueError, match="origin must be a non-empty string"):
+        reg.create_atlas_task("t-blank", "k|2026-08-06|SPY|b", "regime_shift",
+                              {}, "regime_review", origin="   ")
+    assert reg.get_atlas_task("t-empty") is None
+    assert reg.get_atlas_task("t-blank") is None
+
+
+def test_atlas_tasks_gains_the_origin_column_on_an_existing_table(tmp_path):
+    """An atlas_tasks table created before `origin` existed must be migrated.
+
+    _SCHEMA never touches an already-created table, so without the explicit
+    ALTER the user's real dev DB is the only place this fails — every test
+    would pass on a fresh registry while the desk broke on the one that matters.
+    """
+    path = tmp_path / "registry.duckdb"
+    reg = Registry(str(path))
+    reg.con.execute("DROP TABLE atlas_tasks")
+    # The pre-column DDL, verbatim from the parent commit.
+    reg.con.execute(
+        "CREATE TABLE atlas_tasks (task_id VARCHAR PRIMARY KEY, "
+        "dedupe_key VARCHAR UNIQUE, trigger_kind VARCHAR, trigger_payload JSON, "
+        "template_id VARCHAR, status VARCHAR, workflow_id VARCHAR, "
+        "conclusion JSON, error VARCHAR, attempt_count INTEGER, "
+        "created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, "
+        "updated_at VARCHAR)")
+    reg.con.execute(
+        "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
+        "trigger_payload, template_id, status, attempt_count, created_at, "
+        "updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ["old-1", "regime_shift|2026-08-06|SPY|old", "regime_shift", "{}",
+         "regime_review", "queued", 0, "2026-08-06T00:00:00Z",
+         "2026-08-06T00:00:00Z"])
+    reg.close()
+
+    reg = Registry(str(path))
+    try:
+        old = reg.get_atlas_task("old-1")
+        # The column exists (the read would KeyError otherwise) and the
+        # pre-column row is NULL, which the reader owes an answer for.
+        assert "origin" in old
+        assert old["origin"] is None
+        assert reg.create_atlas_task("new-1", "regime_shift|2026-08-06|SPY|new",
+                                     "regime_shift", {}, "regime_review")
+        assert reg.get_atlas_task("new-1")["origin"] == "trigger"
+    finally:
+        reg.close()
+
+
 # --- phase graphs must be executable, not merely well-named ------------------
 
 def test_validate_phase_graph_rejects_an_unknown_phase_type():

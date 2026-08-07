@@ -468,10 +468,19 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 /// How many characters of the owner's prose one item carries.
 ///
-/// One gate for both `purpose` and `reason` — see [`said`]. Wide enough for the
-/// longest sentence the owner actually writes here (the spent-proposal refusal
-/// runs to ~120), so bounding cuts a flood and not the desk's own words.
+/// Wide enough for the longest sentence the owner actually writes here (the
+/// spent-proposal refusal runs to ~120), so bounding cuts a flood and not the
+/// desk's own words.
 const SAID_MAX: usize = 160;
+
+/// How much of `task_status` a row will carry.
+///
+/// Its own budget, because it shares a row with the template id rather than
+/// owning lines of its own: `reconciled` is the longest status the registry
+/// writes, and anything past that is a status nothing produced. It goes through
+/// the same gate all the same — a status is wire data like any other, and one
+/// long enough to take the whole row would leave the id with nowhere to render.
+const STATUS_MAX: usize = 12;
 
 /// The most rows the would-do list may take out of the sidebar.
 ///
@@ -492,14 +501,17 @@ const ACT_INDENT: usize = 2;
 /// marker means.
 const NOT_RULED: &str = "? = not checked on this surface";
 
-/// Foreign prose, bounded once on the way in.
+/// Foreign text, bounded once on the way in.
 ///
-/// At the gate rather than at each row, for the reason `format::bounded` states:
+/// **Every string the owner sends this panel comes through here** — `purpose`,
+/// `reason` and `task_status` alike — for the reason `format::bounded` states:
 /// nothing on the wire is guaranteed to be the owner's, and bounding per call
-/// site is how a row added later becomes the one that forgot. `format::text`
-/// first, because the owner serialises a string it never set as `""`.
-fn said(value: Option<&String>) -> Option<String> {
-    format::text(value).map(|said| format::bounded(said, SAID_MAX))
+/// site is how a row added later becomes the one that forgot. The budget is the
+/// caller's because a sentence and a one-word status are not the same row; the
+/// gate is not. `format::text` first, because the owner serialises a string it
+/// never set as `""`.
+fn said(value: Option<&String>, max: usize) -> Option<String> {
+    format::text(value).map(|said| format::bounded(said, max))
 }
 
 /// One proposal's rows: what it is, and the one sentence that matters about it.
@@ -519,8 +531,8 @@ fn act_rows(item: &ActionItem, width: u16) -> Vec<Line<'static>> {
     // `queued` is every fresh proposal and says nothing. The rest — running,
     // completed, failed, expired — is the only thing that tells a live proposal
     // from one the day has already spent, and the list keeps both all day.
-    let status = format::text(item.task_status.as_ref())
-        .filter(|status| *status != "queued")
+    let status = said(item.task_status.as_ref(), STATUS_MAX)
+        .filter(|status| status != "queued")
         .map(|status| format!(" {status}"));
     let width = width as usize;
     let room = width.saturating_sub(2 + status.as_ref().map_or(0, |s| s.chars().count()));
@@ -538,8 +550,8 @@ fn act_rows(item: &ActionItem, width: u16) -> Vec<Line<'static>> {
     // A refusal renders the owner's own sentence, because that sentence is what
     // the panel is for; anything else renders what the template would do.
     let sentence = match item.startable {
-        Some(false) => said(item.reason.as_ref()),
-        _ => said(item.purpose.as_ref()),
+        Some(false) => said(item.reason.as_ref(), SAID_MAX),
+        _ => said(item.purpose.as_ref(), SAID_MAX),
     };
     if let Some(sentence) = sentence {
         for chunk in wrap(&sentence, width.saturating_sub(ACT_INDENT)) {
@@ -558,12 +570,13 @@ fn act_rows(item: &ActionItem, width: u16) -> Vec<Line<'static>> {
 /// that has minted no proposals are both "nobody has asked today", and an empty
 /// box would read as a desk with nothing it could do.
 ///
-/// `room` is the rows the panel may spend. Items are drawn whole or not at all
-/// — half an item is a sentence that reads as finished — and whatever is left
-/// over is counted rather than dropped. Even at `room` too small for one item
-/// the header's own chip still says how many there are.
+/// `room` is the rows the panel may spend, and it never spends more. Items are
+/// drawn whole or not at all — half an item is a sentence that reads as
+/// finished — and whatever is left over is counted rather than dropped. Even at
+/// a `room` too small for one item the header's own chip still says how many
+/// there are.
 fn acts_lines(items: &[ActionItem], width: u16, room: usize) -> Vec<Line<'static>> {
-    if items.is_empty() || room == 0 {
+    if items.is_empty() {
         return Vec::new();
     }
     let refused = items
@@ -574,33 +587,57 @@ fn acts_lines(items: &[ActionItem], width: u16, room: usize) -> Vec<Line<'static
         0 => format!("{} proposed", items.len()),
         _ => format!("{refused} of {} refused", items.len()),
     };
-    // The legend is a row, so it is taken out of the budget before the items
-    // are, not after — the row it explains must not be the one that got cut.
-    let legend = items.iter().any(|item| item.startable.is_none());
-    let cap = room.saturating_sub(1 + usize::from(legend));
+    // Where each drawn item starts, so one can be taken back off whole. Filled
+    // against the header alone; the note and the legend are settled below,
+    // because whether either is needed is not known until it is.
+    let mut marks: Vec<usize> = Vec::new();
     let mut body: Vec<Line<'static>> = Vec::new();
-    let mut shown = 0;
     for item in items {
         let rows = act_rows(item, width);
-        if body.len() + rows.len() > cap {
+        if 1 + body.len() + rows.len() > room {
             break;
         }
+        marks.push(body.len());
         body.extend(rows);
-        shown += 1;
     }
-    if shown < items.len() {
-        let note = dim(&format!("+{} more, unshown", items.len() - shown));
-        if body.len() < cap {
-            body.push(note);
-        } else if let Some(last) = body.last_mut() {
-            *last = note;
+    // Neither trailing row may be paid for out of an item already drawn: a
+    // refusal whose last line was overwritten by the note ends mid-clause and
+    // reads as finished, which is the one thing this panel must not do. So an
+    // item is handed back whole until all of it fits.
+    //
+    // And the legend is decided over what is *shown*, not over the list: a `?`
+    // beyond the cap is not a marker on screen, and a row explaining one is a
+    // row spent on nothing.
+    let (note, legend) = loop {
+        let note = marks.len() < items.len();
+        let legend = items[..marks.len()]
+            .iter()
+            .any(|item| item.startable.is_none());
+        if 1 + body.len() + usize::from(note) + usize::from(legend) <= room {
+            break (note, legend);
         }
-    }
+        match marks.pop() {
+            Some(mark) => body.truncate(mark),
+            // Nothing left to hand back. The header's chip is what still says
+            // how many proposals there are, and the clamp below drops the rest.
+            None => break (note, legend),
+        }
+    };
     let mut out = vec![head("would do", &chip, width)];
     out.append(&mut body);
+    if note {
+        out.push(dim(&format!(
+            "+{} more, unshown",
+            items.len() - marks.len()
+        )));
+    }
     if legend {
         out.push(dim(NOT_RULED));
     }
+    // The board below is not this panel's to spend. Every path above respects
+    // `room` except the one that ran out of items to hand back, and a panel one
+    // row over budget takes that row from the evidence.
+    out.truncate(room);
     out
 }
 
@@ -1030,21 +1067,133 @@ mod tests {
         // One gate, not one per call site: `purpose` and `reason` are both the
         // wire's, and a row added later must not be the one that forgot.
         let flood = "x".repeat(400);
-        let cut = said(Some(&flood)).unwrap();
+        let cut = said(Some(&flood), SAID_MAX).unwrap();
         assert_eq!(cut.chars().count(), SAID_MAX + 1, "{cut}");
         assert!(cut.ends_with('…'), "the cut was not marked: {cut}");
         assert_eq!(
-            said(Some(&"two   lines\nof it".to_string())),
+            said(Some(&"two   lines\nof it".to_string()), SAID_MAX),
             Some("two lines of it".to_string())
         );
         // The owner serialises a string it never set as `""`, which is absence.
-        assert_eq!(said(Some(&String::new())), None);
+        assert_eq!(said(Some(&String::new()), SAID_MAX), None);
+    }
+
+    #[test]
+    fn a_status_the_owner_did_not_write_cannot_take_the_row_from_its_id() {
+        // `task_status` is wire data like the prose is, and it shares a row
+        // rather than owning one: unbounded, a long status leaves the id no
+        // cells at all and the proposal loses its own name.
+        let rows = act_rows(
+            &ActionItem {
+                template_id: Some("regime_review".into()),
+                purpose: Some("Re-read the regime panel.".into()),
+                task_status: Some("r".repeat(200)),
+                ..ActionItem::default()
+            },
+            32,
+        );
+        let head: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            head.contains("regime_review"),
+            "the id was clipped away: {head}"
+        );
+        assert!(
+            head.chars().count() <= 32,
+            "the row ran past the column: {head}"
+        );
     }
 
     #[test]
     fn an_empty_list_draws_no_panel_at_all() {
         // Not an empty box: a desk nobody has asked has nothing to say here.
         assert!(acts_lines(&[], 32, 12).is_empty());
+    }
+
+    /// A proposal that costs exactly two rows: its id, and one short sentence.
+    #[cfg(test)]
+    fn two_row_item(id: &str, startable: Option<bool>) -> ActionItem {
+        ActionItem {
+            template_id: Some(id.into()),
+            purpose: Some("Short.".into()),
+            startable,
+            reason: Some("Nope.".into()),
+            ..ActionItem::default()
+        }
+    }
+
+    #[test]
+    fn an_item_is_drawn_whole_or_it_is_not_drawn() {
+        // The budget landing exactly on an item's last row is not a licence to
+        // overwrite it: a refusal that ends mid-clause reads as finished, and
+        // the count that replaced it would under-report by the item it ate.
+        let items = [
+            two_row_item("alpha", Some(false)),
+            two_row_item("beta", Some(false)),
+        ];
+        let text = rendered(&acts_lines(&items, 32, 3));
+        assert!(
+            !text.iter().any(|line| line.contains("alpha")),
+            "an item was drawn without its sentence: {text:?}"
+        );
+        assert!(
+            text.iter().any(|line| line.contains("+2 more")),
+            "the count disagrees with what was drawn: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_panel_never_spends_more_rows_than_it_was_given() {
+        // Every row past `room` is a row taken off the board below, and the
+        // narrow end is where that happens: a header and a legend are two rows
+        // on a one-row budget.
+        let items = [
+            two_row_item("alpha", None),
+            two_row_item("beta", Some(false)),
+        ];
+        for room in 0..8 {
+            let lines = acts_lines(&items, 32, room);
+            assert!(
+                lines.len() <= room,
+                "{room} rows given, {} drawn",
+                lines.len()
+            );
+        }
+        assert!(acts_lines(&items, 32, 0).is_empty());
+    }
+
+    #[test]
+    fn the_legend_explains_a_marker_that_is_on_screen() {
+        // Computed over the shown items, not the list: a `?` beyond the cap is
+        // not a marker an operator can see, and a row explaining one is a row
+        // taken from the board to say nothing.
+        let refused = ActionItem {
+            template_id: Some("desk_rebalance_review".into()),
+            startable: Some(false),
+            reason: Some(
+                "creates a paper plan, which requires Propose mode; current mode is research"
+                    .into(),
+            ),
+            ..ActionItem::default()
+        };
+        let items = [refused, two_row_item("regime_review", None)];
+        let text = rendered(&acts_lines(&items, 32, 6));
+        assert!(
+            !text.iter().any(|line| line.contains(NOT_RULED)),
+            "a legend for a marker nothing drew: {text:?}"
+        );
+        assert!(text.iter().any(|line| line.contains("+1 more")), "{text:?}");
+        // And it is there when the marker is.
+        let text = rendered(&acts_lines(&items, 32, 12));
+        assert!(text.iter().any(|line| line.contains(NOT_RULED)), "{text:?}");
+    }
+
+    /// Rendered lines as plain strings — what the operator would read.
+    #[cfg(test)]
+    fn rendered(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
     }
 
     #[test]

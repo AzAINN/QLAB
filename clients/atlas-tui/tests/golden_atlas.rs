@@ -244,6 +244,9 @@ fn an_item_the_snapshot_did_not_rule_on_reads_as_neither_offered_nor_refused() {
     // once, for the marker, rather than four wrapped rows per item.
     assert!(body.contains("Re-read the regime panel"), "{body}");
     assert!(body.contains("not checked on this surface"), "{body}");
+    // A list with nothing refused says so as a count of proposals, not as a
+    // refusal count of zero.
+    assert!(body.contains("1 proposed"), "{body}");
     // And the three verdicts are three tones, not two.
     let buf = client.buffer(120, 36);
     let t = atlas::theme::theme();
@@ -296,6 +299,13 @@ fn a_busy_day_keeps_the_board_and_counts_what_it_could_not_draw() {
         body.contains("more"),
         "the unshown items were dropped in silence:\n{body}"
     );
+    // Every item here is refused, so there is no `?` on screen and no row is
+    // spent explaining one. The chip counts them all.
+    assert!(
+        !body.contains("not checked on this surface"),
+        "a legend for a marker nothing drew:\n{body}"
+    );
+    assert!(body.contains("9 of 9 refused"), "{body}");
 }
 
 #[test]

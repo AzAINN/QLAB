@@ -3,9 +3,14 @@
 //! Chat first, deliberately. Every other pane renders what the desk *is*; this
 //! one is where an operator asks what it *means*, and the answer arrives on the
 //! same bus the question went out on (`atlas_message` rows, served whole in the
-//! snapshot's `atlas_chat` key). The sidebar is the predictor board — the same
-//! summary the reasoner itself is handed — so the words on the left can be read
-//! against the numbers they were reasoned from on the right.
+//! snapshot's `atlas_chat` key). The sidebar is today's proposals over the
+//! predictor board — what the desk would do, and the same board summary the
+//! reasoner itself is handed — so the words on the left can be read against the
+//! evidence they were reasoned from on the right.
+//!
+//! The would-do list is read-only here in the strongest sense: it renders the
+//! gate's verdicts and offers no way to act on one. Approving is a write, and
+//! writes live behind the posture and the confirm path, not in a panel.
 //!
 //! The input row has no mode key: in an armed window a printable character goes
 //! straight into the ask row. The cost of that is stated where it is paid — see
@@ -15,7 +20,7 @@
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
-use crate::model::{Event, PredictorMetrics, Predictors};
+use crate::model::{ActionItem, Event, PredictorMetrics, Predictors};
 use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
@@ -98,7 +103,7 @@ impl View for AtlasView {
         .split(area);
         self.draw_chat(f, cols[0], store);
         if boarded {
-            draw_board(f, cols[1], store);
+            draw_sidebar(f, cols[1], store);
         }
     }
 
@@ -459,15 +464,166 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+// -- what the desk would do -------------------------------------------------
+
+/// How many characters of the owner's prose one item carries.
+///
+/// One gate for both `purpose` and `reason` — see [`said`]. Wide enough for the
+/// longest sentence the owner actually writes here (the spent-proposal refusal
+/// runs to ~120), so bounding cuts a flood and not the desk's own words.
+const SAID_MAX: usize = 160;
+
+/// The most rows the would-do list may take out of the sidebar.
+///
+/// The board is what the sidebar is for, and this list only grows: items stay
+/// for the whole trading day, so an uncapped panel would push the evidence off
+/// the pane by mid-afternoon. What does not fit is counted on the last row.
+const ACTS_MAX_H: usize = 12;
+
+/// The indent a wrapped sentence sits at, matching the board's own rows.
+const ACT_INDENT: usize = 2;
+
+/// What the `?` marker means, said once for the panel.
+///
+/// The owner attaches its own sentence to every unruled item — "the data
+/// preconditions were not checked here; POST /api/atlas/actionables asks the
+/// gate for today's verdict" — and four wrapped rows of it per item would bury
+/// the list it is about. The marker carries the state; this carries what the
+/// marker means.
+const NOT_RULED: &str = "? = not checked on this surface";
+
+/// Foreign prose, bounded once on the way in.
+///
+/// At the gate rather than at each row, for the reason `format::bounded` states:
+/// nothing on the wire is guaranteed to be the owner's, and bounding per call
+/// site is how a row added later becomes the one that forgot. `format::text`
+/// first, because the owner serialises a string it never set as `""`.
+fn said(value: Option<&String>) -> Option<String> {
+    format::text(value).map(|said| format::bounded(said, SAID_MAX))
+}
+
+/// One proposal's rows: what it is, and the one sentence that matters about it.
+///
+/// Three verdicts, three renderings — a glyph *and* a step of the text ramp, so
+/// the distinction survives a terminal nobody can read colour on. `None` is not
+/// drawn as either neighbour: it is the surface saying it did not rule, and a
+/// panel that painted it as an offer would be inviting an approval the gate has
+/// not been asked about.
+fn act_rows(item: &ActionItem, width: u16) -> Vec<Line<'static>> {
+    let t = theme();
+    let (mark, mark_tone, id_tone, said_tone) = match item.startable {
+        Some(true) => ("✓", t.positive, t.text_primary, t.text_secondary),
+        None => ("?", t.text_tertiary, t.text_secondary, t.text_tertiary),
+        Some(false) => ("✗", t.negative_dim, t.text_dim, t.text_dim),
+    };
+    // `queued` is every fresh proposal and says nothing. The rest — running,
+    // completed, failed, expired — is the only thing that tells a live proposal
+    // from one the day has already spent, and the list keeps both all day.
+    let status = format::text(item.task_status.as_ref())
+        .filter(|status| *status != "queued")
+        .map(|status| format!(" {status}"));
+    let width = width as usize;
+    let room = width.saturating_sub(2 + status.as_ref().map_or(0, |s| s.chars().count()));
+    let mut head = vec![
+        Span::styled(format!("{mark} "), Style::default().fg(mark_tone)),
+        Span::styled(
+            clip(format::or_missing(item.template_id.as_ref()), room),
+            Style::default().fg(id_tone),
+        ),
+    ];
+    if let Some(status) = status {
+        head.push(Span::styled(status, Style::default().fg(t.text_dim)));
+    }
+    let mut out = vec![Line::from(head)];
+    // A refusal renders the owner's own sentence, because that sentence is what
+    // the panel is for; anything else renders what the template would do.
+    let sentence = match item.startable {
+        Some(false) => said(item.reason.as_ref()),
+        _ => said(item.purpose.as_ref()),
+    };
+    if let Some(sentence) = sentence {
+        for chunk in wrap(&sentence, width.saturating_sub(ACT_INDENT)) {
+            out.push(Line::from(Span::styled(
+                format!("{}{chunk}", " ".repeat(ACT_INDENT)),
+                Style::default().fg(said_tone),
+            )));
+        }
+    }
+    out
+}
+
+/// The whole panel, or nothing at all.
+///
+/// Nothing at all when the list is empty: an owner that serves no block and one
+/// that has minted no proposals are both "nobody has asked today", and an empty
+/// box would read as a desk with nothing it could do.
+///
+/// `room` is the rows the panel may spend. Items are drawn whole or not at all
+/// — half an item is a sentence that reads as finished — and whatever is left
+/// over is counted rather than dropped. Even at `room` too small for one item
+/// the header's own chip still says how many there are.
+fn acts_lines(items: &[ActionItem], width: u16, room: usize) -> Vec<Line<'static>> {
+    if items.is_empty() || room == 0 {
+        return Vec::new();
+    }
+    let refused = items
+        .iter()
+        .filter(|item| item.startable == Some(false))
+        .count();
+    let chip = match refused {
+        0 => format!("{} proposed", items.len()),
+        _ => format!("{refused} of {} refused", items.len()),
+    };
+    // The legend is a row, so it is taken out of the budget before the items
+    // are, not after — the row it explains must not be the one that got cut.
+    let legend = items.iter().any(|item| item.startable.is_none());
+    let cap = room.saturating_sub(1 + usize::from(legend));
+    let mut body: Vec<Line<'static>> = Vec::new();
+    let mut shown = 0;
+    for item in items {
+        let rows = act_rows(item, width);
+        if body.len() + rows.len() > cap {
+            break;
+        }
+        body.extend(rows);
+        shown += 1;
+    }
+    if shown < items.len() {
+        let note = dim(&format!("+{} more, unshown", items.len() - shown));
+        if body.len() < cap {
+            body.push(note);
+        } else if let Some(last) = body.last_mut() {
+            *last = note;
+        }
+    }
+    let mut out = vec![head("would do", &chip, width)];
+    out.append(&mut body);
+    if legend {
+        out.push(dim(NOT_RULED));
+    }
+    out
+}
+
 // -- the predictor board ----------------------------------------------------
 
-fn draw_board(f: &mut Frame, area: Rect, store: &Store) {
+/// The sidebar: what the desk would do, over the evidence it would reason from.
+fn draw_sidebar(f: &mut Frame, area: Rect, store: &Store) {
     let t = theme();
     let block = panel_block();
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut lines = vec![panel_header("predictor board")];
+    // Half the sidebar at most. The board below is why this column exists, and
+    // a day's proposals only ever accumulate.
+    let mut lines = acts_lines(
+        store.actionables(),
+        inner.width,
+        ACTS_MAX_H.min(inner.height as usize / 2),
+    );
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines.push(panel_header("predictor board"));
     match store.predictors() {
         // Absence is named, exactly as the owner names it: a desk that never
         // ran the board and one whose newest row cannot be read are different
@@ -826,6 +982,69 @@ mod tests {
         ));
         assert!(!view.typing(), "the escape key did not give it back");
         assert!(view.ask.is_empty());
+    }
+
+    #[test]
+    fn the_three_verdicts_are_three_distinct_renderings() {
+        // Collapsing any two loses a fact the operator needs: `true` is the
+        // gate's yes, `false` is its no with a sentence, and `None` is a
+        // verdict this surface did not compute. Reading the third as either of
+        // the others is a client asserting something the owner did not.
+        let item = |startable: Option<bool>| ActionItem {
+            template_id: Some("regime_review".into()),
+            purpose: Some("Re-read the regime panel.".into()),
+            startable,
+            reason: Some("creates a paper plan".into()),
+            ..ActionItem::default()
+        };
+        let marks: Vec<(String, Option<ratatui::style::Color>)> = [Some(true), None, Some(false)]
+            .into_iter()
+            .map(|verdict| {
+                let rows = act_rows(&item(verdict), 32);
+                let head = &rows[0];
+                (
+                    head.spans[0].content.trim().to_string(),
+                    head.spans[1].style.fg,
+                )
+            })
+            .collect();
+        let glyphs: Vec<&str> = marks.iter().map(|(g, _)| g.as_str()).collect();
+        assert_eq!(glyphs, vec!["✓", "?", "✗"], "two verdicts share a glyph");
+        let tones: Vec<_> = marks.iter().map(|(_, tone)| *tone).collect();
+        assert_eq!(tones.len(), 3);
+        assert!(
+            tones[0] != tones[1] && tones[1] != tones[2] && tones[0] != tones[2],
+            "two verdicts share a tone: {tones:?}"
+        );
+
+        // And the sentence follows the verdict: a refusal renders the owner's
+        // own reason, anything else renders what the template would do.
+        let refused = act_rows(&item(Some(false)), 32);
+        assert!(refused[1].spans[0].content.contains("creates a paper plan"));
+        let pending = act_rows(&item(None), 32);
+        assert!(pending[1].spans[0].content.contains("Re-read the regime"));
+    }
+
+    #[test]
+    fn foreign_prose_is_bounded_once_before_any_row_is_built() {
+        // One gate, not one per call site: `purpose` and `reason` are both the
+        // wire's, and a row added later must not be the one that forgot.
+        let flood = "x".repeat(400);
+        let cut = said(Some(&flood)).unwrap();
+        assert_eq!(cut.chars().count(), SAID_MAX + 1, "{cut}");
+        assert!(cut.ends_with('…'), "the cut was not marked: {cut}");
+        assert_eq!(
+            said(Some(&"two   lines\nof it".to_string())),
+            Some("two lines of it".to_string())
+        );
+        // The owner serialises a string it never set as `""`, which is absence.
+        assert_eq!(said(Some(&String::new())), None);
+    }
+
+    #[test]
+    fn an_empty_list_draws_no_panel_at_all() {
+        // Not an empty box: a desk nobody has asked has nothing to say here.
+        assert!(acts_lines(&[], 32, 12).is_empty());
     }
 
     #[test]

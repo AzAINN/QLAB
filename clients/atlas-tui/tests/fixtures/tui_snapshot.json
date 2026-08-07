@@ -976,6 +976,31 @@
       }
     }
   ],
+  "actionables": {
+    "trading_date": "2026-07-30",
+    "items": [
+      {
+        "template_id": "regime_review",
+        "purpose": "Re-read the regime panel and challenge the current estimate.",
+        "creates_plan": false,
+        "needs_coordinator": true,
+        "task_id": "9f2c1ab4d8e35007",
+        "task_status": "queued",
+        "startable": null,
+        "reason": "the data preconditions were not checked here; POST /api/atlas/actionables asks the gate for today's verdict"
+      },
+      {
+        "template_id": "desk_rebalance_review",
+        "purpose": "Full review ending in a checked plan proposed for approval.",
+        "creates_plan": true,
+        "needs_coordinator": true,
+        "task_id": "3b7e05c19a4d6612",
+        "task_status": "running",
+        "startable": false,
+        "reason": "today's proposal for desk_rebalance_review is already running; one task per template per day, so the next one is tomorrow's"
+      }
+    ]
+  },
   "predictors": {
     "status": "ok",
     "run_id": "d41f2b8c9a734e01",

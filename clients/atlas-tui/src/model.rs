@@ -114,6 +114,11 @@ pub struct Snapshot {
     /// reasons from.
     #[serde(default)]
     pub predictors: Option<Predictors>,
+    /// Today's proposal set: what Atlas would do, and what the gate has already
+    /// said it would not. Absent is an owner that serves no such block — see
+    /// [`Actionables`].
+    #[serde(default)]
+    pub actionables: Option<Actionables>,
     /// The allocation policy the paper book is run under, with the mandate's
     /// constraints attached by the owner.
     #[serde(default)]
@@ -148,6 +153,57 @@ pub struct Snapshot {
 pub struct PostureBlock {
     pub armed: Option<bool>,
     pub chosen: Option<bool>,
+}
+
+// -- what the desk would do -------------------------------------------------
+
+/// `atlas_actionables_snapshot`: today's proposals, read from the task table.
+///
+/// The whole block is optional and every field inside it is, on the rule this
+/// module opens with and for the reason [`PostureBlock`] is shaped that way: an
+/// owner that does not serve the block is *absent*, not a desk with nothing to
+/// do, and a client that defaulted the two together would draw an empty panel
+/// over an owner too old to have one.
+///
+/// A snapshot never *composes* the menu — asking is what proposes, drawing is
+/// what reports — so what is here is what somebody already asked for, and it
+/// keeps the whole trading day: running, completed and expired items stay in
+/// the list so both clients agree about what was asked. `task_status` is what
+/// tells them apart.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Actionables {
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub items: Vec<ActionItem>,
+}
+
+/// One proposal, and whatever verdict the surface that served it could reach.
+///
+/// **`startable` is three-valued, and `true` cannot arrive on the snapshot.**
+/// That surface must not call `atlas_facts` — it would latch the regime out
+/// from under the observe tick — so it cannot check the data preconditions and
+/// deliberately does not assert a verdict it did not compute. `false` is an
+/// outright refusal with the owner's own sentence in `reason` (an unregistered
+/// template, a spent task, a stale proposal, or a mode that forbids it); `None`
+/// is "not ruled on here — the POST is where the gate speaks". `true` is the
+/// POST's own answer, modelled because the client must not disagree with the
+/// gate the day it arrives on a payload this decodes.
+///
+/// Absence and `""` are one fact for the strings, as everywhere else: they go
+/// through `format::text` before anything renders them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ActionItem {
+    pub template_id: Option<String>,
+    pub purpose: Option<String>,
+    /// Three states. `None` is not `Some(false)` — see the type's own note.
+    pub startable: Option<bool>,
+    /// Why not, in the owner's words, whenever it said. Never composed here.
+    pub reason: Option<String>,
+    /// The persisted task an approval would bind to. Decoded rather than
+    /// drawn: a 32-cell column has no room for an id, and the item is nothing
+    /// to approve without one. `model_roundtrip` is what holds the shape until
+    /// an approve path reads it.
+    pub task_id: Option<String>,
+    pub task_status: Option<String>,
 }
 
 // -- what the desk is pointed at -------------------------------------------

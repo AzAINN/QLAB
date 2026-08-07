@@ -903,6 +903,22 @@ impl Store {
         self.snapshot.as_ref()?.predictors.as_ref()
     }
 
+    /// Today's proposals, as the owner last served them.
+    ///
+    /// An owner that serves no block and one that has minted no proposals
+    /// answer the same way here, because the panel draws nothing for either —
+    /// an empty box over a desk nobody has asked would read as a desk with
+    /// nothing to do. The two are still different facts and the model keeps
+    /// them apart (`Snapshot::actionables` is an `Option`); this is the reader
+    /// for which they happen to coincide.
+    pub fn actionables(&self) -> &[crate::model::ActionItem] {
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.actionables.as_ref())
+            .map(|acts| acts.items.as_slice())
+            .unwrap_or_default()
+    }
+
     /// What the owner's coordinator is doing, if it said.
     ///
     /// Registering a workflow is not running it — `driving` is the only

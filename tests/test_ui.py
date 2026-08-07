@@ -3067,6 +3067,56 @@ def test_an_autonomous_start_is_never_reported_as_completed():
                 "a task completed without its workflow reaching terminal state")
 
 
+def test_the_heartbeat_never_starts_a_proposal(session):
+    """The envelope, in one test. A proposal is attended by construction:
+    the operator approves it or it does not run. If the heartbeat could start
+    one, the approval gate would be decorative on arrival."""
+    # Today's date, not a literal: `startable_tasks` refuses a trigger older
+    # than max_task_age_days, so a hardcoded day makes this test pass now and
+    # go stale-refused later — for the wrong reason, hiding the guard.
+    today = date.today().isoformat()
+    session.registry.create_atlas_task(
+        "task-proposal", f"regime_review|{today}|SPY|abc", "operator_asked",
+        {"why": "asked"}, "regime_review", origin="proposal")
+    session.atlas.set_mode("research")
+
+    started = session.atlas_run_startable(True, limit=5)
+
+    assert started == []
+    assert session.registry.get_atlas_task("task-proposal")["status"] == "queued"
+
+
+def test_the_heartbeat_still_starts_a_trigger_task(session):
+    """The other side of the same guard: this project did not turn autonomy off."""
+    today = date.today().isoformat()
+    session.registry.create_atlas_task(
+        "task-trigger", f"regime_shift|{today}|SPY|abc", "regime_shift",
+        {"why": "regime"}, "regime_review")
+    session.atlas.set_mode("research")
+
+    started = session.atlas_run_startable(True, limit=5)
+
+    assert [entry["task_id"] for entry in started] == ["task-trigger"]
+
+
+def test_a_task_written_before_this_column_reads_as_a_trigger(session):
+    """An existing dev DB's rows are NULL here, and they are all trigger work.
+    Reading NULL as a proposal would silently stop the desk's own autonomy."""
+    today = date.today().isoformat()
+    session.registry.con.execute(
+        "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
+        "trigger_payload, template_id, status, attempt_count, created_at, "
+        "updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ["task-old", f"regime_shift|{today}|SPY|old", "regime_shift", "{}",
+         "regime_review", "queued", 0, "2026-08-06T00:00:00Z",
+         "2026-08-06T00:00:00Z"])
+    session.atlas.set_mode("research")
+
+    started = session.atlas_run_startable(True, limit=5)
+
+    assert [entry["task_id"] for entry in started] == ["task-old"]
+
+
 def test_the_observe_tick_reconciles_dispatched_tasks():
     # A workflow that finished while nothing was watching must still resolve its
     # task; reconciliation on the observe cycle is what makes that true.

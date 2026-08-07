@@ -233,7 +233,7 @@ CREATE TABLE IF NOT EXISTS atlas_state (
 CREATE TABLE IF NOT EXISTS atlas_tasks (
     task_id VARCHAR PRIMARY KEY, dedupe_key VARCHAR UNIQUE, trigger_kind VARCHAR,
     trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
-    conclusion JSON, error VARCHAR, attempt_count INTEGER,
+    conclusion JSON, error VARCHAR, attempt_count INTEGER, origin VARCHAR,
     created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, updated_at VARCHAR);
 CREATE TABLE IF NOT EXISTS authority_grants (
     grant_id VARCHAR PRIMARY KEY, mode VARCHAR, allowed_universe JSON,
@@ -381,6 +381,11 @@ class Registry:
         # from, so existing desks anchor to whatever feed they actually run.
         self.con.execute(
             "ALTER TABLE account ADD COLUMN IF NOT EXISTS mark_lane VARCHAR")
+        # Proposals and triggers share one lifecycle and one gate; only who may
+        # start them differs. NULL is a row written before this column existed,
+        # and every one of those is trigger work.
+        self.con.execute(
+            "ALTER TABLE atlas_tasks ADD COLUMN IF NOT EXISTS origin VARCHAR")
 
     def _partition_account_by_book(self) -> None:
         """Move a pre-book `account` row onto the book key.
@@ -1886,12 +1891,17 @@ class Registry:
              state.get("coordinator_session_id"), _now()])
 
     def create_atlas_task(self, task_id: str, dedupe_key: str, trigger_kind: str,
-                        trigger_payload: dict, template_id: str | None) -> bool:
+                        trigger_payload: dict, template_id: str | None,
+                        *, origin: str = "trigger") -> bool:
         """Create a queued task, deduped by its UNIQUE key.
 
         Returns True if a new task was created, False if the dedupe key already
         exists (the trigger was already handled for this state) — the caller
         must not re-run a deduplicated task.
+
+        ``origin`` says who may start it: ``"trigger"`` is unattended work the
+        heartbeat starts, anything else is attended and waits for the operator.
+        Keyword-only and defaulted, because every existing caller is a trigger.
         """
         existing = self._rows(
             "SELECT task_id FROM atlas_tasks WHERE dedupe_key = ?", [dedupe_key])
@@ -1900,10 +1910,10 @@ class Registry:
         self.con.execute(
             "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
             "trigger_payload, template_id, status, workflow_id, conclusion, "
-            "error, attempt_count, created_at, started_at, completed_at, "
-            "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "error, attempt_count, origin, created_at, started_at, completed_at, "
+            "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [task_id, dedupe_key, trigger_kind, _j(trigger_payload), template_id,
-             "queued", None, None, None, 0, _now(), None, None, _now()])
+             "queued", None, None, None, 0, origin, _now(), None, None, _now()])
         return True
 
     def update_atlas_task(self, task_id: str, *, status: str | None = None,

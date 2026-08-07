@@ -3221,6 +3221,9 @@ class UISession:
         still goes through ``start_task``, so mode checks, the retry budget,
         and the plan-creation boundary all apply unchanged. In Research mode
         this launches research and still cannot create a paper plan.
+
+        Unattended work only: a proposal is a queued task the operator has yet
+        to approve, so the beat passes over it.
         """
         facts = self.atlas_facts(offline)
         started: list[dict] = []
@@ -3228,6 +3231,10 @@ class UISession:
             if len(started) >= limit:
                 break
             if not candidate.get("startable"):
+                continue
+            if candidate.get("origin") != "trigger":
+                # A proposal is started by the operator approving it, never by
+                # the beat. This line IS the envelope.
                 continue
             result = self.atlas.start_task(
                 candidate["task_id"], facts, runner=self.atlas_workflow_runner)

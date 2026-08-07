@@ -312,7 +312,9 @@ class AtlasSupervisor:
                 str(task.get("trigger_kind")))
             if not template_id:
                 continue
-            entry = {"task_id": task["task_id"], "template_id": template_id}
+            entry = {"task_id": task["task_id"], "template_id": template_id,
+                     # NULL is a pre-column row, and those are all trigger work.
+                     "origin": str(task.get("origin") or "trigger")}
             entry.update(self._task_age(task, today))
             if entry["stale"] is not False:
                 # Stale, or of unknown age. Either way it is refused, and the

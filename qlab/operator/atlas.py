@@ -687,13 +687,15 @@ class AtlasSupervisor:
         # for any task recorded after midnight UTC. Task volume per day is
         # tiny, so a bounded scan is fine.
         #
-        # `origin` is deliberately not consulted: this bounds UNATTENDED
-        # launches, and proposals are minted as `proposal:<template_id>`, which
-        # is outside _WORKFLOW_TRIGGERS and so never counted. That is the whole
-        # reason this is safe. Give a proposal a kind that IS in that set and it
-        # starts consuming the autonomous budget while sitting unapproved — the
-        # desk's own autonomy starved by work no one approved. A proposal kind
-        # inside _WORKFLOW_TRIGGERS must skip non-"trigger" origins here.
+        # This bounds UNATTENDED launches, so it counts trigger rows only, and
+        # it says so in SQL. Two locks, deliberately: proposals are minted as
+        # `proposal:<template_id>`, which is outside _WORKFLOW_TRIGGERS and so
+        # would not be counted anyway. The failure both prevent is a proposal
+        # that spends the desk's own autonomy while sitting unapproved — seven
+        # of them in the morning would exhaust the day's budget and the
+        # afternoon's genuine drawdown trigger would be refused. The kind alone
+        # was one rename away from that; the origin filter does not depend on
+        # anyone remembering which kinds are in the set.
         day = trading_date[:10]
         used = sum(
             1 for task in self.registry.list_atlas_tasks(

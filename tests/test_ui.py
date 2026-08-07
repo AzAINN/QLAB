@@ -3380,10 +3380,12 @@ def test_a_snapshot_item_and_a_menu_item_are_the_same_shape(session):
 
 
 def test_a_proposal_never_spends_the_unattended_daily_budget(session):
-    """The starvation `_within_daily_budget` warns about: give a proposal a
-    kind inside _WORKFLOW_TRIGGERS and a morning's worth of unapproved
-    proposals exhausts `max_autonomous_workflows_per_day`, after which the
-    day's genuine drawdown trigger is refused — with the suite still green."""
+    """Two independent locks keep a proposal out of `_within_daily_budget`:
+    its kind sits outside `_WORKFLOW_TRIGGERS`, and the scan also filters
+    `origin="trigger"` in SQL, so a proposal is excluded regardless of kind.
+    This pins the resulting property — a morning's worth of unapproved
+    proposals never exhausts `max_autonomous_workflows_per_day` — not either
+    lock by itself; only breaking BOTH would turn the suite red."""
     session.atlas.set_mode("research")
     today = date.today().isoformat()
     offered = [i for i in session.atlas_actionables(True)["items"] if i["startable"]]

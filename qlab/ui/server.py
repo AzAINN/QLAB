@@ -3276,9 +3276,10 @@ class UISession:
         # The same clock `atlas_observe` hands the supervisor, so a proposal and
         # a trigger minted in one tick carry the same trading date. It is LOCAL
         # midnight while `startable_tasks` ages against UTC (`_utc_today`), so
-        # for a few hours a day a key here reads as one day younger than the
-        # gate's own clock — always in the fresh direction, never the stale one,
-        # and `_expire_stale_proposals` compares against this same local date so
+        # for a few hours a day the two clocks disagree by up to one day — older
+        # or younger depending on which side of UTC the zone sits — and one day
+        # against `max_task_age_days = 5` cannot flip a fresh proposal to stale.
+        # `_expire_stale_proposals` compares against this same local date so
         # the two ends of the proposal's life agree with each other.
         trading_date = date.today().isoformat()
         universe = ",".join(sorted(facts.get("universe", [])))
@@ -3324,7 +3325,7 @@ class UISession:
         the approve it invites answers 400.
 
         The dedupe key keeps ``AtlasSupervisor``'s shape —
-        ``kind|trading_date|universe|state_hash`` — because ``_task_age`` reads
+        ``kind|trading_date|universe|state_hash`` — because ``task_age`` reads
         the trading date out of it, and a key it cannot parse reads as
         age-unknown, which ``startable_tasks`` refuses: the very gate this
         proposal needs to pass.
@@ -3371,7 +3372,7 @@ class UISession:
         """
         # The supervisor's own parser and window, deliberately: one reader of
         # the dedupe key's shape, so a change to it cannot silently disagree
-        # with `_task_age` about which day a task belongs to.
+        # with `task_age` about which day a task belongs to.
         from qlab.operator.atlas import TASK_SCAN_WINDOW, _dedupe_trading_date
 
         today = trading_date[:10]
@@ -3412,10 +3413,10 @@ class UISession:
         tick saw it — and without facts the data preconditions cannot be
         checked. What it CAN establish without them it does check, and reports
         as an outright refusal: the mode (``check_authority``), the age
-        (``_task_age``), the task's own status, and whether the template still
+        (``task_age``), the task's own status, and whether the template still
         exists. Everything else comes back ``startable: None`` with a reason
         saying where the verdict lives. Unknown must never read the same as
-        permitted — the same reason ``_task_age`` reports an unreadable date as
+        permitted — the same reason ``task_age`` reports an unreadable date as
         ``None`` rather than False, and the same reason ``news_search`` carries
         no ``offer`` field rather than assert one it did not compute.
         """

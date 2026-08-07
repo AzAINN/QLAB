@@ -445,19 +445,31 @@ def _startable_block(context: Mapping) -> list[str]:
     # prompt to say one thing and buried the single startable template in the
     # repetition. Grouping keeps the count, because "fifteen days running"
     # is itself information a manager should act on.
+    # Origin is part of the key. A proposal starts when the operator approves
+    # it and never on the beat, so collapsing one into a trigger's line showed
+    # the model unapprovable work as work the desk would get to on its own.
+    # Nothing here starts anything either way — this is fidelity, and a manager
+    # reasoning from that line is reasoning about a desk that does not exist.
     groups: dict[tuple, list] = {}
     for entry in startable:
         if isinstance(entry, Mapping):
+            # NULL is a pre-column row and those are all trigger work; anything
+            # else passes through verbatim, the same reading `startable_tasks`
+            # does, so an unexpected origin is named rather than normalised.
+            origin = entry.get("origin")
             key = (entry.get("template_id"), bool(entry.get("startable")),
-                   entry.get("reason"))
+                   entry.get("reason"),
+                   "trigger" if origin is None else str(origin))
         else:
-            key = ("", False, str(entry))
+            key = ("", False, str(entry), "trigger")
         groups.setdefault(key, []).append(entry)
-    for (template_id, allowed, reason), members in groups.items():
+    for (template_id, allowed, reason, origin), members in groups.items():
         count = f" [×{len(members)} waiting]" if len(members) > 1 else ""
+        attended = "" if origin == "trigger" else (
+            f" [{origin}: waits for the operator's approval, not the beat]")
         out.append(
             f"  - {template_id}: {'startable' if allowed else 'refused'}"
-            + count + (f" — {reason}" if reason else ""))
+            + count + attended + (f" — {reason}" if reason else ""))
     out.append(f"  {tail}")
     return out
 

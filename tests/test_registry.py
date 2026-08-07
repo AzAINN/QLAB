@@ -965,6 +965,50 @@ def test_atlas_tasks_gains_the_origin_column_on_an_existing_table(tmp_path):
         reg.close()
 
 
+def test_a_filtered_task_scan_keeps_a_legacy_null_origin_as_trigger_work(reg):
+    """`origin='trigger'` in SQL would drop every pre-column row, and those are
+    all trigger work — the desk's own autonomy, filtered out by a scan that was
+    added to protect it. The status filter is exact by comparison: `status` has
+    never been NULL."""
+    reg.con.execute(
+        "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
+        "trigger_payload, template_id, status, attempt_count, created_at, "
+        "updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ["legacy", "regime_flip|2026-08-06|SPY|old", "regime_flip", "{}",
+         "regime_review", "queued", 0, "2026-08-06T00:00:00Z",
+         "2026-08-06T00:00:00Z"])
+    reg.create_atlas_task("fresh", "regime_flip|2026-08-07|SPY|new",
+                          "regime_flip", {}, "regime_review")
+    reg.create_atlas_task("offered", "proposal:desk_brief|2026-08-07|SPY|d",
+                          "proposal:desk_brief", {}, "desk_brief",
+                          origin="proposal")
+    reg.update_atlas_task("fresh", status="running")
+
+    trigger_work = {t["task_id"] for t in reg.list_atlas_tasks(50, origin="trigger")}
+    assert trigger_work == {"legacy", "fresh"}
+    assert {t["task_id"] for t in reg.list_atlas_tasks(50, status="queued")} == {
+        "legacy", "offered"}
+    assert [t["task_id"] for t in reg.list_atlas_tasks(
+        50, status="queued", origin="proposal")] == ["offered"]
+
+
+def test_a_task_is_found_by_its_dedupe_key_without_scanning(reg):
+    """The dedupe key is UNIQUE, so the lookup belongs in SQL. Reading it out of
+    a bounded scan meant a table deeper than the window answered 'no such task'
+    for a key that exists — and the caller then minted a duplicate id."""
+    reg.create_atlas_task("only", "proposal:desk_brief|2026-08-07|SPY|d",
+                          "proposal:desk_brief", {}, "desk_brief",
+                          origin="proposal")
+    for i in range(60):
+        reg.create_atlas_task(f"noise-{i}", f"regime_flip|2026-08-07|SPY|{i}",
+                              "regime_flip", {}, "regime_review")
+
+    found = reg.get_atlas_task_by_dedupe("proposal:desk_brief|2026-08-07|SPY|d")
+
+    assert found["task_id"] == "only"
+    assert reg.get_atlas_task_by_dedupe("nothing|like|this|key") is None
+
+
 # --- phase graphs must be executable, not merely well-named ------------------
 
 def test_validate_phase_graph_rejects_an_unknown_phase_type():

@@ -1957,9 +1957,46 @@ class Registry:
         rows = self._rows("SELECT * FROM atlas_tasks WHERE task_id = ?", [task_id])
         return rows[0] if rows else None
 
-    def list_atlas_tasks(self, limit: int = 50) -> list[dict]:
+    def get_atlas_task_by_dedupe(self, dedupe_key: str) -> dict | None:
+        """The one task carrying this key, or None.
+
+        ``dedupe_key`` is UNIQUE, so this belongs in SQL. Reading it out of a
+        bounded scan meant a table deeper than the window answered "no such
+        task" for a key that exists, and the caller minted a second id for a
+        row it could not see.
+        """
+        rows = self._rows(
+            "SELECT * FROM atlas_tasks WHERE dedupe_key = ?", [dedupe_key])
+        return rows[0] if rows else None
+
+    def list_atlas_tasks(self, limit: int = 50, *, status: str | None = None,
+                         origin: str | None = None) -> list[dict]:
+        """The newest tasks, optionally narrowed by status and origin.
+
+        Both filters are in SQL rather than applied to the page this returns.
+        A caller that wants queued work needs a window bounded by work that is
+        actually waiting: proposals are minted per template per day and no task
+        row is ever deleted, so filtering after the fact means history — most
+        of it long finished — decides what the gate can still see.
+
+        ``origin="trigger"`` includes NULL. Those rows predate the column and
+        are all trigger work; an exact match would filter out the desk's own
+        autonomy with a scan added to protect it.
+        """
+        where, params = [], []
+        if status is not None:
+            where.append("status = ?")
+            params.append(status)
+        if origin == "trigger":
+            where.append("(origin IS NULL OR origin = 'trigger')")
+        elif origin is not None:
+            where.append("origin = ?")
+            params.append(origin)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        params.append(limit)
         return self._rows(
-            "SELECT * FROM atlas_tasks ORDER BY created_at DESC LIMIT ?", [limit])
+            f"SELECT * FROM atlas_tasks{clause} ORDER BY created_at DESC LIMIT ?",
+            params)
 
     def count_atlas_tasks_on(self, day_iso: str, trigger_kind: str | None = None) -> int:
         """Autonomous tasks created on a UTC date (for the daily budget)."""

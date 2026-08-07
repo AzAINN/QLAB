@@ -465,8 +465,13 @@ def _startable_block(context: Mapping) -> list[str]:
         groups.setdefault(key, []).append(entry)
     for (template_id, allowed, reason, origin), members in groups.items():
         count = f" [×{len(members)} waiting]" if len(members) > 1 else ""
+        # An empty origin is the one value that reads as neither NULL nor a
+        # written choice. It is refused at the writer and never treated as a
+        # permit — but it still has to render as a sentence rather than as
+        # "[: waits for ...]", which the model would have to guess at.
         attended = "" if origin == "trigger" else (
-            f" [{origin}: waits for the operator's approval, not the beat]")
+            f" [{origin.strip() or 'unrecorded origin'}: waits for the "
+            "operator's approval, not the beat]")
         out.append(
             f"  - {template_id}: {'startable' if allowed else 'refused'}"
             + count + attended + (f" — {reason}" if reason else ""))

@@ -3236,21 +3236,20 @@ def test_a_proposal_whose_template_vanished_is_shown_refused(session):
     assert "gone_template" in item["reason"]
 
 
-def test_a_proposal_the_window_cannot_see_is_refused_not_invented(session, monkeypatch):
-    """The dedupe key is taken but the bounded scan did not see the row — a
-    task table deeper than the window, or a writer that got there first.
-    Returning the id just minted would hand the operator an approve button for
-    a task that was never written."""
+def test_a_proposal_written_between_lookup_and_insert_is_refused(session, monkeypatch):
+    """The dedupe key is taken but the lookup did not see it — a writer that
+    got there first. Returning the id just minted would hand the operator an
+    approve button for a task that was never written."""
     today = date.today().isoformat()
     universe = ",".join(sorted(session.mandate.universe_whitelist))
     session.registry.create_atlas_task(
         "hidden", f"proposal:desk_brief|{today}|{universe}|desk_brief",
         "proposal:desk_brief", {"template_id": "desk_brief"}, "desk_brief",
         origin="proposal")
-    monkeypatch.setattr(session.registry, "list_atlas_tasks",
-                        lambda *args, **kwargs: [])
+    monkeypatch.setattr(session.registry, "get_atlas_task_by_dedupe",
+                        lambda *args, **kwargs: None)
 
-    with pytest.raises(RuntimeError, match="task window"):
+    with pytest.raises(RuntimeError, match="never stored"):
         session.atlas_actionables(True)
 
 
@@ -3298,6 +3297,126 @@ def test_queued_proposals_do_not_crowd_a_trigger_out_of_the_gate(session):
     entries = session.atlas.startable_tasks(session.atlas_facts(True))
 
     assert "buried-trigger" in [entry["task_id"] for entry in entries]
+
+
+def test_the_snapshot_never_reports_a_verdict_it_did_not_ask_for(session):
+    """The poll cannot afford `atlas_facts` — `_atlas_regime_facts` latches the
+    regime, so a two-second snapshot would swallow every flip before the
+    observe tick saw it. What it must not do is assert the verdict anyway: a
+    proposal minted in Research read `startable: true` forever, including after
+    the desk was moved to Observe, where the gate refuses all seven."""
+    session.atlas.set_mode("research")
+    session.atlas_actionables(True)
+    _, before = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    # Nothing was checked here, and nothing claims otherwise.
+    assert before["actionables"]["items"]
+    assert all(item["startable"] is None for item in before["actionables"]["items"])
+    assert all("actionables" in (item["reason"] or "")
+               for item in before["actionables"]["items"])
+
+    session.atlas.set_mode("observe")
+    _, after = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+
+    assert after["actionables"]["items"]
+    assert all(item["startable"] is False for item in after["actionables"]["items"])
+    assert all("Observe mode" in item["reason"]
+               for item in after["actionables"]["items"])
+
+
+def test_the_snapshot_refuses_a_proposal_that_has_gone_stale(session):
+    """`start_task` has no age check, so an item shown as startable is an item
+    that will run. `_task_age` needs no facts, which is exactly why this
+    surface can and must ask it."""
+    old_day = (date.today() - timedelta(days=10)).isoformat()
+    session.registry.create_atlas_task(
+        "old-proposal", f"proposal:desk_brief|{old_day}|SPY|desk_brief",
+        "proposal:desk_brief", {"template_id": "desk_brief"}, "desk_brief",
+        origin="proposal")
+    session.atlas.set_mode("research")
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+
+    item = next(i for i in snap["actionables"]["items"]
+                if i["task_id"] == "old-proposal")
+    assert item["startable"] is False
+    assert "stale" in item["reason"]
+
+
+def test_an_already_started_proposal_stops_being_offered_today(session):
+    """Ask, approve, ask again. The dedupe key survives the day, so the second
+    ask found the running task and called it startable — a verdict the route
+    itself answers 400 to, and one the snapshot (queued rows only) contradicted."""
+    session.atlas.set_mode("research")
+    first = session.atlas_actionables(True)
+    offered = [item for item in first["items"] if item["startable"]][0]
+    session.registry.update_atlas_task(offered["task_id"], status="running")
+
+    second = session.atlas_actionables(True)
+
+    item = next(i for i in second["items"]
+                if i["template_id"] == offered["template_id"])
+    assert item["task_id"] == offered["task_id"]
+    assert item["startable"] is False
+    assert item["task_status"] == "running"
+    assert "running" in item["reason"]
+    # And the two surfaces agree about it rather than one omitting it.
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+    shown = next(i for i in snap["actionables"]["items"]
+                 if i["task_id"] == offered["task_id"])
+    assert shown["startable"] is False
+    assert shown["task_status"] == "running"
+
+
+def test_a_snapshot_item_and_a_menu_item_are_the_same_shape(session):
+    """One conceptual item, one shape. Otherwise a client has to make fields
+    optional for a reason that is an accident of which surface answered."""
+    session.atlas.set_mode("research")
+    menu = session.atlas_actionables(True)
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+
+    assert snap["actionables"]["items"]
+    assert {frozenset(item) for item in snap["actionables"]["items"]} == {
+        frozenset(item) for item in menu["items"]}
+
+
+def test_a_proposal_never_spends_the_unattended_daily_budget(session):
+    """The starvation `_within_daily_budget` warns about: give a proposal a
+    kind inside _WORKFLOW_TRIGGERS and a morning's worth of unapproved
+    proposals exhausts `max_autonomous_workflows_per_day`, after which the
+    day's genuine drawdown trigger is refused — with the suite still green."""
+    session.atlas.set_mode("research")
+    today = date.today().isoformat()
+    offered = [i for i in session.atlas_actionables(True)["items"] if i["startable"]]
+    assert len(offered) > session.atlas.config.max_autonomous_workflows_per_day
+
+    assert session.atlas._within_daily_budget(today) is True
+    facts = session.atlas_facts(True)
+    facts["portfolio"]["drawdown_tier"] = "control"
+    created = session.atlas.observe(facts, trading_date=today)["created_tasks"]
+
+    assert [t["trigger"] for t in created] == ["drawdown_control"]
+
+
+def test_the_gate_still_sees_queued_work_behind_a_long_history(session):
+    """Raising the scan window only postponed the burial: Research offers seven
+    templates, nothing deletes a task row, and at ~28 days of daily asking the
+    window is proposals again. A queued-only scan is bounded by work that is
+    actually waiting, which does not grow with history."""
+    trigger_day = (date.today() - timedelta(days=2)).isoformat()
+    session.registry.create_atlas_task(
+        "buried-trigger", f"regime_flip|{trigger_day}|SPY|abc", "regime_flip",
+        {"why": "flip"}, "regime_review")
+    for i in range(250):
+        session.registry.create_atlas_task(
+            f"spent-{i}", f"proposal:desk_brief|{trigger_day}|SPY|{i}",
+            "proposal:desk_brief", {"template_id": "desk_brief"}, "desk_brief",
+            origin="proposal")
+        session.registry.update_atlas_task(f"spent-{i}", status="completed")
+    session.atlas.set_mode("research")
+
+    entries = session.atlas.startable_tasks(session.atlas_facts(True))
+
+    assert [entry["task_id"] for entry in entries] == ["buried-trigger"]
 
 
 def test_the_observe_tick_reconciles_dispatched_tasks():

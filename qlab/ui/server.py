@@ -3268,12 +3268,18 @@ class UISession:
         Called under the dispatch lock (every route but two is), so it takes no
         lock of its own — ``_LOCK`` is not reentrant.
         """
+        from qlab.operator.atlas import STARTABLE_TASK_STATES
         from qlab.operator.templates import template_menu
 
         facts = self.atlas_facts(offline)
         mode = self.atlas.mode
         # The same clock `atlas_observe` hands the supervisor, so a proposal and
-        # a trigger minted in one tick carry the same trading date.
+        # a trigger minted in one tick carry the same trading date. It is LOCAL
+        # midnight while `startable_tasks` ages against UTC (`_utc_today`), so
+        # for a few hours a day a key here reads as one day younger than the
+        # gate's own clock — always in the fresh direction, never the stale one,
+        # and `_expire_stale_proposals` compares against this same local date so
+        # the two ends of the proposal's life agree with each other.
         trading_date = date.today().isoformat()
         universe = ",".join(sorted(facts.get("universe", [])))
         self._expire_stale_proposals(trading_date)
@@ -3281,9 +3287,22 @@ class UISession:
         for entry in template_menu(mode, facts):
             item = dict(entry)
             item["task_id"] = None
+            item["task_status"] = None
             if entry["startable"]:
-                item["task_id"] = self._proposal_task(
+                task_id, status = self._proposal_task(
                     entry["template_id"], trading_date, universe)
+                item["task_id"] = task_id
+                item["task_status"] = status
+                if status not in STARTABLE_TASK_STATES:
+                    # The gate permits the template; today's proposal for it is
+                    # spent. `start_task` refuses anything but queued or failed,
+                    # so leaving `startable` True here would offer an approve
+                    # button whose only possible answer is a 400.
+                    item["startable"] = False
+                    item["reason"] = (
+                        f"today's proposal for {entry['template_id']} is "
+                        f"already {status}; one task per template per day, so "
+                        "the next one is tomorrow's")
             items.append(item)
         # Startable first, then the refusals; the gate's own order within each
         # half, which is the registry's declaration order.
@@ -3295,8 +3314,14 @@ class UISession:
         return {"trading_date": trading_date, "items": items}
 
     def _proposal_task(self, template_id: str, trading_date: str,
-                       universe: str) -> str:
-        """The proposal for this template today, created or found.
+                       universe: str) -> tuple[str, str]:
+        """Today's proposal for this template — its id AND its status.
+
+        The status travels with the id because the caller's verdict depends on
+        it. The dedupe key survives the whole trading day, so a proposal that
+        has already been approved and started is still what this returns; an
+        offer built from the template gate alone would call that startable and
+        the approve it invites answers 400.
 
         The dedupe key keeps ``AtlasSupervisor``'s shape —
         ``kind|trading_date|universe|state_hash`` — because ``_task_age`` reads
@@ -3308,26 +3333,25 @@ class UISession:
         ``_WORKFLOW_TRIGGERS``, so a proposal sitting unapproved never consumes
         the unattended desk's daily workflow budget.
         """
-        from qlab.operator.atlas import TASK_SCAN_WINDOW
-
         kind = f"proposal:{template_id}"
         dedupe = f"{kind}|{trading_date}|{universe}|{template_id}"
-        for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW):
-            if task.get("dedupe_key") == dedupe:
-                return str(task["task_id"])
+        # By key, in SQL. A bounded scan answered "no such task" for a key that
+        # exists as soon as the table was deeper than the window, and the
+        # UNIQUE constraint then refused the insert that answer implied.
+        existing = self.registry.get_atlas_task_by_dedupe(dedupe)
+        if existing is not None:
+            return str(existing["task_id"]), str(existing.get("status") or "")
         task_id = uuid.uuid4().hex[:16]
         if not self.registry.create_atlas_task(
                 task_id, dedupe, kind, {"template_id": template_id},
                 template_id, origin="proposal"):
-            # The row exists but was outside the scanned window, or another
-            # thread won the race. Either way the id just minted is not the
-            # one that is stored, and returning it would hand the operator an
-            # approve button for a task that does not exist.
+            # Written between the lookup and the insert. The id just minted is
+            # not the one that is stored, and returning it would hand the
+            # operator an approve button for a task that does not exist.
             raise RuntimeError(
-                f"proposal {dedupe!r} already exists but is not in the newest "
-                f"{TASK_SCAN_WINDOW} tasks; the task window is too small to "
-                "resolve it")
-        return task_id
+                f"proposal {dedupe!r} was created between its lookup and its "
+                "insert; the id minted here was never stored")
+        return task_id, "queued"
 
     def _expire_stale_proposals(self, trading_date: str) -> list[str]:
         """Retire proposals offered on an earlier trading day.
@@ -3352,12 +3376,14 @@ class UISession:
 
         today = trading_date[:10]
         expired: list[str] = []
-        for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW):
-            # Proposals only. A trigger is a claim about a trading day and
-            # keeps for `max_task_age_days`; expiring one here would disarm
-            # the desk's own autonomy without saying so.
-            if task.get("origin") != "proposal" or task.get("status") != "queued":
-                continue
+        # Queued proposals only, in SQL. Filtering after the read left this
+        # bounded by the very window it exists to protect: past 200 rows of
+        # history the cleanup stopped seeing the rows it had to expire.
+        # A trigger is never touched — it is a claim about a trading day and
+        # keeps for `max_task_age_days`; expiring one here would disarm the
+        # desk's own autonomy without saying so.
+        for task in self.registry.list_atlas_tasks(
+                TASK_SCAN_WINDOW, status="queued", origin="proposal"):
             day = _dedupe_trading_date(task.get("dedupe_key"))
             if day == today:
                 continue
@@ -3380,43 +3406,84 @@ class UISession:
         would write a task row per startable template per poll and turn the
         desk's queue into a record of nobody having asked anything.
 
-        Carries the offered half only, because that is all that is persisted;
-        the refusals and their reasons come from POST `/api/atlas/actionables`.
+        **``startable`` is never True here.** This surface must not call
+        ``atlas_facts`` — ``_atlas_regime_facts`` latches ``_last_robust_state``,
+        so a two-second poll would consume every regime flip before the observe
+        tick saw it — and without facts the data preconditions cannot be
+        checked. What it CAN establish without them it does check, and reports
+        as an outright refusal: the mode (``check_authority``), the age
+        (``_task_age``), the task's own status, and whether the template still
+        exists. Everything else comes back ``startable: None`` with a reason
+        saying where the verdict lives. Unknown must never read the same as
+        permitted — the same reason ``_task_age`` reports an unreadable date as
+        ``None`` rather than False, and the same reason ``news_search`` carries
+        no ``offer`` field rather than assert one it did not compute.
         """
-        from qlab.operator.atlas import TASK_SCAN_WINDOW, _dedupe_trading_date
-        from qlab.operator.templates import TEMPLATES
+        # The supervisor's own clock and parser: this surface's age answer must
+        # be the one `startable_tasks` would give, not a second opinion.
+        from qlab.operator.atlas import (
+            STARTABLE_TASK_STATES, TASK_SCAN_WINDOW, _dedupe_trading_date,
+            _utc_today)
+        from qlab.operator.templates import (
+            TEMPLATES, TemplateNotAllowed, check_authority)
 
-        rows = [task for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW)
-                if task.get("origin") == "proposal"
-                and task.get("status") == "queued"]
+        rows = self.registry.list_atlas_tasks(
+            TASK_SCAN_WINDOW, origin="proposal")
         if not rows:
-            # Absence, not an error: nobody has asked today.
+            # Absence, not an error: nobody has asked yet.
             return {"trading_date": None, "items": []}
         newest = max(_dedupe_trading_date(row.get("dedupe_key")) for row in rows)
+        mode = self.atlas.mode
+        today = _utc_today()[:10]
         items: list[dict] = []
         for row in rows:
             if _dedupe_trading_date(row.get("dedupe_key")) != newest:
                 continue
             template_id = str(row.get("template_id") or "")
+            status = str(row.get("status") or "")
             template = TEMPLATES.get(template_id)
+            item = {
+                "template_id": template_id,
+                "purpose": template.purpose if template else "",
+                "creates_plan": bool(template.creates_plan) if template else False,
+                "needs_coordinator": (
+                    bool(template.needs_coordinator) if template else False),
+                "task_id": str(row["task_id"]), "task_status": status,
+                "startable": None, "reason": None,
+            }
             if template is None:
                 # A release can unregister a template while a proposal for it
-                # is queued. Dropping the row would remove an approvable item
-                # from the client with nothing said; raising would take the
-                # whole snapshot — the entire desk — down for one dead row.
-                items.append({
-                    "template_id": template_id, "purpose": "",
-                    "startable": False, "creates_plan": False,
-                    "reason": f"{template_id!r} is no longer a registered "
-                              "template; this proposal cannot start",
-                    "task_id": str(row["task_id"])})
-                continue
-            items.append({
-                "template_id": template_id, "purpose": template.purpose,
-                "startable": True, "reason": None,
-                "creates_plan": template.creates_plan,
-                "task_id": str(row["task_id"])})
-        items.sort(key=lambda item: not item["startable"])
+                # is queued. Dropping the row would remove an item from the
+                # client with nothing said; raising would take the whole
+                # snapshot — the entire desk — down for one dead row.
+                item["startable"] = False
+                item["reason"] = (f"{template_id!r} is no longer a registered "
+                                  "template; this proposal cannot start")
+            elif status not in STARTABLE_TASK_STATES:
+                item["startable"] = False
+                item["reason"] = (
+                    f"today's proposal for {template_id} is already {status}; "
+                    "one task per template per day, so the next one is "
+                    "tomorrow's")
+            else:
+                age = self.atlas.task_age(row, today)
+                if age["stale"] is not False:
+                    item["startable"] = False
+                    item["reason"] = age["age_reason"]
+            if item["startable"] is None:
+                try:
+                    check_authority(template_id, mode)
+                except TemplateNotAllowed as exc:
+                    item["startable"] = False
+                    item["reason"] = str(exc)
+                else:
+                    item["reason"] = (
+                        "the data preconditions were not checked here; POST "
+                        "/api/atlas/actionables asks the gate for today's "
+                        "verdict")
+            items.append(item)
+        # Known-refused last, exactly as the menu orders its own refusals.
+        items.sort(key=lambda item: item["startable"] is False)
         return {"trading_date": newest or None, "items": items}
 
     @staticmethod
@@ -3882,7 +3949,9 @@ class UISession:
             "atlas_tasks": self.registry.list_atlas_tasks(10),
             # The newest proposal set, read from the task table so the client
             # renders it without a second fetch — and so a poll never mints
-            # one. Asking is what proposes; drawing is what reports.
+            # one. Asking is what proposes; drawing is what reports. `startable`
+            # here is False (known refused) or None (not checked on this
+            # surface), never True: see `atlas_actionables_snapshot`.
             "actionables": self.atlas_actionables_snapshot(),
             "approvals": self.actionable_approvals(),
             "quotes": self.quotes(),

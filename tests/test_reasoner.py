@@ -1479,6 +1479,18 @@ def test_the_queued_block_keeps_a_proposal_apart_from_a_trigger():
     assert any("approval" not in line for line in lines)
 
 
+def test_an_unrecorded_origin_still_renders_a_sentence():
+    """`""` is the one origin that reads as neither NULL nor a written choice.
+    The writer refuses it, the reader refuses to treat it as a permit — and
+    this line rendered it as `[: waits for ...]`, which is a prompt the model
+    has to guess at."""
+    text = "\n".join(_startable_block({"startable": [
+        {"task_id": "t1", "template_id": "regime_review", "startable": True,
+         "stale": False, "origin": ""}]}))
+    assert "[: " not in text
+    assert "unrecorded" in text
+
+
 def test_the_queued_block_says_stale_rather_than_implying_a_permit_problem():
     """A stale task's refusal must not read as 'widen the permit and it runs'."""
     text = "\n".join(_startable_block({"startable": [

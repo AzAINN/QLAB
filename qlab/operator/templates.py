@@ -123,11 +123,16 @@ def get_template(template_id: str) -> WorkflowTemplate:
             f"registered templates: {sorted(TEMPLATES)}") from exc
 
 
-def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplate:
-    """Return the template if Atlas may start it now, else raise.
+def check_authority(template_id: str, mode: str) -> WorkflowTemplate:
+    """The mode half of the gate: what this mode may start, whatever the data.
 
-    Authority first, then preconditions — so a mode violation is never masked
-    by a data problem.
+    Split out because it needs no facts, and one surface cannot afford them:
+    the owner's two-second snapshot must not call ``atlas_facts``, which
+    latches the regime and would swallow a flip before the observe tick saw it.
+    That surface still owes an honest answer to "may this mode start it", and
+    the only way to give one without a second copy of the mode rules is for
+    ``check_startable`` to delegate here — which it does. Nothing is relaxed:
+    passing this is necessary, never sufficient.
     """
     template = get_template(template_id)
     if mode == "observe":
@@ -139,6 +144,16 @@ def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplat
         raise TemplateNotAllowed(
             f"{template_id!r} creates a paper plan, which requires Propose "
             f"mode; current mode is {mode!r}")
+    return template
+
+
+def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplate:
+    """Return the template if Atlas may start it now, else raise.
+
+    Authority first, then preconditions — so a mode violation is never masked
+    by a data problem.
+    """
+    template = check_authority(template_id, mode)
     data = facts.get("data", {})
     if "data_eligible_for_research" in template.requires:
         if data.get("blocked"):

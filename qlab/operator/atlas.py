@@ -46,6 +46,11 @@ BLOCKED = "blocked"
 DEGRADED = "degraded"
 PAUSED = "paused"
 
+# The statuses a task may still be started from. `start_task` is the authority;
+# every surface that offers an approve button reads this rather than writing its
+# own copy, because an offer the gate answers 400 to is a wrong verdict.
+STARTABLE_TASK_STATES = ("queued", "failed")
+
 # Trigger kinds that would launch an autonomous workflow (subject to the daily
 # budget). Briefs and alerts are not workflow launches and do not count.
 _WORKFLOW_TRIGGERS = frozenset({
@@ -53,10 +58,14 @@ _WORKFLOW_TRIGGERS = frozenset({
 })
 
 # How many of the newest task rows a bounded scan reads. One number, because
-# two would disagree the first time either moved. Fifty was enough while only
-# triggers were queued; proposals are minted per template per day, so a desk
-# asked daily buries a trigger that is still inside `max_task_age_days` below
-# the window `startable_tasks` scans — and the beat then never sees it.
+# two would disagree the first time either moved.
+#
+# The limit alone is not what keeps a scan honest — every scan below also names
+# the status or origin it cares about, so its window holds that class of row
+# only. Fifty was enough while triggers were the only thing queued; proposals
+# are minted per template per day and no task row is ever deleted, so an
+# unfiltered window fills with spent proposals in about a month and a queued
+# trigger that is still inside `max_task_age_days` drops off the end of it.
 TASK_SCAN_WINDOW = 200
 
 
@@ -198,8 +207,12 @@ class AtlasSupervisor:
         """
         if self.mode == "paused":
             return []
+        # Trigger rows only, of every status: a trigger already handled today
+        # must keep suppressing itself after it has run, so this one genuinely
+        # needs history — but not the history of what the operator was offered.
         known = {task.get("dedupe_key")
-                 for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW)}
+                 for task in self.registry.list_atlas_tasks(
+                     TASK_SCAN_WINDOW, origin="trigger")}
         pending: list[Trigger] = []
         for trig in self._evaluate_triggers(facts):
             if trig.template_id is None or trig.action == "block":
@@ -312,9 +325,10 @@ class AtlasSupervisor:
         mode = self.mode
         today = (today or _utc_today())[:10]
         out: list[dict] = []
-        for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW):
-            if task.get("status") != "queued":
-                continue
+        # Queued only, in SQL. This is the gate's window: what it can see must
+        # be bounded by what is waiting, not by how much has happened.
+        for task in self.registry.list_atlas_tasks(
+                TASK_SCAN_WINDOW, status="queued"):
             template_id = task.get("template_id") or template_for_trigger(
                 str(task.get("trigger_kind")))
             if not template_id:
@@ -328,7 +342,7 @@ class AtlasSupervisor:
             origin = task.get("origin")
             entry = {"task_id": task["task_id"], "template_id": template_id,
                      "origin": "trigger" if origin is None else str(origin)}
-            entry.update(self._task_age(task, today))
+            entry.update(self.task_age(task, today))
             if entry["stale"] is not False:
                 # Stale, or of unknown age. Either way it is refused, and the
                 # reason is the age rather than the permit, because the permit
@@ -349,12 +363,19 @@ class AtlasSupervisor:
             out.append(entry)
         return out
 
-    def _task_age(self, task: dict, today: str) -> dict:
+    def task_age(self, task: dict, today: str) -> dict:
         """How old this task's triggering condition is, in trading days.
 
         Read from the dedupe key, which carries the trading date the trigger
         fired on; `created_at` is wall-clock and would call a task recorded
         just after midnight UTC a day older than it is.
+
+        Public because a second surface needs exactly this answer: the owner's
+        two-second snapshot cannot call ``atlas_facts`` (it latches the regime)
+        and so cannot ask the full gate, but age needs no facts. One reader of
+        the dedupe key's age, not two that drift apart — and ``start_task``
+        checks no age at all, so a surface that shows a stale proposal as
+        startable is showing work that will run.
         """
         day = _dedupe_trading_date(task.get("dedupe_key"))
         if not _looks_like_a_date(day):
@@ -390,7 +411,7 @@ class AtlasSupervisor:
         task = self.registry.get_atlas_task(task_id)
         if task is None:
             raise KeyError(f"unknown task {task_id!r}")
-        if task.get("status") not in ("queued", "failed"):
+        if task.get("status") not in STARTABLE_TASK_STATES:
             raise PermissionError(
                 f"task {task_id!r} is {task.get('status')!r}; only a queued or "
                 "failed task may start")
@@ -472,9 +493,8 @@ class AtlasSupervisor:
         that does not exist is failed rather than left running forever.
         """
         moved: list[dict] = []
-        for task in self.registry.list_atlas_tasks(limit=TASK_SCAN_WINDOW):
-            if task.get("status") != "running":
-                continue
+        for task in self.registry.list_atlas_tasks(
+                limit=TASK_SCAN_WINDOW, status="running"):
             workflow_id = str(task.get("workflow_id") or "")
             if not workflow_id:
                 continue
@@ -676,7 +696,8 @@ class AtlasSupervisor:
         # inside _WORKFLOW_TRIGGERS must skip non-"trigger" origins here.
         day = trading_date[:10]
         used = sum(
-            1 for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW)
+            1 for task in self.registry.list_atlas_tasks(
+                TASK_SCAN_WINDOW, origin="trigger")
             if _dedupe_trading_date(task.get("dedupe_key")) == day
             and task.get("trigger_kind") in _WORKFLOW_TRIGGERS)
         return used < self.config.max_autonomous_workflows_per_day
@@ -699,9 +720,8 @@ class AtlasSupervisor:
         return OBSERVING
 
     def _has_running_task(self) -> bool:
-        return any(task.get("status") == "running"
-                   for task in self.registry.list_atlas_tasks(
-                       limit=TASK_SCAN_WINDOW))
+        return bool(self.registry.list_atlas_tasks(
+            limit=1, status="running"))
 
     def _patch_state(self, **fields) -> None:
         current = self.registry.get_atlas_state(MANAGER_ID) or {}

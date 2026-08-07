@@ -41,6 +41,9 @@ POST /api/atlas/escalate         open a bounded debate on a material disagreemen
 GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
 GET  /api/atlas/templates        the registered workflow templates Atlas may start
 GET  /api/atlas/startable        queued tasks Atlas may start now, with refusals
+POST /api/atlas/actionables      what Atlas would do next: the ranked menu with
+                                 the gate's verdict on each, every offer
+                                 persisted as a proposal you can approve
 GET  /api/atlas/shadow           shadow-rollout scorecard (evidence, not a grant)
 POST /api/atlas/tasks/<id>/start start one queued task's registered template
 POST /api/atlas/observe          run one deterministic Atlas observe tick
@@ -3250,6 +3253,172 @@ class UISession:
         return self.atlas.start_task(task_id, facts,
                                    runner=self.atlas_workflow_runner)
 
+    def atlas_actionables(self, offline: bool) -> dict:
+        """What Atlas would do next, ranked, with the gate's verdict on each.
+
+        Every item is checked here AND again by ``start_task`` when it is
+        approved. That is not redundant: the mode can change and a plan can
+        appear between proposing and approving, and a proposal made in Research
+        must not execute on a permit it no longer holds.
+
+        Only the offered half is persisted. A refusal has nothing to approve,
+        so writing a task row for it would put work in the queue that the gate
+        has already said may not run.
+
+        Called under the dispatch lock (every route but two is), so it takes no
+        lock of its own — ``_LOCK`` is not reentrant.
+        """
+        from qlab.operator.templates import template_menu
+
+        facts = self.atlas_facts(offline)
+        mode = self.atlas.mode
+        # The same clock `atlas_observe` hands the supervisor, so a proposal and
+        # a trigger minted in one tick carry the same trading date.
+        trading_date = date.today().isoformat()
+        universe = ",".join(sorted(facts.get("universe", [])))
+        self._expire_stale_proposals(trading_date)
+        items: list[dict] = []
+        for entry in template_menu(mode, facts):
+            item = dict(entry)
+            item["task_id"] = None
+            if entry["startable"]:
+                item["task_id"] = self._proposal_task(
+                    entry["template_id"], trading_date, universe)
+            items.append(item)
+        # Startable first, then the refusals; the gate's own order within each
+        # half, which is the registry's declaration order.
+        items.sort(key=lambda item: not item["startable"])
+        self.registry.record_event(
+            "atlas_actionables",
+            {"mode": mode, "offered": sum(1 for i in items if i["startable"]),
+             "refused": sum(1 for i in items if not i["startable"])})
+        return {"trading_date": trading_date, "items": items}
+
+    def _proposal_task(self, template_id: str, trading_date: str,
+                       universe: str) -> str:
+        """The proposal for this template today, created or found.
+
+        The dedupe key keeps ``AtlasSupervisor``'s shape —
+        ``kind|trading_date|universe|state_hash`` — because ``_task_age`` reads
+        the trading date out of it, and a key it cannot parse reads as
+        age-unknown, which ``startable_tasks`` refuses: the very gate this
+        proposal needs to pass.
+
+        The kind is ``proposal:<template_id>``, deliberately outside
+        ``_WORKFLOW_TRIGGERS``, so a proposal sitting unapproved never consumes
+        the unattended desk's daily workflow budget.
+        """
+        from qlab.operator.atlas import TASK_SCAN_WINDOW
+
+        kind = f"proposal:{template_id}"
+        dedupe = f"{kind}|{trading_date}|{universe}|{template_id}"
+        for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW):
+            if task.get("dedupe_key") == dedupe:
+                return str(task["task_id"])
+        task_id = uuid.uuid4().hex[:16]
+        if not self.registry.create_atlas_task(
+                task_id, dedupe, kind, {"template_id": template_id},
+                template_id, origin="proposal"):
+            # The row exists but was outside the scanned window, or another
+            # thread won the race. Either way the id just minted is not the
+            # one that is stored, and returning it would hand the operator an
+            # approve button for a task that does not exist.
+            raise RuntimeError(
+                f"proposal {dedupe!r} already exists but is not in the newest "
+                f"{TASK_SCAN_WINDOW} tasks; the task window is too small to "
+                "resolve it")
+        return task_id
+
+    def _expire_stale_proposals(self, trading_date: str) -> list[str]:
+        """Retire proposals offered on an earlier trading day.
+
+        A proposal answers "what should this desk do today", so yesterday's
+        unapproved answer is not an answer to today's question. Nothing else
+        expires one: `reconcile_tasks` resolves dispatched work and the age
+        check in `startable_tasks` only *reports* staleness. Left queued, one
+        set per template per day accumulates in the bounded window the gate
+        scans, and a genuine trigger — still inside `max_task_age_days` —
+        drops off the end of it.
+
+        Bounded on purpose: one pass over the same window everything else
+        reads, writing only to the rows that need it. Minting is the only call
+        site because minting is the only thing that creates proposals, so the
+        pile-up cannot outpace the cleanup.
+        """
+        # The supervisor's own parser and window, deliberately: one reader of
+        # the dedupe key's shape, so a change to it cannot silently disagree
+        # with `_task_age` about which day a task belongs to.
+        from qlab.operator.atlas import TASK_SCAN_WINDOW, _dedupe_trading_date
+
+        today = trading_date[:10]
+        expired: list[str] = []
+        for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW):
+            # Proposals only. A trigger is a claim about a trading day and
+            # keeps for `max_task_age_days`; expiring one here would disarm
+            # the desk's own autonomy without saying so.
+            if task.get("origin") != "proposal" or task.get("status") != "queued":
+                continue
+            day = _dedupe_trading_date(task.get("dedupe_key"))
+            if day == today:
+                continue
+            self.registry.update_atlas_task(
+                str(task["task_id"]), status="expired",
+                error=f"offered on {day or 'an unreadable date'} and not "
+                      f"approved before {today}; ask again to reopen it")
+            expired.append(str(task["task_id"]))
+        if expired:
+            self.registry.record_event(
+                "atlas_proposals_expired",
+                {"task_ids": expired, "trading_date": today})
+        return expired
+
+    def atlas_actionables_snapshot(self) -> dict:
+        """The newest proposal set, read from the task table — never composed.
+
+        A snapshot must not mint proposals as a side effect of being drawn.
+        `/api/tui` is polled every two seconds, so composing the menu here
+        would write a task row per startable template per poll and turn the
+        desk's queue into a record of nobody having asked anything.
+
+        Carries the offered half only, because that is all that is persisted;
+        the refusals and their reasons come from POST `/api/atlas/actionables`.
+        """
+        from qlab.operator.atlas import TASK_SCAN_WINDOW, _dedupe_trading_date
+        from qlab.operator.templates import TEMPLATES
+
+        rows = [task for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW)
+                if task.get("origin") == "proposal"
+                and task.get("status") == "queued"]
+        if not rows:
+            # Absence, not an error: nobody has asked today.
+            return {"trading_date": None, "items": []}
+        newest = max(_dedupe_trading_date(row.get("dedupe_key")) for row in rows)
+        items: list[dict] = []
+        for row in rows:
+            if _dedupe_trading_date(row.get("dedupe_key")) != newest:
+                continue
+            template_id = str(row.get("template_id") or "")
+            template = TEMPLATES.get(template_id)
+            if template is None:
+                # A release can unregister a template while a proposal for it
+                # is queued. Dropping the row would remove an approvable item
+                # from the client with nothing said; raising would take the
+                # whole snapshot — the entire desk — down for one dead row.
+                items.append({
+                    "template_id": template_id, "purpose": "",
+                    "startable": False, "creates_plan": False,
+                    "reason": f"{template_id!r} is no longer a registered "
+                              "template; this proposal cannot start",
+                    "task_id": str(row["task_id"])})
+                continue
+            items.append({
+                "template_id": template_id, "purpose": template.purpose,
+                "startable": True, "reason": None,
+                "creates_plan": template.creates_plan,
+                "task_id": str(row["task_id"])})
+        items.sort(key=lambda item: not item["startable"])
+        return {"trading_date": newest or None, "items": items}
+
     @staticmethod
     def _bounded(text: str, limit: int) -> str:
         """`text` capped at `limit`, saying so when the cap bites.
@@ -3711,6 +3880,10 @@ class UISession:
             },
             "news": self.news_payload(offline),
             "atlas_tasks": self.registry.list_atlas_tasks(10),
+            # The newest proposal set, read from the task table so the client
+            # renders it without a second fetch — and so a poll never mints
+            # one. Asking is what proposes; drawing is what reports.
+            "actionables": self.atlas_actionables_snapshot(),
             "approvals": self.actionable_approvals(),
             "quotes": self.quotes(),
             "agents": self.agents(),
@@ -4213,6 +4386,9 @@ def handle_api(session: UISession, method: str, path: str,
         offline = _qbool(query, "offline", session.offline_default)
         facts = session.atlas_facts(offline)
         return 200, {"startable": session.atlas.startable_tasks(facts)}
+
+    if method == "POST" and path == "/api/atlas/actionables":
+        return 200, session.atlas_actionables(off)
 
     if method == "POST" and path == "/api/atlas/observe":
         return 200, session.atlas_observe(off)

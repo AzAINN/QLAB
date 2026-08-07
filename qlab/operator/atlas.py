@@ -52,6 +52,13 @@ _WORKFLOW_TRIGGERS = frozenset({
     "drawdown_warning", "drawdown_control", "drift_breach", "regime_flip",
 })
 
+# How many of the newest task rows a bounded scan reads. One number, because
+# two would disagree the first time either moved. Fifty was enough while only
+# triggers were queued; proposals are minted per template per day, so a desk
+# asked daily buries a trigger that is still inside `max_task_age_days` below
+# the window `startable_tasks` scans — and the beat then never sees it.
+TASK_SCAN_WINDOW = 200
+
 
 @dataclass(frozen=True)
 class AtlasConfig:
@@ -192,7 +199,7 @@ class AtlasSupervisor:
         if self.mode == "paused":
             return []
         known = {task.get("dedupe_key")
-                 for task in self.registry.list_atlas_tasks(200)}
+                 for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW)}
         pending: list[Trigger] = []
         for trig in self._evaluate_triggers(facts):
             if trig.template_id is None or trig.action == "block":
@@ -305,7 +312,7 @@ class AtlasSupervisor:
         mode = self.mode
         today = (today or _utc_today())[:10]
         out: list[dict] = []
-        for task in self.registry.list_atlas_tasks(50):
+        for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW):
             if task.get("status") != "queued":
                 continue
             template_id = task.get("template_id") or template_for_trigger(
@@ -465,7 +472,7 @@ class AtlasSupervisor:
         that does not exist is failed rather than left running forever.
         """
         moved: list[dict] = []
-        for task in self.registry.list_atlas_tasks(limit=200):
+        for task in self.registry.list_atlas_tasks(limit=TASK_SCAN_WINDOW):
             if task.get("status") != "running":
                 continue
             workflow_id = str(task.get("workflow_id") or "")
@@ -669,7 +676,7 @@ class AtlasSupervisor:
         # inside _WORKFLOW_TRIGGERS must skip non-"trigger" origins here.
         day = trading_date[:10]
         used = sum(
-            1 for task in self.registry.list_atlas_tasks(200)
+            1 for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW)
             if _dedupe_trading_date(task.get("dedupe_key")) == day
             and task.get("trigger_kind") in _WORKFLOW_TRIGGERS)
         return used < self.config.max_autonomous_workflows_per_day
@@ -693,7 +700,8 @@ class AtlasSupervisor:
 
     def _has_running_task(self) -> bool:
         return any(task.get("status") == "running"
-                   for task in self.registry.list_atlas_tasks(limit=50))
+                   for task in self.registry.list_atlas_tasks(
+                       limit=TASK_SCAN_WINDOW))
 
     def _patch_state(self, **fields) -> None:
         current = self.registry.get_atlas_state(MANAGER_ID) or {}

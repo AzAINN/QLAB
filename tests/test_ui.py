@@ -1945,6 +1945,59 @@ def test_unknown_atlas_task_start_is_404(session):
     status, out = handle_api(
         session, "POST", "/api/atlas/tasks/nope/start", {}, {"offline": True})
     assert status == 404
+    # And nothing was approved: there is no task to have approved. The record
+    # below is written from the stored row, so a task that does not exist
+    # cannot leave an approval behind it.
+    assert session.registry.read_events_of_kind("atlas_proposal_approved") == []
+
+
+def test_approving_a_proposal_puts_the_approval_on_the_record(session):
+    """The approval envelope was positional, not structural.
+
+    The beat passes over proposal-origin tasks, so this route IS the approval
+    — and "which route was hit" was the only evidence a human gave one. A
+    started proposal now carries a durable row saying who asked, written
+    before the start so a refused or crashed start still records the asking.
+    """
+    session.atlas.set_mode("research")
+    offered = [item for item in session.atlas_actionables(True)["items"]
+               if item["startable"]]
+    assert offered, "research mode offers at least one template"
+    item = offered[0]
+
+    status, started = handle_api(
+        session, "POST", f"/api/atlas/tasks/{item['task_id']}/start", {},
+        {"offline": True})
+
+    assert status == 200 and started["started"] is True
+    rows = session.registry.read_events_of_kind("atlas_proposal_approved")
+    assert len(rows) == 1
+    payload = rows[0]["payload"]
+    assert payload["task_id"] == item["task_id"]
+    assert payload["template_id"] == item["template_id"]
+    assert payload["task_status"] == "queued"
+    # Before the start, not after: an audit trail whose approval follows the
+    # work it authorises reads as a permission granted retroactively.
+    kinds = [row["kind"] for row in session.registry.read_events(200)]
+    assert kinds.index("atlas_proposal_approved") < kinds.index("atlas_task_started")
+
+
+def test_the_beats_own_work_is_not_recorded_as_an_approval(session):
+    """The other side of the guard. A trigger is work the desk raised for
+    itself and may start unattended, so a row saying a human approved one
+    would put a decision on the record that nobody made."""
+    today = date.today().isoformat()
+    session.registry.create_atlas_task(
+        "task-trigger", f"regime_flip|{today}|SPY|abc", "regime_flip",
+        {"why": "flip"}, "regime_review")
+    session.atlas.set_mode("research")
+
+    status, started = handle_api(
+        session, "POST", "/api/atlas/tasks/task-trigger/start", {},
+        {"offline": True})
+
+    assert status == 200 and started["started"] is True
+    assert session.registry.read_events_of_kind("atlas_proposal_approved") == []
 
 
 def test_performance_payload_from_synthetic_marks(session):

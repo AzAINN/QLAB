@@ -3248,7 +3248,36 @@ class UISession:
         return started
 
     def atlas_start_task(self, task_id: str, offline: bool) -> dict:
-        """Start one queued Atlas task through the governed workflow runner."""
+        """Start one queued Atlas task through the governed workflow runner.
+
+        **This route is the approval.** The beat passes over proposal-origin
+        tasks (`atlas_run_startable`), so nothing but a human reaches one — and
+        that made the envelope positional: which route was hit was the only
+        evidence anybody approved anything. The row below is what makes it
+        structural, and it is written HERE rather than in the dispatcher so
+        every caller of this method leaves it, not only the one path someone
+        remembered to instrument.
+
+        Written *before* the start, for `execute_plan`'s reason: an approval
+        that follows the work it authorises reads as permission granted
+        retroactively, and a start that raises leaves no trace of the asking at
+        all. It records the approval and nothing more — whether the gate then
+        started the task is `atlas_task_started`'s to say.
+
+        Only a proposal. A trigger is work the desk raised for itself and may
+        start unattended, so a row saying a human approved one would put a
+        decision on the record that nobody made.
+        """
+        task = self.registry.get_atlas_task(task_id)
+        if task is not None and str(task.get("origin") or "") == "proposal":
+            self.registry.record_event("atlas_proposal_approved", {
+                "task_id": task_id,
+                "template_id": str(task.get("template_id") or ""),
+                # What was approved, in the state it was approved in: an
+                # approval of a task the gate then refuses for being spent is
+                # a different record from one that started work.
+                "task_status": str(task.get("status") or ""),
+            })
         facts = self.atlas_facts(offline)
         return self.atlas.start_task(task_id, facts,
                                    runner=self.atlas_workflow_runner)

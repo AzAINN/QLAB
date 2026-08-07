@@ -77,6 +77,29 @@ pub enum Wrote {
         template: String,
         workflow_id: String,
     },
+    /// The desk started work the operator approved.
+    ///
+    /// `template` and `workflow_id` are the owner's own, and both are optional
+    /// because both are: a deterministic template completes inside the request
+    /// and registers no workflow at all. What is never optional is the task —
+    /// that is what was approved, and it is the handle an audit reads back.
+    ProposalStarted {
+        task_id: String,
+        template: Option<String>,
+        workflow_id: Option<String>,
+    },
+    /// The owner would not start it, and this is what stopped it.
+    ///
+    /// **Not `Failed`, and not a start.** The gate declines with HTTP 200 and
+    /// `started: false` — an authority refusal, an exhausted retry budget —
+    /// which is the same shape that once let an execution refusal read as a
+    /// booked fill. It carries the owner's own `blocked_by` and sentence,
+    /// because those are what tell an operator what to do next.
+    ProposalRefused {
+        task_id: String,
+        blocked_by: String,
+        reason: String,
+    },
     /// The desk is now pointed somewhere else. `label` is the owner's own word
     /// for the pair (`DeskMode.label`), never one this client composed — the
     /// two halves an operator typed are not the sentence the owner made of them.

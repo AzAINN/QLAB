@@ -719,6 +719,130 @@ mod armed {
         client.press(KeyCode::Up);
         assert_eq!(client.store.cmd.text(), "/mode live alpaca");
     }
+
+    /// Press Enter on whatever the line holds, handing back what the shell
+    /// asked the runtime to do.
+    fn enter(client: &mut Client) -> Option<atlas::cmd::Command> {
+        atlas::ui::shell::on_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        )
+    }
+
+    /// Type a line into an empty field and submit it.
+    fn submit(client: &mut Client, line: &str) -> Option<atlas::cmd::Command> {
+        client.press(KeyCode::Char('/'));
+        type_line(client, line);
+        enter(client)
+    }
+
+    #[test]
+    fn approving_a_proposal_the_panel_never_drew_shows_it_before_it_starts_it() {
+        // The panel is capped and has no cursor, so a name typed for an item
+        // it could not draw is an approval given blind — and the fixture's
+        // first frame here is drawn on DESK, where the would-do list is not on
+        // screen at all.
+        let mut client = armed_client();
+        assert_eq!(client.store.nav.view, ViewId::Desk);
+
+        let refused = submit(&mut client, "do regime_review");
+
+        assert_eq!(refused, None, "an unshown proposal must not start");
+        assert_eq!(
+            client.store.nav.view,
+            ViewId::Atlas,
+            "the refusal must put the operator in front of the panel"
+        );
+        let said = client.store.cmd.note().unwrap_or_default().to_string();
+        assert!(said.contains("regime_review"), "{said}");
+        assert!(said.contains("WOULD DO"), "{said}");
+
+        // And it is not a dead end. The line keeps what was typed — a refusal
+        // leaves it for the operator to act on — so once the panel has drawn
+        // the item, the same Enter approves it.
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("WOULD DO"), "{frame}");
+        assert_eq!(client.store.cmd.text(), "/do regime_review");
+        assert_eq!(
+            enter(&mut client),
+            Some(atlas::cmd::Command::ApproveAction(
+                "9f2c1ab4d8e35007".into()
+            )),
+            "the task the owner served, not the template"
+        );
+        assert_eq!(client.store.nav.focus, Focus::Content);
+    }
+
+    #[test]
+    fn a_proposal_the_cap_hid_is_still_reachable_because_asking_moves_it_up() {
+        // The half the fixture cannot show: a day with more proposals than the
+        // panel has rows. Without the pin the refusal above is a dead end —
+        // the item beyond the cap stays beyond it, and the only remedy is a
+        // taller terminal. `wanted` is last in the owner's own order, so the
+        // panel draws it only because it was asked about.
+        let mut client = Client::new(crowded_desk());
+        client.store.nav.view = ViewId::Atlas;
+        let before = client.frame(120, 36);
+        assert!(
+            !before.contains("wanted"),
+            "the fixture must hide the item this test is about:\n{before}"
+        );
+
+        assert_eq!(submit(&mut client, "do wanted"), None);
+        // The next frame is what the ask changes.
+        let after = client.frame(120, 36);
+        assert!(after.contains("wanted"), "{after}");
+        assert_eq!(
+            enter(&mut client),
+            Some(atlas::cmd::Command::ApproveAction("t-wanted".into()))
+        );
+    }
+
+    /// A desk whose would-do list is longer than the panel's row budget, with
+    /// the item this test approves at the bottom of it.
+    fn crowded_desk() -> Store {
+        let mut store = fixture_store();
+        let mut snapshot = store.snapshot.take().unwrap();
+        let item = |id: &str, task: &str| {
+            serde_json::json!({
+                "template_id": id, "task_id": task, "task_status": "queued",
+                "startable": null,
+                "purpose": "Re-read the regime panel and challenge the current \
+                            estimate before the desk acts on it.",
+                "reason": "the data preconditions were not checked here; POST \
+                           /api/atlas/actionables asks the gate for today's verdict"
+            })
+        };
+        snapshot.actionables = Some(
+            serde_json::from_value(serde_json::json!({"items": [
+                item("first", "t-1"), item("second", "t-2"),
+                item("third", "t-3"), item("wanted", "t-wanted")
+            ]}))
+            .unwrap(),
+        );
+        let now = store
+            .last_snapshot_at
+            .unwrap_or_else(std::time::Instant::now);
+        store.apply(atlas::bus::AppEvent::Snapshot(Box::new(snapshot)), now);
+        store.posture = Posture::Operator;
+        store
+    }
+
+    #[test]
+    fn a_refused_proposal_is_refused_by_the_line_however_visible_it_is() {
+        // The panel draws both of the fixture's items, so this one is on
+        // screen and still cannot be approved: what the gate refused is the
+        // owner's answer, and being visible is not being startable.
+        let mut client = armed_client();
+        client.store.nav.view = ViewId::Atlas;
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("desk_rebalance_review"), "{frame}");
+
+        assert_eq!(submit(&mut client, "do desk_rebalance_review"), None);
+        let said = client.store.cmd.note().unwrap_or_default().to_string();
+        assert!(said.contains("already running"), "{said}");
+    }
 }
 
 #[test]

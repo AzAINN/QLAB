@@ -8,9 +8,13 @@
 //! reasoner itself is handed — so the words on the left can be read against the
 //! evidence they were reasoned from on the right.
 //!
-//! The would-do list is read-only here in the strongest sense: it renders the
-//! gate's verdicts and offers no way to act on one. Approving is a write, and
-//! writes live behind the posture and the confirm path, not in a panel.
+//! The would-do list holds no key. It renders the gate's verdicts and offers
+//! no way to act on one: approving is a write, and writes live behind the
+//! posture and the command line, not in a panel. What it does owe the approval
+//! path is an account of *what it drew* — `/do` may not start work the
+//! operator cannot see, and the panel is the only surface that knows which
+//! proposals fit — so `draw` publishes that, exactly as it publishes the ask
+//! row's rect for the click test. Publishing is not acting.
 //!
 //! The input row has no mode key: in an armed window a printable character goes
 //! straight into the ask row. The cost of that is stated where it is paid — see
@@ -75,6 +79,27 @@ pub struct AtlasView {
     /// The ask row's rect on the last frame, published for the click test.
     #[cfg(feature = "operator")]
     input_row: std::cell::Cell<Rect>,
+    /// The proposals the would-do panel actually drew on the last frame,
+    /// published by `draw` the way `max_scroll` and `input_row` are.
+    ///
+    /// It exists because approving is the one line on this workstation that
+    /// starts work, and the panel is capped at
+    /// `min(ACTS_MAX_H, sidebar_height / 2)` rows with no scrollback and no
+    /// cursor: three verbose proposals fill it at 120×36. Which of them are on
+    /// screen is a fact about geometry, and `cmd::resolve` is a pure function
+    /// of (text, desk, posture) that cannot know it — so the surface that does
+    /// know publishes it, exactly as BOOK publishes where its band left a plan.
+    #[cfg(feature = "operator")]
+    drew: std::cell::RefCell<Vec<String>>,
+    /// The proposal the operator has asked about, drawn first.
+    ///
+    /// The panel's answer to having no cursor. `/do` on an item the cap hid
+    /// refuses and sets this, so the next frame draws that item at the top and
+    /// the second `/do` can approve something the operator has read. Without
+    /// it the refusal above is a dead end: the hidden item stays hidden, and
+    /// the only remedy is a taller terminal.
+    #[cfg(feature = "operator")]
+    asked: Option<String>,
 }
 
 impl View for AtlasView {
@@ -103,7 +128,7 @@ impl View for AtlasView {
         .split(area);
         self.draw_chat(f, cols[0], store);
         if boarded {
-            draw_sidebar(f, cols[1], store);
+            self.draw_sidebar(f, cols[1], store);
         }
     }
 
@@ -564,6 +589,24 @@ fn act_rows(item: &ActionItem, width: u16) -> Vec<Line<'static>> {
     out
 }
 
+/// The panel's rows, and which proposals they are about.
+///
+/// Two halves of one answer rather than two functions: what the packer below
+/// decided to draw is the same fact the approval path has to check against,
+/// and a second function deriving it again is two accounts of one frame — the
+/// exact shape that made the old note and the old count disagree.
+struct Acts {
+    lines: Vec<Line<'static>>,
+    /// The template ids drawn, in the order they were drawn. An item the owner
+    /// named nothing is left out: it cannot be approved either.
+    ///
+    /// Gated with the approval path it exists for. A glass build has no `/do`
+    /// and no writer, so there is nothing to check this against — absence,
+    /// not a field carried and never read.
+    #[cfg(feature = "operator")]
+    shown: Vec<String>,
+}
+
 /// The whole panel, or nothing at all.
 ///
 /// Nothing at all when the list is empty: an owner that serves no block and one
@@ -575,10 +618,34 @@ fn act_rows(item: &ActionItem, width: u16) -> Vec<Line<'static>> {
 /// finished — and whatever is left over is counted rather than dropped. Even at
 /// a `room` too small for one item the header's own chip still says how many
 /// there are.
-fn acts_lines(items: &[ActionItem], width: u16, room: usize) -> Vec<Line<'static>> {
+///
+/// `asked` is the one proposal the operator has named on the command line, and
+/// it is drawn first. That is the panel's whole answer to having no cursor:
+/// the gate's own order is otherwise untouched, and reordering it for anything
+/// short of an explicit request would be this client deciding which proposal
+/// matters.
+fn acts_lines(items: &[ActionItem], width: u16, room: usize, asked: Option<&str>) -> Acts {
     if items.is_empty() {
-        return Vec::new();
+        return Acts {
+            lines: Vec::new(),
+            #[cfg(feature = "operator")]
+            shown: Vec::new(),
+        };
     }
+    // The asked-about item, then the gate's own order with it removed. Stable
+    // in both halves, so nothing else moves. Matched on `asked` rather than on
+    // the item's own emptiness: `format::text` is `None` for an item the owner
+    // named nothing, and a comparison against an absent `asked` would pull
+    // exactly those to the top of a panel nobody asked anything of.
+    let named = |item: &ActionItem| match asked {
+        Some(asked) => format::text(item.template_id.as_ref()) == Some(asked),
+        None => false,
+    };
+    let items: Vec<&ActionItem> = items
+        .iter()
+        .filter(|item| named(item))
+        .chain(items.iter().filter(|item| !named(item)))
+        .collect();
     let refused = items
         .iter()
         .filter(|item| item.startable == Some(false))
@@ -592,7 +659,7 @@ fn acts_lines(items: &[ActionItem], width: u16, room: usize) -> Vec<Line<'static
     // because whether either is needed is not known until it is.
     let mut marks: Vec<usize> = Vec::new();
     let mut body: Vec<Line<'static>> = Vec::new();
-    for item in items {
+    for item in &items {
         let rows = act_rows(item, width);
         if 1 + body.len() + rows.len() > room {
             break;
@@ -638,84 +705,149 @@ fn acts_lines(items: &[ActionItem], width: u16, room: usize) -> Vec<Line<'static
     // `room` except the one that ran out of items to hand back, and a panel one
     // row over budget takes that row from the evidence.
     out.truncate(room);
-    out
+    // What is on screen, read off the marks the packer kept rather than
+    // recomputed: the approval path refuses an item this list does not name,
+    // and a second derivation of "what fits" is how that check would come to
+    // permit an item nobody drew.
+    //
+    // Exact, including after the clamp: the settle loop only exits over budget
+    // once it has handed *every* item back, so a truncated panel has an empty
+    // `marks` and names nothing. An item the owner sent without a template id
+    // is dropped here because it cannot be approved either — `/do` has no word
+    // for it.
+    Acts {
+        lines: out,
+        #[cfg(feature = "operator")]
+        shown: items[..marks.len()]
+            .iter()
+            .filter_map(|item| format::text(item.template_id.as_ref()).map(str::to_string))
+            .collect(),
+    }
 }
 
 // -- the predictor board ----------------------------------------------------
 
 /// The sidebar: what the desk would do, over the evidence it would reason from.
-fn draw_sidebar(f: &mut Frame, area: Rect, store: &Store) {
-    let t = theme();
-    let block = panel_block();
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+impl AtlasView {
+    fn draw_sidebar(&self, f: &mut Frame, area: Rect, store: &Store) {
+        let t = theme();
+        let block = panel_block();
+        let inner = block.inner(area);
+        f.render_widget(block, area);
 
-    // Half the sidebar at most. The board below is why this column exists, and
-    // a day's proposals only ever accumulate.
-    let mut lines = acts_lines(
-        store.actionables(),
-        inner.width,
-        ACTS_MAX_H.min(inner.height as usize / 2),
-    );
-    if !lines.is_empty() {
-        lines.push(Line::from(""));
-    }
-    lines.push(panel_header("predictor board"));
-    match store.predictors() {
-        // Absence is named, exactly as the owner names it: a desk that never
-        // ran the board and one whose newest row cannot be read are different
-        // facts with different remedies.
-        None => lines.push(dim("the owner served no predictor summary")),
-        Some(board) => match board.status.as_deref() {
-            Some("never_ran") => {
-                lines.push(dim("board never ran — /api docs name"));
-                lines.push(dim("research.predictor_board"));
-            }
-            Some("unreadable") => {
-                lines.push(Line::from(Span::styled(
-                    "newest board row is unreadable",
-                    Style::default().fg(t.negative),
-                )));
-                lines.push(dim(&format!(
-                    "run {}",
-                    short_id(board.run_id.as_deref(), 12)
-                )));
-            }
-            _ => board_lines(&mut lines, board, inner.width),
-        },
-    }
-
-    // The tiny status: what the manager itself is doing, under the evidence
-    // it would reason from. Two or three lines, not a second DESK.
-    lines.push(Line::from(""));
-    lines.push(panel_header("atlas"));
-    let atlas = store.snapshot.as_ref().and_then(|s| s.atlas.as_ref());
-    lines.push(kv(
-        "state",
-        format::upper(atlas.and_then(|a| format::text(a.state.as_ref()))),
-    ));
-    lines.push(kv(
-        "mode",
-        format::or_missing(atlas.and_then(|a| a.mode.as_ref())).to_string(),
-    ));
-    if let Some(blocked) = atlas.and_then(|a| format::text(a.blocked_reason.as_ref())) {
-        for chunk in wrap(blocked, (inner.width as usize).saturating_sub(2)) {
-            lines.push(Line::from(Span::styled(
-                format!("  {chunk}"),
-                Style::default().fg(t.warning),
-            )));
+        // Half the sidebar at most. The board below is why this column exists, and
+        // a day's proposals only ever accumulate.
+        let acts = acts_lines(
+            store.actionables(),
+            inner.width,
+            ACTS_MAX_H.min(inner.height as usize / 2),
+            self.asked(),
+        );
+        // Published, not returned: `draw` is `&self` because a paint may not move
+        // what the operator is looking at, and what it drew is a fact about this
+        // frame that the approval path has no other way to learn.
+        #[cfg(feature = "operator")]
+        self.drew.replace(acts.shown);
+        let mut lines = acts.lines;
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
         }
+        lines.push(panel_header("predictor board"));
+        match store.predictors() {
+            // Absence is named, exactly as the owner names it: a desk that never
+            // ran the board and one whose newest row cannot be read are different
+            // facts with different remedies.
+            None => lines.push(dim("the owner served no predictor summary")),
+            Some(board) => match board.status.as_deref() {
+                Some("never_ran") => {
+                    lines.push(dim("board never ran — /api docs name"));
+                    lines.push(dim("research.predictor_board"));
+                }
+                Some("unreadable") => {
+                    lines.push(Line::from(Span::styled(
+                        "newest board row is unreadable",
+                        Style::default().fg(t.negative),
+                    )));
+                    lines.push(dim(&format!(
+                        "run {}",
+                        short_id(board.run_id.as_deref(), 12)
+                    )));
+                }
+                _ => board_lines(&mut lines, board, inner.width),
+            },
+        }
+
+        // The tiny status: what the manager itself is doing, under the evidence
+        // it would reason from. Two or three lines, not a second DESK.
+        lines.push(Line::from(""));
+        lines.push(panel_header("atlas"));
+        let atlas = store.snapshot.as_ref().and_then(|s| s.atlas.as_ref());
+        lines.push(kv(
+            "state",
+            format::upper(atlas.and_then(|a| format::text(a.state.as_ref()))),
+        ));
+        lines.push(kv(
+            "mode",
+            format::or_missing(atlas.and_then(|a| a.mode.as_ref())).to_string(),
+        ));
+        if let Some(blocked) = atlas.and_then(|a| format::text(a.blocked_reason.as_ref())) {
+            for chunk in wrap(blocked, (inner.width as usize).saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {chunk}"),
+                    Style::default().fg(t.warning),
+                )));
+            }
+        }
+
+        f.render_widget(
+            Paragraph::new(
+                lines
+                    .into_iter()
+                    .take(inner.height as usize)
+                    .collect::<Vec<_>>(),
+            ),
+            inner,
+        );
     }
 
-    f.render_widget(
-        Paragraph::new(
-            lines
-                .into_iter()
-                .take(inner.height as usize)
-                .collect::<Vec<_>>(),
-        ),
-        inner,
-    );
+    /// The proposal the operator asked the panel to show, if any.
+    ///
+    /// Two bodies rather than a field a glass build carries and never reads:
+    /// there is no `/do` without a writer, so in that build there is nothing
+    /// to ask about and nothing to publish.
+    #[cfg(feature = "operator")]
+    fn asked(&self) -> Option<&str> {
+        self.asked.as_deref()
+    }
+
+    #[cfg(not(feature = "operator"))]
+    fn asked(&self) -> Option<&str> {
+        None
+    }
+
+    /// Whether the would-do panel drew this proposal on the last frame.
+    ///
+    /// The question the approval path asks before it starts anything, and the
+    /// reason `drew` is published at all. `false` for a proposal beyond the
+    /// panel's row budget, for one on a pane too narrow to hold the sidebar,
+    /// and for every proposal before the first frame that drew any — absence
+    /// is not permission.
+    #[cfg(feature = "operator")]
+    pub fn drew(&self, template: &str) -> bool {
+        self.drew.borrow().iter().any(|shown| shown == template)
+    }
+
+    /// Draw this proposal first from the next frame on.
+    ///
+    /// What makes the refusal above recoverable rather than a dead end: an
+    /// item the cap hid is one `/do` away from the top of the panel, where it
+    /// can be read and then approved. It moves nothing else and grants
+    /// nothing — the gate's own order holds for every other item, and being
+    /// visible is not being startable.
+    #[cfg(feature = "operator")]
+    pub fn ask_about(&mut self, template: &str) {
+        self.asked = Some(template.to_string());
+    }
 }
 
 /// The readable board: champion against baseline, every number the verdict
@@ -1106,7 +1238,7 @@ mod tests {
     #[test]
     fn an_empty_list_draws_no_panel_at_all() {
         // Not an empty box: a desk nobody has asked has nothing to say here.
-        assert!(acts_lines(&[], 32, 12).is_empty());
+        assert!(acts_lines(&[], 32, 12, None).lines.is_empty());
     }
 
     /// A proposal that costs exactly two rows: its id, and one short sentence.
@@ -1130,7 +1262,7 @@ mod tests {
             two_row_item("alpha", Some(false)),
             two_row_item("beta", Some(false)),
         ];
-        let text = rendered(&acts_lines(&items, 32, 3));
+        let text = rendered(&acts_lines(&items, 32, 3, None).lines);
         assert!(
             !text.iter().any(|line| line.contains("alpha")),
             "an item was drawn without its sentence: {text:?}"
@@ -1151,14 +1283,14 @@ mod tests {
             two_row_item("beta", Some(false)),
         ];
         for room in 0..8 {
-            let lines = acts_lines(&items, 32, room);
+            let lines = acts_lines(&items, 32, room, None).lines;
             assert!(
                 lines.len() <= room,
                 "{room} rows given, {} drawn",
                 lines.len()
             );
         }
-        assert!(acts_lines(&items, 32, 0).is_empty());
+        assert!(acts_lines(&items, 32, 0, None).lines.is_empty());
     }
 
     #[test]
@@ -1176,15 +1308,65 @@ mod tests {
             ..ActionItem::default()
         };
         let items = [refused, two_row_item("regime_review", None)];
-        let text = rendered(&acts_lines(&items, 32, 6));
+        let text = rendered(&acts_lines(&items, 32, 6, None).lines);
         assert!(
             !text.iter().any(|line| line.contains(NOT_RULED)),
             "a legend for a marker nothing drew: {text:?}"
         );
         assert!(text.iter().any(|line| line.contains("+1 more")), "{text:?}");
         // And it is there when the marker is.
-        let text = rendered(&acts_lines(&items, 32, 12));
+        let text = rendered(&acts_lines(&items, 32, 12, None).lines);
         assert!(text.iter().any(|line| line.contains(NOT_RULED)), "{text:?}");
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn the_panel_names_exactly_the_proposals_it_drew() {
+        // What `shown` is for: the approval path refuses an item this list
+        // does not name, so a list longer than the panel would approve
+        // something nobody could read, and a shorter one would refuse an item
+        // sitting on screen.
+        let items = [
+            two_row_item("alpha", None),
+            two_row_item("beta", None),
+            two_row_item("gamma", None),
+        ];
+        // Header, two items, the note and the legend: room for one of three.
+        let acts = acts_lines(&items, 32, 5, None);
+        assert_eq!(acts.shown, vec!["alpha".to_string()]);
+        let text = rendered(&acts.lines);
+        assert!(text.iter().any(|line| line.contains("alpha")), "{text:?}");
+        assert!(!text.iter().any(|line| line.contains("beta")), "{text:?}");
+        // And a budget too small for the header's own row names nothing at
+        // all, rather than naming what it would have drawn.
+        assert!(acts_lines(&items, 32, 1, None).shown.is_empty());
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn the_proposal_the_operator_asked_about_is_the_one_that_gets_drawn() {
+        // The panel has no cursor, so this is what keeps an item beyond the
+        // cap from being unapprovable: naming it on the command line puts it
+        // at the top of the next frame, where it can be read.
+        let items = [
+            two_row_item("alpha", None),
+            two_row_item("beta", None),
+            two_row_item("gamma", None),
+        ];
+        let acts = acts_lines(&items, 32, 5, Some("gamma"));
+        assert_eq!(acts.shown, vec!["gamma".to_string()]);
+        let text = rendered(&acts.lines);
+        assert!(text.iter().any(|line| line.contains("gamma")), "{text:?}");
+        // Nothing else moves: the gate's own order holds for the rest, and a
+        // name nothing answers to leaves the list exactly as it was.
+        assert_eq!(
+            acts_lines(&items, 32, 12, Some("gamma")).shown,
+            vec!["gamma".to_string(), "alpha".to_string(), "beta".to_string()]
+        );
+        assert_eq!(
+            acts_lines(&items, 32, 12, Some("nobody")).shown,
+            acts_lines(&items, 32, 12, None).shown
+        );
     }
 
     /// Rendered lines as plain strings — what the operator would read.

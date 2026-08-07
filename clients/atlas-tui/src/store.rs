@@ -828,7 +828,16 @@ impl Store {
                     // every snapshot, so a store that armed itself on its own
                     // write outcome would be the client-side latch
                     // `Posture::from_desk` exists to prevent.
+                    //
+                    // A started proposal and a refused one are the same: the
+                    // owner moves the task's own status and serves it back in
+                    // the `actionables` block, so the panel retones from the
+                    // desk's record rather than from this client remembering
+                    // what it asked for — and a refusal there changed nothing
+                    // to remember.
                     Wrote::Armed { .. }
+                    | Wrote::ProposalStarted { .. }
+                    | Wrote::ProposalRefused { .. }
                     | Wrote::Chose { .. }
                     | Wrote::ChoiceRefused { .. }
                     | Wrote::Decided { .. }

@@ -188,6 +188,76 @@ impl Execution {
     }
 }
 
+/// What became of an approved proposal. Three outcomes, and only one of them
+/// is work that started.
+///
+/// **The start gate does not refuse with a status code either.** `start_task`
+/// answers **HTTP 200** with `{"started": false, "blocked_by": …}` for an
+/// authority refusal (`atlas.py:441`) and for an exhausted retry budget
+/// (`:425`); a task that is no longer queued or failed is the one refusal that
+/// does carry a status (400, `server.py:4486`). So a client keying success off
+/// the status code reports the mode gate's own "no" as work it started — the
+/// same trap `Execution` exists for, on a second route.
+///
+/// `Failed` is the third: the owner answers `{"started": true, "completed":
+/// false, "error": …}` when the runner raised inside the request. The task did
+/// start and it is already over, so reporting it as a start would leave an
+/// operator watching a pipeline that will never move.
+#[derive(Debug)]
+pub enum Start {
+    /// The owner started it. `template_id` is its own word for what it started
+    /// — never the one this client sent — and `workflow_id` is present only
+    /// when durable work was registered, which is not the same as running.
+    Started {
+        template: Option<String>,
+        workflow_id: Option<String>,
+    },
+    /// The owner declined to start it, and said what stopped it.
+    Refused {
+        /// `authority` or `retry_budget`, or `unstated` if it did not say.
+        blocked_by: String,
+        /// Never empty — a refusal an operator cannot read is not actionable.
+        reason: String,
+    },
+    /// It started and immediately failed, inside the same 200.
+    Failed(String),
+}
+
+impl Start {
+    /// Read one 200 body from `/api/atlas/tasks/<id>/start`.
+    fn read(body: Value) -> Result<Start, WriteError> {
+        match body.get("started").and_then(Value::as_bool) {
+            Some(true) => Ok(match field(&body, "error") {
+                Some(said) => Start::Failed(crate::format::bounded(&said, SAID_MAX)),
+                None => Start::Started {
+                    template: field(&body, "template_id"),
+                    workflow_id: field(&body, "workflow_id"),
+                },
+            }),
+            Some(false) => {
+                let blocked_by = field(&body, "blocked_by").unwrap_or_else(|| "unstated".into());
+                Ok(Start::Refused {
+                    // The retry-budget refusal carries no sentence at all, so
+                    // the gate's own word for it is the reason of last resort:
+                    // "refused" with nothing after it is not something an
+                    // operator can act on.
+                    reason: field(&body, "reason")
+                        .map(|said| crate::format::bounded(&said, SAID_MAX))
+                        .unwrap_or_else(|| format!("the desk would not start it ({blocked_by})")),
+                    blocked_by,
+                })
+            }
+            // Fail loud. The owner sets `started` on every answer this route
+            // gives, so a body without it is a broken contract — and both
+            // guesses are indefensible: one reports work nobody started, the
+            // other hides work that is now running.
+            None => Err(WriteError::Unreadable(format!(
+                "the owner answered 200 for a task start without saying whether it started: {body}"
+            ))),
+        }
+    }
+}
+
 /// What became of a login the operator typed. Three outcomes, and the middle
 /// one is the whole reason this is a type.
 ///
@@ -262,11 +332,12 @@ pub struct TestVerdict {
 /// names this type. AUDIT's `a`/`R` and BOOK's `x` return `Command`s that
 /// `main::Writes` dispatches here.
 ///
-/// Three of the methods below have a key path; the Atlas and desk verbs do not
-/// yet, and the surfaces that press them are Tasks 19 and 21. They are the
-/// reachable-code-with-no-caller shape invariant 10 names, held deliberately
+/// Most of the methods below have a key path now — the confirm modal's
+/// execute, AUDIT's approve and reject, the desk verbs, `/model`, `/mode`, and
+/// `/do`'s `start_task`. The Atlas mode verbs still do not, and they are the
+/// reachable-code-with-no-caller shape invariant 10 names: held deliberately
 /// because the routes were pinned against the owner's dispatch table in one
-/// pass — but they are on that list until a view calls them.
+/// pass, and on that list until a surface presses them.
 pub struct WriteClient {
     base: String,
     client: reqwest::Client,
@@ -424,6 +495,49 @@ impl WriteClient {
     pub async fn atlas_message(&self, text: &str) -> Wrote {
         self.post("/api/atlas/message", json!({ "text": text }))
             .await
+    }
+
+    /// Start the proposal a human approved.
+    ///
+    /// **The one write on this route, and the one the owner treats as the
+    /// approval itself.** The beat passes over proposal-origin tasks, so
+    /// nothing but an operator reaches this — which is why the owner records
+    /// an `atlas_proposal_approved` row before it starts anything.
+    ///
+    /// `task_id` is one the owner served on the snapshot, never one that was
+    /// typed: the parser resolves a template id to the task the payload
+    /// carried and refuses an item with none, so there is no id here that this
+    /// client composed.
+    ///
+    /// Grants nothing. The route re-runs `check_startable` — mode authority,
+    /// the retry budget, the data preconditions the snapshot could not check —
+    /// and refuses a plan-creating template below `propose` exactly as it
+    /// would have refused the beat. Returns three outcomes, and a 200 is *not*
+    /// a start: see [`Start`].
+    pub async fn start_task(&self, task_id: &str) -> Result<Start, WriteError> {
+        match self
+            .post(&format!("/api/atlas/tasks/{task_id}/start"), json!({}))
+            .await
+        {
+            Ok(said) => Start::read(said),
+            // The **one** refusal this route does answer with a status: a task
+            // that is no longer queued or failed raises `PermissionError` and
+            // the dispatcher turns it into a 400 (`server.py:4486`). It is the
+            // same gate saying no about the same request as the 200s above —
+            // "task X is 'completed'; only a queued or failed task may start"
+            // — so it comes back as a refusal, exactly as `set_llm` treats its
+            // own 400. Rendering it as a transport failure would bury the
+            // sentence that says the day's proposal is already spent.
+            //
+            // `unstated`, because the owner names no category here and this
+            // client may not invent one. Any other status is a broken owner
+            // rather than a considered answer, and stays an error.
+            Err(WriteError::Refused { status: 400, said }) => Ok(Start::Refused {
+                blocked_by: "unstated".to_string(),
+                reason: sentence(&said),
+            }),
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn workforce_fast(&self, enabled: bool) -> Wrote {

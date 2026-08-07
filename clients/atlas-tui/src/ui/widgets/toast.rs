@@ -329,6 +329,39 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
             // the phases are advancing. The pipeline pane shows which it is.
             format!("{template} registered as {workflow_id}"),
         ),
+        // "registered", not "running", for `Wrote::Started`'s reason: a
+        // workflow row is not a coordinator walking its phases, and the
+        // pipeline pane is what says which it is. The owner's own words for
+        // what it started, with the approved task as the fallback — a box that
+        // named the template this client sent would report the request rather
+        // than the answer.
+        Wrote::ProposalStarted {
+            task_id,
+            template,
+            workflow_id,
+        } => Toast::new(
+            Level::Info,
+            "proposal started",
+            match (template.as_deref(), workflow_id.as_deref()) {
+                (Some(what), Some(id)) => format!("{what} registered as {id}"),
+                (Some(what), None) => format!("{what} started from task {task_id}"),
+                (None, Some(id)) => format!("task {task_id} registered as {id}"),
+                (None, None) => format!("task {task_id} started"),
+            },
+        ),
+        // `Warn`, not `Info` and not `Alarm`: the desk considered the approval
+        // and declined it, so nothing started — and a box that read like a
+        // receipt is the failure this whole outcome exists to prevent. Nothing
+        // was booked either, which is what keeps it below the fill refusal.
+        Wrote::ProposalRefused {
+            task_id,
+            blocked_by,
+            reason,
+        } => Toast::new(
+            Level::Warn,
+            "proposal refused",
+            format!("{task_id} — {blocked_by}: {reason}"),
+        ),
         // `Warn` when the owner took a book it cannot reach, `Info` otherwise.
         // A desk pointed at Alpaca with no usable login changed and cannot
         // trade, and an `Info` box would report that as a clean switch.

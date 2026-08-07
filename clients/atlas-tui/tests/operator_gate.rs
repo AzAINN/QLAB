@@ -1193,6 +1193,175 @@ mod operator {
         assert_eq!(perform(&client, Command::Backends).await, None);
     }
 
+    // -- the approval ------------------------------------------------------
+    //
+    // The one write this stream adds. Every test below is about the same
+    // failure the execution gate shipped once: a 200 whose body says the write
+    // did not happen, reported as the write happening.
+
+    /// The task id off the fixture's own would-do block — an id the owner
+    /// served, never one composed here.
+    const APPROVED_TASK: &str = "9f2c1ab4d8e35007";
+
+    #[tokio::test]
+    async fn approving_a_proposal_starts_the_task_the_owner_bound_to_it() {
+        // The route, the body, and the answer. `template_id` and
+        // `workflow_id` are the owner's own words for what it started; a
+        // client echoing the id it sent would report the request rather than
+        // the answer.
+        let owner = spawn_owner(
+            200,
+            r#"{"started": true, "completed": false, "dispatched": true,
+                "workflow_id": "805e0729cfec4d67", "template_id": "regime_review"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, Command::ApproveAction(APPROVED_TASK.into())).await,
+            Some(Wrote::ProposalStarted {
+                task_id: APPROVED_TASK.into(),
+                template: Some("regime_review".into()),
+                workflow_id: Some("805e0729cfec4d67".into()),
+            })
+        );
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, format!("/api/atlas/tasks/{APPROVED_TASK}/start"));
+        // Nothing in the body. The owner reads `offline` off the query and
+        // takes no other input on this route, and a client that sent a
+        // template id would be offering the owner a second opinion about what
+        // the task it already holds is for.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_two_hundred_that_says_it_did_not_start_is_a_refusal_and_never_a_start() {
+        // The trap, on a second route. `start_task` refuses the mode gate with
+        // HTTP 200 and `started: false` (`atlas.py:441`), so a client keying
+        // success off the status code reports the gate's own no as work in
+        // flight — and the pipeline pane then waits on a run nobody began.
+        let owner = spawn_owner(
+            200,
+            r#"{"started": false, "blocked_by": "authority",
+                "reason": "desk_rebalance_review creates a paper plan, which requires Propose mode; Atlas is in Research"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::ApproveAction(APPROVED_TASK.into())).await {
+            Some(Wrote::ProposalRefused {
+                task_id,
+                blocked_by,
+                reason,
+            }) => {
+                assert_eq!(task_id, APPROVED_TASK);
+                assert_eq!(blocked_by, "authority");
+                assert!(reason.contains("Propose mode"), "{reason}");
+            }
+            other => panic!("a refusal must not read as a start: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_with_no_sentence_still_says_what_stopped_it() {
+        // The retry budget refuses with `blocked_by` and nothing else
+        // (`atlas.py:425`). "Refused" with an empty line under it is not
+        // something an operator can act on, so the gate's own word for it is
+        // the reason of last resort — the same rule `Execution::read` keeps.
+        let owner = spawn_owner(200, r#"{"started": false, "blocked_by": "retry_budget"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::ApproveAction(APPROVED_TASK.into())).await {
+            Some(Wrote::ProposalRefused {
+                blocked_by, reason, ..
+            }) => {
+                assert_eq!(blocked_by, "retry_budget");
+                assert!(reason.contains("retry_budget"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_that_is_no_longer_queued_is_the_gate_speaking_not_a_broken_request() {
+        // The one refusal this route carries a status on: `PermissionError`
+        // becomes a 400 (`server.py:4486`). It is the same gate about the same
+        // request, and rendering it as "write failed" would bury the sentence
+        // that says today's proposal is already spent.
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "task '9f2c1ab4d8e35007' is 'completed'; only a queued or failed task may start"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::ApproveAction(APPROVED_TASK.into())).await {
+            Some(Wrote::ProposalRefused { reason, .. }) => {
+                assert!(reason.contains("only a queued or failed"), "{reason}")
+            }
+            other => panic!("a considered refusal must not read as a broken write: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_that_failed_inside_its_own_two_hundred_is_not_reported_as_started() {
+        // `{"started": true, "completed": false, "error": …}` — the runner
+        // raised inside the request. The work is already over, so a box saying
+        // it started would leave an operator watching a pipeline that will
+        // never move.
+        let owner = spawn_owner(
+            200,
+            r#"{"started": true, "completed": false,
+                "error": "no workflow could be started for template 'regime_review'"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::ApproveAction(APPROVED_TASK.into())).await {
+            Some(Wrote::Failed { what, said }) => {
+                assert!(what.contains(APPROVED_TASK), "{what}");
+                assert!(said.contains("no workflow could be started"), "{said}");
+            }
+            other => panic!("a start that failed must not read as a start: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_the_owner_did_not_rule_on_is_a_failure_rather_than_a_guess() {
+        // The owner sets `started` on every answer this route gives, so a body
+        // without it is a broken contract — and both guesses are indefensible:
+        // one reports work nobody started, the other hides work that is now
+        // running.
+        let owner = spawn_owner(200, r#"{"ok": true}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::ApproveAction(APPROVED_TASK.into())).await {
+            Some(Wrote::Failed { said, .. }) => {
+                assert!(said.contains("without saying whether it started"), "{said}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unarmed_window_cannot_approve_a_proposal_at_the_chokepoint_either() {
+        // The scope's posture filter refuses this line in `resolve`; this is
+        // the gate in series behind it. A desk disarmed between the frame that
+        // drew the panel and the Enter that approved an item must not write.
+        let owner = spawn_owner(200, r#"{"started": true}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
+        writes.dispatch(Command::ApproveAction(APPROVED_TASK.into()), Posture::Glass);
+        match rx.recv().await {
+            Some(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert!(what.contains(APPROVED_TASK), "{what}");
+                assert!(said.contains("not armed"), "{said}");
+            }
+            other => panic!(
+                "an unarmed approval must fail loudly: {}",
+                other.as_ref().map_or("nothing at all", debug)
+            ),
+        }
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "an unarmed window reached the owner"
+        );
+    }
+
     #[tokio::test]
     async fn a_dispatched_command_puts_its_outcome_on_the_bus() {
         // The other half of the seam: the runtime never awaits a write, so an

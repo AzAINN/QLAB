@@ -496,6 +496,39 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
             done(store);
             Some(Command::SetLlm { surface, choice })
         }
+        // The one line that starts work, so it may only start work the
+        // operator is looking at. The would-do panel is capped at
+        // `min(12, sidebar/2)` rows with no scrollback and no cursor — three
+        // verbose proposals fill it at 120×36 — and a name typed for an item
+        // it could not draw is an approval given blind, which is the same
+        // failure as a confirm box nobody read.
+        //
+        // So the first `/do` on an unshown item is a *refusal that shows it*:
+        // ATLAS comes up, the item goes to the top of the panel, and the same
+        // line approves it next time. Refusing without showing it would leave
+        // a proposal beyond the cap unapprovable until the terminal grew.
+        #[cfg(feature = "operator")]
+        Resolved::Approve { template, task } => {
+            // Read before the ask: `drew` is what the *last* frame put on
+            // screen, and pinning first would answer about a frame nobody has
+            // seen yet.
+            let drawn = views.drew_proposal(&template);
+            views.ask_about_proposal(&template);
+            store.nav.view = ViewId::Atlas;
+            match drawn {
+                true => {
+                    done(store);
+                    Some(Command::ApproveAction(task))
+                }
+                false => {
+                    store.cmd.say(format!(
+                        "{template} was not on the WOULD DO panel — it is now, at the top: \
+                         read it, then /do it again"
+                    ));
+                    None
+                }
+            }
+        }
     }
 }
 

@@ -835,7 +835,13 @@ impl Store {
                     // desk's record rather than from this client remembering
                     // what it asked for — and a refusal there changed nothing
                     // to remember.
+                    // And an ask holds nothing here either, emphatically: the
+                    // owner persisted the proposals, the next poll brings the
+                    // `actionables` block back, and a client-side copy of what
+                    // it just asked for would be a second account of a list the
+                    // desk already owns.
                     Wrote::Armed { .. }
+                    | Wrote::Proposed { .. }
                     | Wrote::ProposalStarted { .. }
                     | Wrote::ProposalRefused { .. }
                     | Wrote::Chose { .. }

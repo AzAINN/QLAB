@@ -77,6 +77,14 @@ pub enum Wrote {
         template: String,
         workflow_id: String,
     },
+    /// The desk was asked what it would do, and answered.
+    ///
+    /// Counts rather than the list: the items land in the next snapshot's
+    /// `actionables` block, which is the surface the WOULD DO panel already
+    /// draws from. Both halves, because "nothing to do" is an answer — an
+    /// outcome carrying only the offers could not tell a quiet desk from one
+    /// that refused everything, and the second is a mode the operator can fix.
+    Proposed { offered: usize, refused: usize },
     /// The desk started work the operator approved.
     ///
     /// `template` and `workflow_id` are the owner's own, and both are optional

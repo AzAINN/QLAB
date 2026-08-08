@@ -906,6 +906,61 @@ mod armed {
     }
 
     #[test]
+    fn asking_the_desk_what_it_would_do_reaches_the_owner_and_shows_the_panel() {
+        // The whole feature's front door. Nothing else in this workstation
+        // calls `POST /api/atlas/actionables`: the panel draws a snapshot block
+        // composed from rows an ask persisted, so a desk nobody asked mints
+        // nothing, draws nothing, and refuses every `/do` forever.
+        let mut client = armed_client();
+        assert_eq!(client.store.nav.view, ViewId::Desk);
+
+        // Enter on the picker accepts the scope rather than acting — the same
+        // two steps `/mode` takes, and what puts the strip's "no argument"
+        // hint in front of the operator before anything is sent.
+        assert_eq!(submit(&mut client, "ask"), None);
+        assert_eq!(client.store.cmd.text(), "/ask ");
+
+        assert_eq!(enter(&mut client), Some(atlas::cmd::Command::Actionables));
+        assert_eq!(
+            client.store.nav.view,
+            ViewId::Atlas,
+            "the answer is drawn on ATLAS, so the ask goes there"
+        );
+        assert_eq!(client.store.nav.focus, Focus::Content);
+    }
+
+    #[test]
+    fn a_pane_left_behind_vouches_for_nothing_it_drew_while_it_was_up() {
+        // `drew` is a claim about the frame in front of the operator, and only
+        // the active view is drawn — so a list published on ATLAS would stand
+        // untouched through a whole session on BOOK while the desk moved under
+        // it, and `/do` from there reads it before switching back.
+        let mut client = armed_client();
+        client.store.nav.view = ViewId::Atlas;
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("WOULD DO"), "{frame}");
+
+        client.store.nav.view = ViewId::Book;
+        let frame = client.frame(120, 36);
+        assert!(!frame.contains("WOULD DO"), "{frame}");
+
+        assert_eq!(
+            submit(&mut client, "do regime_review"),
+            None,
+            "a panel nobody is looking at must not approve anything"
+        );
+        // And not a dead end, exactly as every other refusal here: ATLAS is up,
+        // the next frame draws the item, and the same line approves it.
+        let _ = client.frame(120, 36);
+        assert_eq!(
+            enter(&mut client),
+            Some(atlas::cmd::Command::ApproveAction(
+                "9f2c1ab4d8e35007".into()
+            ))
+        );
+    }
+
+    #[test]
     fn a_refused_proposal_is_refused_by_the_line_however_visible_it_is() {
         // The panel draws both of the fixture's items, so this one is on
         // screen and still cannot be approved: what the gate refused is the

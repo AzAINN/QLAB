@@ -173,6 +173,32 @@ pub enum Command {
     /// the only way one runs at all.
     #[cfg(feature = "operator")]
     ApproveAction(String),
+    /// Ask the desk what it would do, and let it write the proposals down.
+    ///
+    /// **The one caller of `POST /api/atlas/actionables`, and the reason that
+    /// route is not dead.** Nothing else in this workstation asks: the panel
+    /// reads a snapshot block that is *composed from what an ask already
+    /// persisted*, so with no ask the desk mints no proposal, the panel draws
+    /// nothing, and `/do` answers "not a proposal this desk is offering"
+    /// forever.
+    ///
+    /// A write, and gated as one. It mints `proposal`-origin task rows, so it
+    /// travels through the runtime's one write chokepoint like every other and an
+    /// unarmed or `--glass` window cannot ask — which is correct: a read-only
+    /// window may look at what somebody else asked for and may not put new
+    /// rows in the desk's queue.
+    ///
+    /// **A keystroke, never a timer.** `atlas_actionables` calls `atlas_facts`,
+    /// and `_atlas_regime_facts` latches the regime it saw — so a poll or a
+    /// per-frame ask would consume a regime flip before the owner's own
+    /// observe tick saw it and silently suppress the desk's `regime_flip`
+    /// trigger. Once per press, because the operator asked.
+    ///
+    /// It grants nothing. Every item comes back gate-checked and is checked
+    /// *again* by `start_task` when one is approved; asking in Research
+    /// cannot produce an item that creates a paper plan.
+    #[cfg(feature = "operator")]
+    Actionables,
     /// Ask the owner what its backends serve.
     ///
     /// A read, and the only one a keystroke asks for: the route probes daemons,
@@ -272,6 +298,8 @@ impl PartialEq for Command {
             (Command::Posture { armed: a }, Command::Posture { armed: b }) => a == b,
             #[cfg(feature = "operator")]
             (Command::ApproveAction(a), Command::ApproveAction(b)) => a == b,
+            #[cfg(feature = "operator")]
+            (Command::Actionables, Command::Actionables) => true,
             (Command::Backends, Command::Backends) => true,
             _ => false,
         }
@@ -282,7 +310,7 @@ impl PartialEq for Command {
 
 /// What the command line can be pointed at.
 ///
-/// Five, and the two that are missing are the point: the plan's Part IV lists
+/// Seven, and the two that are missing are the point: the plan's Part IV lists
 /// `/halt` and `/resume`, and `qlab/ui/server.py` serves no HTTP route for
 /// either — `set_halt` is reachable only from the MCP tools and the autopilot's
 /// own kill switch (the gated writer module carries the same note). A scope
@@ -309,6 +337,21 @@ pub enum Scope {
     /// choosing a model changes *who answers a question*, never what may be
     /// executed. The owner pins the referee to claude whatever this says.
     Model,
+    /// Ask the desk what it would do, which is what puts proposals on the
+    /// panel at all.
+    ///
+    /// It sits beside `/do` because it is the other half of one act: this asks
+    /// and the desk writes down what it would do; `/do` approves one of those
+    /// and the desk starts it. A scope rather than a key on ATLAS, because
+    /// that pane is chat-first — a printable character in an armed window goes
+    /// into the question row — so a letter there would either be stolen from
+    /// the operator's sentence or hidden behind a modifier nothing else uses.
+    ///
+    /// It writes, and is gated accordingly: an ask mints `proposal`-origin
+    /// task rows, so an unarmed or `--glass` window can read a panel somebody
+    /// else filled and cannot fill one. It widens nothing — every item comes
+    /// back gate-checked and is checked again at approval.
+    Ask,
     /// Approve one of today's proposals, which starts the work the owner
     /// offered.
     ///
@@ -323,14 +366,16 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// Picker order: the three a glass window can use, then the three it
-    /// cannot.
-    pub const ALL: [Scope; 6] = [
+    /// Picker order: the three a glass window can use, then the four it
+    /// cannot. `/ask` before `/do`, because that is the order they happen in —
+    /// there is nothing to approve until the desk has been asked.
+    pub const ALL: [Scope; 7] = [
         Scope::View,
         Scope::Ticker,
         Scope::Plan,
         Scope::Mode,
         Scope::Model,
+        Scope::Ask,
         Scope::Do,
     ];
 
@@ -343,6 +388,7 @@ impl Scope {
             Scope::Plan => "plan",
             Scope::Mode => "mode",
             Scope::Model => "model",
+            Scope::Ask => "ask",
             Scope::Do => "do",
         }
     }
@@ -355,6 +401,7 @@ impl Scope {
             Scope::Plan => "a plan id, or enough of one to be unambiguous",
             Scope::Mode => "a data source and a book",
             Scope::Model => "a surface, and the model it should run",
+            Scope::Ask => "nothing — Enter asks the desk what it would do",
             Scope::Do => "a proposal the desk is offering, in full",
         }
     }
@@ -362,7 +409,7 @@ impl Scope {
     /// Whether using this scope changes the desk. Offered only to a window that
     /// can, exactly as every other operator affordance on this workstation.
     pub fn writes(self) -> bool {
-        matches!(self, Scope::Mode | Scope::Model | Scope::Do)
+        matches!(self, Scope::Mode | Scope::Model | Scope::Ask | Scope::Do)
     }
 
     fn from_word(word: &str) -> Option<Scope> {
@@ -501,6 +548,11 @@ pub enum Resolved {
         surface: String,
         choice: ModelChoice,
     },
+    /// Ask the desk what it would do. No payload: the question is always the
+    /// same one, and the answer arrives on the next poll rather than through
+    /// the line that asked.
+    #[cfg(feature = "operator")]
+    Ask,
     /// Approve one proposal: start the task the owner bound to it.
     ///
     /// **Both halves, and neither is redundant.** `task` is what gets sent —
@@ -604,6 +656,7 @@ fn scoped(scope: Scope, query: &str, store: &Store, posture: Posture) -> Resolve
         Scope::Plan => plan(query, store),
         Scope::Mode => mode(query, posture),
         Scope::Model => model(query, store, posture),
+        Scope::Ask => ask(query, posture),
         Scope::Do => act(query, store, posture),
     }
 }
@@ -799,6 +852,44 @@ fn chose(surface: &str, choice: ModelChoice) -> Resolved {
         let _ = (surface, choice);
         Resolved::Refused("this build has no write path".into())
     }
+}
+
+/// One `/ask` line: put the question to the desk and let it write down what it
+/// would do.
+///
+/// The posture first, exactly as every other write scope. Nothing else is
+/// decided here — there is no argument to validate, because the question is
+/// always the same one and the desk composes the answer from its own facts.
+///
+/// **No argument, and a typed one is refused rather than dropped.** A word
+/// after `/ask` can only be an operator meaning something this does not do
+/// (asking about one template, asking a question in prose — that is the ATLAS
+/// chat row), and sending the ask anyway would answer a question nobody put.
+fn ask(query: &str, posture: Posture) -> Resolved {
+    if !posture.writes() {
+        return Resolved::Refused(format!(
+            "/ask puts proposals in this desk's queue; this window is {} — the desk is not \
+             armed",
+            posture.label()
+        ));
+    }
+    if !query.is_empty() {
+        return Resolved::Refused(
+            "/ask takes no argument — Enter asks the desk what it would do next".into(),
+        );
+    }
+    asked()
+}
+
+/// The ask, in the build that has somewhere to send it.
+fn asked() -> Resolved {
+    #[cfg(feature = "operator")]
+    return Resolved::Ask;
+    // Unreachable: `posture.writes()` is false for every `Posture` this build
+    // has, so `ask` refused above. The arm exists because the function is
+    // total, which is what keeps the grammar one grammar in both builds.
+    #[cfg(not(feature = "operator"))]
+    Resolved::Refused("this build has no write path".into())
 }
 
 /// One `/do` line: the proposal an operator approved.
@@ -1194,6 +1285,9 @@ fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Sug
             out.retain(|choice| starts_with_fold(&choice.value, query));
             out
         }
+        // Nothing to offer and nothing to hide: the scope takes no argument, so
+        // the strip carries only `Scope::hint`'s own line saying so.
+        Scope::Ask => Vec::new(),
         Scope::Do if !posture.writes() => Vec::new(),
         // Every proposal the owner served, in the owner's own order — the
         // refused ones shown carrying their reason rather than hidden, exactly
@@ -1872,14 +1966,57 @@ mod tests {
         );
     }
 
+    // -- the ask scope ------------------------------------------------------
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn asking_takes_no_argument_and_an_armed_window_gets_the_ask() {
+        let store = desk();
+        assert_eq!(
+            resolve(&parse("/ask "), &store, Posture::Operator),
+            Resolved::Ask
+        );
+        // A word after it can only be an operator meaning something this does
+        // not do — one template, or a question in prose, which is ATLAS's own
+        // row. Sending the ask anyway would answer a question nobody put.
+        match resolve(&parse("/ask regime_review"), &store, Posture::Operator) {
+            Resolved::Refused(said) => assert!(said.contains("no argument"), "{said}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unarmed_window_may_not_ask_and_is_not_offered_the_scope() {
+        // An ask mints proposal rows in the desk's queue, so it is a write and
+        // is gated exactly like `/mode`, `/model` and `/do`: hidden from the
+        // strip, and refused for being unarmed when it is typed in full.
+        let store = desk();
+        match resolve(&parse("/ask "), &store, Posture::Glass) {
+            Resolved::Refused(said) => assert!(said.contains("not armed"), "{said}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(suggestions(&parse("/a"), &store, Posture::Glass).is_empty());
+        // And it offers no values of its own: the strip carries the scope's
+        // hint instead, which says there is nothing to type.
+        assert!(suggestions(&parse("/ask "), &store, Posture::Glass).is_empty());
+        #[cfg(feature = "operator")]
+        {
+            assert!(suggestions(&parse("/a"), &store, Posture::Operator)
+                .iter()
+                .any(|choice| choice.value == "/ask"));
+            assert!(suggestions(&parse("/ask "), &store, Posture::Operator).is_empty());
+        }
+    }
+
     // -- the approval scope -----------------------------------------------
 
     /// A desk holding today's proposals, in the three shapes the owner serves.
     ///
     /// `startable` is `null` on the offered one because that is the only thing
-    /// the snapshot can say — `true` is unreachable there, and the verdict
-    /// lives at the POST (`atlas_actionables_snapshot`, `server.py:3402`). The
-    /// refusal sentence is the owner's own, copied from `server.py:3465`.
+    /// `UISession.atlas_actionables_snapshot` can say — `true` is unreachable
+    /// there, and the verdict lives at the POST it names in its own reason.
+    /// The refusal sentence is the owner's own, copied from
+    /// `qlab/operator/templates.py::check_authority`.
     fn desk_with_proposals() -> Store {
         let mut store = desk();
         let mut snapshot = store.snapshot.take().unwrap();

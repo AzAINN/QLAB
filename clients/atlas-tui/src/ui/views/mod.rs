@@ -81,6 +81,18 @@ pub trait View {
     /// (a blotter page, a crosshair) or retains nothing at all.
     fn entered(&self) {}
 
+    /// This pane has just gone off screen.
+    ///
+    /// The other half of `entered`, called on the view the last frame drew
+    /// when the nav moves elsewhere. It exists for what a view *publishes*
+    /// rather than for what it keeps: ATLAS vouches for the proposals its last
+    /// frame drew, and the approval path reads that vouching from another
+    /// pane — so a list that outlived the frame would let `/do` approve an
+    /// item nobody is looking at. A default of nothing: a cursor is worth
+    /// keeping across a switch (see `entered`), a claim about what is on
+    /// screen is not.
+    fn left(&self) {}
+
     /// Whether this view is holding a text field open, and therefore owns every
     /// keystroke — including the ones the shell claims for the whole
     /// workstation.
@@ -229,8 +241,14 @@ impl Views {
     ) {
         // The switch, seen the only place it cannot be missed: the registry is
         // asked for exactly one pane per frame, so an id that differs from the
-        // last one it drew *is* the operator having moved.
-        if self.shown.replace(Some(id)) != Some(id) {
+        // last one it drew *is* the operator having moved. Both ends of it: the
+        // pane being left is told before the one being entered, so a view that
+        // publishes what it drew can retract it while the fact is still true.
+        let before = self.shown.replace(Some(id));
+        if before != Some(id) {
+            if let Some(before) = before {
+                self.at(before).left();
+            }
             self.at(id).entered();
         }
         self.at(id).draw(f, area, store, fx, now);

@@ -329,6 +329,31 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
             // the phases are advancing. The pipeline pane shows which it is.
             format!("{template} registered as {workflow_id}"),
         ),
+        // What the desk said it would do, in its own arithmetic. `Warn` when it
+        // would do nothing: the request succeeded and the desk is idle, which
+        // is the "succeeded and did nothing" shape this client refuses to draw
+        // as a receipt — and the remedy (a mode, a data plane) is one the
+        // operator has. The panel is where the sentences are; this says how
+        // many there are and where to read them.
+        Wrote::Proposed { offered, refused } => Toast::new(
+            match offered {
+                0 => Level::Warn,
+                _ => Level::Info,
+            },
+            "desk asked",
+            match (offered, refused) {
+                (0, 0) => "the desk offered nothing and refused nothing — it has no \
+                           templates to weigh"
+                    .to_string(),
+                (0, refused) => {
+                    format!("nothing it would do; {refused} refused — WOULD DO says why")
+                }
+                (offered, 0) => format!("{offered} on the WOULD DO panel — /do one of them"),
+                (offered, refused) => {
+                    format!("{offered} on the WOULD DO panel, {refused} refused — /do one of them")
+                }
+            },
+        ),
         // "registered", not "running", for `Wrote::Started`'s reason: a
         // workflow row is not a coordinator walking its phases, and the
         // pipeline pane is what says which it is. The owner's own words for

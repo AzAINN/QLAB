@@ -1337,6 +1337,122 @@ mod operator {
         }
     }
 
+    // -- the ask -----------------------------------------------------------
+    //
+    // The write that makes every test above reachable on a real desk. The
+    // owner mints a proposal per startable template here and nowhere else, so
+    // without this call the panel is empty and `/do` has nothing to name.
+
+    #[tokio::test]
+    async fn asking_the_desk_posts_to_the_actionables_route_and_counts_the_answer() {
+        let owner = spawn_owner(
+            200,
+            r#"{"trading_date": "2026-08-07", "items": [
+                {"template_id": "desk_brief", "startable": true, "reason": null,
+                 "task_id": "9f2c1ab4d8e35007", "task_status": "queued"},
+                {"template_id": "regime_review", "startable": true, "reason": null,
+                 "task_id": "8f21a0c4de3b1157", "task_status": "queued"},
+                {"template_id": "desk_rebalance_review", "startable": false,
+                 "reason": "desk_rebalance_review creates a paper plan, which requires Propose mode; Atlas is in Research",
+                 "task_id": null, "task_status": null}]}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, Command::Actionables).await,
+            Some(Wrote::Proposed {
+                offered: 2,
+                refused: 1
+            })
+        );
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/atlas/actionables");
+        // Nothing in the body: the owner reads `offline` off the query and
+        // composes the menu from its own facts. A client that sent a mode or a
+        // template list would be offering the gate a second opinion.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ask_that_offers_nothing_is_still_an_answer_and_says_so() {
+        // Observe refuses every template. The desk answered the question — the
+        // answer is "nothing" — so this is not a failure, and it must not read
+        // as one: the refusals are on the panel with their reasons.
+        let owner = spawn_owner(
+            200,
+            r#"{"trading_date": "2026-08-07", "items": [
+                {"template_id": "desk_brief", "startable": false,
+                 "reason": "'desk_brief' requires Research mode; Atlas is in Observe mode",
+                 "task_id": null, "task_status": null}]}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(&client, Command::Actionables).await,
+            Some(Wrote::Proposed {
+                offered: 0,
+                refused: 1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ask_the_owner_answered_without_a_verdict_is_a_broken_contract() {
+        // The POST is where the gate speaks, so `startable` is a boolean on
+        // every item it serves — `null` is the snapshot's "not ruled on here".
+        // Counting an unruled item as either would put a number on screen the
+        // desk never said, and the offered half is the one an operator acts on.
+        let owner = spawn_owner(
+            200,
+            r#"{"items": [{"template_id": "desk_brief", "startable": null}]}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::Actionables).await {
+            Some(Wrote::Failed { what, said }) => {
+                assert!(what.contains("would do"), "{what}");
+                assert!(said.contains("whether it may start"), "{said}");
+            }
+            other => panic!("an unreadable answer must not read as an ask: {other:?}"),
+        }
+        // And a 200 with no list at all is the same answer.
+        let owner = spawn_owner(200, r#"{"trading_date": "2026-08-07"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::Actionables).await {
+            Some(Wrote::Failed { said, .. }) => {
+                assert!(said.contains("without a list of actionables"), "{said}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unarmed_window_cannot_ask_because_asking_writes_to_the_queue() {
+        // The scope's posture filter refuses this line in `resolve`; this is
+        // the gate in series behind it. An ask mints `proposal`-origin task
+        // rows, so a read-only window may look at a panel somebody else filled
+        // and may not fill one.
+        let owner = spawn_owner(200, r#"{"items": []}"#);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writes = Writes::new(&owner.base, false, tx).unwrap();
+        writes.dispatch(Command::Actionables, Posture::Glass);
+        match rx.recv().await {
+            Some(AppEvent::Wrote(Wrote::Failed { what, said })) => {
+                assert!(what.contains("would do"), "{what}");
+                assert!(said.contains("not armed"), "{said}");
+            }
+            other => panic!(
+                "an unarmed ask must fail loudly: {}",
+                other.as_ref().map_or("nothing at all", debug)
+            ),
+        }
+        assert!(
+            owner.seen.lock().unwrap().is_empty(),
+            "an unarmed window reached the owner"
+        );
+    }
+
     #[tokio::test]
     async fn an_unarmed_window_cannot_approve_a_proposal_at_the_chokepoint_either() {
         // The scope's posture filter refuses this line in `resolve`; this is

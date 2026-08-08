@@ -496,6 +496,20 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
             done(store);
             Some(Command::SetLlm { surface, choice })
         }
+        // The line that fills the panel. ATLAS comes up because that is where
+        // the answer is drawn — the owner persists it and the next poll brings
+        // it back, so a window left on BOOK would report "5 proposed" in a
+        // toast and show the operator nothing they could read or approve.
+        //
+        // Nothing is awaited here: the dispatch seam spawns, and the outcome
+        // refetches the desk. A line that blocked on the ask would freeze the
+        // frame loop for as long as the owner took to compose it.
+        #[cfg(feature = "operator")]
+        Resolved::Ask => {
+            store.nav.view = ViewId::Atlas;
+            done(store);
+            Some(Command::Actionables)
+        }
         // The one line that starts work, so it may only start work the
         // operator is looking at. The would-do panel is capped at
         // `min(12, sidebar/2)` rows with no scrollback and no cursor — three

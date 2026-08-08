@@ -96,8 +96,15 @@ pub struct AtlasView {
     /// Enter that approves it gives the same word a different task. Keyed on
     /// the template alone, that Enter would send a task no frame ever drew.
     ///
-    /// **Every frame writes it, including the frames that draw no panel.** A
-    /// list left over from a wider frame is the same lie one resize later.
+    /// **Every frame THIS VIEW draws writes it, including the frames that draw
+    /// no panel** — a list left over from a wider frame is the same lie one
+    /// resize later. The shell draws only the active view, so those are the
+    /// only frames that reach here at all; a trip to BOOK would otherwise
+    /// leave the last ATLAS frame's list standing while the desk moved under
+    /// it, and `/do` from another pane reads this before switching back. So
+    /// leaving the view clears it too (`View::left`), and the first `/do` from
+    /// elsewhere is the refusal that asks for the item rather than an approval
+    /// off a frame nobody is looking at.
     #[cfg(feature = "operator")]
     drew: std::cell::RefCell<Vec<(String, String)>>,
     /// The proposal the operator has asked about, drawn first.
@@ -152,6 +159,17 @@ impl View for AtlasView {
 
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         self.keys(k, store)
+    }
+
+    /// Off screen, so this pane vouches for nothing.
+    ///
+    /// `drew` is a claim about the frame in front of the operator, and the
+    /// approval path reads it from wherever they happen to be typing. Left
+    /// standing across a trip to BOOK it would answer about a frame painted
+    /// before the desk moved — so it is retracted here, and the first `/do`
+    /// from another pane brings ATLAS up and asks for the item instead.
+    fn left(&self) {
+        self.drew_nothing();
     }
 
     /// Whether the ask row currently owns the keyboard.

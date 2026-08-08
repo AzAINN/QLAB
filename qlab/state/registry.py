@@ -233,7 +233,7 @@ CREATE TABLE IF NOT EXISTS atlas_state (
 CREATE TABLE IF NOT EXISTS atlas_tasks (
     task_id VARCHAR PRIMARY KEY, dedupe_key VARCHAR UNIQUE, trigger_kind VARCHAR,
     trigger_payload JSON, template_id VARCHAR, status VARCHAR, workflow_id VARCHAR,
-    conclusion JSON, error VARCHAR, attempt_count INTEGER,
+    conclusion JSON, error VARCHAR, attempt_count INTEGER, origin VARCHAR,
     created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, updated_at VARCHAR);
 CREATE TABLE IF NOT EXISTS authority_grants (
     grant_id VARCHAR PRIMARY KEY, mode VARCHAR, allowed_universe JSON,
@@ -381,6 +381,11 @@ class Registry:
         # from, so existing desks anchor to whatever feed they actually run.
         self.con.execute(
             "ALTER TABLE account ADD COLUMN IF NOT EXISTS mark_lane VARCHAR")
+        # Proposals and triggers share one lifecycle and one gate; only who may
+        # start them differs. NULL is a row written before this column existed,
+        # and every one of those is trigger work.
+        self.con.execute(
+            "ALTER TABLE atlas_tasks ADD COLUMN IF NOT EXISTS origin VARCHAR")
 
     def _partition_account_by_book(self) -> None:
         """Move a pre-book `account` row onto the book key.
@@ -1886,13 +1891,25 @@ class Registry:
              state.get("coordinator_session_id"), _now()])
 
     def create_atlas_task(self, task_id: str, dedupe_key: str, trigger_kind: str,
-                        trigger_payload: dict, template_id: str | None) -> bool:
+                        trigger_payload: dict, template_id: str | None,
+                        *, origin: str = "trigger") -> bool:
         """Create a queued task, deduped by its UNIQUE key.
 
         Returns True if a new task was created, False if the dedupe key already
         exists (the trigger was already handled for this state) — the caller
         must not re-run a deduplicated task.
+
+        ``origin`` says who may start it: ``"trigger"`` is unattended work the
+        heartbeat starts, anything else is attended and waits for the operator.
+        Keyword-only and defaulted, because every existing caller is a trigger.
+
+        An empty ``origin`` is refused rather than stored. The reader must tell
+        a pre-column NULL (trigger work, by definition) from a value that was
+        written, and `""` is the one input that reads as neither — silently
+        landing on the permissive side of the envelope.
         """
+        if not isinstance(origin, str) or not origin.strip():
+            raise ValueError("origin must be a non-empty string")
         existing = self._rows(
             "SELECT task_id FROM atlas_tasks WHERE dedupe_key = ?", [dedupe_key])
         if existing:
@@ -1900,10 +1917,10 @@ class Registry:
         self.con.execute(
             "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
             "trigger_payload, template_id, status, workflow_id, conclusion, "
-            "error, attempt_count, created_at, started_at, completed_at, "
-            "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "error, attempt_count, origin, created_at, started_at, completed_at, "
+            "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [task_id, dedupe_key, trigger_kind, _j(trigger_payload), template_id,
-             "queued", None, None, None, 0, _now(), None, None, _now()])
+             "queued", None, None, None, 0, origin, _now(), None, None, _now()])
         return True
 
     def update_atlas_task(self, task_id: str, *, status: str | None = None,
@@ -1940,9 +1957,46 @@ class Registry:
         rows = self._rows("SELECT * FROM atlas_tasks WHERE task_id = ?", [task_id])
         return rows[0] if rows else None
 
-    def list_atlas_tasks(self, limit: int = 50) -> list[dict]:
+    def get_atlas_task_by_dedupe(self, dedupe_key: str) -> dict | None:
+        """The one task carrying this key, or None.
+
+        ``dedupe_key`` is UNIQUE, so this belongs in SQL. Reading it out of a
+        bounded scan meant a table deeper than the window answered "no such
+        task" for a key that exists, and the caller minted a second id for a
+        row it could not see.
+        """
+        rows = self._rows(
+            "SELECT * FROM atlas_tasks WHERE dedupe_key = ?", [dedupe_key])
+        return rows[0] if rows else None
+
+    def list_atlas_tasks(self, limit: int = 50, *, status: str | None = None,
+                         origin: str | None = None) -> list[dict]:
+        """The newest tasks, optionally narrowed by status and origin.
+
+        Both filters are in SQL rather than applied to the page this returns.
+        A caller that wants queued work needs a window bounded by work that is
+        actually waiting: proposals are minted per template per day and no task
+        row is ever deleted, so filtering after the fact means history — most
+        of it long finished — decides what the gate can still see.
+
+        ``origin="trigger"`` includes NULL. Those rows predate the column and
+        are all trigger work; an exact match would filter out the desk's own
+        autonomy with a scan added to protect it.
+        """
+        where, params = [], []
+        if status is not None:
+            where.append("status = ?")
+            params.append(status)
+        if origin == "trigger":
+            where.append("(origin IS NULL OR origin = 'trigger')")
+        elif origin is not None:
+            where.append("origin = ?")
+            params.append(origin)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        params.append(limit)
         return self._rows(
-            "SELECT * FROM atlas_tasks ORDER BY created_at DESC LIMIT ?", [limit])
+            f"SELECT * FROM atlas_tasks{clause} ORDER BY created_at DESC LIMIT ?",
+            params)
 
     def count_atlas_tasks_on(self, day_iso: str, trigger_kind: str | None = None) -> int:
         """Autonomous tasks created on a UTC date (for the daily budget)."""

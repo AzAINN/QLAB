@@ -35,6 +35,14 @@ Rust/Ratatui client in `clients/atlas-tui`, seven views on `1`–`7`: Desk,
 Markets, Book, Research, Workforce, Audit, Settings. The launcher refuses
 rather than falling back if the binary is not there.
 
+On ATLAS, `/ask` asks the desk what it would do: the gate ranks every
+registered template, the ones it permits become approvable proposals on the
+**WOULD DO** panel, the ones it refuses are shown there with the refusal, and
+`/do <template>` approves one — which is what starts the governed run. Asking
+and approving are both writes, so a desk that is not armed can read the panel
+and not fill or act on it, and approving re-runs the same gate: no proposal
+creates a paper plan below Propose.
+
 ```bash
 qlab tui --classic    # the Textual client, against the same owner
 ```

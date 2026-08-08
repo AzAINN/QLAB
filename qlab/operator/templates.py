@@ -123,11 +123,16 @@ def get_template(template_id: str) -> WorkflowTemplate:
             f"registered templates: {sorted(TEMPLATES)}") from exc
 
 
-def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplate:
-    """Return the template if Atlas may start it now, else raise.
+def check_authority(template_id: str, mode: str) -> WorkflowTemplate:
+    """The mode half of the gate: what this mode may start, whatever the data.
 
-    Authority first, then preconditions — so a mode violation is never masked
-    by a data problem.
+    Split out because it needs no facts, and one surface cannot afford them:
+    the owner's two-second snapshot must not call ``atlas_facts``, which
+    latches the regime and would swallow a flip before the observe tick saw it.
+    That surface still owes an honest answer to "may this mode start it", and
+    the only way to give one without a second copy of the mode rules is for
+    ``check_startable`` to delegate here — which it does. Nothing is relaxed:
+    passing this is necessary, never sufficient.
     """
     template = get_template(template_id)
     if mode == "observe":
@@ -139,6 +144,16 @@ def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplat
         raise TemplateNotAllowed(
             f"{template_id!r} creates a paper plan, which requires Propose "
             f"mode; current mode is {mode!r}")
+    return template
+
+
+def check_startable(template_id: str, mode: str, facts: dict) -> WorkflowTemplate:
+    """Return the template if Atlas may start it now, else raise.
+
+    Authority first, then preconditions — so a mode violation is never masked
+    by a data problem.
+    """
+    template = check_authority(template_id, mode)
     data = facts.get("data", {})
     if "data_eligible_for_research" in template.requires:
         if data.get("blocked"):
@@ -168,21 +183,41 @@ def template_for_trigger(trigger_kind: str) -> str | None:
     return TRIGGER_TEMPLATE.get(trigger_kind)
 
 
+def template_menu(mode: str, facts: dict) -> list[dict]:
+    """Every registered template with the gate's verdict on it, refusals included.
+
+    The refusal is the product here. ``startable_templates`` answers "what may
+    run", which is what a menu needs; an operator asking "what should I do" also
+    needs to know why the other things are not on offer, and inferring it from
+    an absence is how a mode mistake reads as an empty desk.
+    """
+    out: list[dict] = []
+    for template_id, template in TEMPLATES.items():
+        entry = {
+            "template_id": template_id, "purpose": template.purpose,
+            "creates_plan": template.creates_plan,
+            "needs_coordinator": template.needs_coordinator,
+        }
+        try:
+            check_startable(template_id, mode, facts)
+        except TemplateNotAllowed as exc:
+            entry.update({"startable": False, "reason": str(exc)})
+        else:
+            entry.update({"startable": True, "reason": None})
+        out.append(entry)
+    return out
+
+
 def startable_templates(mode: str, facts: dict) -> dict[str, str]:
     """Every registered template Atlas may start right now → its purpose.
 
-    The reasoner's menu, and it is *derived* from ``check_startable`` rather
-    than written down beside it. A second list of what is permitted would be a
-    second authority, and the two would disagree the first time a template's
-    requirements changed — which is exactly the failure this whole gate exists
-    to prevent. Nothing here relaxes anything: a template absent from this map
-    is one ``check_startable`` refuses, for the reason it gives.
+    The reasoner's menu, and it is *derived* from ``check_startable`` (through
+    ``template_menu``'s permitted half) rather than written down beside it. A
+    second list of what is permitted would be a second authority, and the two
+    would disagree the first time a template's requirements changed — which is
+    exactly the failure this whole gate exists to prevent. Nothing here relaxes
+    anything: a template absent from this map is one ``check_startable``
+    refuses, for the reason it gives.
     """
-    allowed: dict[str, str] = {}
-    for template_id, template in TEMPLATES.items():
-        try:
-            check_startable(template_id, mode, facts)
-        except TemplateNotAllowed:
-            continue
-        allowed[template_id] = template.purpose
-    return allowed
+    return {entry["template_id"]: entry["purpose"]
+            for entry in template_menu(mode, facts) if entry["startable"]}

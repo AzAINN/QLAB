@@ -160,15 +160,51 @@ def build_owner_tick(session, lock, *, offline: bool,
         live_autonomous = autonomous
 
         def observe(**handed) -> dict:
+            # Before the observe, so one tick closes the whole loop: the reap
+            # interrupts a workflow whose coordinator lease has expired,
+            # `atlas_observe` reconciles the task it belongs to, and the sweep
+            # below then passes over it instead of respawning a coordinator for
+            # a run that died half an hour ago. Reaping was reachable ONLY from
+            # the snapshot path and `GET /api/workflows`, so an owner running
+            # unattended — no TUI, no browser — never reaped at all, and that is
+            # exactly the desk the sweep runs on. It self-throttles to a minute.
+            reap = getattr(session, "reap_stale_workflows", None)
+            reaped, reap_error = None, ""
+            if callable(reap):
+                try:
+                    reaped = reap()
+                except Exception as exc:
+                    # Its own key, never the value's: a field that changes JSON
+                    # type mid-run poisons the tick for a typed client.
+                    reap_error = str(exc)[:200]
             # `handed` is empty unless the reasoner ran, so a desk with the
             # flag off calls exactly what it called before.
             result = session.atlas_observe(offline, **handed)
+            if reaped is not None:
+                result["reaped"] = reaped
+            if reap_error:
+                result["reap_error"] = reap_error
             result["autonomous_enabled"] = bool(live_autonomous)
             if live_autonomous:
                 try:
                     result["autonomous"] = session.atlas_run_startable(offline)
                 except Exception as exc:
                     result["autonomous_error"] = str(exc)[:200]
+            # Deliberately NOT under `live_autonomous`. Approving is what
+            # started this work; the sweep only walks a workflow the gate has
+            # already opened, and the dispatch that opened it could not drive
+            # it because the one coordinator slot was taken. Gating this on
+            # autonomy would mean a desk with autonomy off leaves the operator's
+            # own approvals parked at phase one forever.
+            #
+            # After `atlas_observe`, whose reconciliation resolves the runs that
+            # DID finish — so the sweep only ever sees what is still in flight.
+            sweep = getattr(session, "drive_pending_tasks", None)
+            if callable(sweep):
+                try:
+                    result["driven"] = sweep()
+                except Exception as exc:
+                    result["drive_error"] = str(exc)[:200]
             return result
 
         with lock:

@@ -41,6 +41,9 @@ POST /api/atlas/escalate         open a bounded debate on a material disagreemen
 GET  /api/atlas/tasks            Atlas's deduplicated autonomous task history
 GET  /api/atlas/templates        the registered workflow templates Atlas may start
 GET  /api/atlas/startable        queued tasks Atlas may start now, with refusals
+POST /api/atlas/actionables      what Atlas would do next: the ranked menu with
+                                 the gate's verdict on each, every offer
+                                 persisted as a proposal you can approve
 GET  /api/atlas/shadow           shadow-rollout scorecard (evidence, not a grant)
 POST /api/atlas/tasks/<id>/start start one queued task's registered template
 POST /api/atlas/observe          run one deterministic Atlas observe tick
@@ -202,6 +205,12 @@ _ACTIVE_MARKET_THREAD: threading.Thread | None = None
 # update beyond this grace cannot belong to a healthy qlab coordinator.
 _WORKFLOW_STALE_AFTER_SECONDS = 35 * 60
 _WORKFLOW_REAP_INTERVAL_SECONDS = 60.0
+# How many parked workflows one sweep may ASK to drive. A refusal is per-graph
+# (a daemon-backed one-role read can be refused while a claude review would
+# start), so the sweep must look past one — but a desk-wide refusal, like no
+# `claude` on PATH, refuses every candidate, and without a cap that writes one
+# skip row per running task per beat, forever.
+_DRIVE_ATTEMPTS_PER_SWEEP = 3
 
 # Realized-performance window. `_MARK_WINDOW` is the newest-N read cap; when the
 # book has more marks than that, the payload says so rather than letting a
@@ -3129,7 +3138,11 @@ class UISession:
                     "driving": driven.get("driving", False),
                     # Carried even on success: an undriven dispatch is still a
                     # valid dispatch, and the operator has to be able to see
-                    # that it is waiting on them rather than on Claude.
+                    # that it is waiting on them rather than on Claude. It is no
+                    # longer waiting FOREVER — `drive_pending_tasks` picks this
+                    # workflow up on a later beat once the slot frees — but the
+                    # reason is what says whether the wait is on a busy slot or
+                    # on something only they can fix.
                     "drive_reason": driven.get("reason", "")},
         )
 
@@ -3214,6 +3227,120 @@ class UISession:
             status["note"] = note
         return status
 
+    def drive_pending_tasks(self) -> list[dict]:
+        """Walk a running task's workflow that nothing is currently walking.
+
+        Registering a workflow is not running it. The owner drives one
+        coordinator at a time, so an approval that lands while the slot is busy
+        leaves a real workflow parked at phase one — and ``reconcile_tasks``
+        never resolves it, because a run nobody walks never reaches a terminal
+        state. This is what picks it up when the slot frees.
+
+        It grants nothing. Only ``start_task`` binds a workflow to a task, and
+        only a task the gate started is ``running``, so every workflow reachable
+        here is one that already passed the mode check and (for a proposal) a
+        human approval. Driving is resuming, never starting.
+
+        One SPAWN per call, because the owner has one coordinator. The check
+        that makes that safe is not the early return below — the beat runs on
+        its own thread beside HTTP handlers that can also dispatch. It is
+        ``CoordinatorDriver.drive``, which re-tests ``busy``, spawns and stores
+        the session all under the driver's own lock, and refuses the second
+        caller. The early return only spares the audit bus a skip row per beat
+        while a run is in flight.
+
+        And that idle slot is the OWNER's. A coordinator a human started from
+        the classic TUI is a client-side process this flag cannot see, so a
+        manual resume landing inside one beat window can put two coordinators on
+        one graph. The window is one beat, nothing is granted that the human did
+        not already have, and closing it properly needs a lease in the registry
+        rather than a flag in a process.
+
+        A refusal is not the end of the sweep. ``available()`` answers per
+        graph — a one-role read served by a daemon that is down is refused while
+        a claude review would start — so stopping at the first refusal would
+        park every later candidate behind it, which is the state this method
+        exists to remove. Refusals are attempted past, up to
+        ``_DRIVE_ATTEMPTS_PER_SWEEP``; the return value carries every attempt.
+
+        And a candidate the driver would refuse costs no attempt at all. That
+        cap exists to bound audit rows, and ``available()`` is deterministic per
+        graph in a stable environment: three parked one-role tasks whose daemon
+        is down would otherwise consume the whole budget on the same three
+        refusals every beat, and a fourth task that WOULD drive is never
+        reached on any beat — the parked-forever state this method removes,
+        rebuilt in bounded form. So the screen is asked first, without
+        emitting, and the cap bounds real ``drive()`` calls.
+        """
+        from qlab.operator.atlas import (
+            TASK_SCAN_WINDOW,
+            WORKFLOW_RESOLVED_STATUSES,
+        )
+
+        if self.coordinator_status().get("driving"):
+            return []
+        attempted: list[dict] = []
+        # Filtered in SQL, because no task row is ever deleted and finished
+        # history must not decide whether live work is visible. Sorted here, and
+        # the direction is the opposite of the registry's: the newest parked
+        # approval first would retry a doomed young workflow ahead of an older
+        # healthy one on every single beat. Oldest first is the queue order the
+        # operator would expect anyway. The window is the one `reconcile_tasks`
+        # uses, so the sweep never drives a task reconciliation cannot see.
+        for task in sorted(
+                self.registry.list_atlas_tasks(TASK_SCAN_WINDOW,
+                                               status="running"),
+                key=lambda row: str(row.get("created_at") or "")):
+            workflow = self.registry.get_workflow(
+                str(task.get("workflow_id") or ""))
+            if workflow is None:
+                # Two cases, one answer. A task that bound nothing belongs to a
+                # deterministic template that concluded inline; a task whose
+                # bound workflow has vanished is reconciliation's to fail.
+                # Neither has a graph to walk. (`or ""` because `str(None)` is
+                # the id "None", which would be looked up and not found — the
+                # same answer by accident rather than on purpose.)
+                continue
+            if str(workflow.get("status") or "") in WORKFLOW_RESOLVED_STATUSES:
+                continue
+            # The row's own id, not the task's copy of it: they agree, and the
+            # one that was just read is the one being driven.
+            workflow_id = str(workflow["workflow_id"])
+            # The roles are read from the step rows rather than re-derived from
+            # their phases: `start_workflow` resolved them once, and the column
+            # is what this graph was created with. Read here rather than at the
+            # call below because the screen needs them first.
+            roles = tuple(str(step["agent"])
+                          for step in workflow.get("steps") or ())
+            # The driver's own answer, asked without emitting anything. A
+            # refusal here is not an attempt: `drive` would record an
+            # `atlas_coordinator_skipped` row and spend one of the sweep's
+            # three, which is what starved the fourth parked approval behind
+            # three that could never move.
+            ok, _ = self.coordinator_driver.available(roles)
+            if not ok:
+                continue
+            driven = self.drive_workflow(
+                workflow_id,
+                # The workflow's own goal and its own graph. A blank goal and an
+                # unnamed graph are both meaningful to the driver — the first
+                # tells the coordinator nothing, the second routes every
+                # one-role read to the claude coordinator — so neither may be a
+                # default standing in for a row that has the answer.
+                str((workflow.get("request") or {}).get("goal") or ""),
+                roles=roles)
+            attempted.append({"task_id": str(task["task_id"]),
+                              "workflow_id": workflow_id,
+                              # Reported rather than assumed: a refusal is not a
+                              # drive, and a later beat has to try this again.
+                              "driving": bool(driven.get("driving"))})
+            if driven.get("driving"):
+                # The slot is taken now. Anything else waits for a later beat.
+                break
+            if len(attempted) >= _DRIVE_ATTEMPTS_PER_SWEEP:
+                break
+        return attempted
+
     def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
         """Start the queued work Atlas's current mode already permits.
 
@@ -3221,6 +3348,9 @@ class UISession:
         still goes through ``start_task``, so mode checks, the retry budget,
         and the plan-creation boundary all apply unchanged. In Research mode
         this launches research and still cannot create a paper plan.
+
+        Unattended work only: a proposal is a queued task the operator has yet
+        to approve, so the beat passes over it.
         """
         facts = self.atlas_facts(offline)
         started: list[dict] = []
@@ -3228,6 +3358,10 @@ class UISession:
             if len(started) >= limit:
                 break
             if not candidate.get("startable"):
+                continue
+            if candidate.get("origin") != "trigger":
+                # A proposal is started by the operator approving it, never by
+                # the beat. This line IS the envelope.
                 continue
             result = self.atlas.start_task(
                 candidate["task_id"], facts, runner=self.atlas_workflow_runner)
@@ -3238,10 +3372,358 @@ class UISession:
         return started
 
     def atlas_start_task(self, task_id: str, offline: bool) -> dict:
-        """Start one queued Atlas task through the governed workflow runner."""
+        """Start one queued Atlas task through the governed workflow runner.
+
+        **This route is the approval.** The beat passes over proposal-origin
+        tasks (`atlas_run_startable`), so nothing but a human reaches one — and
+        that made the envelope positional: which route was hit was the only
+        evidence anybody approved anything. The row below is what makes it
+        structural, and it is written HERE rather than in the dispatcher so
+        every caller of this method leaves it, not only the one path someone
+        remembered to instrument.
+
+        Written *before* the start, for `execute_plan`'s reason: an approval
+        that follows the work it authorises reads as permission granted
+        retroactively, and a start that raises leaves no trace of the asking at
+        all. It records the approval and nothing more — whether the gate then
+        started the task is `atlas_task_started`'s to say.
+
+        Only a proposal. A trigger is work the desk raised for itself and may
+        start unattended, so a row saying a human approved one would put a
+        decision on the record that nobody made.
+        """
+        task = self.registry.get_atlas_task(task_id)
+        if task is not None and str(task.get("origin") or "") == "proposal":
+            self.registry.record_event("atlas_proposal_approved", {
+                "task_id": task_id,
+                "template_id": str(task.get("template_id") or ""),
+                # What was approved, in the state it was approved in: an
+                # approval of a task the gate then refuses for being spent is
+                # a different record from one that started work.
+                "task_status": str(task.get("status") or ""),
+            })
         facts = self.atlas_facts(offline)
         return self.atlas.start_task(task_id, facts,
                                    runner=self.atlas_workflow_runner)
+
+    def atlas_actionables(self, offline: bool) -> dict:
+        """What Atlas would do next, ranked, with the gate's verdict on each.
+
+        Every item is checked here AND again by ``start_task`` when it is
+        approved. That is not redundant: the mode can change and a plan can
+        appear between proposing and approving, and a proposal made in Research
+        must not execute on a permit it no longer holds.
+
+        Only the offered half is persisted **as a task**. A refusal has nothing
+        to approve, so writing a task row for it would put work in the queue
+        that the gate has already said may not run. The refusals are recorded
+        on the audit row instead, which is what lets
+        ``atlas_actionables_snapshot`` show them: a desk that silently omits
+        what it will not do teaches the operator nothing about why.
+
+        Called under the dispatch lock (every route but two is), so it takes no
+        lock of its own — ``_LOCK`` is not reentrant.
+        """
+        from qlab.operator.atlas import STARTABLE_TASK_STATES
+        from qlab.operator.templates import template_menu
+
+        facts = self.atlas_facts(offline)
+        mode = self.atlas.mode
+        # The same clock `atlas_observe` hands the supervisor, so a proposal and
+        # a trigger minted in one tick carry the same trading date. It is LOCAL
+        # midnight while `startable_tasks` ages against UTC (`_utc_today`), so
+        # for a few hours a day the two clocks disagree by up to one day — older
+        # or younger depending on which side of UTC the zone sits — and one day
+        # against `max_task_age_days = 5` cannot flip a fresh proposal to stale.
+        # `_expire_stale_proposals` compares against this same local date so
+        # the two ends of the proposal's life agree with each other.
+        trading_date = date.today().isoformat()
+        universe = ",".join(sorted(facts.get("universe", [])))
+        self._expire_stale_proposals(trading_date)
+        items: list[dict] = []
+        # The gate's own refusals, kept whole. They mint no task, so the
+        # snapshot has no row to compose them from — persisting them here is
+        # the only way the panel can show what this desk would NOT do and why.
+        # The spent-proposal refusal below is deliberately not one of these: it
+        # HAS a row, and the snapshot reads that row's status for itself.
+        refusals: list[dict] = []
+        for entry in template_menu(mode, facts):
+            item = dict(entry)
+            item["task_id"] = None
+            item["task_status"] = None
+            if not entry["startable"]:
+                refusals.append(dict(entry))
+            else:
+                task_id, status = self._proposal_task(
+                    entry["template_id"], trading_date, universe)
+                item["task_id"] = task_id
+                item["task_status"] = status
+                if status not in STARTABLE_TASK_STATES:
+                    # The gate permits the template; today's proposal for it is
+                    # spent. `start_task` refuses anything but queued or failed,
+                    # so leaving `startable` True here would offer an approve
+                    # button whose only possible answer is a 400.
+                    item["startable"] = False
+                    item["reason"] = (
+                        f"today's proposal for {entry['template_id']} is "
+                        f"already {status}; one task per template per day, so "
+                        "the next one is tomorrow's")
+            items.append(item)
+        # Startable first, then the refusals; the gate's own order within each
+        # half, which is the registry's declaration order.
+        items.sort(key=lambda item: not item["startable"])
+        self.registry.record_event(
+            "atlas_actionables",
+            {"mode": mode, "trading_date": trading_date,
+             "offered": sum(1 for i in items if i["startable"]),
+             # The count keeps its name and its type — a field that changes
+             # JSON shape mid-history poisons every reader of the older rows —
+             # and the refusals themselves travel beside it.
+             "refused": sum(1 for i in items if not i["startable"]),
+             "refusals": refusals})
+        return {"trading_date": trading_date, "items": items}
+
+    def _proposal_task(self, template_id: str, trading_date: str,
+                       universe: str) -> tuple[str, str]:
+        """Today's proposal for this template — its id AND its status.
+
+        The status travels with the id because the caller's verdict depends on
+        it. The dedupe key survives the whole trading day, so a proposal that
+        has already been approved and started is still what this returns; an
+        offer built from the template gate alone would call that startable and
+        the approve it invites answers 400.
+
+        The dedupe key keeps ``AtlasSupervisor``'s shape —
+        ``kind|trading_date|universe|state_hash`` — because ``task_age`` reads
+        the trading date out of it, and a key it cannot parse reads as
+        age-unknown, which ``startable_tasks`` refuses: the very gate this
+        proposal needs to pass.
+
+        The kind is ``proposal:<template_id>``, deliberately outside
+        ``_WORKFLOW_TRIGGERS``, so a proposal sitting unapproved never consumes
+        the unattended desk's daily workflow budget.
+        """
+        kind = f"proposal:{template_id}"
+        dedupe = f"{kind}|{trading_date}|{universe}|{template_id}"
+        # By key, in SQL. A bounded scan answered "no such task" for a key that
+        # exists as soon as the table was deeper than the window, and the
+        # UNIQUE constraint then refused the insert that answer implied.
+        existing = self.registry.get_atlas_task_by_dedupe(dedupe)
+        if existing is not None:
+            return str(existing["task_id"]), str(existing.get("status") or "")
+        task_id = uuid.uuid4().hex[:16]
+        if not self.registry.create_atlas_task(
+                task_id, dedupe, kind, {"template_id": template_id},
+                template_id, origin="proposal"):
+            # Written between the lookup and the insert. The id just minted is
+            # not the one that is stored, and returning it would hand the
+            # operator an approve button for a task that does not exist.
+            raise RuntimeError(
+                f"proposal {dedupe!r} was created between its lookup and its "
+                "insert; the id minted here was never stored")
+        return task_id, "queued"
+
+    def _expire_stale_proposals(self, trading_date: str) -> list[str]:
+        """Retire proposals offered on an earlier trading day.
+
+        A proposal answers "what should this desk do today", so yesterday's
+        unapproved answer is not an answer to today's question. Nothing else
+        expires one: `reconcile_tasks` resolves dispatched work and the age
+        check in `startable_tasks` only *reports* staleness. Left queued, one
+        set per template per day accumulates in the bounded window the gate
+        scans, and a genuine trigger — still inside `max_task_age_days` —
+        drops off the end of it.
+
+        Bounded on purpose: one pass over the same window everything else
+        reads, writing only to the rows that need it. Minting is the only call
+        site because minting is the only thing that creates proposals, so the
+        pile-up cannot outpace the cleanup.
+        """
+        # The supervisor's own parser and window, deliberately: one reader of
+        # the dedupe key's shape, so a change to it cannot silently disagree
+        # with `task_age` about which day a task belongs to.
+        from qlab.operator.atlas import TASK_SCAN_WINDOW, _dedupe_trading_date
+
+        today = trading_date[:10]
+        expired: list[str] = []
+        # Queued proposals only, in SQL. Filtering after the read left this
+        # bounded by the very window it exists to protect: past 200 rows of
+        # history the cleanup stopped seeing the rows it had to expire.
+        # A trigger is never touched — it is a claim about a trading day and
+        # keeps for `max_task_age_days`; expiring one here would disarm the
+        # desk's own autonomy without saying so.
+        for task in self.registry.list_atlas_tasks(
+                TASK_SCAN_WINDOW, status="queued", origin="proposal"):
+            day = _dedupe_trading_date(task.get("dedupe_key"))
+            if day == today:
+                continue
+            self.registry.update_atlas_task(
+                str(task["task_id"]), status="expired",
+                error=f"offered on {day or 'an unreadable date'} and not "
+                      f"approved before {today}; ask again to reopen it")
+            expired.append(str(task["task_id"]))
+        if expired:
+            self.registry.record_event(
+                "atlas_proposals_expired",
+                {"task_ids": expired, "trading_date": today})
+        return expired
+
+    def _asked_refusals(self) -> tuple[str, list[dict]]:
+        """The newest ask's own refusals, and the trading day it was asked on.
+
+        Read from the audit row ``atlas_actionables`` writes, because a refused
+        candidate mints no task and there is no other record of it. Replayed
+        rather than recomposed: this surface may not call ``atlas_facts``, so
+        the only refusal it can show is the one the gate already made — with
+        the day it was made on beside it, which is what says how old the answer
+        is.
+
+        Absence is not an error at any step. A desk nobody has asked, and an
+        ask recorded before this payload carried its refusals, both answer
+        "nothing to add" rather than raising or inventing a verdict.
+        """
+        rows = self.registry.read_events_of_kind("atlas_actionables", limit=1)
+        if not rows:
+            return "", []
+        payload = rows[-1].get("payload")
+        if not isinstance(payload, dict):
+            return "", []
+        day = str(payload.get("trading_date") or "")[:10]
+        refusals = payload.get("refusals")
+        if not isinstance(refusals, list):
+            return day, []
+        return day, [entry for entry in refusals if isinstance(entry, dict)]
+
+    def atlas_actionables_snapshot(self) -> dict:
+        """The newest proposal set, read from the task table — never composed.
+
+        A snapshot must not mint proposals as a side effect of being drawn.
+        `/api/tui` is polled every two seconds, so composing the menu here
+        would write a task row per startable template per poll and turn the
+        desk's queue into a record of nobody having asked anything.
+
+        **``startable`` is never True here.** This surface must not call
+        ``atlas_facts`` — ``_atlas_regime_facts`` latches ``_last_robust_state``,
+        so a two-second poll would consume every regime flip before the observe
+        tick saw it — and without facts the data preconditions cannot be
+        checked. What it CAN establish without them it does check, and reports
+        as an outright refusal: the mode (``check_authority``), the age
+        (``task_age``), the task's own status, and whether the template still
+        exists. Everything else comes back ``startable: None`` with a reason
+        saying where the verdict lives. Unknown must never read the same as
+        permitted — the same reason ``task_age`` reports an unreadable date as
+        ``None`` rather than False, and the same reason ``news_search`` carries
+        no ``offer`` field rather than assert one it did not compute.
+
+        **The ask's own refusals are merged in, with no task.** A candidate the
+        gate refused mints nothing, so composing this from proposal rows alone
+        showed the operator only the half the desk agreed to — in Research that
+        silently drops every plan-creating template from the panel. They arrive
+        as ``startable: False`` with ``task_id: None``: the ask's verdict,
+        replayed. It is the answer as of the ask rather than as of now, which
+        is why the block carries the day it was asked on; a refusal cannot
+        become an approve affordance in the meantime, so a stale one errs on
+        the side the gate already chose.
+        """
+        # The supervisor's own clock and parser: this surface's age answer must
+        # be the one `startable_tasks` would give, not a second opinion.
+        from qlab.operator.atlas import (
+            STARTABLE_TASK_STATES, TASK_SCAN_WINDOW, _dedupe_trading_date,
+            _utc_today)
+        from qlab.operator.templates import (
+            TEMPLATES, TemplateNotAllowed, check_authority)
+
+        rows = self.registry.list_atlas_tasks(
+            TASK_SCAN_WINDOW, origin="proposal")
+        asked_day, asked_refusals = self._asked_refusals()
+        if not rows and not asked_refusals:
+            # Absence, not an error: nobody has asked yet.
+            return {"trading_date": None, "items": []}
+        newest = max([_dedupe_trading_date(row.get("dedupe_key"))
+                      for row in rows] or [""])
+        # An ask that offered nothing mints no row at all, so the newest ask can
+        # be newer than the newest proposal. Its refusals are still the answer
+        # to "what would this desk do today", and yesterday's rows are not.
+        newest = max(newest, asked_day)
+        mode = self.atlas.mode
+        today = _utc_today()[:10]
+        items: list[dict] = []
+        for row in rows:
+            if _dedupe_trading_date(row.get("dedupe_key")) != newest:
+                continue
+            template_id = str(row.get("template_id") or "")
+            status = str(row.get("status") or "")
+            template = TEMPLATES.get(template_id)
+            item = {
+                "template_id": template_id,
+                "purpose": template.purpose if template else "",
+                "creates_plan": bool(template.creates_plan) if template else False,
+                "needs_coordinator": (
+                    bool(template.needs_coordinator) if template else False),
+                "task_id": str(row["task_id"]), "task_status": status,
+                "startable": None, "reason": None,
+            }
+            if template is None:
+                # A release can unregister a template while a proposal for it
+                # is queued. Dropping the row would remove an item from the
+                # client with nothing said; raising would take the whole
+                # snapshot — the entire desk — down for one dead row.
+                item["startable"] = False
+                item["reason"] = (f"{template_id!r} is no longer a registered "
+                                  "template; this proposal cannot start")
+            elif status not in STARTABLE_TASK_STATES:
+                item["startable"] = False
+                item["reason"] = (
+                    f"today's proposal for {template_id} is already {status}; "
+                    "one task per template per day, so the next one is "
+                    "tomorrow's")
+            else:
+                age = self.atlas.task_age(row, today)
+                if age["stale"] is not False:
+                    item["startable"] = False
+                    item["reason"] = age["age_reason"]
+            if item["startable"] is None:
+                try:
+                    check_authority(template_id, mode)
+                except TemplateNotAllowed as exc:
+                    item["startable"] = False
+                    item["reason"] = str(exc)
+                else:
+                    item["reason"] = (
+                        "the data preconditions were not checked here; POST "
+                        "/api/atlas/actionables asks the gate for today's "
+                        "verdict")
+            items.append(item)
+        if asked_day and asked_day == newest:
+            # Only the templates no row already speaks for. A day can hold two
+            # asks in two modes — the first mints a proposal, the second
+            # refuses the same template — and the row is the better account of
+            # the two: it carries the task an approval would bind to, and the
+            # loop above re-checks the mode against it.
+            spoken = {item["template_id"] for item in items}
+            for entry in asked_refusals:
+                template_id = str(entry.get("template_id") or "")
+                if not template_id or template_id in spoken:
+                    continue
+                items.append({
+                    "template_id": template_id,
+                    "purpose": str(entry.get("purpose") or ""),
+                    "creates_plan": bool(entry.get("creates_plan")),
+                    "needs_coordinator": bool(entry.get("needs_coordinator")),
+                    # No task, and that is the fact rather than a gap: the gate
+                    # refused it, so there is nothing queued to approve.
+                    "task_id": None, "task_status": None,
+                    "startable": False,
+                    # The gate's own sentence. A refusal a client cannot read
+                    # is not one an operator can act on, so a refusal that
+                    # arrived without one says which silence it met.
+                    "reason": str(entry.get("reason") or "").strip() or (
+                        f"the desk refused {template_id} when it was asked and "
+                        "did not say why"),
+                })
+        # Known-refused last, exactly as the menu orders its own refusals.
+        items.sort(key=lambda item: item["startable"] is False)
+        return {"trading_date": newest or None, "items": items}
 
     @staticmethod
     def _bounded(text: str, limit: int) -> str:
@@ -3703,7 +4185,20 @@ class UISession:
                 "fast": self.fast_mode,
             },
             "news": self.news_payload(offline),
-            "atlas_tasks": self.registry.list_atlas_tasks(10),
+            # Trigger work only. This key is what the classic TUI draws as
+            # OPEN TASKS and RECENT TASKS, under a heading whose empty state
+            # reads "no autonomous tasks recorded" and beside an AUTHORITY
+            # panel about what Atlas starts unattended — so a proposal here
+            # reads as open autonomous work that nobody authorised, and one ask
+            # in Research fills the ten-row window and pushes real trigger work
+            # off it. Proposals have their own block below.
+            "atlas_tasks": self.registry.list_atlas_tasks(10, origin="trigger"),
+            # The newest proposal set, read from the task table so the client
+            # renders it without a second fetch — and so a poll never mints
+            # one. Asking is what proposes; drawing is what reports. `startable`
+            # here is False (known refused) or None (not checked on this
+            # surface), never True: see `atlas_actionables_snapshot`.
+            "actionables": self.atlas_actionables_snapshot(),
             "approvals": self.actionable_approvals(),
             "quotes": self.quotes(),
             "agents": self.agents(),
@@ -4206,6 +4701,9 @@ def handle_api(session: UISession, method: str, path: str,
         offline = _qbool(query, "offline", session.offline_default)
         facts = session.atlas_facts(offline)
         return 200, {"startable": session.atlas.startable_tasks(facts)}
+
+    if method == "POST" and path == "/api/atlas/actionables":
+        return 200, session.atlas_actionables(off)
 
     if method == "POST" and path == "/api/atlas/observe":
         return 200, session.atlas_observe(off)

@@ -301,6 +301,78 @@ def test_autonomous_tick_runs_only_what_the_mode_permits(reg):
     assert session.started == ["regime_review"]
 
 
+def test_the_beat_drives_an_approval_that_landed_while_the_slot_was_busy():
+    """The sweep needs a caller or it is a method nothing runs.
+
+    Deliberately NOT gated on autonomy: a human already approved this task, and
+    the dispatch that registered its workflow could not drive it. Nothing else
+    comes back for it, so an unattended desk would leave approved work parked
+    at phase one forever.
+    """
+    from qlab.operator.heartbeat import build_owner_tick
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    drove: list[str] = []
+    session.drive_workflow = lambda wid, goal, roles=(): (
+        drove.append(wid) or {"driving": True})
+    # The sweep pre-screens with the driver's own `available()` so a refusal
+    # costs it no attempt. Pinned here, or this test would be a claim about
+    # whether `claude` is on the machine running it rather than about the beat.
+    session.coordinator_driver.available = lambda roles=(), **kwargs: (True, "")
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "[news_read] read the window"},
+        phases=("news-analyst",))["workflow_id"]
+    session.registry.create_atlas_task(
+        "task-parked", "proposal:news_read|2026-08-06|SPY|news_read",
+        "proposal:news_read", {}, "news_read", origin="proposal")
+    session.registry.update_atlas_task("task-parked", status="running",
+                                       workflow_id=workflow_id)
+
+    result = build_owner_tick(session, threading.Lock(), offline=True)()
+
+    assert drove == [workflow_id]
+    assert result["driven"] == [{"task_id": "task-parked",
+                                 "workflow_id": workflow_id, "driving": True}]
+
+
+def test_an_unattended_owner_reaps_the_workflow_it_would_otherwise_respawn():
+    """The reaper was reachable only from the snapshot path and GET
+    /api/workflows — both client polls. An owner running headless never reaped,
+    so a workflow whose coordinator died stayed `running` forever, and the sweep
+    respawns a coordinator for every running workflow it finds. The beat is the
+    one caller that is always there.
+    """
+    from qlab.operator.heartbeat import build_owner_tick
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    drove: list[str] = []
+    session.drive_workflow = lambda wid, goal, roles=(): (
+        drove.append(wid) or {"driving": True})
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "g"},
+        phases=("news-analyst",))["workflow_id"]
+    # A coordinator that died without saying so: the row still reads `running`
+    # and has not been touched since long before the lease could have expired.
+    session.registry.con.execute(
+        "UPDATE workflows SET updated_at=? WHERE workflow_id=?",
+        ["2000-01-01T00:00:00+00:00", workflow_id])
+    session.registry.create_atlas_task(
+        "task-stale", "proposal:news_read|2026-08-06|SPY|stale",
+        "proposal:news_read", {}, "news_read", origin="proposal")
+    session.registry.update_atlas_task("task-stale", status="running",
+                                       workflow_id=workflow_id)
+
+    result = build_owner_tick(session, threading.Lock(), offline=True)()
+
+    assert [row["workflow_id"] for row in result["reaped"]] == [workflow_id]
+    assert session.registry.get_workflow(workflow_id)["status"] == "interrupted"
+    # One tick closes the loop: reaped, reconciled, and therefore not respawned.
+    assert session.registry.get_atlas_task("task-stale")["status"] == "failed"
+    assert drove == []
+
+
 def test_owner_tick_keeps_external_news_fetch_outside_dispatch_lock():
     """Slow providers must not freeze every owner API request."""
     from qlab.operator.heartbeat import build_owner_tick

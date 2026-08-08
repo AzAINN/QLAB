@@ -828,7 +828,22 @@ impl Store {
                     // every snapshot, so a store that armed itself on its own
                     // write outcome would be the client-side latch
                     // `Posture::from_desk` exists to prevent.
+                    //
+                    // A started proposal and a refused one are the same: the
+                    // owner moves the task's own status and serves it back in
+                    // the `actionables` block, so the panel retones from the
+                    // desk's record rather than from this client remembering
+                    // what it asked for — and a refusal there changed nothing
+                    // to remember.
+                    // And an ask holds nothing here either, emphatically: the
+                    // owner persisted the proposals, the next poll brings the
+                    // `actionables` block back, and a client-side copy of what
+                    // it just asked for would be a second account of a list the
+                    // desk already owns.
                     Wrote::Armed { .. }
+                    | Wrote::Proposed { .. }
+                    | Wrote::ProposalStarted { .. }
+                    | Wrote::ProposalRefused { .. }
                     | Wrote::Chose { .. }
                     | Wrote::ChoiceRefused { .. }
                     | Wrote::Decided { .. }
@@ -901,6 +916,22 @@ impl Store {
     /// The predictor board summary, if the owner served one.
     pub fn predictors(&self) -> Option<&crate::model::Predictors> {
         self.snapshot.as_ref()?.predictors.as_ref()
+    }
+
+    /// Today's proposals, as the owner last served them.
+    ///
+    /// An owner that serves no block and one that has minted no proposals
+    /// answer the same way here, because the panel draws nothing for either —
+    /// an empty box over a desk nobody has asked would read as a desk with
+    /// nothing to do. The two are still different facts and the model keeps
+    /// them apart (`Snapshot::actionables` is an `Option`); this is the reader
+    /// for which they happen to coincide.
+    pub fn actionables(&self) -> &[crate::model::ActionItem] {
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.actionables.as_ref())
+            .map(|acts| acts.items.as_slice())
+            .unwrap_or_default()
     }
 
     /// What the owner's coordinator is doing, if it said.

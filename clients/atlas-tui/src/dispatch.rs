@@ -22,7 +22,7 @@
 mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
-    use crate::net::write::{Choice, Execution, Login, WriteClient, WriteError};
+    use crate::net::write::{Choice, Execution, Login, Proposed, Start, WriteClient, WriteError};
     use crate::store::Posture;
     use std::sync::Arc;
 
@@ -186,6 +186,12 @@ mod armed {
             Command::AlpacaLogin { .. } => "store the alpaca login".to_string(),
             Command::TestAlpaca => "test the alpaca login".to_string(),
             Command::SetLlm { surface, .. } => format!("point {surface} at a model"),
+            // The task, because that is what was approved. The template id is
+            // the word an operator typed; the task is the row the owner
+            // refuses or starts, and a refusal naming the other one cannot be
+            // matched against the desk's own record of what happened.
+            Command::ApproveAction(task) => format!("approve {task}"),
+            Command::Actionables => "ask what the desk would do".to_string(),
             // One name for both answers. What failed is the act of recording
             // the desk's posture, and a refusal that read "leave this desk
             // read-only — refused" would be a sentence an operator has to
@@ -415,6 +421,57 @@ mod armed {
                 },
                 Err(err) => Wrote::Failed {
                     what: "test the alpaca login".to_string(),
+                    said: err.to_string(),
+                },
+            },
+            // The operator asking what the desk would do. A write because it
+            // is one — the owner mints a `proposal`-origin task per startable
+            // template — and the only caller of the route that makes the WOULD
+            // DO panel non-empty. Nothing is granted: the items come back
+            // gate-checked and are checked again at approval, and this cannot
+            // start any of them.
+            //
+            // The answer it reports is a pair of counts. The list itself lands
+            // in the next snapshot, which the refetch below already asks for —
+            // a second copy carried here would be two accounts of one answer.
+            Command::Actionables => match client.actionables().await {
+                Ok(Proposed { offered, refused }) => Wrote::Proposed { offered, refused },
+                Err(err) => Wrote::Failed {
+                    what: "ask what the desk would do".to_string(),
+                    said: err.to_string(),
+                },
+            },
+            // The operator approving one of today's proposals. Governance
+            // still lives at the owner — the route re-runs `check_startable`,
+            // and a plan-creating template is refused below `propose` — so the
+            // three answers are reported as three things. A 200 that says
+            // `started: false` is a *refusal*, not a start: reading one of
+            // those as work in flight is exactly what shipped once on the
+            // execution path, and the pipeline pane would then be waiting on a
+            // run nobody began.
+            Command::ApproveAction(task_id) => match client.start_task(&task_id).await {
+                Ok(Start::Started {
+                    template,
+                    workflow_id,
+                }) => Wrote::ProposalStarted {
+                    task_id,
+                    template,
+                    workflow_id,
+                },
+                Ok(Start::Refused { blocked_by, reason }) => Wrote::ProposalRefused {
+                    task_id,
+                    blocked_by,
+                    reason,
+                },
+                // Started and already over, inside one 200. A failure rather
+                // than a refusal: nothing declined it, and there is nothing
+                // for the operator to move the desk's mode about.
+                Ok(Start::Failed(said)) => Wrote::Failed {
+                    what: format!("approve {task_id}"),
+                    said,
+                },
+                Err(err) => Wrote::Failed {
+                    what: format!("approve {task_id}"),
                     said: err.to_string(),
                 },
             },

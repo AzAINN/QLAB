@@ -1458,6 +1458,39 @@ def test_the_queued_block_groups_repeats_instead_of_reciting_them():
     assert "startable" in text
 
 
+def test_the_queued_block_keeps_a_proposal_apart_from_a_trigger():
+    """A proposal starts when the operator approves it and never on the beat.
+
+    Grouping on `(template_id, startable, reason)` alone collapsed the two into
+    one line reading "regime_review: startable ×2", which told the model the
+    desk would get to both on its own. It starts nothing either way, so this is
+    fidelity rather than safety — but a manager reasoning from that line is
+    reasoning about a desk that does not exist.
+    """
+    text = "\n".join(_startable_block({"startable": [
+        {"task_id": "t1", "template_id": "regime_review", "startable": True,
+         "stale": False, "origin": "trigger"},
+        {"task_id": "t2", "template_id": "regime_review", "startable": True,
+         "stale": False, "origin": "proposal"}]}))
+    lines = [line for line in text.splitlines() if "regime_review" in line]
+    assert len(lines) == 2
+    assert "×2" not in text
+    assert any("approval" in line for line in lines)
+    assert any("approval" not in line for line in lines)
+
+
+def test_an_unrecorded_origin_still_renders_a_sentence():
+    """`""` is the one origin that reads as neither NULL nor a written choice.
+    The writer refuses it, the reader refuses to treat it as a permit — and
+    this line rendered it as `[: waits for ...]`, which is a prompt the model
+    has to guess at."""
+    text = "\n".join(_startable_block({"startable": [
+        {"task_id": "t1", "template_id": "regime_review", "startable": True,
+         "stale": False, "origin": ""}]}))
+    assert "[: " not in text
+    assert "unrecorded" in text
+
+
 def test_the_queued_block_says_stale_rather_than_implying_a_permit_problem():
     """A stale task's refusal must not read as 'widen the permit and it runs'."""
     text = "\n".join(_startable_block({"startable": [

@@ -81,6 +81,18 @@ pub trait View {
     /// (a blotter page, a crosshair) or retains nothing at all.
     fn entered(&self) {}
 
+    /// This pane has just gone off screen.
+    ///
+    /// The other half of `entered`, called on the view the last frame drew
+    /// when the nav moves elsewhere. It exists for what a view *publishes*
+    /// rather than for what it keeps: ATLAS vouches for the proposals its last
+    /// frame drew, and the approval path reads that vouching from another
+    /// pane — so a list that outlived the frame would let `/do` approve an
+    /// item nobody is looking at. A default of nothing: a cursor is worth
+    /// keeping across a switch (see `entered`), a claim about what is on
+    /// screen is not.
+    fn left(&self) {}
+
     /// Whether this view is holding a text field open, and therefore owns every
     /// keystroke — including the ones the shell claims for the whole
     /// workstation.
@@ -229,8 +241,14 @@ impl Views {
     ) {
         // The switch, seen the only place it cannot be missed: the registry is
         // asked for exactly one pane per frame, so an id that differs from the
-        // last one it drew *is* the operator having moved.
-        if self.shown.replace(Some(id)) != Some(id) {
+        // last one it drew *is* the operator having moved. Both ends of it: the
+        // pane being left is told before the one being entered, so a view that
+        // publishes what it drew can retract it while the fact is still true.
+        let before = self.shown.replace(Some(id));
+        if before != Some(id) {
+            if let Some(before) = before {
+                self.at(before).left();
+            }
             self.at(id).entered();
         }
         self.at(id).draw(f, area, store, fx, now);
@@ -270,6 +288,29 @@ impl Views {
     /// Aim BOOK's plan cursor, and say where its band left it.
     pub fn select_plan(&mut self, plan_id: &str, store: &Store) -> book::PlanAt {
         self.book.select_plan(plan_id, store)
+    }
+
+    /// Whether ATLAS's would-do panel drew this proposal — this template bound
+    /// to this task — on the last frame.
+    ///
+    /// Routed through the registry for `select_plan`'s reason: the surface
+    /// that drew something is the only one that knows it did, and the command
+    /// line has to ask rather than assume. Approving what the operator cannot
+    /// see is the one thing the `/do` scope may not do, and this is the
+    /// question that stops it.
+    ///
+    /// The task travels with the template because the desk moves under the
+    /// frame: the snapshot polls every two seconds, and a proposal re-minted
+    /// between the frame and the keystroke keeps its word and changes its id.
+    #[cfg(feature = "operator")]
+    pub fn drew_proposal(&self, template: &str, task: &str) -> bool {
+        self.atlas.drew(template, task)
+    }
+
+    /// Ask ATLAS to draw one proposal first.
+    #[cfg(feature = "operator")]
+    pub fn ask_about_proposal(&mut self, template: &str) {
+        self.atlas.ask_about(template);
     }
 
     fn at(&self, id: ViewId) -> &dyn View {

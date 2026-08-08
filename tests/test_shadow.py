@@ -15,8 +15,10 @@ def reg():
     r.close()
 
 
-def _task(reg, task_id, trigger, status, *, action_taken=None):
-    reg.create_atlas_task(task_id, f"{task_id}-key", trigger, {}, "regime_review")
+def _task(reg, task_id, trigger, status, *, action_taken=None,
+          origin="trigger"):
+    reg.create_atlas_task(task_id, f"{task_id}-key", trigger, {},
+                          "regime_review", origin=origin)
     conclusion = None if action_taken is None else {"action_taken": action_taken}
     reg.update_atlas_task(task_id, status=status, conclusion=conclusion)
 
@@ -102,6 +104,28 @@ def test_clean_history_reports_sufficient_evidence_but_grants_nothing(reg):
     # Even with clean evidence, this is never a promotion.
     assert "separate design review" in card["readiness"]["note"]
     assert "grant" not in card["tasks"]
+
+
+def test_an_approved_proposal_does_not_move_the_false_trigger_rate(reg):
+    """The measurement that governs authority promotion is about UNATTENDED
+    judgment. A proposal is attended by construction — a human asked for it and
+    a human approved it — so an approved proposal concluding `action_taken:
+    False` counted here would be scored as a trigger that fired without earning
+    its wake, when no trigger fired at all."""
+    _task(reg, "t1", "regime_flip", "completed", action_taken=True)
+    clean = shadow_scorecard(reg)["tasks"]
+    assert clean["false_trigger_rate"] == pytest.approx(0.0)
+
+    _task(reg, "p1", "proposal:regime_review", "completed", action_taken=False,
+          origin="proposal")
+    card = shadow_scorecard(reg)["tasks"]
+
+    assert card["false_trigger_rate"] == pytest.approx(0.0)
+    assert card["total"] == 1
+    assert card["no_action_conclusions"] == 0
+    # And it does not invent a trigger kind either: `by_trigger` is what an
+    # operator reads to see which conditions wake this desk up.
+    assert "proposal:regime_review" not in card["by_trigger"]
 
 
 def test_since_filter_narrows_the_window(reg):

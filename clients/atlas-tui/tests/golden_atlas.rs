@@ -1,12 +1,13 @@
 //! ATLAS: the conversation with the desk manager, and the board it reasons from.
 //!
-//! Three claims run through everything here. The chat renders both voices and
+//! Four claims run through everything here. The chat renders both voices and
 //! keeps their order, wrapped to the pane rather than clipped. The sidebar is
 //! the owner's own board summary — champion against baseline with every number
 //! the verdict was derived from, and absence named the way the owner names it.
-//! And the ask row is the posture's: straight-in typing in an armed window, no
-//! row at all in glass, and the workstation's own keys still live over an
-//! empty row.
+//! Over it sits today's proposal list, where the gate's three answers stay three
+//! answers and a refusal is rendered rather than dropped. And the ask row is the
+//! posture's: straight-in typing in an armed window, no row at all in glass, and
+//! the workstation's own keys still live over an empty row.
 //!
 //! Assertions read through `content`, the columns this view owns. The tape and
 //! the pulse rail render words of their own, so a pin on the whole frame could
@@ -45,6 +46,24 @@ fn atlas_from(json: &str) -> Client {
     client.press(KeyCode::Char('1'));
     client
 }
+
+/// A desk whose owner served exactly these proposals and nothing else.
+fn acts_from(items: &str) -> Client {
+    atlas_from(&format!(
+        r#"{{"actionables": {{"trading_date": "2026-06-02", "items": [{items}]}}}}"#
+    ))
+}
+
+/// The owner's own refusal for a plan-creating template below Propose mode
+/// (`check_authority`, qlab/operator/templates.py). Verbatim, because what the
+/// panel is for is the sentence the gate wrote.
+const REFUSED: &str = "'desk_rebalance_review' creates a paper plan, which requires \
+                       Propose mode; current mode is 'research'";
+
+/// The reason the snapshot attaches to an item it did not rule on
+/// (`atlas_actionables_snapshot`). Also verbatim.
+const NOT_RULED: &str = "the data preconditions were not checked here; POST \
+                         /api/atlas/actionables asks the gate for today's verdict";
 
 #[test]
 fn the_atlas_view_renders_the_chat_and_the_board_at_120x36() {
@@ -171,6 +190,148 @@ fn a_narrow_pane_drops_the_board_whole_and_keeps_the_chat() {
     assert!(body.contains("why is the book flat"), "{body}");
 }
 
+// -- what the desk would do -------------------------------------------------
+
+#[test]
+fn the_sidebar_lists_what_the_desk_would_do_and_why_it_would_not() {
+    let client = acts_from(&format!(
+        r#"{{"template_id": "regime_review", "purpose": "Re-read the regime panel.",
+             "creates_plan": false, "needs_coordinator": true,
+             "startable": true, "reason": null,
+             "task_id": "t1", "task_status": "queued"}},
+           {{"template_id": "desk_rebalance_review", "purpose": "Propose a rebalance.",
+             "creates_plan": true, "needs_coordinator": true,
+             "startable": false, "reason": "{REFUSED}",
+             "task_id": null, "task_status": "queued"}}"#
+    ));
+    let body = content(&client.frame(120, 36));
+    assert!(body.contains("regime_review"), "{body}");
+    // The refusal is the product: a template silently dropped teaches nothing.
+    assert!(body.contains("desk_rebalance_review"), "{body}");
+    assert!(body.contains("requires Propose mode"), "{body}");
+}
+
+#[test]
+fn an_owner_that_serves_no_actionables_draws_no_panel() {
+    // Absence is not an error, and not an empty box either — and an owner that
+    // serves the block with nothing in it is the same nothing to draw.
+    for json in [
+        r#"{"actionables": {"items": []}}"#,
+        r#"{"actionables": null}"#,
+        "{}",
+    ] {
+        let body = content(&atlas_from(json).frame(120, 36));
+        assert!(!body.contains("WOULD DO"), "{json}\n{body}");
+    }
+}
+
+#[test]
+fn an_item_the_snapshot_did_not_rule_on_reads_as_neither_offered_nor_refused() {
+    // `startable` is tri-state and `true` is unreachable on this surface: the
+    // snapshot reports what it checked, and the verdict lives at the POST. A
+    // client that drew `null` as either answer would be inventing one.
+    let client = acts_from(&format!(
+        r#"{{"template_id": "regime_review", "purpose": "Re-read the regime panel.",
+             "startable": null, "reason": "{NOT_RULED}",
+             "task_id": "t1", "task_status": "queued"}}"#
+    ));
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "regime_review");
+    assert!(row.contains('?'), "{row}");
+    assert!(!row.contains('✓') && !row.contains('✗'), "{row}");
+    let body = content(&frame);
+    // What it would do is the item's sentence; where the verdict lives is said
+    // once, for the marker, rather than four wrapped rows per item.
+    assert!(body.contains("Re-read the regime panel"), "{body}");
+    assert!(body.contains("not checked on this surface"), "{body}");
+    // A list with nothing refused says so as a count of proposals, not as a
+    // refusal count of zero.
+    assert!(body.contains("1 proposed"), "{body}");
+    // And the three verdicts are three tones, not two.
+    let buf = client.buffer(120, 36);
+    let t = atlas::theme::theme();
+    let pending = harness::body_style_of(&buf, "regime_review").fg;
+    assert_eq!(
+        pending,
+        Some(t.text_secondary),
+        "pending took another verdict's tone"
+    );
+    assert_ne!(pending, Some(t.text_primary));
+    assert_ne!(pending, Some(t.text_dim));
+}
+
+#[test]
+fn a_spent_proposal_carries_the_status_that_says_so() {
+    // The list keeps the whole trading day, running and completed items with
+    // it, so both surfaces agree about what was asked. `task_status` is the
+    // only thing that tells a live proposal from a spent one.
+    let client = acts_from(
+        r#"{"template_id": "desk_brief", "purpose": "Summarize the desk.",
+            "startable": false, "reason": "today's proposal for desk_brief is already running",
+            "task_id": "t9", "task_status": "running"}"#,
+    );
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "desk_brief");
+    assert!(row.contains("running"), "{row}");
+}
+
+#[test]
+fn a_busy_day_keeps_the_board_and_counts_what_it_could_not_draw() {
+    // The list only grows over a day. The board is what the sidebar is for, so
+    // the panel is capped — and what does not fit is counted, never dropped in
+    // silence.
+    let items = (0..9)
+        .map(|i| {
+            format!(
+                r#"{{"template_id": "template_{i}", "purpose": "Purpose {i}.",
+                     "startable": false, "reason": "{REFUSED}",
+                     "task_id": "t{i}", "task_status": "queued"}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = content(&acts_from(&items).frame(120, 36));
+    assert!(
+        body.contains("PREDICTOR BOARD"),
+        "the board was pushed off:\n{body}"
+    );
+    assert!(
+        body.contains("more"),
+        "the unshown items were dropped in silence:\n{body}"
+    );
+    // Every item here is refused, so there is no `?` on screen and no row is
+    // spent explaining one. The chip counts them all.
+    assert!(
+        !body.contains("not checked on this surface"),
+        "a legend for a marker nothing drew:\n{body}"
+    );
+    assert!(body.contains("9 of 9 refused"), "{body}");
+}
+
+#[test]
+fn a_sentence_the_owner_did_not_write_is_cut_rather_than_costing_its_item_a_row() {
+    // Nothing on the wire is guaranteed to be the owner's: a proxy in front of
+    // the desk answers with a page, and `purpose` is where it would land.
+    // Unbounded, that item is taller than the whole panel, so the cap drops it
+    // whole and the operator never learns the proposal exists. Bounded, it
+    // renders — cut, and marked as cut.
+    let flood = "lorem ".repeat(200);
+    let client = acts_from(&format!(
+        r#"{{"template_id": "regime_review", "purpose": "{flood}",
+             "startable": null, "reason": null, "task_id": "t1", "task_status": "queued"}},
+           {{"template_id": "desk_rebalance_review", "purpose": "Propose a rebalance.",
+             "startable": false, "reason": "{REFUSED}", "task_id": "t2", "task_status": "queued"}}"#
+    ));
+    let body = content(&client.frame(120, 36));
+    assert!(
+        body.contains("regime_review"),
+        "the flooded item was dropped:\n{body}"
+    );
+    assert!(body.contains("…"), "the cut was not marked:\n{body}");
+    // And what it crowded out is counted rather than vanishing.
+    assert!(body.contains("+1 more, unshown"), "{body}");
+}
+
 // -- the ask row ------------------------------------------------------------
 
 #[test]
@@ -290,5 +451,25 @@ mod armed {
     #[test]
     fn the_armed_atlas_view_renders_its_ask_row_at_120x36() {
         insta::assert_snapshot!(armed().frame(120, 36));
+    }
+
+    #[test]
+    fn the_would_do_list_is_the_same_list_in_an_armed_window() {
+        // Reading what the desk would do is not a write, so the panel is the
+        // posture's business only in that a glass window cannot act on it. The
+        // read-only leg of this claim is every test above; this is the other.
+        let mut store = super::store_from(&format!(
+            r#"{{"actionables": {{"items": [
+                 {{"template_id": "desk_rebalance_review", "purpose": "Propose a rebalance.",
+                   "startable": false, "reason": "{}", "task_id": "t2",
+                   "task_status": "queued"}}]}}}}"#,
+            super::REFUSED
+        ));
+        store.posture = Posture::Operator;
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('1'));
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("WOULD DO"), "{body}");
+        assert!(body.contains("requires Propose mode"), "{body}");
     }
 }

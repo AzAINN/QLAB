@@ -75,6 +75,7 @@ fn every_modeled_section_is_present_in_the_fixture() {
     assert!(!s.algorithms.is_empty(), "algorithms");
     assert!(!s.atlas_chat.is_empty(), "atlas_chat");
     assert!(s.predictors.is_some(), "predictors");
+    assert!(s.actionables.is_some(), "actionables");
 }
 
 #[test]
@@ -116,6 +117,44 @@ fn the_chat_and_the_board_decode_the_shapes_the_owner_serves() {
     assert_eq!(bare_board.status.as_deref(), Some("never_ran"));
     assert!(bare_board.champion.is_none());
     assert!(bare_board.age_days.is_none(), "missing age is not day zero");
+}
+
+#[test]
+fn the_actionables_block_keeps_its_verdict_three_valued() {
+    // `atlas_actionables_snapshot` serves `false` (known refused) or `null`
+    // (not checked here — the verdict lives at the POST), and never `true`. A
+    // model that decoded the third state as either of the other two would make
+    // this client claim a verdict the owner did not compute.
+    let s = snapshot();
+    let acts = s.actionables.as_ref().expect("actionables");
+    assert_eq!(acts.items.len(), 2);
+    assert_eq!(acts.items[0].template_id.as_deref(), Some("regime_review"));
+    assert_eq!(
+        acts.items[0].startable, None,
+        "an unchecked item is not a permitted one"
+    );
+    assert!(acts.items[0].reason.is_some());
+    assert_eq!(acts.items[1].startable, Some(false));
+    assert_eq!(acts.items[1].task_status.as_deref(), Some("running"));
+    assert_eq!(acts.items[1].task_id.as_deref(), Some("3b7e05c19a4d6612"));
+
+    // `true` is the POST's own answer. Unreachable on the snapshot today, and
+    // decoded rather than rejected so the client cannot disagree with the gate
+    // the day it arrives.
+    let posted: Snapshot = serde_json::from_str(
+        r#"{"actionables": {"items": [{"template_id": "regime_review", "startable": true}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(posted.actionables.unwrap().items[0].startable, Some(true));
+
+    // Absent whole, and an empty-or-null list, are all a desk nobody has asked
+    // — none of them may reject the payload the whole workstation is drawn from.
+    assert!(serde_json::from_str::<Snapshot>("{}")
+        .unwrap()
+        .actionables
+        .is_none());
+    let null: Snapshot = serde_json::from_str(r#"{"actionables": {"items": null}}"#).unwrap();
+    assert!(null.actionables.unwrap().items.is_empty());
 }
 
 #[test]

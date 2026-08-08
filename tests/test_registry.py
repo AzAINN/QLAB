@@ -907,6 +907,108 @@ def test_equity_marks_gains_the_book_column_on_an_existing_table(tmp_path):
         reg.close()
 
 
+# --- a task's origin decides who may start it --------------------------------
+
+def test_an_empty_origin_is_refused_at_the_writer(reg):
+    """`origin` decides whether the heartbeat may start a task unattended, so
+    the one value that reads as neither NULL nor a written choice must never
+    reach the column. Refuse it at the writer instead of resolving it later.
+    """
+    with pytest.raises(ValueError, match="origin must be a non-empty string"):
+        reg.create_atlas_task("t-empty", "k|2026-08-06|SPY|a", "regime_shift",
+                              {}, "regime_review", origin="")
+    with pytest.raises(ValueError, match="origin must be a non-empty string"):
+        reg.create_atlas_task("t-blank", "k|2026-08-06|SPY|b", "regime_shift",
+                              {}, "regime_review", origin="   ")
+    assert reg.get_atlas_task("t-empty") is None
+    assert reg.get_atlas_task("t-blank") is None
+
+
+def test_atlas_tasks_gains_the_origin_column_on_an_existing_table(tmp_path):
+    """An atlas_tasks table created before `origin` existed must be migrated.
+
+    _SCHEMA never touches an already-created table, so without the explicit
+    ALTER the user's real dev DB is the only place this fails — every test
+    would pass on a fresh registry while the desk broke on the one that matters.
+    """
+    path = tmp_path / "registry.duckdb"
+    reg = Registry(str(path))
+    reg.con.execute("DROP TABLE atlas_tasks")
+    # The pre-column DDL, verbatim from the parent commit.
+    reg.con.execute(
+        "CREATE TABLE atlas_tasks (task_id VARCHAR PRIMARY KEY, "
+        "dedupe_key VARCHAR UNIQUE, trigger_kind VARCHAR, trigger_payload JSON, "
+        "template_id VARCHAR, status VARCHAR, workflow_id VARCHAR, "
+        "conclusion JSON, error VARCHAR, attempt_count INTEGER, "
+        "created_at VARCHAR, started_at VARCHAR, completed_at VARCHAR, "
+        "updated_at VARCHAR)")
+    reg.con.execute(
+        "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
+        "trigger_payload, template_id, status, attempt_count, created_at, "
+        "updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ["old-1", "regime_shift|2026-08-06|SPY|old", "regime_shift", "{}",
+         "regime_review", "queued", 0, "2026-08-06T00:00:00Z",
+         "2026-08-06T00:00:00Z"])
+    reg.close()
+
+    reg = Registry(str(path))
+    try:
+        old = reg.get_atlas_task("old-1")
+        # The column exists (the read would KeyError otherwise) and the
+        # pre-column row is NULL, which the reader owes an answer for.
+        assert "origin" in old
+        assert old["origin"] is None
+        assert reg.create_atlas_task("new-1", "regime_shift|2026-08-06|SPY|new",
+                                     "regime_shift", {}, "regime_review")
+        assert reg.get_atlas_task("new-1")["origin"] == "trigger"
+    finally:
+        reg.close()
+
+
+def test_a_filtered_task_scan_keeps_a_legacy_null_origin_as_trigger_work(reg):
+    """`origin='trigger'` in SQL would drop every pre-column row, and those are
+    all trigger work — the desk's own autonomy, filtered out by a scan that was
+    added to protect it. The status filter is exact by comparison: `status` has
+    never been NULL."""
+    reg.con.execute(
+        "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
+        "trigger_payload, template_id, status, attempt_count, created_at, "
+        "updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ["legacy", "regime_flip|2026-08-06|SPY|old", "regime_flip", "{}",
+         "regime_review", "queued", 0, "2026-08-06T00:00:00Z",
+         "2026-08-06T00:00:00Z"])
+    reg.create_atlas_task("fresh", "regime_flip|2026-08-07|SPY|new",
+                          "regime_flip", {}, "regime_review")
+    reg.create_atlas_task("offered", "proposal:desk_brief|2026-08-07|SPY|d",
+                          "proposal:desk_brief", {}, "desk_brief",
+                          origin="proposal")
+    reg.update_atlas_task("fresh", status="running")
+
+    trigger_work = {t["task_id"] for t in reg.list_atlas_tasks(50, origin="trigger")}
+    assert trigger_work == {"legacy", "fresh"}
+    assert {t["task_id"] for t in reg.list_atlas_tasks(50, status="queued")} == {
+        "legacy", "offered"}
+    assert [t["task_id"] for t in reg.list_atlas_tasks(
+        50, status="queued", origin="proposal")] == ["offered"]
+
+
+def test_a_task_is_found_by_its_dedupe_key_without_scanning(reg):
+    """The dedupe key is UNIQUE, so the lookup belongs in SQL. Reading it out of
+    a bounded scan meant a table deeper than the window answered 'no such task'
+    for a key that exists — and the caller then minted a duplicate id."""
+    reg.create_atlas_task("only", "proposal:desk_brief|2026-08-07|SPY|d",
+                          "proposal:desk_brief", {}, "desk_brief",
+                          origin="proposal")
+    for i in range(60):
+        reg.create_atlas_task(f"noise-{i}", f"regime_flip|2026-08-07|SPY|{i}",
+                              "regime_flip", {}, "regime_review")
+
+    found = reg.get_atlas_task_by_dedupe("proposal:desk_brief|2026-08-07|SPY|d")
+
+    assert found["task_id"] == "only"
+    assert reg.get_atlas_task_by_dedupe("nothing|like|this|key") is None
+
+
 # --- phase graphs must be executable, not merely well-named ------------------
 
 def test_validate_phase_graph_rejects_an_unknown_phase_type():

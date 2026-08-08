@@ -3594,10 +3594,25 @@ def test_a_dispatched_task_fails_when_the_restart_interrupts_its_workflow():
 
 # --- an approved action that could not be driven is driven later -------------
 
+def _drive_screen(session, monkeypatch, verdict=lambda roles: (True, "")):
+    """Pin the driver's own pre-screen for the sweep.
+
+    `drive_pending_tasks` asks `available()` before it spends an attempt, so
+    without this every sweep test below would be a claim about whether `claude`
+    is on the machine running it rather than about the sweep. `verdict` takes
+    the graph's roles, because the screen is per-graph and that is the whole
+    reason a refusal must not cost the sweep its budget.
+    """
+    monkeypatch.setattr(
+        session.coordinator_driver, "available",
+        lambda roles=(), **kwargs: verdict(tuple(roles)))
+
+
 def test_an_approved_action_that_could_not_be_driven_is_driven_later(session, monkeypatch):
     """One coordinator at a time means an approval can land while the slot is
     busy. Registering a workflow is not running it — without this sweep the
     task sits in `running` with nothing walking its phases."""
+    _drive_screen(session, monkeypatch)
     drove: list[str] = []
     monkeypatch.setattr(session, "drive_workflow",
                         lambda wid, goal, roles=(): drove.append(wid) or
@@ -3621,6 +3636,7 @@ def test_an_approved_action_that_could_not_be_driven_is_driven_later(session, mo
 def test_the_sweep_drives_one_at_a_time(session, monkeypatch):
     """The owner has one coordinator slot; driving two would be the bug
     invariant 9 already caught once."""
+    _drive_screen(session, monkeypatch)
     drove: list[str] = []
     monkeypatch.setattr(session, "drive_workflow",
                         lambda wid, goal, roles=(): drove.append(wid) or
@@ -3746,6 +3762,7 @@ def test_the_sweep_drives_the_workflow_with_its_own_goal_and_graph(session, monk
     """What the coordinator is told is what the workflow says, not a blank.
     The roles decide which provider serves the dispatch — an empty tuple is an
     unnamed graph, which routes every one-role read to the claude coordinator."""
+    _drive_screen(session, monkeypatch)
     handed: dict = {}
     monkeypatch.setattr(
         session, "drive_workflow",
@@ -3783,6 +3800,7 @@ def test_a_refused_candidate_does_not_park_the_one_behind_it(session, monkeypatc
     is down is refused while a claude review would start. Stopping at the first
     refusal would leave every later approval parked forever — this method's own
     bug, reintroduced for a subset."""
+    _drive_screen(session, monkeypatch)
     refused = _park(session, 1)
     drivable = _park(session, 2)
     monkeypatch.setattr(
@@ -3799,6 +3817,7 @@ def test_a_refused_candidate_does_not_park_the_one_behind_it(session, monkeypatc
 def test_the_sweep_asks_the_oldest_parked_approval_first(session, monkeypatch):
     """The registry lists newest-first. Swept in that order, a young doomed
     workflow is retried ahead of an older healthy one on every beat."""
+    _drive_screen(session, monkeypatch)
     asked: list[str] = []
     monkeypatch.setattr(session, "drive_workflow",
                         lambda wid, goal, roles=(): asked.append(wid) or
@@ -3813,14 +3832,19 @@ def test_the_sweep_asks_the_oldest_parked_approval_first(session, monkeypatch):
     assert asked == [oldest, newest]
 
 
-def test_a_desk_wide_refusal_is_asked_a_bounded_number_of_times(session, monkeypatch):
-    """No `claude` on PATH refuses every candidate. Uncapped, that is one
-    `atlas_coordinator_skipped` row per running task per beat, forever."""
+def test_a_drive_that_fails_past_the_screen_is_asked_a_bounded_number_of_times(
+    session, monkeypatch,
+):
+    """The cap bounds real `drive()` calls: the screen said yes and the spawn
+    failed anyway — a coordinator that could not start, or the slot taken
+    between the two. Uncapped, that is one audit row per running task per beat,
+    forever."""
+    _drive_screen(session, monkeypatch)
     asked: list[str] = []
     monkeypatch.setattr(session, "drive_workflow",
                         lambda wid, goal, roles=(): asked.append(wid) or
                         {"driving": False,
-                         "reason": "the `claude` CLI is not on PATH"})
+                         "reason": "coordinator failed to start"})
     for n in range(ui_server._DRIVE_ATTEMPTS_PER_SWEEP + 1):
         _park(session, n)
 
@@ -3830,10 +3854,36 @@ def test_a_desk_wide_refusal_is_asked_a_bounded_number_of_times(session, monkeyp
     assert len(swept) == ui_server._DRIVE_ATTEMPTS_PER_SWEEP
 
 
+def test_a_screened_out_candidate_costs_the_sweep_nothing(session, monkeypatch):
+    """The starvation this screen removes. `available()` is per-graph and
+    deterministic in a stable environment, so three parked one-role tasks whose
+    daemon is down were re-attempted on every beat — spending the whole budget
+    on the same three refusals — while a fourth parked task that WOULD drive
+    was never reached on any beat, forever."""
+    for n in range(1, ui_server._DRIVE_ATTEMPTS_PER_SWEEP + 1):
+        _park(session, n)
+    drivable = _park(session, 9, phases=("analyst", "challenger", "optimizer",
+                                         "referee", "reporter"))
+    _drive_screen(session, monkeypatch,
+                  verdict=lambda roles: (roles != ("news-analyst",),
+                                         "the daemon is down"))
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+
+    swept = session.drive_pending_tasks()
+
+    assert drove == [drivable]
+    # No audit row and no attempt spent on the three the driver would refuse.
+    assert [row["workflow_id"] for row in swept] == [drivable]
+
+
 def test_a_later_sweep_drives_the_next_parked_task(session, monkeypatch):
     """The first drive takes the slot, so the second waits — but it must not
     wait forever. Once the first workflow resolves, the next beat picks up the
     one behind it."""
+    _drive_screen(session, monkeypatch)
     drove: list[str] = []
     monkeypatch.setattr(session, "drive_workflow",
                         lambda wid, goal, roles=(): drove.append(wid) or
@@ -3860,6 +3910,7 @@ def test_a_later_sweep_drives_the_next_parked_task(session, monkeypatch):
 def test_an_undriven_dispatch_reports_that_it_was_not_driven(session, monkeypatch):
     """A refusal is not a drive. The sweep reports what actually happened so
     the next beat can try again rather than believing the slot is taken."""
+    _drive_screen(session, monkeypatch)
     monkeypatch.setattr(session, "drive_workflow",
                         lambda wid, goal, roles=(): {
                             "driving": False, "reason": "the `claude` CLI is not on PATH"})

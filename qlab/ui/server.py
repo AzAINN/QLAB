@@ -3262,6 +3262,15 @@ class UISession:
         park every later candidate behind it, which is the state this method
         exists to remove. Refusals are attempted past, up to
         ``_DRIVE_ATTEMPTS_PER_SWEEP``; the return value carries every attempt.
+
+        And a candidate the driver would refuse costs no attempt at all. That
+        cap exists to bound audit rows, and ``available()`` is deterministic per
+        graph in a stable environment: three parked one-role tasks whose daemon
+        is down would otherwise consume the whole budget on the same three
+        refusals every beat, and a fourth task that WOULD drive is never
+        reached on any beat — the parked-forever state this method removes,
+        rebuilt in bounded form. So the screen is asked first, without
+        emitting, and the cap bounds real ``drive()`` calls.
         """
         from qlab.operator.atlas import (
             TASK_SCAN_WINDOW,
@@ -3297,19 +3306,29 @@ class UISession:
             # The row's own id, not the task's copy of it: they agree, and the
             # one that was just read is the one being driven.
             workflow_id = str(workflow["workflow_id"])
+            # The roles are read from the step rows rather than re-derived from
+            # their phases: `start_workflow` resolved them once, and the column
+            # is what this graph was created with. Read here rather than at the
+            # call below because the screen needs them first.
+            roles = tuple(str(step["agent"])
+                          for step in workflow.get("steps") or ())
+            # The driver's own answer, asked without emitting anything. A
+            # refusal here is not an attempt: `drive` would record an
+            # `atlas_coordinator_skipped` row and spend one of the sweep's
+            # three, which is what starved the fourth parked approval behind
+            # three that could never move.
+            ok, _ = self.coordinator_driver.available(roles)
+            if not ok:
+                continue
             driven = self.drive_workflow(
                 workflow_id,
                 # The workflow's own goal and its own graph. A blank goal and an
                 # unnamed graph are both meaningful to the driver — the first
                 # tells the coordinator nothing, the second routes every
                 # one-role read to the claude coordinator — so neither may be a
-                # default standing in for a row that has the answer. The roles
-                # are read from the step rows rather than re-derived from their
-                # phases: `start_workflow` resolved them once, and the column is
-                # what this graph was created with.
+                # default standing in for a row that has the answer.
                 str((workflow.get("request") or {}).get("goal") or ""),
-                roles=tuple(str(step["agent"])
-                            for step in workflow.get("steps") or ()))
+                roles=roles)
             attempted.append({"task_id": str(task["task_id"]),
                               "workflow_id": workflow_id,
                               # Reported rather than assumed: a refusal is not a

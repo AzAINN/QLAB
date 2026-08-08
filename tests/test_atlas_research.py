@@ -316,6 +316,10 @@ def test_the_beat_drives_an_approval_that_landed_while_the_slot_was_busy():
     drove: list[str] = []
     session.drive_workflow = lambda wid, goal, roles=(): (
         drove.append(wid) or {"driving": True})
+    # The sweep pre-screens with the driver's own `available()` so a refusal
+    # costs it no attempt. Pinned here, or this test would be a claim about
+    # whether `claude` is on the machine running it rather than about the beat.
+    session.coordinator_driver.available = lambda roles=(), **kwargs: (True, "")
     workflow_id = session.registry.start_workflow(
         "portfolio_review", {"goal": "[news_read] read the window"},
         phases=("news-analyst",))["workflow_id"]

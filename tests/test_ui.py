@@ -3394,19 +3394,22 @@ def test_the_snapshot_never_reports_a_verdict_it_did_not_ask_for(session):
     session.atlas.set_mode("research")
     session.atlas_actionables(True)
     _, before = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
-    # Nothing was checked here, and nothing claims otherwise.
-    assert before["actionables"]["items"]
-    assert all(item["startable"] is None for item in before["actionables"]["items"])
-    assert all("actionables" in (item["reason"] or "")
-               for item in before["actionables"]["items"])
+    # The proposals — the items with a task behind them. Nothing was checked
+    # here, and nothing claims otherwise. (The ask's own refusals are merged in
+    # beside them carrying `startable: false`; those are a verdict the gate DID
+    # make, which is the next test.)
+    proposed = [item for item in before["actionables"]["items"] if item["task_id"]]
+    assert proposed
+    assert all(item["startable"] is None for item in proposed)
+    assert all("actionables" in (item["reason"] or "") for item in proposed)
 
     session.atlas.set_mode("observe")
     _, after = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
 
-    assert after["actionables"]["items"]
-    assert all(item["startable"] is False for item in after["actionables"]["items"])
-    assert all("Observe mode" in item["reason"]
-               for item in after["actionables"]["items"])
+    proposed = [item for item in after["actionables"]["items"] if item["task_id"]]
+    assert proposed
+    assert all(item["startable"] is False for item in proposed)
+    assert all("Observe mode" in item["reason"] for item in proposed)
 
 
 def test_the_snapshot_refuses_a_proposal_that_has_gone_stale(session):
@@ -3451,6 +3454,93 @@ def test_an_already_started_proposal_stops_being_offered_today(session):
                  if i["task_id"] == offered["task_id"])
     assert shown["startable"] is False
     assert shown["task_status"] == "running"
+
+
+def test_the_snapshot_shows_what_the_ask_refused_and_not_only_what_it_offered(session):
+    """§B2: refused candidates are shown with their refusal, not hidden. A
+    refusal mints no task, so a block composed from proposal rows alone showed
+    the operator only the half the desk agreed to — in Research that silently
+    drops every plan-creating template off the panel."""
+    session.atlas.set_mode("research")
+    asked = session.atlas_actionables(True)
+    refused = [i for i in asked["items"]
+               if not i["startable"] and i["task_id"] is None]
+    assert refused, "premise: Research refuses at least one template outright"
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+
+    shown = {i["template_id"]: i for i in snap["actionables"]["items"]}
+    for item in refused:
+        drawn = shown[item["template_id"]]
+        assert drawn["startable"] is False
+        # No task, and that is the fact rather than a gap: there is nothing
+        # queued to approve, which is what `approvable()` reads.
+        assert drawn["task_id"] is None
+        assert drawn["task_status"] is None
+        assert drawn["reason"] == item["reason"]
+
+
+def test_an_ask_that_offers_nothing_still_says_what_it_refused(session):
+    """Observe refuses every template, so nothing is minted and there is no
+    proposal row to compose a block from. The desk still has to say why: an
+    empty panel reads as a desk with nothing to do rather than as a mode."""
+    session.atlas.set_mode("observe")
+    asked = session.atlas_actionables(True)
+    assert not [i for i in asked["items"] if i["startable"]]
+    assert session.registry.list_atlas_tasks(200, origin="proposal") == []
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+
+    block = snap["actionables"]
+    assert block["trading_date"] == asked["trading_date"]
+    assert {i["template_id"] for i in block["items"]} == {
+        i["template_id"] for i in asked["items"]}
+    assert all(i["startable"] is False for i in block["items"])
+    assert all("Observe mode" in i["reason"] for i in block["items"])
+
+
+def test_a_template_with_a_proposal_row_is_not_also_shown_as_a_refusal(session):
+    """One trading day can hold two asks against different facts: the first
+    offers a template and mints its task, the second refuses it. The row is the
+    better account of the two — it carries the task an approval binds to, and
+    the snapshot re-checks the mode against it — so the stored refusal stands
+    down rather than drawing the same template twice."""
+    today = date.today().isoformat()
+    universe = ",".join(sorted(session.mandate.universe_whitelist))
+    session.registry.create_atlas_task(
+        "earlier-ask", f"proposal:news_read|{today}|{universe}|news_read",
+        "proposal:news_read", {"template_id": "news_read"}, "news_read",
+        origin="proposal")
+    session.atlas.set_mode("research")
+    asked = session.atlas_actionables(True)
+    assert next(i for i in asked["items"]
+                if i["template_id"] == "news_read")["startable"] is False
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+
+    drawn = [i for i in snap["actionables"]["items"]
+             if i["template_id"] == "news_read"]
+    assert len(drawn) == 1
+    assert drawn[0]["task_id"] == "earlier-ask"
+
+
+def test_the_task_panel_carries_trigger_work_and_not_proposals(session):
+    """`atlas_tasks` is what the classic TUI draws as OPEN TASKS and RECENT
+    TASKS, beside an AUTHORITY panel about what Atlas starts unattended. One
+    ask in Research mints ~5 proposals, which read there as open autonomous
+    work nobody authorised and push real trigger work out of the window."""
+    session.atlas.set_mode("research")
+    session.registry.create_atlas_task(
+        "a-trigger", f"regime_flip|{date.today().isoformat()}|SPY|abc",
+        "regime_flip", {"why": "flip"}, "regime_review")
+    session.atlas_actionables(True)
+    assert len(session.registry.list_atlas_tasks(200, origin="proposal")) > 1
+
+    _, snap = handle_api(session, "GET", "/api/tui", {"offline": ["1"]}, {})
+
+    assert [t["task_id"] for t in snap["atlas_tasks"]] == ["a-trigger"]
+    # And the proposals are still served — on the block that is about them.
+    assert snap["actionables"]["items"]
 
 
 def test_a_snapshot_item_and_a_menu_item_are_the_same_shape(session):

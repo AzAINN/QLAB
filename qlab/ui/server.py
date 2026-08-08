@@ -3414,9 +3414,12 @@ class UISession:
         appear between proposing and approving, and a proposal made in Research
         must not execute on a permit it no longer holds.
 
-        Only the offered half is persisted. A refusal has nothing to approve,
-        so writing a task row for it would put work in the queue that the gate
-        has already said may not run.
+        Only the offered half is persisted **as a task**. A refusal has nothing
+        to approve, so writing a task row for it would put work in the queue
+        that the gate has already said may not run. The refusals are recorded
+        on the audit row instead, which is what lets
+        ``atlas_actionables_snapshot`` show them: a desk that silently omits
+        what it will not do teaches the operator nothing about why.
 
         Called under the dispatch lock (every route but two is), so it takes no
         lock of its own — ``_LOCK`` is not reentrant.
@@ -3438,11 +3441,19 @@ class UISession:
         universe = ",".join(sorted(facts.get("universe", [])))
         self._expire_stale_proposals(trading_date)
         items: list[dict] = []
+        # The gate's own refusals, kept whole. They mint no task, so the
+        # snapshot has no row to compose them from — persisting them here is
+        # the only way the panel can show what this desk would NOT do and why.
+        # The spent-proposal refusal below is deliberately not one of these: it
+        # HAS a row, and the snapshot reads that row's status for itself.
+        refusals: list[dict] = []
         for entry in template_menu(mode, facts):
             item = dict(entry)
             item["task_id"] = None
             item["task_status"] = None
-            if entry["startable"]:
+            if not entry["startable"]:
+                refusals.append(dict(entry))
+            else:
                 task_id, status = self._proposal_task(
                     entry["template_id"], trading_date, universe)
                 item["task_id"] = task_id
@@ -3463,8 +3474,13 @@ class UISession:
         items.sort(key=lambda item: not item["startable"])
         self.registry.record_event(
             "atlas_actionables",
-            {"mode": mode, "offered": sum(1 for i in items if i["startable"]),
-             "refused": sum(1 for i in items if not i["startable"])})
+            {"mode": mode, "trading_date": trading_date,
+             "offered": sum(1 for i in items if i["startable"]),
+             # The count keeps its name and its type — a field that changes
+             # JSON shape mid-history poisons every reader of the older rows —
+             # and the refusals themselves travel beside it.
+             "refused": sum(1 for i in items if not i["startable"]),
+             "refusals": refusals})
         return {"trading_date": trading_date, "items": items}
 
     def _proposal_task(self, template_id: str, trading_date: str,
@@ -3552,6 +3568,32 @@ class UISession:
                 {"task_ids": expired, "trading_date": today})
         return expired
 
+    def _asked_refusals(self) -> tuple[str, list[dict]]:
+        """The newest ask's own refusals, and the trading day it was asked on.
+
+        Read from the audit row ``atlas_actionables`` writes, because a refused
+        candidate mints no task and there is no other record of it. Replayed
+        rather than recomposed: this surface may not call ``atlas_facts``, so
+        the only refusal it can show is the one the gate already made — with
+        the day it was made on beside it, which is what says how old the answer
+        is.
+
+        Absence is not an error at any step. A desk nobody has asked, and an
+        ask recorded before this payload carried its refusals, both answer
+        "nothing to add" rather than raising or inventing a verdict.
+        """
+        rows = self.registry.read_events_of_kind("atlas_actionables", limit=1)
+        if not rows:
+            return "", []
+        payload = rows[-1].get("payload")
+        if not isinstance(payload, dict):
+            return "", []
+        day = str(payload.get("trading_date") or "")[:10]
+        refusals = payload.get("refusals")
+        if not isinstance(refusals, list):
+            return day, []
+        return day, [entry for entry in refusals if isinstance(entry, dict)]
+
     def atlas_actionables_snapshot(self) -> dict:
         """The newest proposal set, read from the task table — never composed.
 
@@ -3572,6 +3614,16 @@ class UISession:
         permitted — the same reason ``task_age`` reports an unreadable date as
         ``None`` rather than False, and the same reason ``news_search`` carries
         no ``offer`` field rather than assert one it did not compute.
+
+        **The ask's own refusals are merged in, with no task.** A candidate the
+        gate refused mints nothing, so composing this from proposal rows alone
+        showed the operator only the half the desk agreed to — in Research that
+        silently drops every plan-creating template from the panel. They arrive
+        as ``startable: False`` with ``task_id: None``: the ask's verdict,
+        replayed. It is the answer as of the ask rather than as of now, which
+        is why the block carries the day it was asked on; a refusal cannot
+        become an approve affordance in the meantime, so a stale one errs on
+        the side the gate already chose.
         """
         # The supervisor's own clock and parser: this surface's age answer must
         # be the one `startable_tasks` would give, not a second opinion.
@@ -3583,10 +3635,16 @@ class UISession:
 
         rows = self.registry.list_atlas_tasks(
             TASK_SCAN_WINDOW, origin="proposal")
-        if not rows:
+        asked_day, asked_refusals = self._asked_refusals()
+        if not rows and not asked_refusals:
             # Absence, not an error: nobody has asked yet.
             return {"trading_date": None, "items": []}
-        newest = max(_dedupe_trading_date(row.get("dedupe_key")) for row in rows)
+        newest = max([_dedupe_trading_date(row.get("dedupe_key"))
+                      for row in rows] or [""])
+        # An ask that offered nothing mints no row at all, so the newest ask can
+        # be newer than the newest proposal. Its refusals are still the answer
+        # to "what would this desk do today", and yesterday's rows are not.
+        newest = max(newest, asked_day)
         mode = self.atlas.mode
         today = _utc_today()[:10]
         items: list[dict] = []
@@ -3636,6 +3694,33 @@ class UISession:
                         "/api/atlas/actionables asks the gate for today's "
                         "verdict")
             items.append(item)
+        if asked_day and asked_day == newest:
+            # Only the templates no row already speaks for. A day can hold two
+            # asks in two modes — the first mints a proposal, the second
+            # refuses the same template — and the row is the better account of
+            # the two: it carries the task an approval would bind to, and the
+            # loop above re-checks the mode against it.
+            spoken = {item["template_id"] for item in items}
+            for entry in asked_refusals:
+                template_id = str(entry.get("template_id") or "")
+                if not template_id or template_id in spoken:
+                    continue
+                items.append({
+                    "template_id": template_id,
+                    "purpose": str(entry.get("purpose") or ""),
+                    "creates_plan": bool(entry.get("creates_plan")),
+                    "needs_coordinator": bool(entry.get("needs_coordinator")),
+                    # No task, and that is the fact rather than a gap: the gate
+                    # refused it, so there is nothing queued to approve.
+                    "task_id": None, "task_status": None,
+                    "startable": False,
+                    # The gate's own sentence. A refusal a client cannot read
+                    # is not one an operator can act on, so a refusal that
+                    # arrived without one says which silence it met.
+                    "reason": str(entry.get("reason") or "").strip() or (
+                        f"the desk refused {template_id} when it was asked and "
+                        "did not say why"),
+                })
         # Known-refused last, exactly as the menu orders its own refusals.
         items.sort(key=lambda item: item["startable"] is False)
         return {"trading_date": newest or None, "items": items}
@@ -4100,7 +4185,14 @@ class UISession:
                 "fast": self.fast_mode,
             },
             "news": self.news_payload(offline),
-            "atlas_tasks": self.registry.list_atlas_tasks(10),
+            # Trigger work only. This key is what the classic TUI draws as
+            # OPEN TASKS and RECENT TASKS, under a heading whose empty state
+            # reads "no autonomous tasks recorded" and beside an AUTHORITY
+            # panel about what Atlas starts unattended — so a proposal here
+            # reads as open autonomous work that nobody authorised, and one ask
+            # in Research fills the ten-row window and pushes real trigger work
+            # off it. Proposals have their own block below.
+            "atlas_tasks": self.registry.list_atlas_tasks(10, origin="trigger"),
             # The newest proposal set, read from the task table so the client
             # renders it without a second fetch — and so a poll never mints
             # one. Asking is what proposes; drawing is what reports. `startable`

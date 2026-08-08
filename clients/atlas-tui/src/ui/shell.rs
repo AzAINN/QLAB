@@ -503,16 +503,25 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
         // it could not draw is an approval given blind, which is the same
         // failure as a confirm box nobody read.
         //
-        // So the first `/do` on an unshown item is a *refusal that shows it*:
-        // ATLAS comes up, the item goes to the top of the panel, and the same
-        // line approves it next time. Refusing without showing it would leave
-        // a proposal beyond the cap unapprovable until the terminal grew.
+        // So the first `/do` on an unshown item is a *refusal that asks for
+        // it*: ATLAS comes up, the panel is asked to draw that proposal first,
+        // and the same line approves it next time. Refusing without asking
+        // would leave a proposal beyond the cap unapprovable until the
+        // terminal grew.
+        //
+        // The sentence says what this did, not what the next frame will show:
+        // a proposal too tall for the whole budget is asked for and still not
+        // drawn, and the panel's own note is what says so — a line here
+        // promising it is "at the top" would be a claim about a frame nobody
+        // has painted.
         #[cfg(feature = "operator")]
         Resolved::Approve { template, task } => {
             // Read before the ask: `drew` is what the *last* frame put on
             // screen, and pinning first would answer about a frame nobody has
-            // seen yet.
-            let drawn = views.drew_proposal(&template);
+            // seen yet. Both halves, because the desk moves under the frame —
+            // a proposal re-minted between the paint and the keystroke keeps
+            // its word and changes the task the word resolves to.
+            let drawn = views.drew_proposal(&template, &task);
             views.ask_about_proposal(&template);
             store.nav.view = ViewId::Atlas;
             match drawn {
@@ -522,8 +531,8 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
                 }
                 false => {
                     store.cmd.say(format!(
-                        "{template} was not on the WOULD DO panel — it is now, at the top: \
-                         read it, then /do it again"
+                        "{template} is not on the WOULD DO panel as the desk is serving it \
+                         now — ATLAS is asking for it; read it there, then /do it again"
                     ));
                     None
                 }

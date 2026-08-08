@@ -830,6 +830,82 @@ mod armed {
     }
 
     #[test]
+    fn a_pane_narrowed_below_the_sidebar_vouches_for_nothing_it_drew_when_it_was_wide() {
+        // The resize hole. `drew` is published by the sidebar, and the sidebar
+        // is dropped whole on a narrow pane — so a list left over from a wide
+        // frame would let `/do` approve a proposal that had left the screen.
+        let mut client = armed_client();
+        client.store.nav.view = ViewId::Atlas;
+        let wide = client.frame(120, 36);
+        assert!(wide.contains("WOULD DO"), "{wide}");
+
+        // 100 columns: the rails take 42 and the sidebar needs the pane to be
+        // wider than CHAT_MIN + SIDEBAR_W, so the chat keeps the lot.
+        let narrow = client.frame(100, 36);
+        assert!(!narrow.contains("WOULD DO"), "{narrow}");
+
+        assert_eq!(
+            submit(&mut client, "do regime_review"),
+            None,
+            "a proposal that left the screen must not still be approvable"
+        );
+        // And the pane too narrow for ATLAS at all is the same answer.
+        let mut client = armed_client();
+        client.store.nav.view = ViewId::Atlas;
+        let _ = client.frame(120, 36);
+        let _ = client.frame(60, 36);
+        assert_eq!(submit(&mut client, "do regime_review"), None);
+    }
+
+    #[test]
+    fn a_proposal_re_minted_between_the_frame_and_the_key_is_not_the_one_that_was_drawn() {
+        // The panel draws a word and `/do` sends an id; one snapshot binds
+        // them. Another client asking `/api/atlas/actionables` after a day
+        // roll gets the same word a new task, and an approval keyed on the
+        // word alone would send an id no frame ever drew.
+        let mut client = armed_client();
+        assert_eq!(submit(&mut client, "do regime_review"), None);
+        let _ = client.frame(120, 36);
+
+        remint(&mut client.store, "regime_review", "a1b2c3d4e5f60718");
+
+        assert_eq!(
+            enter(&mut client),
+            None,
+            "a task no frame drew must not start"
+        );
+        // Refuse and re-ask, not refuse and stop: the next frame draws the
+        // proposal the desk is serving now, and the same line approves that.
+        let _ = client.frame(120, 36);
+        assert_eq!(
+            enter(&mut client),
+            Some(atlas::cmd::Command::ApproveAction(
+                "a1b2c3d4e5f60718".into()
+            ))
+        );
+    }
+
+    /// The owner re-minted today's proposal for `template`: same word, new row.
+    fn remint(store: &mut Store, template: &str, task: &str) {
+        let mut snapshot = store.snapshot.take().unwrap();
+        for item in &mut snapshot.actionables.as_mut().unwrap().items {
+            if item.template_id.as_deref() == Some(template) {
+                item.task_id = Some(task.to_string());
+            }
+        }
+        let now = store
+            .last_snapshot_at
+            .unwrap_or_else(std::time::Instant::now);
+        store.apply(atlas::bus::AppEvent::Snapshot(Box::new(snapshot)), now);
+        // A snapshot re-derives the posture from the owner's own block, and
+        // this fixture's owner says the desk is read-only — so the arming this
+        // test is running under is re-stated, exactly as `armed_client` states
+        // it. That the posture survives nothing but the owner's word is the
+        // point of `Posture::from_desk`, not an accident of this helper.
+        store.posture = Posture::Operator;
+    }
+
+    #[test]
     fn a_refused_proposal_is_refused_by_the_line_however_visible_it_is() {
         // The panel draws both of the fixture's items, so this one is on
         // screen and still cannot be approved: what the gate refused is the

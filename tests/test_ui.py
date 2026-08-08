@@ -1982,6 +1982,39 @@ def test_approving_a_proposal_puts_the_approval_on_the_record(session):
     assert kinds.index("atlas_proposal_approved") < kinds.index("atlas_task_started")
 
 
+def test_a_start_the_gate_refuses_still_records_the_approval_that_asked(session):
+    """The negative side of writing the row before the start.
+
+    The human approved; the gate then said no. Both are facts, and the one
+    this route is the only evidence of is the approval — so it is recorded
+    whatever the gate answers, carrying the status it was approved in. A row
+    written only on success would lose every approval the desk turned down,
+    which is exactly the half an audit asks about.
+    """
+    session.atlas.set_mode("research")
+    offered = [item for item in session.atlas_actionables(True)["items"]
+               if item["startable"]]
+    assert offered, "research mode offers at least one template"
+    item = offered[0]
+    # Observe cannot start anything: `check_startable` refuses on authority,
+    # and the route answers 200 saying so.
+    session.atlas.set_mode("observe")
+
+    status, refused = handle_api(
+        session, "POST", f"/api/atlas/tasks/{item['task_id']}/start", {},
+        {"offline": True})
+
+    assert status == 200
+    assert refused["started"] is False and refused["blocked_by"] == "authority"
+    rows = session.registry.read_events_of_kind("atlas_proposal_approved")
+    assert [row["payload"]["task_id"] for row in rows] == [item["task_id"]]
+    # The status it was approved in, which is what tells this row apart from
+    # one that started work: nothing ran, and the task is still queued.
+    assert rows[0]["payload"]["task_status"] == "queued"
+    assert "atlas_task_started" not in [
+        row["kind"] for row in session.registry.read_events(200)]
+
+
 def test_the_beats_own_work_is_not_recorded_as_an_approval(session):
     """The other side of the guard. A trigger is work the desk raised for
     itself and may start unattended, so a row saying a human approved one

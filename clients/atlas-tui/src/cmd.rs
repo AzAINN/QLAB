@@ -1907,7 +1907,15 @@ mod tests {
                 // what a fall-back to the template id would start blind.
                 {"template_id": "desk_brief", "purpose": "Write the brief.",
                  "startable": null, "reason": null,
-                 "task_id": "", "task_status": "queued"}
+                 "task_id": "", "task_status": "queued"},
+                // The other contract failure: refused, with no sentence. The
+                // owner attaches one to every refusal it makes, so this cannot
+                // arrive from it — but a proxy in front of the desk answers
+                // with whatever it likes, and the arm that says which silence
+                // this is has to be reachable to be trusted.
+                {"template_id": "news_scan", "purpose": "Read the tape.",
+                 "startable": false, "reason": null,
+                 "task_id": "c41d90fe27ba8836", "task_status": "queued"}
             ]}))
             .unwrap(),
         );
@@ -1942,6 +1950,15 @@ mod tests {
         ) {
             Resolved::Refused(said) => assert!(said.contains("Propose mode"), "{said}"),
             other => panic!("a refused proposal must not resolve: {other:?}"),
+        }
+        // And a refusal the owner attached no sentence to is still a refusal,
+        // saying which silence it met rather than borrowing the reason of the
+        // item beside it or offering the proposal anyway.
+        match resolve(&parse("/do news_scan"), &store, Posture::Operator) {
+            Resolved::Refused(said) => {
+                assert_eq!(said, "the desk refused news_scan and did not say why")
+            }
+            other => panic!("a refusal with no sentence must still refuse: {other:?}"),
         }
         // And it is not offered either — a refused item is on the strip
         // carrying its reason, which is what the `/model` scope does with a
@@ -2011,12 +2028,22 @@ mod tests {
         let strip = suggestions(&parse("/do "), &store, Posture::Operator);
         assert_eq!(
             strip.iter().map(|s| s.value.clone()).collect::<Vec<_>>(),
-            vec!["regime_review", "desk_rebalance_review", "desk_brief"],
+            vec![
+                "regime_review",
+                "desk_rebalance_review",
+                "desk_brief",
+                "news_scan"
+            ],
             "every proposal is on the strip, in the owner's own order"
         );
         assert_eq!(strip[0].refusal, None, "{strip:?}");
-        assert!(strip[1].refusal.is_some(), "{strip:?}");
-        assert!(strip[2].refusal.is_some(), "{strip:?}");
+        for refused in &strip[1..] {
+            assert!(refused.refusal.is_some(), "{refused:?}");
+            assert!(
+                !refused.choosable(),
+                "a key must not accept it: {refused:?}"
+            );
+        }
         // And an owner sentence is bounded here like every other.
         let flooded = {
             let mut store = desk_with_proposals();

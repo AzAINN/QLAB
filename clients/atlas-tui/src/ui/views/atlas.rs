@@ -89,8 +89,17 @@ pub struct AtlasView {
     /// screen is a fact about geometry, and `cmd::resolve` is a pure function
     /// of (text, desk, posture) that cannot know it — so the surface that does
     /// know publishes it, exactly as BOOK publishes where its band left a plan.
+    ///
+    /// **The template and the task, as a pair.** The panel draws a template id
+    /// and `/do` sends a task id, and the two are bound by one snapshot: a
+    /// re-mint or a day roll between the frame that drew a proposal and the
+    /// Enter that approves it gives the same word a different task. Keyed on
+    /// the template alone, that Enter would send a task no frame ever drew.
+    ///
+    /// **Every frame writes it, including the frames that draw no panel.** A
+    /// list left over from a wider frame is the same lie one resize later.
     #[cfg(feature = "operator")]
-    drew: std::cell::RefCell<Vec<String>>,
+    drew: std::cell::RefCell<Vec<(String, String)>>,
     /// The proposal the operator has asked about, drawn first.
     ///
     /// The panel's answer to having no cursor. `/do` on an item the cap hid
@@ -105,6 +114,12 @@ pub struct AtlasView {
 impl View for AtlasView {
     fn draw(&self, f: &mut Frame, area: Rect, store: &Store, _fx: &FlashTracker, _now: Instant) {
         if area.width < CHAT_MIN || area.height < 4 {
+            // Nothing is on screen, so nothing may be approved off the back of
+            // it. Every path out of this function settles `drew`, because the
+            // one that did not was the resize: a pane narrowed after a wide
+            // frame kept the wide frame's list and `/do` went on approving
+            // proposals that had left the screen.
+            self.drew_nothing();
             refuse(
                 f,
                 area,
@@ -127,8 +142,11 @@ impl View for AtlasView {
         .spacing(1)
         .split(area);
         self.draw_chat(f, cols[0], store);
-        if boarded {
-            self.draw_sidebar(f, cols[1], store);
+        match boarded {
+            true => self.draw_sidebar(f, cols[1], store),
+            // The sidebar is dropped whole on a narrow pane, so the would-do
+            // panel drew nothing — and a stale list here is the resize hole.
+            false => self.drew_nothing(),
         }
     }
 
@@ -597,14 +615,20 @@ fn act_rows(item: &ActionItem, width: u16) -> Vec<Line<'static>> {
 /// exact shape that made the old note and the old count disagree.
 struct Acts {
     lines: Vec<Line<'static>>,
-    /// The template ids drawn, in the order they were drawn. An item the owner
-    /// named nothing is left out: it cannot be approved either.
+    /// The proposals drawn, as `(template_id, task_id)`, in the order they
+    /// were drawn.
+    ///
+    /// **The pair, not the word.** What the panel draws is a template id and
+    /// what `/do` sends is a task id; they are bound by the snapshot the frame
+    /// was drawn from, and a re-mint or a day roll rebinds them. An item the
+    /// owner named nothing, or served no task for, is left out — neither can
+    /// be approved, so neither is something this list may vouch for.
     ///
     /// Gated with the approval path it exists for. A glass build has no `/do`
     /// and no writer, so there is nothing to check this against — absence,
     /// not a field carried and never read.
     #[cfg(feature = "operator")]
-    shown: Vec<String>,
+    shown: Vec<(String, String)>,
 }
 
 /// The whole panel, or nothing at all.
@@ -693,9 +717,23 @@ fn acts_lines(items: &[ActionItem], width: u16, room: usize, asked: Option<&str>
     let mut out = vec![head("would do", &chip, width)];
     out.append(&mut body);
     if note {
-        out.push(dim(&format!(
-            "+{} more, unshown",
-            items.len() - marks.len()
+        // The unshown count, and — when the operator has *asked* for one of
+        // them — which one. The command line refuses an item the panel did not
+        // draw and asks for it; if it still does not fit, that refusal repeats
+        // with nothing on screen to explain why. This row is the explanation,
+        // and it costs nothing: the note was already budgeted for.
+        let unshown = items.len() - marks.len();
+        let asked_unshown = asked.filter(|asked| {
+            items[marks.len()..]
+                .iter()
+                .any(|item| format::text(item.template_id.as_ref()) == Some(asked))
+        });
+        out.push(dim(&clip(
+            &match asked_unshown {
+                Some(asked) => format!("+{unshown} more; {asked} needs more rows"),
+                None => format!("+{unshown} more, unshown"),
+            },
+            width as usize,
         )));
     }
     if legend {
@@ -712,15 +750,20 @@ fn acts_lines(items: &[ActionItem], width: u16, room: usize, asked: Option<&str>
     //
     // Exact, including after the clamp: the settle loop only exits over budget
     // once it has handed *every* item back, so a truncated panel has an empty
-    // `marks` and names nothing. An item the owner sent without a template id
-    // is dropped here because it cannot be approved either — `/do` has no word
-    // for it.
+    // `marks` and names nothing. An item the owner sent without a template id,
+    // or without a task, is dropped here because it cannot be approved either
+    // — `/do` has no word for the first and nothing to send for the second.
     Acts {
         lines: out,
         #[cfg(feature = "operator")]
         shown: items[..marks.len()]
             .iter()
-            .filter_map(|item| format::text(item.template_id.as_ref()).map(str::to_string))
+            .filter_map(|item| {
+                Some((
+                    format::text(item.template_id.as_ref())?.to_string(),
+                    format::text(item.task_id.as_ref())?.to_string(),
+                ))
+            })
             .collect(),
     }
 }
@@ -825,17 +868,35 @@ impl AtlasView {
         None
     }
 
-    /// Whether the would-do panel drew this proposal on the last frame.
+    /// Whether the would-do panel drew this exact proposal on the last frame.
     ///
     /// The question the approval path asks before it starts anything, and the
     /// reason `drew` is published at all. `false` for a proposal beyond the
     /// panel's row budget, for one on a pane too narrow to hold the sidebar,
-    /// and for every proposal before the first frame that drew any — absence
-    /// is not permission.
+    /// for every proposal before the first frame that drew any, and for a
+    /// template whose **task id has moved** since it was drawn — absence is
+    /// not permission, and neither is a matching word over a task the operator
+    /// never saw.
     #[cfg(feature = "operator")]
-    pub fn drew(&self, template: &str) -> bool {
-        self.drew.borrow().iter().any(|shown| shown == template)
+    pub fn drew(&self, template: &str, task: &str) -> bool {
+        self.drew
+            .borrow()
+            .iter()
+            .any(|(shown, bound)| shown == template && bound == task)
     }
+
+    /// This frame drew no proposals at all.
+    ///
+    /// Two bodies rather than a cfg at each call site, and called from every
+    /// path in `draw` that does not reach the sidebar. A glass build has
+    /// nothing to publish and nothing to clear.
+    #[cfg(feature = "operator")]
+    fn drew_nothing(&self) {
+        self.drew.borrow_mut().clear();
+    }
+
+    #[cfg(not(feature = "operator"))]
+    fn drew_nothing(&self) {}
 
     /// Draw this proposal first from the next frame on.
     ///
@@ -1249,8 +1310,20 @@ mod tests {
             purpose: Some("Short.".into()),
             startable,
             reason: Some("Nope.".into()),
+            // The owner binds every proposal it serves to a persisted task,
+            // and the panel vouches for the pair rather than for the word.
+            task_id: Some(format!("t-{id}")),
             ..ActionItem::default()
         }
+    }
+
+    /// What the panel vouched for, as the approval path reads it.
+    #[cfg(feature = "operator")]
+    fn shown(acts: &Acts) -> Vec<(&str, &str)> {
+        acts.shown
+            .iter()
+            .map(|(template, task)| (template.as_str(), task.as_str()))
+            .collect()
     }
 
     #[test]
@@ -1333,13 +1406,22 @@ mod tests {
         ];
         // Header, two items, the note and the legend: room for one of three.
         let acts = acts_lines(&items, 32, 5, None);
-        assert_eq!(acts.shown, vec!["alpha".to_string()]);
+        assert_eq!(shown(&acts), vec![("alpha", "t-alpha")]);
         let text = rendered(&acts.lines);
         assert!(text.iter().any(|line| line.contains("alpha")), "{text:?}");
         assert!(!text.iter().any(|line| line.contains("beta")), "{text:?}");
         // And a budget too small for the header's own row names nothing at
         // all, rather than naming what it would have drawn.
         assert!(acts_lines(&items, 32, 1, None).shown.is_empty());
+        // An item the owner served no task for is drawn and **not** vouched
+        // for: there is nothing to approve, so there is nothing to name.
+        let taskless = [ActionItem {
+            task_id: None,
+            ..two_row_item("alpha", None)
+        }];
+        let acts = acts_lines(&taskless, 32, 12, None);
+        assert!(acts.shown.is_empty(), "{:?}", acts.shown);
+        assert!(rendered(&acts.lines).iter().any(|l| l.contains("alpha")));
     }
 
     #[cfg(feature = "operator")]
@@ -1354,18 +1436,53 @@ mod tests {
             two_row_item("gamma", None),
         ];
         let acts = acts_lines(&items, 32, 5, Some("gamma"));
-        assert_eq!(acts.shown, vec!["gamma".to_string()]);
+        assert_eq!(shown(&acts), vec![("gamma", "t-gamma")]);
         let text = rendered(&acts.lines);
         assert!(text.iter().any(|line| line.contains("gamma")), "{text:?}");
         // Nothing else moves: the gate's own order holds for the rest, and a
         // name nothing answers to leaves the list exactly as it was.
         assert_eq!(
-            acts_lines(&items, 32, 12, Some("gamma")).shown,
-            vec!["gamma".to_string(), "alpha".to_string(), "beta".to_string()]
+            shown(&acts_lines(&items, 32, 12, Some("gamma"))),
+            vec![
+                ("gamma", "t-gamma"),
+                ("alpha", "t-alpha"),
+                ("beta", "t-beta")
+            ]
         );
         assert_eq!(
             acts_lines(&items, 32, 12, Some("nobody")).shown,
             acts_lines(&items, 32, 12, None).shown
+        );
+    }
+
+    #[test]
+    fn a_proposal_asked_for_and_still_unshown_is_named_by_the_note() {
+        // The command line refuses an item the panel did not draw and asks for
+        // it. When it *still* does not fit, that refusal would otherwise
+        // repeat with nothing on screen to explain why — so the note says
+        // which item needs the rows, in the row it was already spending.
+        let items = [two_row_item("alpha", None), two_row_item("beta", None)];
+        // Two rows: the header and the note. Nothing fits, `beta` least of all.
+        let text = rendered(&acts_lines(&items, 32, 2, Some("beta")).lines);
+        assert!(
+            text.iter()
+                .any(|line| line.contains("beta needs more rows")),
+            "the panel did not say why the asked item is missing: {text:?}"
+        );
+        // And the ordinary note is unchanged when nothing was asked for.
+        let text = rendered(&acts_lines(&items, 32, 2, None).lines);
+        assert!(
+            text.iter().any(|line| line.contains("+2 more, unshown")),
+            "{text:?}"
+        );
+        // Nor when the asked item is the one that *did* fit: the note is about
+        // what is missing, and naming a drawn item there would send an
+        // operator looking for rows they do not need.
+        // Five rows: the header, `alpha` whole, the note and the legend.
+        let text = rendered(&acts_lines(&items, 32, 5, Some("alpha")).lines);
+        assert!(
+            text.iter().any(|line| line.contains("+1 more, unshown")),
+            "{text:?}"
         );
     }
 

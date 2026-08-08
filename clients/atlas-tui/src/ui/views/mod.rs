@@ -272,16 +272,21 @@ impl Views {
         self.book.select_plan(plan_id, store)
     }
 
-    /// Whether ATLAS's would-do panel drew this proposal on the last frame.
+    /// Whether ATLAS's would-do panel drew this proposal — this template bound
+    /// to this task — on the last frame.
     ///
     /// Routed through the registry for `select_plan`'s reason: the surface
     /// that drew something is the only one that knows it did, and the command
     /// line has to ask rather than assume. Approving what the operator cannot
     /// see is the one thing the `/do` scope may not do, and this is the
     /// question that stops it.
+    ///
+    /// The task travels with the template because the desk moves under the
+    /// frame: the snapshot polls every two seconds, and a proposal re-minted
+    /// between the frame and the keystroke keeps its word and changes its id.
     #[cfg(feature = "operator")]
-    pub fn drew_proposal(&self, template: &str) -> bool {
-        self.atlas.drew(template)
+    pub fn drew_proposal(&self, template: &str, task: &str) -> bool {
+        self.atlas.drew(template, task)
     }
 
     /// Ask ATLAS to draw one proposal first.

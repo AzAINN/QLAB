@@ -111,6 +111,12 @@ _WORKFLOW_SUCCESS = "complete"
 _WORKFLOW_UNSUCCESSFUL = frozenset({
     "failed", "blocked", "interrupted", "abandoned",
 })
+# The union, for readers that only need "would reconcile_tasks resolve this?".
+# Derived rather than re-listed so a state added to either half above cannot
+# leave a second copy behind: `drive_pending_tasks` spawns a coordinator for
+# every workflow NOT in this set, so a stale copy here would re-walk a run that
+# reconciliation is about to close.
+WORKFLOW_RESOLVED_STATUSES = frozenset({_WORKFLOW_SUCCESS}) | _WORKFLOW_UNSUCCESSFUL
 
 
 @dataclass(frozen=True)

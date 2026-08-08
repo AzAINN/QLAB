@@ -301,6 +301,37 @@ def test_autonomous_tick_runs_only_what_the_mode_permits(reg):
     assert session.started == ["regime_review"]
 
 
+def test_the_beat_drives_an_approval_that_landed_while_the_slot_was_busy():
+    """The sweep needs a caller or it is a method nothing runs.
+
+    Deliberately NOT gated on autonomy: a human already approved this task, and
+    the dispatch that registered its workflow could not drive it. Nothing else
+    comes back for it, so an unattended desk would leave approved work parked
+    at phase one forever.
+    """
+    from qlab.operator.heartbeat import build_owner_tick
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    drove: list[str] = []
+    session.drive_workflow = lambda wid, goal, roles=(): (
+        drove.append(wid) or {"driving": True})
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "[news_read] read the window"},
+        phases=("news-analyst",))["workflow_id"]
+    session.registry.create_atlas_task(
+        "task-parked", "proposal:news_read|2026-08-06|SPY|news_read",
+        "proposal:news_read", {}, "news_read", origin="proposal")
+    session.registry.update_atlas_task("task-parked", status="running",
+                                       workflow_id=workflow_id)
+
+    result = build_owner_tick(session, threading.Lock(), offline=True)()
+
+    assert drove == [workflow_id]
+    assert result["driven"] == [{"task_id": "task-parked",
+                                 "workflow_id": workflow_id, "driving": True}]
+
+
 def test_owner_tick_keeps_external_news_fetch_outside_dispatch_lock():
     """Slow providers must not freeze every owner API request."""
     from qlab.operator.heartbeat import build_owner_tick

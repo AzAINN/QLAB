@@ -3132,7 +3132,11 @@ class UISession:
                     "driving": driven.get("driving", False),
                     # Carried even on success: an undriven dispatch is still a
                     # valid dispatch, and the operator has to be able to see
-                    # that it is waiting on them rather than on Claude.
+                    # that it is waiting on them rather than on Claude. It is no
+                    # longer waiting FOREVER — `drive_pending_tasks` picks this
+                    # workflow up on a later beat once the slot frees — but the
+                    # reason is what says whether the wait is on a busy slot or
+                    # on something only they can fix.
                     "drive_reason": driven.get("reason", "")},
         )
 
@@ -3216,6 +3220,71 @@ class UISession:
         if note:
             status["note"] = note
         return status
+
+    def drive_pending_tasks(self) -> list[dict]:
+        """Walk a running task's workflow that nothing is currently walking.
+
+        Registering a workflow is not running it. The owner drives one
+        coordinator at a time, so an approval that lands while the slot is busy
+        leaves a real workflow parked at phase one — and ``reconcile_tasks``
+        never resolves it, because a run nobody walks never reaches a terminal
+        state. This is what picks it up when the slot frees.
+
+        It grants nothing. Only ``start_task`` binds a workflow to a task, and
+        only a task the gate started is ``running``, so every workflow reachable
+        here is one that already passed the mode check and (for a proposal) a
+        human approval. Driving is resuming, never starting.
+
+        One per call, because the owner has one coordinator. The check that
+        makes that safe is not the early return below — the beat runs on its own
+        thread beside HTTP handlers that can also dispatch. It is
+        ``CoordinatorDriver.drive``, which re-tests ``busy`` under the driver's
+        own lock and refuses the second caller. The early return only spares the
+        audit bus a skip row per beat while a run is in flight.
+        """
+        from qlab.operator.atlas import (
+            TASK_SCAN_WINDOW,
+            WORKFLOW_RESOLVED_STATUSES,
+        )
+        from qlab.state.registry import agent_for_phase
+
+        if self.coordinator_status().get("driving"):
+            return []
+        # In SQL: no task row is ever deleted, so a scan filtered afterwards
+        # would let finished history decide whether live work is visible.
+        for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW,
+                                                   status="running"):
+            workflow = self.registry.get_workflow(
+                str(task.get("workflow_id") or ""))
+            if workflow is None:
+                # Two cases, one answer. A task that bound nothing belongs to a
+                # deterministic template that concluded inline; a task whose
+                # bound workflow has vanished is reconciliation's to fail.
+                # Neither has a graph to walk. (`or ""` because `str(None)` is
+                # the id "None", which would be looked up and not found — the
+                # same answer by accident rather than on purpose.)
+                continue
+            if str(workflow.get("status") or "") in WORKFLOW_RESOLVED_STATUSES:
+                continue
+            # The row's own id, not the task's copy of it: they agree, and the
+            # one that was just read is the one being driven.
+            workflow_id = str(workflow["workflow_id"])
+            driven = self.drive_workflow(
+                workflow_id,
+                # The workflow's own goal and its own graph. A blank goal and an
+                # unnamed graph are both meaningful to the driver — the first
+                # tells the coordinator nothing, the second routes every
+                # one-role read to the claude coordinator — so neither may be a
+                # default standing in for a row that has the answer.
+                str((workflow.get("request") or {}).get("goal") or ""),
+                roles=tuple(agent_for_phase(str(step["phase"]))
+                            for step in workflow.get("steps") or ()))
+            return [{"task_id": str(task["task_id"]),
+                     "workflow_id": workflow_id,
+                     # Reported rather than assumed: a refusal is not a drive,
+                     # and the next beat has to try this one again.
+                     "driving": bool(driven.get("driving"))}]
+        return []
 
     def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
         """Start the queued work Atlas's current mode already permits.

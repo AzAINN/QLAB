@@ -3592,6 +3592,198 @@ def test_a_dispatched_task_fails_when_the_restart_interrupts_its_workflow():
     assert "interrupted" in (stored["error"] or "")
 
 
+# --- an approved action that could not be driven is driven later -------------
+
+def test_an_approved_action_that_could_not_be_driven_is_driven_later(session, monkeypatch):
+    """One coordinator at a time means an approval can land while the slot is
+    busy. Registering a workflow is not running it — without this sweep the
+    task sits in `running` with nothing walking its phases."""
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "g", "as_of": "2026-08-06",
+                             "universe": "core", "offline": True})["workflow_id"]
+    session.registry.create_atlas_task(
+        "task-parked", "proposal:regime_review|2026-08-06|SPY|regime_review",
+        "proposal:regime_review", {}, "regime_review", origin="proposal")
+    session.registry.update_atlas_task("task-parked", status="running",
+                                     workflow_id=workflow_id)
+
+    swept = session.drive_pending_tasks()
+
+    assert drove == [workflow_id]
+    assert swept == [{"task_id": "task-parked", "workflow_id": workflow_id,
+                      "driving": True}]
+
+
+def test_the_sweep_drives_one_at_a_time(session, monkeypatch):
+    """The owner has one coordinator slot; driving two would be the bug
+    invariant 9 already caught once."""
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+    for n in (1, 2):
+        workflow_id = session.registry.start_workflow(
+            "portfolio_review", {"goal": f"g{n}", "as_of": "2026-08-06",
+                                 "universe": "core", "offline": True},
+            phases=("news-analyst",))["workflow_id"]
+        session.registry.create_atlas_task(
+            f"task-parked-{n}", f"proposal:news_read|2026-08-06|SPY|{n}",
+            "proposal:news_read", {}, "news_read", origin="proposal")
+        session.registry.update_atlas_task(f"task-parked-{n}", status="running",
+                                         workflow_id=workflow_id)
+
+    swept = session.drive_pending_tasks()
+
+    assert len(drove) == 1
+    assert len(swept) == 1
+
+
+def test_a_busy_coordinator_is_not_interrupted(session, monkeypatch):
+    """The slot is taken. Spawning beside it is exactly the second coordinator
+    the driver's lock exists to refuse — the sweep must not even ask."""
+    monkeypatch.setattr(session, "coordinator_status", lambda: {"driving": True})
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "g", "as_of": "2026-08-06",
+                             "universe": "core", "offline": True})["workflow_id"]
+    session.registry.create_atlas_task(
+        "task-parked", "proposal:regime_review|2026-08-06|SPY|regime_review",
+        "proposal:regime_review", {}, "regime_review", origin="proposal")
+    session.registry.update_atlas_task("task-parked", status="running",
+                                     workflow_id=workflow_id)
+
+    assert session.drive_pending_tasks() == []
+    assert drove == []
+
+
+def test_the_sweep_never_drives_work_nobody_approved(session, monkeypatch):
+    """The other side of the status filter, and the envelope in one test: a
+    queued task has not been through the gate. Driving its workflow would make
+    the sweep a second way to start unapproved work."""
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "g"}, phases=("news-analyst",))["workflow_id"]
+    session.registry.create_atlas_task(
+        "task-queued", "proposal:news_read|2026-08-06|SPY|q", "proposal:news_read",
+        {}, "news_read", origin="proposal")
+    # A workflow binding without the running status: the shape a task carries
+    # before the gate has said anything about it.
+    session.registry.update_atlas_task("task-queued", workflow_id=workflow_id)
+
+    assert session.drive_pending_tasks() == []
+    assert drove == []
+
+
+def test_a_running_task_with_no_workflow_is_left_alone(session, monkeypatch):
+    """A deterministic template concludes inline and binds no workflow. There
+    is nothing to walk, and `str(None)` would hand the driver the id "None"."""
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+    session.registry.create_atlas_task(
+        "task-inline", "proposal:desk_brief|2026-08-06|SPY|desk_brief",
+        "proposal:desk_brief", {}, "desk_brief", origin="proposal")
+    session.registry.update_atlas_task("task-inline", status="running")
+
+    assert session.drive_pending_tasks() == []
+    assert drove == []
+
+
+def test_a_finished_workflow_is_left_for_reconciliation(session, monkeypatch):
+    """`reconcile_tasks` resolves this task from the workflow's own terminal
+    state. Spawning a coordinator for a run that is already complete would
+    re-walk finished phases against a referee verdict that has been given."""
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "g"}, phases=("news-analyst",))["workflow_id"]
+    session.registry.update_workflow_phase(
+        workflow_id, "news-analyst", "done", summary="ok",
+        artifacts={"news_view": "the record supports a narrow reading"})
+    assert session.registry.get_workflow(workflow_id)["status"] == "complete"
+    session.registry.create_atlas_task(
+        "task-done", "proposal:news_read|2026-08-06|SPY|d", "proposal:news_read",
+        {}, "news_read", origin="proposal")
+    session.registry.update_atlas_task("task-done", status="running",
+                                     workflow_id=workflow_id)
+
+    assert session.drive_pending_tasks() == []
+    assert drove == []
+
+
+def test_a_workflow_that_vanished_is_left_for_reconciliation(session, monkeypatch):
+    """Failing the task is reconciliation's call, not the sweep's — and there
+    is no goal, no graph and no phases to drive here anyway."""
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+    session.registry.create_atlas_task(
+        "task-orphaned", "proposal:news_read|2026-08-06|SPY|o", "proposal:news_read",
+        {}, "news_read", origin="proposal")
+    session.registry.update_atlas_task("task-orphaned", status="running",
+                                     workflow_id="no-such-workflow")
+
+    assert session.drive_pending_tasks() == []
+    assert drove == []
+    assert session.registry.get_atlas_task("task-orphaned")["status"] == "running"
+
+
+def test_the_sweep_drives_the_workflow_with_its_own_goal_and_graph(session, monkeypatch):
+    """What the coordinator is told is what the workflow says, not a blank.
+    The roles decide which provider serves the dispatch — an empty tuple is an
+    unnamed graph, which routes every one-role read to the claude coordinator."""
+    handed: dict = {}
+    monkeypatch.setattr(
+        session, "drive_workflow",
+        lambda wid, goal, roles=(): handed.update(goal=goal, roles=roles) or
+        {"driving": True})
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "[news_read] read the window"},
+        phases=("news-analyst",))["workflow_id"]
+    session.registry.create_atlas_task(
+        "task-parked", "proposal:news_read|2026-08-06|SPY|news_read",
+        "proposal:news_read", {}, "news_read", origin="proposal")
+    session.registry.update_atlas_task("task-parked", status="running",
+                                     workflow_id=workflow_id)
+
+    session.drive_pending_tasks()
+
+    assert handed["goal"] == "[news_read] read the window"
+    assert handed["roles"] == ("news-analyst",)
+
+
+def test_an_undriven_dispatch_reports_that_it_was_not_driven(session, monkeypatch):
+    """A refusal is not a drive. The sweep reports what actually happened so
+    the next beat can try again rather than believing the slot is taken."""
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): {
+                            "driving": False, "reason": "the `claude` CLI is not on PATH"})
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "g"}, phases=("news-analyst",))["workflow_id"]
+    session.registry.create_atlas_task(
+        "task-parked", "proposal:news_read|2026-08-06|SPY|news_read",
+        "proposal:news_read", {}, "news_read", origin="proposal")
+    session.registry.update_atlas_task("task-parked", status="running",
+                                     workflow_id=workflow_id)
+
+    assert session.drive_pending_tasks() == [
+        {"task_id": "task-parked", "workflow_id": workflow_id, "driving": False}]
+
+
 def test_an_unparseable_post_body_is_refused_rather_than_silently_emptied(
     session, monkeypatch,
 ):

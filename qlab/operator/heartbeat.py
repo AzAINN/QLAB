@@ -169,6 +169,21 @@ def build_owner_tick(session, lock, *, offline: bool,
                     result["autonomous"] = session.atlas_run_startable(offline)
                 except Exception as exc:
                     result["autonomous_error"] = str(exc)[:200]
+            # Deliberately NOT under `live_autonomous`. Approving is what
+            # started this work; the sweep only walks a workflow the gate has
+            # already opened, and the dispatch that opened it could not drive
+            # it because the one coordinator slot was taken. Gating this on
+            # autonomy would mean a desk with autonomy off leaves the operator's
+            # own approvals parked at phase one forever.
+            #
+            # After `atlas_observe`, whose reconciliation resolves the runs that
+            # DID finish — so the sweep only ever sees what is still in flight.
+            sweep = getattr(session, "drive_pending_tasks", None)
+            if callable(sweep):
+                try:
+                    result["driven"] = sweep()
+                except Exception as exc:
+                    result["drive_error"] = str(exc)[:200]
             return result
 
         with lock:

@@ -26,8 +26,18 @@ def shadow_scorecard(registry, *, since: str | None = None,
 
     ``since`` is an ISO date; rows created before it are ignored. Every figure
     is a count of persisted facts — nothing is inferred or modeled.
+
+    **Trigger work only.** These are the statistics that say whether Atlas's
+    unattended judgment is worth more authority, and a proposal is attended by
+    construction: a human asked for it and a human approved it. Counted here it
+    would fill ``by_trigger`` with ``proposal:<template_id>`` keys, and an
+    approved proposal that concluded ``action_taken: False`` would be scored as
+    a FALSE TRIGGER — when no trigger fired and the desk did exactly what it
+    was asked. Whether proposals deserve their own scorecard (approved against
+    refused, which is a different question) is an open one; mixing them into
+    this one biases the measurement that governs promotion.
     """
-    tasks = [t for t in registry.list_atlas_tasks(limit)
+    tasks = [t for t in registry.list_atlas_tasks(limit, origin="trigger")
              if not since or _day(t) >= since[:10]]
     approvals = [a for a in registry.list_approval_requests(limit)
                  if not since or _day(a) >= since[:10]]

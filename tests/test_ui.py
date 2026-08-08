@@ -3766,6 +3766,97 @@ def test_the_sweep_drives_the_workflow_with_its_own_goal_and_graph(session, monk
     assert handed["roles"] == ("news-analyst",)
 
 
+def _park(session, n: int, *, phases=("news-analyst",)) -> str:
+    """One approved task bound to a workflow nothing is walking."""
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": f"g{n}"}, phases=phases)["workflow_id"]
+    session.registry.create_atlas_task(
+        f"task-parked-{n}", f"proposal:news_read|2026-08-06|SPY|{n}",
+        "proposal:news_read", {}, "news_read", origin="proposal")
+    session.registry.update_atlas_task(f"task-parked-{n}", status="running",
+                                     workflow_id=workflow_id)
+    return workflow_id
+
+
+def test_a_refused_candidate_does_not_park_the_one_behind_it(session, monkeypatch):
+    """`available()` answers per graph: a one-role read served by a daemon that
+    is down is refused while a claude review would start. Stopping at the first
+    refusal would leave every later approval parked forever — this method's own
+    bug, reintroduced for a subset."""
+    refused = _park(session, 1)
+    drivable = _park(session, 2)
+    monkeypatch.setattr(
+        session, "drive_workflow",
+        lambda wid, goal, roles=(): {"driving": wid != refused,
+                                     "reason": "the daemon is down"})
+
+    swept = session.drive_pending_tasks()
+
+    assert [(row["workflow_id"], row["driving"]) for row in swept] == [
+        (refused, False), (drivable, True)]
+
+
+def test_the_sweep_asks_the_oldest_parked_approval_first(session, monkeypatch):
+    """The registry lists newest-first. Swept in that order, a young doomed
+    workflow is retried ahead of an older healthy one on every beat."""
+    asked: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): asked.append(wid) or
+                        {"driving": False, "reason": "no"})
+    oldest = _park(session, 1)
+    newest = _park(session, 2)
+    assert [t["task_id"] for t in session.registry.list_atlas_tasks(10)] == [
+        "task-parked-2", "task-parked-1"], "premise: the registry lists newest first"
+
+    session.drive_pending_tasks()
+
+    assert asked == [oldest, newest]
+
+
+def test_a_desk_wide_refusal_is_asked_a_bounded_number_of_times(session, monkeypatch):
+    """No `claude` on PATH refuses every candidate. Uncapped, that is one
+    `atlas_coordinator_skipped` row per running task per beat, forever."""
+    asked: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): asked.append(wid) or
+                        {"driving": False,
+                         "reason": "the `claude` CLI is not on PATH"})
+    for n in range(ui_server._DRIVE_ATTEMPTS_PER_SWEEP + 1):
+        _park(session, n)
+
+    swept = session.drive_pending_tasks()
+
+    assert len(asked) == ui_server._DRIVE_ATTEMPTS_PER_SWEEP
+    assert len(swept) == ui_server._DRIVE_ATTEMPTS_PER_SWEEP
+
+
+def test_a_later_sweep_drives_the_next_parked_task(session, monkeypatch):
+    """The first drive takes the slot, so the second waits — but it must not
+    wait forever. Once the first workflow resolves, the next beat picks up the
+    one behind it."""
+    drove: list[str] = []
+    monkeypatch.setattr(session, "drive_workflow",
+                        lambda wid, goal, roles=(): drove.append(wid) or
+                        {"driving": True})
+    first = _park(session, 1)
+    second = _park(session, 2)
+
+    session.drive_pending_tasks()
+    assert drove == [first]
+
+    # The first run finishes; reconciliation completes its task, and the slot is
+    # free again by the time the next beat asks.
+    session.registry.update_workflow_phase(
+        first, "news-analyst", "done", summary="ok",
+        artifacts={"news_view": "the record supports a narrow reading"})
+    session.atlas.reconcile_tasks()
+
+    session.drive_pending_tasks()
+
+    assert drove == [first, second]
+    assert session.registry.get_atlas_task("task-parked-1")["status"] == "completed"
+
+
 def test_an_undriven_dispatch_reports_that_it_was_not_driven(session, monkeypatch):
     """A refusal is not a drive. The sweep reports what actually happened so
     the next beat can try again rather than believing the slot is taken."""

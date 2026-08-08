@@ -205,6 +205,12 @@ _ACTIVE_MARKET_THREAD: threading.Thread | None = None
 # update beyond this grace cannot belong to a healthy qlab coordinator.
 _WORKFLOW_STALE_AFTER_SECONDS = 35 * 60
 _WORKFLOW_REAP_INTERVAL_SECONDS = 60.0
+# How many parked workflows one sweep may ASK to drive. A refusal is per-graph
+# (a daemon-backed one-role read can be refused while a claude review would
+# start), so the sweep must look past one — but a desk-wide refusal, like no
+# `claude` on PATH, refuses every candidate, and without a cap that writes one
+# skip row per running task per beat, forever.
+_DRIVE_ATTEMPTS_PER_SWEEP = 3
 
 # Realized-performance window. `_MARK_WINDOW` is the newest-N read cap; when the
 # book has more marks than that, the payload says so rather than letting a
@@ -3235,25 +3241,47 @@ class UISession:
         here is one that already passed the mode check and (for a proposal) a
         human approval. Driving is resuming, never starting.
 
-        One per call, because the owner has one coordinator. The check that
-        makes that safe is not the early return below — the beat runs on its own
-        thread beside HTTP handlers that can also dispatch. It is
-        ``CoordinatorDriver.drive``, which re-tests ``busy`` under the driver's
-        own lock and refuses the second caller. The early return only spares the
-        audit bus a skip row per beat while a run is in flight.
+        One SPAWN per call, because the owner has one coordinator. The check
+        that makes that safe is not the early return below — the beat runs on
+        its own thread beside HTTP handlers that can also dispatch. It is
+        ``CoordinatorDriver.drive``, which re-tests ``busy``, spawns and stores
+        the session all under the driver's own lock, and refuses the second
+        caller. The early return only spares the audit bus a skip row per beat
+        while a run is in flight.
+
+        And that idle slot is the OWNER's. A coordinator a human started from
+        the classic TUI is a client-side process this flag cannot see, so a
+        manual resume landing inside one beat window can put two coordinators on
+        one graph. The window is one beat, nothing is granted that the human did
+        not already have, and closing it properly needs a lease in the registry
+        rather than a flag in a process.
+
+        A refusal is not the end of the sweep. ``available()`` answers per
+        graph — a one-role read served by a daemon that is down is refused while
+        a claude review would start — so stopping at the first refusal would
+        park every later candidate behind it, which is the state this method
+        exists to remove. Refusals are attempted past, up to
+        ``_DRIVE_ATTEMPTS_PER_SWEEP``; the return value carries every attempt.
         """
         from qlab.operator.atlas import (
             TASK_SCAN_WINDOW,
             WORKFLOW_RESOLVED_STATUSES,
         )
-        from qlab.state.registry import agent_for_phase
 
         if self.coordinator_status().get("driving"):
             return []
-        # In SQL: no task row is ever deleted, so a scan filtered afterwards
-        # would let finished history decide whether live work is visible.
-        for task in self.registry.list_atlas_tasks(TASK_SCAN_WINDOW,
-                                                   status="running"):
+        attempted: list[dict] = []
+        # Filtered in SQL, because no task row is ever deleted and finished
+        # history must not decide whether live work is visible. Sorted here, and
+        # the direction is the opposite of the registry's: the newest parked
+        # approval first would retry a doomed young workflow ahead of an older
+        # healthy one on every single beat. Oldest first is the queue order the
+        # operator would expect anyway. The window is the one `reconcile_tasks`
+        # uses, so the sweep never drives a task reconciliation cannot see.
+        for task in sorted(
+                self.registry.list_atlas_tasks(TASK_SCAN_WINDOW,
+                                               status="running"),
+                key=lambda row: str(row.get("created_at") or "")):
             workflow = self.registry.get_workflow(
                 str(task.get("workflow_id") or ""))
             if workflow is None:
@@ -3275,16 +3303,24 @@ class UISession:
                 # unnamed graph are both meaningful to the driver — the first
                 # tells the coordinator nothing, the second routes every
                 # one-role read to the claude coordinator — so neither may be a
-                # default standing in for a row that has the answer.
+                # default standing in for a row that has the answer. The roles
+                # are read from the step rows rather than re-derived from their
+                # phases: `start_workflow` resolved them once, and the column is
+                # what this graph was created with.
                 str((workflow.get("request") or {}).get("goal") or ""),
-                roles=tuple(agent_for_phase(str(step["phase"]))
+                roles=tuple(str(step["agent"])
                             for step in workflow.get("steps") or ()))
-            return [{"task_id": str(task["task_id"]),
-                     "workflow_id": workflow_id,
-                     # Reported rather than assumed: a refusal is not a drive,
-                     # and the next beat has to try this one again.
-                     "driving": bool(driven.get("driving"))}]
-        return []
+            attempted.append({"task_id": str(task["task_id"]),
+                              "workflow_id": workflow_id,
+                              # Reported rather than assumed: a refusal is not a
+                              # drive, and a later beat has to try this again.
+                              "driving": bool(driven.get("driving"))})
+            if driven.get("driving"):
+                # The slot is taken now. Anything else waits for a later beat.
+                break
+            if len(attempted) >= _DRIVE_ATTEMPTS_PER_SWEEP:
+                break
+        return attempted
 
     def atlas_run_startable(self, offline: bool, *, limit: int = 1) -> list[dict]:
         """Start the queued work Atlas's current mode already permits.

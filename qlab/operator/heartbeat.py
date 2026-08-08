@@ -160,9 +160,30 @@ def build_owner_tick(session, lock, *, offline: bool,
         live_autonomous = autonomous
 
         def observe(**handed) -> dict:
+            # Before the observe, so one tick closes the whole loop: the reap
+            # interrupts a workflow whose coordinator lease has expired,
+            # `atlas_observe` reconciles the task it belongs to, and the sweep
+            # below then passes over it instead of respawning a coordinator for
+            # a run that died half an hour ago. Reaping was reachable ONLY from
+            # the snapshot path and `GET /api/workflows`, so an owner running
+            # unattended — no TUI, no browser — never reaped at all, and that is
+            # exactly the desk the sweep runs on. It self-throttles to a minute.
+            reap = getattr(session, "reap_stale_workflows", None)
+            reaped, reap_error = None, ""
+            if callable(reap):
+                try:
+                    reaped = reap()
+                except Exception as exc:
+                    # Its own key, never the value's: a field that changes JSON
+                    # type mid-run poisons the tick for a typed client.
+                    reap_error = str(exc)[:200]
             # `handed` is empty unless the reasoner ran, so a desk with the
             # flag off calls exactly what it called before.
             result = session.atlas_observe(offline, **handed)
+            if reaped is not None:
+                result["reaped"] = reaped
+            if reap_error:
+                result["reap_error"] = reap_error
             result["autonomous_enabled"] = bool(live_autonomous)
             if live_autonomous:
                 try:

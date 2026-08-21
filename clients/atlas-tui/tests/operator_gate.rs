@@ -73,14 +73,15 @@ fn production_files_mentioning(literal: &str) -> Vec<String> {
                 None => &whole[..],
             };
             if source.contains(literal) {
-                // Separators normalized before the prefix cuts: a Windows
-                // walk yields `src\ui\...`, and every census downstream
-                // classifies by `/`-spelled prefixes — unnormalized, the
-                // whole IO census silently moves files between categories.
+                // Separators normalized before the prefix cuts — on BOTH
+                // sides. A Windows walk yields `\`-spelled paths, and SRC is
+                // built from CARGO_MANIFEST_DIR, which is `\`-spelled there
+                // too: normalizing only the walked path left the prefix
+                // untrimmed and absolute paths leaked into the census.
                 found.push(
                     path.to_string_lossy()
                         .replace('\\', "/")
-                        .trim_start_matches(SRC)
+                        .trim_start_matches(SRC.replace('\\', "/").as_str())
                         .trim_start_matches('/')
                         .to_string(),
                 );

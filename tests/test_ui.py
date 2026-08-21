@@ -651,17 +651,18 @@ def test_tui_launcher_waits_for_owner_readiness_after_spawn(
         raise SystemExit(0)
 
     monkeypatch.setattr(cli_module.os, "execvpe", fake_exec)
-    monkeypatch.setattr(
-        cli_module.subprocess, "run",
-        lambda _argv, **_kw: calls.__setitem__("run", calls["run"] + 1)
-        or type("Done", (), {"returncode": 0})())
 
-    if cli_module.os.name == "nt":
-        assert cli_module._cmd_tui(_tui_args(port=8877, claude="off")) == 0
-    else:
-        with pytest.raises(SystemExit) as exit_info:
-            cli_module._cmd_tui(_tui_args(port=8877, claude="off"))
-        assert exit_info.value.code == 0
+    def fake_run(_argv, **_kw):
+        calls["run"] += 1
+        # The launcher raises the child's returncode after this returns, so
+        # the SystemExit expectation below holds on Windows too.
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_module._cmd_tui(_tui_args(port=8877, claude="off"))
+    assert exit_info.value.code == 0
 
     assert calls == {"probe": 2, "system": 1, "run": 1}
 
@@ -733,6 +734,15 @@ def test_tui_launches_the_ratatui_workstation_and_tells_it_the_port(
         raise SystemExit(0)   # execvpe never returns; neither does this
 
     monkeypatch.setattr(cli_module.os, "execvpe", fake_exec)
+    # The Windows hand-off is spawn-then-exit rather than exec-in-place;
+    # capture it through the same `seen` so the assertions hold on every
+    # platform. `subprocess.run` calls Popen internally, so leaving it
+    # unpatched would also trip any Popen tripwire a test set.
+    monkeypatch.setattr(
+        cli_module.subprocess, "run",
+        lambda argv, env=None, **_kw: seen.update(
+            path=argv[0], argv=list(argv), env=env or {})
+        or type("Done", (), {"returncode": 0})())
 
     with pytest.raises(SystemExit) as exit_info:
         cli_module._cmd_tui(_tui_args(port=8899))
@@ -766,6 +776,11 @@ def test_tui_glass_flag_reaches_the_workstation(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli_module.os, "execvpe",
         lambda path, argv, env: seen.update(argv=argv) or (_ for _ in ()).throw(SystemExit(0)))
+    # The Windows leg of the same hand-off, captured the same way.
+    monkeypatch.setattr(
+        cli_module.subprocess, "run",
+        lambda argv, **_kw: seen.update(argv=list(argv))
+        or type("Done", (), {"returncode": 0})())
 
     with pytest.raises(SystemExit):
         cli_module._cmd_tui(_tui_args(glass=True))

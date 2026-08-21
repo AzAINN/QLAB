@@ -292,12 +292,11 @@ def _drive_cmd_tui(monkeypatch, tmp_path, argv, *, owner_running):
     monkeypatch.setattr(cli.socket, "socket", FakeSocket)
     monkeypatch.setattr(cli.subprocess, "Popen", FakeOwner)
     monkeypatch.setattr(tui_client, "ApiClient", FakeClient)
-    if cli.os.name == "nt":
-        assert cli.main(argv) == 0
-    else:
-        with pytest.raises(SystemExit) as exit_info:
-            cli.main(argv)
-        assert exit_info.value.code == 0
+    # Both platforms end in SystemExit(0): the exec stub raises it, and the
+    # Windows leg raises the child's returncode after subprocess.run.
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(argv)
+    assert exit_info.value.code == 0
     assert record["exec"], "the workstation was never handed off to"
     return record
 

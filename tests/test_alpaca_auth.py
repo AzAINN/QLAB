@@ -363,8 +363,12 @@ def test_the_desk_takes_a_login_and_the_resolver_reads_it_back(
     assert status == 200
 
     profile = tmp_path / "alpaca" / "profiles" / "paper.yaml"
-    assert stat.S_IMODE(profile.stat().st_mode) == 0o600
-    assert stat.S_IMODE(profile.parent.stat().st_mode) & 0o077 == 0
+    if os.name != "nt":
+        # POSIX bits are decorative on Windows (st_mode reads 0o666-ish
+        # whatever the ACL); production's privacy check there is profile
+        # containment, asserted in its own test below.
+        assert stat.S_IMODE(profile.stat().st_mode) == 0o600
+        assert stat.S_IMODE(profile.parent.stat().st_mode) & 0o077 == 0
 
     # The written profile is the shape the resolver already reads.
     creds = resolve_alpaca_credentials()
@@ -415,14 +419,18 @@ def test_an_obviously_wrong_login_is_refused_and_nothing_is_written(
 
     # A directory whose mode will not stick (a fixed-permission mount) must
     # refuse *before* the secret is written, not write into a readable one.
-    profiles.mkdir(parents=True)
-    profiles.chmod(0o755)
-    monkeypatch.setattr(os, "chmod", lambda *args, **kwargs: None)
-    status, refused = _post(desk, "/api/alpaca/credentials",
-                            {"api_key": _KEY, "api_secret": _SECRET})
-    assert status == 400
-    assert "private" in refused["error"]
-    assert not (profiles / "paper.yaml").exists()
+    # POSIX only: the mode-readback this leg neuters does not exist on
+    # Windows, where the equivalent refusal — a config dir outside the user
+    # profile — is pinned by its own test.
+    if os.name != "nt":
+        profiles.mkdir(parents=True)
+        profiles.chmod(0o755)
+        monkeypatch.setattr(os, "chmod", lambda *args, **kwargs: None)
+        status, refused = _post(desk, "/api/alpaca/credentials",
+                                {"api_key": _KEY, "api_secret": _SECRET})
+        assert status == 400
+        assert "private" in refused["error"]
+        assert not (profiles / "paper.yaml").exists()
 
 
 def test_the_probe_reports_the_account_masked_to_its_last_four(desk, monkeypatch):

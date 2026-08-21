@@ -185,6 +185,9 @@ impl Source {
             // placeholder, which is what would catch a cursor added to it
             // without a help row.
             Source::View(ViewId::Research) => ("ui/views/research.rs", "", "on_key"),
+            // PRED binds nothing either, for RSCH's reason: read-only, nothing
+            // scrolls, and the board refetch rides the shell's own `r`.
+            Source::View(ViewId::Predictors) => ("ui/views/predictors.rs", "", "on_key"),
             // SETT's `View::on_key` only forwards; `keys` is the router, and
             // the form under it is the section below.
             Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "keys"),
@@ -263,7 +266,7 @@ pub const KEYMAP: &[Binding] = &[
         Source::Shell,
         "refresh now, without waiting for the poll",
     ),
-    b("Char(c)", "1–8", Source::Shell, "show that view"),
+    b("Char(c)", "1–9", Source::Shell, "show that view"),
     b("Tab", "Tab", Source::Shell, "the next view"),
     b("BackTab", "Shift-Tab", Source::Shell, "the previous view"),
     b(

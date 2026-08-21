@@ -21,7 +21,7 @@ Sleep 2s
 Show
 
 # Launch exactly the command the README shows.
-Type "qlab tui --port 8799 --claude off"
+Type "qlab tui --offline --port 8799 --claude off"
 Sleep 1s
 Enter
 

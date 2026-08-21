@@ -1,6 +1,5 @@
 ---
 source: tests/golden_shell.rs
-assertion_line: 950
 expression: "frame_to_string(&rail_store(), 120, 36)"
 ---
 " SPY 729.46 ▲0.42%   QQQ 661.73 ▲1.10%   XLF 52.40 ▲0.15%   GLD 201.77 ▼0.88%   VNQ 88.12 ▼1.63%   SPY 729.46 ▲0.42%   Q"
@@ -9,10 +8,10 @@ expression: "frame_to_string(&rail_store(), 120, 36)"
 " 3 MKTS │                                                                             │ regime STRESS  robust UNCERTAIN "
 " 4 BOOK │ATLAS                                                                        │ drawdown -3.1%  tier WARNING    "
 " 5 RSCH │· Mode is RESEARCH but                                                       │ gross 94.0%                     "
-" 6 WORK │  autonomy is OFF — Atlas      ──────────────────────────────────────────────│                                 "
-" 7 AUDIT│  queues work and waits.       ▌ REGIME                ▌ ALERTS              │▌ BREADTH                        "
-" 8 SETT │· No trigger has fired — no    STATE    UNCERTAIN      TIER     WARNING      │ ███████████████████████████████ "
-"        │  drawdown tier, drift breach, DETECTOR STRESS         HEADROOM --           │ adv 3 / dec 2                   "
+" 6 PRED │  autonomy is OFF — Atlas      ──────────────────────────────────────────────│                                 "
+" 7 WORK │  queues work and waits.       ▌ REGIME                ▌ ALERTS              │▌ BREADTH                        "
+" 8 AUDIT│· No trigger has fired — no    STATE    UNCERTAIN      TIER     WARNING      │ ███████████████████████████████ "
+" 9 SETT │  drawdown tier, drift breach, DETECTOR STRESS         HEADROOM --           │ adv 3 / dec 2                   "
 "        │  regime flip, or data outage. SIG/THR  -- / --        VOL/LIM  -- / --      │                                 "
 "        │  Nothing to act on is not     CONF     --             GATE     CLEAR        │▌ MOVERS                         "
 "        │  idle by accident.                                                          │ ▲ best  QQQ    +1.10%           "

@@ -1,5 +1,5 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
-use crate::model::{LlmCatalog, RegimePanel, Snapshot, Template};
+use crate::model::{LlmCatalog, PredictorDetail, RegimePanel, Snapshot, Template};
 
 pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
@@ -24,6 +24,15 @@ pub enum AppEvent {
     /// on `/api/tui` for exactly that reason, and a client that polled the
     /// prober would have moved the cost rather than avoided it.
     Backends(LlmCatalog),
+    /// The full predictor board, from `/api/research/predictors`.
+    ///
+    /// Fetched when the operator opens the PREDICTORS view rather than on a
+    /// beat: the board changes when a run lands — days apart — and the
+    /// snapshot's own `predictors` summary already carries the headline on the
+    /// desk cadence. Boxed like the snapshot: the payload carries every
+    /// model's per-fold series, and the bus should not grow to its widest
+    /// passenger.
+    PredictorDetail(Box<PredictorDetail>),
     Sse(SseEvent),
     Http(HttpResult),
     ConnUp(Channel),

@@ -1,6 +1,5 @@
 ---
 source: tests/golden_settings.rs
-assertion_line: 1310
 expression: "client.frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
@@ -9,10 +8,10 @@ expression: "client.frame(120, 36)"
 " 3 MKTS │ data         synthetic                                                      │ regime CALM  robust UNCERTAIN   "
 " 4 BOOK │ book         simulated                                                      │ drawdown 0.0%  tier NONE        "
 " 5 RSCH │ lane         offline · synthetic                                            │ gross 100.0%                    "
-" 6 WORK │ alpaca login no ALPACA_API_KEY_ID in the environment or .env                │                                 "
-" 7 AUDIT│                                                                             │▌ BREADTH                        "
-"▌8 SETT │                                                                             │ ███████████████████████████████ "
-"        │                                                                             │ adv 1 / dec 4                   "
+" 6 PRED │ alpaca login no ALPACA_API_KEY_ID in the environment or .env                │                                 "
+" 7 WORK │                                                                             │▌ BREADTH                        "
+" 8 AUDIT│                                                                             │ ███████████████████████████████ "
+"▌9 SETT │                                                                             │ adv 1 / dec 4                   "
 "        │─────────────────────────────────────────────────────────────────────────────│                                 "
 "        │▌ POLICY ┌────────────────────────────────────────────────────────┐          │▌ MOVERS                         "
 "        │ policy  │▌ WHICH MINDS                                           │          │ ▲ best  XLF    +1.24%           "

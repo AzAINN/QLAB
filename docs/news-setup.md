@@ -30,7 +30,7 @@ alpaca profile login
 # 2. Start the desk on the live data lane. The book stays simulated unless you
 #    also pass --alpaca-book, so this reads real prices and real news without
 #    touching your paper account.
-qlab tui --live
+qlab
 ```
 
 Confirm it in **Settings → DESK MODE**: it reports the resolved credential, and

@@ -12,7 +12,7 @@ use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
     Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig, Plan,
-    Policy, RegimePanel, Run, Snapshot, System, Template, Workflow,
+    Policy, PredictorDetail, RegimePanel, Run, Snapshot, System, Template, Workflow,
 };
 use crate::net::http;
 use crate::ui::door::Door;
@@ -94,6 +94,11 @@ pub enum ViewId {
     Markets,
     Book,
     Research,
+    /// The predictor board's own pane: every evaluated model, where RESEARCH
+    /// keeps a one-row readout. Beside RESEARCH because the board is a
+    /// research artifact — its models are visible here and runnable only
+    /// through the owner's governed tool, never from this client.
+    Predictors,
     Workforce,
     Audit,
     Settings,
@@ -102,12 +107,13 @@ pub enum ViewId {
 impl ViewId {
     /// Nav order. The digit keys index this, so it is also the numbering an
     /// operator sees — the two cannot drift apart.
-    pub const ALL: [ViewId; 8] = [
+    pub const ALL: [ViewId; 9] = [
         ViewId::Atlas,
         ViewId::Desk,
         ViewId::Markets,
         ViewId::Book,
         ViewId::Research,
+        ViewId::Predictors,
         ViewId::Workforce,
         ViewId::Audit,
         ViewId::Settings,
@@ -122,6 +128,7 @@ impl ViewId {
             ViewId::Markets => "MKTS",
             ViewId::Book => "BOOK",
             ViewId::Research => "RSCH",
+            ViewId::Predictors => "PRED",
             ViewId::Workforce => "WORK",
             ViewId::Audit => "AUDIT",
             ViewId::Settings => "SETT",
@@ -434,6 +441,12 @@ pub struct Store {
     /// place this client compares two machines' wall clocks stays the one place
     /// (`format::since`).
     backends_at: Option<Instant>,
+    /// The full predictor board, fetched when the PREDICTORS view opens.
+    ///
+    /// No arrival stamp beside it: the fetch is edge-triggered on entering the
+    /// view, so "would asking again learn anything" is answered by the
+    /// operator pressing `r`, not by a TTL this client would have to invent.
+    predictor_detail: Option<PredictorDetail>,
     pub nav: Nav,
     /// What the operator has typed into the command line, and what it said back.
     ///
@@ -598,6 +611,7 @@ impl Store {
             templates: Vec::new(),
             backends: None,
             backends_at: None,
+            predictor_detail: None,
             nav: Nav::default(),
             cmd: CmdLine::default(),
             help_top: 0,
@@ -753,6 +767,13 @@ impl Store {
             AppEvent::Backends(catalog) => {
                 self.backends = Some(catalog);
                 self.backends_at = Some(now);
+                self.dirty = true;
+            }
+            // Replaced wholesale like the catalog: the route serves the whole
+            // newest board, and merging two boards would render rows from two
+            // different runs as one evaluation nobody performed.
+            AppEvent::PredictorDetail(detail) => {
+                self.predictor_detail = Some(*detail);
                 self.dirty = true;
             }
             // A keystroke may move a selection and a resize moves everything;
@@ -916,6 +937,15 @@ impl Store {
     /// The predictor board summary, if the owner served one.
     pub fn predictors(&self) -> Option<&crate::model::Predictors> {
         self.snapshot.as_ref()?.predictors.as_ref()
+    }
+
+    /// The full predictor board, if the PREDICTORS view has fetched one.
+    ///
+    /// `None` is "not asked yet or not answered yet", never "the desk has no
+    /// board" — the payload itself says that, via `status`, and the view keeps
+    /// the two apart.
+    pub fn predictor_detail(&self) -> Option<&PredictorDetail> {
+        self.predictor_detail.as_ref()
     }
 
     /// Today's proposals, as the owner last served them.
@@ -2562,8 +2592,10 @@ mod tests {
     fn the_view_order_is_the_numbering_the_operator_sees() {
         assert_eq!(ViewId::from_digit('1'), Some(ViewId::Atlas));
         assert_eq!(ViewId::from_digit('2'), Some(ViewId::Desk));
-        assert_eq!(ViewId::from_digit('8'), Some(ViewId::Settings));
-        assert_eq!(ViewId::from_digit('9'), None);
+        // PRED sits beside RSCH — the board is a research artifact — which is
+        // the deliberate renumbering of everything after it, pinned here.
+        assert_eq!(ViewId::from_digit('6'), Some(ViewId::Predictors));
+        assert_eq!(ViewId::from_digit('9'), Some(ViewId::Settings));
         assert_eq!(ViewId::from_digit('0'), None, "there is no view zero");
         for (i, id) in ViewId::ALL.iter().enumerate() {
             assert_eq!(

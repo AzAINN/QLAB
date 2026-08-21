@@ -32,7 +32,7 @@ desk that touches a book.
 Bob attaches to the running desk through the same propose-only MCP proxy the
 Claude workforce uses. Start an owner runtime, then open the project in Bob:
 
-    qlab tui          # or: qlab ui --no-browser
+    qlab              # or headless: qlab owner
 
 `.bob/mcp.json` points Bob at `qlab.mcp.tui_proxy`, which never opens DuckDB and
 talks to the owner over HTTP only. Bob can read the portfolio, the regime panel,

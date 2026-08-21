@@ -42,7 +42,7 @@ Install qlab in editable mode. The core is deliberately light and everything
 heavy is an optional extra, so pick the extras you actually need:
 
 ```bash
-python -m pip install -e ".[operator]"                        # minimum for `qlab tui` / `qlab ui`
+python -m pip install -e ".[operator]"                        # minimum for the `qlab` desk
 python -m pip install -e ".[operator,data,trader]"            # + live data + your Alpaca paper book
 python -m pip install -e ".[operator,data,optimize,mcp,dev]"  # the dev setup (tests + convex solver)
 python -m pip install -e ".[all]"                             # data, hmm, optimize, mcp, trader, viz, tui, dev
@@ -50,7 +50,7 @@ python -m pip install -e ".[all]"                             # data, hmm, optim
 
 | Extra | Pulls in | Needed for |
 |---|---|---|
-| `operator` | textual, httpx, fastmcp | `qlab tui`, `qlab ui`, the desk CLI verbs, the Claude MCP proxy |
+| `operator` | httpx, fastmcp | the `qlab` desk, the CLI verbs, the Claude MCP proxy |
 | `data` | yfinance, pyarrow | live/cached daily bars (`--live`) |
 | `trader` | alpaca-py | the Alpaca paper book (`--alpaca-book`) and Alpaca market data |
 | `optimize` | cvxpy | the faster convex solver path |
@@ -235,9 +235,9 @@ qlab tui
 ```
 
 `qlab tui` starts the owner runtime and opens the **Atlas workstation** — the
-Rust/Ratatui client in `clients/atlas-tui`, seven views on `1`–`7`: Desk,
-Markets, Book, Research, Workforce, Audit, Settings. The launcher refuses
-rather than falling back if the binary is not there.
+Rust/Ratatui client in `clients/atlas-tui`, nine views on `1`–`9`: Atlas,
+Desk, Markets, Book, Research, Predictors, Workforce, Audit, Settings. The
+launcher refuses rather than falling back if the binary is not there.
 
 On ATLAS, `/ask` asks the desk what it would do: the gate ranks every
 registered template, the ones it permits become approvable proposals on the
@@ -247,22 +247,14 @@ and approving are both writes, so a desk that is not armed can read the panel
 and not fill or act on it, and approving re-runs the same gate: no proposal
 creates a paper plan below Propose.
 
-```bash
-qlab tui --classic    # the Textual client, against the same owner
-```
-
-`--classic` is the soak valve while the Ratatui workstation is being lived
-with — both clients read the same `/api/tui` over HTTP, so it changes which
-screen is drawn and nothing about what is running. The Textual client's views
-are `1`–`9`: Atlas, Dashboard, Market, Workforce, Research, Book, Audit,
-Reference, Settings.
-
-The desk opens on synthetic data with a simulated book, so it runs with no
-account at all. Once you have signed in with the Alpaca CLI (step 3 above), turn
-on real prices and, separately, your real Alpaca paper book:
+The desk opens on **live data with the simulated book** — every operation
+available, no flags. `qlab --offline` is the synthetic no-network demo, and
+`qlab --restart` stops whatever runtime holds the port and starts fresh. Once
+you have signed in with the Alpaca CLI (step 3 above), your real Alpaca paper
+book is one word away:
 
 ```bash
-qlab tui --live           # real prices, qlab's simulated book
+qlab                      # real prices, qlab's simulated book
 qlab tui --alpaca-book    # real prices and your Alpaca paper book (implies --live)
 ```
 
@@ -297,7 +289,7 @@ qlab tui
     |
     +-- owner HTTP runtime ---- DuckDB registry and paper book
     |       |
-    |       +-- Textual TUI, web client, and atlas-tui observe over HTTP
+    |       +-- the Atlas workstation and the CLI verbs observe over HTTP
     |       +-- qlab-operator gives the Claude workforce role-bound HTTP tools
     |
     +-- explicit human confirmation is required for paper execution
@@ -325,40 +317,36 @@ broken sweep, not a strong result.
 
 | Surface | What it is |
 |---|---|
-| `qlab tui` | the Atlas workstation (`clients/atlas-tui`) — Ratatui, armed by default; read-only by construction only in the `--no-default-features` build ([README](clients/atlas-tui/README.md)) |
-| `qlab tui --classic` | Textual workstation — the complete surface |
-| `qlab ui` | same owner runtime, local web client |
+| `qlab` | the Atlas workstation (`clients/atlas-tui`) — Ratatui, armed by default; read-only by construction only in the `--no-default-features` build ([README](clients/atlas-tui/README.md)) |
+| `qlab owner` | the same owner runtime, headless — for a desk kept up as a service |
 | `qlab desk` / `qlab workforce` / `qlab events` | one-shot CLI verbs over the owner's HTTP and event stream |
 
-Both workstations read the same `/api/tui`, so there is no window where the desk
-has two faces that disagree. The Textual client stays reachable behind
-`--classic` until the Ratatui one has been soaked on a real desk. Either
-workstation can confirm a paper trade, and both are held to the same rule: the
-fill needs the last six of the plan's own `targets_hash` typed into a confirm
-modal, a referee PASS pinned to that same hash, and an owner that re-validates
-the request and refuses it without a persisted approval. Whether the Ratatui
-window may write at all is the owner's persisted posture, asked once at startup
-— not a launch flag.
+The workstation is the desk's one client, and a paper trade is held to one
+rule: the fill needs the last six of the plan's own `targets_hash` typed into a
+confirm modal, a referee PASS pinned to that same hash, and an owner that
+re-validates the request and refuses it without a persisted approval. Whether
+this window may write at all is the owner's persisted posture, asked once at
+startup — not a launch flag.
 
 ## Running qlab
 
-`qlab tui` and `qlab ui` are long-running clients over the owner runtime; the
-rest are one-shot verbs. Every verb takes `--offline` (refuse the network, serve
-cache/synthetic only). The direct-registry verbs refuse to run while an owner
-runtime holds the book — alongside a running desk, use `qlab desk`,
+`qlab` is the desk — a long-running workstation over the owner runtime; the
+rest are one-shot verbs. Every verb takes `--offline` (refuse the network,
+serve cache/synthetic only). The direct-registry verbs refuse to run while an
+owner runtime holds the book — alongside a running desk, use `qlab desk`,
 `qlab workforce`, and `qlab events`, which speak HTTP.
 
-**Workstations and web client**
+**The desk**
 
 ```bash
-qlab tui                       # Atlas workstation (Ratatui); starts/attaches the owner
-qlab tui --classic             # Textual client instead, same owner
-qlab tui --glass               # keep this window read-only for the session
-qlab tui --live                # real prices, simulated book  (alias: --online)
-qlab tui --alpaca-book         # real prices AND your Alpaca paper book (implies --live)
-qlab tui --port 8800           # owner on a non-default port (default 8765)
-qlab tui --claude auto         # Claude workforce startup: offer (default) | auto | off
-qlab ui --no-browser           # same owner, local web client, don't auto-open a tab
+qlab                           # the desk: live prices, simulated book, all operations
+qlab --restart                 # stop whatever runtime holds the port, start fresh
+qlab --offline                 # the synthetic no-network demo desk
+qlab --alpaca-book             # real prices AND your Alpaca paper book
+qlab --glass                   # keep this window read-only for the session
+qlab --port 8800               # owner on a non-default port (default 8765)
+qlab --claude auto             # Claude workforce startup: offer (default) | auto | off
+qlab owner                     # the owner runtime headless, for a desk kept up as a service
 ```
 
 **Governed autopilot** — proposal-only; these never book a fill:

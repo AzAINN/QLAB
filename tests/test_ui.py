@@ -8,23 +8,13 @@ import pytest
 
 from qlab.state.registry import Registry
 from qlab.ui import server as ui_server
-from qlab.ui.server import UISession, _INDEX, handle_api
+from qlab.ui.server import UISession, handle_api
 
 
 @pytest.fixture
 def session():
     # isolated in-memory paper book per test
     return UISession(offline_default=True, registry=Registry(":memory:"))
-
-
-def test_index_html_is_self_contained():
-    html = _INDEX.read_text(encoding="utf-8")
-    assert "<title>qlab" in html
-    # no external CDN dependencies — must work fully offline
-    assert "http://" not in html.split("<script>")[0] or "127.0.0.1" not in html
-    assert "cdn" not in html.lower()
-    assert 'data-nav="algorithms"' in html
-    assert "434" not in html
 
 
 def test_bootstrap_has_everything_the_ui_needs(session):
@@ -513,7 +503,7 @@ def test_serve_refuses_the_port_before_opening_or_recovering_registry(
         lambda **kwargs: constructed.append(kwargs),
     )
     with pytest.raises(OSError, match="address already in use"):
-        server_module.serve(port=8765, offline=True, open_browser=False)
+        server_module.serve(port=8765, offline=True)
     assert constructed == []
 
 
@@ -589,18 +579,15 @@ def test_owner_stderr_drain_survives_a_chatty_child():
     assert tail.tail().splitlines()[-1] == "line 19999"
 
 
-def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
+def test_tui_launcher_waits_for_owner_readiness_after_spawn(
+        monkeypatch, tmp_path):
     """A bound port is not enough: the owner may still be opening its state.
 
-    Driven through ``--classic``, which is the flag that keeps the Textual
-    client during the soak. The owner spawn and readiness wait below are shared
-    by both paths and unchanged by the cutover; this is the leg that ends in a
-    ``QlabTui``.
+    The launcher may hand off to the workstation only after the owner's
+    readiness probe answers — a client exec'd against a bound-but-not-ready
+    owner opens on a broken desk.
     """
-    from types import SimpleNamespace
-
     import qlab.autopilot.cli as cli_module
-    import qlab.tui.app as app_module
     import qlab.tui.client as client_module
 
     calls = {"probe": 0, "system": 0, "run": 0}
@@ -639,20 +626,15 @@ def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
 
         def get(self, path, **params):
             assert path == "/api/system"
-            assert params == {"offline": 1}
+            # Bare launch: the live default lane, no flag needed.
+            assert params == {"offline": 0}
             calls["system"] += 1
-            return {"mode": "offline"}
+            return {"mode": "live"}
 
-    class Tui:
-        def __init__(self, client, **kwargs):
-            assert isinstance(client, Client)
-            assert kwargs["owned_server"].poll() is None
-            assert kwargs["offline"] is True
-            assert kwargs["claude_start"] == "off"
-
-        def run(self):
-            calls["run"] += 1
-
+    binary = tmp_path / "atlas"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("QLAB_ATLAS_BIN", str(binary))
     monkeypatch.setattr(cli_module.socket, "socket", ClosedPort)
     monkeypatch.setattr(
         cli_module.subprocess,
@@ -661,18 +643,26 @@ def test_tui_launcher_waits_for_owner_readiness_after_spawn(monkeypatch):
     )
     monkeypatch.setattr(cli_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(client_module, "ApiClient", Client)
-    monkeypatch.setattr(app_module, "QlabTui", Tui)
 
-    result = cli_module._cmd_tui(SimpleNamespace(
-        port=8877,
-        online=False,
-        refresh=0.0,
-        claude="off",
-        classic=True,
-        operator=False,
-    ))
+    def fake_exec(_path, _argv, _env):
+        # The handoff is the pass criterion: reaching it before the probe
+        # answered would have failed on Client.get above.
+        calls["run"] += 1
+        raise SystemExit(0)
 
-    assert result == 0
+    monkeypatch.setattr(cli_module.os, "execvpe", fake_exec)
+    monkeypatch.setattr(
+        cli_module.subprocess, "run",
+        lambda _argv, **_kw: calls.__setitem__("run", calls["run"] + 1)
+        or type("Done", (), {"returncode": 0})())
+
+    if cli_module.os.name == "nt":
+        assert cli_module._cmd_tui(_tui_args(port=8877, claude="off")) == 0
+    else:
+        with pytest.raises(SystemExit) as exit_info:
+            cli_module._cmd_tui(_tui_args(port=8877, claude="off"))
+        assert exit_info.value.code == 0
+
     assert calls == {"probe": 2, "system": 1, "run": 1}
 
 
@@ -681,8 +671,9 @@ def _tui_args(**overrides):
     from types import SimpleNamespace
 
     return SimpleNamespace(**{
-        "port": 8765, "online": False, "refresh": 2.0, "claude": "offer",
-        "classic": False, "glass": False, "operator": False, **overrides,
+        "port": 8765, "offline": False, "alpaca_book": False, "restart": False,
+        "refresh": 2.0, "claude": "offer", "classic": False, "live": False,
+        "online": False, "glass": False, "operator": False, **overrides,
     })
 
 
@@ -748,7 +739,9 @@ def test_tui_launches_the_ratatui_workstation_and_tells_it_the_port(
 
     assert exit_info.value.code == 0
     assert seen["path"] == str(binary)
-    assert seen["argv"] == [str(binary)]
+    # The bare launch resolves the live default, and the client is told
+    # which view of the owner to poll.
+    assert seen["argv"] == [str(binary), "--live"]
     # The one thing the client cannot discover for itself: which owner to talk
     # to. It never opens the registry, so a wrong port is a blank desk.
     assert seen["env"]["QLAB_UI_PORT"] == "8899"
@@ -776,7 +769,7 @@ def test_tui_glass_flag_reaches_the_workstation(monkeypatch, tmp_path):
 
     with pytest.raises(SystemExit):
         cli_module._cmd_tui(_tui_args(glass=True))
-    assert seen["argv"] == [str(binary), "--glass"]
+    assert seen["argv"] == [str(binary), "--glass", "--live"]
 
 
 def test_tui_without_a_built_workstation_says_how_to_build_it(monkeypatch, tmp_path):
@@ -798,38 +791,49 @@ def test_tui_without_a_built_workstation_says_how_to_build_it(monkeypatch, tmp_p
         cli_module._cmd_tui(_tui_args())
     message = str(exit_info.value)
     assert "cargo build --release" in message
-    assert "--classic" in message
+    assert "QLAB_ATLAS_BIN" in message
 
 
-def test_tui_classic_without_textual_names_the_extra_to_install(monkeypatch):
-    """The rollback valve may not fail obscurely.
+def test_tui_refuses_the_retired_classic_flag(monkeypatch):
+    """The Textual client is gone; the word may not quietly do anything else.
 
-    An operator reaching for --classic is already having a bad day; a bare
-    `ModuleNotFoundError: textual` names no remedy. The Textual import moved
-    into the branch so the default path does not pay for it, and this is what
-    keeps that move from having cost the message.
+    A flag that parses and silently draws a different screen than it used to
+    is the worst kind of no-op — refused by name, with the sentence saying
+    what the desk's one client is.
     """
-    import sys
-
     import qlab.autopilot.cli as cli_module
 
-    _attached_owner(monkeypatch, cli_module)
+    monkeypatch.setattr(
+        cli_module.subprocess, "Popen",
+        lambda *_a, **_k: pytest.fail("a refused invocation must not spawn"))
     monkeypatch.setattr(
         cli_module.os, "execvpe",
-        lambda *_a: pytest.fail("--classic must not exec the workstation"))
-    # A `None` entry is how the import system is told a module is unavailable;
-    # `from qlab.tui.app import QlabTui` then raises ImportError.
-    monkeypatch.setitem(sys.modules, "qlab.tui.app", None)
+        lambda *_a: pytest.fail("a refused invocation must not exec"))
 
     with pytest.raises(SystemExit) as exit_info:
         cli_module._cmd_tui(_tui_args(classic=True))
     message = str(exit_info.value)
-    assert "TUI extra is not installed" in message
-    assert "pip install -e '.[operator]'" in message
+    assert "--classic is retired" in message
+    assert "Atlas workstation" in message
+
+
+def test_tui_refuses_the_retired_live_words(monkeypatch):
+    """Live data became the default; the old words must name the new one."""
+    import qlab.autopilot.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module.subprocess, "Popen",
+        lambda *_a, **_k: pytest.fail("a refused invocation must not spawn"))
+
+    for retired in ({"live": True}, {"online": True}):
+        with pytest.raises(SystemExit) as exit_info:
+            cli_module._cmd_tui(_tui_args(**retired))
+        message = str(exit_info.value)
+        assert "retired" in message and "--offline" in message
 
 
 @pytest.mark.parametrize("classic", [False, True])
-def test_tui_refuses_the_retired_operator_flag(monkeypatch, classic):
+def test_tui_refuses_the_retired_operator_flag_before_everything(monkeypatch, classic):
     """`--operator` grants nothing now, so it must not parse quietly.
 
     Arming became the owner's persisted answer to the startup door in this
@@ -857,28 +861,6 @@ def test_tui_refuses_the_retired_operator_flag(monkeypatch, classic):
     assert "--glass" in message
 
 
-def test_tui_refuses_glass_with_the_classic_client(monkeypatch):
-    """A posture word the chosen client cannot honour is refused, not dropped.
-
-    `--glass` is Ratatui vocabulary. The Textual client has no posture to
-    decline, so forwarding it nowhere would leave an operator believing this
-    window had been made read-only when it still reaches the confirm gate.
-    """
-    import qlab.autopilot.cli as cli_module
-
-    monkeypatch.setattr(
-        cli_module.subprocess, "Popen",
-        lambda *_a, **_k: pytest.fail("a refused invocation must not spawn"))
-    monkeypatch.setattr(
-        cli_module.os, "execvpe",
-        lambda *_a: pytest.fail("a refused invocation must not exec"))
-
-    with pytest.raises(SystemExit) as exit_info:
-        cli_module._cmd_tui(_tui_args(classic=True, glass=True))
-    message = str(exit_info.value)
-    assert "--glass" in message and "--classic" in message
-
-
 def test_tui_parser_still_accepts_the_retired_word_so_it_can_be_refused():
     """argparse's "unrecognized arguments" names no remedy.
 
@@ -891,33 +873,6 @@ def test_tui_parser_still_accepts_the_retired_word_so_it_can_be_refused():
     args = build_parser().parse_args(["tui", "--operator"])
     assert args.operator is True
     assert args.glass is False
-
-
-def test_tui_classic_runs_the_textual_client_against_the_same_owner(monkeypatch):
-    """The soak valve: one flag, no revert."""
-    import qlab.autopilot.cli as cli_module
-    import qlab.tui.app as app_module
-
-    _attached_owner(monkeypatch, cli_module)
-    monkeypatch.setattr(
-        cli_module.os, "execvpe",
-        lambda *_a: pytest.fail("--classic must not exec the workstation"))
-
-    started = {}
-
-    class Tui:
-        def __init__(self, _client, **kwargs):
-            started.update(kwargs)
-
-        def run(self):
-            started["ran"] = True
-
-    monkeypatch.setattr(app_module, "QlabTui", Tui)
-    assert cli_module._cmd_tui(_tui_args(classic=True, refresh=0.0)) == 0
-    assert started["ran"] is True
-    # Attached rather than owned: the Textual client only terminates a server it
-    # started itself.
-    assert started["owned_server"] is None
 
 
 def test_model_invocations_route(session):
@@ -1881,7 +1836,7 @@ def test_refused_second_serve_preserves_first_handler_session(
     stop_event, producer = server_module._start_market_topics(session)
     try:
         with pytest.raises(RuntimeError, match="already running"):
-            server_module.serve(port=0, offline=True, open_browser=False)
+            server_module.serve(port=0, offline=True)
         assert server_module._Handler.session is session
     finally:
         server_module._stop_market_topics(
@@ -4076,27 +4031,6 @@ def test_an_unparseable_post_body_is_refused_rather_than_silently_emptied(
         httpd.server_close()
 
 
-def test_a_non_finite_weight_is_reported_not_rendered_as_a_number():
-    """NaN and inf survive float() and rendered as "SPY nan%".
-
-    That is a number-shaped non-number on a trading surface — it reads as a
-    real target. Python's json emits and parses NaN by default, so an agent
-    artifact carries one all the way to the render; it must be reported the
-    same way a string weight is.
-    """
-    from qlab.tui.app import _format_targets
-
-    out = _format_targets({"SPY": float("nan"), "GLD": 0.4})
-    assert "nan%" not in out
-    assert "GLD 40.0%" in out and "[unreadable: SPY]" in out
-    assert "[unreadable: SPY]" in _format_targets({"SPY": float("inf")})
-    # And a clean set is untouched.
-    assert _format_targets({"SPY": 0.6, "GLD": 0.4}) == "SPY 60.0% · GLD 40.0%"
-
-
-# --- the news window ----------------------------------------------------------
-
-
 def test_news_payload_separates_holding_stories_from_macro_context(session):
     """A cross-asset desk gets almost no symbol-tagged coverage.
 
@@ -4417,14 +4351,6 @@ def test_a_board_that_admitted_nothing_is_reported_as_a_result(session):
     assert payload["reason"], "an empty result still states what happened"
 
 
-def test_the_ui_has_a_research_panel_for_the_augmented_lane():
-    """The route is useless if nothing renders it."""
-    html = _INDEX.read_text(encoding="utf-8")
-    assert 'data-nav="research"' in html
-    assert 'data-panel="research"' in html
-    assert "/api/research/predictors" in html
-
-
 def test_the_linear_kernel_is_not_labelled_a_quantum_map(session):
     """`kernel:linear` is in the `kernel` family but carries NO quantum feature
     map: `quantum_gram` returns early on it, so it is the dual of the plain
@@ -4473,37 +4399,6 @@ def test_augmentation_is_decided_by_the_feature_map_not_the_family(
         _, payload = handle_api(session, "GET", "/api/research/predictors",
                                 {}, {})
         assert payload["models"][0]["augmented"] is augmented
-
-
-def test_the_fold_strip_draws_both_signs_from_one_zero_line():
-    """The first version of this chart bottom-anchored every bar in a flex row
-    and pushed it with a margin, so all the positive bars shared a TOP edge and
-    the height of a bar no longer meant its magnitude. Driving the real page
-    showed +0.324 rendered taller-looking than +0.531.
-
-    The fix is two fixed rows of equal height with the positive bar
-    bottom-anchored in the upper one and the negative bar top-anchored in the
-    lower one, which is the only layout where "above the line" and "below the
-    line" mean the same thing for every bar. This test pins the mechanism,
-    because the failure was invisible in the payload and only showed up in
-    layout."""
-    html = _INDEX.read_text(encoding="utf-8")
-    css = html.split("</style>")[0]
-    assert ".folds .f{display:grid;grid-template-rows:19px 19px" in css
-    assert ".folds .f > i.pos{grid-row:1;align-self:end" in css
-    assert ".folds .f > i.neg{grid-row:2;align-self:start" in css
-    # No margin-based nudging: that was the bug.
-    assert "margin-${v<0?'top':'bottom'}" not in html
-
-
-# --- the workforce Atlas manages -------------------------------------------
-#
-# Live gap: /api/atlas/context returned 12 keys and not one of them mentioned
-# a workflow, a step, an agent or a phase. The desk had ten durable workflows
-# on it -- three blocked at the reporter, two interrupted mid-debate, one
-# abandoned by the operator -- each carrying a written step summary saying
-# exactly what happened. Atlas, the manager of that workforce, could not see
-# any of it: asked "why is the desk stuck", it had nothing to answer from.
 
 
 def _stalled_workflow(session):
@@ -4612,12 +4507,6 @@ def test_the_workforce_has_a_route_and_a_panel(session):
     assert status == 200
     assert wid in [w["workflow_id"] for w in payload["workflows"]]
     assert payload["needs_attention"] == 1
-    html = _INDEX.read_text(encoding="utf-8")
-    assert 'data-nav="workforce"' in html
-    assert 'data-panel="workforce"' in html
-    assert "/api/workforce" in html
-    # The stall reason must be rendered, not just fetched.
-    assert "stalled_at" in html
 
 
 def test_an_abandoned_run_stopped_but_is_not_awaiting_the_operator(session):
@@ -4647,28 +4536,9 @@ def test_a_blocked_run_is_awaiting_the_operator(session):
     assert row["awaiting_operator"] is True
 
 
-def test_the_stall_box_distinguishes_absent_from_already_decided():
-    """`w.awaiting_operator ? a : b` reads an ABSENT key as false.
-
-    Driving the live page proved this: against an older server that did not
-    send the key, all seven stall boxes rendered "already decided" — the UI
-    inventing an operator decision that had never been taken. The template
-    must test the three states explicitly, so absent renders as unknown.
-    """
-    html = _INDEX.read_text(encoding="utf-8")
-    assert "awaiting_operator===true" in html
-    assert "awaiting_operator===false" in html
-    # ...and the truthiness form must not come back.
-    assert "w.awaiting_operator?" not in html
-    assert "unknown" in html
-
-
-def test_the_agent_stream_has_a_route_and_reaches_the_page(session):
-    """The coordinator republishes every agent event onto the audit bus and no
-    page ever read it: `grep api/events qlab/ui/index.html` returned nothing.
-
-    Agent reasoning that is recorded but never rendered is not visibility.
-    """
+def test_the_agent_stream_has_a_route(session):
+    """The coordinator republishes every agent event onto the audit bus; this
+    is the route every client renders it from."""
     session.registry.record_event("atlas_coordinator_event", {
         "workflow_id": "wf-1", "event_kind": "tool_start",
         "agent": "moments-analyst", "tool": "Agent", "text": "calling Agent"})
@@ -4681,8 +4551,6 @@ def test_the_agent_stream_has_a_route_and_reaches_the_page(session):
     assert "tool_start" in kinds and "text" in kinds
     assert any(e["agent"] == "moments-analyst" for e in payload["events"])
     assert payload["reason"]
-    html = _INDEX.read_text(encoding="utf-8")
-    assert "/api/workforce/stream" in html
 
 
 def test_an_empty_agent_stream_says_why_rather_than_showing_nothing(session):

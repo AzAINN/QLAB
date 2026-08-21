@@ -547,6 +547,85 @@ pub struct PredictorFold {
     pub ic: Option<f64>,
 }
 
+/// `/api/research/predictors` — the whole board, for the PREDICTORS view.
+///
+/// Deliberately **not** `Predictors` widened, for the same reason `Predictors`
+/// is not `BoardSpec` widened: the summary is the reasoner's narrow feed and
+/// this is the operator's full ranking. One struct for both would leave
+/// whichever surface reads the other shape decoding absent fields forever.
+///
+/// `reason` and `lane` are the owner's own prose. This client renders them
+/// verbatim rather than re-deriving a verdict from the numbers: the sentence
+/// that says "cleared the bar" versus "NOT ESTABLISHED against the selection
+/// null" is a judgment the *board* made, and two wordings of it would drift.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PredictorDetail {
+    pub status: Option<String>,
+    pub run_id: Option<String>,
+    pub as_of: Option<String>,
+    pub universe: Option<String>,
+    pub lane: Option<String>,
+    pub reason: Option<String>,
+    pub admitted_any: Option<bool>,
+    /// `None` is a board that predates the selection null — neither
+    /// established nor refuted, and it must not render as either.
+    pub champion_established: Option<bool>,
+    pub selection_null: Option<SelectionNull>,
+    pub champion: Option<String>,
+    pub baseline: Option<String>,
+    pub n_obs: Option<i64>,
+    pub n_folds: Option<i64>,
+    pub target: Option<String>,
+    pub horizon_days: Option<i64>,
+    pub embargo_days: Option<i64>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub models: Vec<PredictorRow>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub caveats: Vec<String>,
+}
+
+/// One evaluated model on the full board, in the owner's ranking order.
+///
+/// `augmented` and `control_note` are stated by the owner rather than inferred
+/// from the id here: `kernel:linear` sits in the kernel family and applies no
+/// feature map, and a client that filed lanes by family would put a control in
+/// the treatment arm.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PredictorRow {
+    pub model_id: Option<String>,
+    pub family: Option<String>,
+    pub variant: Option<String>,
+    pub augmented: Option<bool>,
+    pub control_note: Option<String>,
+    pub is_baseline: Option<bool>,
+    pub is_champion: Option<bool>,
+    pub mean_ic: Option<f64>,
+    pub ic_std: Option<f64>,
+    pub ic_stability: Option<f64>,
+    pub usable: Option<bool>,
+    pub delta_mean_ic_vs_baseline: Option<f64>,
+    pub wins_vs_baseline: Option<i64>,
+    pub paired_t_vs_baseline: Option<f64>,
+    /// The owner's stated |t| >= 2 convention, already folded with its n:
+    /// `false` whenever the fold count is unknown, never `None`.
+    pub significant: Option<bool>,
+    /// Plain ICs, unlike the summary's `PredictorFold` rows: the detail route
+    /// serves the series already flattened.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub per_fold: Vec<f64>,
+    pub negative_folds: Option<i64>,
+}
+
+/// The board's selection null: the same champion-picking procedure run on
+/// resampled noise, which is what turns "cleared a fixed bar" into evidence.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SelectionNull {
+    pub trials: Option<i64>,
+    pub p_value: Option<f64>,
+    pub p_value_resolution: Option<f64>,
+    pub underpowered_for_alpha: Option<bool>,
+}
+
 /// The admission gate a prediction run states about itself.
 ///
 /// Read off the payload rather than duplicated as constants here. The owner

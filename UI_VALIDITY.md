@@ -1,14 +1,14 @@
 # UI validity and deployment boundary
 
-> Updated 2026-07-30. Describes the owner-backed Textual TUI, the web client,
-> and the read-only `atlas-tui` Ratatui client. The former staged Quantum panel
-> and QAOA comparison were removed.
+> Updated 2026-08-21. Describes the owner runtime and the Atlas workstation
+> (`clients/atlas-tui`), the desk's one client since the Textual TUI and the
+> web client were retired. The former staged Quantum panel and QAOA comparison
+> were removed earlier.
 
-Use `qlab tui` for the primary quiet-workstation interface, `qlab ui` for the
-browser client, or `clients/atlas-tui` for the Atlas-first terminal client. All
-three talk to one owner process that exclusively holds the DuckDB research
-registry and paper book. Only the Textual TUI can confirm a paper trade;
-`atlas-tui` has no order path at all.
+Use `qlab` for the desk. The workstation talks to one owner process that
+exclusively holds the DuckDB research registry and paper book. Confirming a
+paper trade lives in the workstation's hash-bound confirm modal, on an armed
+desk only; the `--no-default-features` build has no order path at all.
 
 ## Interpret every number in context
 

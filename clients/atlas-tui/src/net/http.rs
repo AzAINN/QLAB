@@ -11,7 +11,7 @@
 //! the frame loop for the length of a request.
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
-use crate::model::{LlmCatalog, RegimePanel, Snapshot, Templates};
+use crate::model::{LlmCatalog, PredictorDetail, RegimePanel, Snapshot, Templates};
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -112,8 +112,8 @@ pub async fn readiness(base: &str) -> Readiness {
 
 /// What the runtime may ask the poller for.
 ///
-/// Two variants, and still not a fetch path anything can aim anywhere: both
-/// name a request this module already knows how to build, so the handle can
+/// Three variants, and still not a fetch path anything can aim anywhere: each
+/// names a request this module already knows how to build, so the handle can
 /// choose *which* of the owner's routes is asked and never *what* is asked for.
 ///
 /// `Backends` is the one payload with no beat behind it. The route probes every
@@ -125,6 +125,12 @@ pub async fn readiness(base: &str) -> Readiness {
 pub enum Refetch {
     Now,
     Backends,
+    /// The full predictor board. No beat behind it either, for the opposite
+    /// reason to `Backends`: the route is one registry read, but the board it
+    /// reads changes when a run lands — days apart — so a cadence would be
+    /// almost entirely re-fetching an answer the client already holds. It is
+    /// asked for when the PREDICTORS view opens and when `r` is pressed there.
+    Predictors,
 }
 
 /// The runtime's end of the poller.
@@ -132,7 +138,7 @@ pub enum Refetch {
 /// Clonable because two callers hold one: the frame loop's `r` key and the SSE
 /// task, which brings the next poll forward when an event says the snapshot is
 /// already out of date. Cloning cannot widen what the handle can ask for —
-/// `Refetch` has one variant.
+/// `Refetch` names a closed set of requests.
 #[derive(Clone)]
 pub struct PollerHandle {
     pub refetch: UnboundedSender<Refetch>,
@@ -150,6 +156,13 @@ impl PollerHandle {
     /// and leaves the snapshot's own beat where it was.
     pub fn backends(&self) {
         let _ = self.refetch.send(Refetch::Backends);
+    }
+
+    /// Ask for the full predictor board, once. Same shape as `backends`: an
+    /// action's fetch, not a beat's, and the snapshot cadence stays where it
+    /// was.
+    pub fn predictors(&self) {
+        let _ = self.refetch.send(Refetch::Predictors);
     }
 }
 
@@ -193,6 +206,8 @@ async fn poll_loop(
     // cache is what keeps a palette opened twice from probing twice, and asking
     // it to bypass that would make every scope entry a round trip per daemon.
     let backends_url = format!("{base}/api/llm/backends");
+    // No lane here either: the board is a registry row, identical in both.
+    let predictors_url = format!("{base}/api/research/predictors");
 
     // Two facts, not one. `up` is what the chips read — a payload this client
     // could actually use — and `reachable` is what the socket said.
@@ -329,9 +344,11 @@ async fn poll_loop(
                         // happened to arrive behind a nudge.
                         let mut jump = first == Refetch::Now;
                         let mut catalog = first == Refetch::Backends;
+                        let mut predictors = first == Refetch::Predictors;
                         while let Ok(next) = refetch.try_recv() {
                             jump |= next == Refetch::Now;
                             catalog |= next == Refetch::Backends;
+                            predictors |= next == Refetch::Predictors;
                         }
                         if catalog {
                             match fetch::<LlmCatalog>(&client, &backends_url).await {
@@ -352,6 +369,28 @@ async fn poll_loop(
                                 // Same reasoning as the panel and the templates.
                                 Fetched::Failed(error) => {
                                     tracing::warn!(%error, "model backend catalog fetch failed")
+                                }
+                            }
+                        }
+                        if predictors {
+                            match fetch::<PredictorDetail>(&client, &predictors_url).await {
+                                Fetched::Decoded(payload) => {
+                                    emit(&tx, AppEvent::PredictorDetail(Box::new(payload)))?
+                                }
+                                Fetched::Malformed(error) => emit(
+                                    &tx,
+                                    AppEvent::Http(HttpResult::Malformed {
+                                        url: predictors_url.clone(),
+                                        error,
+                                    }),
+                                )?,
+                                // The board is evidence, not the desk: a
+                                // failure here must not tell the operator the
+                                // owner went away when the snapshot that
+                                // decides that is still arriving. Same
+                                // reasoning as the panel and the templates.
+                                Fetched::Failed(error) => {
+                                    tracing::warn!(%error, "predictor board fetch failed")
                                 }
                             }
                         }

@@ -24,7 +24,7 @@ use std::time::Instant;
 /// The fixture desk, already switched to WORKFORCE.
 fn workforce() -> Client {
     let mut client = Client::fixture();
-    client.press(KeyCode::Char('6'));
+    client.press(KeyCode::Char('7'));
     client
 }
 
@@ -58,7 +58,7 @@ fn flow_row(frame: &str, id: &str) -> String {
 
 fn workforce_from(json: &str) -> Client {
     let mut client = Client::new(store_from(json));
-    client.press(KeyCode::Char('6'));
+    client.press(KeyCode::Char('7'));
     client
 }
 
@@ -424,7 +424,7 @@ mod armed {
         store.posture = Posture::Operator;
         store.apply(AppEvent::Templates(templates()), Instant::now());
         let mut client = Client::new(store);
-        client.press(KeyCode::Char('6'));
+        client.press(KeyCode::Char('7'));
         // One frame before any key, exactly as the runtime draws one before it
         // reads its first event. The pane publishes its height there, and the
         // picker's floor is read off it — a client that has never drawn cannot
@@ -741,7 +741,7 @@ mod armed {
         let mut store = super::store_from(super::running());
         store.posture = Posture::Operator;
         let mut client = Client::new(store);
-        client.press(KeyCode::Char('6'));
+        client.press(KeyCode::Char('7'));
         // The frame that publishes the pane's height, as `armed` does it.
         client.frame(120, 36);
         press(&mut client, KeyCode::Char('S'));

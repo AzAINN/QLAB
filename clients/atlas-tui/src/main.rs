@@ -37,7 +37,7 @@ use atlas::dispatch::Writes;
 use atlas::fx::Fx;
 use atlas::net::http::{self, PollerHandle};
 use atlas::net::sse;
-use atlas::store::{should_render, Store, TICK};
+use atlas::store::{should_render, Store, ViewId, TICK};
 use atlas::ui::views::Views;
 use atlas::ui::widgets::{pulse, toast};
 use atlas::{theme, ui};
@@ -327,8 +327,15 @@ fn ingest(
                 Some(Command::Quit) => quit = true,
                 // The refresh jumps the poll queue instead of fetching inline:
                 // a synchronous fetch in this loop froze the client for its
-                // duration.
-                Some(Command::Refresh) => poller.now(),
+                // duration. On PREDICTORS it also re-asks for the board —
+                // `r` refreshes what the operator is looking at, and the board
+                // rides no beat that would ever refresh it otherwise.
+                Some(Command::Refresh) => {
+                    poller.now();
+                    if store.nav.view == ViewId::Predictors {
+                        poller.predictors();
+                    }
+                }
                 // A read, and the only one a keystroke asks for. The store
                 // decides whether asking again could learn anything — the
                 // owner's own cache window — so a palette opened twice in a
@@ -355,6 +362,11 @@ fn ingest(
             // that can see the nav move, so the coalesce is fired from here.
             if store.nav.view != before {
                 fx.on_view_switch();
+                // Edge-triggered, so a Tick can never re-ask: arriving on
+                // PREDICTORS is the one moment the board is wanted and not held.
+                if store.nav.view == ViewId::Predictors {
+                    poller.predictors();
+                }
             }
         }
     }
@@ -373,6 +385,11 @@ fn ingest(
         }
         if store.nav.view != before {
             fx.on_view_switch();
+            // The rail is clickable, so a mouse can arrive on PREDICTORS the
+            // same way a digit does — same edge, same single fetch.
+            if store.nav.view == ViewId::Predictors {
+                poller.predictors();
+            }
         }
     }
     // What a write outcome owes the poller is `dispatch::refetches`, which is

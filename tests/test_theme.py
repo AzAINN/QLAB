@@ -11,7 +11,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 THEME_PATH = ROOT / "qlab" / "tui" / "theme.py"
-APP_PATH = ROOT / "qlab" / "tui" / "app.py"
 
 
 def _load_theme():
@@ -105,5 +104,11 @@ def test_state_style_covers_every_workflow_state():
     }
 
 
-def test_app_source_has_no_literal_six_digit_hex():
-    assert re.search(r"#[0-9a-fA-F]{6}", APP_PATH.read_text(encoding="utf-8")) is None
+def test_theme_source_has_no_literal_six_digit_hex_outside_its_palette():
+    # The palette block is where hex belongs; the Textual app this test used
+    # to sweep is retired, so the theme file itself is what must stay clean of
+    # stray colours defined outside the named constants.
+    source = THEME_PATH.read_text(encoding="utf-8")
+    for line in source.splitlines():
+        if re.search(r"#[0-9a-fA-F]{6}", line):
+            assert "=" in line or line.lstrip().startswith("#"), line

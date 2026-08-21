@@ -1,4 +1,4 @@
-"""Stateless MCP proxy for Claude sessions launched by the Textual console.
+"""Stateless MCP proxy for Claude sessions launched by the desk.
 
 Unlike the original quant-lab / quant-trader stdio servers, this process never
 opens DuckDB. Every tool delegates to the already-running owner API. Its

@@ -1,6 +1,5 @@
 ---
 source: tests/golden_audit.rs
-assertion_line: 270
 expression: "queue().frame(120, 36)"
 ---
 " no market assets in the last snapshot                                                                                  "
@@ -9,10 +8,10 @@ expression: "queue().frame(120, 36)"
 " 3 MKTS │ bbbb4444555 pppp2222   approved    --                                       │ regime --  robust --            "
 " 4 BOOK │                                                                             │ drawdown --  tier --            "
 " 5 RSCH │                                                                             │ gross --                        "
-" 6 WORK │                                                                             │                                 "
-"▌7 AUDIT│                                                                             │▌ BREADTH                        "
-" 8 SETT │                                                                             │ --                              "
-"        │                                                                             │ adv -- / dec --                 "
+" 6 PRED │                                                                             │                                 "
+" 7 WORK │                                                                             │▌ BREADTH                        "
+"▌8 AUDIT│                                                                             │ --                              "
+" 9 SETT │                                                                             │ adv -- / dec --                 "
 "        │                                                                             │                                 "
 "        │                                                                             │▌ MOVERS                         "
 "        │                                                                             │ --                              "

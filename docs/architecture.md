@@ -123,7 +123,8 @@ the TUI workforce view.
 ### Operator and agent surfaces
 
 - qlab tui is the terminal face of the owner runtime.
-- qlab ui starts the same owner runtime with a local web client.
+- qlab owner runs the same owner runtime headless, for a desk kept up as a
+  service that workstations attach to.
 - The combined qlab MCP server is for headless orchestration and refuses to
   start while the owner runtime is alive.
 - The qlab-operator MCP proxy is the propose-only surface for Claude sessions
@@ -155,7 +156,7 @@ the TUI workforce view.
       trader/       mandate, broker adapters, plans, reconcile
       operator/     Atlas supervisor, heartbeat, model routing, coordinator driver
       research/     purged walk-forward prediction and quantum-inspired features
-      tui/          Textual operator workstation
+      tui/          owner-client plumbing: API client, Claude session, theme
       ui/           owner HTTP runtime and local web client
     agents/         source-of-truth role definitions
     clients/        atlas-tui, the Ratatui client for the same owner runtime

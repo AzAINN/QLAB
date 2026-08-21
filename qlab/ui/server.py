@@ -95,7 +95,6 @@ import os
 import threading
 import time
 import uuid
-import webbrowser
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -109,9 +108,6 @@ from qlab.core.posture import (
 from qlab.core.llm_config import SurfaceModel, save_llm_config, startup_llm_config
 from qlab.core.types import _jsonable
 from qlab.paths import workspace_root
-
-_HERE = Path(__file__).resolve().parent
-_INDEX = _HERE / "index.html"
 
 # Workflow statuses where a run stopped and a human decision is what unblocks
 # it. `abandoned` is deliberately absent: that run also stopped, but the
@@ -3741,11 +3737,11 @@ class UISession:
     def _record_atlas_reply(self, text: str, error: str | None = None) -> None:
         """Put the desk's own words on the bus as a second `atlas_message` row.
 
-        The existing kind, deliberately. Both clients already render it — the
-        Rust console keys `atlas_message` in `CONSOLE_KINDS` and reads `text` as
-        the row's subject, the Textual timeline prints the payload — so a reply
-        arrives in front of the operator with no client change at all. A new
-        kind would have been an answer nothing displays.
+        The existing kind, deliberately. The workstation already renders it —
+        the Rust console keys `atlas_message` in `CONSOLE_KINDS` and reads
+        `text` as the row's subject — so a reply arrives in front of the
+        operator with no client change at all. A new kind would have been an
+        answer nothing displays.
         """
         payload = {"actor": "atlas",
                    "text": self._bounded(text, _ATLAS_REPLY_CHARS)}
@@ -5081,7 +5077,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
-            self._send(200, _INDEX.read_bytes(), "text/html; charset=utf-8")
+            # The web client is retired. The root answers with where the desk
+            # actually is rather than 404ing, because a browser pointed here is
+            # an operator following an old habit, not a broken client.
+            self._json(200, {
+                "qlab": "owner runtime",
+                "client": "the Atlas workstation — run `qlab`",
+                "api": "/api/tui",
+            })
             return
         if parsed.path == "/readyz":
             self._json(200, {"ready": True})
@@ -5413,9 +5416,9 @@ def _alpaca_stream_runner(*, supervisor, key, secret, stop_event) -> None:
         supervisor, key=key, secret=secret, stop_event=stop_event)
 
 
-def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
+def serve(port: int = 8765, *, offline: bool = True,
           desk_mode: DeskMode | None = None) -> None:
-    """Start the UI server (blocking). Ctrl-C to stop.
+    """Start the owner runtime (blocking). Ctrl-C to stop.
 
     ``desk_mode=None`` means no launcher flag chose one, so the session loads
     the operator's persisted choice rather than being handed a guess — and
@@ -5457,8 +5460,6 @@ def serve(port: int = 8765, *, offline: bool = True, open_browser: bool = True,
     url = f"http://127.0.0.1:{port}/"
     print(_startup_banner(session.desk_mode, url))
     print("[qlab] press Ctrl-C to stop.")
-    if open_browser:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

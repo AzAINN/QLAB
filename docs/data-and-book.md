@@ -10,10 +10,10 @@ no account at all. Two independent things can be switched on: the data lane and
 the book.
 
     alpaca profile login      # browser OAuth; paper-only by construction
-    qlab tui --live           # online market data, qlab's own simulated book
+    qlab                      # online market data, qlab's own simulated book
     qlab tui --alpaca-book    # online market data and your Alpaca paper book
 
-`--live` (equivalently `--online`) only takes the data lane online; which
+The live lane is the default — `--offline` is the synthetic demo — and which
 provider serves it is `QLAB_DATA_PROVIDER`, and that defaults to `yfinance`.
 Alpaca market data is a separate, additional choice: it needs
 `QLAB_DATA_PROVIDER=alpaca` **and** exported `ALPACA_API_KEY` /
@@ -22,7 +22,7 @@ variables directly. The `alpaca profile login` session reaches the **book**
 lane only — with an OAuth-only login, `--alpaca-book` trades your real Alpaca
 paper account while prices still come from yfinance.
 
-`--alpaca-book` implies `--live`: reaching the real paper account is never a
+`--alpaca-book` implies live data: reaching the real paper account is never a
 side effect of asking for real prices. The same three modes are offered by the
 startup modal on first launch — the flags only skip the question — and the
 choice persists, so later launches reopen the desk in the mode you left it in.

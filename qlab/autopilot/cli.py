@@ -7,9 +7,10 @@
     qlab batch      <spec.yaml> [--offline]            the reproducible ablation
     qlab recommend  [--as-of DATE] [--offline]         print an allocation, no trade
     qlab prewarm    [--universe core|candidates]       pre-fill the data cache
-    qlab ui         [--no-browser] [--port N]          owner runtime + web client
-    qlab tui        [--claude offer|auto|off]          terminal operator console
-    ui/tui          [--live] [--alpaca-book]           desk mode: which data, whose book
+    qlab            [--restart] [--port N]             the desk (owner + workstation)
+    qlab owner      [--port N]                         owner runtime, headless
+    qlab tui        [--claude offer|auto|off]          the desk, spelled out
+    owner/tui       [--offline] [--alpaca-book]        desk mode: which data, whose book
     qlab desk                                          one-card desk status
     qlab workforce  run "GOAL" | status | watch        governed runs from any shell
     qlab events     [--kind K]                         tail the live audit bus
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -171,12 +173,13 @@ def desk_mode_from_args(args) -> DeskMode | None:
     """The mode an explicit flag selected, or None to ask / use the persisted one.
 
     ``--alpaca-book`` implies live: the real paper account is never reachable
-    without naming it, and bare ``--live`` keeps the simulated book.
+    without naming it. Live/simulated needs no flag — it is the default — and
+    ``--offline`` is the explicit word for the synthetic demo desk.
     """
     if getattr(args, "alpaca_book", False):
         return DeskMode("live", "alpaca")
-    if getattr(args, "live", False) or getattr(args, "online", False):
-        return DeskMode("live", "simulated")
+    if getattr(args, "offline", False):
+        return DeskMode("synthetic", "simulated")
     return None
 
 
@@ -184,12 +187,15 @@ def desk_mode_argv(mode: DeskMode | None) -> list[str]:
     """The flags that reproduce ``mode`` — the inverse of ``desk_mode_from_args``.
 
     The owner subprocess must be launched with the same words the TUI is about
-    to display, or the two disagree about whose book is being traded. Synthetic
-    needs no flag: it is the default on both sides.
+    to display, or the two disagree about whose book is being traded. Live with
+    the simulated book needs no flag: it is the default on both sides, and
+    synthetic is the lane that must now be named.
     """
-    if mode is None or mode.data != "live":
+    if mode is None:
         return []
-    return ["--live"] + (["--alpaca-book"] if mode.book == "alpaca" else [])
+    if mode.data != "live":
+        return ["--offline"]
+    return ["--alpaca-book"] if mode.book == "alpaca" else []
 
 
 def _alpaca_credentials_resolve() -> bool:
@@ -224,26 +230,42 @@ def startup_desk_mode(flagged: DeskMode | None) -> DeskMode | None:
         save_desk_mode(flagged)
         return flagged
     persisted = load_desk_mode()
-    if persisted is None or persisted.offline or _alpaca_credentials_resolve():
-        return persisted
-    return None
+    if persisted is not None:
+        if persisted.offline or _alpaca_credentials_resolve():
+            return persisted
+        return None
+    # Never chosen: the live desk, on the credential-free provider. Every
+    # operation is available without a flag, and the desk's own surfaces say
+    # honestly what the feed is doing — which is the fail-loud path, where a
+    # synthetic default was the desk quietly showing invented prices.
+    return DeskMode("live", "simulated")
 
 
-def _cmd_ui(args) -> int:
+def _cmd_owner(args) -> int:
+    """Run the owner runtime headless: the one writer, no client attached.
+
+    What `qlab ui --no-browser` used to be, without the web client that rode
+    on it. The launcher spawns this for `qlab`; running it by hand is for a
+    desk kept up as a service that workstations attach to and outlive.
+    """
     from qlab.ui.server import serve
 
     _publish_owner_port(args.port)
-    # No modal on this surface, so an unflagged run is handed no guess: the
-    # session loads the persisted mode itself (and defaults to synthetic).
-    mode = desk_mode_from_args(args)
-    if mode is not None:
-        # The session holds its mode in memory only, and `qlab ui` is a
-        # first-class entry point: without this, a later `qlab tui` attaching to
-        # this owner would read a stale file and show a desk nobody is trading.
-        save_desk_mode(mode)
-    serve(port=args.port,
-          offline=not args.online if mode is None else mode.offline,
-          open_browser=not args.no_browser, desk_mode=mode)
+    # No modal on this surface, so the resolution must end in a mode: flags,
+    # then the persisted choice, then the live default startup_desk_mode
+    # gives a never-chosen desk. Its one None — a persisted live mode whose
+    # credential no longer resolves — is a question, and a headless process
+    # cannot ask it.
+    mode = startup_desk_mode(desk_mode_from_args(args))
+    if mode is None:
+        raise SystemExit(
+            "the persisted desk mode is live but no Alpaca credential "
+            "resolves; sign in (alpaca profile login) or choose a lane "
+            "explicitly: qlab owner --offline")
+    # `startup_desk_mode` already persisted a flagged mode — the operator
+    # speaking now — and only that: persisting the resolved default too would
+    # quietly convert "never chose" into "chose live" on disk.
+    serve(port=args.port, offline=mode.offline, desk_mode=mode)
     return 0
 
 
@@ -268,6 +290,72 @@ def _refuse_second_writer(command: str, port: int = 0) -> None:
         "writer. Stop the desk (or use `qlab desk`, `qlab workforce` and "
         "`qlab events`, which speak to the owner over HTTP)."
     )
+
+
+def _stop_listener_on_port(port: int) -> None:
+    """Stop whatever owns ``port``, for ``--restart``.
+
+    The pid is read off the socket rather than off a pidfile: the process an
+    operator wants gone is by definition the one actually holding the port,
+    whatever started it. TERM first — the owner closes DuckDB cleanly on it —
+    and KILL only for a process that ignored a generous grace.
+    """
+    def port_open() -> bool:
+        with socket.socket() as sock:
+            sock.settimeout(0.2)
+            return sock.connect_ex(("127.0.0.1", port)) == 0
+
+    if not port_open():
+        return
+    if os.name == "nt":
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True,
+        ).stdout
+        pids = {
+            line.split()[-1]
+            for line in out.splitlines()
+            if f":{port}" in line and "LISTENING" in line.upper()
+        }
+        if not pids:
+            raise SystemExit(
+                f"--restart: port {port} is open but netstat names no "
+                "listener; stop the process by hand and run again")
+        for pid in pids:
+            subprocess.run(
+                ["taskkill", "/PID", pid, "/T", "/F"],
+                capture_output=True, text=True,
+            )
+    else:
+        probe = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True,
+        )
+        pids = [int(line) for line in probe.stdout.split() if line.strip()]
+        if not pids:
+            raise SystemExit(
+                f"--restart: port {port} is open but lsof names no listener; "
+                "stop the process by hand and run again")
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline and port_open():
+            time.sleep(0.2)
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and port_open():
+        time.sleep(0.2)
+    if port_open():
+        raise SystemExit(
+            f"--restart could not free port {port}; the listener survived "
+            "TERM and KILL, which is not a process this launcher started")
+    print(f"--restart: stopped the previous runtime on port {port}", flush=True)
 
 
 def _publish_owner_port(port: int) -> None:
@@ -369,17 +457,12 @@ def atlas_client_argv(binary: str, *, glass: bool, offline: bool) -> list[str]:
 def _cmd_tui(args) -> int:
     """Launch the terminal workstation and, when needed, its owner API process.
 
-    Two clients over one owner. The default is the Ratatui workstation in
-    ``clients/atlas-tui``; ``--classic`` keeps the Textual client, which is the
-    soak valve — a week of real desk use can find a parity gap while rolling
-    back is one flag rather than a revert.
-
-    The owner spawn and readiness wait below are shared by both, deliberately:
-    which client is drawn must not change what starts the desk, or a difference
-    between the two would be a difference in the runtime rather than in the
-    screen.
+    One client over one owner: the Ratatui workstation in
+    ``clients/atlas-tui``. The Textual client was the soak valve while the
+    workstation was being lived with; the soak is over and the valve is
+    retired, so which screen is drawn is no longer a question the launcher
+    answers.
     """
-    classic = bool(getattr(args, "classic", False))
     if getattr(args, "operator", False):
         # Retired, and refused rather than dropped. Arming is the owner's
         # persisted answer to the startup door, so no launcher flag can grant
@@ -396,14 +479,18 @@ def _cmd_tui(args) -> int:
             "    qlab tui --glass        this one window stays read-only "
             "whatever the desk says"
         )
-    if classic and getattr(args, "glass", False):
-        # The same silence, in the other direction. `--glass` is a Ratatui
-        # posture word; the Textual client has no posture to decline, so
-        # forwarding it nowhere would leave an operator believing this window
-        # had been made read-only when it still reaches the confirm gate.
+    if getattr(args, "classic", False):
+        # Retired with the Textual client itself, and refused by name for the
+        # same reason --operator is: a flag that parses and silently draws a
+        # different screen than it used to is the worst kind of no-op.
         raise SystemExit(
-            "--glass is a Ratatui-workstation flag and --classic is the "
-            "Textual client, which has no posture to decline."
+            "--classic is retired: the Textual client is gone and the Atlas "
+            "workstation is the desk's one terminal client. `qlab` opens it."
+        )
+    if getattr(args, "live", False) or getattr(args, "online", False):
+        raise SystemExit(
+            "--live/--online are retired: live data is the default now. "
+            "`qlab --offline` selects the synthetic no-network demo desk."
         )
     try:
         from qlab.tui.client import ApiClient
@@ -420,7 +507,7 @@ def _cmd_tui(args) -> int:
     _publish_owner_port(args.port)
     flagged = desk_mode_from_args(args)
     mode = startup_desk_mode(flagged)
-    offline = not args.online if mode is None else mode.offline
+    offline = True if mode is None else mode.offline
 
     def port_open() -> bool:
         with socket.socket() as sock:
@@ -434,14 +521,20 @@ def _cmd_tui(args) -> int:
     # an error once this budget is spent.
     startup_budget_s = 45.0
 
+    if getattr(args, "restart", False):
+        _stop_listener_on_port(args.port)
+
     owner = None
     already_open = port_open()
     client = ApiClient(f"http://127.0.0.1:{args.port}")
     if not already_open:
         server_argv = [
-            sys.executable, "-m", "qlab.autopilot.cli", "ui",
-            "--port", str(args.port), "--no-browser",
-            *desk_mode_argv(mode),
+            sys.executable, "-m", "qlab.autopilot.cli", "owner",
+            "--port", str(args.port),
+            # While the door is still asking, the owner runs the synthetic
+            # lane — the only one that invents nothing an unanswered desk
+            # could be misread as trading.
+            *(desk_mode_argv(mode) if mode is not None else ["--offline"]),
         ]
         owner = subprocess.Popen(
             server_argv,
@@ -505,7 +598,7 @@ def _cmd_tui(args) -> int:
                 f"{int(startup_budget_s)}s"
                 + (f":\n{detail}" if detail else
                    f"; last readiness error: {last_probe_error or 'none'}. "
-                   "Startup may be unusually slow. Try `qlab ui --no-browser` "
+                   "Startup may be unusually slow. Try `qlab owner` "
                    "in a separate terminal to see its output.")
             )
 
@@ -528,45 +621,18 @@ def _cmd_tui(args) -> int:
                 f"the qlab runtime already on port {args.port} would not accept "
                 f"the requested desk mode ({mode.label}): {exc}") from exc
 
-    if classic:
-        # Imported here rather than beside `ApiClient` above, so the default
-        # path never pays for Textual — and wrapped, because the rollback valve
-        # is exactly the thing that must not fail obscurely. An operator
-        # reaching for `--classic` is already having a bad day; a bare
-        # `ModuleNotFoundError: textual` names no remedy.
-        try:
-            from qlab.tui.app import QlabTui
-        except ImportError as exc:
-            raise SystemExit(
-                "The TUI extra is not installed. Run:\n"
-                "    pip install -e '.[operator]'\n"
-                f"(original error: {exc})"
-            ) from exc
-
-        QlabTui(
-            client,
-            offline=offline,
-            refresh_interval=args.refresh,
-            owned_server=owner,
-            claude_start=args.claude,
-            desk_mode=mode,
-        ).run()
-        return 0
-
     binary = _atlas_binary()
     # `isfile` as well as `access`: X_OK is true of every directory, so a path
     # that resolved to `clients/atlas-tui/target/release/` — an interrupted
     # build leaves exactly that — would pass the check and fail at exec, after
     # the owner had already been started.
     if not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
-        # Fail loud, and never fall back to the Textual client. Silently running
-        # a different client would make `--classic` unfalsifiable as a soak
-        # valve: an operator soaking the workstation would have spent the week
-        # on the other one with no way to tell.
+        # Fail loud. There is no other client to fall back to, and a launcher
+        # that silently did anything but open the workstation would be the
+        # no-op invariant 4 forbids.
         raise SystemExit(
             f"the Atlas workstation is not built at {binary}\n"
             "    cd clients/atlas-tui && cargo build --release\n"
-            "or run the Textual client instead:  qlab tui --classic\n"
             "($QLAB_ATLAS_BIN overrides where this looks.)"
         )
     argv = atlas_client_argv(
@@ -686,30 +752,35 @@ def build_parser() -> argparse.ArgumentParser:
     nc.set_defaults(func=_cmd_news_check)
 
     def add_desk_mode(sp):
-        # Two words, because the safe choice is the default: bare --live keeps
-        # the simulated book, so reaching the real paper account is never a
-        # side effect of asking for real prices. --live switches the data lane
-        # online only; which provider serves it is QLAB_DATA_PROVIDER's job, and
-        # its `alpaca` option reads env API keys, not the browser login.
-        sp.add_argument("--live", action="store_true",
-                        help="online market data from QLAB_DATA_PROVIDER "
-                             "(yfinance by default; simulated book)")
+        # Two words, and the safe defaults need neither: live data with the
+        # simulated book is what a bare launch runs, so reaching the real
+        # paper account is never a side effect of just opening the desk.
+        # Which provider serves the live lane is QLAB_DATA_PROVIDER's job.
+        sp.add_argument("--offline", action="store_true",
+                        help="synthetic data and the simulated book — the "
+                             "no-network demo desk")
         sp.add_argument("--alpaca-book", action="store_true",
-                        help="trade your Alpaca paper book (implies --live)")
+                        help="trade your Alpaca paper book (live data)")
 
-    ui = sub.add_parser("ui", help="launch the single-page web UI (no CLI needed after)")
-    ui.add_argument("--port", type=int, default=8765)
-    ui.add_argument("--online", action="store_true",
-                    help="same as --live (default: offline synthetic)")
-    add_desk_mode(ui)
-    ui.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
-    ui.set_defaults(func=_cmd_ui)
+    owner = sub.add_parser(
+        "owner", help="run the owner runtime headless (workstations attach to it)")
+    owner.add_argument("--port", type=int, default=8765)
+    add_desk_mode(owner)
+    # Retired words, registered without help purely so the refusal below can
+    # name the remedy instead of argparse's "unrecognized arguments".
+    owner.add_argument("--live", action="store_true", help=argparse.SUPPRESS)
+    owner.add_argument("--online", action="store_true", help=argparse.SUPPRESS)
+    owner.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
+    owner.set_defaults(func=_cmd_owner)
 
-    tui = sub.add_parser("tui", help="launch the terminal operator console")
+    tui = sub.add_parser(
+        "tui",
+        help="the desk: owner runtime + Atlas workstation (what bare `qlab` runs)")
     tui.add_argument("--port", type=int, default=8765)
-    tui.add_argument("--online", action="store_true",
-                     help="same as --live (default: offline synthetic)")
     add_desk_mode(tui)
+    tui.add_argument(
+        "--restart", action="store_true",
+        help="stop any owner already on the port and start the desk fresh")
     tui.add_argument("--refresh", type=float, default=2.0,
                      help="snapshot refresh interval in seconds")
     tui.add_argument(
@@ -717,11 +788,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=("Claude workforce startup: show readiness without prompting (offer), "
               "launch automatically (auto), or keep it off until requested (off)"),
     )
-    # The soak valve. Both clients read the same owner over HTTP, so this
-    # changes which screen is drawn and nothing about what is running.
-    tui.add_argument(
-        "--classic", action="store_true",
-        help="use the Textual client instead of the Ratatui workstation")
+    # Retired words, kept registered so the refusals in `_cmd_tui` can name
+    # remedies instead of argparse's "unrecognized arguments".
+    tui.add_argument("--classic", action="store_true", help=argparse.SUPPRESS)
+    tui.add_argument("--live", action="store_true", help=argparse.SUPPRESS)
+    tui.add_argument("--online", action="store_true", help=argparse.SUPPRESS)
     # Passthrough, and the only posture word a launcher may still say. It can
     # only take authority away: the window stays read-only whatever the desk
     # answered. A binary built without the operator feature is glass already,
@@ -761,7 +832,15 @@ def main(argv: list[str] | None = None) -> int:
     from qlab.env import load_once
 
     load_once()
-    args = build_parser().parse_args(argv if argv is not None else sys.argv[1:])
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `qlab` is the desk. A bare invocation — or one that leads with a flag,
+    # like `qlab --restart` — routes to `tui`; a leading `-h` stays top-level
+    # so the full command list remains one keystroke away.
+    if not argv:
+        argv = ["tui"]
+    elif argv[0].startswith("-") and argv[0] not in ("-h", "--help"):
+        argv = ["tui", *argv]
+    args = build_parser().parse_args(argv)
     return args.func(args)
 
 

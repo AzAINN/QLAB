@@ -517,7 +517,7 @@ class ClaudeCliBackend:
     def _executable() -> str | None:
         """The codebase's single ``claude`` predicate, imported lazily.
 
-        ``qlab.tui.__init__`` pulls in Textual — an optional extra — so a
+        ``qlab.tui.claude`` sits behind the operator extra, so a
         module-level import would make the owner's backend layer depend on the
         TUI's install. ``coordinator.py:126`` sets the same precedent.
         """

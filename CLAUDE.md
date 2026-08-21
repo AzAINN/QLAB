@@ -14,8 +14,8 @@ Read README.md first; it is the authoritative overview.
 python -m pip install -e ".[operator,data,optimize,mcp,dev]"   # dev setup
 python -m pytest                    # full offline suite (no network needed)
 python -m pytest tests/test_ui.py  -q          # one module while iterating
-qlab tui                            # terminal workstation (starts/attaches owner)
-qlab ui --no-browser                # same owner runtime, web client
+qlab                                # the desk (owner + Atlas workstation; --restart, --offline)
+qlab owner                          # same owner runtime, headless
 qlab run-once --offline --dry-run   # one governed autopilot cycle, no orders
                                     # (run-once is proposal-only: it opens an
                                     # approval request, never books a fill)
@@ -34,7 +34,7 @@ replacement. Both read `/api/tui`, and neither ever holds a registry handle.
 Its default build now ships armed, so the by-construction claim narrows to the
 `--no-default-features` monitoring artifact: that binary contains no
 `net::write`, no confirm modal and no `Posture::Operator`, so invariant 3 holds
-there by absence. The armed build is protected the way the Textual TUI is —
+there by absence. In the armed build,
 `human_confirmed` comes from a modal bound to the last six of the plan's own
 `targets_hash`, the referee PASS is pinned to that same hash, and the owner
 re-validates every write and refuses without a persisted approval. What the
@@ -54,10 +54,12 @@ excluded from `[all]`, the staged runtime, and the default ablation.
 ## Architecture in sixty seconds
 
 - **One DuckDB writer, always.** The owner HTTP runtime (`qlab/ui/server.py`,
-  started by `qlab tui` or `qlab ui`) is the only process that opens
-  `.lab/registry.duckdb`. Every other surface — the Textual TUI
-  (`qlab/tui/`), the web client, and the `qlab-operator` MCP proxy
-  (`qlab/mcp/tui_proxy.py`) — talks to it over HTTP only.
+  started by `qlab` or `qlab owner`) is the only process that opens
+  `.lab/registry.duckdb`. Every other surface — the Atlas workstation, the
+  CLI verbs, and the `qlab-operator` MCP proxy (`qlab/mcp/tui_proxy.py`) —
+  talks to it over HTTP only. The Textual client and the web client are
+  retired; `qlab/tui/` retains only client plumbing (ApiClient, the Claude
+  session, theme constants).
 - The combined `qlab` MCP server (`qlab/mcp/server.py`) is for headless
   sessions and refuses to start while an owner runtime is alive (port guard).
 - **Claude workforce**: the TUI can launch Claude as a coordinator whose only

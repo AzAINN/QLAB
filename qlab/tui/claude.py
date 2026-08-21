@@ -1117,7 +1117,7 @@ class ClaudeSession:
     def _emit(self, event: ClaudeEvent) -> None:
         """Hand one event to the app without letting a render fault escape.
 
-        `on_event` marshals into the Textual app, which re-raises app-side
+        `on_event` marshals into the owning app's event loop, which re-raises app-side
         exceptions on this thread. Letting one escape killed the reader before
         `process.wait()`, the session-dir cleanup and the `process = None`
         reset — leaking the materialised agent files and, because nothing

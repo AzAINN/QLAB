@@ -84,8 +84,8 @@ def _client(args):
     except Exception:
         console = _console()
         console.print(f"[bad]✗[/bad] no owner runtime at {base}")
-        console.print("[muted]  start one with `qlab tui` or "
-                      "`qlab ui --no-browser`, or pass --port[/muted]")
+        console.print("[muted]  start one with `qlab` or "
+                      "`qlab owner`, or pass --port[/muted]")
         raise SystemExit(1)
     return client
 

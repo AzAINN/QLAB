@@ -57,10 +57,12 @@ offline-quantum = [
 mcp = ["fastmcp>=2.0"]
 
 # Terminal operator console. Kept optional so the quant core remains light.
-tui = ["textual>=0.60", "httpx>=0.27"]
+tui = ["httpx>=0.27"]
 
-# Complete operator surface: TUI plus the stateless Claude MCP proxy.
-operator = ["textual>=0.60", "httpx>=0.27", "fastmcp>=2.0"]
+# Complete operator surface: the desk CLI plus the stateless Claude MCP proxy.
+# (The Textual client is retired; the Atlas workstation is a Rust binary and
+# needs no Python dependency.)
+operator = ["httpx>=0.27", "fastmcp>=2.0"]
 
 # Execution gateway. Alpaca paper trading (live is unimplemented by design).
 trader = ["alpaca-py>=0.20"]

@@ -518,6 +518,8 @@ def test_alpaca_requests_adjusted_daily_closes(monkeypatch):
     modules["alpaca"].__path__ = []
     modules["alpaca.data"].__path__ = []
     modules["alpaca.data.enums"].Adjustment = SimpleNamespace(ALL="all")
+    modules["alpaca.data.enums"].DataFeed = SimpleNamespace(
+        IEX="iex", SIP="sip", DELAYED_SIP="delayed_sip")
     modules["alpaca.data.historical"].StockHistoricalDataClient = (
         StockHistoricalDataClient
     )
@@ -538,6 +540,9 @@ def test_alpaca_requests_adjusted_daily_closes(monkeypatch):
 
     assert requests[-1].timeframe == "day"
     assert requests[-1].adjustment == "all"
+    # Explicit feed, matching the policy's own: the SDK default is SIP, which
+    # the free tier refuses for recent data while the desk claims iex.
+    assert requests[-1].feed == "iex"
     assert list(prices.columns) == ["AAA", "BBB"]
     assert prices.index.tz is None
     assert prices.index.equals(

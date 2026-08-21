@@ -137,8 +137,7 @@ def policy_for(offline: bool, *, provider: str | None = None,
         return DataPolicy.demo(seed)
     prov = _provider_name(provider)
     if prov == "alpaca":
-        return DataPolicy.alpaca_operational(
-            os.environ.get("ALPACA_FEED", "iex").strip().lower() or "iex")
+        return DataPolicy.alpaca_operational(_alpaca_feed())
     return DataPolicy(
         mode="historical", provider=prov,  # type: ignore[arg-type]
         feed=None, allow_network=True, allow_cache=True, allow_synthetic=True,
@@ -438,7 +437,7 @@ def _alpaca_dependencies() -> tuple[object, object, object, object]:
     # uses). Requiring the env pair here meant a browser-logged-in desk
     # could trade on Alpaca but never price from it.
     try:
-        from alpaca.data.enums import Adjustment  # noqa: PLC0415
+        from alpaca.data.enums import Adjustment, DataFeed  # noqa: PLC0415
         from alpaca.data.historical import StockHistoricalDataClient  # noqa: PLC0415
         from alpaca.data.requests import StockBarsRequest  # noqa: PLC0415
         from alpaca.data.timeframe import TimeFrame  # noqa: PLC0415
@@ -447,7 +446,8 @@ def _alpaca_dependencies() -> tuple[object, object, object, object]:
             "alpaca provider requires the 'alpaca-py' package; "
             "install qlab[trader]"
         ) from exc
-    return Adjustment, StockHistoricalDataClient, StockBarsRequest, TimeFrame
+    return (Adjustment, DataFeed, StockHistoricalDataClient, StockBarsRequest,
+            TimeFrame)
 
 
 def _alpaca_client_kwargs() -> dict:
@@ -473,9 +473,21 @@ def _alpaca_client_kwargs() -> dict:
     return {"api_key": creds.api_key, "secret_key": creds.secret_key}
 
 
+def _alpaca_feed() -> str:
+    """The one Alpaca feed this desk is entitled to, validated.
+
+    Read here and by ``policy_for`` through this single helper: the policy
+    advertises the feed and the fetch must request the same one, or the two
+    drift and the drift is invisible until a subscription refuses it.
+    """
+    return _check_feed(
+        os.environ.get("ALPACA_FEED", "iex").strip().lower() or "iex")
+
+
 def _fetch_alpaca(tickers: list[str], start: str, end: str) -> pd.DataFrame | None:
     (
         Adjustment,
+        DataFeed,
         StockHistoricalDataClient,
         StockBarsRequest,
         TimeFrame,
@@ -501,6 +513,11 @@ def _fetch_alpaca(tickers: list[str], start: str, end: str) -> pd.DataFrame | No
             # no look-ahead.
             end=(pd.Timestamp(end) + pd.Timedelta(days=1)).to_pydatetime(),
             adjustment=Adjustment.ALL,
+            # Explicit, always: the SDK's default is SIP, which quietly asks
+            # for more entitlement than the policy advertises — on the free
+            # tier every fetch then dies on "subscription does not permit
+            # querying recent SIP data" while the desk claims feed=iex.
+            feed=getattr(DataFeed, _alpaca_feed().upper()),
         )
         raw = client.get_stock_bars(request).df
         if raw is None or raw.empty:

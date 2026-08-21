@@ -23,7 +23,7 @@ use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
 use crate::ui::widgets::table_cell::{cell, head, LEFT, RIGHT};
-use crate::ui::widgets::{panel_block, panel_header, refuse};
+use crate::ui::widgets::{panel_block, panel_header, refuse, tristate_spark};
 use crossterm::event::KeyEvent;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -50,8 +50,14 @@ const COLS: [(&str, u16, bool); 9] = [
     ("STD", 6, RIGHT),
     ("Δ IC", 7, RIGHT),
     ("t", 6, RIGHT),
-    ("WINS", 4, RIGHT),
-    ("NEG", 4, RIGHT),
+    // Wins over the baseline and negative folds, one cell: both are counts
+    // out of the same folds, and two four-wide columns did not fit beside
+    // the spark — the desk pane is 77 columns after the rails.
+    ("W/N", 5, RIGHT),
+    // The fold-by-fold IC shape. Folds that change sign are not a skill
+    // estimate, and a sign flip is visible in a spark long before it is
+    // legible in a standard deviation.
+    ("FOLDS", 8, LEFT),
     ("", 7, LEFT),
 ];
 
@@ -135,10 +141,15 @@ impl View for PredictorsView {
         // explainer takes what is left: the sentence that says whether this
         // is evidence outranks the paragraph that says what the lanes are.
         let table_rows = (board.models.len() as u16 + 1).min(12);
+        let bar_rows = match board.models.len() {
+            0 => 0,
+            n => (n as u16 + 2).min(11),
+        };
         let rows = Layout::vertical([
             Constraint::Length(2),
             Constraint::Length(verdict_h(board, inner.width)),
             Constraint::Length(table_rows),
+            Constraint::Length(bar_rows),
             Constraint::Min(0),
         ])
         .split(inner);
@@ -149,9 +160,10 @@ impl View for PredictorsView {
             rows[1],
         );
         draw_table(f, rows[2], board);
+        draw_delta_bars(f, rows[3], board);
         f.render_widget(
             Paragraph::new(footer_lines(board)).wrap(Wrap { trim: true }),
-            rows[3],
+            rows[4],
         );
     }
 
@@ -291,17 +303,18 @@ fn model_row(row: &PredictorRow) -> Row<'static> {
         toned_signed(row.delta_mean_ic_vs_baseline),
         toned_at(row.paired_t_vs_baseline, 2),
         (
-            row.wins_vs_baseline
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| MISSING.to_string()),
+            format!(
+                "{}/{}",
+                row.wins_vs_baseline
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| MISSING.to_string()),
+                row.negative_folds
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| MISSING.to_string()),
+            ),
             Style::default().fg(t.text_secondary),
         ),
-        (
-            row.negative_folds
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| MISSING.to_string()),
-            Style::default().fg(t.text_secondary),
-        ),
+        fold_spark(row),
         mark(row),
     ];
     Row::new(
@@ -310,6 +323,105 @@ fn model_row(row: &PredictorRow) -> Row<'static> {
             .zip(COLS)
             .map(|((text, style), (_, width, right))| cell(text, style, right, width)),
     )
+}
+
+/// The per-fold ICs as an eight-level spark, toned by the delta's own sign.
+///
+/// The quantizer is the desk's one (`tristate_spark`): two spellings of "the
+/// tail of a series" is how bars and colour once came to disagree. An empty
+/// series is absent, not flat — the summary payload serves fold dicts and the
+/// detail serves plain numbers, and a decode drift would land here first.
+fn fold_spark(row: &PredictorRow) -> (String, Style) {
+    let t = theme();
+    if row.per_fold.is_empty() {
+        return (MISSING.to_string(), Style::default().fg(t.text_tertiary));
+    }
+    let tone = match row.delta_mean_ic_vs_baseline {
+        Some(d) => format::change_tone(d, 3),
+        None => t.text_secondary,
+    };
+    (
+        tristate_spark::glyphs(&row.per_fold, 8),
+        Style::default().fg(tone),
+    )
+}
+
+/// Δ IC vs the baseline, as magnitude bars in the owner's ranking order.
+///
+/// The table's Δ column says the number; this pane says the *proportion* — a
+/// mapped model earning a third of what another loses is legible at a glance
+/// here and only at a squint in a column of signed decimals. Scaled to the
+/// board's own largest |Δ|, and the baseline row is the axis itself.
+fn draw_delta_bars(f: &mut Frame, area: Rect, board: &PredictorDetail) {
+    if area.height < 2 {
+        return;
+    }
+    let t = theme();
+    let widest = board
+        .models
+        .iter()
+        .filter_map(|m| m.delta_mean_ic_vs_baseline)
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max);
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "Δ IC vs {}",
+            format::text(board.baseline.as_ref()).unwrap_or(MISSING)
+        ),
+        Style::default().fg(t.text_secondary),
+    ))];
+    let room = area.height.saturating_sub(1) as usize;
+    for row in board.models.iter().take(room) {
+        lines.push(delta_bar_line(row, widest));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// One model's bar: id, magnitude, signed value — toned by what is printed.
+fn delta_bar_line(row: &PredictorRow, widest: f64) -> Line<'static> {
+    let t = theme();
+    const BAR_W: usize = 24;
+    let id = format!(
+        "{:<19}",
+        head(
+            format::text(row.model_id.as_ref())
+                .unwrap_or(MISSING)
+                .to_string(),
+            18
+        )
+    );
+    let Some(delta) = row.delta_mean_ic_vs_baseline else {
+        return Line::from(vec![
+            Span::styled(id, Style::default().fg(t.text_primary)),
+            Span::styled(MISSING.to_string(), Style::default().fg(t.text_tertiary)),
+        ]);
+    };
+    if row.is_baseline == Some(true) {
+        return Line::from(vec![
+            Span::styled(id, Style::default().fg(t.text_primary)),
+            Span::styled(
+                format!("{:<BAR_W$} baseline", "▏", BAR_W = BAR_W),
+                Style::default().fg(t.text_dim),
+            ),
+        ]);
+    }
+    // Printed-value discipline, same as every signed cell: dust that rounds
+    // to 0.000 draws the axis tick, not a one-cell bar claiming an edge.
+    let printed = signed(delta, 3);
+    let cells = if widest > 0.0 && !printed.chars().all(|c| c == '0' || c == '.') {
+        ((delta.abs() / widest) * BAR_W as f64).round().max(1.0) as usize
+    } else {
+        0
+    };
+    let bar = format!("{:<BAR_W$}", "█".repeat(cells.min(BAR_W)), BAR_W = BAR_W);
+    Line::from(vec![
+        Span::styled(id, Style::default().fg(t.text_primary)),
+        Span::styled(bar, Style::default().fg(format::change_tone(delta, 3))),
+        Span::styled(
+            format!(" {printed}"),
+            Style::default().fg(format::change_tone(delta, 3)),
+        ),
+    ])
 }
 
 /// Which arm of the experiment a model sits in, as the owner filed it.

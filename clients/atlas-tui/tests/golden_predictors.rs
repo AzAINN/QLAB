@@ -72,7 +72,9 @@ const BOARD: &str = r#"{
         {"model_id": "groupwise:angle_zz", "augmented": true, "is_champion": true,
          "mean_ic": 0.061, "delta_mean_ic_vs_baseline": 0.024,
          "paired_t_vs_baseline": 2.4, "significant": true,
-         "wins_vs_baseline": 9, "negative_folds": 2},
+         "wins_vs_baseline": 9, "negative_folds": 2,
+         "per_fold": [0.02, 0.08, -0.01, 0.06, 0.09, 0.05, -0.02, 0.07,
+                      0.1, 0.04, 0.06, 0.08]},
         {"model_id": "ridge:none", "augmented": false, "is_baseline": true,
          "mean_ic": 0.037, "delta_mean_ic_vs_baseline": 0.0},
         {"model_id": "kernel:linear", "family": "kernel", "augmented": false,
@@ -91,6 +93,9 @@ fn the_board_renders_every_model_with_the_lane_the_owner_filed() {
     assert!(champion.contains("groupwise:angle_zz"), "{champion}");
     assert!(champion.contains("quant"), "{champion}");
     assert!(champion.contains("+0.024"), "{champion}");
+    assert!(champion.contains("9/2"), "{champion}");
+    // The fold spark drew from the per-fold series rather than absence.
+    assert!(champion.contains('▁') || champion.contains('█'), "{champion}");
 
     let baseline = line_with(&frame, "BASE");
     assert!(baseline.contains("ridge:none"), "{baseline}");

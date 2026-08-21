@@ -1,6 +1,7 @@
 ---
 source: tests/golden_atlas.rs
-expression: "atlas_view().frame(120, 36)"
+assertion_line: 453
+expression: "armed().frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
 "▌1 ATLAS│▌ ATLAS                           4 messages ▌ WOULD DO        1 of 2 refused│▌ PULSE                          "
@@ -34,7 +35,7 @@ expression: "atlas_view().frame(120, 36)"
 "        │                                             805e0729 · reporter running     │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
 "        │                                                                             │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
 "        │                                             ▌ ATLAS                         │ ⠤⢄⣀⣀⣀⠤⠔⠊⠉⠉⠉⠒                    "
-"        │                                             state      OBSERVING            │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
-"        │read-only in this posture — asking needs an  mode       propose              │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
+"        │ask › Ask Atlas — type to ask, Enter sends   state      OBSERVING            │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
+"        │Enter sends · Esc clears · ↑↓ wheel scroll   mode       propose              │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
 "        │──────────────────────────────────────────── ────────────────────────────────│ WATCHING                        "
-" /command …   http://127.0.0.1:8765                                      ● SSE  ● OWNER  SYNTHETIC  propose·auto  GLASS "
+" /command …   http://127.0.0.1:8765                                   ● SSE  ● OWNER  SYNTHETIC  propose·auto  OPERATOR "

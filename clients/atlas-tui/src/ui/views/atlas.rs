@@ -28,7 +28,7 @@ use crate::model::{ActionItem, Event, PredictorMetrics, Predictors};
 use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
-use crate::ui::widgets::{panel_block, panel_header, refuse};
+use crate::ui::widgets::{md, panel_block, panel_header, pipeline, refuse};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -337,7 +337,13 @@ impl AtlasView {
         };
         f.render_widget(Paragraph::new(head("ATLAS", &chip, rows[0].width)), rows[0]);
 
-        let lines = chat_lines(store.atlas_chat(), rows[1].width);
+        let startable: Vec<&str> = store
+            .actionables()
+            .iter()
+            .filter(|item| item.startable == Some(true))
+            .filter_map(|item| item.template_id.as_deref())
+            .collect();
+        let lines = chat_lines(store.atlas_chat(), rows[1].width, &startable);
         let room = rows[1].height as usize;
         // Publish what the keys may clamp against, then window from the
         // bottom: zero offset is the newest line on the last row.
@@ -418,7 +424,7 @@ impl AtlasView {
 /// Built whole and windowed by the caller, because the scroll offset is in
 /// *rendered* lines: a message is as many lines as its wrap needed, and an
 /// offset counted in messages would jump by paragraphs.
-fn chat_lines(chat: &[Event], width: u16) -> Vec<Line<'static>> {
+fn chat_lines(chat: &[Event], width: u16, startable: &[&str]) -> Vec<Line<'static>> {
     let t = theme();
     if chat.is_empty() {
         return vec![Line::from(Span::styled(
@@ -456,8 +462,20 @@ fn chat_lines(chat: &[Event], width: u16) -> Vec<Line<'static>> {
         } else {
             t.text_secondary
         };
-        for (i, chunk) in wrap(text, room).into_iter().enumerate() {
-            let lead = if i == 0 {
+        // The operator's rows render verbatim — they typed exactly that —
+        // and the desk's flow through the markdown-light pass, because the
+        // reasoner emits `**bold**`, backticked spans and `- ` bullets and a
+        // pane printing the markers buried the answer in asterisks.
+        let body: Vec<Vec<Span<'static>>> = if actor == "operator" {
+            wrap(text, room)
+                .into_iter()
+                .map(|chunk| vec![Span::styled(chunk, Style::default().fg(body_tone))])
+                .collect()
+        } else {
+            md::rows(text, room, body_tone, t.cyan)
+        };
+        for (i, row) in body.into_iter().enumerate() {
+            let mut spans = if i == 0 {
                 vec![
                     Span::styled(format!("{stamp} "), Style::default().fg(t.text_tertiary)),
                     Span::styled(
@@ -469,8 +487,7 @@ fn chat_lines(chat: &[Event], width: u16) -> Vec<Line<'static>> {
             } else {
                 vec![Span::raw(" ".repeat(PREFIX_W))]
             };
-            let mut spans = lead;
-            spans.push(Span::styled(chunk, Style::default().fg(body_tone)));
+            spans.extend(row);
             out.push(Line::from(spans));
         }
         if let Some(error) = error {
@@ -480,6 +497,33 @@ fn chat_lines(chat: &[Event], width: u16) -> Vec<Line<'static>> {
                     Span::styled(chunk, Style::default().fg(t.text_dim)),
                 ]));
             }
+        }
+    }
+    // The interactive tail: when the desk's proposals include something the
+    // gate already said yes to, the answer ends with the word that starts it.
+    // An affordance, not authority — `/do` re-runs `check_startable` at the
+    // start route, so this line can never widen what the gate permits.
+    let last_is_desk = chat
+        .last()
+        .and_then(|e| e.payload.as_ref())
+        .and_then(|p| p.get("actor"))
+        .and_then(|a| a.as_str())
+        != Some("operator");
+    if last_is_desk && !startable.is_empty() {
+        out.push(Line::from(Span::raw(String::new())));
+        for id in startable.iter().take(3) {
+            out.push(Line::from(vec![
+                Span::raw(" ".repeat(PREFIX_W)),
+                Span::styled("→ ", Style::default().fg(t.text_dim)),
+                Span::styled(
+                    format!("/do {id}"),
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " starts it — the gate re-checks first",
+                    Style::default().fg(t.text_dim),
+                ),
+            ]));
         }
     }
     out
@@ -836,6 +880,25 @@ impl AtlasView {
                 }
                 _ => board_lines(&mut lines, board, inner.width),
             },
+        }
+
+        // The live run, connected: the pipeline the workforce is walking,
+        // under the board it feeds. One glyph line, not a second WORK — the
+        // full flowchart with per-phase artifacts stays on `7`.
+        if let Some(wf) = store
+            .workflows()
+            .iter()
+            .find(|w| matches!(w.status.as_deref(), Some("running" | "blocked")))
+        {
+            lines.push(Line::from(""));
+            lines.push(panel_header("workforce"));
+            lines.push(pipeline::line(&wf.steps, 0));
+            lines.push(dim(&format!(
+                "{} · {} {}",
+                short_id(wf.workflow_id.as_deref(), 8),
+                format::or_missing(wf.current_phase.as_ref()),
+                format::or_missing(wf.status.as_ref()),
+            )));
         }
 
         // The tiny status: what the manager itself is doing, under the evidence

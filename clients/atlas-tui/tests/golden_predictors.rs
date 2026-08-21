@@ -95,7 +95,10 @@ fn the_board_renders_every_model_with_the_lane_the_owner_filed() {
     assert!(champion.contains("+0.024"), "{champion}");
     assert!(champion.contains("9/2"), "{champion}");
     // The fold spark drew from the per-fold series rather than absence.
-    assert!(champion.contains('▁') || champion.contains('█'), "{champion}");
+    assert!(
+        champion.contains('▁') || champion.contains('█'),
+        "{champion}"
+    );
 
     let baseline = line_with(&frame, "BASE");
     assert!(baseline.contains("ridge:none"), "{baseline}");

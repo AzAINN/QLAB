@@ -391,6 +391,10 @@ pub struct TestVerdict {
 /// reachable-code-with-no-caller shape invariant 10 names: held deliberately
 /// because the routes were pinned against the owner's dispatch table in one
 /// pass, and on that list until a surface presses them.
+/// How long an ask may think: the owner's own reasoner budget (60s) plus the
+/// margin a slow model needs to serialize its answer onto the bus.
+const ASK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
+
 pub struct WriteClient {
     base: String,
     client: reqwest::Client,
@@ -545,8 +549,16 @@ impl WriteClient {
     /// stream, not through this response, and this call carries no
     /// confirmation: the `note` it returns says only whether the desk could
     /// answer at all.
+    ///
+    /// With its own deadline, because a question is allowed to think: the
+    /// owner answers through the configured reasoner and budgets it
+    /// `_ATLAS_REPLY_TIMEOUT_S` (60s). The shared 8-second write deadline is
+    /// sized for plan writes, and an ask that outlived it was reported
+    /// "WRITE FAILED — the owner did not answer" while the answer was mid-
+    /// compose and landed on the bus seconds later — a false negative on the
+    /// one surface whose whole job is telling the operator the truth.
     pub async fn atlas_message(&self, text: &str) -> Wrote {
-        self.post("/api/atlas/message", json!({ "text": text }))
+        self.post_within("/api/atlas/message", json!({ "text": text }), ASK_DEADLINE)
             .await
     }
 
@@ -805,8 +817,23 @@ impl WriteClient {
     /// Every method above goes through here, so there is exactly one place that
     /// can build a request and exactly one that decides what an answer means.
     async fn post(&self, path: &str, body: Value) -> Wrote {
+        self.post_within(path, body, crate::net::http::TIMEOUT)
+            .await
+    }
+
+    /// `post`, with the one knob a route may vary: how long an answer is
+    /// allowed to take. Everything else — refusal handling, the verbatim
+    /// body — stays the one implementation.
+    async fn post_within(&self, path: &str, body: Value, deadline: std::time::Duration) -> Wrote {
         let url = format!("{}{path}", self.base);
-        let resp = match self.client.post(&url).json(&body).send().await {
+        let resp = match self
+            .client
+            .post(&url)
+            .timeout(deadline)
+            .json(&body)
+            .send()
+            .await
+        {
             Ok(resp) => resp,
             Err(err) => return Err(WriteError::Unreachable(crate::net::because(&err))),
         };

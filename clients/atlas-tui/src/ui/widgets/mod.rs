@@ -11,6 +11,7 @@ pub mod confirm;
 pub mod event_row;
 pub mod heat_cell;
 pub mod help;
+pub mod md;
 mod panel_header;
 pub mod pipeline;
 pub mod pulse;

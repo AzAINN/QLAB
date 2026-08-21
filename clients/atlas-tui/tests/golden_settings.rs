@@ -23,7 +23,7 @@ use std::time::Instant;
 /// The fixture desk, already switched to SETTINGS.
 fn settings() -> Client {
     let mut client = Client::fixture();
-    client.press(KeyCode::Char('8'));
+    client.press(KeyCode::Char('9'));
     client
 }
 
@@ -41,7 +41,7 @@ fn store_from(json: &str) -> Store {
 
 fn settings_from(json: &str) -> Client {
     let mut client = Client::new(store_from(json));
-    client.press(KeyCode::Char('8'));
+    client.press(KeyCode::Char('9'));
     client
 }
 
@@ -248,7 +248,7 @@ fn models_from(llm: &str) -> Client {
     let mut store = store_from(&format!(r#"{{"llm": {llm}}}"#));
     store.wall = Some(NOW);
     let mut client = Client::new(store);
-    client.press(KeyCode::Char('8'));
+    client.press(KeyCode::Char('9'));
     client
 }
 
@@ -577,7 +577,7 @@ mod armed {
         let mut store = super::harness::fixture_store();
         store.posture = Posture::Operator;
         let mut client = Client::new(store);
-        client.press(KeyCode::Char('8'));
+        client.press(KeyCode::Char('9'));
         // One frame before any key, exactly as the runtime draws one before it
         // reads its first event: the pane publishes its area there, and the
         // form's floor is read off it.
@@ -849,7 +849,7 @@ mod armed {
         );
         store.posture = Posture::Operator;
         let mut ok = Client::new(store);
-        ok.press(KeyCode::Char('8'));
+        ok.press(KeyCode::Char('9'));
         assert_eq!(
             body_style_of(&ok.buffer(120, 36), "paper key ending").fg,
             Some(Theme::truecolor().text_secondary),
@@ -883,7 +883,7 @@ mod cards {
             std::time::Instant::now(),
         );
         let mut client = Client::new(store);
-        client.press(KeyCode::Char('8'));
+        client.press(KeyCode::Char('9'));
         client.frame(120, 36);
         client
     }
@@ -979,7 +979,7 @@ mod cards {
         focus_on(&mut client, "MODELS");
         client.press(KeyCode::Char('4'));
         client.frame(120, 36);
-        client.press(KeyCode::Char('8'));
+        client.press(KeyCode::Char('9'));
         let body = content(&client.frame(120, 36));
         assert!(
             body.contains("a types a login"),
@@ -1101,7 +1101,7 @@ mod cards {
             std::time::Instant::now(),
         );
         let mut client = Client::new(store);
-        client.press(KeyCode::Char('8'));
+        client.press(KeyCode::Char('9'));
         client.frame(120, 36);
         client
     }
@@ -1265,7 +1265,7 @@ mod cards {
             std::time::Instant::now(),
         );
         let mut client = Client::new(store);
-        client.press(KeyCode::Char('8'));
+        client.press(KeyCode::Char('9'));
         client.frame(120, 36);
         focus_on(&mut client, "MODELS");
         press(&mut client, KeyCode::Char('m'));

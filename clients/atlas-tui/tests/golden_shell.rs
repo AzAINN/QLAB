@@ -118,15 +118,16 @@ fn the_regime_reaches_the_frame_from_the_typed_snapshot() {
 /// workstation's accent bar everywhere — panel headers wear it, and so does the
 /// markets grid's selected row — so the only reading that stays about *the nav*
 /// is the entries themselves.
-const NAV_MARKED: [&str; 8] = [
+const NAV_MARKED: [&str; 9] = [
     "▌1 ATLAS",
     "▌2 DESK",
     "▌3 MKTS",
     "▌4 BOOK",
     "▌5 RSCH",
-    "▌6 WORK",
-    "▌7 AUDIT",
-    "▌8 SETT",
+    "▌6 PRED",
+    "▌7 WORK",
+    "▌8 AUDIT",
+    "▌9 SETT",
 ];
 
 #[test]
@@ -164,6 +165,7 @@ fn tab_cycles_the_views_and_wraps_in_both_directions() {
         ViewId::Markets,
         ViewId::Book,
         ViewId::Research,
+        ViewId::Predictors,
         ViewId::Workforce,
         ViewId::Audit,
         ViewId::Settings,

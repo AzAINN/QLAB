@@ -23,7 +23,7 @@ use std::time::Instant;
 /// The fixture desk, already switched to AUDIT.
 fn audit() -> Client {
     let mut client = Client::fixture();
-    client.press(KeyCode::Char('7'));
+    client.press(KeyCode::Char('8'));
     client
 }
 
@@ -41,7 +41,7 @@ fn store_from(json: &str) -> Store {
 
 fn audit_from(json: &str) -> Client {
     let mut client = Client::new(store_from(json));
-    client.press(KeyCode::Char('7'));
+    client.press(KeyCode::Char('8'));
     client
 }
 
@@ -242,7 +242,7 @@ mod armed {
         let mut store = super::store_from(json);
         store.posture = Posture::Operator;
         let mut client = Client::new(store);
-        client.press(KeyCode::Char('7'));
+        client.press(KeyCode::Char('8'));
         client
     }
 

@@ -235,9 +235,9 @@ qlab tui
 ```
 
 `qlab tui` starts the owner runtime and opens the **Atlas workstation** — the
-Rust/Ratatui client in `clients/atlas-tui`, seven views on `1`–`7`: Desk,
-Markets, Book, Research, Workforce, Audit, Settings. The launcher refuses
-rather than falling back if the binary is not there.
+Rust/Ratatui client in `clients/atlas-tui`, nine views on `1`–`9`: Atlas,
+Desk, Markets, Book, Research, Predictors, Workforce, Audit, Settings. The
+launcher refuses rather than falling back if the binary is not there.
 
 On ATLAS, `/ask` asks the desk what it would do: the gate ranks every
 registered template, the ones it permits become approvable proposals on the

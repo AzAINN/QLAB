@@ -22,6 +22,7 @@ pub mod audit;
 pub mod book;
 pub mod desk;
 pub mod markets;
+pub mod predictors;
 pub mod research;
 pub mod settings;
 pub mod workforce;
@@ -139,13 +140,14 @@ pub struct Selected {
     pub blotter: bool,
 }
 
-/// The eight views, alive for the life of the process.
+/// The nine views, alive for the life of the process.
 pub struct Views {
     atlas: atlas::AtlasView,
     desk: desk::DeskView,
     markets: markets::MarketsView,
     book: book::BookView,
     research: research::ResearchView,
+    predictors: predictors::PredictorsView,
     workforce: workforce::WorkforceView,
     audit: audit::AuditView,
     settings: settings::SettingsView,
@@ -175,6 +177,7 @@ impl Views {
             markets: markets::MarketsView::default(),
             book: book::BookView::default(),
             research: research::ResearchView,
+            predictors: predictors::PredictorsView,
             workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
             settings: settings::SettingsView::default(),
@@ -320,6 +323,7 @@ impl Views {
             ViewId::Markets => &self.markets,
             ViewId::Book => &self.book,
             ViewId::Research => &self.research,
+            ViewId::Predictors => &self.predictors,
             ViewId::Workforce => &self.workforce,
             ViewId::Audit => &self.audit,
             ViewId::Settings => &self.settings,
@@ -333,6 +337,7 @@ impl Views {
             ViewId::Markets => &mut self.markets,
             ViewId::Book => &mut self.book,
             ViewId::Research => &mut self.research,
+            ViewId::Predictors => &mut self.predictors,
             ViewId::Workforce => &mut self.workforce,
             ViewId::Audit => &mut self.audit,
             ViewId::Settings => &mut self.settings,

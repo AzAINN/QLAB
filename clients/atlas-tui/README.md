@@ -64,10 +64,10 @@ pretending otherwise would just produce a worse Textual.
 
 ## The shell
 
-One frame is five regions: a ticker row, an eight-cell nav rail, the active
+One frame is five regions: a ticker row, a nine-cell nav rail, the active
 view, the pulse rail, and a status line that always states the posture — `GLASS`
 when this window holds no writer, whether because the build has none, because
-`--glass` declined it, or because the desk is not armed. Keys `1`–`7` and `Tab`/`BackTab`
+`--glass` declined it, or because the desk is not armed. Keys `1`–`9` and `Tab`/`BackTab`
 switch views, `r` jumps the poll queue, `q` quits.
 
 `shell::draw` is a pure function of the store — no clock read, no socket, no

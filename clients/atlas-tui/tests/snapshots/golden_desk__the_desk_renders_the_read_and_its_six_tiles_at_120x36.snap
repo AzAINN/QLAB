@@ -1,6 +1,5 @@
 ---
 source: tests/golden_desk.rs
-assertion_line: 122
 expression: "desk_from(DESK).frame(120, 36)"
 ---
 " no market assets in the last snapshot                                                                                  "
@@ -9,10 +8,10 @@ expression: "desk_from(DESK).frame(120, 36)"
 " 3 MKTS │DIVERGENT · STRESS             ▜▄▖  █  █▗█▌    █▗█▌█▗█▌█▗█▌    █▗█▌█▗█▌      │ regime CALM  robust UNCERTAIN   "
 " 4 BOOK │                               ▄▄▛  █  █▛▐▌ ▄  █▛▐▌█▛▐▌█▛▐▌ ▄  █▛▐▌█▛▐▌      │ drawdown --  tier WARNING       "
 " 5 RSCH │TENSIONS                        ▀  ▀▀▀ ▝▀▀ ▗▛  ▝▀▀ ▝▀▀ ▝▀▀  ▀  ▝▀▀ ▝▀▀       │ gross --                        "
-" 6 WORK │▌ Absorption is high while the ──────────────────────────────────────────────│                                 "
-" 7 AUDIT│  tape is quiet.               ▌ REGIME                ▌ ALERTS              │▌ BREADTH                        "
-" 8 SETT │                               STATE    UNCERTAIN      TIER     WARNING      │ --                              "
-"        │WOULD CHANGE THIS              DETECTOR CALM           HEADROOM 25.0%        │ adv -- / dec --                 "
+" 6 PRED │▌ Absorption is high while the ──────────────────────────────────────────────│                                 "
+" 7 WORK │  tape is quiet.               ▌ REGIME                ▌ ALERTS              │▌ BREADTH                        "
+" 8 AUDIT│                               STATE    UNCERTAIN      TIER     WARNING      │ --                              "
+" 9 SETT │WOULD CHANGE THIS              DETECTOR CALM           HEADROOM 25.0%        │ adv -- / dec --                 "
 "        │▌ Absorption falling back      SIG/THR  9.2% / 11.1%   VOL/LIM  10.1% / 30.0%│                                 "
 "        │  under its threshold.         CONF     66.7%          GATE     1 REFUSED    │▌ MOVERS                         "
 "        │                                                         est_cost 41bp       │ --                              "

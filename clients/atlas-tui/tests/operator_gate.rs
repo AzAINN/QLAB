@@ -73,8 +73,13 @@ fn production_files_mentioning(literal: &str) -> Vec<String> {
                 None => &whole[..],
             };
             if source.contains(literal) {
+                // Separators normalized before the prefix cuts: a Windows
+                // walk yields `src\ui\...`, and every census downstream
+                // classifies by `/`-spelled prefixes — unnormalized, the
+                // whole IO census silently moves files between categories.
                 found.push(
                     path.to_string_lossy()
+                        .replace('\\', "/")
                         .trim_start_matches(SRC)
                         .trim_start_matches('/')
                         .to_string(),

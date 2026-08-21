@@ -1073,6 +1073,13 @@ def _canned_facts(**over) -> dict:
 
 def _pin_facts(owner, monkeypatch, facts: dict) -> None:
     monkeypatch.setattr(owner, "atlas_facts", lambda offline: dict(facts))
+    # The host must not decide the verdict: with no `claude` on PATH the
+    # supervisor reports DEGRADED before any backend under test is consulted,
+    # so a state assertion would be about the machine, not about the desk.
+    # CI's runners have no claude and every developer machine does — the four
+    # tick-state tests passed locally and failed everywhere else until this
+    # was pinned.
+    monkeypatch.setattr(owner.atlas, "_coordinator_available", lambda: True)
 
 
 def _tick(owner, *, autonomous: bool = False) -> dict:
@@ -1407,6 +1414,9 @@ def _pin_consuming_facts(owner, monkeypatch, facts: dict) -> dict:
         seen["n"] += 1
         return out
 
+    # Same host-independence pin as _pin_facts: the machine's PATH must
+    # not decide the tick's state.
+    monkeypatch.setattr(owner.atlas, "_coordinator_available", lambda: True)
     monkeypatch.setattr(owner, "atlas_facts", assembled)
     return seen
 

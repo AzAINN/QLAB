@@ -1,0 +1,73 @@
+# The suite is offline by design (invariant 2): no network, no accounts, no
+# secrets. A job that needs a credential here is a bug in the job.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install the dev extras
+        run: python -m pip install -e ".[operator,data,optimize,mcp,dev]"
+      - name: Full offline suite
+        run: python -m pytest -q
+
+  rust:
+    name: rust · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: clients/atlas-tui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/atlas-tui
+      # Both legs, every platform: the armed default and the GLASS monitoring
+      # artifact make different by-construction claims, so each must build and
+      # pass on its own.
+      - name: Armed leg
+        run: cargo test
+      - name: GLASS leg
+        run: cargo test --no-default-features
+
+  rust-lint:
+    name: rust · clippy + fmt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/atlas-tui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/atlas-tui
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings

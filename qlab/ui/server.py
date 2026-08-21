@@ -138,10 +138,12 @@ _VALUATION_TTL_SECONDS = 15.0
 # `ollama pull` finishing is visible almost at once, and long enough that a
 # burst of clicks costs one probe.
 _LLM_CATALOG_TTL_SECONDS = 5.0
-# The chat surface's budget. A desk brief, not an essay: enough for a read with
-# its numbers and a recommendation, short enough that an operator gets an answer
-# rather than a wall.
-_ATLAS_REPLY_TOKENS = 700
+# The chat surface's budget, env-tunable and generous by default: the operator
+# asked for unabridged answers, and 8000 tokens is effectively unbounded for a
+# chat reply while still being a number the completion protocols require. The
+# real guard on a runaway answer stays `_ATLAS_REPLY_TIMEOUT_S`, which bounds
+# the worker thread a human is waiting on.
+_ATLAS_REPLY_TOKENS = int(os.environ.get("QLAB_ATLAS_REPLY_TOKENS", "8000"))
 # And its ceiling. Far below the backends' own batch defaults (300s for Ollama,
 # 600s for the CLI) because a human is watching this one, and the thread it
 # holds is an owner worker.

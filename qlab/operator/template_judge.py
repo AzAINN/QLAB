@@ -35,6 +35,7 @@ other's answer measures nothing.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -47,9 +48,10 @@ if TYPE_CHECKING:      # annotations only; a runtime import would be a cycle
 # but the owner's own loop is what makes the desk look alive, so the ceiling is
 # under `atlas_message`'s 60s rather than the backends' batch defaults.
 REASONER_TIMEOUT_S = 45.0
-# One id and two or three sentences. A longer budget buys narration the parser
-# discards anyway.
-REASONER_MAX_TOKENS = 400
+# One id and its reasoning. The parser keeps the id and a rationale; the rest
+# is thinking room, and starving a judgment to save tokens was a false economy
+# the operator explicitly declined — env-tunable for the desk that disagrees.
+REASONER_MAX_TOKENS = int(os.environ.get("QLAB_REASONER_TOKENS", "2000"))
 
 # Where the caller puts the menu on the context. The set MUST come from
 # `templates.startable_templates`; composing it any other way here would make

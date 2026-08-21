@@ -1015,7 +1015,7 @@ def _fmt_pct(value) -> str:
 
 def compose_reasoner_prompt(*, context: Mapping, evidence: ArchiveEvidence,
                             question: str | None, spec: ModelSpec,
-                            max_output_tokens: int = 1200) -> CompletionRequest:
+                            max_output_tokens: int = 8000) -> CompletionRequest:
     """Build the one request. Overflow refuses; it never trims the evidence.
 
     Dropping records to fit would silently unbind a citation from its evidence,

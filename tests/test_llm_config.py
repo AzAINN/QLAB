@@ -878,7 +878,11 @@ def test_the_desk_answers_through_the_configured_reasoner(owner, monkeypatch):
     assert "never" in call["system"] and "execute" in call["system"]
     assert "why are we flat?" in call["user"]
     assert '"regime_panel"' in call["user"] and '"startable"' in call["user"]
-    assert call["max_tokens"] <= 700
+    # The configured budget rides the call — generous by operator directive
+    # (env-tunable via QLAB_ATLAS_REPLY_TOKENS), so the pin is the wiring,
+    # not a number: the guard on a runaway answer is the timeout below.
+    from qlab.ui import server as server_module
+    assert call["max_tokens"] == server_module._ATLAS_REPLY_TOKENS
     # A chat completion cannot ride the 300s default: the operator is waiting.
     assert call["timeout"] is not None and call["timeout"] <= 60
 

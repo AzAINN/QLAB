@@ -901,6 +901,37 @@ impl AtlasView {
             )));
         }
 
+        // What the desk is waiting on the OPERATOR for, each with the key
+        // that answers it. This is the "it says awaiting approval but where"
+        // question, answered on the page the operator actually asks from —
+        // the affordance only; both keys still land in the confirm ritual.
+        let approvals_waiting = store
+            .approvals()
+            .iter()
+            .filter(|a| a.status.as_deref() == Some("pending"))
+            .count();
+        let plans_checked = store
+            .plans()
+            .iter()
+            .filter(|p| p.state.as_deref() == Some("checked"))
+            .count();
+        if approvals_waiting + plans_checked > 0 {
+            lines.push(Line::from(""));
+            lines.push(panel_header("your call"));
+            if approvals_waiting > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("{approvals_waiting} approval(s) — AUDIT (8), a"),
+                    Style::default().fg(t.accent),
+                )));
+            }
+            if plans_checked > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("{plans_checked} checked plan(s) — BOOK (4), x"),
+                    Style::default().fg(t.accent),
+                )));
+            }
+        }
+
         // The tiny status: what the manager itself is doing, under the evidence
         // it would reason from. Two or three lines, not a second DESK.
         lines.push(Line::from(""));

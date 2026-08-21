@@ -469,6 +469,13 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
             }
             None
         }
+        Resolved::ClearChat => {
+            // Local: the window's own pane empties; the bus and AUDIT keep
+            // every row, exactly like Claude Code's /clear keeps the log.
+            store.clear_chat();
+            done(store);
+            None
+        }
         Resolved::Plan(id) => {
             // The jump happens either way: an operator who named a plan is
             // asking to look at the ledger, and BOOK is where it is drawn even

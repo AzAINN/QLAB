@@ -447,6 +447,12 @@ pub struct Store {
     /// view, so "would asking again learn anything" is answered by the
     /// operator pressing `r`, not by a TTL this client would have to invent.
     predictor_detail: Option<PredictorDetail>,
+    /// The newest chat timestamp at the moment `/clear` ran. The bus keeps
+    /// every row and AUDIT still draws them — this window just stops drawing
+    /// rows at or before the mark. A timestamp rather than a count, because
+    /// the owner serves a *bounded* chat window: counting rows would keep
+    /// hiding new arrivals once the window rotates under the mark.
+    chat_cleared_through: Option<String>,
     pub nav: Nav,
     /// What the operator has typed into the command line, and what it said back.
     ///
@@ -612,6 +618,7 @@ impl Store {
             backends: None,
             backends_at: None,
             predictor_detail: None,
+            chat_cleared_through: None,
             nav: Nav::default(),
             cmd: CmdLine::default(),
             help_top: 0,
@@ -928,10 +935,36 @@ impl Store {
     /// The conversation with the desk manager, oldest first as the owner
     /// serves it (`atlas_chat`, limit 60).
     pub fn atlas_chat(&self) -> &[crate::model::Event] {
-        self.snapshot
+        let chat = self
+            .snapshot
             .as_ref()
             .map(|s| s.atlas_chat.as_slice())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let Some(mark) = self.chat_cleared_through.as_deref() else {
+            return chat;
+        };
+        // ISO-8601 compares lexicographically, so "after the mark" is a
+        // string comparison. A row with no stamp cannot be placed against the
+        // mark and is shown — hiding what cannot be dated would be the silent
+        // drop this pane exists to avoid.
+        let at = chat
+            .iter()
+            .position(|e| match e.ts.as_deref() {
+                Some(ts) => ts > mark,
+                None => true,
+            })
+            .unwrap_or(chat.len());
+        &chat[at..]
+    }
+
+    /// `/clear`: stop drawing every chat row this window currently shows.
+    /// New rows appear as they arrive — the mark is a moment, not a count.
+    pub fn clear_chat(&mut self) {
+        self.chat_cleared_through = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.atlas_chat.iter().filter_map(|e| e.ts.clone()).max());
+        self.dirty = true;
     }
 
     /// The predictor board summary, if the owner served one.
@@ -2586,6 +2619,41 @@ mod tests {
         );
         assert_eq!(views[0].price, Some(152.47));
         assert_eq!(views[1].price, Some(730.0));
+    }
+
+    #[test]
+    fn clear_chat_hides_what_was_shown_and_new_rows_still_arrive() {
+        // The mark is a moment, not a count: the owner serves a BOUNDED chat
+        // window, and a count-based clear kept hiding new arrivals once the
+        // window rotated under it.
+        let mut store = Store::new(std::time::Duration::from_secs(9));
+        let t0 = Instant::now();
+        let snap = |rows: &str| -> AppEvent {
+            AppEvent::Snapshot(Box::new(
+                serde_json::from_str(&format!("{{\"atlas_chat\": {rows}}}")).unwrap(),
+            ))
+        };
+        store.apply(
+            snap(
+                r#"[{"kind": "atlas_message", "ts": "2026-08-21T10:00:00+00:00"},
+                     {"kind": "atlas_message", "ts": "2026-08-21T10:00:05+00:00"}]"#,
+            ),
+            t0,
+        );
+        assert_eq!(store.atlas_chat().len(), 2);
+        store.clear_chat();
+        assert_eq!(store.atlas_chat().len(), 0, "the pane empties");
+        // The window rotates: one old row survives, one new row arrives.
+        store.apply(
+            snap(
+                r#"[{"kind": "atlas_message", "ts": "2026-08-21T10:00:05+00:00"},
+                     {"kind": "atlas_message", "ts": "2026-08-21T10:01:00+00:00"}]"#,
+            ),
+            t0,
+        );
+        let shown = store.atlas_chat();
+        assert_eq!(shown.len(), 1, "only the row after the mark draws");
+        assert_eq!(shown[0].ts.as_deref(), Some("2026-08-21T10:01:00+00:00"));
     }
 
     #[test]

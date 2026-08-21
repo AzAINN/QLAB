@@ -323,6 +323,8 @@ pub enum Scope {
     View,
     Ticker,
     Plan,
+    // NOTE: `Clear` is declared at the tail; the doc comments between keep
+    // their variants.
     /// Which data source and which book the desk is pointed at.
     ///
     /// The first scope that writes. It is in the grammar in both builds so the
@@ -363,13 +365,16 @@ pub enum Scope {
     /// so a started proposal is a decision with a human behind it rather than
     /// a task that appeared in the queue.
     Do,
+    /// Empty this window's chat pane. The one scope that acts without touching
+    /// the desk, so it is offered in every posture.
+    Clear,
 }
 
 impl Scope {
     /// Picker order: the three a glass window can use, then the four it
     /// cannot. `/ask` before `/do`, because that is the order they happen in —
     /// there is nothing to approve until the desk has been asked.
-    pub const ALL: [Scope; 7] = [
+    pub const ALL: [Scope; 8] = [
         Scope::View,
         Scope::Ticker,
         Scope::Plan,
@@ -377,6 +382,7 @@ impl Scope {
         Scope::Model,
         Scope::Ask,
         Scope::Do,
+        Scope::Clear,
     ];
 
     /// The word an operator types, and the word the suggestions show. One
@@ -390,6 +396,7 @@ impl Scope {
             Scope::Model => "model",
             Scope::Ask => "ask",
             Scope::Do => "do",
+            Scope::Clear => "clear",
         }
     }
 
@@ -403,12 +410,15 @@ impl Scope {
             Scope::Model => "a surface, and the model it should run",
             Scope::Ask => "nothing — Enter asks the desk what it would do",
             Scope::Do => "a proposal the desk is offering, in full",
+            Scope::Clear => "nothing — Enter empties this window's chat pane",
         }
     }
 
     /// Whether using this scope changes the desk. Offered only to a window that
     /// can, exactly as every other operator affordance on this workstation.
     pub fn writes(self) -> bool {
+        // `/clear` is deliberately absent: it empties this window's chat pane
+        // and touches nothing on the desk, so a glass window may use it.
         matches!(self, Scope::Mode | Scope::Model | Scope::Ask | Scope::Do)
     }
 
@@ -563,6 +573,10 @@ pub enum Resolved {
     /// unanswerable without re-deriving the pairing that produced it.
     #[cfg(feature = "operator")]
     Approve { template: String, task: String },
+    /// Empty this window's chat pane. Local: the bus keeps every row and the
+    /// AUDIT view still shows them — what clears is what this window draws,
+    /// exactly like Claude Code's own `/clear`.
+    ClearChat,
     /// The line cannot be acted on, and this is the sentence that says why.
     Refused(String),
 }
@@ -658,6 +672,12 @@ fn scoped(scope: Scope, query: &str, store: &Store, posture: Posture) -> Resolve
         Scope::Model => model(query, store, posture),
         Scope::Ask => ask(query, posture),
         Scope::Do => act(query, store, posture),
+        Scope::Clear => match query.is_empty() {
+            true => Resolved::ClearChat,
+            false => {
+                Resolved::Refused("/clear takes no argument — Enter empties the chat pane".into())
+            }
+        },
     }
 }
 
@@ -1228,6 +1248,8 @@ fn scopes(posture: Posture) -> Vec<Suggestion> {
 
 fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Suggestion> {
     match scope {
+        // Takes nothing; the hint row already says Enter acts.
+        Scope::Clear => Vec::new(),
         Scope::View => ViewId::ALL
             .into_iter()
             .filter(|id| starts_with_fold(id.label(), query))
@@ -1808,6 +1830,23 @@ mod tests {
         // listing every view.
         assert!(matches!(
             resolve(&parse("/view "), &store, Posture::Glass),
+            Resolved::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn clear_is_offered_to_every_posture_and_takes_no_argument() {
+        // Local like /view: it empties this window's pane and touches nothing
+        // on the desk, so a glass window may use it — and an argument is
+        // refused rather than ignored, because a swallowed word is a command
+        // the operator believes did something else.
+        let store = desk();
+        assert_eq!(
+            resolve(&parse("/clear "), &store, Posture::Glass),
+            Resolved::ClearChat
+        );
+        assert!(matches!(
+            resolve(&parse("/clear everything"), &store, Posture::Glass),
             Resolved::Refused(_)
         ));
     }

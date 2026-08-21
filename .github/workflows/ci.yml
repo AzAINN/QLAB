@@ -23,10 +23,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # The version the desk is developed on. 3.12 differs in stdlib
+          # error wording the suite asserts on (json's "trailing comma").
+          python-version: "3.13"
           cache: pip
       - name: Install the dev extras
-        run: python -m pip install -e ".[operator,data,optimize,mcp,dev]"
+        # `trader` rides along for import-availability: without alpaca-py the
+        # credential-error tests see "install qlab[trader]" instead of the
+        # errors they exist to pin. No network beyond pip; no keys.
+        run: python -m pip install -e ".[operator,data,optimize,mcp,trader,dev]"
       - name: Full offline suite
         run: python -m pytest -q
 

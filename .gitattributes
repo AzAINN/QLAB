@@ -1,0 +1,5 @@
+# LF everywhere, including Windows checkouts. The Rust client's authority
+# tests scan source files byte-for-byte (write call sites, credential
+# plaintext, one-producer rules); autocrlf on a Windows runner hands them
+# CRLF files and five of them fail on line endings rather than on authority.
+* text=auto eol=lf

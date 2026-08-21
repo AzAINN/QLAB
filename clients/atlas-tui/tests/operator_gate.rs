@@ -22,25 +22,61 @@ fn source(relative: &str) -> String {
         .unwrap_or_else(|err| panic!("could not read {relative}: {err}"))
 }
 
-/// Every file under `src` that mentions `needle`, as paths relative to `src`.
+/// A walked path as the censuses spell it: `/`-separated, relative to `src`.
 ///
-/// Asserting the exact list rather than "nothing found" also proves the search
-/// ran: a grep that cannot read the tree returns no matches, which would
-/// otherwise read as a clean crate. The same reasoning as
-/// `theme::tests::no_hardcoded_rgb_outside_theme`, which this follows.
+/// One normalization for every searcher in this file. Windows walks yield
+/// `\`-spelled paths and CARGO_MANIFEST_DIR is `\`-spelled there too, so a
+/// searcher that trimmed the raw prefix leaked absolute paths into lists the
+/// assertions compare against `/`-spelled names.
+fn rel(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches(SRC.replace('\\', "/").as_str())
+        .trim_start_matches('/')
+        .to_string()
+}
+
+/// Every file under `src` that mentions `needle` as a plain substring.
+///
+/// In-process rather than shelling to `grep`: the census must give the same
+/// answer on a runner with no grep on PATH, and a search that could not run
+/// would return no matches — which reads as a clean crate. The anchor
+/// assertion beside each empty-list check is what proves the search ran.
 fn files_mentioning(needle: &str) -> Vec<String> {
-    let out = std::process::Command::new("grep")
-        .args(["-rl", "--include=*.rs", needle, SRC])
-        .output()
-        .expect("grep is available");
-    let mut found: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|line| {
-            line.trim_start_matches(SRC)
-                .trim_start_matches('/')
-                .to_string()
+    files_where(|source| source.contains(needle))
+}
+
+/// Every file under `src` mentioning `word` with no identifier character on
+/// either side — the census's `\bWrites\b`, without the external grep.
+fn files_mentioning_word(word: &str) -> Vec<String> {
+    let boundary = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+    files_where(move |source| {
+        source.match_indices(word).any(|(at, _)| {
+            boundary(source[..at].chars().next_back())
+                && boundary(source[at + word.len()..].chars().next())
         })
-        .collect();
+    })
+}
+
+fn files_where(hit: impl Fn(&str) -> bool) -> Vec<String> {
+    fn walk(dir: &std::path::Path, hit: &dyn Fn(&str) -> bool, found: &mut Vec<String>) {
+        let entries = std::fs::read_dir(dir).unwrap_or_else(|err| panic!("{dir:?}: {err}"));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, hit, found);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if hit(&std::fs::read_to_string(&path).unwrap_or_default()) {
+                found.push(rel(&path));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(std::path::Path::new(SRC), &hit, &mut found);
     found.sort();
     found
 }
@@ -78,13 +114,7 @@ fn production_files_mentioning(literal: &str) -> Vec<String> {
                 // built from CARGO_MANIFEST_DIR, which is `\`-spelled there
                 // too: normalizing only the walked path left the prefix
                 // untrimmed and absolute paths leaked into the census.
-                found.push(
-                    path.to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_start_matches(SRC.replace('\\', "/").as_str())
-                        .trim_start_matches('/')
-                        .to_string(),
-                );
+                found.push(rel(&path));
             }
         }
     }
@@ -133,11 +163,11 @@ fn no_write_call_site_exists_outside_the_gated_module() {
     // watched the wrong door. Each verb may appear in exactly one file — the one
     // the feature gate can remove.
     for verb in [
-        r"\.post(",
-        r"\.put(",
-        r"\.patch(",
-        r"\.delete(",
-        r"\.request(",
+        ".post(",
+        ".put(",
+        ".patch(",
+        ".delete(",
+        ".request(",
         "Method::",
     ] {
         let found = files_mentioning(verb);
@@ -150,7 +180,7 @@ fn no_write_call_site_exists_outside_the_gated_module() {
     // asserting nothing: a grep that cannot read the tree returns no matches,
     // which would otherwise read as a clean crate.
     assert_eq!(
-        files_mentioning(r"\.post("),
+        files_mentioning(".post("),
         vec!["net/write.rs".to_string()],
         "the POST call site is in the gated write module"
     );
@@ -177,7 +207,7 @@ fn no_view_or_widget_can_reach_the_writer() {
     // Both spellings, for the reason the writer needs both: a glob import would
     // bring the type in without the module path ever appearing.
     reachers.extend(files_mentioning("dispatch::Writes"));
-    reachers.extend(files_mentioning(r"\bWrites\b"));
+    reachers.extend(files_mentioning_word("Writes"));
     // And the HTTP stack itself, not only the types this crate wraps it in: a
     // view that built its own `reqwest::Client` would be an order path with no
     // composition root in between, and would name neither of the above.

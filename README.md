@@ -340,7 +340,8 @@ owner runtime holds the book — alongside a running desk, use `qlab desk`,
 
 ```bash
 qlab                           # the desk: live prices, simulated book, all operations
-qlab --restart                 # stop whatever runtime holds the port, start fresh
+qlab --restart                 # from the base up: warn, choose runtime|book|everything, type it to agree
+qlab --restart=everything --yes  # the scripted spelling; the old desk is archived to .lab-archive/, never deleted
 qlab --offline                 # the synthetic no-network demo desk
 qlab --alpaca-book             # real prices AND your Alpaca paper book
 qlab --glass                   # keep this window read-only for the session

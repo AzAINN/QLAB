@@ -14,7 +14,7 @@ Read README.md first; it is the authoritative overview.
 python -m pip install -e ".[operator,data,optimize,mcp,dev]"   # dev setup
 python -m pytest                    # full offline suite (no network needed)
 python -m pytest tests/test_ui.py  -q          # one module while iterating
-qlab                                # the desk (owner + Atlas workstation; --restart, --offline)
+qlab                                # the desk (owner + Atlas workstation; --offline; --restart warns, asks a tier, archives)
 qlab owner                          # same owner runtime, headless
 qlab run-once --offline --dry-run   # one governed autopilot cycle, no orders
                                     # (run-once is proposal-only: it opens an

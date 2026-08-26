@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -37,7 +38,7 @@ from zoneinfo import ZoneInfo
 from qlab.autopilot.loop import daily_ops, render_summary, run_once
 from qlab.autopilot.scheduler import is_trading_day, next_trading_morning
 from qlab.core.desk_mode import DeskMode, load_desk_mode, save_desk_mode
-from qlab.paths import workspace_root
+from qlab.paths import state_root, workspace_root
 
 
 def _f(x) -> str:
@@ -292,6 +293,92 @@ def _refuse_second_writer(command: str, port: int = 0) -> None:
     )
 
 
+# What `--restart` may take from the base up, in the order of how much goes.
+# `runtime` is the old --restart; `book` is the owner's own reset; `everything`
+# is a desk that has never been opened.
+RESTART_TIERS = ("runtime", "book", "everything")
+
+
+def _restart_dialog(scope: str, yes: bool, port: int, root: Path) -> str:
+    """Warn, choose, agree. Returns the tier to carry out.
+
+    A restart that can take the book or the whole desk with it is not a flag
+    an operator should be able to pass by habit, so the ritual is the one the
+    desk uses for money: say what will happen, in the operator's own terms
+    and with the paths and sizes, and take the tier's own word typed back as
+    the agreement. `--restart=<tier> --yes` is the scripted spelling and is
+    equally explicit; a non-interactive run with neither is refused rather
+    than defaulted, because the safe default and the asked-for default
+    disagree here.
+    """
+    registry = root / "registry.duckdb"
+    size_mb = sum(
+        f.stat().st_size for f in root.rglob("*") if f.is_file()
+    ) / 1e6 if root.exists() else 0.0
+    menu = (
+        f"\n  --restart takes the desk down from the base up. On port {port}:\n\n"
+        f"    runtime     stop the owner and start it fresh; keep the book,\n"
+        f"                the history and every setting\n"
+        f"    book        that, and reset the paper book to starting capital —\n"
+        f"                positions, orders, marks, high-water mark, halt\n"
+        f"    everything  that, and archive the whole desk state so it opens\n"
+        f"                as new: {root} ({size_mb:.0f} MB incl. the registry\n"
+        f"                {'present' if registry.exists() else 'absent'}, caches,\n"
+        f"                posture, lane, model settings). Archived, not deleted —\n"
+        f"                the record moves to {root.parent / '.lab-archive'}.\n"
+    )
+    if scope != "ask":
+        tier = scope
+        if not yes:
+            if not sys.stdin.isatty():
+                raise SystemExit(
+                    f"--restart={tier} needs --yes when there is no terminal to "
+                    "agree on; a destructive restart is never defaulted.")
+            print(menu, flush=True)
+            typed = input(f"  Type {tier} to agree, anything else to stop: ").strip()
+            if typed != tier:
+                raise SystemExit("restart declined; nothing was touched.")
+        return tier
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "--restart asks which tier to take and there is no terminal to "
+            "ask on; spell it out: --restart=runtime|book|everything --yes")
+    print(menu, flush=True)
+    chosen = input("  Which tier? [runtime/book/everything]: ").strip().lower()
+    if chosen not in RESTART_TIERS:
+        raise SystemExit(f"{chosen or '(nothing)'} is not a tier; nothing was touched.")
+    if chosen != "runtime":
+        typed = input(f"  This cannot be undone from the desk. Type {chosen} to agree: ").strip()
+        if typed != chosen:
+            raise SystemExit("restart declined; nothing was touched.")
+    return chosen
+
+
+def _archive_state(root: Path) -> Path:
+    """Move the whole desk state aside so the next owner opens a new desk.
+
+    Moved, not removed: the registry is the audit record and the honest-results
+    ledger, and a wipe that could not be reversed from disk would be the one
+    destructive act on this desk with no way back. Refuses while anything is
+    still holding the registry — one writer, always, including the mover.
+    """
+    if not root.exists():
+        return root
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = root.parent / ".lab-archive" / stamp
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    wal = root / "registry.duckdb.wal"
+    if wal.exists() and wal.stat().st_size > 64 * 1024 * 1024:
+        # A large WAL means the owner did not checkpoint on the way down. Still
+        # archived whole — DuckDB replays it on the next open of the archive —
+        # but said, because "moved" and "moved intact" are different claims.
+        print(f"  note: {wal.name} is {wal.stat().st_size / 1e6:.0f} MB; the archive "
+              "carries it and DuckDB will replay it on open.", flush=True)
+    shutil.move(str(root), str(dest))
+    print(f"  archived {root} -> {dest}", flush=True)
+    return dest
+
+
 def _stop_listener_on_port(port: int) -> None:
     """Stop whatever owns ``port``, for ``--restart``.
 
@@ -521,8 +608,19 @@ def _cmd_tui(args) -> int:
     # an error once this budget is spent.
     startup_budget_s = 45.0
 
-    if getattr(args, "restart", False):
+    tier = None
+    restart = getattr(args, "restart", None)
+    if restart:
+        tier = _restart_dialog(
+            restart, bool(getattr(args, "yes", False)), args.port, state_root())
         _stop_listener_on_port(args.port)
+        if tier == "everything":
+            _archive_state(state_root())
+            # The mode the door persisted went with the archive; a fresh desk
+            # is asked, and asked from the live default like a first open.
+            flagged = desk_mode_from_args(args)
+            mode = startup_desk_mode(flagged)
+            offline = True if mode is None else mode.offline
 
     owner = None
     already_open = port_open()
@@ -609,6 +707,16 @@ def _cmd_tui(args) -> int:
             owner.terminate()
         raise SystemExit(
             f"port {args.port} is open but is not a compatible qlab runtime: {exc}") from exc
+
+    if tier == "book":
+        # Through the fresh owner, never around it: the registry has exactly
+        # one writer, and the launcher is not it.
+        try:
+            said = client.post("/api/reset", {})
+        except Exception as exc:
+            raise SystemExit(
+                f"the runtime came up but would not reset the book: {exc}") from exc
+        print(f"  paper book reset: {said}", flush=True)
 
     if owner is None and flagged is not None:
         # An owner we did not spawn read its mode at construction; a flag has to
@@ -779,8 +887,13 @@ def build_parser() -> argparse.ArgumentParser:
     tui.add_argument("--port", type=int, default=8765)
     add_desk_mode(tui)
     tui.add_argument(
-        "--restart", action="store_true",
-        help="stop any owner already on the port and start the desk fresh")
+        "--restart", nargs="?", const="ask", default=None,
+        choices=["ask", *RESTART_TIERS], metavar="TIER",
+        help="restart from the base up: warn, choose runtime|book|everything, "
+             "agree by typing the tier; --restart=TIER --yes is the scripted spelling")
+    tui.add_argument(
+        "--yes", action="store_true",
+        help="agree to --restart=TIER without the dialog (scripts only)")
     tui.add_argument("--refresh", type=float, default=2.0,
                      help="snapshot refresh interval in seconds")
     tui.add_argument(

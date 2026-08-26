@@ -563,3 +563,77 @@ def test_restart_stops_the_previous_listener():
         if child.poll() is None:
             child.kill()
         child.wait(timeout=10)
+
+
+def test_restart_dialog_takes_the_tier_typed_back_as_the_agreement(monkeypatch, tmp_path):
+    from qlab.autopilot import cli
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    answers = iter(["everything", "everything"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    assert cli._restart_dialog("ask", False, 8765, tmp_path) == "everything"
+
+    # A mistyped agreement stops everything, and says so.
+    answers = iter(["book", "yes"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    with pytest.raises(SystemExit) as exit_info:
+        cli._restart_dialog("ask", False, 8765, tmp_path)
+    assert "declined" in str(exit_info.value)
+
+    # runtime is the old --restart: chosen, not re-typed.
+    monkeypatch.setattr("builtins.input", lambda _prompt: "runtime")
+    assert cli._restart_dialog("ask", False, 8765, tmp_path) == "runtime"
+
+
+def test_a_destructive_restart_is_never_defaulted_without_a_terminal(monkeypatch, tmp_path):
+    from qlab.autopilot import cli
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit) as exit_info:
+        cli._restart_dialog("ask", False, 8765, tmp_path)
+    assert "--yes" in str(exit_info.value)
+    with pytest.raises(SystemExit):
+        cli._restart_dialog("everything", False, 8765, tmp_path)
+    # The scripted spelling is equally explicit and needs no terminal.
+    assert cli._restart_dialog("everything", True, 8765, tmp_path) == "everything"
+
+
+def test_everything_archives_the_desk_state_rather_than_deleting_it(tmp_path):
+    from qlab.autopilot import cli
+
+    root = tmp_path / ".lab"
+    root.mkdir()
+    (root / "registry.duckdb").write_bytes(b"x" * 10)
+    (root / "posture.json").write_text("{}")
+    dest = cli._archive_state(root)
+    assert not root.exists()
+    assert dest.parent == tmp_path / ".lab-archive"
+    assert (dest / "registry.duckdb").read_bytes() == b"x" * 10
+    assert (dest / "posture.json").exists()
+    # Nothing to archive is not an error: a first open has no desk yet.
+    assert cli._archive_state(tmp_path / "absent") == tmp_path / "absent"
+
+
+def test_the_book_tier_resets_through_the_fresh_owner(monkeypatch, tmp_path):
+    """One writer: the reset rides the owner's own route after readiness, and
+    the launcher never opens the registry itself."""
+    from qlab.autopilot import cli
+
+    # The listener stop has its own test against a real socket; here it would
+    # consume the harness's port probe and read the fake owner as already up.
+    monkeypatch.setattr(cli, "_stop_listener_on_port", lambda _port: None)
+    record = _drive_cmd_tui(
+        monkeypatch, tmp_path, ["tui", "--restart=book", "--yes"], owner_running=False)
+    assert record["spawned"][1:4] == ["-m", "qlab.autopilot.cli", "owner"]
+    assert ("/api/reset", {}) in record["posts"]
+
+
+def test_the_restart_parser_takes_a_tier_or_asks():
+    from qlab.autopilot.cli import build_parser
+
+    p = build_parser()
+    assert p.parse_args(["tui"]).restart is None
+    assert p.parse_args(["tui", "--restart"]).restart == "ask"
+    assert p.parse_args(["tui", "--restart=everything", "--yes"]).restart == "everything"
+    with pytest.raises(SystemExit):
+        p.parse_args(["tui", "--restart=all"])

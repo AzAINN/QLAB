@@ -458,10 +458,19 @@ class UISession:
                 "tool_call", {"tool": tool},
             ),
         )
+        # The domain gate, before any budget is charged: a goal that names an
+        # email, a poem or a plumber is refused here with the sentence that
+        # says what a research goal is made of, not forty seconds in by an
+        # analyst whose tools cannot serve it. ValueError reaches the route
+        # as the 400 every other refusal on this surface uses.
+        from qlab.governance.goal_guard import check_goal
+
+        goal = check_goal(
+            str(body.get("goal") or "Prepare a governed portfolio review."),
+            self.mandate.universe_whitelist,
+        )
         request = {
-            "goal": str(
-                body.get("goal") or "Prepare a governed portfolio review."
-            )[:4000],
+            "goal": goal[:4000],
             "as_of": str(body.get("as_of") or date.today().isoformat()),
             "universe": str(body.get("universe") or "core"),
             "offline": bool(body.get("offline", self.offline_default)),

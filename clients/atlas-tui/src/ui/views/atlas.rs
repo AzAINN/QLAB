@@ -58,6 +58,10 @@ const PREFIX_W: usize = 8 + 1 + 5 + 3;
 /// says — that is the `Store`'s.
 #[derive(Default)]
 pub struct AtlasView {
+    /// Where the last frame drew a clickable `/word`, and the line it runs.
+    /// Published by `draw` the way `input_row` is: a click is answered about
+    /// the frame in front of the operator, never about one not yet painted.
+    affordances: std::cell::RefCell<Vec<(Rect, String)>>,
     /// The chat's own confirm slot, for `/approve` and `/execute` typed here.
     /// The same widget BOOK and AUDIT host, so the ritual is identical
     /// wherever the operator happens to be typing.
@@ -127,6 +131,7 @@ pub struct AtlasView {
 
 impl View for AtlasView {
     fn draw(&self, f: &mut Frame, area: Rect, store: &Store, _fx: &FlashTracker, _now: Instant) {
+        self.affordances.borrow_mut().clear();
         if area.width < CHAT_MIN || area.height < 4 {
             // Nothing is on screen, so nothing may be approved off the back of
             // it. Every path out of this function settles `drew`, because the
@@ -216,7 +221,29 @@ impl View for AtlasView {
         match m.kind {
             MouseEventKind::ScrollUp => self.scroll(WHEEL),
             MouseEventKind::ScrollDown => self.scroll(-WHEEL),
+            // Right-click copies the id — the argument of the word under the
+            // pointer — through the terminal's own clipboard protocol. Said
+            // either way: a terminal that ignores OSC 52 ignores it silently,
+            // so the sentence names the fallback rather than claiming a copy
+            // that may not have happened.
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(line) = self.affordance_at(m.column, m.row) {
+                    let id = line.split_whitespace().last().unwrap_or(&line).to_string();
+                    match crate::clipboard::copy(&id) {
+                        Ok(()) => store.cmd.say(format!(
+                            "copied {id} (OSC 52; if nothing landed, Shift-drag selects text)"
+                        )),
+                        Err(err) => store.cmd.say(format!("could not copy {id}: {err}")),
+                    }
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
+                // A click on a `/word` runs that line — the same resolver the
+                // palette and the chat box use, so a click can do exactly
+                // what typing the word would and nothing else.
+                if let Some(line) = self.affordance_at(m.column, m.row) {
+                    return Some(Command::RunLine(line));
+                }
                 // A click on the ask row focuses it — the mouse's answer to
                 // the focus key. Armed windows only: a glass frame publishes
                 // an empty rect, so the branch is unreachable there.
@@ -356,6 +383,19 @@ impl AtlasView {
     }
 }
 
+impl AtlasView {
+    /// The `/word` drawn under a screen cell on the last frame, if any.
+    fn affordance_at(&self, column: u16, row: u16) -> Option<String> {
+        self.affordances
+            .borrow()
+            .iter()
+            .find(|(rect, _)| {
+                row == rect.y && column >= rect.x && column < rect.x.saturating_add(rect.width)
+            })
+            .map(|(_, line)| line.clone())
+    }
+}
+
 // -- the conversation -------------------------------------------------------
 
 impl AtlasView {
@@ -391,7 +431,7 @@ impl AtlasView {
             .filter(|item| item.startable == Some(true))
             .filter_map(|item| item.template_id.as_deref())
             .collect();
-        let lines = chat_lines(store.atlas_chat(), rows[1].width, &startable);
+        let (lines, clickable) = chat_lines(store.atlas_chat(), rows[1].width, &startable);
         let room = rows[1].height as usize;
         // Publish what the keys may clamp against, then window from the
         // bottom: zero offset is the newest line on the last row.
@@ -399,11 +439,30 @@ impl AtlasView {
         let offset = self.offset.min(self.max_scroll.get());
         let end = lines.len() - offset;
         let start = end.saturating_sub(room);
+        // The `/word` rows on screen this frame, by the screen row they landed on.
+        {
+            let mut found = self.affordances.borrow_mut();
+            for (index, line) in clickable {
+                if index >= start && index < end {
+                    found.push((
+                        Rect::new(
+                            rows[1].x,
+                            rows[1].y + (index - start) as u16,
+                            rows[1].width,
+                            1,
+                        ),
+                        line,
+                    ));
+                }
+            }
+        }
         f.render_widget(Paragraph::new(lines[start..end].to_vec()), rows[1]);
 
         self.draw_input(f, rows[2], store);
         let hint = if self.input_row_shown(store) {
-            "Enter sends · Esc clears · ↑↓ wheel scroll"
+            // 41 cells: the chat column is ~45 wide with the sidebar up, and
+            // a hint that clips mid-sentence teaches the wrong half.
+            "↵ send · Esc · click /word · r-click copy"
         } else {
             "read-only in this posture — asking needs an operator window"
         };
@@ -472,13 +531,21 @@ impl AtlasView {
 /// Built whole and windowed by the caller, because the scroll offset is in
 /// *rendered* lines: a message is as many lines as its wrap needed, and an
 /// offset counted in messages would jump by paragraphs.
-fn chat_lines(chat: &[Event], width: u16, startable: &[&str]) -> Vec<Line<'static>> {
+fn chat_lines(
+    chat: &[Event],
+    width: u16,
+    startable: &[&str],
+) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
     let t = theme();
+    let mut clickable: Vec<(usize, String)> = Vec::new();
     if chat.is_empty() {
-        return vec![Line::from(Span::styled(
-            "nothing has been asked on this desk yet",
-            Style::default().fg(t.text_dim),
-        ))];
+        return (
+            vec![Line::from(Span::styled(
+                "nothing has been asked on this desk yet",
+                Style::default().fg(t.text_dim),
+            ))],
+            clickable,
+        );
     }
     let room = (width as usize).saturating_sub(PREFIX_W).max(8);
     let mut out = Vec::new();
@@ -523,6 +590,14 @@ fn chat_lines(chat: &[Event], width: u16, startable: &[&str]) -> Vec<Line<'stati
             md::rows(text, room, body_tone, t.cyan)
         };
         for (i, row) in body.into_iter().enumerate() {
+            // A desk row carrying a `/word` is clickable: the first slash
+            // token on it is the line a click runs, read off the rendered
+            // spans so the announcement's own words are the affordance.
+            if actor != "operator" {
+                if let Some(word) = slash_word(&row) {
+                    clickable.push((out.len(), word));
+                }
+            }
             let mut spans = if i == 0 {
                 vec![
                     Span::styled(format!("{stamp} "), Style::default().fg(t.text_tertiary)),
@@ -560,6 +635,7 @@ fn chat_lines(chat: &[Event], width: u16, startable: &[&str]) -> Vec<Line<'stati
     if last_is_desk && !startable.is_empty() {
         out.push(Line::from(Span::raw(String::new())));
         for id in startable.iter().take(3) {
+            clickable.push((out.len(), format!("/do {id}")));
             out.push(Line::from(vec![
                 Span::raw(" ".repeat(PREFIX_W)),
                 Span::styled("→ ", Style::default().fg(t.text_dim)),
@@ -574,7 +650,37 @@ fn chat_lines(chat: &[Event], width: u16, startable: &[&str]) -> Vec<Line<'stati
             ]));
         }
     }
-    out
+    (out, clickable)
+}
+
+/// The first `/scope arg` on a rendered row, as the line a click would run.
+///
+/// Only the two words: a trailing clause ("to approve it, then …") is prose,
+/// and a click running it would be a click doing more than it showed.
+fn slash_word(row: &[Span<'_>]) -> Option<String> {
+    let text: String = row.iter().map(|s| s.content.as_ref()).collect();
+    // Punctuation around a word is the renderer's (backticks, colons) and is
+    // shed before the slash is looked for, so "`/approve 9cc4fcf0`" reads as
+    // the word it is.
+    let bare = |w: &str| {
+        w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '_')
+            .to_string()
+    };
+    let mut words = text
+        .split_whitespace()
+        .map(bare)
+        .skip_while(|w| !w.starts_with('/'));
+    let scope = words.next()?;
+    if !scope.starts_with('/') || scope.len() < 2 {
+        return None;
+    }
+    let arg = words
+        .next()
+        .filter(|w| !w.is_empty() && !w.starts_with('/'));
+    Some(match arg {
+        Some(arg) if scope != "/clear" => format!("{scope} {arg}"),
+        _ => scope,
+    })
 }
 
 /// Word wrap at `width` cells, hard-breaking a word longer than the line.
@@ -974,8 +1080,13 @@ impl AtlasView {
                 .take(3)
             {
                 if let Some(id) = approval.approval_id.as_deref() {
+                    let word = format!("/approve {}", &id[..8.min(id.len())]);
+                    self.affordances.borrow_mut().push((
+                        Rect::new(inner.x, inner.y + lines.len() as u16, inner.width, 1),
+                        word.clone(),
+                    ));
                     lines.push(Line::from(Span::styled(
-                        format!("/approve {}", &id[..8.min(id.len())]),
+                        word,
                         Style::default().fg(t.accent),
                     )));
                 }
@@ -995,6 +1106,10 @@ impl AtlasView {
                     None if store.approval_for(id).is_none() => format!("/approve {short}"),
                     None => continue,
                 };
+                self.affordances.borrow_mut().push((
+                    Rect::new(inner.x, inner.y + lines.len() as u16, inner.width, 1),
+                    word.clone(),
+                ));
                 lines.push(Line::from(Span::styled(
                     word,
                     Style::default().fg(t.accent),
@@ -1315,6 +1430,38 @@ fn head(title: &str, chip: &str, width: u16) -> Line<'static> {
         Style::default().fg(t.text_tertiary),
     ));
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod affordance_tests {
+    use super::*;
+
+    fn row(text: &str) -> Vec<Span<'static>> {
+        vec![Span::raw(text.to_string())]
+    }
+
+    #[test]
+    fn the_click_word_is_the_scope_and_its_argument_and_nothing_after() {
+        // The announcement's trailing clause is prose; a click may not run
+        // more than the two words it showed.
+        assert_eq!(
+            slash_word(&row(
+                "Approval 9cc4fcf0 is open — in chat: `/approve 9cc4fcf0` to approve it"
+            )),
+            Some("/approve 9cc4fcf0".into())
+        );
+        assert_eq!(
+            slash_word(&row("→ /do news_read starts it")),
+            Some("/do news_read".into())
+        );
+        assert_eq!(
+            slash_word(&row("type /clear to empty the pane")),
+            Some("/clear".into())
+        );
+        assert_eq!(slash_word(&row("no word here at all")), None);
+        // A bare slash is punctuation, not a scope.
+        assert_eq!(slash_word(&row("risk / reward")), None);
+    }
 }
 
 #[cfg(test)]

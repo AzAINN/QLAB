@@ -7,6 +7,7 @@
 //! — one initialised, one not, depending on which copy the caller reached.
 
 pub mod bus;
+pub mod clipboard;
 pub mod cmd;
 /// The seam between a confirmed `Command` and a request. Here rather than in
 /// `main.rs` because the binary has no test harness, and what reaches the owner

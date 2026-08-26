@@ -874,6 +874,7 @@ impl Store {
                     | Wrote::ProposalRefused { .. }
                     | Wrote::Chose { .. }
                     | Wrote::ChoiceRefused { .. }
+                    | Wrote::ApprovalOpened { .. }
                     | Wrote::Decided { .. }
                     | Wrote::Asked { .. }
                     | Wrote::Started { .. }

@@ -72,6 +72,13 @@ pub enum Wrote {
         approval_id: String,
         decision: &'static str,
     },
+    /// An approval request now exists for the plan. Nothing is decided: the
+    /// ATLAS view opens the approve box on hearing this, so `/approve <plan>`
+    /// is one command and one confirm.
+    ApprovalOpened {
+        approval_id: String,
+        plan_id: String,
+    },
     /// A question reached the desk manager. It authorises nothing — the owner
     /// records the message and answers only through the coordinator.
     ///

@@ -190,6 +190,17 @@ def build_owner_tick(session, lock, *, offline: bool,
                     result["autonomous"] = session.atlas_run_startable(offline)
                 except Exception as exc:
                     result["autonomous_error"] = str(exc)[:200]
+            # What the desk now wants from the operator, said where they ask.
+            # After the autonomous run, so a trigger this tick both started
+            # and announced reads as one fact, and before the sweep, which
+            # only walks what an operator already approved.
+            announce = getattr(session, "announce_desk_work", None)
+            if callable(announce):
+                try:
+                    result["announced"] = announce(
+                        offline, result.get("created_tasks") or [])
+                except Exception as exc:
+                    result["announce_error"] = str(exc)[:200]
             # Deliberately NOT under `live_autonomous`. Approving is what
             # started this work; the sweep only walks a workflow the gate has
             # already opened, and the dispatch that opened it could not drive

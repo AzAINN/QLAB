@@ -3736,6 +3736,61 @@ class UISession:
             return text
         return f"{text[:limit]} …[truncated from {len(text)} chars]"
 
+    def announce_desk_work(self, offline: bool,
+                           created_tasks: list[dict] | None = None) -> dict:
+        """Say in the chat what the desk now wants from the operator, or just did.
+
+        Two announcements, each bounded to once per fact, both on the same
+        `atlas_message` kind the console already draws:
+
+        * A checked plan with no approval request gets one opened here, and
+          the chat names the two words that answer it. The reporter's checked
+          preview IS the desk asking — but nothing opened the request, so a
+          plan sat "awaiting approval" with no way to give one, and BOOK's
+          `x` returned in silence for want of a covering approval. Any prior
+          request (pending, approved, consumed, expired) means the desk has
+          already asked; it asks once.
+        * A trigger task minted this tick is named with its reason and the
+          template the lookup maps it to. `created_tasks` is per-tick and
+          deduped upstream, so a strong indicator is announced once.
+        """
+        from qlab.operator.templates import TRIGGER_TEMPLATE
+
+        announced: dict = {"approvals_opened": [], "triggers": []}
+        asked = {str(a.get("plan_id") or "")
+                 for a in self.registry.list_approval_requests(200)}
+        for plan in self.registry.list_plans(20):
+            pid = str(plan.get("plan_id") or "")
+            if not pid or plan.get("state") != "checked" or pid in asked:
+                continue
+            try:
+                opened = self.create_approval({"plan_id": pid}, offline)
+            except (KeyError, ValueError, RuntimeError) as exc:
+                self._record_atlas_reply(
+                    f"⚑ Plan {pid[:8]} is checked but no approval could be "
+                    f"opened: {exc}")
+                continue
+            aid = str(opened.get("approval_id") or "")
+            pre = plan.get("pre_trade") or {}
+            turnover = pre.get("turnover")
+            shape = (f"{pre.get('n_legs', '?')} legs, turnover {turnover:.1%}"
+                     if isinstance(turnover, (int, float)) else "checked")
+            self._record_atlas_reply(
+                f"⚑ Plan {pid[:8]} is checked ({shape}). Approval {aid[:8]} "
+                f"is open — in chat: `/approve {aid[:8]}` to approve it, then "
+                f"`/execute {pid[:8]}` to book it; each opens the confirm box.")
+            announced["approvals_opened"].append(aid)
+        for task in created_tasks or []:
+            kind = str(task.get("trigger") or "trigger")
+            action = str(task.get("action") or "")
+            tid = str(task.get("task_id") or "")[:8]
+            template = TRIGGER_TEMPLATE.get(kind)
+            what = (f"queued `{template}`" if template and action != "block"
+                    else action or "noted")
+            self._record_atlas_reply(f"⚑ {kind} fired — Atlas {what} ({tid}).")
+            announced["triggers"].append(tid)
+        return announced
+
     def _record_atlas_reply(self, text: str, error: str | None = None) -> None:
         """Put the desk's own words on the bus as a second `atlas_message` row.
 

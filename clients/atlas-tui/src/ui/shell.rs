@@ -411,6 +411,20 @@ fn entered_model_scope(before: Option<Scope>, store: &Store) -> bool {
 /// with no effect anyone can see is the hung-client reading this workstation
 /// refuses everywhere else, and a command line is where an operator would meet
 /// it first.
+/// A palette line arriving from somewhere other than the palette.
+///
+/// The ATLAS chat box hands its slash lines here, so the chat has every scope
+/// the palette has and never a second grammar. The line is put where the
+/// palette would have it and submitted the same way — a refusal stays on the
+/// command row carrying its sentence, exactly as if it had been typed there.
+pub fn run_line(text: &str, store: &mut Store, views: &mut Views) -> Option<Command> {
+    store.cmd.clear();
+    for c in text.chars() {
+        store.cmd.insert(c);
+    }
+    submit(store, views)
+}
+
 fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
     let state = cmd::parse(store.cmd.text());
     // A picker with one answer accepts rather than acts. Enter on `/tick` means
@@ -466,6 +480,54 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
                 None => store
                     .cmd
                     .say(format!("{symbol} is on no pane this client draws")),
+            }
+            None
+        }
+        #[cfg(feature = "operator")]
+        Resolved::OpenApprove(id) => {
+            let facts = approval_facts(store, &id);
+            store.nav.view = ViewId::Atlas;
+            if let Some(host) = views.confirm_mut(ViewId::Atlas) {
+                host.open(
+                    crate::ui::widgets::confirm::Modal::action("APPROVE APPROVAL", facts),
+                    crate::ui::widgets::confirm::Pending::Approve(id),
+                );
+            }
+            done(store);
+            None
+        }
+        #[cfg(feature = "operator")]
+        Resolved::RequestApproval(plan) => {
+            store.nav.view = ViewId::Atlas;
+            done(store);
+            Some(Command::RequestApproval(plan))
+        }
+        #[cfg(feature = "operator")]
+        Resolved::OpenExecute(plan_id) => {
+            let modal = store
+                .plans()
+                .iter()
+                .find(|p| p.plan_id.as_deref() == Some(plan_id.as_str()))
+                .and_then(|plan| {
+                    store.covering_approval(&plan_id).and_then(|approval| {
+                        crate::ui::widgets::confirm::Modal::for_plan(plan, approval)
+                    })
+                });
+            match modal {
+                Some(modal) => {
+                    store.nav.view = ViewId::Atlas;
+                    if let Some(host) = views.confirm_mut(ViewId::Atlas) {
+                        host.open(modal, crate::ui::widgets::confirm::Pending::Execute);
+                    }
+                    done(store);
+                }
+                // Resolved only past a covering approval, so this is the
+                // approval lacking the hash the box is bound to — a desk
+                // fact, said rather than swallowed.
+                None => store.cmd.say(format!(
+                    "plan {}'s approval carries no targets_hash to confirm against",
+                    &plan_id[..8.min(plan_id.len())]
+                )),
             }
             None
         }
@@ -568,6 +630,26 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
 /// Staying put matters more than it sounds. An operator working through the
 /// blotter who types a symbol is naming a position, and being thrown to MARKETS
 /// for it would lose the column they had sorted by.
+/// What the approve box shows: the request, its plan, its expiry — the same
+/// three facts AUDIT's own `a` puts up, from the same rows.
+#[cfg(feature = "operator")]
+fn approval_facts(store: &Store, approval_id: &str) -> Vec<(String, String)> {
+    let mut facts = vec![("approval".to_string(), approval_id.to_string())];
+    if let Some(approval) = store
+        .approvals()
+        .iter()
+        .find(|a| a.approval_id.as_deref() == Some(approval_id))
+    {
+        if let Some(plan) = approval.plan_id.as_deref() {
+            facts.push(("plan".to_string(), plan.to_string()));
+        }
+        if let Some(expires) = crate::format::clock(approval.expires_at.as_ref()) {
+            facts.push(("expires".to_string(), expires));
+        }
+    }
+    facts
+}
+
 fn landing(current: ViewId, hit: Selected) -> Option<ViewId> {
     match (current, hit) {
         (ViewId::Markets, Selected { markets: true, .. }) => Some(ViewId::Markets),

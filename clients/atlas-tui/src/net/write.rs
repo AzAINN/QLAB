@@ -442,6 +442,26 @@ impl WriteClient {
             .await
     }
 
+    /// Open an approval request bound to a checked plan.
+    ///
+    /// The request is the desk's question, not the answer: the owner binds it
+    /// to the plan's exact `targets_hash`, and approving it is a second,
+    /// confirmed write. Returns the owner's id for the request, which is what
+    /// the approve box is then opened against.
+    pub async fn request_approval(&self, plan_id: &str) -> Result<String, WriteError> {
+        let said = self
+            .post("/api/approvals", json!({ "plan_id": plan_id }))
+            .await?;
+        said.get("approval_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                WriteError::Unreadable(format!(
+                    "the owner answered 200 for an approval request without an approval_id: {said}"
+                ))
+            })
+    }
+
     /// Reject one pending approval request.
     pub async fn reject(&self, approval_id: &str) -> Wrote {
         self.post(&format!("/api/approvals/{approval_id}/reject"), json!({}))

@@ -49,9 +49,20 @@ pub enum Command {
     /// client for the length of the request, so the refresh nudges the poller
     /// rather than doing the work itself.
     Refresh,
+    /// A palette line typed somewhere other than the palette — the ATLAS
+    /// chat box, where `/approve …` or `/clear` lands beside the questions.
+    /// The runtime hands it to the shell's own resolver, so the chat gains
+    /// every scope the palette has and never a second grammar.
+    RunLine(String),
     /// Approve one pending approval request, by id.
     #[cfg(feature = "operator")]
     Approve(String),
+    /// Open an approval request for a checked plan that has none. The desk's
+    /// tick opens one itself; this is the operator asking first. Grants
+    /// nothing — a request is a question, and the confirm box that follows
+    /// is the answer.
+    #[cfg(feature = "operator")]
+    RequestApproval(String),
     /// Reject one pending approval request, by id.
     #[cfg(feature = "operator")]
     Reject(String),
@@ -365,6 +376,15 @@ pub enum Scope {
     /// so a started proposal is a decision with a human behind it rather than
     /// a task that appeared in the queue.
     Do,
+    /// Approve a pending approval by id — or, named a checked plan with no
+    /// request yet, ask the desk to open one and approve that. Either way the
+    /// decision itself happens in the confirm box this opens; the word alone
+    /// decides nothing.
+    Approve,
+    /// Book a checked plan whose approval is on the record: opens the box
+    /// that takes the last six of the plan's own `targets_hash`. The chat's
+    /// spelling of BOOK's `x`, held to the identical ritual.
+    Execute,
     /// Empty this window's chat pane. The one scope that acts without touching
     /// the desk, so it is offered in every posture.
     Clear,
@@ -374,7 +394,7 @@ impl Scope {
     /// Picker order: the three a glass window can use, then the four it
     /// cannot. `/ask` before `/do`, because that is the order they happen in —
     /// there is nothing to approve until the desk has been asked.
-    pub const ALL: [Scope; 8] = [
+    pub const ALL: [Scope; 10] = [
         Scope::View,
         Scope::Ticker,
         Scope::Plan,
@@ -382,6 +402,8 @@ impl Scope {
         Scope::Model,
         Scope::Ask,
         Scope::Do,
+        Scope::Approve,
+        Scope::Execute,
         Scope::Clear,
     ];
 
@@ -396,6 +418,8 @@ impl Scope {
             Scope::Model => "model",
             Scope::Ask => "ask",
             Scope::Do => "do",
+            Scope::Approve => "approve",
+            Scope::Execute => "execute",
             Scope::Clear => "clear",
         }
     }
@@ -410,6 +434,8 @@ impl Scope {
             Scope::Model => "a surface, and the model it should run",
             Scope::Ask => "nothing — Enter asks the desk what it would do",
             Scope::Do => "a proposal the desk is offering, in full",
+            Scope::Approve => "a pending approval id, or a checked plan id — opens the approve box",
+            Scope::Execute => "a checked plan id with its approval on record — opens the hash box",
             Scope::Clear => "nothing — Enter empties this window's chat pane",
         }
     }
@@ -419,7 +445,10 @@ impl Scope {
     pub fn writes(self) -> bool {
         // `/clear` is deliberately absent: it empties this window's chat pane
         // and touches nothing on the desk, so a glass window may use it.
-        matches!(self, Scope::Mode | Scope::Model | Scope::Ask | Scope::Do)
+        matches!(
+            self,
+            Scope::Mode | Scope::Model | Scope::Ask | Scope::Do | Scope::Approve | Scope::Execute
+        )
     }
 
     fn from_word(word: &str) -> Option<Scope> {
@@ -573,6 +602,18 @@ pub enum Resolved {
     /// unanswerable without re-deriving the pairing that produced it.
     #[cfg(feature = "operator")]
     Approve { template: String, task: String },
+    /// Open the approve box for one pending approval. The box is the
+    /// decision; this only puts it in front of the operator.
+    #[cfg(feature = "operator")]
+    OpenApprove(String),
+    /// Ask the owner to open an approval request for a checked plan that has
+    /// none. The approve box follows on the owner's answer — see
+    /// `AtlasView::wrote` — so `/approve <plan>` is one command, one confirm.
+    #[cfg(feature = "operator")]
+    RequestApproval(String),
+    /// Open the hash box for a checked plan whose approval is on the record.
+    #[cfg(feature = "operator")]
+    OpenExecute(String),
     /// Empty this window's chat pane. Local: the bus keeps every row and the
     /// AUDIT view still shows them — what clears is what this window draws,
     /// exactly like Claude Code's own `/clear`.
@@ -672,6 +713,8 @@ fn scoped(scope: Scope, query: &str, store: &Store, posture: Posture) -> Resolve
         Scope::Model => model(query, store, posture),
         Scope::Ask => ask(query, posture),
         Scope::Do => act(query, store, posture),
+        Scope::Approve => approve(query, store, posture),
+        Scope::Execute => execute(query, store, posture),
         Scope::Clear => match query.is_empty() {
             true => Resolved::ClearChat,
             false => {
@@ -885,6 +928,97 @@ fn chose(surface: &str, choice: ModelChoice) -> Resolved {
 /// after `/ask` can only be an operator meaning something this does not do
 /// (asking about one template, asking a question in prose — that is the ATLAS
 /// chat row), and sending the ask anyway would answer a question nobody put.
+/// `/approve`: a pending approval by id, or a checked plan that needs one.
+///
+/// Prefix-matched on what the desk is serving, never on what was typed
+/// alone: an id this desk is not holding resolves to nothing, and the
+/// sentence says which of the two things the word answers was looked for.
+fn approve(query: &str, store: &Store, posture: Posture) -> Resolved {
+    if !posture.writes() {
+        return Resolved::Refused(format!(
+            "/approve decides for this desk; this window is {} — the desk is not armed",
+            posture.label()
+        ));
+    }
+    if query.is_empty() {
+        return Resolved::Refused(
+            "/approve takes a pending approval id, or a checked plan id".into(),
+        );
+    }
+    #[cfg(feature = "operator")]
+    {
+        let wanted = query.to_ascii_lowercase();
+        if let Some(id) = store
+            .approvals()
+            .iter()
+            .filter(|a| a.status.as_deref() == Some("pending"))
+            .filter_map(|a| a.approval_id.as_deref())
+            .find(|id| id.to_ascii_lowercase().starts_with(&wanted))
+        {
+            return Resolved::OpenApprove(id.to_string());
+        }
+        if let Some(id) = store
+            .plans()
+            .iter()
+            .filter(|p| p.state.as_deref() == Some("checked"))
+            .filter_map(|p| p.plan_id.as_deref())
+            .find(|id| id.to_ascii_lowercase().starts_with(&wanted))
+        {
+            return match store.approval_for(id).and_then(|a| a.status.as_deref()) {
+                None => Resolved::RequestApproval(id.to_string()),
+                Some("approved") => Resolved::Refused(format!(
+                    "plan {} is already approved — /execute {} books it",
+                    &id[..8.min(id.len())],
+                    &id[..8.min(id.len())]
+                )),
+                Some(state) => Resolved::Refused(format!(
+                    "plan {}'s approval is {state}; ask again for a fresh one",
+                    &id[..8.min(id.len())]
+                )),
+            };
+        }
+    }
+    let _ = store;
+    Resolved::Refused(format!(
+        "no pending approval or checked plan on this desk starts with {query}"
+    ))
+}
+
+/// `/execute`: BOOK's `x`, spelled in the chat and held to the same ritual.
+fn execute(query: &str, store: &Store, posture: Posture) -> Resolved {
+    if !posture.writes() {
+        return Resolved::Refused(format!(
+            "/execute books on this desk; this window is {} — the desk is not armed",
+            posture.label()
+        ));
+    }
+    if query.is_empty() {
+        return Resolved::Refused("/execute takes a checked plan id".into());
+    }
+    let wanted = query.to_ascii_lowercase();
+    let Some(id) = store
+        .plans()
+        .iter()
+        .filter(|p| p.state.as_deref() == Some("checked"))
+        .filter_map(|p| p.plan_id.as_deref())
+        .find(|id| id.to_ascii_lowercase().starts_with(&wanted))
+    else {
+        return Resolved::Refused(format!("no checked plan on this desk starts with {query}"));
+    };
+    let short = &id[..8.min(id.len())];
+    if store.covering_approval(id).is_none() {
+        return Resolved::Refused(format!(
+            "plan {short} has no approval on record — /approve {short} opens one"
+        ));
+    }
+    #[cfg(feature = "operator")]
+    {
+        return Resolved::OpenExecute(id.to_string());
+    }
+    #[cfg(not(feature = "operator"))]
+    Resolved::Refused("this build carries no writer".into())
+}
+
 fn ask(query: &str, posture: Posture) -> Resolved {
     if !posture.writes() {
         return Resolved::Refused(format!(
@@ -1250,6 +1384,42 @@ fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Sug
     match scope {
         // Takes nothing; the hint row already says Enter acts.
         Scope::Clear => Vec::new(),
+        // What can be approved: pending requests first, then checked plans
+        // with no request yet — the two things the word answers.
+        Scope::Approve => {
+            let wanted = query.to_ascii_lowercase();
+            let mut out: Vec<Suggestion> = store
+                .approvals()
+                .iter()
+                .filter(|a| a.status.as_deref() == Some("pending"))
+                .filter_map(|a| a.approval_id.clone())
+                .filter(|id| id.to_ascii_lowercase().starts_with(&wanted))
+                .map(Suggestion::offered)
+                .collect();
+            out.extend(
+                store
+                    .plans()
+                    .iter()
+                    .filter(|p| p.state.as_deref() == Some("checked"))
+                    .filter_map(|p| p.plan_id.clone())
+                    .filter(|id| store.approval_for(id).is_none())
+                    .filter(|id| id.to_ascii_lowercase().starts_with(&wanted))
+                    .map(Suggestion::offered),
+            );
+            out
+        }
+        Scope::Execute => {
+            let wanted = query.to_ascii_lowercase();
+            store
+                .plans()
+                .iter()
+                .filter(|p| p.state.as_deref() == Some("checked"))
+                .filter_map(|p| p.plan_id.clone())
+                .filter(|id| store.covering_approval(id).is_some())
+                .filter(|id| id.to_ascii_lowercase().starts_with(&wanted))
+                .map(Suggestion::offered)
+                .collect()
+        }
         Scope::View => ViewId::ALL
             .into_iter()
             .filter(|id| starts_with_fold(id.label(), query))
@@ -1830,6 +2000,85 @@ mod tests {
         // listing every view.
         assert!(matches!(
             resolve(&parse("/view "), &store, Posture::Glass),
+            Resolved::Refused(_)
+        ));
+    }
+
+    /// A desk holding one checked plan with no request, one checked plan
+    /// with a pending request, and one with an approved-unspent approval.
+    #[cfg(feature = "operator")]
+    fn desk_with_plans() -> Store {
+        use crate::bus::AppEvent;
+        let mut store = Store::new(std::time::Duration::from_secs(9));
+        let snap: crate::model::Snapshot = serde_json::from_str(
+            r#"{"plans": [
+                    {"plan_id": "aaaa1111bbbb2222", "state": "checked"},
+                    {"plan_id": "cccc3333dddd4444", "state": "checked"},
+                    {"plan_id": "eeee5555ffff6666", "state": "checked"}],
+                "approvals": [
+                    {"approval_id": "pend0001", "plan_id": "cccc3333dddd4444",
+                     "status": "pending", "targets_hash": "0123456789abcdef"},
+                    {"approval_id": "appr0002", "plan_id": "eeee5555ffff6666",
+                     "status": "approved", "targets_hash": "fedcba9876543210"}]}"#,
+        )
+        .unwrap();
+        store.apply(
+            AppEvent::Snapshot(Box::new(snap)),
+            std::time::Instant::now(),
+        );
+        store
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn approve_answers_the_two_things_the_word_can_mean() {
+        let store = desk_with_plans();
+        // A pending request, by prefix: the box opens on it.
+        assert_eq!(
+            resolve(&parse("/approve pend"), &store, Posture::Operator),
+            Resolved::OpenApprove("pend0001".into())
+        );
+        // A checked plan with no request: the desk is asked to open one.
+        assert_eq!(
+            resolve(&parse("/approve aaaa"), &store, Posture::Operator),
+            Resolved::RequestApproval("aaaa1111bbbb2222".into())
+        );
+        // Already approved: the word is /execute, and the refusal says so.
+        match resolve(&parse("/approve eeee"), &store, Posture::Operator) {
+            Resolved::Refused(said) => assert!(said.contains("/execute eeee5555"), "{said}"),
+            other => panic!("{other:?}"),
+        }
+        // Nothing this desk holds: named, not silently nothing.
+        assert!(matches!(
+            resolve(&parse("/approve zzzz"), &store, Posture::Operator),
+            Resolved::Refused(_)
+        ));
+        // Glass windows are told why, not offered a box they cannot answer.
+        assert!(matches!(
+            resolve(&parse("/approve pend"), &store, Posture::Glass),
+            Resolved::Refused(_)
+        ));
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn execute_needs_the_approval_on_record_and_says_so_when_it_is_missing() {
+        let store = desk_with_plans();
+        assert_eq!(
+            resolve(&parse("/execute eeee"), &store, Posture::Operator),
+            Resolved::OpenExecute("eeee5555ffff6666".into())
+        );
+        // The silent-x case, now a sentence with the remedy in it.
+        match resolve(&parse("/execute aaaa"), &store, Posture::Operator) {
+            Resolved::Refused(said) => {
+                assert!(said.contains("no approval on record"), "{said}");
+                assert!(said.contains("/approve aaaa1111"), "{said}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Pending is not approved: still no covering approval to book on.
+        assert!(matches!(
+            resolve(&parse("/execute cccc"), &store, Posture::Operator),
             Resolved::Refused(_)
         ));
     }

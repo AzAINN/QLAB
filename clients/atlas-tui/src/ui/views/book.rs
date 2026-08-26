@@ -1747,23 +1747,40 @@ impl BookView {
     /// armed against a request the owner would refuse teaches an operator that
     /// typing the characters means nothing.
     #[cfg(feature = "operator")]
-    fn ask_to_execute(&mut self, store: &Store) {
+    fn ask_to_execute(&mut self, store: &mut Store) {
         let cards = plan_cards(store);
         let Some(plan) = cards.get(self.plan.min(cards.len().saturating_sub(1))) else {
             return;
         };
-        if !executable(store, plan) {
-            return;
-        }
-        let Some(plan_id) = format::text(plan.plan_id.as_ref()) else {
+        let Some(plan_id) = format::text(plan.plan_id.as_ref()).map(str::to_string) else {
             return;
         };
-        let Some(approval) = store.covering_approval(plan_id) else {
+        let short = plan_id[..8.min(plan_id.len())].to_string();
+        // Every reason `x` does nothing is said. A key that returned in
+        // silence read as a hung client, and the missing approval — the
+        // common case for a reporter's checked plan — is a desk fact with a
+        // remedy the operator can type.
+        if store::booked(format::text(plan.state.as_ref())) {
+            store.cmd.say(format!("plan {short} is already booked"));
+            return;
+        }
+        if format::text(plan.state.as_ref()) != Some("checked") {
+            store.cmd.say(format!("plan {short} is not a checked plan"));
+            return;
+        }
+        let Some(approval) = store.covering_approval(&plan_id) else {
+            store.cmd.say(format!(
+                "plan {short} has no approval on record — /approve {short} opens one"
+            ));
             return;
         };
-        if let Some(modal) = confirm::Modal::for_plan(plan, approval) {
-            self.confirm.open(modal, confirm::Pending::Execute);
-        }
+        let Some(modal) = confirm::Modal::for_plan(plan, approval) else {
+            store.cmd.say(format!(
+                "plan {short}'s approval carries no targets_hash to confirm against"
+            ));
+            return;
+        };
+        self.confirm.open(modal, confirm::Pending::Execute);
     }
 
     /// The plan ledger: what the desk has proposed, and what each one is waiting

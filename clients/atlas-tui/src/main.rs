@@ -323,8 +323,18 @@ fn ingest(
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
             let before = store.nav.view;
-            match ui::shell::on_key(*key, store, views) {
+            // A line the chat typed is resolved here, where the shell's own
+            // resolver has the views it needs, and whatever it produces
+            // takes the same arms as a palette line would.
+            let command = match ui::shell::on_key(*key, store, views) {
+                Some(Command::RunLine(line)) => ui::shell::run_line(&line, store, views),
+                other => other,
+            };
+            match command {
                 Some(Command::Quit) => quit = true,
+                // Resolved above; a resolver that produced another line would
+                // be a grammar that recurses, and this one does not.
+                Some(Command::RunLine(_)) => {}
                 // The refresh jumps the poll queue instead of fetching inline:
                 // a synchronous fetch in this loop froze the client for its
                 // duration. On PREDICTORS it also re-asks for the board —

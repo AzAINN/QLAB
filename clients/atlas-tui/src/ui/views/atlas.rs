@@ -28,6 +28,8 @@ use crate::model::{ActionItem, Event, PredictorMetrics, Predictors};
 use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
+#[cfg(feature = "operator")]
+use crate::ui::widgets::confirm;
 use crate::ui::widgets::{md, panel_block, panel_header, pipeline, refuse};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -56,6 +58,11 @@ const PREFIX_W: usize = 8 + 1 + 5 + 3;
 /// says — that is the `Store`'s.
 #[derive(Default)]
 pub struct AtlasView {
+    /// The chat's own confirm slot, for `/approve` and `/execute` typed here.
+    /// The same widget BOOK and AUDIT host, so the ritual is identical
+    /// wherever the operator happens to be typing.
+    #[cfg(feature = "operator")]
+    confirm: confirm::Host,
     /// How far up the conversation the operator has scrolled, in rendered
     /// lines from the bottom. Zero is pinned-to-bottom, which is where a new
     /// answer must land without being asked for.
@@ -159,6 +166,16 @@ impl View for AtlasView {
 
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         self.keys(k, store)
+    }
+
+    #[cfg(feature = "operator")]
+    fn confirm(&self) -> Option<&confirm::Host> {
+        Some(&self.confirm)
+    }
+
+    #[cfg(feature = "operator")]
+    fn confirm_mut(&mut self) -> Option<&mut confirm::Host> {
+        Some(&mut self.confirm)
     }
 
     /// Off screen, so this pane vouches for nothing.
@@ -300,11 +317,42 @@ impl AtlasView {
                 }
                 self.ask.clear();
                 self.focused = false;
+                // A slash line is a command, not a question: `/approve …`
+                // typed beside the questions goes to the palette's resolver
+                // rather than to the reasoner, which would answer it in prose.
+                if text.starts_with('/') {
+                    return Some(Command::RunLine(text));
+                }
                 return Some(Command::Message(text));
             }
             _ => {}
         }
         None
+    }
+}
+
+impl AtlasView {
+    /// An approval request the chat asked for has been opened: put the
+    /// approve box up now, so `/approve <plan>` was one command and this is
+    /// its one confirm. Any other outcome is a toast and a refetch.
+    #[cfg(feature = "operator")]
+    pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
+        if let crate::bus::Wrote::ApprovalOpened {
+            approval_id,
+            plan_id,
+        } = outcome
+        {
+            self.confirm.open(
+                confirm::Modal::action(
+                    "APPROVE APPROVAL",
+                    vec![
+                        ("approval".to_string(), approval_id.clone()),
+                        ("plan".to_string(), plan_id.clone()),
+                    ],
+                ),
+                confirm::Pending::Approve(approval_id.clone()),
+            );
+        }
     }
 }
 
@@ -918,15 +966,37 @@ impl AtlasView {
         if approvals_waiting + plans_checked > 0 {
             lines.push(Line::from(""));
             lines.push(panel_header("your call"));
-            if approvals_waiting > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!("{approvals_waiting} approval(s) — AUDIT (8), a"),
-                    Style::default().fg(t.accent),
-                )));
+            // The chat's own words, one per item: what to type, right here.
+            for approval in store
+                .approvals()
+                .iter()
+                .filter(|a| a.status.as_deref() == Some("pending"))
+                .take(3)
+            {
+                if let Some(id) = approval.approval_id.as_deref() {
+                    lines.push(Line::from(Span::styled(
+                        format!("/approve {}", &id[..8.min(id.len())]),
+                        Style::default().fg(t.accent),
+                    )));
+                }
             }
-            if plans_checked > 0 {
+            for plan in store
+                .plans()
+                .iter()
+                .filter(|p| p.state.as_deref() == Some("checked"))
+                .take(3)
+            {
+                let Some(id) = plan.plan_id.as_deref() else {
+                    continue;
+                };
+                let short = &id[..8.min(id.len())];
+                let word = match store.covering_approval(id) {
+                    Some(_) => format!("/execute {short}"),
+                    None if store.approval_for(id).is_none() => format!("/approve {short}"),
+                    None => continue,
+                };
                 lines.push(Line::from(Span::styled(
-                    format!("{plans_checked} checked plan(s) — BOOK (4), x"),
+                    word,
                     Style::default().fg(t.accent),
                 )));
             }

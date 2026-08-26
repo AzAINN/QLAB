@@ -303,6 +303,14 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
             &format!("approval {decision}"),
             format!("{approval_id} is on the record as {decision}"),
         ),
+        Wrote::ApprovalOpened {
+            approval_id,
+            plan_id,
+        } => Toast::new(
+            Level::Info,
+            "approval opened",
+            format!("{approval_id} covers plan {plan_id} — the approve box is up"),
+        ),
         // The owner's own sentence, not a receipt of this client's own making.
         // `atlas_message` answers 200 whether or not a coordinator exists to
         // read the question — "coordinator unavailable; Atlas is degraded and

@@ -200,6 +200,7 @@ impl Views {
     #[cfg(feature = "operator")]
     pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
         self.settings.wrote(outcome);
+        self.atlas.wrote(outcome);
     }
 
     /// Open the one box in this client a credential is typed into.

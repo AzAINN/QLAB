@@ -4836,3 +4836,38 @@ def test_a_posture_that_is_not_a_boolean_is_refused(session, value):
     assert status == 400 and "true or false" in body["error"]
     # Nothing was recorded: a refused arming must not half-arm the desk.
     assert session.posture_payload() == {"armed": False, "chosen": False}
+
+
+def test_a_checked_plan_gets_its_approval_opened_and_announced_once(session):
+    """The reporter's checked preview is the desk asking; nothing opened the
+    request, so BOOK's `x` returned in silence for want of a covering
+    approval. The tick now opens it and says the two chat words that answer.
+    """
+    plan_id = _checked_plan(session)
+
+    first = session.announce_desk_work(True, [])
+    assert len(first["approvals_opened"]) == 1
+    aid = first["approvals_opened"][0]
+    pending = [a for a in session.registry.list_approval_requests(50)
+               if a.get("plan_id") == plan_id]
+    assert len(pending) == 1 and pending[0]["status"] == "pending"
+
+    chat = session.registry.read_events_of_kind("atlas_message", 20)
+    said = " ".join(str(e.get("payload", {}).get("text")) for e in chat)
+    assert f"/approve {aid[:8]}" in said and f"/execute {plan_id[:8]}" in said
+
+    # Once. A second tick must neither reopen nor repeat.
+    again = session.announce_desk_work(True, [])
+    assert again["approvals_opened"] == []
+    assert len([a for a in session.registry.list_approval_requests(50)
+                if a.get("plan_id") == plan_id]) == 1
+
+
+def test_a_fired_trigger_is_announced_in_the_chat(session):
+    out = session.announce_desk_work(True, [
+        {"task_id": "abc123def456", "trigger": "regime_flip", "action": "workflow"},
+    ])
+    assert out["triggers"] == ["abc123de"]
+    chat = session.registry.read_events_of_kind("atlas_message", 10)
+    text = chat[0]["payload"]["text"] if chat else ""
+    assert "regime_flip" in text and "regime_review" in text, text

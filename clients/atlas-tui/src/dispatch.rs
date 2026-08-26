@@ -177,7 +177,9 @@ mod armed {
             Command::Quit => "quit".to_string(),
             Command::Refresh => "refresh".to_string(),
             Command::Backends => "read the backends".to_string(),
+            Command::RunLine(_) => "run a palette line".to_string(),
             Command::Approve(id) => format!("approve {id}"),
+            Command::RequestApproval(plan) => format!("open an approval for {plan}"),
             Command::Reject(id) => format!("reject {id}"),
             Command::Execute(token) => format!("execute {}", token.plan_id()),
             Command::Message(_) => "ask the desk".to_string(),
@@ -221,6 +223,16 @@ mod armed {
                 },
                 Err(err) => Wrote::Failed {
                     what: format!("approve {id}"),
+                    said: err.to_string(),
+                },
+            },
+            Command::RequestApproval(plan) => match client.request_approval(&plan).await {
+                Ok(approval_id) => Wrote::ApprovalOpened {
+                    approval_id,
+                    plan_id: plan,
+                },
+                Err(err) => Wrote::Failed {
+                    what: format!("open an approval for {plan}"),
                     said: err.to_string(),
                 },
             },
@@ -480,7 +492,9 @@ mod armed {
             // whole type, and `Backends` is a *read* the poller serves — a
             // write outcome for it would put a row on the bus about a request
             // that changed nothing.
-            Command::Quit | Command::Refresh | Command::Backends => return None,
+            Command::Quit | Command::Refresh | Command::Backends | Command::RunLine(_) => {
+                return None
+            }
         })
     }
 

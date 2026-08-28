@@ -165,18 +165,76 @@ def fetch_news(
             )
         )
 
-    ordered = sorted(
-        items,
-        key=lambda item: (
-            -_as_datetime(item.published).timestamp(),
-            item.source.casefold(),
-            item.headline.casefold(),
-            item.url,
-        ),
-    )
+    ordered = sorted(items, key=_ordering_key)
     with _CACHE_LOCK:
         _NEWS_CACHE[tickers] = tuple(ordered)
     return ordered
+
+
+def _ordering_key(item: NewsItem) -> tuple[float, str, str, str]:
+    """The one window ordering: newest first, then source, headline, url.
+
+    A stack of one member must be byte-for-byte a plain fetch, so the merge in
+    :func:`fetch_news_stacked` and :func:`fetch_news` share this key rather
+    than each spelling out an ordering that could drift apart.
+    """
+    return (
+        -_as_datetime(item.published).timestamp(),
+        item.source.casefold(),
+        item.headline.casefold(),
+        item.url,
+    )
+
+
+@dataclass(frozen=True)
+class StackedWindow:
+    """Every member's records, and what each member said about fetching."""
+
+    items: list[NewsItem]
+    outcomes: dict[str, str]           # provider -> "ok" | error sentence
+    providers: tuple[str, ...]
+
+
+def parse_provider_stack(value: str | None) -> tuple[str, ...]:
+    """The providers to read, in order. Plural env wins, then singular."""
+    raw = (value or os.environ.get("QLAB_NEWS_PROVIDERS")
+           or os.environ.get("QLAB_NEWS_PROVIDER") or "synthetic")
+    names = tuple(n.strip().lower() for n in raw.split(",") if n.strip())
+    if not names:
+        raise ValueError("the provider stack is empty")
+    return names
+
+
+def fetch_news_stacked(
+    as_of: str | date | datetime,
+    universe: Sequence[str],
+    providers: Sequence[str],
+    lookback_hours: int = 48,
+) -> StackedWindow:
+    """Fetch every member of a stack; report each member; merge the records.
+
+    A dead member is an outcome, not a smaller window: the sentence travels
+    with the result so the desk can say which source went away. Only a stack
+    with NO living member raises — that is a desk with no record at all.
+    """
+    load_plugin_providers()
+    items: list[NewsItem] = []
+    outcomes: dict[str, str] = {}
+    for name in providers:
+        try:
+            got = fetch_news(as_of, universe, lookback_hours=lookback_hours,
+                             provider=name)
+        except Exception as exc:
+            outcomes[name] = str(exc)
+            continue
+        outcomes[name] = "ok"
+        items.extend(got)
+    if not any(v == "ok" for v in outcomes.values()):
+        raise RuntimeError(
+            "every provider in the stack failed: "
+            + "; ".join(f"{k}: {v}" for k, v in outcomes.items()))
+    items.sort(key=_ordering_key)
+    return StackedWindow(items=items, outcomes=outcomes, providers=tuple(providers))
 
 
 def cached_news_provenance(

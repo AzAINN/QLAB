@@ -55,9 +55,11 @@ def _get_json(url: str) -> dict:
     wait = _MIN_INTERVAL_S - (time.monotonic() - _last_request)
     if wait > 0:
         time.sleep(wait)
+    # User-Agent only, as feed._fetch_rss sends. urlopen does not decode
+    # content encodings, so negotiating gzip would hand compressed bytes
+    # straight to json.loads on the first live call.
     request = urllib.request.Request(
-        url, headers={"User-Agent": f"qlab-news/0.1 {_contact()}",
-                      "Accept-Encoding": "gzip, deflate"})
+        url, headers={"User-Agent": f"qlab-news/0.1 {_contact()}"})
     response = urllib.request.urlopen(request, timeout=_TIMEOUT_S)
     try:
         payload = response.read()
@@ -103,19 +105,28 @@ def fetch(as_of: datetime, universe: tuple[str, ...]) -> list[NewsItem]:
     ciks = cik_map()
     window_start = as_of - _MAX_LOOKBACK
     items: list[NewsItem] = []
-    seen: set[str] = set()
+    # Caches the REQUEST, not the record: one submissions call per CIK keeps
+    # the rate constraint, while an issuer held by two funds is evidence for
+    # both. Deduping the record instead tagged every shared megacap to
+    # whichever fund happened to be walked first.
+    submissions: dict[str, dict] = {}
     for fund, issuers in _issuers_for(universe).items():
         for ticker in issuers:
             cik = ciks.get(ticker)
-            if cik is None or cik in seen:
+            if cik is None:
                 continue
-            seen.add(cik)
-            sub = _get_json(_SUBMISSIONS_URL.format(cik=cik))
+            if cik not in submissions:
+                submissions[cik] = _get_json(_SUBMISSIONS_URL.format(cik=cik))
+            sub = submissions[cik]
             recent = (sub.get("filings") or {}).get("recent") or {}
             name = sub.get("name") or ticker
-            rows = zip(recent.get("form", []), recent.get("acceptanceDateTime", []),
+            forms = recent.get("form", [])
+            # strict: a short column is a shape change at the SEC, and zip's
+            # default would turn it into a quietly truncated window.
+            rows = zip(forms, recent.get("acceptanceDateTime", []),
                        recent.get("accessionNumber", []), recent.get("primaryDocument", []),
-                       recent.get("items", []) or [""] * len(recent.get("form", [])))
+                       recent.get("items", []) or [""] * len(forms),
+                       strict=True)
             for form, accepted, acc, doc, item_codes in rows:
                 if form not in KEPT_FORMS:
                     continue

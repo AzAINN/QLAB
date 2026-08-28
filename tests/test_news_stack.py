@@ -169,3 +169,37 @@ def test_an_all_dead_stack_keeps_each_members_own_sentence(monkeypatch):
                                       "two": "feed Y timed out"}
     # Still a RuntimeError: every existing caller catches it as one.
     assert isinstance(excinfo.value, RuntimeError)
+
+
+def test_a_partial_member_contributes_its_records_and_names_what_it_lost(
+        monkeypatch):
+    # The member answered with some of its feeds. Its records belong in the
+    # window and the feeds it could not read belong in its outcome — dropping
+    # either one is the silent shrinkage the stack exists to prevent.
+    def partial(a, u):
+        raise feed.PartialWindow(
+            [_item("macro", "BEA", "h1")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(feed.PROVIDERS, "macro", partial)
+    monkeypatch.setitem(
+        feed.PROVIDERS, "two",
+        lambda a, u: [_item("two", "B", "h2", "2026-08-27T15:00:00+00:00")])
+    window = feed.fetch_news_stacked(
+        datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("macro", "two"))
+    assert {i.headline for i in window.items} == {"h1", "h2"}
+    assert window.outcomes["macro"].startswith("partial: ")
+    assert "BLS" in window.outcomes["macro"] and "403" in window.outcomes["macro"]
+    assert window.outcomes["two"] == "ok"
+    assert feed.outcome_is_live(window.outcomes["macro"])
+
+
+def test_a_stack_whose_only_member_is_partial_is_still_a_window(monkeypatch):
+    def partial(a, u):
+        raise feed.PartialWindow(
+            [_item("macro", "BEA", "h1")], {"BLS": "403"})
+
+    monkeypatch.setitem(feed.PROVIDERS, "macro", partial)
+    window = feed.fetch_news_stacked(
+        datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("macro",))
+    assert [i.headline for i in window.items] == ["h1"]

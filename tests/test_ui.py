@@ -4993,3 +4993,32 @@ def test_an_archive_window_naming_an_undeclared_provider_is_refused(session):
     }
     with pytest.raises(RuntimeError, match="smuggled"):
         session.archive_desk_news(window)
+
+
+def test_a_partial_member_is_archived_as_a_window_not_as_a_failure(
+        session, monkeypatch):
+    # A batch with records is not a failed batch. Stamping the member's missing
+    # feeds on it as `error` would file real primary records under an outage.
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "macro")
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    def partial(a, u):
+        raise feed.PartialWindow(
+            [NewsItem(source="BEA", published=published, headline="h",
+                      summary="", url="https://x/1", tickers=("SPY",),
+                      provider="macro")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(feed.PROVIDERS, "macro", partial)
+    window = session.fetch_desk_news(False)
+    assert window["outcomes"]["macro"].startswith("partial: ")
+    assert len(window["items"]) == 1
+
+    result = session.archive_desk_news(window)
+    assert result["stored"] == 1
+    payload = session.registry.read_events_of_kind("news_archive", 5)[0]["payload"]
+    assert payload["returned"] == 1
+    assert payload["error"] is None
+    assert "BLS" in payload["outcome"] and "403" in payload["outcome"]

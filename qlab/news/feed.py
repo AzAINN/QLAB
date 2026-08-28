@@ -125,7 +125,15 @@ def fetch_news(
     tickers = _normalize_universe(universe)
     provider_name = "synthetic" if offline else _provider_name(provider)
     provider_name, fetch = _resolve_provider(provider_name)
-    raw_items = fetch(as_of_dt, tickers)
+    # A partial answer is still an answer: its records go through exactly the
+    # same window contract below — look-ahead gate, universe mapping, provider
+    # stamp — and the refusal is re-raised once they have.
+    partial_failures: dict[str, str] = {}
+    try:
+        raw_items = fetch(as_of_dt, tickers)
+    except PartialWindow as exc:
+        raw_items = exc.items
+        partial_failures = exc.failures
 
     cutoff = as_of_dt - timedelta(hours=lookback_hours)
     universe_set = set(tickers)
@@ -168,6 +176,8 @@ def fetch_news(
     ordered = sorted(items, key=_ordering_key)
     with _CACHE_LOCK:
         _NEWS_CACHE[tickers] = tuple(ordered)
+    if partial_failures:
+        raise PartialWindow(ordered, partial_failures)
     return ordered
 
 
@@ -197,6 +207,24 @@ def outcome_is_live(outcome: str) -> bool:
     """Whether a member's outcome carried records. Partial counts as live."""
     text = str(outcome or "")
     return text == NEWS_OUTCOME_OK or text.startswith(_PARTIAL_PREFIX)
+
+
+class PartialWindow(RuntimeError):
+    """A provider answered with some of its feeds, and lost the rest.
+
+    Measured on 2026-08-28: one publisher started refusing automated requests
+    and took a three-feed provider dark although two feeds were answering. A
+    provider that refuses outright is one fact; a provider that came back with
+    two of three sources is a different one, and the records it did return are
+    real. Both the records and the names of what was lost travel with it.
+    """
+
+    def __init__(self, items: list[NewsItem], failures: dict[str, str]):
+        self.items = list(items)
+        self.failures = dict(failures)
+        super().__init__(
+            "some feeds were unavailable: "
+            + "; ".join(f"{k}: {v}" for k, v in self.failures.items()))
 
 
 class StackFailed(RuntimeError):
@@ -252,6 +280,14 @@ def fetch_news_stacked(
         try:
             got = fetch_news(as_of, universe, lookback_hours=lookback_hours,
                              provider=name)
+        except PartialWindow as exc:
+            # The member is live and short some feeds. Its records join the
+            # merge and the feeds it lost are named in its outcome, where the
+            # desk and the archive both read it.
+            outcomes[name] = _PARTIAL_PREFIX + "; ".join(
+                f"{feed}: {error}" for feed, error in exc.failures.items())
+            items.extend(exc.items)
+            continue
         except Exception as exc:
             outcomes[name] = str(exc)
             continue
@@ -366,6 +402,12 @@ def _fetch_rss_feeds(
     growing a second one that could drift from it.
     """
     items: list[NewsItem] = []
+    # Every feed is attempted, and a failure is collected rather than thrown:
+    # one publisher going dark must not decide the window for the publishers
+    # that are answering. What that adds up to is decided after the loop.
+    failures: dict[str, str] = {}
+    first_error: Exception | None = None
+    live = 0
     for feed in feeds:
         source = feed["name"]
         url = feed["url"]
@@ -378,10 +420,14 @@ def _fetch_rss_feeds(
             response = urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_S)
             payload = response.read()
         except Exception as exc:
-            raise RuntimeError(
+            error = RuntimeError(
                 "rss news provider requires reachable network feeds; "
                 f"source {source!r} at {url!r} is unavailable ({exc})"
-            ) from exc
+            )
+            error.__cause__ = exc
+            failures[source] = str(exc)
+            first_error = first_error or error
+            continue
         finally:
             close = getattr(response, "close", None)
             if callable(close):
@@ -390,10 +436,15 @@ def _fetch_rss_feeds(
         try:
             entries = _parse_feed(payload, url)
         except Exception as exc:
-            raise RuntimeError(
+            error = RuntimeError(
                 f"rss news provider could not parse source {source!r} "
                 f"at {url!r} ({exc})"
-            ) from exc
+            )
+            error.__cause__ = exc
+            failures[source] = str(exc)
+            first_error = first_error or error
+            continue
+        live += 1
 
         for entry in entries:
             headline = entry.get("headline", "").strip()
@@ -423,6 +474,13 @@ def _fetch_rss_feeds(
                     provider="rss",
                 )
             )
+    if failures:
+        # All dead is the refusal this provider always made — a window with no
+        # source behind it is not a window. Some dead with something live is a
+        # partial: the caller decides what to do with records it really has.
+        if not live:
+            raise first_error
+        raise PartialWindow(items, failures)
     return items
 
 

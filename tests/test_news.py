@@ -373,3 +373,87 @@ def test_credential_status_reports_the_whole_stack_not_just_the_singular(monkeyp
     monkeypatch.delenv("QLAB_NEWS_PROVIDERS")
     monkeypatch.setenv("QLAB_NEWS_PROVIDER", "rss")
     assert credential_status()["news_provider"] == "rss"
+
+
+def _rss_payload(headline: str) -> bytes:
+    return (
+        b"<rss version=\"2.0\"><channel><item>"
+        b"<title>" + headline.encode() + b"</title>"
+        b"<description>World stocks show wider dispersion.</description>"
+        b"<link>https://example.test/story</link>"
+        b"<pubDate>Wed, 15 Jan 2025 10:00:00 GMT</pubDate>"
+        b"</item></channel></rss>"
+    )
+
+
+def test_one_dead_feed_does_not_take_its_live_neighbours_with_it(monkeypatch):
+    # Measured on 2026-08-28: bls.gov returned 403 to every request, and the
+    # whole macro provider went dark although BEA was answering. A dead feed
+    # must neither kill the live ones nor disappear without a sentence.
+    class Response:
+        def read(self):
+            return _rss_payload("Global equities face a busier volatility backdrop")
+
+        def close(self):
+            pass
+
+    def urlopen(request, timeout):
+        if "dead" in request.full_url:
+            raise URLError("HTTP Error 403: Forbidden")
+        return Response()
+
+    monkeypatch.setattr(news.urllib.request, "urlopen", urlopen)
+    monkeypatch.setitem(sys.modules, "feedparser", None)
+    feeds = [
+        {"name": "Dead Feed", "url": "https://example.test/dead.xml",
+         "tickers": ["ACWI"]},
+        {"name": "Live Feed", "url": "https://example.test/live.xml",
+         "tickers": ["ACWI"]},
+    ]
+    with pytest.raises(news.PartialWindow) as excinfo:
+        news._fetch_rss_feeds(
+            feeds, datetime(2025, 1, 15, 12, tzinfo=timezone.utc), ("ACWI",))
+    partial = excinfo.value
+    assert [item.source for item in partial.items] == ["Live Feed"]
+    assert "403" in partial.failures["Dead Feed"]
+    assert list(partial.failures) == ["Dead Feed"]
+
+
+def test_every_feed_dead_is_still_the_plain_refusal(monkeypatch):
+    def urlopen(request, timeout):
+        raise URLError("offline")
+
+    monkeypatch.setattr(news.urllib.request, "urlopen", urlopen)
+    feeds = [{"name": "Dead Feed", "url": "https://example.test/dead.xml",
+              "tickers": ["ACWI"]}]
+    with pytest.raises(RuntimeError) as excinfo:
+        news._fetch_rss_feeds(
+            feeds, datetime(2025, 1, 15, 12, tzinfo=timezone.utc), ("ACWI",))
+    assert not isinstance(excinfo.value, news.PartialWindow)
+    assert "requires reachable network feeds" in str(excinfo.value)
+
+
+def test_a_partial_windows_records_still_go_through_the_window_contract(monkeypatch):
+    # Propagating the provider's RAW items would hand the caller records that
+    # skipped the look-ahead gate, the universe mapping and the provider stamp
+    # — the one path into the desk that is not point-in-time.
+    def partial(as_of, universe):
+        return [
+            NewsItem(source="BEA", published="2025-01-15T10:00:00+00:00",
+                     headline="kept", summary="", url="https://x/1",
+                     tickers=("ACWI",), provider="whatever"),
+            NewsItem(source="BEA", published="2025-01-16T10:00:00+00:00",
+                     headline="after as_of", summary="", url="https://x/2",
+                     tickers=("ACWI",), provider="whatever"),
+        ]
+
+    def fetch(as_of, universe):
+        raise news.PartialWindow(partial(as_of, universe), {"BLS": "403"})
+
+    monkeypatch.setitem(news.PROVIDERS, "macro", fetch)
+    with pytest.raises(news.PartialWindow) as excinfo:
+        news.fetch_news("2025-01-15T12:00:00+00:00", ["ACWI"], provider="macro")
+    items = excinfo.value.items
+    assert [i.headline for i in items] == ["kept"]
+    assert items[0].provider == "macro"
+    assert excinfo.value.failures == {"BLS": "403"}

@@ -114,3 +114,58 @@ long-lived owner keeps serving pre-change imports).
 `docs/news-setup.md` gains the six-provider table with tiers, a "Stacking
 providers" section, and the per-member `news-check` output. The README extras
 table's `news` row now names all four network providers.
+
+## Second run — 2026-08-28, after the fix round
+
+Three of the four findings above were acted on, and the live check was re-run
+with the same scratch `QLAB_STATE_DIR`, from the worktree, with no owner:
+
+```
+$ python -m qlab.autopilot.cli news-check --provider macro,gdelt
+news integration: OK
+  stack              macro,gdelt
+
+  provider           macro  [OK]
+  fetched/kept       2/2
+  claims             1 (1 well-supported, 1 primary)
+  publishers         Bureau of Economic Analysis
+  window hash        13adfe5003f877ef
+  sample:
+    - GDP (Second Estimate) and Corporate Profits, 2nd Quarter 2026  (primary source)
+
+  provider           gdelt  [NOT WORKING]
+  error              URLError: <urlopen error timed out>
+```
+Exit code 0 — a live primary-source window, which the first run did not have.
+
+- **`macro` is live.** BLS and Treasury were removed from the shipped
+  `macro.feeds` (each replaced by a comment naming the finding and the date);
+  BEA answers, and a real BEA GDP release is now grounded as a primary claim.
+  No replacement URL was invented: Treasury's press-release page links no feed
+  at all, and bls.gov returns 403 even for its own feed index page
+  (`/bls/rss.htm`), so nothing could be verified live.
+- **A dead feed no longer takes a member down.** `PartialWindow` means a
+  multi-feed provider keeps what answered and reports what did not as
+  `partial: <feed>: <error>`; only an all-dead provider is a dead member. Had
+  this existed on the first run, `macro` would have returned BEA's records
+  instead of going dark.
+- **`gdelt` is still dark, and the timeout was not the whole story.** Raising
+  `_TIMEOUT_S` from 10s to 45s did not fix it. Measured on the same connection
+  minutes later: one DOC API request returned 200 in **43.1s**, another **hung
+  past 75s** and was killed. The API is reachable but its latency today is both
+  high and unstable, and the provider issues one request per rule (five rules
+  shipped), so a full member fetch is minutes, not seconds. This is a
+  measurement, not a fix.
+
+Follow-ups this leaves open (superseding items 1 and 3 of the first run; item 1
+is now done, item 2 stands):
+
+1. **Decide whether `gdelt` belongs in a default stack at all while it is this
+   slow.** A member that takes minutes on the heartbeat's path is a different
+   problem from one that fails, and raising a timeout is the wrong instrument
+   for it — a per-rule budget, fewer rules, or leaving `gdelt` an opt-in member
+   are the real options. Do not raise `_TIMEOUT_S` again without measuring.
+2. Re-verify the BLS and Treasury URLs from the publishers' own feed indexes
+   (unchanged from the first run). If BLS keeps refusing automation, that is a
+   publisher decision, not a bug, and the honest record is the comment now in
+   `news_sources.yaml`.

@@ -22,7 +22,10 @@ from datetime import datetime, timedelta, timezone
 from qlab.news.feed import NewsItem, _validate_gdelt_rules, load_news_sources
 
 _DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
-_TIMEOUT_S = 10
+# Measured 2026-08-28: the DOC API answered a two-rule window in ~31s from a
+# residential connection. A ten-second ceiling reported a live-but-slow API
+# as a timeout, which reads as an outage and is a different fact.
+_TIMEOUT_S = 45
 # The request window. `fetch_news` trims every record to the caller's own
 # lookback afterwards; this only bounds what is asked for.
 _LOOKBACK = timedelta(hours=48)

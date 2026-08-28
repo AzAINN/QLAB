@@ -271,15 +271,18 @@ edgar:
 # primary-tier by name (see grounding.PRIMARY_SOURCE_MARKERS).
 macro:
   feeds:
-    - name: BLS
-      url: https://www.bls.gov/feed/bls_latest.rss
-      tickers: [TIP, BNDW]
+    # BLS (was https://www.bls.gov/feed/bls_latest.rss, tickers TIP/BNDW):
+    # removed 2026-08-28 — 403 Forbidden to every request, with a browser
+    # User-Agent as well, and bls.gov/bls/rss.htm (their own feed index) is
+    # 403 too. Not a moved file: the publisher is refusing automation. No
+    # replacement is shipped because none was verified.
+    # US Treasury (was https://home.treasury.gov/news/press-releases/rss,
+    # tickers TLT/IEF/BNDW): removed 2026-08-28 — 404, and the press-release
+    # page itself links no feed. Restore only against a URL read from
+    # Treasury's own site and verified live.
     - name: Bureau of Economic Analysis
       url: https://apps.bea.gov/rss/rss.xml
       tickers: [ACWI, BNDW]
-    - name: US Treasury
-      url: https://home.treasury.gov/news/press-releases/rss
-      tickers: [TLT, IEF, BNDW]
 
 # Scheduled releases. Dated in the future on purpose and never served as
 # news — they are what Atlas reads as "what is coming". Maintain per quarter.

@@ -85,6 +85,11 @@ gap is attributable to the source that had it. Only a stack where *every*
 member failed is an outage, and that raises the way a single dead provider
 always did.
 
+The same rule holds one level down. A provider that reads several feeds —
+`macro` reads one per publisher — keeps the feeds that answered and reports the
+ones that did not as `partial: <feed>: <error>`. Its records are archived
+normally; only a provider whose feeds are *all* dead is a dead member.
+
 `QLAB_EDGAR_CONTACT` is not optional for `edgar`: the SEC asks that automated
 requests identify a contact, and the provider refuses rather than sending an
 anonymous one.

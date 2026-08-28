@@ -186,6 +186,34 @@ def _ordering_key(item: NewsItem) -> tuple[float, str, str, str]:
     )
 
 
+# The outcome vocabulary, named once. Three call sites compared the literal
+# "ok", and a fourth state (a member that came back with some of its feeds)
+# would otherwise have had to be discovered by each of them independently.
+NEWS_OUTCOME_OK = "ok"
+_PARTIAL_PREFIX = "partial: "
+
+
+def outcome_is_live(outcome: str) -> bool:
+    """Whether a member's outcome carried records. Partial counts as live."""
+    text = str(outcome or "")
+    return text == NEWS_OUTCOME_OK or text.startswith(_PARTIAL_PREFIX)
+
+
+class StackFailed(RuntimeError):
+    """Every member of the stack failed, and each one's own reason.
+
+    A RuntimeError still, because every caller already catches one — but the
+    per-member sentences travel with it. Stamping the aggregate sentence on
+    each member reported a diagnosis no member ever gave.
+    """
+
+    def __init__(self, outcomes: dict[str, str]):
+        self.outcomes = dict(outcomes)
+        super().__init__(
+            "every provider in the stack failed: "
+            + "; ".join(f"{k}: {v}" for k, v in self.outcomes.items()))
+
+
 @dataclass(frozen=True)
 class StackedWindow:
     """Every member's records, and what each member said about fetching."""
@@ -227,12 +255,10 @@ def fetch_news_stacked(
         except Exception as exc:
             outcomes[name] = str(exc)
             continue
-        outcomes[name] = "ok"
+        outcomes[name] = NEWS_OUTCOME_OK
         items.extend(got)
-    if not any(v == "ok" for v in outcomes.values()):
-        raise RuntimeError(
-            "every provider in the stack failed: "
-            + "; ".join(f"{k}: {v}" for k, v in outcomes.items()))
+    if not any(outcome_is_live(v) for v in outcomes.values()):
+        raise StackFailed(outcomes)
     items.sort(key=_ordering_key)
     # Each member's fetch overwrote the cache, so the provenance the desk
     # reported described only the LAST member — a fraction of the window, under
@@ -245,7 +271,12 @@ def fetch_news_stacked(
 def cached_news_provenance(
     universe: Sequence[str],
 ) -> tuple[str, int] | None:
-    """Return provider/count provenance from the last in-process fetch."""
+    """Return provider/count provenance from the last in-process fetch.
+
+    After a stack, this is the MERGED window: the count is every member's
+    records and the name is the window's plurality provider — the one that
+    contributed most, not the only one that contributed.
+    """
     tickers = _normalize_universe(universe)
     with _CACHE_LOCK:
         items = _NEWS_CACHE.get(tickers)

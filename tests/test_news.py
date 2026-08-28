@@ -335,3 +335,41 @@ def test_news_check_reports_each_member_of_a_stack(monkeypatch):
     assert report["members"]["good"]["ok"] is True
     assert report["members"]["bad"]["ok"] is False and "down" in report["members"]["bad"]["error"]
     assert report["ok"] is True, "one living member is a record"
+
+
+def test_render_names_the_status_for_one_provider_and_for_each_member(monkeypatch):
+    # A stack of one must read exactly as the single-provider check always did:
+    # the headline is the line an operator greps for, and losing it left the
+    # whole report indented as if it were nested under something.
+    from qlab.news import check, feed
+
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    monkeypatch.setitem(feed.PROVIDERS, "good", lambda a, u: [NewsItem(
+        source="BLS", published=published, headline="h", summary="",
+        url="https://bls.gov/x", tickers=("TIP",), provider="good")])
+    monkeypatch.setitem(
+        feed.PROVIDERS, "bad",
+        lambda a, u: (_ for _ in ()).throw(RuntimeError("down")))
+
+    one = check.render(check.check_news(["TIP"], provider="good"))
+    assert one.startswith("news integration: OK")
+    assert len([ln for ln in one.splitlines() if "  provider  " in ln]) == 1
+
+    stack = check.render(check.check_news(["TIP"], provider="good,bad"))
+    assert stack.startswith("news integration: OK")
+    members = [ln for ln in stack.splitlines() if "  provider  " in ln]
+    assert len(members) == 2
+    assert "[OK]" in members[0] and "[NOT WORKING]" in members[1]
+
+
+def test_credential_status_reports_the_whole_stack_not_just_the_singular(monkeypatch):
+    # The plural is what the desk reads; a status line naming only the singular
+    # reports a configuration the owner is not running.
+    from qlab.env import credential_status
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "alpaca,edgar,macro")
+    monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+    assert credential_status()["news_provider"] == "alpaca,edgar,macro"
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS")
+    monkeypatch.setenv("QLAB_NEWS_PROVIDER", "rss")
+    assert credential_status()["news_provider"] == "rss"

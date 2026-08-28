@@ -4913,12 +4913,83 @@ def test_the_desk_reads_a_stack_and_archives_each_member(session, monkeypatch):
                                       headline=f"{src} story", summary="", url=f"https://x/{src}",
                                       tickers=("SPY",), provider=provider)]
 
+    def dead(a, u):
+        raise RuntimeError("feed three is unavailable")
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two,three")
     monkeypatch.setitem(feed.PROVIDERS, "one", mk("one", "SEC EDGAR"))
     monkeypatch.setitem(feed.PROVIDERS, "two", mk("two", "reuters.com"))
-    assert session.news_provider_for(False) == ("one", "two")
+    monkeypatch.setitem(feed.PROVIDERS, "three", dead)
+    assert session.news_provider_for(False) == ("one", "two", "three")
     window = session.fetch_desk_news(False)
-    assert window["outcomes"] == {"one": "ok", "two": "ok"}
+    assert window["outcomes"]["one"] == "ok" and window["outcomes"]["two"] == "ok"
+    # The member that went away is named, not absent: a smaller window with no
+    # explanation is indistinguishable from a quiet wire.
+    assert "unavailable" in window["outcomes"]["three"]
     result = session.archive_desk_news(window)
     events = [e for e in session.registry.read_events_of_kind("news_archive", 10)]
-    assert {e["payload"]["provider"] for e in events} == {"one", "two"}
+    by_provider = {e["payload"]["provider"]: e["payload"] for e in events}
+    assert set(by_provider) == {"one", "two", "three"}
+    assert "unavailable" in by_provider["three"]["outcome"]
+    assert by_provider["three"]["returned"] == 0
+    assert by_provider["one"]["outcome"] == "ok"
     assert result["stored"] == 2
+    assert set(result["per_provider"]) == {"one", "two", "three"}
+
+    # And the wire carries the same facts the archive does.
+    status, snapshot = handle_api(session, "GET", "/api/tui", {}, {})
+    assert status == 200
+    news = snapshot["news"]
+    assert news["providers"] == ["one", "two", "three"]
+    assert "unavailable" in news["outcomes"]["three"]
+
+
+def test_news_archive_events_do_not_crowd_the_generic_audit_page(session, monkeypatch):
+    # One event per member per tick, on a fixed-size page: a four-member stack
+    # on the heartbeat pushes everything an operator is auditing off the page
+    # within minutes. Selected by kind at the store, like atlas_chat.
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two")
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    for name in ("one", "two"):
+        monkeypatch.setitem(feed.PROVIDERS, name, lambda a, u, n=name: [NewsItem(
+            source=n, published=published, headline=f"{n} story", summary="",
+            url=f"https://x/{n}", tickers=("SPY",), provider=n)])
+    session.registry.record_event("halt", {"reason": "audited"})
+    session.archive_desk_news(session.fetch_desk_news(False))
+
+    page = session.read_audit_stream_events(50, after=None)
+    assert [e["kind"] for e in page if e["kind"] == "news_archive"] == []
+    assert any(e["kind"] == "halt" for e in page)
+    # The rows still exist; only the generic page declines to carry them.
+    assert len(session.registry.read_events_of_kind("news_archive", 10)) == 2
+
+
+def test_a_malformed_provider_stack_is_a_loud_window_not_a_dead_heartbeat(
+        session, monkeypatch):
+    # news_provider_for now parses, so it can refuse. Called outside the try it
+    # took the whole heartbeat tick down with it — including the parts of the
+    # tick that have nothing to do with news.
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", ",")
+    window = session.fetch_desk_news(False)
+    assert window["items"] == []
+    assert window["error"]
+    assert window["providers"] == []
+
+
+def test_an_archive_window_naming_an_undeclared_provider_is_refused(session):
+    from qlab.news.feed import NewsItem
+
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    window = {
+        "items": [NewsItem(source="X", published=published, headline="h",
+                           summary="", url="https://x/1", tickers=("SPY",),
+                           provider="smuggled")],
+        "outcomes": {"one": "ok"},
+        "providers": ["one"],
+        "provider_name": "one",
+        "error": None,
+    }
+    with pytest.raises(RuntimeError, match="smuggled"):
+        session.archive_desk_news(window)

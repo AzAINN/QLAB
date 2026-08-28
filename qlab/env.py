@@ -99,12 +99,23 @@ def credential_status() -> dict:
             # A broken or absent profile is simply "no credential" here; the
             # resolver reports the detail where it is actionable.
             alpaca = False
+    # The desk reads a stack, so the status must name the stack: reporting only
+    # QLAB_NEWS_PROVIDER described a configuration the owner is not running.
+    from qlab.news.feed import parse_provider_stack
+
+    try:
+        stack = parse_provider_stack(None)
+    except ValueError:
+        stack = ()
     return {
         "alpaca_credentials": alpaca,
         "market_data_provider": os.environ.get("QLAB_DATA_PROVIDER") or "yfinance",
-        "news_provider": os.environ.get("QLAB_NEWS_PROVIDER") or "synthetic",
+        "news_provider": ",".join(stack) or "synthetic",
         "alpaca_feed": os.environ.get("ALPACA_FEED") or "iex",
-        "news_ready": (
-            os.environ.get("QLAB_NEWS_PROVIDER") == "alpaca" and alpaca
-            or os.environ.get("QLAB_NEWS_PROVIDER") == "rss"),
+        # Ready when any member can actually answer: alpaca needs its
+        # credential, every other real provider needs none, and synthetic is
+        # fixtures rather than news.
+        "news_ready": any(
+            (name == "alpaca" and alpaca) or name not in ("alpaca", "synthetic")
+            for name in stack),
     }

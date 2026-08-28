@@ -2543,8 +2543,10 @@ class UISession:
                 return self._desk_news
         return {
             "items": [],
+            # No providers, not a guessed one: nothing has been read yet, and
+            # `outcomes` being empty already says so.
             "outcomes": {},
-            "providers": ["synthetic"],
+            "providers": [],
             "provider": "synthetic",
             "provider_name": "synthetic",
             "error": "news window not fetched yet (owner is still starting up)",
@@ -2581,9 +2583,14 @@ class UISession:
         # published after as_of — so the desk's window structurally excluded
         # every story filed so far today. Measured: a full 24 hours.
         as_of = datetime.now(timezone.utc)
-        providers = self.news_provider_for(offline)
-        provider_name = ",".join(providers)
+        # Initialised before the try because `news_provider_for` parses, and a
+        # malformed QLAB_NEWS_PROVIDERS must be a loud news window rather than
+        # an exception that takes down the whole heartbeat tick around it.
+        providers: tuple[str, ...] = ()
+        provider_name = ""
         try:
+            providers = self.news_provider_for(offline)
+            provider_name = ",".join(providers)
             # Passed explicitly rather than letting the feed re-resolve from the
             # environment: the label and the fetch must be the same decision, or
             # the desk can report a provenance it did not use.
@@ -2597,9 +2604,13 @@ class UISession:
             # Only a stack with no living member raises. A member that died on
             # its own is an outcome carried beside the records, never a quietly
             # smaller window.
+            outcomes = dict(getattr(exc, "outcomes", None) or {})
             window = {
                 "items": [],
-                "outcomes": {name: str(exc) for name in providers},
+                # Each member keeps its own sentence when the feed carried them
+                # (StackFailed); the aggregate stands in only when the failure
+                # happened before any member ran, such as a malformed stack.
+                "outcomes": outcomes or {name: str(exc) for name in providers},
                 "providers": list(providers),
                 "provider": provider_name,
                 "provider_name": provider_name,
@@ -2638,8 +2649,13 @@ class UISession:
         entry point for callers that do NOT hold the dispatch lock — burying a
         registry write inside it would create a lock-free writer by
         construction.
+
+        ``stored`` counts rows written by this pass, insert or update, summed
+        across the members. It is not a count of distinct stories: two members
+        that both carried the same story write it in two batches.
         """
         from qlab.news.archive import build_archive_batch, canonical_timestamp
+        from qlab.news.feed import NEWS_OUTCOME_OK, outcome_is_live
 
         window = window or {}
         items = list(window.get("items") or [])
@@ -2656,7 +2672,15 @@ class UISession:
         grouped: dict[str, list] = {name: [] for name in members}
         for item in items:
             name = str(getattr(item, "provider", "") or members[0])
-            grouped.setdefault(name, []).append(item)
+            if name not in grouped:
+                # An attribution nothing in the window declared. Filing it
+                # anyway would archive a provenance the desk cannot account
+                # for, which is exactly what the per-member batch exists to
+                # prevent.
+                raise RuntimeError(
+                    f"news window carries provider {name!r}, which is not one "
+                    f"of the members it declares ({', '.join(members)})")
+            grouped[name].append(item)
 
         now = canonical_timestamp(datetime.now(timezone.utc))
         window_error = window.get("error")
@@ -2664,10 +2688,12 @@ class UISession:
         per_provider: dict[str, dict] = {}
         stored = 0
         for provider, records in grouped.items():
-            outcome = outcomes.get(provider, "ok")
+            outcome = outcomes.get(provider, NEWS_OUTCOME_OK)
             # A member's own failure sentence is that member's error; the
             # window-wide error only stands in when no member said anything.
-            error = None if outcome == "ok" else str(outcome)
+            # A partial member is live: its records are real, so its batch is
+            # not a failed batch — the missing feeds are on the event instead.
+            error = None if outcome_is_live(outcome) else str(outcome)
             if error is None and window_error and not outcomes:
                 error = str(window_error)
             batch = build_archive_batch(
@@ -4370,20 +4396,28 @@ class UISession:
         limit: int,
         after: str | None,
     ) -> list[dict]:
-        """Read a bounded audit page in the merged stream's stable ordering."""
+        """Read a bounded audit page in the merged stream's stable ordering.
+
+        `news_archive` is selected out at the store, the way `atlas_chat` is
+        selected in: a stack writes one row per member per heartbeat tick, and
+        on a fixed-size page that pushes everything an operator is actually
+        auditing off the end within minutes. The rows are untouched —
+        `read_events_of_kind("news_archive", …)` still returns every one.
+        """
         limit = max(1, min(int(limit), _STREAM_PAGE_CEILING))
         # Registry.read_events caps ordinary observers at 500 and orders only
         # by timestamp. The owner needs the full tuple order to page one dense
         # timestamp without adding another registry connection or writer.
         if after:
             return self.registry._rows(
-                "SELECT * FROM events WHERE ts > ? "
+                "SELECT * FROM events WHERE ts > ? AND kind <> 'news_archive' "
                 "ORDER BY ts ASC, event_id ASC LIMIT ?",
                 [after, limit],
             )
         return self.registry._rows(
             "SELECT * FROM ("
-            "SELECT * FROM events ORDER BY ts DESC, event_id DESC LIMIT ?"
+            "SELECT * FROM events WHERE kind <> 'news_archive' "
+            "ORDER BY ts DESC, event_id DESC LIMIT ?"
             ") ORDER BY ts ASC, event_id ASC",
             [limit],
         )

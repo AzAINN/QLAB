@@ -118,7 +118,8 @@ def render(report: dict) -> str:
             lines.append("")
             lines.append(_render_member(member))
         return "\n".join(lines)
-    return _render_member(report)
+    status = "OK" if report.get("ok") else "NOT WORKING"
+    return f"news integration: {status}\n" + _render_member(report)
 
 
 def _render_member(report: dict) -> str:

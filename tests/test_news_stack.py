@@ -150,3 +150,22 @@ def test_the_merged_window_is_what_provenance_reports(monkeypatch):
         datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("one", "two"))
     assert len(window.items) == 3
     assert feed.cached_news_provenance(("SPY",)) == ("one", 3)
+
+
+def test_an_all_dead_stack_keeps_each_members_own_sentence(monkeypatch):
+    # The aggregate sentence stamped on every member said each of them failed
+    # for the union of all their reasons — a diagnosis no member ever gave.
+    def dead(msg):
+        def fetch(a, u):
+            raise RuntimeError(msg)
+        return fetch
+
+    monkeypatch.setitem(feed.PROVIDERS, "one", dead("feed X is 403"))
+    monkeypatch.setitem(feed.PROVIDERS, "two", dead("feed Y timed out"))
+    with pytest.raises(feed.StackFailed) as excinfo:
+        feed.fetch_news_stacked(
+            datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("one", "two"))
+    assert excinfo.value.outcomes == {"one": "feed X is 403",
+                                      "two": "feed Y timed out"}
+    # Still a RuntimeError: every existing caller catches it as one.
+    assert isinstance(excinfo.value, RuntimeError)

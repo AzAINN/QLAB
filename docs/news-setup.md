@@ -102,7 +102,8 @@ opposite facts and the desk never conflates them: a news outage appears as
 `NEWS FEED UNAVAILABLE` with the reason, not as silence.
 
 A stack gets one block per member, so a healthy stack with one dead source
-still names the source that died:
+still names the source that died. Illustration of the shape, not a recording of
+a real run:
 
 ```
 news integration: OK
@@ -110,9 +111,9 @@ news integration: OK
 
   provider           macro  [OK]
   alpaca credentials absent
-  fetched/kept       31/31
-  claims             28 (12 well-supported, 28 primary)
-  publishers         bls.gov, eia.gov, home.treasury.gov
+  fetched/kept       12/12
+  claims             11 (4 well-supported, 11 primary)
+  publishers         apps.bea.gov
 
   provider           gdelt  [NOT WORKING]
   alpaca credentials absent

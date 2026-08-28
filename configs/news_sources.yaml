@@ -274,7 +274,7 @@ macro:
     - name: BLS
       url: https://www.bls.gov/feed/bls_latest.rss
       tickers: [TIP, BNDW]
-    - name: BEA
+    - name: Bureau of Economic Analysis
       url: https://apps.bea.gov/rss/rss.xml
       tickers: [ACWI, BNDW]
     - name: US Treasury

@@ -42,7 +42,8 @@ _WORD = re.compile(r"[a-z0-9][a-z0-9'\-\.]*")
 PRIMARY_SOURCE_MARKERS = (
     "federal reserve", "european central bank", "ecb", "bank of england",
     "bank of japan", "treasury", "sec", "edgar", "eia", "bls",
-    "bureau of labor", "census", "imf", "world bank", "opec",
+    "bureau of labor", "bureau of economic", "census", "imf", "world bank",
+    "opec",
 )
 
 

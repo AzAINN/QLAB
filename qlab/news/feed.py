@@ -621,44 +621,48 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].rsplit(":", 1)[-1].casefold()
 
 
-def _validate_config(raw: Any) -> None:
-    if not isinstance(raw, dict):
-        raise ValueError("news sources config must be a mapping")
-    feeds = raw.get("feeds")
+def _validate_feeds(feeds: Any, field: str, label: str) -> None:
+    """Hold a list of feed definitions to the one feed contract.
+
+    ``field`` and ``label`` name the section in the error, so a bad entry
+    under ``macro.feeds`` reads as one rather than as a top-level feed.
+    """
     if not isinstance(feeds, list) or not feeds:
-        raise ValueError("news sources config field 'feeds' must be a non-empty list")
+        raise ValueError(
+            f"news sources config field {field!r} must be a non-empty list"
+        )
     for index, feed in enumerate(feeds):
         if not isinstance(feed, dict):
-            raise ValueError(f"news feed {index} must be a mapping")
+            raise ValueError(f"{label} {index} must be a mapping")
         for field in ("name", "url"):
             value = feed.get(field)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(
-                    f"news feed {index} field {field!r} must be a non-empty string"
+                    f"{label} {index} field {field!r} must be a non-empty string"
                 )
         direct = feed.get("tickers")
         rules = feed.get("keywords")
         if direct is None and rules is None:
             raise ValueError(
-                f"news feed {feed['name']!r} must define tickers or keywords"
+                f"{label} {feed['name']!r} must define tickers or keywords"
             )
         if direct is not None:
-            _validate_ticker_list(direct, f"news feed {feed['name']!r} tickers")
+            _validate_ticker_list(direct, f"{label} {feed['name']!r} tickers")
         if rules is not None:
             if not isinstance(rules, list) or not rules:
                 raise ValueError(
-                    f"news feed {feed['name']!r} keywords must be a non-empty list"
+                    f"{label} {feed['name']!r} keywords must be a non-empty list"
                 )
             if all(isinstance(rule, str) for rule in rules):
                 if direct is None:
                     raise ValueError(
-                        f"news feed {feed['name']!r} string keywords need tickers"
+                        f"{label} {feed['name']!r} string keywords need tickers"
                     )
                 continue
             for rule_index, rule in enumerate(rules):
                 if not isinstance(rule, dict):
                     raise ValueError(
-                        f"news feed {feed['name']!r} keyword rule "
+                        f"{label} {feed['name']!r} keyword rule "
                         f"{rule_index} must be a mapping"
                     )
                 terms = rule.get("terms", rule.get("keywords"))
@@ -668,13 +672,56 @@ def _validate_config(raw: Any) -> None:
                     or not all(isinstance(term, str) and term.strip() for term in terms)
                 ):
                     raise ValueError(
-                        f"news feed {feed['name']!r} keyword rule "
+                        f"{label} {feed['name']!r} keyword rule "
                         f"{rule_index} has invalid terms"
                     )
                 _validate_ticker_list(
                     rule.get("tickers"),
-                    f"news feed {feed['name']!r} keyword rule {rule_index} tickers",
+                    f"{label} {feed['name']!r} keyword rule {rule_index} tickers",
                 )
+
+
+
+def _validate_calendar(calendar: Any) -> None:
+    """Every scheduled release must say what, when, for whom, and by whom.
+
+    The calendar is hand-maintained and future-dated, so nothing downstream
+    ever reads it as news and catches a half-written entry: it is either
+    right here or wrong on the desk.
+    """
+    if not isinstance(calendar, list):
+        raise ValueError("news sources config field 'calendar' must be a list")
+    for index, entry in enumerate(calendar):
+        if not isinstance(entry, dict):
+            raise ValueError(f"news calendar entry {index} must be a mapping")
+        for field in ("name", "when", "source"):
+            value = entry.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"news calendar entry {index} field {field!r} must be a "
+                    "non-empty string"
+                )
+        _validate_ticker_list(
+            entry.get("tickers"),
+            f"news calendar entry {entry['name']!r} tickers",
+        )
+
+
+def _validate_config(raw: Any) -> None:
+    if not isinstance(raw, dict):
+        raise ValueError("news sources config must be a mapping")
+    feeds = raw.get("feeds")
+    _validate_feeds(feeds, "feeds", "news feed")
+
+    macro = raw.get("macro")
+    if macro is not None:
+        if not isinstance(macro, dict):
+            raise ValueError("news sources config field 'macro' must be a mapping")
+        _validate_feeds(macro.get("feeds"), "macro.feeds", "macro news feed")
+
+    calendar = raw.get("calendar")
+    if calendar is not None:
+        _validate_calendar(calendar)
 
     synthetic = raw.get("synthetic")
     if not isinstance(synthetic, dict) or not synthetic:

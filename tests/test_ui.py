@@ -4874,8 +4874,21 @@ def test_a_fired_trigger_is_announced_in_the_chat(session):
 
 
 def test_upcoming_releases_are_served_and_dated(session, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
     from qlab.news.providers import macro
+
+    soon = datetime.now(timezone.utc) + timedelta(days=3, hours=1)
     monkeypatch.setattr(macro, "load_news_sources", lambda: {"calendar": [
-        {"name": "FOMC", "when": "2999-01-01T18:00:00+00:00", "tickers": ["TLT"]}]})
+        # The 2999 entry is the out-of-horizon control; it also keeps the
+        # calendar from reading as exhausted, which is a loud refusal.
+        {"name": "FOMC", "when": "2999-01-01T18:00:00+00:00", "tickers": ["TLT"],
+         "source": "Federal Reserve"},
+        {"name": "CPI", "when": soon.isoformat(), "tickers": ["TIP"],
+         "source": "BLS"}]})
     status, out = handle_api(session, "GET", "/api/news/upcoming", {}, {})
-    assert status == 200 and out["upcoming"] == [], "beyond the 14-day horizon"
+    assert status == 200
+    assert [e["name"] for e in out["upcoming"]] == ["CPI"], "2999 is beyond 14 days"
+    entry = out["upcoming"][0]
+    assert entry["when"].startswith(soon.strftime("%Y-%m-%dT%H:"))
+    assert entry["days_ahead"] == 3 and entry["source"] == "BLS"

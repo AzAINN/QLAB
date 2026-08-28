@@ -7,7 +7,7 @@ import os
 import pytest
 
 from qlab.news.feed import NewsItem
-from qlab.news.grounding import by_ticker, content_hash, ground
+from qlab.news.grounding import by_ticker, content_hash, ground, source_tier
 
 
 def _item(headline, source="wire-a", published="2026-07-25T10:00:00+00:00",
@@ -205,6 +205,9 @@ def test_a_primary_source_stands_alone():
     assert claim.corroborated is True          # despite corroboration == 1
     assert claim.support == "primary source"
     assert grounded.corroborated_claims == [claim]
+    # An EDGAR filing is the same shape of event, and reaches primary tier
+    # through the marker list rather than through a provider special case.
+    assert source_tier("SEC EDGAR") == "primary"
 
 
 def test_a_single_secondary_source_is_not_enough():

@@ -828,3 +828,10 @@ PROVIDERS.update(
         "alpaca": _fetch_alpaca,
     }
 )
+
+# Last statements in the module, deliberately: the first-party provider modules
+# import NewsItem and load_news_sources from here, so this cycle only closes
+# once every name they need is defined.
+from qlab.news.providers import register_first_party  # noqa: E402
+
+register_first_party(PROVIDERS)

@@ -61,8 +61,10 @@ MIN_ARCHIVE_ITEMS = MIN_SIGNAL_ITEMS
 # The rss provider drops every untagged entry inside the fetch itself
 # (feed.py:_fetch_rss, `if not tickers: continue`) — one layer earlier than
 # ground() — so under rss the macro lane does not exist and silence in the
-# archive is not evidence of silence on the wire.
-MACRO_LANE_PROVIDERS = frozenset({"alpaca"})
+# archive is not evidence of silence on the wire. The edgar provider tags every
+# filing with the fund it was read for, so it never uses the lane — it is named
+# here so a future untagged filing record is kept rather than silently dropped.
+MACRO_LANE_PROVIDERS = frozenset({"alpaca", "edgar"})
 
 EMPTY_WINDOW_FINGERPRINT = "empty"
 

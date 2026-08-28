@@ -76,6 +76,30 @@ PROVIDERS: dict[str, ProviderFetch] = {}
 _NEWS_CACHE: dict[tuple[str, ...], tuple[NewsItem, ...]] = {}
 _CACHE_LOCK = threading.RLock()
 
+PLUGIN_GROUP = "qlab.news.providers"
+_FIRST_PARTY = frozenset({"synthetic", "rss", "alpaca", "edgar", "macro", "gdelt"})
+
+
+def load_plugin_providers() -> dict[str, ProviderFetch]:
+    """Discover third-party providers and merge them into ``PROVIDERS``.
+
+    The shareable unit: a pip package declaring an entry point in
+    ``qlab.news.providers`` is a provider this desk can name, with no change
+    to qlab. First-party names may not be shadowed — a plugin quietly
+    replacing ``alpaca`` would be a provenance lie with a familiar label.
+    """
+    from importlib import metadata
+
+    found: dict[str, ProviderFetch] = {}
+    for ep in metadata.entry_points(group=PLUGIN_GROUP):
+        if ep.name in _FIRST_PARTY:
+            raise RuntimeError(
+                f"news plugin {ep.name!r} shadows the first-party provider of "
+                "the same name; rename the entry point")
+        found[ep.name] = ep.load()
+    PROVIDERS.update(found)
+    return found
+
 
 def fetch_news(
     as_of: str | date | datetime,

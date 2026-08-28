@@ -88,11 +88,11 @@ qlab = "qlab.autopilot.cli:main"
 include = ["qlab*"]
 
 [tool.setuptools.package-data]
-"qlab.ui" = ["index.html"]
+# (the web client is retired; nothing to ship here)
 
 [tool.setuptools.data-files]
 "share/qlab" = ["mandate.yaml"]
-"share/qlab/configs" = ["configs/universe.yaml"]
+"share/qlab/configs" = ["configs/universe.yaml", "configs/news_sources.yaml"]
 "share/qlab/configs/specs" = ["configs/specs/*.yaml"]
 "share/qlab/agents" = ["agents/*.md"]
 

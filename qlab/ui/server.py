@@ -388,6 +388,11 @@ class UISession:
         # invalidated from the heartbeat thread (invariant 9).
         self._archive_lock = threading.Lock()
         self._archive_stats_cache = None
+        # The qualitative matrix is logged once per news window, and "has this
+        # window already been logged" is a check followed by a write. The owner
+        # is threaded (invariant 9): without this, a handler thread and the
+        # heartbeat can both pass the check and log the same window twice.
+        self._matrix_lock = threading.Lock()
         self.registry.init_account(self.mandate.paper_capital)
         self.lab_state = LabState(
             registry=self.registry, max_calls=200,
@@ -2222,6 +2227,10 @@ class UISession:
             # Unsigned by construction: these are properties of the record, and
             # turning them into a view is the reasoner's job, not theirs.
             "qualitative_signals": read.get("qualitative_signals") or {},
+            # The same counts, per name, as a table. Rows only: the claim keys
+            # are archive ids a reasoner cannot resolve and must not cite, and
+            # they stay on the route for a screen that can.
+            "qualitative_matrix": self._matrix_for_reasoner(offline),
             "news": {
                 "provider": news.get("provider"),
                 "error": news.get("error"),
@@ -2259,6 +2268,25 @@ class UISession:
             # could describe the market in detail and not its own desk.
             "workforce": self.workforce_summary(),
         }
+
+    def _matrix_for_reasoner(self, offline: bool) -> dict:
+        """The matrix as counts, with the archive ids stripped.
+
+        A gap in the look-ahead travels with it: a row whose
+        ``days_to_next_release`` is None because nobody extended the calendar
+        must not read to the reasoner as a name with nothing scheduled.
+        """
+        matrix = self.qualitative_matrix(offline)
+        entry: dict = {
+            "rows": {
+                ticker: {k: v for k, v in row.items() if k != "claim_keys"}
+                for ticker, row in (matrix.get("rows") or {}).items()
+            },
+        }
+        for key in ("calendar_error", "news_error"):
+            if matrix.get(key):
+                entry[key] = matrix[key]
+        return entry
 
     def atlas_facts(self, offline: bool) -> dict:
         """Assemble the deterministic owner facts Atlas observes (no LLM).
@@ -2997,6 +3025,69 @@ class UISession:
         payload["qualitative_signals"] = qualitative.to_dict()
         self._desk_read = payload
         return self._desk_read
+
+    def qualitative_matrix(self, offline: bool) -> dict:
+        """Per-name counts of what the grounded window says, logged per window.
+
+        Built from the same cached window ``desk_read`` composes from and
+        grounded the same way, so the matrix is point-in-time by construction
+        and never fetches — nothing reached from ``handle_api`` may block on
+        the network. A window that has not been fetched yet, or one that
+        arrived with an error, is named through ``news_error`` exactly as the
+        read names it: zero coverage on a broken feed is not a quiet tape.
+
+        The row is logged once per window rather than once per call, so the
+        registry carries the history of the record rather than a row per page
+        refresh.
+        """
+        from qlab.news.grounding import ground
+        from qlab.news.matrix import build_matrix
+        from qlab.news.providers.macro import upcoming
+
+        window = self.desk_news_window()
+        universe = list(self.mandate.universe_whitelist)
+        as_of = date.today().isoformat()
+        provider_name = str(window.get("provider_name") or "synthetic")
+        grounded = ground(
+            list(window.get("items") or []),
+            as_of=datetime.now(timezone.utc).isoformat(),
+            provider=provider_name, universe=universe)
+        # The look-ahead is hand-maintained and refuses loudly once it runs
+        # out. That refusal must not take the matrix down with it — coverage is
+        # a fact about the window, not about the yaml — but it is carried
+        # verbatim, because "no releases ahead" and "nobody has extended the
+        # calendar" are different claims and only one of them is about markets.
+        calendar_error = None
+        try:
+            events = upcoming(datetime.now(timezone.utc))
+        except RuntimeError as exc:
+            events, calendar_error = [], str(exc)
+        matrix = build_matrix(grounded.claims, universe, as_of, events)
+        payload = matrix.to_dict()
+        payload["provider"] = provider_name
+        news_error = window.get("error")
+        if news_error:
+            payload["news_error"] = str(news_error)[:400]
+        if calendar_error:
+            payload["calendar_error"] = calendar_error
+        with self._matrix_lock:
+            previous = next(
+                (
+                    r for r in self.registry.list_runs(limit=100)
+                    if r.get("kind") == "qualitative_matrix"
+                ),
+                None,
+            )
+            spec = previous.get("spec") if isinstance(previous, dict) else None
+            logged = spec.get("matrix") if isinstance(spec, dict) else None
+            last_hash = (logged or {}).get("window_hash") \
+                if isinstance(logged, dict) else None
+            if last_hash != matrix.window_hash:
+                payload["run_id"] = self.registry.log_run(
+                    "qualitative_matrix", {"matrix": matrix.to_dict()})
+            else:
+                payload["run_id"] = previous.get("run_id")
+        return payload
 
     def news_provider_for(self, offline: bool) -> tuple[str, ...]:
         """Which news providers this desk should read, in order, and why.
@@ -4830,6 +4921,12 @@ def handle_api(session: UISession, method: str, path: str,
         # /api/lab/research.predictor_board, which is owner-gated: reading the
         # evidence and producing it are different authorities.
         return 200, session.predictor_board_detail()
+
+    if method == "GET" and path == "/api/research/qualitative":
+        # Read-only over the window already fetched: composing the matrix never
+        # touches the network, so it is safe under the dispatch lock.
+        offline = _qbool(query, "offline", session.offline_default)
+        return 200, session.qualitative_matrix(offline)
 
     if method == "GET" and path == "/api/workforce":
         # The same summary Atlas reasons from, so the operator and the manager

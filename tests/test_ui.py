@@ -5024,3 +5024,38 @@ def test_a_partial_member_is_archived_as_a_window_not_as_a_failure(
     assert payload["returned"] == 1
     assert payload["error"] is None
     assert "BLS" in payload["outcome"] and "403" in payload["outcome"]
+
+
+def test_the_qualitative_matrix_is_served_and_logged_once_per_window(session):
+    status, out = handle_api(session, "GET", "/api/research/qualitative", {}, {})
+    assert status == 200 and set(out["rows"]) == set(session.mandate.universe_whitelist)
+    first = [r for r in session.registry.list_runs(20) if r["kind"] == "qualitative_matrix"]
+    handle_api(session, "GET", "/api/research/qualitative", {}, {})
+    again = [r for r in session.registry.list_runs(20) if r["kind"] == "qualitative_matrix"]
+    assert len(again) == len(first) == 1
+
+
+def test_an_exhausted_release_calendar_is_named_not_silently_empty(session, monkeypatch):
+    """`upcoming()` refuses loudly once its hand-maintained calendar runs out.
+    The matrix must still be built — coverage is a fact about the window, not
+    about the yaml — but with the gap named rather than rendered as 'no
+    releases ahead', which is a different claim."""
+    from qlab.news.providers import macro
+
+    monkeypatch.setattr(macro, "load_news_sources", lambda: {"calendar": [
+        {"name": "CPI (stale)", "when": "2020-01-02T12:30:00+00:00",
+         "tickers": ["BNDW"], "source": "BLS"}]})
+    status, out = handle_api(session, "GET", "/api/research/qualitative", {}, {})
+    assert status == 200
+    assert "exhausted" in out["calendar_error"]
+    assert all(row["days_to_next_release"] is None for row in out["rows"].values())
+    context = session.atlas_context(True)
+    assert "exhausted" in context["qualitative_matrix"]["calendar_error"]
+
+
+def test_the_reasoner_gets_matrix_counts_and_not_archive_ids(session):
+    context = session.atlas_context(True)
+    rows = context["qualitative_matrix"]["rows"]
+    assert set(rows) == set(session.mandate.universe_whitelist)
+    ticker = sorted(rows)[0]
+    assert "coverage" in rows[ticker] and "claim_keys" not in rows[ticker]

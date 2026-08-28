@@ -137,3 +137,16 @@ def test_a_short_column_is_a_loud_failure_not_a_quiet_window(sec, monkeypatch):
     monkeypatch.setitem(SUBMISSIONS["filings"]["recent"], "form", ["8-K"])
     with pytest.raises(ValueError, match="zip"):
         edgar.fetch(datetime(2026, 8, 28, tzinfo=timezone.utc), ("QQQ",))
+
+
+def test_a_duplicated_issuer_in_one_fund_is_still_one_record(sec, monkeypatch):
+    """A config that lists the fund's own symbol, or a ticker twice, must not
+    double the evidence — the request cache dedupes across funds, this dedupes
+    within one."""
+    monkeypatch.setattr(
+        edgar, "load_news_sources",
+        lambda: {"edgar": {"issuers": {"QQQ": ["QQQ", "AAPL", "aapl"]}}})
+    items = edgar.fetch(datetime(2026, 8, 28, tzinfo=timezone.utc), ("QQQ",))
+    keys = [(i.headline, i.url) for i in items]
+    assert len(keys) == len(set(keys))
+    assert any(i.headline.startswith("8-K") for i in items)

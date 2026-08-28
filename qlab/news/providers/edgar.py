@@ -96,7 +96,7 @@ def _issuers_for(universe: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
     out: dict[str, tuple[str, ...]] = {}
     for name in universe:
         listed = tuple(str(t).upper() for t in config.get(name, ()))
-        out[name] = (name.upper(), *listed)
+        out[name] = tuple(dict.fromkeys((name.upper(), *listed)))
     return out
 
 

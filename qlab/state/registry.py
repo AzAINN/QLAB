@@ -1024,6 +1024,20 @@ class Registry:
     def list_runs(self, limit: int = 20) -> list[dict]:
         return self._rows("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", [limit])
 
+    def newest_run_of_kind(self, kind: str) -> dict | None:
+        """The most recent run of one kind, or None if that kind never ran.
+
+        Read-only, and deliberately not `list_runs` plus a filter: a desk logs
+        solves and backtests continuously, so scanning the newest N runs of any
+        kind stops finding the last board or matrix as soon as N others have
+        landed since — and a caller checking "have I already logged this" then
+        re-logs what it already has.
+        """
+        rows = self._rows(
+            "SELECT * FROM runs WHERE kind=? ORDER BY created_at DESC LIMIT 1",
+            [str(kind)])
+        return rows[0] if rows else None
+
     def report(self, run_id: str) -> dict:
         return {
             "run": self._rows("SELECT * FROM runs WHERE run_id=?", [run_id]),

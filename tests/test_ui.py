@@ -5025,14 +5025,80 @@ def test_a_partial_member_is_archived_as_a_window_not_as_a_failure(
     assert payload["error"] is None
     assert "BLS" in payload["outcome"] and "403" in payload["outcome"]
 
+def _pinned_upcoming(monkeypatch, tickers):
+    """A fixed look-ahead. The real one reads a hand-maintained yaml against
+    today's date, so a test that used it would start failing on a calendar
+    edit rather than on a code change."""
+    from qlab.news.providers import macro
 
-def test_the_qualitative_matrix_is_served_and_logged_once_per_window(session):
+    monkeypatch.setattr(macro, "upcoming", lambda as_of, horizon_days=14: [
+        {"name": "FOMC statement", "when": "2026-09-17T18:00:00+00:00",
+         "days_ahead": 7, "tickers": list(tickers), "source": "Federal Reserve"}])
+
+
+def _push_window(session, headlines, ticker):
+    """Publish a news window the way ``fetch_desk_news`` publishes one."""
+    from qlab.news.feed import NewsItem
+
+    published = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    window = {
+        "items": [NewsItem(source=f"reuters.com/{n}", published=published,
+                           headline=headline, summary="", url=f"https://x/{n}",
+                           tickers=(ticker,), provider="gdelt")
+                  for n, headline in enumerate(headlines)],
+        "outcomes": {"gdelt": "ok"}, "providers": ["gdelt"],
+        "provider": "gdelt", "provider_name": "gdelt",
+        "as_of": datetime.now(timezone.utc).isoformat(), "error": None,
+    }
+    with session._news_lock:
+        session._desk_news = window
+    return window
+
+
+class _FixedDate:
+    """`date` with a pinned `today()`, so a second call can be a second day."""
+
+    def __init__(self, iso):
+        self._iso = iso
+
+    def today(self):
+        return date.fromisoformat(self._iso)
+
+    def fromisoformat(self, iso):
+        return date.fromisoformat(iso)
+
+
+def test_the_qualitative_matrix_is_served_and_logged_once_per_window(
+        session, monkeypatch):
+    """One row per WINDOW, and `as_of` is not part of what a window is.
+
+    The discriminating case is the same window read on a later day: the spec
+    differs, so `log_run`'s content hash collapses nothing, and only the
+    window-hash guard stops the registry accumulating a row per day of a tape
+    that never moved.
+    """
+    ticker = session.mandate.universe_whitelist[0]
+    _pinned_upcoming(monkeypatch, [ticker])
+    _push_window(session, ["gold holds its gain after the auction"], ticker)
+
     status, out = handle_api(session, "GET", "/api/research/qualitative", {}, {})
     assert status == 200 and set(out["rows"]) == set(session.mandate.universe_whitelist)
+    assert out["rows"][ticker]["coverage"] == 1
+    assert out["rows"][ticker]["days_to_next_release"] == 7
     first = [r for r in session.registry.list_runs(20) if r["kind"] == "qualitative_matrix"]
-    handle_api(session, "GET", "/api/research/qualitative", {}, {})
+
+    monkeypatch.setattr(ui_server, "date", _FixedDate("2026-09-01"))
+    _, same = handle_api(session, "GET", "/api/research/qualitative", {}, {})
     again = [r for r in session.registry.list_runs(20) if r["kind"] == "qualitative_matrix"]
+    assert same["run_id"] == out["run_id"]
     assert len(again) == len(first) == 1
+
+    # A different window is a different observation and does get its own row.
+    _push_window(session, ["oil slips as OPEC delays the quota decision"], ticker)
+    _, moved = handle_api(session, "GET", "/api/research/qualitative", {}, {})
+    assert moved["run_id"] != out["run_id"]
+    assert len([r for r in session.registry.list_runs(20)
+                if r["kind"] == "qualitative_matrix"]) == 2
 
 
 def test_an_exhausted_release_calendar_is_named_not_silently_empty(session, monkeypatch):
@@ -5059,3 +5125,17 @@ def test_the_reasoner_gets_matrix_counts_and_not_archive_ids(session):
     assert set(rows) == set(session.mandate.universe_whitelist)
     ticker = sorted(rows)[0]
     assert "coverage" in rows[ticker] and "claim_keys" not in rows[ticker]
+
+
+def test_a_broken_matrix_does_not_take_the_whole_reasoner_context_down(
+        session, monkeypatch):
+    """`atlas_judgment_request` drops the entire request when composing the
+    context raises, so every surface on it is wrapped — the regime panel two
+    lines up for exactly this reason."""
+    def boom(offline):
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr(session, "qualitative_matrix", boom)
+    context = session.atlas_context(True)
+    assert context["qualitative_matrix"]["rows"] == {}
+    assert "registry unreadable" in context["qualitative_matrix"]["error"]

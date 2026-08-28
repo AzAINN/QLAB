@@ -2185,6 +2185,13 @@ class UISession:
             })
 
         news = self.news_payload(offline)
+        try:
+            matrix_entry = self._matrix_for_reasoner(offline)
+        except Exception as exc:
+            # Same rule the panel above follows: `atlas_judgment_request`
+            # drops the whole request when composing this raises, so one
+            # broken surface must arrive as a named gap, not as no context.
+            matrix_entry = {"error": str(exc)[:200], "rows": {}}
         return {
             "as_of": self._now_iso(),
             # The gate's own view, carried verbatim so the reasoner can see
@@ -2230,7 +2237,7 @@ class UISession:
             # The same counts, per name, as a table. Rows only: the claim keys
             # are archive ids a reasoner cannot resolve and must not cite, and
             # they stay on the route for a screen that can.
-            "qualitative_matrix": self._matrix_for_reasoner(offline),
+            "qualitative_matrix": matrix_entry,
             "news": {
                 "provider": news.get("provider"),
                 "error": news.get("error"),
@@ -3071,13 +3078,11 @@ class UISession:
         if calendar_error:
             payload["calendar_error"] = calendar_error
         with self._matrix_lock:
-            previous = next(
-                (
-                    r for r in self.registry.list_runs(limit=100)
-                    if r.get("kind") == "qualitative_matrix"
-                ),
-                None,
-            )
+            # Scoped to the kind in SQL: a desk that logged a hundred solves
+            # since the last matrix would fall off the end of any bounded scan
+            # of all runs, find nothing, and re-log — turning one row per
+            # window into one per window per day.
+            previous = self.registry.newest_run_of_kind("qualitative_matrix")
             spec = previous.get("spec") if isinstance(previous, dict) else None
             logged = spec.get("matrix") if isinstance(spec, dict) else None
             last_hash = (logged or {}).get("window_hash") \

@@ -84,27 +84,76 @@ def _view_number(value: object, field: str, index: int) -> float:
     return number
 
 
-def _verify_view_provenance(canonical_views: list[dict], excerpt: str) -> bool:
-    """Every view's quote must be grounded in the operator's source text.
+def _view_claims(value: object, index: int) -> list[str]:
+    """A view's cited archive claim keys: a non-empty list of non-empty keys."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(
+            f"view {index} field 'source_claims' must be a non-empty list "
+            "of claim keys"
+        )
+    return [_view_string(item, "source_claims", index) for item in value]
 
-    Returns False (unverified, but permitted) when no excerpt was supplied so
-    the audit trail is explicit; raises when an excerpt is supplied and a quote
-    is not a whitespace-normalized substring of it — a fabricated or
-    laundered quote cannot then reach the analyst's context.
+
+def _verify_view_provenance(
+    canonical_views: list[dict],
+    excerpt: str,
+    claim_keys: set[str] | None = None,
+) -> bool:
+    """Every view must be grounded — in the operator's text, or in the archive.
+
+    A view carrying ``source_quote`` is checked against ``excerpt`` as before.
+    A view carrying ``source_claims`` is checked against ``claim_keys``, the
+    claim keys of the current qualitative matrix: a rule-built view cites the
+    records it was counted from rather than pasting one of them.
+
+    Returns False (unverified, but permitted) when the ground truth is absent —
+    no excerpt supplied, or no matrix logged — so the audit trail is explicit;
+    raises when the ground truth exists and a view does not match it, so a
+    fabricated quote or an invented claim key cannot reach the analyst.
     """
     normalized_excerpt = " ".join(excerpt.split()).lower()
-    if not normalized_excerpt:
-        return False
+    known = {str(key) for key in (claim_keys or ())}
+    verified = True
     for index, view in enumerate(canonical_views, start=1):
+        claims = view.get("source_claims")
+        if claims:
+            if not known:
+                verified = False
+                continue
+            unknown = sorted({str(claim) for claim in claims} - known)
+            if unknown:
+                raise ValueError(
+                    f"view {index} cites claim keys {unknown} not in the "
+                    "archive; a rule-built view must cite the qualitative "
+                    "matrix it was counted from"
+                )
+            continue
+        if not normalized_excerpt:
+            verified = False
+            continue
         quote = " ".join(str(view.get("source_quote", "")).split()).lower()
         if not quote or quote not in normalized_excerpt:
             raise ValueError(
                 f"view {index} source_quote is not found in the supplied "
                 "excerpt; every risk view must quote the operator's text"
             )
-    return True
+    return verified
 
 
+def _archive_claim_keys(registry) -> set[str]:
+    """Claim keys of the newest logged qualitative matrix — read-only, may be empty."""
+    run = registry.newest_run_of_kind("qualitative_matrix")
+    spec = run.get("spec") if isinstance(run, dict) else None
+    logged = spec.get("matrix") if isinstance(spec, dict) else None
+    rows = logged.get("rows") if isinstance(logged, dict) else None
+    keys: set[str] = set()
+    for row in (rows or {}).values():
+        if isinstance(row, dict):
+            keys.update(str(key) for key in row.get("claim_keys") or ())
+    return keys
+
+
+_PROVENANCE_FIELDS = {"source_quote", "source_claims"}
 _CORROBORATION_HAIRCUT = 0.5
 
 
@@ -224,17 +273,15 @@ def _validated_risk_views(
             f"got {len(views)}"
         )
 
+    # Provenance is required but may take either shape: an operator's quote,
+    # or the archive claim keys a rule counted. Both are checked later against
+    # their own ground truth; neither is optional.
     fields_by_type = {
-        "vol": {
-            "type", "ticker", "target_vol", "confidence", "source_quote",
-        },
+        "vol": {"type", "ticker", "target_vol", "confidence"},
         "corr": {
             "type", "ticker_a", "ticker_b", "target_corr", "confidence",
-            "source_quote",
         },
-        "tail": {
-            "type", "ticker", "direction", "confidence", "source_quote",
-        },
+        "tail": {"type", "ticker", "direction", "confidence"},
     }
     typed: list[VolView | CorrView | TailView] = []
     canonical: list[dict] = []
@@ -262,7 +309,7 @@ def _validated_risk_views(
             )
 
         required = fields_by_type[view_type]
-        extra = set(raw) - required
+        extra = set(raw) - required - _PROVENANCE_FIELDS
         if extra:
             return_fields = sorted(
                 key for key in extra
@@ -289,9 +336,17 @@ def _validated_risk_views(
                 f"view {index} confidence must be in "
                 f"(0, {_MAX_VIEW_CONFIDENCE}], got {confidence}"
             )
-        source_quote = _view_string(
-            raw["source_quote"], "source_quote", index
-        )
+        provenance: dict[str, object] = {}
+        if "source_quote" in raw:
+            provenance["source_quote"] = _view_string(
+                raw["source_quote"], "source_quote", index
+            )
+        if "source_claims" in raw:
+            provenance["source_claims"] = _view_claims(
+                raw["source_claims"], index
+            )
+        if not provenance:
+            raise ValueError("a view must carry source_quote or source_claims")
 
         if view_type == "vol":
             ticker = _view_string(raw["ticker"], "ticker", index)
@@ -304,7 +359,7 @@ def _validated_risk_views(
                 "ticker": ticker,
                 "target_vol": target_vol,
                 "confidence": confidence,
-                "source_quote": source_quote,
+                **provenance,
             })
         elif view_type == "corr":
             ticker_a = _view_string(raw["ticker_a"], "ticker_a", index)
@@ -321,7 +376,7 @@ def _validated_risk_views(
                 "ticker_b": ticker_b,
                 "target_corr": target_corr,
                 "confidence": confidence,
-                "source_quote": source_quote,
+                **provenance,
             })
         else:
             ticker = _view_string(raw["ticker"], "ticker", index)
@@ -334,7 +389,7 @@ def _validated_risk_views(
                 "ticker": ticker,
                 "direction": direction,
                 "confidence": confidence,
-                "source_quote": source_quote,
+                **provenance,
             })
 
     return typed, canonical
@@ -1262,8 +1317,10 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         ``excerpt`` is the operator-supplied source text. When provided, every
         view's ``source_quote`` must be a whitespace-normalized substring of
         it — a deterministic provenance gate so the quarantine does not rest on
-        the extractor's prompt alone. The audit run records whether provenance
-        was verified.
+        the extractor's prompt alone. A rule-built view may instead carry
+        ``source_claims``, archive claim keys checked against the newest logged
+        qualitative matrix. Every view must carry one of the two. The audit run
+        records whether provenance was verified.
         """
         st.budget.charge("research.apply_views")
         if not isinstance(dry, bool):
@@ -1276,7 +1333,16 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         if budget <= 0.0:
             raise ValueError("kl_budget must be positive")
         typed_views, canonical_views = _validated_risk_views(views)
-        provenance_verified = _verify_view_provenance(canonical_views, excerpt)
+        # The archive is read only when a view actually cites it, so a quoted
+        # view costs no registry read.
+        claim_keys = (
+            _archive_claim_keys(st.registry)
+            if any(v.get("source_claims") for v in canonical_views)
+            else None
+        )
+        provenance_verified = _verify_view_provenance(
+            canonical_views, excerpt, claim_keys
+        )
 
         d = check_as_of(as_of)
         tickers = load_universe().tickers(universe)

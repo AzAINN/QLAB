@@ -434,3 +434,59 @@ def test_news_fetch_returns_a_partial_window_rather_than_failing_the_agent(
     assert out["items"][0]["headline"] == "GDP, second estimate"
     assert out["excerpt"]
     assert out["partial"] == {"BLS": "HTTP Error 403: Forbidden"}
+
+
+def test_a_view_may_cite_archive_claims_instead_of_an_excerpt(reg):
+    """Provenance can trace to logged claim keys, not only a pasted quote."""
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    reg.log_run("qualitative_matrix", {"matrix": {
+        "as_of": "2021-06-30", "window_hash": "w",
+        "rows": {"ACWI": {"ticker": "ACWI", "coverage": 1, "publishers": 1,
+                          "corroborated": 1, "primary_docs": 1,
+                          "days_to_next_release": None,
+                          "claim_keys": ["k1"]}}}})
+
+    cited = {"type": "tail", "ticker": "ACWI", "direction": "fatter",
+             "confidence": 0.3, "source_claims": ["k1"]}
+    ok = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "views": [cited]},
+        offline=True)
+    assert ok["provenance_verified"] is True
+
+    invented = dict(cited, source_claims=["nope"])
+    with pytest.raises(ValueError, match="not in the archive"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core", "views": [invented]},
+            offline=True)
+
+
+def test_a_view_carrying_neither_quote_nor_claims_is_refused(reg):
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    with pytest.raises(ValueError,
+                       match="must carry source_quote or source_claims"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core",
+             "views": [{"type": "tail", "ticker": "ACWI",
+                        "direction": "fatter", "confidence": 0.3}]},
+            offline=True)
+
+
+def test_cited_claims_are_unverified_when_no_matrix_has_been_logged(reg):
+    """No archive to check against is 'unverified', as a missing excerpt is."""
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    out = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core",
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3, "source_claims": ["k1"]}]},
+        offline=True)
+    assert out["provenance_verified"] is False

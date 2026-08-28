@@ -311,3 +311,10 @@ def test_the_desk_window_asks_for_an_instant_not_a_calendar_date():
     assert isinstance(as_of, datetime)
     now = datetime.now(timezone.utc)
     assert (now - as_of).total_seconds() < 60
+
+
+def test_every_registered_provider_is_named_in_the_collision_guard():
+    # _FIRST_PARTY is what plugin discovery refuses to let an entry point
+    # shadow. A first-party provider registered but missing from it could be
+    # replaced by a plugin under its own name, so the two must agree.
+    assert set(news.PROVIDERS) <= news._FIRST_PARTY

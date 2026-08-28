@@ -287,3 +287,14 @@ calendar:
   - {name: FOMC statement, when: "2026-09-17T18:00:00+00:00", tickers: [BNDW, TLT, IEF], source: Federal Reserve}
   - {name: CPI (August), when: "2026-09-11T12:30:00+00:00", tickers: [TIP, BNDW], source: BLS}
   - {name: Employment situation (August), when: "2026-09-04T12:30:00+00:00", tickers: [BNDW, ACWI], source: BLS}
+
+# GDELT: global press coverage, keyless and English-only, as the many-publisher
+# secondary source. Each article's domain is its source, so corroboration by two
+# outlets is two publishers and not one wire twice.
+gdelt:
+  rules:
+    - {query: "gold OR bullion", tickers: [GLD]}
+    - {query: "crude oil OR OPEC", tickers: [USO, GSG, DBC]}
+    - {query: "treasury yields OR federal reserve", tickers: [TLT, IEF, BNDW]}
+    - {query: "emerging markets debt", tickers: [EMB, EEM]}
+    - {query: "real estate investment trust", tickers: [VNQ, RWO]}

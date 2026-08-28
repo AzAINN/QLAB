@@ -682,6 +682,27 @@ def _validate_feeds(feeds: Any, field: str, label: str) -> None:
 
 
 
+def _validate_gdelt_rules(rules: Any) -> None:
+    """Every GDELT rule must say what to search for and who it is about.
+
+    The provider indexes both fields directly, so a rule missing either is a
+    runtime failure on the first live call; it is cheaper to refuse the file.
+    """
+    if not isinstance(rules, list) or not rules:
+        raise ValueError(
+            "news sources config field 'gdelt.rules' must be a non-empty list"
+        )
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise ValueError(f"gdelt rule {index} must be a mapping")
+        query = rule.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError(
+                f"gdelt rule {index} field 'query' must be a non-empty string"
+            )
+        _validate_ticker_list(rule.get("tickers"), f"gdelt rule {index} tickers")
+
+
 def _validate_calendar(calendar: Any) -> None:
     """Every scheduled release must say what, when, for whom, and by whom.
 
@@ -718,6 +739,12 @@ def _validate_config(raw: Any) -> None:
         if not isinstance(macro, dict):
             raise ValueError("news sources config field 'macro' must be a mapping")
         _validate_feeds(macro.get("feeds"), "macro.feeds", "macro news feed")
+
+    gdelt = raw.get("gdelt")
+    if gdelt is not None:
+        if not isinstance(gdelt, dict):
+            raise ValueError("news sources config field 'gdelt' must be a mapping")
+        _validate_gdelt_rules(gdelt.get("rules"))
 
     calendar = raw.get("calendar")
     if calendar is not None:

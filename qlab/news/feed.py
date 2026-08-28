@@ -315,9 +315,22 @@ def _fetch_rss(
     _as_of: datetime,
     universe: tuple[str, ...],
 ) -> list[NewsItem]:
-    config = load_news_sources()
+    return _fetch_rss_feeds(load_news_sources()["feeds"], _as_of, universe)
+
+
+def _fetch_rss_feeds(
+    feeds: list[dict],
+    as_of: datetime,
+    universe: tuple[str, ...],
+) -> list[NewsItem]:
+    """Read an explicit list of feed definitions with the one RSS parser.
+
+    Split out of :func:`_fetch_rss` so a provider carrying its own curated
+    feeds — the official macro releases — shares this parser instead of
+    growing a second one that could drift from it.
+    """
     items: list[NewsItem] = []
-    for feed in config["feeds"]:
+    for feed in feeds:
         source = feed["name"]
         url = feed["url"]
         request = urllib.request.Request(

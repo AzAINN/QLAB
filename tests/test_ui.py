@@ -4871,3 +4871,11 @@ def test_a_fired_trigger_is_announced_in_the_chat(session):
     chat = session.registry.read_events_of_kind("atlas_message", 10)
     text = chat[0]["payload"]["text"] if chat else ""
     assert "regime_flip" in text and "regime_review" in text, text
+
+
+def test_upcoming_releases_are_served_and_dated(session, monkeypatch):
+    from qlab.news.providers import macro
+    monkeypatch.setattr(macro, "load_news_sources", lambda: {"calendar": [
+        {"name": "FOMC", "when": "2999-01-01T18:00:00+00:00", "tickers": ["TLT"]}]})
+    status, out = handle_api(session, "GET", "/api/news/upcoming", {}, {})
+    assert status == 200 and out["upcoming"] == [], "beyond the 14-day horizon"

@@ -266,3 +266,24 @@ edgar:
   issuers:
     QQQ: [AAPL, MSFT, NVDA, AMZN, META, AVGO, GOOGL, TSLA]
     SPY: [AAPL, MSFT, NVDA, AMZN, META, BRK-B, GOOGL, JPM]
+
+# Official releases: the publisher IS the event, so every record here is
+# primary-tier by name (see grounding.PRIMARY_SOURCE_MARKERS).
+macro:
+  feeds:
+    - name: BLS
+      url: https://www.bls.gov/feed/bls_latest.rss
+      tickers: [TIP, BNDW]
+    - name: BEA
+      url: https://apps.bea.gov/rss/rss.xml
+      tickers: [ACWI, BNDW]
+    - name: US Treasury
+      url: https://home.treasury.gov/news/press-releases/rss
+      tickers: [TLT, IEF, BNDW]
+
+# Scheduled releases. Dated in the future on purpose and never served as
+# news — they are what Atlas reads as "what is coming". Maintain per quarter.
+calendar:
+  - {name: FOMC statement, when: "2026-09-17T18:00:00+00:00", tickers: [BNDW, TLT, IEF], source: Federal Reserve}
+  - {name: CPI (August), when: "2026-09-11T12:30:00+00:00", tickers: [TIP, BNDW], source: BLS}
+  - {name: Employment situation (August), when: "2026-09-04T12:30:00+00:00", tickers: [BNDW, ACWI], source: BLS}

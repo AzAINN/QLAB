@@ -64,7 +64,10 @@ MIN_ARCHIVE_ITEMS = MIN_SIGNAL_ITEMS
 # archive is not evidence of silence on the wire. The edgar provider tags every
 # filing with the fund it was read for, so it never uses the lane — it is named
 # here so a future untagged filing record is kept rather than silently dropped.
-MACRO_LANE_PROVIDERS = frozenset({"alpaca", "edgar"})
+# The macro provider shares that rss parser, so it too drops untagged entries
+# one layer early today; it is named for edgar's reason — an official release
+# naming no holding is macro context, and must not be dropped as noise.
+MACRO_LANE_PROVIDERS = frozenset({"alpaca", "edgar", "macro"})
 
 EMPTY_WINDOW_FINGERPRINT = "empty"
 

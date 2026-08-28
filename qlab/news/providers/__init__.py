@@ -10,6 +10,6 @@ def register_first_party(registry: dict) -> None:
     import from it exists — these modules import ``feed``, so registering any
     earlier closes the cycle on a half-built module.
     """
-    from qlab.news.providers import edgar
+    from qlab.news.providers import edgar, macro
 
-    registry.update({"edgar": edgar.fetch})
+    registry.update({"edgar": edgar.fetch, "macro": macro.fetch})

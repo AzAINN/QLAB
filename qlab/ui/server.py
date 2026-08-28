@@ -4714,6 +4714,13 @@ def handle_api(session: UISession, method: str, path: str,
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.news_search(question=question, offline=offline)
 
+    if method == "GET" and path == "/api/news/upcoming":
+        # Scheduled releases, not news: future-dated by definition, so they
+        # never travel through the point-in-time window.
+        from qlab.news.providers.macro import upcoming
+
+        return 200, {"upcoming": upcoming(datetime.now(timezone.utc))}
+
     if method == "GET" and path == "/api/news":
         offline = _qbool(query, "offline", session.offline_default)
         return 200, session.news_payload(offline)

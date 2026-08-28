@@ -14,6 +14,7 @@ compares instants rather than text.
 from __future__ import annotations
 
 import json
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,31 @@ _TIMEOUT_S = 10
 # The request window. `fetch_news` trims every record to the caller's own
 # lookback afterwards; this only bounds what is asked for.
 _LOOKBACK = timedelta(hours=48)
+_TIMESPAN = f"{int(_LOOKBACK.total_seconds() // 3600)}h"
+# GDELT's per-request ceiling. Named because it bounds every window the desk
+# shows, and a silent cap on a news feed reads as "that is all there was".
+_MAX_RECORDS = 75
+_MIN_INTERVAL_S = 1.0                # GDELT answers a burst with a non-JSON body
+_last_request = 0.0
+
+
+def _get_json(url: str) -> dict:
+    global _last_request
+    wait = _MIN_INTERVAL_S - (time.monotonic() - _last_request)
+    if wait > 0:
+        time.sleep(wait)
+    # User-Agent only, as feed._fetch_rss sends. urlopen does not decode
+    # content encodings, so negotiating gzip would hand compressed bytes
+    # straight to json.loads on the first live call.
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "qlab-news/0.1 (+https://github.com/qlab)"})
+    response = urllib.request.urlopen(request, timeout=_TIMEOUT_S)
+    try:
+        payload = response.read()
+    finally:
+        response.close()
+    _last_request = time.monotonic()
+    return json.loads(payload)
 
 
 def fetch(as_of: datetime, universe: tuple[str, ...]) -> list[NewsItem]:
@@ -45,32 +71,42 @@ def fetch(as_of: datetime, universe: tuple[str, ...]) -> list[NewsItem]:
         # the filter this desk asked for.
         params = urllib.parse.urlencode({
             "query": query, "mode": "artlist", "format": "json",
-            "maxrecords": 75, "timespan": "48h", "sort": "datedesc"}, safe=":")
-        request = urllib.request.Request(
-            f"{_DOC_URL}?{params}",
-            # User-Agent only. urlopen does not decode content encodings, so
-            # negotiating gzip would hand compressed bytes to json.loads.
-            headers={"User-Agent": "qlab-news/0.1 (+https://github.com/qlab)"})
-        response = urllib.request.urlopen(request, timeout=_TIMEOUT_S)
-        try:
-            payload = json.loads(response.read())
-        finally:
-            response.close()
+            "maxrecords": _MAX_RECORDS, "timespan": _TIMESPAN,
+            "sort": "datedesc"}, safe=":")
+        payload = _get_json(f"{_DOC_URL}?{params}")
         for art in payload.get("articles", []):
             # GDELT indexes the world's press; the desk reads one language,
-            # and an untranslated headline is not evidence it can weigh.
-            if str(art.get("language", "")).lower() != "english":
+            # and an untranslated headline is not evidence it can weigh. Only a
+            # field that is PRESENT and non-English drops the article: the query
+            # already carries sourcelang:english, so reading a dropped or renamed
+            # field as "not english" would empty the window on a schema change —
+            # a fact about the payload, not about the press.
+            lang = art.get("language")
+            if lang is not None and str(lang).lower() != "english":
                 continue
             seen = datetime.strptime(
                 art["seendate"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
             if seen >= as_of or seen < as_of - _LOOKBACK:
                 continue
+            headline = str(art.get("title") or "").strip()
+            url = str(art.get("url") or "").strip()
+            if not url:
+                # No silent fallback: a secondary-tier article nobody can open
+                # corroborates nothing, and an unopenable row in the archive is
+                # evidence the desk cannot check.
+                raise ValueError(
+                    f"gdelt returned an article with no url: {headline!r}")
+            # One article matched by two rules is emitted twice, once per ticker
+            # set. That is deliberate: archive.py collapses the pair by
+            # `content_hash` — which covers source, url, timestamp and text but
+            # not tickers — and unions the ticker edges, so the duplicate is the
+            # mapping, never the evidence.
             dated.append((seen, NewsItem(
                 source=str(art.get("domain") or "gdelt"),
                 published=seen.isoformat(),
-                headline=str(art.get("title") or "").strip(),
+                headline=headline,
                 summary="",
-                url=str(art.get("url") or ""),
+                url=url,
                 tickers=tickers,
                 provider="gdelt",
             )))

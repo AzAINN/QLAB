@@ -16,6 +16,18 @@ ARTICLES = {"articles": [
 ]}
 
 
+@pytest.fixture(autouse=True)
+def _no_throttle(monkeypatch):
+    """Neutralise the inter-request pace and its module-level clock.
+
+    The throttle exists for the live API. Left running it would make every
+    test in this file wait on the one before it — the cross-test timing state
+    the suite is meant to be free of — for no assertion in return.
+    """
+    monkeypatch.setattr(gdelt, "_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(gdelt, "_last_request", 0.0)
+
+
 class _Resp:
     def __init__(self, body: bytes):
         self._body = body
@@ -124,11 +136,60 @@ def test_config_holds_gdelt_rules_to_their_contract():
 
 
 def test_the_shipped_config_names_gdelt_rules_for_held_tickers():
+    from qlab.trader.mandate import load_mandate
+
+    held = {t.upper() for t in load_mandate().universe_whitelist}
     rules = news.load_news_sources()["gdelt"]["rules"]
-    assert rules and all(rule["query"].strip() and rule["tickers"] for rule in rules)
+    assert rules
+    for index, rule in enumerate(rules):
+        assert rule["query"].strip(), f"rule {index} has no query"
+        # A rule naming nothing the desk holds is dead on arrival: fetch skips
+        # it every time, so it costs a reader's attention and buys no coverage.
+        named = {t.upper() for t in rule["tickers"]}
+        assert named & held, f"rule {index} names no held ticker: {sorted(named)}"
 
 
 def test_gdelt_archives_stories_that_name_no_holding():
     from qlab.news import archive
 
     assert archive.macro_lane_supported("gdelt")
+
+
+def test_an_article_missing_the_language_field_is_kept(monkeypatch):
+    # The query already carries sourcelang:english. Reading a missing field as
+    # "not english" would empty the window on a GDELT schema change — an empty
+    # window that is a fact about the payload, not about the press.
+    monkeypatch.setattr(gdelt, "load_news_sources", lambda: {"gdelt": {"rules": [
+        {"query": "gold OR bullion", "tickers": ["GLD"]}]}})
+    _payload_urlopen(monkeypatch, {"articles": [
+        {"url": "https://www.reuters.com/markets/gold-x", "title": "Gold climbs",
+         "seendate": "20260827T140000Z", "domain": "reuters.com"}]})
+    items = gdelt.fetch(datetime(2026, 8, 28, tzinfo=timezone.utc), ("GLD",))
+    assert [i.source for i in items] == ["reuters.com"]
+
+
+def test_an_article_without_a_url_is_refused_by_its_headline(monkeypatch):
+    # A secondary-tier article nobody can open corroborates nothing.
+    monkeypatch.setattr(gdelt, "load_news_sources", lambda: {"gdelt": {"rules": [
+        {"query": "gold OR bullion", "tickers": ["GLD"]}]}})
+    _payload_urlopen(monkeypatch, {"articles": [
+        {"title": "Gold climbs as yields fall", "seendate": "20260827T140000Z",
+         "domain": "reuters.com", "language": "English"}]})
+    with pytest.raises(ValueError, match=r"Gold climbs as yields fall"):
+        gdelt.fetch(datetime(2026, 8, 28, tzinfo=timezone.utc), ("GLD",))
+
+
+def test_one_article_matched_by_two_rules_keeps_one_identity(monkeypatch):
+    # Two emissions, one story: the archive collapses them by content_hash and
+    # unions the ticker edges, so the duplicate is the ticker mapping, not the
+    # evidence.
+    from qlab.news.grounding import content_hash
+
+    monkeypatch.setattr(gdelt, "load_news_sources", lambda: {"gdelt": {"rules": [
+        {"query": "gold OR bullion", "tickers": ["GLD"]},
+        {"query": "federal reserve", "tickers": ["TLT"]}]}})
+    _payload_urlopen(monkeypatch, {"articles": [ARTICLES["articles"][0]]})
+    items = gdelt.fetch(datetime(2026, 8, 28, tzinfo=timezone.utc), ("GLD", "TLT"))
+    assert len(items) == 2
+    assert content_hash(items[0]) == content_hash(items[1])
+    assert {i.tickers for i in items} == {("GLD",), ("TLT",)}

@@ -174,6 +174,18 @@ def test_apply_views_persists_applied_target_only_when_requested(reg):
             }
         ], "source_quote"),
         ([_tail_view() for _ in range(4)], "at most 3"),
+        ([{
+            "type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.3, "source_claims": [],
+        }], "source_claims' must be a non-empty list"),
+        ([{
+            "type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.3, "source_claims": "k1",
+        }], "source_claims' must be a non-empty list"),
+        ([{
+            "type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.3, "source_claims": [1],
+        }], "source_claims' must be a non-empty string"),
     ],
 )
 def test_apply_views_refuses_malformed_or_return_flavored_payloads_before_data(
@@ -490,3 +502,29 @@ def test_cited_claims_are_unverified_when_no_matrix_has_been_logged(reg):
                     "confidence": 0.3, "source_claims": ["k1"]}]},
         offline=True)
     assert out["provenance_verified"] is False
+
+
+def test_a_quote_riding_alongside_claims_is_still_checked_against_the_excerpt(reg):
+    """Citing the archive must not launder a fabricated quote into the spec."""
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    reg.log_run("qualitative_matrix", {"matrix": {
+        "as_of": "2021-06-30", "window_hash": "w",
+        "rows": {"ACWI": {"claim_keys": ["k1"]}}}})
+    excerpt = "Dealers report options markets imply unusually wide outcomes."
+    both = {"type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.3, "source_claims": ["k1"],
+            "source_quote": "options markets imply unusually wide outcomes"}
+    ok = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "views": [both],
+         "excerpt": excerpt}, offline=True)
+    assert ok["provenance_verified"] is True
+
+    fabricated = dict(both, source_quote="ACWI will rally hard next week")
+    with pytest.raises(ValueError, match="not found in the supplied excerpt"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core", "views": [fabricated],
+             "excerpt": excerpt}, offline=True)

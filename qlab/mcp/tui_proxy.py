@@ -274,7 +274,10 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         """Validate and apply dry research risk views through the owner.
 
         Pass the operator's source text as ``excerpt`` so every view's
-        ``source_quote`` is checked against it deterministically.
+        ``source_quote`` is checked against it deterministically. A rule-built
+        view may instead carry ``source_claims``, archive claim keys the owner
+        checks against the newest logged qualitative matrix; every view must
+        carry one of the two.
         """
         return lab("research.apply_views", {
             "as_of": as_of,

@@ -14,8 +14,10 @@ view types cannot carry direction and the matrix has none to give:
   confidence — coverage concentration is what the absorption ratio sees from
   the price side, stated from the record side.
 
-At most three views, the largest excess first: the KL budget downstream is
-finite and a rule that emitted ten would spend it on noise.
+At most three views, the largest confidence first, and at most one
+correlation view per sleeve (its widest coverage gap): the KL budget
+downstream is finite, and ranking the two rules on anything but their shared
+confidence scale would let one rule's units silently outrank the other's.
 """
 
 from __future__ import annotations
@@ -33,11 +35,20 @@ def views_from_matrix(
     baseline: dict[str, MatrixRow] | None,
     sleeves: dict[str, list[str]],
 ) -> list[dict]:
-    """Bounded, unsigned views the entropy-pooling tool accepts, by rule."""
+    """Bounded, unsigned views the entropy-pooling tool accepts, by rule.
+
+    ``baseline`` is the previous window's matrix, keyed by ticker. ``None``
+    treats the whole window as new — every primary document counts as excess —
+    which is right for a first window and wrong for any later one, so a
+    production caller must pass the previous window's rows.
+    """
     if not matrix.rows:
         raise ValueError(
             "a qualitative matrix with no rows cannot be read for views"
         )
+    # (confidence, view): one scale for both rules, so a strong correlation
+    # view can outrank a weak tail view. Ranking tail excess (an integer) against
+    # a coverage ratio (<= 1.0) made the correlation rule unreachable.
     candidates: list[tuple[float, dict]] = []
     base = baseline or {}
     for ticker, r in matrix.rows.items():
@@ -46,7 +57,7 @@ def views_from_matrix(
         excess = r.primary_docs - prior
         if excess >= 2 and r.corroborated >= excess:
             confidence = min(TAIL_CAP, 0.15 * excess)
-            candidates.append((excess, {
+            candidates.append((confidence, {
                 "type": "tail", "ticker": ticker, "direction": "fatter",
                 "confidence": round(confidence, 3),
                 "source_claims": list(r.claim_keys)}))
@@ -58,16 +69,22 @@ def views_from_matrix(
         if total < 4:
             continue
         top = max(rows, key=lambda x: x.coverage)
-        if top.coverage / total >= 0.75:
-            for other in rows:
-                if other.ticker == top.ticker:
-                    continue
-                candidates.append((top.coverage / total, {
-                    "type": "corr", "ticker_a": top.ticker,
-                    "ticker_b": other.ticker,
-                    "target_corr": _CORR_TARGET,
-                    "confidence": round(
-                        min(CORR_CAP, top.coverage / total - 0.5), 3),
-                    "source_claims": list(top.claim_keys)}))
+        share = top.coverage / total
+        if share >= 0.75:
+            # One view per sleeve, on its widest coverage gap: the same
+            # concentration restated against every member would spend the whole
+            # budget saying one thing.
+            others = [r for r in rows if r.ticker != top.ticker]
+            if not others:
+                continue
+            quietest = min(others, key=lambda x: x.coverage)
+            confidence = round(min(CORR_CAP, share - 0.5), 3)
+            candidates.append((confidence, {
+                "type": "corr", "ticker_a": top.ticker,
+                "ticker_b": quietest.ticker,
+                "target_corr": _CORR_TARGET,
+                "confidence": confidence,
+                "source_claims": list(top.claim_keys)}))
+    # Stable: equal confidences keep the order the rules produced them in.
     candidates.sort(key=lambda c: c[0], reverse=True)
     return [v for _, v in candidates[:MAX_VIEWS]]

@@ -116,6 +116,19 @@ def _verify_view_provenance(
     verified = True
     for index, view in enumerate(canonical_views, start=1):
         claims = view.get("source_claims")
+        # A view may carry both. Each field is then checked against its own
+        # ground truth: citing the archive must not smuggle an unchecked quote
+        # into the persisted spec.
+        if "source_quote" in view and normalized_excerpt:
+            quote = " ".join(str(view["source_quote"]).split()).lower()
+            if not quote or quote not in normalized_excerpt:
+                raise ValueError(
+                    f"view {index} source_quote is not found in the supplied "
+                    "excerpt; every risk view must quote the operator's text"
+                )
+        elif not claims:
+            # A quote with no excerpt to check it against is unverified.
+            verified = False
         if claims:
             if not known:
                 verified = False
@@ -127,16 +140,6 @@ def _verify_view_provenance(
                     "archive; a rule-built view must cite the qualitative "
                     "matrix it was counted from"
                 )
-            continue
-        if not normalized_excerpt:
-            verified = False
-            continue
-        quote = " ".join(str(view.get("source_quote", "")).split()).lower()
-        if not quote or quote not in normalized_excerpt:
-            raise ValueError(
-                f"view {index} source_quote is not found in the supplied "
-                "excerpt; every risk view must quote the operator's text"
-            )
     return verified
 
 

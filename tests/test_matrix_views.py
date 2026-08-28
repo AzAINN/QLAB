@@ -23,6 +23,7 @@ def test_excess_corroborated_primary_documents_fatten_the_tail_with_capped_confi
     tail = [v for v in views if v["type"] == "tail"]
     assert len(tail) == 1 and tail[0]["ticker"] == "TLT" and tail[0]["direction"] == "fatter"
     assert 0 < tail[0]["confidence"] <= 0.5
+    assert tail[0]["confidence"] == 0.45  # 0.15 per excess document, under the cap
     assert tail[0]["source_claims"] == ["a", "b", "c", "d"]
 
 
@@ -31,8 +32,10 @@ def test_no_rule_emits_a_return_view_and_quiet_records_emit_nothing():
     assert views_from_matrix(quiet, None, sleeves={}) == []
     loud = matrix([row(t, 5, 4, 3, 3, keys=("k",)) for t in ["A", "B", "C", "D", "E"]])
     views = views_from_matrix(loud, None, sleeves={})
-    assert len(views) <= 3
-    assert {v["type"] for v in views} <= {"tail", "corr", "vol"}
+    assert len(views) == 3
+    assert {v["type"] for v in views} <= {"tail", "corr"}
+    # Equal confidences keep the matrix's own row order, so the tie-break is fixed.
+    assert [v["ticker"] for v in views] == ["A", "B", "C"]
 
 
 def test_concentrated_sleeve_coverage_couples_the_loud_name_to_its_neighbours():
@@ -54,3 +57,34 @@ def test_concentrated_sleeve_coverage_couples_the_loud_name_to_its_neighbours():
 def test_an_empty_matrix_refuses_rather_than_quietly_producing_nothing():
     with pytest.raises(ValueError, match="no rows"):
         views_from_matrix(matrix([]), None, sleeves={})
+
+
+def test_a_stronger_correlation_view_outranks_a_weaker_tail_view():
+    """Both rules are ranked on one scale — confidence — or corr never lands."""
+    now = matrix([
+        row("A", 0, 0, 2, 2, keys=("a",)),
+        row("B", 0, 0, 2, 2, keys=("b",)),
+        row("C", 0, 0, 2, 2, keys=("c",)),
+        row("X", 8, 3, 0, 0, keys=("x",)),
+        row("Y", 1, 1, 0, 0, keys=("y",)),
+    ])
+    views = views_from_matrix(now, None, sleeves={"s": ["X", "Y"]})
+    assert len(views) == 3
+    corr = [v for v in views if v["type"] == "corr"]
+    assert len(corr) == 1 and corr[0]["confidence"] == 0.389
+    assert [v["confidence"] for v in views] == [0.389, 0.3, 0.3]
+    # Three equal tails at 0.3; the weakest by stable order is the one dropped.
+    assert [v["ticker"] for v in views if v["type"] == "tail"] == ["A", "B"]
+
+
+def test_one_sleeve_spends_at_most_one_view_on_its_widest_pair():
+    now = matrix([
+        row("X", 9, 3, 0, 0, keys=("x",)),
+        row("Y", 1, 1, 0, 0, keys=("y",)),
+        row("Z", 2, 1, 0, 0, keys=("z",)),
+        row("W", 0, 0, 0, 0, keys=("w",)),
+    ])
+    views = views_from_matrix(now, None, sleeves={"s": ["X", "Y", "Z", "W"]})
+    assert len(views) == 1
+    assert views[0]["type"] == "corr" and views[0]["ticker_a"] == "X"
+    assert views[0]["ticker_b"] == "W"  # the widest coverage gap in the sleeve

@@ -17,7 +17,10 @@ def test_plugin_providers_are_discovered_from_the_entry_point_group(monkeypatch)
     monkeypatch.setattr(
         metadata, "entry_points",
         lambda **kw: [Ep()] if kw.get("group") == "qlab.news.providers" else [])
-    monkeypatch.delitem(feed.PROVIDERS, "acme", raising=False)
+    # setitem, not delitem: monkeypatch records an undo only for a key it
+    # already saw, so deleting an absent key registers nothing and the
+    # discovered provider would outlive this test in PROVIDERS.
+    monkeypatch.setitem(feed.PROVIDERS, "acme", None)
     found = feed.load_plugin_providers()
     assert found["acme"] is fetch
     assert feed.PROVIDERS["acme"] is fetch

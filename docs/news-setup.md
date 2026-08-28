@@ -71,9 +71,11 @@ One source is one publisher's view. Name several and the desk reads all of
 them, in order, and merges the windows:
 
 ```bash
-export QLAB_NEWS_PROVIDERS=alpaca,edgar,macro,gdelt
+export QLAB_NEWS_PROVIDERS=alpaca,edgar,macro
 export QLAB_EDGAR_CONTACT="Your Name your@email"   # the SEC requires a contact
 ```
+
+`gdelt` is deliberately absent from that line — see below.
 
 `QLAB_NEWS_PROVIDERS` (plural) wins over `QLAB_NEWS_PROVIDER` (singular); a
 stack of one behaves exactly like the single provider it names.
@@ -89,6 +91,16 @@ The same rule holds one level down. A provider that reads several feeds —
 `macro` reads one per publisher — keeps the feeds that answered and reports the
 ones that did not as `partial: <feed>: <error>`. Its records are archived
 normally; only a provider whose feeds are *all* dead is a dead member.
+
+### `gdelt` is opt-in
+
+`gdelt` is never part of a shipped default stack, and adding it is a decision
+about latency rather than about coverage. Measured on 2026-08-28: one DOC API
+request returned in **43 seconds**, and a second **hung past 75 seconds**. The
+provider issues one request per configured rule, and a stack member's fetch runs
+on the owner's **heartbeat** — so an operator who puts `gdelt` in the stack is
+accepting ticks that can take minutes. Name it when you want its corroboration
+and can pay for it; leave it out otherwise.
 
 `QLAB_EDGAR_CONTACT` is not optional for `edgar`: the SEC asks that automated
 requests identify a contact, and the provider refuses rather than sending an

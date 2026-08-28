@@ -457,3 +457,33 @@ def test_a_partial_windows_records_still_go_through_the_window_contract(monkeypa
     assert [i.headline for i in items] == ["kept"]
     assert items[0].provider == "macro"
     assert excinfo.value.failures == {"BLS": "403"}
+
+
+def test_check_reports_a_partial_member_as_working_and_names_what_it_lost(
+        monkeypatch):
+    # The generic `except Exception` turned a partial answer into NOT WORKING
+    # and threw the records away — the exact outcome PartialWindow exists to
+    # prevent, in the one place an operator looks to find out what is wrong.
+    from qlab.news import check
+
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    def partial(as_of, universe):
+        raise news.PartialWindow(
+            [NewsItem(source="Bureau of Economic Analysis", published=published,
+                      headline="GDP, second estimate", summary="",
+                      url="https://apps.bea.gov/x", tickers=("TIP",),
+                      provider="macro")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(news.PROVIDERS, "macro", partial)
+    report = check.check_news(["TIP"], provider="macro")
+    assert report["ok"] is True
+    assert report["fetched"] == 1 and report["kept"] == 1
+    flags = report["quality_flags"]
+    assert any(f.startswith("partial: ") and "BLS" in f and "403" in f
+               for f in flags)
+    rendered = check.render(report)
+    assert rendered.startswith("news integration: OK")
+    assert any("partial: " in line and "BLS" in line
+               for line in rendered.splitlines())

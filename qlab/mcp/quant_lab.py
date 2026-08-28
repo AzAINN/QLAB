@@ -1142,13 +1142,23 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         that supplies the quarantined news-extractor's evidence; the extractor
         never fetches. Offline uses the deterministic synthetic provider.
         """
-        from qlab.news.feed import fetch_news
+        from qlab.news.feed import PartialWindow, fetch_news
 
         st.budget.charge("news.fetch")
         d = check_as_of(as_of)
         tickers = load_universe().tickers(universe)
-        items = fetch_news(
-            str(d), tickers, lookback_hours=lookback_hours, offline=st.offline)
+        # A provider that lost one of its feeds returned a smaller window, not
+        # an error. Failing the tool would tell the agent the news lane is down
+        # while the records it did fetch sit inside the exception; the feeds
+        # that went missing are named in the result instead.
+        partial: dict[str, str] = {}
+        try:
+            items = fetch_news(
+                str(d), tickers, lookback_hours=lookback_hours,
+                offline=st.offline)
+        except PartialWindow as exc:
+            items = exc.items
+            partial = exc.failures
         # A single excerpt string the extractor can quote against, plus the
         # structured items for display/provenance.
         excerpt = "\n".join(
@@ -1162,6 +1172,9 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                                          "summary": it.summary}
                       for it in items],
             "excerpt": excerpt,
+            # Empty when every feed answered. Never absent: an agent must be
+            # able to tell "nothing was missing" from "nobody said".
+            "partial": partial,
         }
 
     @app.tool(name="research.window_evidence")

@@ -2903,7 +2903,9 @@ class UISession:
             })
         tagged = sum(1 for r in rows if r["scope"] == "holding")
         return {
-            "provider": window.get("provider_name", "—"),
+            # `or`, not a default: a malformed stack leaves the name empty,
+            # and a blank where a provider goes reads as a rendering bug.
+            "provider": window.get("provider_name") or "—",
             # Which sources were read, and what each of them said about being
             # read. A member that went away is visible on the wire rather than
             # showing up only as a window that quietly got smaller.

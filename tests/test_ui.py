@@ -4976,6 +4976,8 @@ def test_a_malformed_provider_stack_is_a_loud_window_not_a_dead_heartbeat(
     assert window["items"] == []
     assert window["error"]
     assert window["providers"] == []
+    # And the card says "no provider", not an empty gap where a name goes.
+    assert session.news_payload(False)["provider"] == "—"
 
 
 def test_an_archive_window_naming_an_undeclared_provider_is_refused(session):

@@ -403,3 +403,34 @@ def test_news_fetch_reaches_extractor_only_via_owner_not_the_extractor_role():
     assert agents["news-extractor"]["tools"] == [_claude_tool("research.apply_views")]
     # The coordinator is the one granted the feed, to fetch and inject.
     assert _claude_tool("news.fetch") in agents["qlab-coordinator"]["tools"]
+
+
+def test_news_fetch_returns_a_partial_window_rather_than_failing_the_agent(
+        reg, monkeypatch):
+    # A provider short one feed is a smaller window, not a tool error. Raising
+    # here told the agent the news lane was down while real records sat in the
+    # exception.
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    from qlab.ui.server import UISession
+
+    def partial(as_of, universe):
+        raise feed.PartialWindow(
+            [NewsItem(source="Bureau of Economic Analysis",
+                      published="2021-06-29T09:00:00+00:00",
+                      headline="GDP, second estimate", summary="",
+                      url="https://apps.bea.gov/x", tickers=("ACWI",),
+                      provider="macro")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(feed.PROVIDERS, "macro", partial)
+    monkeypatch.setenv("QLAB_NEWS_PROVIDER", "macro")
+    session = UISession(offline_default=False, registry=reg)
+    out = session.call_lab_tool(
+        "news.fetch",
+        {"as_of": "2021-06-30", "universe": "core", "lookback_hours": 72},
+        offline=False)
+    assert out["n_items"] == 1
+    assert out["items"][0]["headline"] == "GDP, second estimate"
+    assert out["excerpt"]
+    assert out["partial"] == {"BLS": "HTTP Error 403: Forbidden"}

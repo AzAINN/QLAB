@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 def _check_one(name: str, universe: list[str], *, lookback_hours: int,
                now: datetime, creds: dict) -> dict:
     """Diagnose one provider. Never raises; the failure IS the report."""
-    from qlab.news.feed import fetch_news
+    from qlab.news.feed import PartialWindow, fetch_news
     from qlab.news.grounding import ground
 
     report: dict = {
@@ -38,9 +38,17 @@ def _check_one(name: str, universe: list[str], *, lookback_hours: int,
             "root.")
         return report
 
+    # A provider short one of its feeds answered; it did not fail. Reporting it
+    # as NOT WORKING and dropping the records it did return is the outcome
+    # PartialWindow exists to prevent — and this is the one place an operator
+    # looks to find out what is wrong.
+    partial: dict[str, str] = {}
     try:
         items = fetch_news(now, universe, lookback_hours=lookback_hours,
                            provider=name, offline=False)
+    except PartialWindow as exc:
+        items = exc.items
+        partial = exc.failures
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
         return report
@@ -57,7 +65,10 @@ def _check_one(name: str, universe: list[str], *, lookback_hours: int,
         "primary_sources": sum(1 for c in grounded.claims if c.tier == "primary"),
         "publishers": sorted({str(getattr(i, "source", "")) for i in grounded.items}),
         "window_hash": grounded.window_hash,
-        "quality_flags": list(grounded.quality_flags),
+        # The missing feeds ride the same channel the grounding uses for
+        # everything else the reader should weigh the window against.
+        "quality_flags": list(grounded.quality_flags) + [
+            f"partial: {feed}: {error}" for feed, error in partial.items()],
         "sample": [
             {"headline": c.headline[:110], "support": c.support,
              "tickers": list(c.tickers)}

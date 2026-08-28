@@ -856,7 +856,8 @@ def build_parser() -> argparse.ArgumentParser:
         "news-check",
         help="authenticate the news integration and show what it returns")
     nc.add_argument("--provider", default=None,
-                    help="override QLAB_NEWS_PROVIDER for this check")
+                    help="a provider, or a comma-separated stack; overrides "
+                         "QLAB_NEWS_PROVIDERS for this check")
     nc.set_defaults(func=_cmd_news_check)
 
     def add_desk_mode(sp):

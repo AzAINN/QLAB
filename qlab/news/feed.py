@@ -234,6 +234,11 @@ def fetch_news_stacked(
             "every provider in the stack failed: "
             + "; ".join(f"{k}: {v}" for k, v in outcomes.items()))
     items.sort(key=_ordering_key)
+    # Each member's fetch overwrote the cache, so the provenance the desk
+    # reported described only the LAST member — a fraction of the window, under
+    # the wrong provider name. What the desk read is the merge; publish the merge.
+    with _CACHE_LOCK:
+        _NEWS_CACHE[_normalize_universe(universe)] = tuple(items)
     return StackedWindow(items=items, outcomes=outcomes, providers=tuple(providers))
 
 

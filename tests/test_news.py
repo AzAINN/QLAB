@@ -318,3 +318,20 @@ def test_every_registered_provider_is_named_in_the_collision_guard():
     # shadow. A first-party provider registered but missing from it could be
     # replaced by a plugin under its own name, so the two must agree.
     assert set(news.PROVIDERS) <= news._FIRST_PARTY
+
+
+def test_news_check_reports_each_member_of_a_stack(monkeypatch):
+    from qlab.news import check, feed
+    from qlab.news.feed import NewsItem
+    # An instant inside the window, not a literal date: check_news bounds the
+    # window at its own `now`, so a fixed timestamp would make this test pass
+    # only in the week it was written (and a future one is dropped outright).
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    monkeypatch.setitem(feed.PROVIDERS, "good", lambda a, u: [NewsItem(
+        source="BLS", published=published, headline="h", summary="",
+        url="https://bls.gov/x", tickers=("TIP",), provider="good")])
+    monkeypatch.setitem(feed.PROVIDERS, "bad", lambda a, u: (_ for _ in ()).throw(RuntimeError("down")))
+    report = check.check_news(["TIP"], provider="good,bad")
+    assert report["members"]["good"]["ok"] is True
+    assert report["members"]["bad"]["ok"] is False and "down" in report["members"]["bad"]["error"]
+    assert report["ok"] is True, "one living member is a record"

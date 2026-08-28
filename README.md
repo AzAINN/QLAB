@@ -55,7 +55,7 @@ python -m pip install -e ".[all]"                             # data, hmm, optim
 | `trader` | alpaca-py | the Alpaca paper book (`--alpaca-book`) and Alpaca market data |
 | `optimize` | cvxpy | the faster convex solver path |
 | `hmm` | hmmlearn | the Gaussian-HMM regime posterior (the deterministic ensemble runs without it) |
-| `news` | feedparser | the RSS news provider |
+| `news` | feedparser | the RSS, EDGAR, macro and GDELT providers (stdlib; feedparser only for RSS) |
 | `mcp` | fastmcp | headless MCP sessions |
 | `viz` | matplotlib | the scaling / ablation charts |
 | `dev` | pytest | the test suite |

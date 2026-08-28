@@ -2543,6 +2543,9 @@ class UISession:
                 return self._desk_news
         return {
             "items": [],
+            "outcomes": {},
+            "providers": ["synthetic"],
+            "provider": "synthetic",
             "provider_name": "synthetic",
             "error": "news window not fetched yet (owner is still starting up)",
         }
@@ -2570,7 +2573,7 @@ class UISession:
         boundary. The window is cached so ``desk_read`` can compose under the
         lock without ever reaching the network itself.
         """
-        from qlab.news.feed import fetch_news
+        from qlab.news.feed import fetch_news_stacked
 
         universe = self.mandate.universe_whitelist
         # An instant, not a calendar date. `date.today().isoformat()` is read by
@@ -2578,28 +2581,39 @@ class UISession:
         # published after as_of — so the desk's window structurally excluded
         # every story filed so far today. Measured: a full 24 hours.
         as_of = datetime.now(timezone.utc)
-        provider_name = self.news_provider_for(offline)
+        providers = self.news_provider_for(offline)
+        provider_name = ",".join(providers)
         try:
             # Passed explicitly rather than letting the feed re-resolve from the
             # environment: the label and the fetch must be the same decision, or
             # the desk can report a provenance it did not use.
-            items = fetch_news(
+            stacked = fetch_news_stacked(
                 as_of,
                 universe,
+                providers,
                 lookback_hours=48,
-                offline=offline,
-                provider=provider_name,
             )
         except Exception as exc:
+            # Only a stack with no living member raises. A member that died on
+            # its own is an outcome carried beside the records, never a quietly
+            # smaller window.
             window = {
                 "items": [],
+                "outcomes": {name: str(exc) for name in providers},
+                "providers": list(providers),
+                "provider": provider_name,
                 "provider_name": provider_name,
+                "as_of": as_of.isoformat(),
                 "error": str(exc),
             }
         else:
             window = {
-                "items": items,
+                "items": stacked.items,
+                "outcomes": dict(stacked.outcomes),
+                "providers": list(stacked.providers),
+                "provider": provider_name,
                 "provider_name": provider_name,
+                "as_of": as_of.isoformat(),
                 "error": None,
             }
         # Publishing under the same lock the heartbeat composes under keeps a
@@ -2627,25 +2641,61 @@ class UISession:
         """
         from qlab.news.archive import build_archive_batch, canonical_timestamp
 
-        items = list((window or {}).get("items") or [])
-        provider = str((window or {}).get("provider_name") or "synthetic")
+        window = window or {}
+        items = list(window.get("items") or [])
+        outcomes = dict(window.get("outcomes") or {})
+        # One batch per member, never one batch for the merge: an ArchiveBatch
+        # carries a single provenance, so a merged batch would file an EDGAR
+        # filing and a wire story under one attribution and neither could be
+        # replayed. Members with no records are still walked — "this source
+        # answered with nothing" and "this source was not read" are different
+        # facts, and only a per-member event can tell them apart.
+        members = [str(name) for name in (window.get("providers") or [])]
+        if not members:
+            members = [str(window.get("provider_name") or "synthetic")]
+        grouped: dict[str, list] = {name: [] for name in members}
+        for item in items:
+            name = str(getattr(item, "provider", "") or members[0])
+            grouped.setdefault(name, []).append(item)
+
         now = canonical_timestamp(datetime.now(timezone.utc))
-        batch = build_archive_batch(
-            items, provider=provider, offline=bool(self.offline_default),
-            as_of=now, lookback_hours=48,
-            universe=list(self.mandate.universe_whitelist), first_seen=now,
-            error=(window or {}).get("error"))
-        result = self.registry.record_news_items(batch)
-        # The event carries what distinguishes "the desk was not watching" from
-        # "the wire was quiet" — a coverage gap the row count alone cannot show.
-        self.registry.record_event("news_archive", {
-            "provider": provider, "returned": batch.returned,
-            "inserted": result["inserted"], "updated": result["updated"],
-            "window_fingerprint": batch.window_fingerprint,
-            "error": batch.error,
-        })
+        window_error = window.get("error")
+        totals = {"inserted": 0, "updated": 0, "edges": 0, "total_rows": 0}
+        per_provider: dict[str, dict] = {}
+        stored = 0
+        for provider, records in grouped.items():
+            outcome = outcomes.get(provider, "ok")
+            # A member's own failure sentence is that member's error; the
+            # window-wide error only stands in when no member said anything.
+            error = None if outcome == "ok" else str(outcome)
+            if error is None and window_error and not outcomes:
+                error = str(window_error)
+            batch = build_archive_batch(
+                records, provider=provider, offline=bool(self.offline_default),
+                as_of=now, lookback_hours=48,
+                universe=list(self.mandate.universe_whitelist), first_seen=now,
+                error=error)
+            result = self.registry.record_news_items(batch)
+            # The event carries what distinguishes "the desk was not watching"
+            # from "the wire was quiet" — a coverage gap the row count alone
+            # cannot show — and now says which source it is a gap in.
+            self.registry.record_event("news_archive", {
+                "provider": provider, "returned": batch.returned,
+                "inserted": result["inserted"], "updated": result["updated"],
+                "window_fingerprint": batch.window_fingerprint,
+                "outcome": outcome,
+                "error": batch.error,
+            })
+            per_provider[provider] = result
+            totals["inserted"] += int(result.get("inserted", 0))
+            totals["updated"] += int(result.get("updated", 0))
+            totals["edges"] += int(result.get("edges", 0))
+            totals["total_rows"] = int(result.get("total_rows", 0))
+            stored += int(result.get("inserted", 0)) + int(result.get("updated", 0))
         self._archive_stats_cache = None
-        return result
+        # The aggregate keys stay where callers already read them; `stored` and
+        # `per_provider` are what a stack adds.
+        return {**totals, "stored": stored, "per_provider": per_provider}
 
     def archive_summary(self) -> dict:
         """Archive size and span, TTL-cached.
@@ -2828,6 +2878,11 @@ class UISession:
         tagged = sum(1 for r in rows if r["scope"] == "holding")
         return {
             "provider": window.get("provider_name", "—"),
+            # Which sources were read, and what each of them said about being
+            # read. A member that went away is visible on the wire rather than
+            # showing up only as a window that quietly got smaller.
+            "providers": list(window.get("providers") or []),
+            "outcomes": dict(window.get("outcomes") or {}),
             "error": window.get("error"),
             "as_of": self._now_iso(),
             "lookback_hours": 48,
@@ -2915,8 +2970,8 @@ class UISession:
         self._desk_read = payload
         return self._desk_read
 
-    def news_provider_for(self, offline: bool) -> str:
-        """Which news provider this desk should read, and why.
+    def news_provider_for(self, offline: bool) -> tuple[str, ...]:
+        """Which news providers this desk should read, in order, and why.
 
         News follows the data lane the operator already chose. A desk running on
         live prices while its qualitative side is deterministic fixtures is the
@@ -2924,26 +2979,31 @@ class UISession:
         would carry a real market and an invented narrative under one heading.
 
         Precedence: offline is always synthetic (it is the demo, and it must
-        never reach the network); then an explicit `QLAB_NEWS_PROVIDER`, because
-        naming a provider is an operator instruction; then Alpaca when a
-        credential actually resolves; then synthetic, which `compose_desk_read`
-        already labels as fixtures.
+        never reach the network); then whatever the operator named, because
+        naming providers is an operator instruction — `QLAB_NEWS_PROVIDERS`
+        first and the singular `QLAB_NEWS_PROVIDER` after it, parsed by the feed
+        so the desk and a bare `fetch_news` cannot disagree about what a stack
+        is; then Alpaca when a credential actually resolves; then synthetic,
+        which `compose_desk_read` already labels as fixtures.
         """
+        from qlab.news.feed import parse_provider_stack
+
         if offline:
-            return "synthetic"
-        explicit = os.environ.get("QLAB_NEWS_PROVIDER", "").strip().lower()
-        if explicit:
-            return explicit
+            return ("synthetic",)
+        named = (os.environ.get("QLAB_NEWS_PROVIDERS", "").strip()
+                 or os.environ.get("QLAB_NEWS_PROVIDER", "").strip())
+        if named:
+            return parse_provider_stack(None)
         try:
             from qlab.trader.alpaca_auth import resolve_alpaca_credentials
 
             if resolve_alpaca_credentials() is not None:
-                return "alpaca"
+                return ("alpaca",)
         except Exception:
             # A broken credential source is not a provider; the resolver reports
             # the detail where the operator can act on it.
             pass
-        return "synthetic"
+        return ("synthetic",)
 
     def mark_desk_read_stale(self, error: str) -> None:
         """Record that the read could not be recomposed.

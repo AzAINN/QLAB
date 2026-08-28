@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from importlib import metadata
 
+import pytest
+
 from qlab.news import feed
 from qlab.news.feed import NewsItem
 
@@ -37,7 +39,6 @@ def test_a_plugin_may_not_shadow_a_first_party_provider(monkeypatch):
             return lambda a, u: []
 
     monkeypatch.setattr(metadata, "entry_points", lambda **kw: [Ep()])
-    import pytest
     with pytest.raises(RuntimeError, match="shadows the first-party provider"):
         feed.load_plugin_providers()
 
@@ -123,8 +124,6 @@ def test_a_stack_member_may_come_from_a_plugin_entry_point(monkeypatch):
 
 
 def test_a_stack_of_all_dead_members_raises(monkeypatch):
-    import pytest
-
     def dead(a, u):
         raise RuntimeError("down")
 
@@ -132,3 +131,22 @@ def test_a_stack_of_all_dead_members_raises(monkeypatch):
     with pytest.raises(RuntimeError, match="every provider in the stack failed"):
         feed.fetch_news_stacked(
             datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("dead",))
+
+
+def test_the_merged_window_is_what_provenance_reports(monkeypatch):
+    # fetch_news writes the in-process cache per call, so a stack used to leave
+    # it holding only the LAST member's records: cached_news_provenance then
+    # described a fraction of the window the desk had actually read, and named
+    # the wrong provider for it. The merge is what the desk read, so the merge
+    # is what the cache must hold.
+    monkeypatch.setitem(
+        feed.PROVIDERS, "one",
+        lambda a, u: [_item("one", "A", "h1", "2026-08-27T09:00:00+00:00"),
+                      _item("one", "A", "h1b", "2026-08-27T10:00:00+00:00")])
+    monkeypatch.setitem(
+        feed.PROVIDERS, "two",
+        lambda a, u: [_item("two", "B", "h2", "2026-08-27T15:00:00+00:00")])
+    window = feed.fetch_news_stacked(
+        datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("one", "two"))
+    assert len(window.items) == 3
+    assert feed.cached_news_provenance(("SPY",)) == ("one", 3)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -2420,25 +2420,31 @@ def test_news_follows_the_data_lane_the_operator_chose(session, monkeypatch):
     # carries a real market and an invented narrative under one heading. News
     # follows the lane, so signing in and running --live is the whole setup.
     monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS", raising=False)
 
     # Offline is always synthetic: it is the demo and must not reach the network.
     monkeypatch.setattr(
         "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: object())
-    assert session.news_provider_for(True) == "synthetic"
+    assert session.news_provider_for(True) == ("synthetic",)
     # Live with a resolvable credential upgrades without being asked.
-    assert session.news_provider_for(False) == "alpaca"
+    assert session.news_provider_for(False) == ("alpaca",)
 
     # Live with no credential stays synthetic rather than failing the desk.
     monkeypatch.setattr(
         "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: None)
-    assert session.news_provider_for(False) == "synthetic"
+    assert session.news_provider_for(False) == ("synthetic",)
 
     # An explicit provider is an instruction and is never second-guessed —
     # including naming synthetic on a live desk on purpose.
     monkeypatch.setenv("QLAB_NEWS_PROVIDER", "synthetic")
     monkeypatch.setattr(
         "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: object())
-    assert session.news_provider_for(False) == "synthetic"
+    assert session.news_provider_for(False) == ("synthetic",)
+
+    # The plural names a stack and wins over the singular; a credential that
+    # resolves does not get to append itself to what the operator asked for.
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "edgar,macro")
+    assert session.news_provider_for(False) == ("edgar", "macro")
 
 
 def test_an_opened_debate_can_be_closed_so_the_reporter_can_run(session):
@@ -4892,3 +4898,27 @@ def test_upcoming_releases_are_served_and_dated(session, monkeypatch):
     entry = out["upcoming"][0]
     assert entry["when"].startswith(soon.strftime("%Y-%m-%dT%H:"))
     assert entry["days_ahead"] == 3 and entry["source"] == "BLS"
+
+
+def test_the_desk_reads_a_stack_and_archives_each_member(session, monkeypatch):
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two")
+    # An instant, not a literal: the desk's window is `now` minus 48h, so a
+    # hard-coded date would make this test pass only in the week it was written.
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    def mk(provider, src):
+        return lambda a, u: [NewsItem(source=src, published=published,
+                                      headline=f"{src} story", summary="", url=f"https://x/{src}",
+                                      tickers=("SPY",), provider=provider)]
+
+    monkeypatch.setitem(feed.PROVIDERS, "one", mk("one", "SEC EDGAR"))
+    monkeypatch.setitem(feed.PROVIDERS, "two", mk("two", "reuters.com"))
+    assert session.news_provider_for(False) == ("one", "two")
+    window = session.fetch_desk_news(False)
+    assert window["outcomes"] == {"one": "ok", "two": "ok"}
+    result = session.archive_desk_news(window)
+    events = [e for e in session.registry.read_events_of_kind("news_archive", 10)]
+    assert {e["payload"]["provider"] for e in events} == {"one", "two"}
+    assert result["stored"] == 2

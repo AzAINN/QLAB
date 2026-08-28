@@ -1426,6 +1426,15 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         }
         if persist:
             run_spec["persist_applied_views"] = True
+            # Flat, not nested inside `result`: these three are the *gate's*
+            # inputs — the tilt itself, how far it moved, and whether the views
+            # were ever sourced — and a gate that has to guess where its inputs
+            # live is a gate that stops running when the payload is reshaped.
+            # Only on the persisted path: a scenario vector is one float per
+            # panel row, and every dry diagnostic does not need to carry one.
+            run_spec["probabilities"] = [float(x) for x in result.probabilities]
+            run_spec["kl_total"] = float(result.kl_total)
+            run_spec["provenance_verified"] = bool(provenance_verified)
         run_id = st.registry.log_run("views", run_spec)
 
         if arm_result is not None:
@@ -1455,6 +1464,91 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         if persist:
             response["persisted_view_ids"] = persisted_view_ids
         return response
+
+    @app.tool(name="research.qualitative_matrix")
+    def research_qualitative_matrix(as_of: str, universe: str = "core") -> dict:
+        """The newest qualitative matrix for the window: counts per name, no sign.
+
+        Read-only and never builds one: the matrix is logged by the owner from
+        the window it already fetched, so building one here would either fetch
+        on a read path or invent a second window for the same day.
+        """
+        st.budget.charge("research.qualitative_matrix")
+        check_as_of(as_of)
+        run = st.registry.newest_run_of_kind("qualitative_matrix")
+        if run is None:
+            return {"status": "never_built", "rows": {}}
+        matrix = (run.get("spec") or {}).get("matrix") or {}
+        return {"status": "ok", "run_id": run.get("run_id"), **matrix}
+
+    @app.tool(name="moments.condition")
+    def moments_condition(moment_set_id: str, views_run_id: str) -> dict:
+        """Condition a moment set on a persisted views run. Research-stage.
+
+        Three gates, in this order, before anything is computed: the run must
+        be a views run, it must have stayed inside its own KL budget, and its
+        views must have been provenance-verified — conditioning on an unsourced
+        view is precisely what the quarantine exists to stop. The stage check
+        comes last so the three lineage refusals are reachable while the
+        catalog entry is research; today it refuses every call, and that is the
+        point until the ablation earns a promotion.
+        """
+        st.budget.charge("moments.condition")
+        import numpy as np
+
+        from qlab.algorithms.catalog import require_operational_stage
+        from qlab.core.moments import condition
+
+        views = st.registry.get_run(views_run_id)
+        if views is None or views.get("kind") != "views":
+            raise ValueError(f"{views_run_id!r} is not a persisted views run")
+        spec = views.get("spec") or {}
+        if "probabilities" not in spec:
+            raise ValueError(
+                f"views run {views_run_id!r} was not persisted with its "
+                "scenario probabilities; re-run research.apply_views with "
+                "persist=true")
+        kl_total = float(spec.get("kl_total", 0.0))
+        kl_budget = float(spec.get("kl_budget", 0.0))
+        if kl_total > kl_budget:
+            raise ValueError(
+                f"the views run exceeds its own KL budget ({kl_total:.4f} > "
+                f"{kl_budget:.4f}); relax a view")
+        if spec.get("provenance_verified") is not True:
+            raise ValueError(
+                f"views run {views_run_id!r} has unverified provenance; a view "
+                "with no excerpt and no archive claim behind it may not "
+                "condition a moment set")
+        require_operational_stage("views_conditioned_min_variance")
+
+        ms = st.get_moment_set(moment_set_id)
+        panel = _views_panel(spec)
+        out = condition(ms, np.asarray(spec["probabilities"], dtype=float),
+                        panel=panel, views_run_id=views_run_id)
+        return {"moment_set_id": st.put_moment_set(out),
+                "parent": moment_set_id, "kl_total": kl_total,
+                "summary": out.summary()}
+
+    def _views_panel(spec: dict):
+        """Rebuild the exact scenario panel a persisted views run pooled over.
+
+        Deterministic from the run's own spec (as_of, tickers, lookback), so
+        the probabilities are re-applied to the rows they were solved on rather
+        than to whatever window the caller happens to be looking at.
+        """
+        d = check_as_of(str(spec["as_of"]))
+        tickers = list(spec["tickers"])
+        snapshot = market.snapshot(tickers, d, offline=st.offline, seed=st.seed)
+        panel = snapshot.log_returns(
+            lookback_days=int(spec.get("panel_lookback_days",
+                                       _VIEWS_LOOKBACK_DAYS))
+        ).dropna(how="any")
+        if len(panel) != len(spec["probabilities"]):
+            raise ValueError(
+                "the views run's panel does not reproduce: it pooled "
+                f"{len(spec['probabilities'])} scenarios, this window has "
+                f"{len(panel)}")
+        return panel.to_numpy(dtype=float)
 
     # -- backtest -----------------------------------------------------------
     @app.tool(name="backtest.run")

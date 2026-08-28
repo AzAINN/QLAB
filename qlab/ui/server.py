@@ -251,6 +251,8 @@ OWNER_LAB_TOOLS = frozenset({
     "backtest.run",
     "news.fetch",
     "research.apply_views",
+    "research.qualitative_matrix",
+    "moments.condition",
     "research.equilibrium_returns",
     "research.predict_vol",
     "research.predictor_board",

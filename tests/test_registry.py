@@ -1107,3 +1107,39 @@ def test_newest_run_of_kind_is_not_limited_by_how_much_else_ran(reg):
     # have to know whether this path went through the JSON helper.
     assert row["spec"]["matrix"]["window_hash"] == "new"
     assert reg.newest_run_of_kind("never_logged_anything") is None
+
+
+def test_runs_of_kind_returns_the_newest_first_and_only_that_kind(reg):
+    """Views built from a matrix need the PREVIOUS window too, not just the newest."""
+    first = reg.log_run("qualitative_matrix", {"matrix": {"window_hash": "w1"}})
+    second = reg.log_run("qualitative_matrix", {"matrix": {"window_hash": "w2"}})
+    reg.log_run("backtest", {"arm": "A1"})
+
+    rows = reg.runs_of_kind("qualitative_matrix", 2)
+    assert [r["run_id"] for r in rows] == [second, first]
+    assert rows[0]["spec"]["matrix"]["window_hash"] == "w2"
+    assert reg.runs_of_kind("never_logged", 5) == []
+
+
+def test_get_run_reads_one_run_by_id_with_its_spec_parsed(reg):
+    run_id = reg.log_run("views", {"kl_total": 0.1, "kl_budget": 0.25})
+    row = reg.get_run(run_id)
+    assert row["kind"] == "views" and row["spec"]["kl_total"] == 0.1
+    assert reg.get_run("not-a-run") is None
+
+
+def test_a_moment_sets_lineage_survives_the_round_trip(reg):
+    """The referee reads provenance back out; a write-only column proves nothing."""
+    import numpy as np
+
+    from qlab.core.types import MomentSet
+
+    ms = MomentSet(tickers=["A", "B"], as_of=date(2021, 6, 30),
+                   cov=np.eye(2), provenance={"parent": "p", "views_run_id": "v"})
+    h = reg.log_moment_set(ms)
+    row = reg.moment_set(h)
+    assert row["provenance"] == {"parent": "p", "views_run_id": "v"}
+    assert reg.moment_set("nope") is None
+
+    plain = MomentSet(tickers=["A", "B"], as_of=date(2021, 6, 30), cov=np.eye(2) * 2)
+    assert reg.moment_set(reg.log_moment_set(plain))["provenance"] == {}

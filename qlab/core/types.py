@@ -182,6 +182,11 @@ class MomentSet:
     coskew: np.ndarray | None = None            # (n, n, n)
     cokurt: np.ndarray | None = None            # (n, n, n, n)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    # Lineage, deliberately LAST and deliberately outside ``content_hash``:
+    # a conditioned set differs from its parent in the tensors, which the
+    # hash already covers, and hashing lineage would renumber every moment
+    # set already logged.
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def n(self) -> int:
@@ -208,6 +213,9 @@ class MomentSet:
             "has_cokurt": self.cokurt is not None,
         }
         out.update(self.diagnostics)
+        # After the diagnostics update: lineage is what the referee reads,
+        # and an estimator diagnostic must never be able to shadow it.
+        out["provenance"] = dict(self.provenance)
         return out
 
 

@@ -59,6 +59,17 @@ arms:
     objective: min_variance
     solver: classical
     params: { regime_conditional: true }
+  - id: A5                  # views-conditioned min-variance (qualitative matrix)
+    # RESEARCH-STAGE (`views_conditioned_min_variance` is not operational, so
+    # nothing here can reach a governed solve). Everything is held constant
+    # against A1 except the covariance: at each rebalance the point-in-time
+    # news window becomes a qualitative matrix, two bounded rules turn its
+    # counts into unsigned risk views, and entropy pooling tilts Sigma under a
+    # KL budget with every mean pinned. If the record says nothing, the arm
+    # reproduces A1 exactly — and that is the comparison, not a failure.
+    objective: min_variance
+    solver: classical
+    params: { views_source: qualitative_matrix }
   - id: A2                  # THE FALSIFIABLE RIVAL — uses the distribution directly
     objective: scenario_cvar
     solver: cvar_lp

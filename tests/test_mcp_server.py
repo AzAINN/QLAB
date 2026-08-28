@@ -408,8 +408,13 @@ def test_backtest_run_accepts_every_operational_pair_in_ablation_spec(reg):
         )
 
     arms = [arm for arm in spec["arms"] if is_operational_pair(arm)]
+    # A5 shares A1's operational (objective, solver) pair; what makes it a
+    # research arm is `params.views_source`, which `backtest.run` has no
+    # parameter for. Running it here therefore runs an unconditioned
+    # min-variance — the conditioning is unreachable from this tool by
+    # construction, which is exactly the claim.
     assert [arm["id"] for arm in arms] == [
-        "B0", "B1", "B2", "B3", "A1", "B4", "A2",
+        "B0", "B1", "B2", "B3", "A1", "B4", "A5", "A2",
     ]
 
     app = StubApp()

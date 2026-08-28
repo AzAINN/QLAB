@@ -88,3 +88,155 @@ def test_one_sleeve_spends_at_most_one_view_on_its_widest_pair():
     assert len(views) == 1
     assert views[0]["type"] == "corr" and views[0]["ticker_a"] == "X"
     assert views[0]["ticker_b"] == "W"  # the widest coverage gap in the sleeve
+
+
+# ---------------------------------------------------------------------------
+# The production caller: the ablation's A5 arm.
+# ---------------------------------------------------------------------------
+CORE7 = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
+
+
+@pytest.fixture
+def snapshot():
+    from qlab.core import data as market
+
+    return market.snapshot(CORE7, "2015-09-30", offline=True, seed=7)
+
+
+@pytest.fixture
+def moment_set_7(snapshot):
+    from qlab.core.moments import estimate_moments
+
+    return estimate_moments(snapshot, lookback_days=504, higher_moments=False)
+
+
+def _conditioner(reg, **kw):
+    from qlab.research.views_arm import MatrixViewsConditioner
+
+    return MatrixViewsConditioner(reg, panel_lookback_days=504, **kw)
+
+
+def test_sleeves_come_from_the_universes_own_asset_classes():
+    from qlab.research.views_arm import sleeves_for
+
+    sleeves = sleeves_for(CORE7)
+    # Non-overlapping by construction: a ticker appears in exactly one sleeve,
+    # or the correlation rule would state one concentration under two names.
+    seen = [t for members in sleeves.values() for t in members]
+    assert sorted(seen) == sorted(CORE7)
+    assert sleeves_for(["NOT_IN_UNIVERSE"]) == {"unclassified": ["NOT_IN_UNIVERSE"]}
+
+
+def test_a_silent_record_leaves_the_covariance_exactly_as_it_was(
+    reg, snapshot, moment_set_7
+):
+    """No view is a real answer; the arm must then reproduce its baseline."""
+    cond = _conditioner(reg)
+    out = cond.condition(moment_set_7, snapshot)
+    assert out is moment_set_7
+    assert cond.stats["windows"] == 1
+    assert cond.stats["windows_with_views"] == 0
+    assert cond.stats["windows_conditioned"] == 0
+
+
+def test_a_speaking_record_tilts_the_covariance_and_logs_a_checkable_views_run(
+    reg, snapshot, moment_set_7, monkeypatch
+):
+    from qlab.news.matrix import QualitativeMatrix
+    from qlab.research import views_arm
+
+    loud = QualitativeMatrix("2015-09-30", "w1", {
+        "ACWI": row("ACWI", 6, 3, 4, 4, keys=("a", "b", "c", "d")),
+    })
+    monkeypatch.setattr(views_arm, "build_matrix",
+                        lambda *a, **k: loud)
+
+    cond = _conditioner(reg)
+    out = cond.condition(moment_set_7, snapshot)
+
+    assert cond.stats["windows_with_views"] == 1
+    assert cond.stats["windows_conditioned"] == 1
+    import numpy as np
+
+    assert not np.allclose(out.cov, moment_set_7.cov)
+    # The arm estimates covariance-only (mu is None by policy), so the pinning
+    # evidence is the drift that was measured and discarded, not a copied mu.
+    assert out.mu is moment_set_7.mu
+    assert out.provenance["mean_pinning_max_abs"] > 0.0
+
+    run = reg.get_run(out.provenance["views_run_id"])
+    assert run["kind"] == "views"
+    spec = run["spec"]
+    assert spec["kl_total"] <= spec["kl_budget"]
+    assert spec["provenance_verified"] is True
+    assert spec["views"][0]["source_claims"] == ["a", "b", "c", "d"]
+    # And the matrix it was counted from is on the record beside it.
+    assert reg.newest_run_of_kind("qualitative_matrix") is not None
+
+
+def test_the_window_is_read_once_however_many_arms_walk_the_same_date(
+    reg, snapshot, moment_set_7
+):
+    cond = _conditioner(reg)
+    cond.condition(moment_set_7, snapshot)
+    cond.condition(moment_set_7, snapshot)
+    assert cond.stats["windows"] == 1
+    assert len(reg.runs_of_kind("qualitative_matrix", 10)) == 1
+
+
+def test_the_previous_window_is_the_baseline_not_the_current_one(reg):
+    """A rule that compares a window to itself finds every document 'new'."""
+    from qlab.news.matrix import QualitativeMatrix
+
+    cond = _conditioner(reg)
+    first = QualitativeMatrix("2015-06-30", "w1",
+                              {"ACWI": row("ACWI", 6, 3, 4, 4, keys=("a",))})
+    assert cond._log_and_previous(first) is None
+    second = QualitativeMatrix("2015-09-30", "w2",
+                               {"ACWI": row("ACWI", 8, 3, 6, 6, keys=("b",))})
+    baseline = cond._log_and_previous(second)
+    assert baseline["ACWI"].primary_docs == 4
+
+
+def test_an_arm_asking_for_views_with_no_conditioner_refuses_loudly(snapshot):
+    from qlab.arms import Arm, solve_arm
+
+    arm = Arm("A5", "min_variance", "classical",
+              {"views_source": "qualitative_matrix"})
+    with pytest.raises(ValueError, match="needs a conditioner"):
+        solve_arm(arm, snapshot)
+
+
+def test_views_conditioning_refuses_the_higher_moment_objectives(snapshot, reg):
+    from qlab.arms import Arm, MomentsConfig, solve_arm
+
+    arm = Arm("A5m", "mvsk", "classical_multistart",
+              {"views_source": "qualitative_matrix"})
+    cfg = MomentsConfig(lookback_days=504, views_conditioner=_conditioner(reg))
+    with pytest.raises(ValueError, match="covariance-only"):
+        solve_arm(arm, snapshot, moments=cfg)
+
+
+def test_an_unknown_views_source_is_refused_rather_than_ignored(snapshot, reg):
+    from qlab.arms import Arm, MomentsConfig, solve_arm
+
+    arm = Arm("A5x", "min_variance", "classical", {"views_source": "vibes"})
+    cfg = MomentsConfig(lookback_days=504, views_conditioner=_conditioner(reg))
+    with pytest.raises(ValueError, match="unknown views_source"):
+        solve_arm(arm, snapshot, moments=cfg)
+
+
+def test_the_ablation_spec_carries_the_arm_and_the_runner_honours_it():
+    """Invariant 10: the arm in the yaml must be the arm the runner builds."""
+    import inspect
+
+    import yaml
+
+    from qlab import experiment
+    from qlab.paths import workspace_root
+
+    spec = yaml.safe_load(
+        (workspace_root() / "configs/specs/ablation_v1.yaml").read_text())
+    a5 = next(a for a in spec["arms"] if a["id"] == "A5")
+    assert a5["params"]["views_source"] == "qualitative_matrix"
+    assert "views_source" in inspect.getsource(experiment.run_ablation)

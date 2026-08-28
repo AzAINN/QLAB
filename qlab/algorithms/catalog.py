@@ -129,6 +129,12 @@ _ALGORITHMS = (
         "Covariance-only research arm conditioned by the deterministic regime signal.",
     ),
     AlgorithmSpec(
+        "views_conditioned_min_variance", "Views-conditioned minimum variance",
+        "allocation", "research", ("min_variance",), "classical", None,
+        "Minimum variance on a covariance tilted by archive-derived risk views "
+        "(mean pinned). Research until the ablation shows it earns its place.",
+    ),
+    AlgorithmSpec(
         "mvsk_vol_target", "Vol-targeted MVSK", "overlay", "research",
         ("mvsk",), "classical_multistart", None,
         "Research-only de-risking overlay; it does not satisfy the live mandate.",
@@ -225,6 +231,22 @@ def operational_algorithm_for_solver(
     return matches[0]
 
 
+def require_operational_stage(algorithm_id: str) -> AlgorithmSpec:
+    """The staged-execution boundary, as one check with one sentence.
+
+    ``solve_prepared_objective`` and ``moments.condition`` both stand on it, so
+    it lives here rather than being restated: two copies of a gate drift, and
+    the copy that drifts is the one nobody reads.
+    """
+    spec = get_algorithm(algorithm_id)
+    if spec.stage != "operational":
+        raise PermissionError(
+            f"algorithm {algorithm_id!r} is stage={spec.stage!r} and is not "
+            "runnable through the staged agent surface"
+        )
+    return spec
+
+
 def solve_prepared_objective(
     algorithm_id: str,
     objective: Objective,
@@ -236,12 +258,7 @@ def solve_prepared_objective(
     function. That makes the same boundary apply to the MCP server, TUI, and
     any Claude Code agent using the catalog.
     """
-    spec = get_algorithm(algorithm_id)
-    if spec.stage != "operational":
-        raise PermissionError(
-            f"algorithm {algorithm_id!r} is stage={spec.stage!r} and is not "
-            "runnable through the staged agent surface"
-        )
+    spec = require_operational_stage(algorithm_id)
     if not spec.prepared_objective or not spec.solver:
         raise PermissionError(
             f"algorithm {algorithm_id!r} does not take a prepared objective; "

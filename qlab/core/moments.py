@@ -20,6 +20,7 @@ objective relies on.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from math import comb
 
 import numpy as np
@@ -103,6 +104,52 @@ def estimate_moments(
         coskew=coskew,
         cokurt=cokurt,
         diagnostics=diagnostics,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Views conditioning (research stage — see qlab/algorithms/catalog.py)
+# ---------------------------------------------------------------------------
+def condition(ms: MomentSet, probabilities, *, panel,
+              views_run_id: str) -> MomentSet:
+    """A moment set whose covariance is views-tilted and whose mean is ``ms``'s.
+
+    The mean is copied, not recomputed: ``conditioned_moments`` returns a
+    tilted mean too, and the entire safety of the qualitative lane is that no
+    view can move one. That is re-established here as arithmetic — the tilted
+    mean is computed, measured against the parent's, then discarded — rather
+    than trusted from the pooling code. The measurement is kept in
+    ``provenance["mean_pinning_max_abs"]`` so a tilt that would have moved a
+    mean is visible in the audit instead of merely absent from the tensor.
+
+    ``panel`` must be the scenario panel the probabilities were solved on, in
+    this moment set's column order. The higher-moment tensors are carried
+    through unconditioned, which is why the catalog entry that consumes this is
+    covariance-only: mixing a tilted Sigma with an untilted cokurt would blend
+    two different distributions in one objective (the same reason
+    ``qlab.signals.condition`` refuses MVSK).
+    """
+    from qlab.core.views import conditioned_moments
+
+    panel = np.asarray(panel, dtype=float)
+    if panel.ndim != 2 or panel.shape[1] != ms.n:
+        width = panel.shape[1] if panel.ndim == 2 else 0
+        raise ValueError(
+            f"panel has {width} columns but this moment set has {ms.n} "
+            "tickers; conditioning requires the panel the views were solved "
+            "on, in the same column order")
+    tilted_mean, cov = conditioned_moments(panel, np.asarray(probabilities))
+    reference = ms.mu if ms.mu is not None else panel.mean(axis=0)
+    drift = float(np.max(np.abs(tilted_mean - np.asarray(reference, dtype=float))))
+    return replace(
+        ms,
+        cov=cov,
+        provenance={
+            **(ms.provenance or {}),
+            "parent": ms.content_hash(),
+            "views_run_id": str(views_run_id),
+            "mean_pinning_max_abs": drift,
+        },
     )
 
 

@@ -254,3 +254,24 @@ def test_news_analyst_is_quarantined_and_forecasts_nothing():
     # Support tiers must be respected, not re-derived by article count.
     assert "Primary source" in body and "Single secondary" in body
     assert "one claim, not five confirmations" in body
+
+
+def test_the_matrix_is_readable_by_the_roles_that_reason_from_the_record():
+    agents = _by_name()
+    for role in ("atlas", "moments-analyst"):
+        assert "mcp__qlab__research.qualitative_matrix" in agents[role].tools
+
+
+def test_only_the_moments_analyst_may_condition_a_moment_set():
+    agents = _by_name()
+    holders = {name for name, a in agents.items()
+               if "mcp__qlab__moments.condition" in a.tools}
+    assert holders == {"moments-analyst"}
+
+
+def test_conditioning_is_research_only_and_reaches_no_trader_tool():
+    """A role that can condition must still be unable to move the book."""
+    agents = _by_name()
+    scopes = role_scopes(agents["moments-analyst"].tools)
+    assert "moments.condition" in scopes["lab"]
+    assert scopes["trader"] == set()

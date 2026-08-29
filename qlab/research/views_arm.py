@@ -99,6 +99,20 @@ class MatrixViewsConditioner:
     })
     _cache: dict = field(default_factory=dict)
 
+    def __post_init__(self):
+        # The online path is not designed, and half of it would be wrong in
+        # ways no assertion here would catch: `_matrix` calls the singular
+        # `fetch_news` without handling `PartialWindow`, so one provider short
+        # a feed aborts the whole walk mid-arm; and it passes
+        # `provider="synthetic"` to `ground()`, which would stamp live records
+        # with the fixtures' provider name and make the arm's own archive lie
+        # about where its evidence came from. Refusing at construction is the
+        # honest state until the online path is designed.
+        if not self.offline:
+            raise ValueError(
+                "the A5 arm's online news path is not designed; run with "
+                "--offline")
+
     # -- the public seam the arm calls ------------------------------------
     def condition(self, ms: MomentSet, snapshot: DataSnapshot) -> MomentSet:
         """``ms``, tilted onto this window's matrix-derived views, or unchanged.
@@ -202,6 +216,10 @@ class MatrixViewsConditioner:
                            offline=self.offline)
         stamp = datetime.combine(
             datetime.fromisoformat(as_of).date(), time.min, tzinfo=timezone.utc)
+        # `provider="synthetic"` is a statement of fact, not a default: the
+        # conditioner refuses `offline=False` at construction, so this window
+        # can only be the fixtures'. It stops being true the moment the online
+        # path is designed, and the provider must be read from the records then.
         grounded = ground(items, as_of=stamp.isoformat(), provider="synthetic",
                           universe=list(tickers))
         # No look-ahead calendar: `upcoming` is anchored to wall-clock today, so

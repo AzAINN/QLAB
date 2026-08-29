@@ -386,3 +386,35 @@ def test_the_runner_walks_the_arm_and_records_a_queryable_views_summary(reg):
     # The counts describe the walk; they must never enter the metrics that
     # feed ranking and the DSR trial accounting.
     assert not {"windows", "views_applied"} & set(report["arms"]["A5"]["metrics"])
+
+
+def test_the_conditioner_refuses_an_online_run_until_that_path_is_designed(reg):
+    """The A5 arm's online news path does not exist yet; it must not be faked.
+
+    `_matrix` calls the singular `fetch_news`, does not handle `PartialWindow`
+    — so a live provider short one feed would abort the whole walk mid-arm —
+    and hardcodes `provider="synthetic"` into `ground()`, which would stamp
+    every live record with the fixtures' provider name. Refusing is the honest
+    state: the offline walk is designed, the online one is not.
+    """
+    from qlab.research.views_arm import MatrixViewsConditioner
+
+    with pytest.raises(ValueError, match="not designed"):
+        MatrixViewsConditioner(reg, offline=False)
+    # The designed path is unchanged.
+    assert MatrixViewsConditioner(reg, offline=True).offline is True
+
+
+def test_views_conditioning_and_regime_conditioning_may_not_be_combined():
+    """Two covariances, one slot: the regime tilt was silently overwritten.
+
+    `estimate` applied the regime-conditioned covariance and then handed the
+    unconditioned moment set's Sigma to the views conditioner, so an arm asking
+    for both measured only the views — under a name claiming both.
+    """
+    from qlab.arms import MomentsConfig, estimate
+
+    cfg = MomentsConfig(views_source="qualitative_matrix",
+                        regime_conditional=True)
+    with pytest.raises(ValueError, match="regime_conditional"):
+        estimate(object(), cfg, higher=False)

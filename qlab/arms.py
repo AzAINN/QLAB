@@ -61,6 +61,16 @@ class Arm:
 # estimation + single-shot solve
 # ---------------------------------------------------------------------------
 def estimate(snapshot: DataSnapshot, cfg: MomentsConfig, *, higher: bool) -> MomentSet:
+    if cfg.views_source and cfg.regime_conditional:
+        # Both write the same slot. The regime tilt was applied and then the
+        # views conditioner was handed the moment set again, overwriting it —
+        # so an arm asking for both measured only the views, under a name that
+        # claimed both. Composing them is a hypothesis about how two tilts
+        # interact, and it has not been stated anywhere.
+        raise ValueError(
+            "views_source and regime_conditional both condition the "
+            "covariance, and the views tilt would silently discard the "
+            "regime-conditioned one; pick one per arm")
     ms = estimate_moments(
         snapshot,
         lookback_days=cfg.lookback_days,

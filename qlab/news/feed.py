@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ElementTree
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
@@ -112,7 +112,9 @@ def fetch_news(
 
     ``offline=True`` always uses the synthetic provider and never resolves or
     invokes the configured online provider. Otherwise the provider defaults to
-    ``QLAB_NEWS_PROVIDER`` or ``"synthetic"``. Results are bounded to
+    the configured stack (``QLAB_NEWS_PROVIDERS``, then ``QLAB_NEWS_PROVIDER``,
+    then ``"synthetic"``) and refuses a stack of more than one member — that is
+    :func:`fetch_news_stacked`'s window, not this one. Results are bounded to
     ``[as_of - lookback_hours, as_of]`` and sorted by publication time
     descending, then source ascending.
     """
@@ -249,6 +251,10 @@ class StackedWindow:
     items: list[NewsItem]
     outcomes: dict[str, str]           # provider -> "ok" | error sentence
     providers: tuple[str, ...]
+    # provider -> {feed: error}, for members that answered with some feeds.
+    # The outcome sentence says the same thing in prose; a caller that has to
+    # re-parse that sentence to name the feed is a caller that stops naming it.
+    partials: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def parse_provider_stack(value: str | None) -> tuple[str, ...]:
@@ -276,6 +282,7 @@ def fetch_news_stacked(
     load_plugin_providers()
     items: list[NewsItem] = []
     outcomes: dict[str, str] = {}
+    partials: dict[str, dict[str, str]] = {}
     for name in providers:
         try:
             got = fetch_news(as_of, universe, lookback_hours=lookback_hours,
@@ -286,6 +293,7 @@ def fetch_news_stacked(
             # desk and the archive both read it.
             outcomes[name] = _PARTIAL_PREFIX + "; ".join(
                 f"{feed}: {error}" for feed, error in exc.failures.items())
+            partials[name] = dict(exc.failures)
             items.extend(exc.items)
             continue
         except Exception as exc:
@@ -301,7 +309,8 @@ def fetch_news_stacked(
     # the wrong provider name. What the desk read is the merge; publish the merge.
     with _CACHE_LOCK:
         _NEWS_CACHE[_normalize_universe(universe)] = tuple(items)
-    return StackedWindow(items=items, outcomes=outcomes, providers=tuple(providers))
+    return StackedWindow(items=items, outcomes=outcomes,
+                         providers=tuple(providers), partials=partials)
 
 
 def cached_news_provenance(
@@ -644,13 +653,41 @@ def _map_tickers(
 
 
 def _provider_name(provider: str | None) -> str:
-    return (
-        provider or os.environ.get("QLAB_NEWS_PROVIDER") or "synthetic"
-    ).strip().lower()
+    """The one provider this singular API reads, or a refusal.
+
+    ``provider=None`` resolves through :func:`parse_provider_stack`, so the
+    plural ``QLAB_NEWS_PROVIDERS`` that docs/news-setup.md tells operators to
+    set governs this path too. Reading only the singular variable meant a desk
+    configured for two live sources silently fell through to the synthetic
+    fixtures, under a configuration that had asked for neither.
+
+    A stack of several members has no singular answer. Returning its first
+    member would report one source's window under a configuration that asked
+    for all of them, so this refuses and names the API that reads a stack.
+    """
+    if provider is not None and str(provider).strip():
+        return str(provider).strip().lower()
+    stack = parse_provider_stack(None)
+    if len(stack) > 1:
+        raise RuntimeError(
+            f"the configured provider stack has {len(stack)} members "
+            f"({', '.join(stack)}); fetch_news reads a single provider — call "
+            "fetch_news_stacked to read the whole stack, or name one provider")
+    return stack[0]
 
 
 def _resolve_provider(provider: str | None) -> tuple[str, ProviderFetch]:
     name = _provider_name(provider)
+    try:
+        return name, PROVIDERS[name]
+    except KeyError:
+        pass
+    # A name this process has not imported yet is not an unknown name. Only
+    # fetch_news_stacked discovered plugins, so every singular path — the CLI's
+    # `news-check --provider`, check_news — refused an installed entry-point
+    # provider. Discovery is idempotent and runs only on a miss, so the common
+    # path stays one dict lookup.
+    load_plugin_providers()
     try:
         return name, PROVIDERS[name]
     except KeyError as exc:

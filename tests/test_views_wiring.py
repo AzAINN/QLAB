@@ -445,7 +445,10 @@ def test_news_fetch_returns_a_partial_window_rather_than_failing_the_agent(
     assert out["n_items"] == 1
     assert out["items"][0]["headline"] == "GDP, second estimate"
     assert out["excerpt"]
-    assert out["partial"] == {"BLS": "HTTP Error 403: Forbidden"}
+    # Keyed by the member that lost the feed: a one-member stack says the same
+    # thing a flat map did, and a two-member stack can still be read.
+    assert out["partial"] == {"macro": {"BLS": "HTTP Error 403: Forbidden"}}
+    assert out["providers"] == ["macro"]
 
 
 def test_a_view_may_cite_archive_claims_instead_of_an_excerpt(reg):
@@ -528,3 +531,58 @@ def test_a_quote_riding_alongside_claims_is_still_checked_against_the_excerpt(re
             "research.apply_views",
             {"as_of": "2021-06-30", "universe": "core", "views": [fabricated],
              "excerpt": excerpt}, offline=True)
+
+
+def test_news_fetch_reads_the_whole_configured_stack(reg, monkeypatch):
+    """The plural env governs the owner's feed tool, as docs/news-setup.md says.
+
+    news.fetch called the singular fetch_news with no provider, which read only
+    QLAB_NEWS_PROVIDER. An operator following the documented setup got the
+    synthetic fixtures from a desk configured for two live sources, and the
+    result said nothing about either.
+    """
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    from qlab.ui.server import UISession
+
+    def one(as_of, universe):
+        return [NewsItem(source="Wire One", published="2021-06-29T09:00:00+00:00",
+                         headline="one speaks", summary="", url="https://x/1",
+                         tickers=("ACWI",), provider="one")]
+
+    def two(as_of, universe):
+        raise feed.PartialWindow(
+            [NewsItem(source="Wire Two", published="2021-06-29T10:00:00+00:00",
+                      headline="two speaks", summary="", url="https://x/2",
+                      tickers=("ACWI",), provider="two")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(feed.PROVIDERS, "one", one)
+    monkeypatch.setitem(feed.PROVIDERS, "two", two)
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two")
+    session = UISession(offline_default=False, registry=reg)
+    out = session.call_lab_tool(
+        "news.fetch",
+        {"as_of": "2021-06-30", "universe": "core", "lookback_hours": 72},
+        offline=False)
+    assert out["providers"] == ["one", "two"]
+    assert out["outcomes"]["one"] == "ok"
+    assert out["outcomes"]["two"].startswith("partial: ")
+    assert {i["headline"] for i in out["items"]} == {"one speaks", "two speaks"}
+    # Whose feed went missing, not just which feed: a flat merge across members
+    # would report a failure without saying which source it belonged to.
+    assert out["partial"] == {"two": {"BLS": "HTTP Error 403: Forbidden"}}
+
+
+def test_news_fetch_offline_reads_only_the_synthetic_member(reg, monkeypatch):
+    """Offline is the demo and must never resolve an operator's live stack."""
+    from qlab.ui.server import UISession
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "alpaca,gdelt")
+    session = UISession(offline_default=True, registry=reg)
+    out = session.call_lab_tool(
+        "news.fetch",
+        {"as_of": "2021-06-30", "universe": "core", "lookback_hours": 72},
+        offline=True)
+    assert out["providers"] == ["synthetic"]
+    assert out["outcomes"] == {"synthetic": "ok"}

@@ -80,6 +80,12 @@ export QLAB_EDGAR_CONTACT="Your Name your@email"   # the SEC requires a contact
 `QLAB_NEWS_PROVIDERS` (plural) wins over `QLAB_NEWS_PROVIDER` (singular); a
 stack of one behaves exactly like the single provider it names.
 
+The plural variable governs the desk's own feed, not just the CLI: the owner's
+`news.fetch` reads every member you name and reports each member's outcome
+beside the merged window. The internal single-provider API (`fetch_news`)
+refuses a stack of more than one rather than quietly reading its first member —
+if you see that refusal, the caller wants `fetch_news_stacked`.
+
 A member that goes away is **reported, never absorbed**: the window keeps the
 records the living members returned, each member's outcome travels beside them,
 and the archive files one batch and one `news_archive` event per member so a
@@ -111,7 +117,13 @@ anonymous one.
 ```bash
 qlab news-check
 qlab news-check --provider macro,gdelt      # a stack, or one member of it
+qlab news-check --provider acme             # an installed plugin provider
 ```
+
+`--provider` accepts a plugin name as readily as a built-in one: a pip package
+declaring a `qlab.news.providers` entry point is discovered on first use, so
+there is no separate registration step and no need to name it in the stack
+first.
 
 Reports the provider, whether a credential resolved, and — if the window comes
 back empty — whether that is an outage or a genuinely quiet market. Those are

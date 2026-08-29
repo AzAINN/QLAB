@@ -1156,24 +1156,31 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         Text only — no market numbers, no writes. This is the owner-side feed
         that supplies the quarantined news-extractor's evidence; the extractor
         never fetches. Offline uses the deterministic synthetic provider.
+
+        Reads the whole configured stack. This called the singular
+        ``fetch_news``, which saw only ``QLAB_NEWS_PROVIDER``, so an operator
+        who set the documented ``QLAB_NEWS_PROVIDERS`` got the synthetic
+        fixtures from a desk configured for live sources and nothing in the
+        result said so. Every member's outcome travels with the window: a
+        source that went away is a fact, not a smaller answer.
         """
-        from qlab.news.feed import PartialWindow, fetch_news
+        from qlab.news.feed import fetch_news_stacked, parse_provider_stack
 
         st.budget.charge("news.fetch")
         d = check_as_of(as_of)
         tickers = load_universe().tickers(universe)
+        # Offline is the demo and must never resolve an operator's live stack.
+        providers = ("synthetic",) if st.offline else parse_provider_stack(None)
         # A provider that lost one of its feeds returned a smaller window, not
         # an error. Failing the tool would tell the agent the news lane is down
         # while the records it did fetch sit inside the exception; the feeds
-        # that went missing are named in the result instead.
-        partial: dict[str, str] = {}
-        try:
-            items = fetch_news(
-                str(d), tickers, lookback_hours=lookback_hours,
-                offline=st.offline)
-        except PartialWindow as exc:
-            items = exc.items
-            partial = exc.failures
+        # that went missing are named in the result instead, under the member
+        # that lost them — a flat merge across members would report a dead feed
+        # without saying whose it was.
+        window = fetch_news_stacked(
+            str(d), tickers, providers, lookback_hours=lookback_hours)
+        items = window.items
+        partial = window.partials
         # A single excerpt string the extractor can quote against, plus the
         # structured items for display/provenance.
         excerpt = "\n".join(
@@ -1187,8 +1194,12 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                                          "summary": it.summary}
                       for it in items],
             "excerpt": excerpt,
-            # Empty when every feed answered. Never absent: an agent must be
-            # able to tell "nothing was missing" from "nobody said".
+            # Which sources were read, in order, and what each one said. Never
+            # absent: an agent must be able to tell "nothing was missing" from
+            # "nobody said", and "the stack answered" from "one member did".
+            "providers": list(window.providers),
+            "outcomes": dict(window.outcomes),
+            # Empty when every feed of every member answered.
             "partial": partial,
         }
 

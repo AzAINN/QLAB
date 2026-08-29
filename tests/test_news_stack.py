@@ -203,3 +203,70 @@ def test_a_stack_whose_only_member_is_partial_is_still_a_window(monkeypatch):
     window = feed.fetch_news_stacked(
         datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("macro",))
     assert [i.headline for i in window.items] == ["h1"]
+
+
+def test_the_singular_api_reads_the_plural_env_and_refuses_a_stack(monkeypatch):
+    """One provider is one window; a stack of several has no singular answer.
+
+    docs/news-setup.md tells operators to set QLAB_NEWS_PROVIDERS. The singular
+    fetch_news read only the singular variable, so an operator who followed the
+    docs got the synthetic fixtures under a live configuration and nothing said
+    so. Naming fetch_news_stacked in the refusal is the whole point: the caller
+    has to be told which API reads what it configured.
+    """
+    monkeypatch.setitem(feed.PROVIDERS, "one", lambda a, u: [_item("one", "A", "h1")])
+    monkeypatch.setitem(feed.PROVIDERS, "two", lambda a, u: [_item("two", "B", "h2")])
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two")
+    with pytest.raises(RuntimeError, match="fetch_news_stacked"):
+        feed.fetch_news(datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",))
+    # One member is a singular answer, and it must be THAT member.
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "two")
+    items = feed.fetch_news(datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",))
+    assert [i.provider for i in items] == ["two"]
+    # An explicitly named provider is the caller's own instruction and still wins.
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two")
+    named = feed.fetch_news(
+        datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), provider="one")
+    assert [i.provider for i in named] == ["one"]
+
+
+def test_a_plugin_provider_resolves_by_name_without_a_stack(monkeypatch):
+    """`qlab news-check --provider acme` must find an entry-point provider.
+
+    Only fetch_news_stacked called load_plugin_providers, so every singular
+    path — the CLI's --provider, check_news — refused an installed plugin as
+    an "unknown news provider". Discovery on a miss is idempotent and leaves
+    the common path a dict lookup.
+    """
+    def fetch(as_of, universe):
+        return [_item("acme", "Acme Wire", "plugin headline")]
+
+    class Ep:
+        name = "acme"
+        group = "qlab.news.providers"
+
+        def load(self):
+            return fetch
+
+    monkeypatch.setattr(
+        metadata, "entry_points",
+        lambda **kw: [Ep()] if kw.get("group") == "qlab.news.providers" else [])
+    monkeypatch.setitem(feed.PROVIDERS, "acme", None)
+    del feed.PROVIDERS["acme"]
+
+    items = feed.fetch_news(
+        datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), provider="acme")
+    assert [i.headline for i in items] == ["plugin headline"]
+
+    from qlab.news.check import check_news
+
+    report = check_news(["SPY"], provider="acme")
+    assert report["ok"] is True
+    assert report["provider"] == "acme"
+
+
+def test_an_unknown_provider_still_refuses_by_name(monkeypatch):
+    monkeypatch.setattr(metadata, "entry_points", lambda **kw: [])
+    with pytest.raises(RuntimeError, match="unknown news provider 'nope'"):
+        feed.fetch_news(
+            datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), provider="nope")

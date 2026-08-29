@@ -8,7 +8,9 @@ data, like every other source list.
 
 Point-in-time by ``seendate``, which GDELT stamps in UTC: the instant is
 carried into an offset-aware ISO string so the caller's look-ahead gate
-compares instants rather than text.
+compares instants rather than text. The *request* is point-in-time too — an
+explicit ``startdatetime``/``enddatetime`` derived from the caller's ``as_of``,
+never a wall-clock ``timespan``.
 """
 
 from __future__ import annotations
@@ -26,10 +28,15 @@ _DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 # residential connection. A ten-second ceiling reported a live-but-slow API
 # as a timeout, which reads as an outage and is a different fact.
 _TIMEOUT_S = 45
-# The request window. `fetch_news` trims every record to the caller's own
-# lookback afterwards; this only bounds what is asked for.
+# The request window, measured back from the caller's `as_of`. `fetch_news`
+# trims every record to the caller's own lookback afterwards; this only bounds
+# what is asked for.
 _LOOKBACK = timedelta(hours=48)
-_TIMESPAN = f"{int(_LOOKBACK.total_seconds() // 3600)}h"
+# GDELT's explicit-window format, in UTC. `timespan=48h` means "48 hours back
+# from now", so every non-live as_of asked for today's articles and then
+# dropped all of them against the cutoff below — a permanent empty window with
+# no error, indistinguishable from a quiet press.
+_WINDOW_FORMAT = "%Y%m%d%H%M%S"
 # GDELT's per-request ceiling. Named because it bounds every window the desk
 # shows, and a silent cap on a news feed reads as "that is all there was".
 _MAX_RECORDS = 75
@@ -63,6 +70,7 @@ def fetch(as_of: datetime, universe: tuple[str, ...]) -> list[NewsItem]:
     # coverage, never about who last edited the yaml.
     _validate_gdelt_rules(rules)
     wanted = {t.upper() for t in universe}
+    start = (as_of - _LOOKBACK).astimezone(timezone.utc)
     dated: list[tuple[datetime, NewsItem]] = []
     for rule in rules:
         tickers = tuple(t for t in rule["tickers"] if t.upper() in wanted)
@@ -74,7 +82,10 @@ def fetch(as_of: datetime, universe: tuple[str, ...]) -> list[NewsItem]:
         # the filter this desk asked for.
         params = urllib.parse.urlencode({
             "query": query, "mode": "artlist", "format": "json",
-            "maxrecords": _MAX_RECORDS, "timespan": _TIMESPAN,
+            "maxrecords": _MAX_RECORDS,
+            "startdatetime": start.strftime(_WINDOW_FORMAT),
+            "enddatetime": as_of.astimezone(timezone.utc).strftime(
+                _WINDOW_FORMAT),
             "sort": "datedesc"}, safe=":")
         payload = _get_json(f"{_DOC_URL}?{params}")
         for art in payload.get("articles", []):

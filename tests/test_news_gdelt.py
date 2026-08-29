@@ -193,3 +193,33 @@ def test_one_article_matched_by_two_rules_keeps_one_identity(monkeypatch):
     assert len(items) == 2
     assert content_hash(items[0]) == content_hash(items[1])
     assert {i.tickers for i in items} == {("GLD",), ("TLT",)}
+
+
+def test_the_request_window_is_anchored_to_as_of_not_to_wall_clock(monkeypatch):
+    """`timespan=48h` is "the last 48 hours from now", whatever `as_of` says.
+
+    Every non-live as_of therefore asked for today's articles and then dropped
+    all of them against the caller's own cutoff, returning an empty window with
+    no error — a backfill or a dated research read saw a silent, permanent
+    blackout it could not distinguish from a quiet press.
+    """
+    monkeypatch.setattr(gdelt, "load_news_sources", lambda: {"gdelt": {"rules": [
+        {"query": "gold OR bullion", "tickers": ["GLD"]}]}})
+    calls = []
+    _payload_urlopen(monkeypatch, {"articles": []}, calls)
+    gdelt.fetch(datetime(2021, 6, 30, tzinfo=timezone.utc), ("GLD",))
+    assert len(calls) == 1
+    assert "startdatetime=20210628000000" in calls[0]
+    assert "enddatetime=20210630000000" in calls[0]
+    assert "timespan" not in calls[0]
+
+
+def test_a_dated_window_returns_the_articles_inside_it(monkeypatch):
+    monkeypatch.setattr(gdelt, "load_news_sources", lambda: {"gdelt": {"rules": [
+        {"query": "gold OR bullion", "tickers": ["GLD"]}]}})
+    _payload_urlopen(monkeypatch, {"articles": [
+        {"url": "https://www.reuters.com/a", "title": "Gold in June 2021",
+         "seendate": "20210629T140000Z", "domain": "reuters.com",
+         "language": "English"}]})
+    items = gdelt.fetch(datetime(2021, 6, 30, tzinfo=timezone.utc), ("GLD",))
+    assert [i.headline for i in items] == ["Gold in June 2021"]

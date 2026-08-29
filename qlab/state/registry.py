@@ -512,8 +512,10 @@ class Registry:
     def moment_set(self, moment_set_hash: str) -> dict | None:
         """One logged moment set's row, lineage parsed. Read-only.
 
-        The referee reads ``provenance`` from here, so a column that is only
-        ever written would prove nothing about what a conditioned set is.
+        The ``provenance`` column is the persisted record of what conditioned a
+        moment set. The referee does NOT read it from here — it reads
+        ``moments_summary["provenance"]`` off the summary it is handed — so
+        this is the audit's way back to a stored set, and the two must agree.
         """
         rows = self._rows(
             "SELECT * FROM moment_sets WHERE hash=?", [str(moment_set_hash)])

@@ -111,6 +111,80 @@ path. The moment the stage changes, the workflow path becomes the unguarded one.
 Promotion must first carry a moment-set reference through the plan and pass the
 registry at that call site, with a test that fails without it.
 
+**3. A conditioned moment set is consumable by every operational algorithm.**
+`moments.condition` returns a `moment_set_id` like any other, and nothing
+downstream distinguishes it: `objective.build` takes the id and checks only the
+objective *form*; `algorithms.solve` checks only that the catalog entry is
+operational. No code path anywhere reads `provenance.views_run_id` off the
+moment set before solving — the referee reads it from the moments *summary*,
+after the solve, and only where it is handed a registry (see 2 above). So the
+one thing today keeping a views-tilted covariance out of a governed solve is
+that `moments.condition` itself refuses: the stage gate on
+`views_conditioned_min_variance`. The tensor, once produced, is anonymous.
+
+**This too is an explicit precondition of promotion.** Promoting the entry as
+it stands would not make the conditioned tensor solvable by *its own* entry —
+it would make it solvable by `min_variance`, `hrp`, `erc` and every other
+operational algorithm, none of which were measured on it and none of which
+would record that they had been handed one. Promotion must make a conditioned
+`moment_set_id` consumable **only** by its own catalog entry: the lineage has to
+be read where the objective or the solve is built, not merely re-checked
+afterwards by a referee that may not have been given a registry.
+
+## After the branch review (2026-08-29)
+
+The whole-branch review found seven seams that only show when the branch is read
+end to end. All were fixed on this branch; each has a failing-first test.
+
+1. **The plural provider env did not govern `news.fetch`.** `docs/news-setup.md`
+   tells operators to set `QLAB_NEWS_PROVIDERS`, but the owner's feed tool
+   called the singular `fetch_news`, which read only `QLAB_NEWS_PROVIDER` — a
+   desk configured for two live sources served synthetic fixtures and said
+   nothing. `news.fetch` now reads the whole stack and reports each member's
+   outcome; the singular API resolves through the same stack and refuses a
+   multi-member one, naming `fetch_news_stacked`.
+2. **`research.qualitative_matrix` was granted but not forwarded.** It was in
+   `agents/*.md` and in `OWNER_LAB_TOOLS`, but missing from `_LAB_TOOL_BASES`
+   and from the proxy, so `_proxy_tool` returned `None` and
+   `build_workforce_agents` dropped it from the grant in silence — invariant 10
+   again, from the other direction: a grant with nothing to forward it.
+3. **Plugin providers were undiscoverable outside the stack.** Only
+   `fetch_news_stacked` called `load_plugin_providers()`, so
+   `qlab news-check --provider acme` called an installed entry-point provider
+   unknown. Discovery now runs once on a resolve miss.
+4. **Claim-key provenance was not point-in-time, and the views run was not
+   bound to its matrix.** The archive was read as "the newest matrix by write
+   time", so a window logged for T+7 sourced a view at T — look-ahead entering
+   through the provenance gate itself. The owner now stamps its matrices
+   `source: "desk"`, claim keys are selected at or before the run's own date,
+   the persisted views run carries the `matrix_run_id` it verified against
+   (`None` for a quoted excerpt, never absent), `moments.condition` refuses a
+   verified run carrying no such field, and the referee FAILS a solve whose
+   cited matrix is dated after it. This closes E1's "a `views` run bound to the
+   matrix run", which had been left as provenance verified against *something*
+   unnamed.
+5. **An `ablation_a5` matrix could answer as the desk's record.**
+   `research.qualitative_matrix` read `matrix_runs(source=None, ...)`, so the
+   arm's research window — another universe, another day, built by rule rather
+   than read from the press — could be served as what the press said. It now
+   selects the desk's stamp and reports `source`.
+6. **GDELT was anchored to wall clock.** `timespan=48h` means "48 hours back
+   from now", so every non-live `as_of` asked for today's articles and then
+   dropped all of them against the caller's cutoff: a permanent empty window,
+   with no error, indistinguishable from a quiet press. The request now carries
+   an explicit `startdatetime`/`enddatetime` derived from `as_of`.
+7. **The A5 arm's online path was half-built rather than absent.**
+   `MatrixViewsConditioner._matrix` called `fetch_news` without handling
+   `PartialWindow` (one provider short a feed would abort the walk mid-arm) and
+   passed `provider="synthetic"` to `ground()`, which would have stamped live
+   records with the fixtures' provider name. It now refuses `offline=False` at
+   construction until that path is designed; the offline walk is unchanged.
+
+Also: `qlab.arms.estimate` refused nothing when `views_source` and
+`regime_conditional` were combined — it applied the regime-conditioned
+covariance and then let the views conditioner overwrite it, so such an arm
+measured only the views under a name claiming both. It now refuses.
+
 ## Adaptations Task 9 made to its brief
 
 The brief (`.superpowers/sdd/2026-08-28-primary-sources-plan/task-9-brief.md`)

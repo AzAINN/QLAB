@@ -31,9 +31,13 @@ _SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 _ARCHIVE_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{doc}"
 _CACHE_TTL = timedelta(days=7)
 # How far back the provider will look at all. It is a bound on the request,
-# not the desk's window: `fetch_news` trims every record to the caller's
-# lookback afterwards. It has to exceed a quarter, or the periodic forms in
-# KEPT_FORMS (10-Q, 10-K, N-CSR, 13F-HR) could never appear.
+# not the desk's window: `fetch_news` is the window authority and trims every
+# record to the caller's own lookback afterwards, so a 72h caller sees 72h
+# whatever this says — including a 10-Q accepted yesterday, which arrives on
+# the same wire as everything else. The bound therefore matters only to a
+# caller with a LONG lookback_hours: a quarterly read asking for 90 days would
+# silently see a shorter history if this were tighter than the period between
+# the periodic forms in KEPT_FORMS (10-Q, 10-K, N-CSR, 13F-HR).
 _MAX_LOOKBACK = timedelta(days=120)
 _MIN_INTERVAL_S = 0.12               # under the SEC's 10 requests/second
 _TIMEOUT_S = 10

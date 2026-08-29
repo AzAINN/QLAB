@@ -14,6 +14,13 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass
 
+# The stamp on a matrix the OWNER logged from the desk's own live window. The
+# ablation arm writes its research windows to the same registry under its own
+# stamp (``views_arm.ARM_MATRIX_SOURCE``), so a reader with no stamp to filter
+# on will serve an arm's window — a different universe, a different day, built
+# by rule rather than read from the press — as the desk's record.
+DESK_MATRIX_SOURCE = "desk"
+
 
 @dataclass(frozen=True)
 class MatrixRow:

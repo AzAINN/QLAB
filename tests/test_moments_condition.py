@@ -217,7 +217,7 @@ def test_research_qualitative_matrix_reads_the_newest_logged_matrix(reg):
         "research.qualitative_matrix", {"as_of": "2021-06-30"}, offline=True)
     assert empty["status"] == "never_built" and empty["rows"] == {}
 
-    reg.log_run("qualitative_matrix", {"matrix": {
+    reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
         "as_of": "2021-06-30", "window_hash": "w",
         "rows": {"ACWI": {"ticker": "ACWI", "coverage": 3, "publishers": 2,
                           "corroborated": 2, "primary_docs": 2,
@@ -228,3 +228,23 @@ def test_research_qualitative_matrix_reads_the_newest_logged_matrix(reg):
     assert out["status"] == "ok"
     assert out["rows"]["ACWI"]["primary_docs"] == 2
     assert out["window_hash"] == "w"
+
+
+def test_moments_condition_refuses_verified_views_with_no_matrix_lineage(reg):
+    """Verified provenance and no lineage field at all is an inconsistent run.
+
+    Every run the tool persists writes ``matrix_run_id`` — the matrix it
+    verified against, or None for a quoted excerpt. A run that claims verified
+    provenance and carries no such field was written by something that never
+    established lineage, and conditioning on it would restore exactly the
+    unsourced tilt the gate exists to refuse.
+    """
+    session = _session(reg)
+    run_id = reg.log_run("views", {"kl_total": 0.01, "kl_budget": 0.25,
+                                   "provenance_verified": True,
+                                   "probabilities": [1.0]})
+    with pytest.raises(ValueError, match="matrix_run_id"):
+        session.call_lab_tool(
+            "moments.condition",
+            {"moment_set_id": _moment_set(session), "views_run_id": run_id},
+            offline=True)

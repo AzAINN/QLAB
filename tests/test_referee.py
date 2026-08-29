@@ -117,3 +117,45 @@ def test_a_run_of_the_wrong_kind_is_not_a_views_run(reg, kind):
     status, reasons = _referee(reg, _summary(views_run_id=run_id))
     assert status == "FAIL"
     assert any("not in the registry" in r for r in reasons)
+
+
+def _matrix_run(reg, as_of: str) -> str:
+    return reg.log_run("qualitative_matrix", {
+        "source": "desk",
+        "matrix": {"as_of": as_of, "window_hash": as_of, "rows": {}}})
+
+
+def test_a_views_run_sourced_from_a_later_matrix_fails(reg):
+    """Provenance verified against a window the solve could not have seen.
+
+    The lineage check re-verified that provenance was checked, never against
+    WHAT. A matrix dated after the rebalance is look-ahead that has already
+    passed every upstream gate, so the referee is the last place it can be
+    caught — and it is the one gate holding the solve's own date.
+    """
+    matrix = _matrix_run(reg, "2021-07-31")
+    run_id = reg.log_run("views", {"kl_total": 0.01, "kl_budget": 0.25,
+                                   "provenance_verified": True,
+                                   "matrix_run_id": matrix})
+    status, reasons = _referee(reg, _summary(views_run_id=run_id))
+    assert status == "FAIL"
+    assert any("2021-07-31" in r and "2021-06-30" in r for r in reasons)
+
+
+def test_a_views_run_sourced_from_a_matrix_at_or_before_the_solve_passes(reg):
+    matrix = _matrix_run(reg, "2021-06-30")
+    run_id = reg.log_run("views", {"kl_total": 0.01, "kl_budget": 0.25,
+                                   "provenance_verified": True,
+                                   "matrix_run_id": matrix})
+    status, reasons = _referee(reg, _summary(views_run_id=run_id))
+    assert status == "PASS"
+    assert any(run_id in r for r in reasons)
+
+
+def test_a_cited_matrix_that_is_not_in_the_registry_fails(reg):
+    run_id = reg.log_run("views", {"kl_total": 0.01, "kl_budget": 0.25,
+                                   "provenance_verified": True,
+                                   "matrix_run_id": "ghost"})
+    status, reasons = _referee(reg, _summary(views_run_id=run_id))
+    assert status == "FAIL"
+    assert any("'ghost'" in r for r in reasons)

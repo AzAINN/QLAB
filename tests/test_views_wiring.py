@@ -456,7 +456,7 @@ def test_a_view_may_cite_archive_claims_instead_of_an_excerpt(reg):
     from qlab.ui.server import UISession
 
     session = UISession(offline_default=True, registry=reg)
-    reg.log_run("qualitative_matrix", {"matrix": {
+    reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
         "as_of": "2021-06-30", "window_hash": "w",
         "rows": {"ACWI": {"ticker": "ACWI", "coverage": 1, "publishers": 1,
                           "corroborated": 1, "primary_docs": 1,
@@ -512,7 +512,7 @@ def test_a_quote_riding_alongside_claims_is_still_checked_against_the_excerpt(re
     from qlab.ui.server import UISession
 
     session = UISession(offline_default=True, registry=reg)
-    reg.log_run("qualitative_matrix", {"matrix": {
+    reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
         "as_of": "2021-06-30", "window_hash": "w",
         "rows": {"ACWI": {"claim_keys": ["k1"]}}}})
     excerpt = "Dealers report options markets imply unusually wide outcomes."
@@ -586,3 +586,96 @@ def test_news_fetch_offline_reads_only_the_synthetic_member(reg, monkeypatch):
         offline=True)
     assert out["providers"] == ["synthetic"]
     assert out["outcomes"] == {"synthetic": "ok"}
+
+
+def _desk_matrix(reg, as_of: str, keys: list[str], window_hash: str = "w") -> str:
+    """One desk-stamped qualitative matrix over ACWI, as the owner logs it."""
+    return reg.log_run("qualitative_matrix", {
+        "source": "desk",
+        "matrix": {
+            "as_of": as_of, "window_hash": window_hash,
+            "rows": {"ACWI": {"ticker": "ACWI", "coverage": 1, "publishers": 1,
+                              "corroborated": 1, "primary_docs": 1,
+                              "days_to_next_release": None,
+                              "claim_keys": list(keys)}}}})
+
+
+def test_cited_claim_keys_are_read_point_in_time(reg):
+    """A claim the desk had not recorded yet cannot source a view at T.
+
+    The archive was read as "the newest matrix by write time", so a window
+    logged for a later date — the desk refreshes continuously — supplied claim
+    keys to a rebalance that could not have seen them. That is look-ahead
+    entering through the provenance gate itself.
+    """
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    _desk_matrix(reg, "2021-06-30", ["k1"], "w1")
+    _desk_matrix(reg, "2021-07-07", ["k2"], "w2")
+
+    ok = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core",
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3, "source_claims": ["k1"]}]},
+        offline=True)
+    assert ok["provenance_verified"] is True
+
+    with pytest.raises(ValueError, match="not in the archive"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core",
+             "views": [{"type": "tail", "ticker": "ACWI",
+                        "direction": "fatter", "confidence": 0.3,
+                        "source_claims": ["k2"]}]},
+            offline=True)
+
+
+def test_a_persisted_views_run_is_bound_to_the_matrix_it_verified_against(reg):
+    """The run says WHICH matrix sourced it, not merely that one did.
+
+    Without the binding the referee can only re-check that provenance was
+    verified, never against what — and 'verified' against a window from after
+    the solve is not verification.
+    """
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    matrix_run = _desk_matrix(reg, "2021-06-30", ["k1"])
+    out = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "persist": True,
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3, "source_claims": ["k1"]}]},
+        offline=True)
+    spec = reg.get_run(out["run_id"])["spec"]
+    assert spec["matrix_run_id"] == matrix_run
+
+    # A quote-sourced view cites no matrix. The field is still written, so an
+    # absent field means "this run predates the binding", not "no matrix".
+    quoted = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "persist": True,
+         "excerpt": "Dealers report unusually wide outcomes.",
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3,
+                    "source_quote": "unusually wide outcomes"}]},
+        offline=True)
+    quoted_spec = reg.get_run(quoted["run_id"])["spec"]
+    assert "matrix_run_id" in quoted_spec and quoted_spec["matrix_run_id"] is None
+
+
+def test_unverified_views_are_bound_to_no_matrix(reg):
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    out = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "persist": True,
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3, "source_claims": ["k1"]}]},
+        offline=True)
+    spec = reg.get_run(out["run_id"])["spec"]
+    assert spec["provenance_verified"] is False
+    assert spec["matrix_run_id"] is None

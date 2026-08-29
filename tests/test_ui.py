@@ -5093,6 +5093,11 @@ def test_the_qualitative_matrix_is_served_and_logged_once_per_window(
     assert same["run_id"] == out["run_id"]
     assert len(again) == len(first) == 1
 
+    # Stamped as the desk's own: the ablation arm writes qualitative_matrix
+    # runs to this same registry, and a reader that cannot tell them apart
+    # will serve an arm's research window as the desk's record.
+    assert first[0]["spec"]["source"] == "desk"
+
     # A different window is a different observation and does get its own row.
     _push_window(session, ["oil slips as OPEC delays the quota decision"], ticker)
     _, moved = handle_api(session, "GET", "/api/research/qualitative", {}, {})

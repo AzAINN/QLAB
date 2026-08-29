@@ -95,8 +95,8 @@ def deterministic_referee(targets: dict[str, float], mandate: Mandate,
                           ) -> tuple[str, list[str]]:
     failures: list[str] = []
     audit_reasons: list[str] = []
-    failures.extend(_views_lineage_failures(moments_summary, registry))
-    audit_reasons.extend(_views_lineage_audit(moments_summary, registry))
+    failures.extend(_views_lineage_failures(moments_summary, registry, as_of))
+    audit_reasons.extend(_views_lineage_audit(moments_summary, registry, as_of))
     vals = np.array(list(targets.values()), dtype=float)
     target_gross = float(np.abs(vals).sum())
     drawdown: float | None = None
@@ -209,7 +209,7 @@ def _views_run_id(moments_summary: dict | None) -> str | None:
 
 
 def _views_lineage_failures(moments_summary: dict | None,
-                            registry) -> list[str]:
+                            registry, as_of: date | None = None) -> list[str]:
     """Why a views-conditioned covariance may not be traded on.
 
     A conditioned moment set is a covariance an *interpretation* moved. The
@@ -244,15 +244,51 @@ def _views_lineage_failures(moments_summary: dict | None,
         reasons.append(
             f"conditioned on views run {run_id!r} whose provenance was never "
             "verified against an excerpt or the archive")
+    reasons.extend(_matrix_lineage_failures(spec, registry, as_of))
     return reasons
 
 
-def _views_lineage_audit(moments_summary: dict | None, registry) -> list[str]:
+def _matrix_lineage_failures(spec: dict, registry,
+                             as_of: date | None) -> list[str]:
+    """Whether the matrix a views run cites could have been seen by this solve.
+
+    "Provenance verified" says a claim key was checked against the archive; it
+    does not say the archive entry existed yet. A matrix dated after the
+    rebalance is look-ahead that has already passed every upstream gate, and
+    the referee is both the last place it can be caught and the only one
+    holding the solve's own date.
+    """
+    matrix_run_id = spec.get("matrix_run_id")
+    if not matrix_run_id:
+        return []
+    matrix = registry.get_run(str(matrix_run_id))
+    if matrix is None or matrix.get("kind") != "qualitative_matrix":
+        return [f"conditioned on views sourced from matrix run "
+                f"{str(matrix_run_id)!r}, which is not in the registry"]
+    matrix_as_of = ((matrix.get("spec") or {}).get("matrix") or {}).get("as_of")
+    if not matrix_as_of:
+        return [f"matrix run {str(matrix_run_id)!r} carries no window date, so "
+                "the views sourced from it cannot be placed in time"]
+    if as_of is None:
+        # The gate needs a solve date to compare against. Refusing is the same
+        # rule the missing-registry branch already applies: lineage that cannot
+        # be checked is not lineage that checked out.
+        return [f"conditioned on views sourced from matrix run "
+                f"{str(matrix_run_id)!r}, dated {matrix_as_of}, with no solve "
+                "date to compare it against"]
+    if str(matrix_as_of) > str(as_of):
+        return [f"conditioned on views sourced from a qualitative matrix dated "
+                f"{matrix_as_of}, after the solve date {as_of}"]
+    return []
+
+
+def _views_lineage_audit(moments_summary: dict | None, registry,
+                         as_of: date | None = None) -> list[str]:
     """Name a lineage that checked out; silence would not distinguish it from none."""
     run_id = _views_run_id(moments_summary)
     if run_id is None or registry is None:
         return []
-    if _views_lineage_failures(moments_summary, registry):
+    if _views_lineage_failures(moments_summary, registry, as_of):
         return []
     provenance = (moments_summary or {}).get("provenance") or {}
     drift = provenance.get("mean_pinning_max_abs")

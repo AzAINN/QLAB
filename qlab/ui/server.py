@@ -3050,7 +3050,7 @@ class UISession:
         refresh.
         """
         from qlab.news.grounding import ground
-        from qlab.news.matrix import build_matrix
+        from qlab.news.matrix import DESK_MATRIX_SOURCE, build_matrix
         from qlab.news.providers.macro import upcoming
 
         window = self.desk_news_window()
@@ -3084,14 +3084,21 @@ class UISession:
             # since the last matrix would fall off the end of any bounded scan
             # of all runs, find nothing, and re-log — turning one row per
             # window into one per window per day.
-            previous = self.registry.newest_run_of_kind("qualitative_matrix")
+            # Scoped to the desk's own stamp as well: the ablation arm logs
+            # its research windows here too, and reading one of those as "the
+            # last window I logged" makes the hash differ every time, turning
+            # the guard below into a row per page refresh.
+            found = self.registry.matrix_runs(
+                source=DESK_MATRIX_SOURCE, limit=1)
+            previous = found[0] if found else None
             spec = previous.get("spec") if isinstance(previous, dict) else None
             logged = spec.get("matrix") if isinstance(spec, dict) else None
             last_hash = (logged or {}).get("window_hash") \
                 if isinstance(logged, dict) else None
             if last_hash != matrix.window_hash:
                 payload["run_id"] = self.registry.log_run(
-                    "qualitative_matrix", {"matrix": matrix.to_dict()})
+                    "qualitative_matrix",
+                    {"source": DESK_MATRIX_SOURCE, "matrix": matrix.to_dict()})
             else:
                 payload["run_id"] = previous.get("run_id")
         return payload

@@ -663,7 +663,7 @@ def test_qualitative_matrix_honours_its_as_of_and_its_universe(reg):
     assert matrix(as_of="2022-06-30")["status"] == "never_built"
 
     def log(as_of, window, rows):
-        reg.log_run("qualitative_matrix", {"matrix": {
+        reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
             "as_of": as_of, "window_hash": window,
             "rows": {t: {"ticker": t, "coverage": c, "publishers": 1,
                          "corroborated": 0, "primary_docs": 0,
@@ -695,7 +695,7 @@ def test_qualitative_matrix_resolves_an_old_window_on_a_busy_registry(reg):
     register_lab_tools(app, LabState(offline=True, registry=reg, seed=7))
 
     def log(as_of, ticker, key):
-        reg.log_run("qualitative_matrix", {"matrix": {
+        reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
             "as_of": as_of, "window_hash": key,
             "rows": {ticker: {"ticker": ticker, "coverage": 1,
                               "publishers": 1, "corroborated": 0,
@@ -745,3 +745,32 @@ def test_qualitative_matrix_is_in_owner_proxy_and_analyst_scopes():
     # choose estimators nor manage the desk stay out.
     for role in ("optimization-runner", "referee", "reporter", "news-extractor"):
         assert tool not in agents.get(role, {"tools": []})["tools"]
+
+
+def test_qualitative_matrix_serves_the_desks_own_record_not_an_arms(reg):
+    """The ablation writes matrices to the same registry; they are not the desk's.
+
+    `matrix_runs(source=None, ...)` let an `ablation_a5` window — built over
+    the arm's universe, from the arm's rules, for a research walk — answer as
+    the desk's record of what the press said. The stamp is what separates them.
+    """
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, seed=7, registry=reg)
+    row = {"ticker": "ACWI", "coverage": 1, "publishers": 1, "corroborated": 1,
+           "primary_docs": 1, "days_to_next_release": None, "claim_keys": []}
+    desk = reg.log_run("qualitative_matrix", {
+        "source": "desk",
+        "matrix": {"as_of": "2021-06-28", "window_hash": "desk",
+                   "rows": {"ACWI": dict(row, coverage=3)}}})
+    reg.log_run("qualitative_matrix", {
+        "source": "ablation_a5",
+        "matrix": {"as_of": "2021-06-30", "window_hash": "arm",
+                   "rows": {"ACWI": dict(row, coverage=99)}}})
+
+    out = session.call_lab_tool(
+        "research.qualitative_matrix", {"as_of": "2021-06-30"}, offline=True)
+    assert out["run_id"] == desk
+    assert out["source"] == "desk"
+    assert out["window_hash"] == "desk"
+    assert out["rows"]["ACWI"]["coverage"] == 3

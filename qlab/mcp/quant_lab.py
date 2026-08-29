@@ -51,6 +51,7 @@ from qlab.core.views import (
 from qlab.core.window_evidence import window_evidence
 from qlab.experiment import news_conditioned_arm, recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
+from qlab.news.matrix import DESK_MATRIX_SOURCE
 from qlab.research.view_provenance import verify_view_provenance
 from qlab.solvers.base import Constraints
 
@@ -100,17 +101,27 @@ def _view_claims(value: object, index: int) -> list[str]:
 _verify_view_provenance = verify_view_provenance
 
 
-def _archive_claim_keys(registry) -> set[str]:
-    """Claim keys of the newest logged qualitative matrix — read-only, may be empty."""
-    run = registry.newest_run_of_kind("qualitative_matrix")
-    spec = run.get("spec") if isinstance(run, dict) else None
-    logged = spec.get("matrix") if isinstance(spec, dict) else None
+def _archive_claim_keys(registry, as_of: str) -> tuple[str | None, set[str]]:
+    """The desk's newest matrix AT OR BEFORE ``as_of``: its run id and claim keys.
+
+    Point-in-time, and the desk's own. Reading "the newest matrix by write
+    time" handed a rebalance at T the claim keys of a window logged for T+7 —
+    look-ahead entering through the provenance gate itself — and, on a registry
+    the ablation shares, let an ``ablation_a5`` window source a desk view.
+    Read-only; ``(None, set())`` when nothing qualifies.
+    """
+    found = registry.matrix_runs(source=DESK_MATRIX_SOURCE,
+                                 as_of_at_or_before=str(as_of), limit=1)
+    if not found:
+        return None, set()
+    run = found[0]
+    logged = (run.get("spec") or {}).get("matrix")
     rows = logged.get("rows") if isinstance(logged, dict) else None
     keys: set[str] = set()
     for row in (rows or {}).values():
         if isinstance(row, dict):
             keys.update(str(key) for key in row.get("claim_keys") or ())
-    return keys
+    return run.get("run_id"), keys
 
 
 _PROVENANCE_FIELDS = {"source_quote", "source_claims"}
@@ -1289,9 +1300,10 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         view's ``source_quote`` must be a whitespace-normalized substring of
         it — a deterministic provenance gate so the quarantine does not rest on
         the extractor's prompt alone. A rule-built view may instead carry
-        ``source_claims``, archive claim keys checked against the newest logged
-        qualitative matrix. Every view must carry one of the two. The audit run
-        records whether provenance was verified.
+        ``source_claims``, archive claim keys checked against the desk's newest
+        qualitative matrix dated at or before ``as_of``. Every view must carry
+        one of the two. The audit run records whether provenance was verified
+        and, when persisted, which matrix run it was verified against.
         """
         st.budget.charge("research.apply_views")
         if not isinstance(dry, bool):
@@ -1304,18 +1316,21 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         if budget <= 0.0:
             raise ValueError("kl_budget must be positive")
         typed_views, canonical_views = _validated_risk_views(views)
+        d = check_as_of(as_of)
         # The archive is read only when a view actually cites it, so a quoted
-        # view costs no registry read.
-        claim_keys = (
-            _archive_claim_keys(st.registry)
-            if any(v.get("source_claims") for v in canonical_views)
-            else None
-        )
+        # view costs no registry read. Bounded by the run's own date: a view
+        # may only cite what the desk had already recorded by then.
+        matrix_run_id: str | None = None
+        claim_keys = None
+        if any(v.get("source_claims") for v in canonical_views):
+            matrix_run_id, claim_keys = _archive_claim_keys(st.registry, str(d))
         provenance_verified = _verify_view_provenance(
             canonical_views, excerpt, claim_keys
         )
-
-        d = check_as_of(as_of)
+        if not provenance_verified:
+            # The binding names the matrix this run's provenance was actually
+            # established against. An unverified run established none.
+            matrix_run_id = None
         tickers = load_universe().tickers(universe)
         snapshot = market.snapshot(
             tickers,
@@ -1403,6 +1418,11 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
             run_spec["probabilities"] = [float(x) for x in result.probabilities]
             run_spec["kl_total"] = float(result.kl_total)
             run_spec["provenance_verified"] = bool(provenance_verified)
+            # Which matrix sourced it, or None for a quoted excerpt. Always
+            # written on this path, so an ABSENT field means "persisted by
+            # something that never established lineage" rather than "no
+            # matrix" — two facts a downstream gate must not conflate.
+            run_spec["matrix_run_id"] = matrix_run_id
         run_id = st.registry.log_run("views", run_spec)
 
         if arm_result is not None:
@@ -1446,13 +1466,18 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         from after its own rebalance, and returning every row would hand it
         names it is not trading. A matrix with no row for the requested
         universe refuses rather than answering with an empty table.
+
+        Only the desk's own matrices answer. The ablation arm logs its research
+        windows to this same registry, and one of those — another universe,
+        another day, built by rule rather than read from the press — is not the
+        desk's record of what the press said.
         """
         st.budget.charge("research.qualitative_matrix")
         d = check_as_of(as_of)
         wanted = set(load_universe().tickers(universe))
         # The date bound is a SQL predicate: scanning the newest N runs and
         # filtering here loses every older window as soon as N newer ones land.
-        found = st.registry.matrix_runs(source=None,
+        found = st.registry.matrix_runs(source=DESK_MATRIX_SOURCE,
                                         as_of_at_or_before=str(d), limit=1)
         if not found:
             return {"status": "never_built", "rows": {}}
@@ -1466,7 +1491,7 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                 f"row for any name in universe {universe!r}; it was built "
                 "over a different universe")
         return {"status": "ok", "run_id": run.get("run_id"),
-                **matrix, "rows": rows}
+                "source": DESK_MATRIX_SOURCE, **matrix, "rows": rows}
 
     @app.tool(name="moments.condition")
     def moments_condition(moment_set_id: str, views_run_id: str) -> dict:
@@ -1506,6 +1531,15 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                 f"views run {views_run_id!r} has unverified provenance; a view "
                 "with no excerpt and no archive claim behind it may not "
                 "condition a moment set")
+        if "matrix_run_id" not in spec:
+            # Verified, against nothing recorded. Every run research.apply_views
+            # persists carries this field — the matrix it verified against, or
+            # None for a quoted excerpt — so its absence means the run was
+            # written by something that never established lineage at all.
+            raise ValueError(
+                f"views run {views_run_id!r} claims verified provenance but "
+                "carries no matrix_run_id; its lineage is inconsistent and it "
+                "may not condition a moment set")
         require_operational_stage("views_conditioned_min_variance")
 
         ms = st.get_moment_set(moment_set_id)

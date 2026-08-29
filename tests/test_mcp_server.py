@@ -709,3 +709,39 @@ def test_qualitative_matrix_resolves_an_old_window_on_a_busy_registry(reg):
     out = app.tools["research.qualitative_matrix"](as_of="2020-12-31")
     assert out["status"] == "ok" and out["as_of"] == "2020-06-30"
     assert set(out["rows"]) == {"ACWI"}
+
+
+def test_qualitative_matrix_is_in_owner_proxy_and_analyst_scopes():
+    """A grant nothing forwards is a grant that silently disappears.
+
+    `research.qualitative_matrix` was granted in agents/*.md and served by the
+    owner, but the proxy never registered it and `_LAB_TOOL_BASES` never
+    listed it — so `_proxy_tool` returned None and `build_workforce_agents`
+    dropped it from the role's list without a word. Four things have to agree
+    for a grant to reach an agent, so all four are asserted together.
+    """
+    from qlab.mcp.tui_proxy import register_proxy_tools
+    from qlab.tui.claude import (
+        _LAB_TOOL_BASES,
+        _PROXY_TOOLS,
+        _claude_tool,
+        build_workforce_agents,
+    )
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    base = "research.qualitative_matrix"
+    tool = _claude_tool(base)
+    assert base in OWNER_LAB_TOOLS
+    assert base in _LAB_TOOL_BASES
+    assert tool in _PROXY_TOOLS
+
+    proxy = StubApp()
+    register_proxy_tools(proxy, object())
+    assert "research_qualitative_matrix" in proxy.names
+
+    agents = build_workforce_agents()
+    assert tool in agents["moments-analyst"]["tools"]
+    # Reading the record is not conditioning on it: the roles that neither
+    # choose estimators nor manage the desk stay out.
+    for role in ("optimization-runner", "referee", "reporter", "news-extractor"):
+        assert tool not in agents.get(role, {"tools": []})["tools"]

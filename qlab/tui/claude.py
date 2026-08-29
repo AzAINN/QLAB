@@ -80,6 +80,7 @@ _LAB_TOOL_BASES = {
     "backtest.run",
     "news.fetch",
     "research.apply_views",
+    "research.qualitative_matrix",
     "research.equilibrium_returns",
     "research.predict_vol",
     "research.predictor_board",

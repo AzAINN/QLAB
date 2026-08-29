@@ -288,6 +288,23 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "excerpt": excerpt,
         })
 
+    @app.tool(name="research_qualitative_matrix")
+    def research_qualitative_matrix(
+        as_of: str,
+        universe: str = "core",
+    ) -> dict:
+        """Read the owner's logged qualitative matrix as of a date.
+
+        Read-only: the matrix is built by the owner from the window it already
+        fetched, so this never fetches and never builds one. The owner honours
+        both arguments, so a point-in-time caller cannot be handed a window
+        from after its own rebalance.
+        """
+        return lab("research.qualitative_matrix", {
+            "as_of": as_of,
+            "universe": universe,
+        })
+
     # -- regime indicators (options for the analyst's regime call) --------
     def regime(name: str, as_of: str, universe: str, lookback_days: int) -> dict:
         return lab(name, {"as_of": as_of, "universe": universe,

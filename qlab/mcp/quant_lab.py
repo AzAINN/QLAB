@@ -51,6 +51,7 @@ from qlab.core.views import (
 from qlab.core.window_evidence import window_evidence
 from qlab.experiment import news_conditioned_arm, recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
+from qlab.research.view_provenance import verify_view_provenance
 from qlab.solvers.base import Constraints
 
 
@@ -94,53 +95,9 @@ def _view_claims(value: object, index: int) -> list[str]:
     return [_view_string(item, "source_claims", index) for item in value]
 
 
-def _verify_view_provenance(
-    canonical_views: list[dict],
-    excerpt: str,
-    claim_keys: set[str] | None = None,
-) -> bool:
-    """Every view must be grounded — in the operator's text, or in the archive.
-
-    A view carrying ``source_quote`` is checked against ``excerpt`` as before.
-    A view carrying ``source_claims`` is checked against ``claim_keys``, the
-    claim keys of the current qualitative matrix: a rule-built view cites the
-    records it was counted from rather than pasting one of them.
-
-    Returns False (unverified, but permitted) when the ground truth is absent —
-    no excerpt supplied, or no matrix logged — so the audit trail is explicit;
-    raises when the ground truth exists and a view does not match it, so a
-    fabricated quote or an invented claim key cannot reach the analyst.
-    """
-    normalized_excerpt = " ".join(excerpt.split()).lower()
-    known = {str(key) for key in (claim_keys or ())}
-    verified = True
-    for index, view in enumerate(canonical_views, start=1):
-        claims = view.get("source_claims")
-        # A view may carry both. Each field is then checked against its own
-        # ground truth: citing the archive must not smuggle an unchecked quote
-        # into the persisted spec.
-        if "source_quote" in view and normalized_excerpt:
-            quote = " ".join(str(view["source_quote"]).split()).lower()
-            if not quote or quote not in normalized_excerpt:
-                raise ValueError(
-                    f"view {index} source_quote is not found in the supplied "
-                    "excerpt; every risk view must quote the operator's text"
-                )
-        elif not claims:
-            # A quote with no excerpt to check it against is unverified.
-            verified = False
-        if claims:
-            if not known:
-                verified = False
-                continue
-            unknown = sorted({str(claim) for claim in claims} - known)
-            if unknown:
-                raise ValueError(
-                    f"view {index} cites claim keys {unknown} not in the "
-                    "archive; a rule-built view must cite the qualitative "
-                    "matrix it was counted from"
-                )
-    return verified
+# One definition of "grounded", shared with the ablation arm that builds its
+# own views by rule (qlab/research/view_provenance.py).
+_verify_view_provenance = verify_view_provenance
 
 
 def _archive_claim_keys(registry) -> set[str]:
@@ -1467,19 +1424,41 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
 
     @app.tool(name="research.qualitative_matrix")
     def research_qualitative_matrix(as_of: str, universe: str = "core") -> dict:
-        """The newest qualitative matrix for the window: counts per name, no sign.
+        """The qualitative matrix as of a date: counts per name, no sign.
 
         Read-only and never builds one: the matrix is logged by the owner from
         the window it already fetched, so building one here would either fetch
         on a read path or invent a second window for the same day.
+
+        ``as_of`` and ``universe`` are both honoured. Returning the newest
+        matrix whatever the date would hand a point-in-time caller a window
+        from after its own rebalance, and returning every row would hand it
+        names it is not trading. A matrix with no row for the requested
+        universe refuses rather than answering with an empty table.
         """
         st.budget.charge("research.qualitative_matrix")
-        check_as_of(as_of)
-        run = st.registry.newest_run_of_kind("qualitative_matrix")
-        if run is None:
+        d = check_as_of(as_of)
+        wanted = set(load_universe().tickers(universe))
+        candidates = []
+        for run in st.registry.runs_of_kind("qualitative_matrix", 200):
+            matrix = (run.get("spec") or {}).get("matrix") or {}
+            stamp = str(matrix.get("as_of") or "")
+            if stamp and stamp <= str(d):
+                candidates.append((stamp, run, matrix))
+        if not candidates:
             return {"status": "never_built", "rows": {}}
-        matrix = (run.get("spec") or {}).get("matrix") or {}
-        return {"status": "ok", "run_id": run.get("run_id"), **matrix}
+        # max() keeps the first maximal element, and the scan is newest-write
+        # first, so two matrices for one window resolve to the later write.
+        _, run, matrix = max(candidates, key=lambda c: c[0])
+        rows = {t: r for t, r in (matrix.get("rows") or {}).items()
+                if t in wanted}
+        if not rows:
+            raise ValueError(
+                f"the qualitative matrix as of {matrix.get('as_of')} has no "
+                f"row for any name in universe {universe!r}; it was built "
+                "over a different universe")
+        return {"status": "ok", "run_id": run.get("run_id"),
+                **matrix, "rows": rows}
 
     @app.tool(name="moments.condition")
     def moments_condition(moment_set_id: str, views_run_id: str) -> dict:

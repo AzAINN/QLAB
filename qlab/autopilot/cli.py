@@ -155,6 +155,14 @@ def _cmd_batch(args) -> int:
         print(f"{row['arm']:>4}  {_f(row.get('sortino')):>9}  "
               f"{_f(row.get('ann_vol')):>8}  {_f(row.get('max_drawdown')):>8}  "
               f"{_f(row.get('deflated_sharpe')):>8}")
+    views = report.get("views_conditioning")
+    if views:
+        # Whether the record spoke at all. Without this line an arm that
+        # reproduced its baseline because no rule fired is indistinguishable
+        # on screen from one that fired and changed nothing.
+        print(f"views: {views['windows']} windows, "
+              f"{views['windows_with_views']} with views, "
+              f"{views['views_applied']} views applied")
     return 0
 
 

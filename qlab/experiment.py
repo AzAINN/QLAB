@@ -160,6 +160,17 @@ def run_ablation(
         # metrics to the unconditioned arm is the arm reproducing its baseline,
         # which is the honest reading of a silent archive — not a broken sweep.
         results["views_conditioning"] = dict(conditioner.stats)
+        # ... and a measured null that dies with the process is not a record.
+        # The counts go to the registry under their own kind, readable by
+        # newest_run_of_kind/runs_of_kind, and deliberately NOT into any arm's
+        # metrics: those feed the ranking and the DSR trial accounting, where a
+        # window count is not a performance number.
+        reg.log_run("views_summary", {
+            "ablation_run_id": run_id,
+            "arm": ",".join(a.id for a in arms
+                            if a.params.get("views_source")),
+            **conditioner.stats,
+        })
     results["n_trials_registry"] = reg.backtest_trial_count()
     results["n_trials_dsr"] = n_trials_dsr
 

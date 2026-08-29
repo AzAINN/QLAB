@@ -159,9 +159,6 @@ def test_a_speaking_record_tilts_the_covariance_and_logs_a_checkable_views_run(
     import numpy as np
 
     assert not np.allclose(out.cov, moment_set_7.cov)
-    # The arm estimates covariance-only (mu is None by policy), so the pinning
-    # evidence is the drift that was measured and discarded, not a copied mu.
-    assert out.mu is moment_set_7.mu
     assert out.provenance["mean_pinning_max_abs"] > 0.0
 
     run = reg.get_run(out.provenance["views_run_id"])
@@ -172,6 +169,57 @@ def test_a_speaking_record_tilts_the_covariance_and_logs_a_checkable_views_run(
     assert spec["views"][0]["source_claims"] == ["a", "b", "c", "d"]
     # And the matrix it was counted from is on the record beside it.
     assert reg.newest_run_of_kind("qualitative_matrix") is not None
+
+
+def test_a_tilt_never_moves_a_mean_the_parent_actually_carried(
+    reg, snapshot, monkeypatch
+):
+    """The pinning claim is only testable on a parent that HAS a mean."""
+    import numpy as np
+
+    from qlab.core.moments import estimate_moments
+    from qlab.news.matrix import QualitativeMatrix
+    from qlab.research import views_arm
+
+    parent = estimate_moments(snapshot, lookback_days=504,
+                              higher_moments=False, include_mu=True)
+    assert parent.mu is not None
+    loud = QualitativeMatrix("2015-09-30", "w1", {
+        "ACWI": row("ACWI", 6, 3, 4, 4, keys=("a", "b", "c", "d")),
+    })
+    monkeypatch.setattr(views_arm, "build_matrix", lambda *a, **k: loud)
+
+    out = _conditioner(reg).condition(parent, snapshot)
+    assert not np.allclose(out.cov, parent.cov)
+    assert np.array_equal(out.mu, parent.mu)
+    # The tilted mean the pooling code returned did differ; it was measured
+    # against the parent's and discarded, which is what makes this a check.
+    assert out.provenance["mean_pinning_max_abs"] > 0.0
+
+
+def test_a_view_citing_a_claim_absent_from_the_matrix_is_not_conditioned_on(
+    reg, snapshot, moment_set_7, monkeypatch
+):
+    """Provenance is derived from the archive, never asserted by the caller."""
+    from qlab.news.matrix import QualitativeMatrix
+    from qlab.research import views_arm
+
+    loud = QualitativeMatrix("2015-09-30", "w1", {
+        "ACWI": row("ACWI", 6, 3, 4, 4, keys=("a", "b", "c", "d")),
+    })
+    monkeypatch.setattr(views_arm, "build_matrix", lambda *a, **k: loud)
+    monkeypatch.setattr(views_arm, "views_from_matrix", lambda *a, **k: [
+        {"type": "tail", "ticker": "ACWI", "direction": "fatter",
+         "confidence": 0.3, "source_claims": ["not-in-the-archive"]}])
+
+    cond = _conditioner(reg)
+    out = cond.condition(moment_set_7, snapshot)
+    assert out is moment_set_7
+    assert cond.stats["windows_conditioned"] == 0
+    assert cond.stats["unverified_windows"] == 1
+    spec = reg.newest_run_of_kind("views")["spec"]
+    assert spec["provenance_verified"] is False
+    assert spec["provenance_source"] == "matrix_rule"
 
 
 def test_the_window_is_read_once_however_many_arms_walk_the_same_date(
@@ -196,6 +244,44 @@ def test_the_previous_window_is_the_baseline_not_the_current_one(reg):
                                {"ACWI": row("ACWI", 8, 3, 6, 6, keys=("b",))})
     baseline = cond._log_and_previous(second)
     assert baseline["ACWI"].primary_docs == 4
+
+
+def test_the_baseline_is_never_a_later_window_or_another_universes_matrix(reg):
+    """A shared registry holds the owner's matrices too — and later ones.
+
+    Taking "the second newest qualitative_matrix run" as the baseline reads a
+    matrix the owner logged today, for a different universe, as though it were
+    this window's past: look-ahead and cross-universe in one line.
+    """
+    from qlab.news.matrix import QualitativeMatrix
+    from qlab.research.views_arm import ARM_MATRIX_SOURCE
+
+    def logged(source, as_of, window, rows):
+        spec = {"matrix": QualitativeMatrix(as_of, window, rows).to_dict()}
+        if source:
+            spec["source"] = source
+        reg.log_run("qualitative_matrix", spec)
+
+    # A later window, this universe — the look-ahead the old baseline read.
+    logged(ARM_MATRIX_SOURCE, "2016-06-30", "later",
+           {"ACWI": row("ACWI", 9, 3, 9, 9, keys=("z",))})
+    # An earlier window, a different universe.
+    logged(ARM_MATRIX_SOURCE, "2015-03-31", "other",
+           {"SPY": row("SPY", 9, 3, 9, 9, keys=("s",))})
+    # An earlier window the OWNER logged from live news, not this arm.
+    logged(None, "2015-03-31", "owner",
+           {"ACWI": row("ACWI", 7, 3, 7, 7, keys=("o",))})
+
+    cond = _conditioner(reg)
+    now = QualitativeMatrix("2015-09-30", "w2",
+                            {"ACWI": row("ACWI", 8, 3, 6, 6, keys=("b",))})
+    assert cond._log_and_previous(now) is None
+    earlier = QualitativeMatrix("2015-06-30", "w1",
+                                {"ACWI": row("ACWI", 6, 3, 4, 4, keys=("a",))})
+    assert cond._log_and_previous(earlier) is None
+    baseline = cond._log_and_previous(now)
+    assert set(baseline) == {"ACWI"}
+    assert baseline["ACWI"].primary_docs == 4  # the arm's own earlier window
 
 
 def test_an_arm_asking_for_views_with_no_conditioner_refuses_loudly(snapshot):
@@ -228,15 +314,42 @@ def test_an_unknown_views_source_is_refused_rather_than_ignored(snapshot, reg):
 
 def test_the_ablation_spec_carries_the_arm_and_the_runner_honours_it():
     """Invariant 10: the arm in the yaml must be the arm the runner builds."""
-    import inspect
-
     import yaml
 
-    from qlab import experiment
     from qlab.paths import workspace_root
 
     spec = yaml.safe_load(
         (workspace_root() / "configs/specs/ablation_v1.yaml").read_text())
     a5 = next(a for a in spec["arms"] if a["id"] == "A5")
     assert a5["params"]["views_source"] == "qualitative_matrix"
-    assert "views_source" in inspect.getsource(experiment.run_ablation)
+
+
+def test_the_runner_walks_the_arm_and_records_a_queryable_views_summary(reg):
+    """A null result must be a queryable null, not a dict that dies with the run."""
+    from qlab.experiment import run_ablation
+
+    report = run_ablation({
+        "name": "a5_smoke",
+        "seed": 7,
+        "data": {"tickers": CORE7, "start": "2013-01-01", "end": "2015-12-31"},
+        "backtest": {"rebalance": "quarterly", "lookback_days": 252,
+                     "cost_bps": 5},
+        "arms": [
+            {"id": "A1", "objective": "min_variance", "solver": "classical"},
+            {"id": "A5", "objective": "min_variance", "solver": "classical",
+             "params": {"views_source": "qualitative_matrix"}},
+        ],
+    }, registry=reg, offline=True)
+
+    summary = reg.newest_run_of_kind("views_summary")
+    assert summary is not None, "the walk's counts must survive the run"
+    spec = summary["spec"]
+    assert spec["ablation_run_id"] == report["run_id"]
+    assert spec["arm"] == "A5"
+    assert spec["windows"] > 0
+    assert spec["windows"] == report["views_conditioning"]["windows"]
+    assert spec["windows_with_views"] == \
+        report["views_conditioning"]["windows_with_views"]
+    # The counts describe the walk; they must never enter the metrics that
+    # feed ranking and the DSR trial accounting.
+    assert not {"windows", "views_applied"} & set(report["arms"]["A5"]["metrics"])

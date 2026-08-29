@@ -78,14 +78,37 @@ def test_lineage_that_cannot_be_checked_at_all_fails_rather_than_passes(reg):
     assert any("cannot be verified" in r for r in reasons)
 
 
-def test_the_autopilot_passes_its_registry_so_the_check_actually_runs():
-    """Invariant 10: a gate nothing calls with a registry is a gate that never runs."""
-    import inspect
+def test_the_trigger_proposal_passes_its_registry_so_the_check_actually_runs(
+    reg, monkeypatch
+):
+    """Invariant 10: a gate nothing calls with a registry is a gate that never runs.
 
+    The autopilot's other call site (``run_once``) is asserted the same way in
+    ``tests/test_autopilot.py``; both check the object the referee actually
+    received rather than the source text that passes it.
+    """
     from qlab.autopilot import loop
 
-    src = inspect.getsource(loop)
-    assert src.count("registry=reg") >= 1
+    captured: dict = {}
+    referee = loop.deterministic_referee
+
+    def capture_referee(*args, **kwargs):
+        captured.update(kwargs)
+        return referee(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "deterministic_referee", capture_referee)
+    proposal = loop._build_trigger_proposal(
+        reg, None, load_mandate(),
+        {"kind": "drift", "detail": {}}, TARGETS, date(2021, 6, 30),
+        {"equity": 10_000.0, "high_water_mark": 10_000.0,
+         "weights": {}, "positions": {}},
+        {"clean": True}, "calm",
+        moments_summary=_summary(views_run_id="ghost"))
+
+    assert captured["registry"] is reg
+    # And the lineage check that registry enabled is what refused the proposal.
+    assert proposal["blocked_by"] == "referee"
+    assert any("not in the registry" in r for r in proposal["reasons"])
 
 
 @pytest.mark.parametrize("kind", ["backtest", "solve"])

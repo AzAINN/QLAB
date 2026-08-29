@@ -195,6 +195,9 @@ def test_run_once_referee_receives_portfolio_state_and_annualized_asset_vols(
     )
 
     assert captured["portfolio_state"]["high_water_mark"] == 11_000.0
+    # Invariant 10: the views-lineage gate only runs when the caller hands the
+    # referee the registry to read the views run out of.
+    assert captured["registry"] is reg
     daily_vols = summary["diagnostics"]["portfolio_moments"]["asset_daily_vols"]
     assert set(captured["vols"]) == set(summary["targets"])
     for ticker, daily_vol in daily_vols.items():

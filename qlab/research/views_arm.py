@@ -26,13 +26,19 @@ import numpy as np
 from qlab.core.moments import condition
 from qlab.core.types import DataSnapshot, MomentSet
 from qlab.core.universe import load_universe
-from qlab.core.views import CorrView, TailView, VolView, apply_views
+from qlab.core.views import CorrView, TailView, apply_views
 from qlab.news.feed import fetch_news
 from qlab.news.grounding import ground
 from qlab.news.matrix import MatrixRow, QualitativeMatrix, build_matrix
 from qlab.research.matrix_views import views_from_matrix
+from qlab.research.view_provenance import verify_view_provenance
 
 VIEWS_SOURCE = "qualitative_matrix"
+# The registry is shared with a live owner that logs its own matrices from
+# today's real news, for whatever universe it is running. An arm that reads
+# those as its own past is reading a later day and another universe: every
+# matrix this module writes is stamped, and only stamped ones are read back.
+ARM_MATRIX_SOURCE = "ablation_a5"
 
 
 def sleeves_for(tickers: list[str]) -> dict[str, list[str]]:
@@ -52,7 +58,7 @@ def sleeves_for(tickers: list[str]) -> dict[str, list[str]]:
     return out
 
 
-def _typed(view: dict) -> VolView | CorrView | TailView:
+def _typed(view: dict) -> CorrView | TailView:
     """The rule's dict, as the pooling code's own validated type."""
     kind = view["type"]
     if kind == "tail":
@@ -62,11 +68,9 @@ def _typed(view: dict) -> VolView | CorrView | TailView:
         return CorrView(ticker_a=view["ticker_a"], ticker_b=view["ticker_b"],
                         target_corr=float(view["target_corr"]),
                         confidence=float(view["confidence"]))
-    if kind == "vol":
-        return VolView(ticker=view["ticker"],
-                       target_vol=float(view["target_vol"]),
-                       confidence=float(view["confidence"]))
-    # The rules emit two shapes and a third would be a silent new hypothesis.
+    # The rules emit exactly these two shapes; a third — a vol view included —
+    # would be a new hypothesis, and translating one here in advance would hide
+    # its arrival behind code that already accepts it.
     raise ValueError(f"matrix rule emitted an unknown view type {kind!r}")
 
 
@@ -87,6 +91,7 @@ class MatrixViewsConditioner:
     stats: dict = field(default_factory=lambda: {
         "windows": 0, "windows_with_views": 0, "views_applied": 0,
         "windows_conditioned": 0, "infeasible_windows": 0,
+        "unverified_windows": 0,
     })
     _cache: dict = field(default_factory=dict)
 
@@ -129,6 +134,26 @@ class MatrixViewsConditioner:
             return None
         self.stats["windows_with_views"] += 1
         self.stats["views_applied"] += len(views)
+        spec = {
+            "algorithm_id": "entropy_pooling_views",
+            "as_of": as_of,
+            "tickers": list(tickers),
+            "source": VIEWS_SOURCE,
+            "panel_lookback_days": self.panel_lookback_days,
+            "views": views,
+            "kl_budget": float(self.kl_budget),
+            "dry": False,
+            "dsr_trial_counted": False,
+            "provenance_source": "matrix_rule",
+            "provenance_verified": self._verified(matrix, views),
+        }
+        if not spec["provenance_verified"]:
+            # Recorded, then refused: a view whose cited claim is not in the
+            # matrix it was supposedly counted from is exactly what the
+            # quarantine exists to stop, and the arm must not tilt on it.
+            self.stats["unverified_windows"] += 1
+            self.registry.log_run("views", spec)
+            return None
         panel = self._panel(snapshot, list(tickers))
         try:
             result = apply_views(panel, list(tickers), [_typed(v) for v in views],
@@ -140,25 +165,29 @@ class MatrixViewsConditioner:
             # not express, which is not the same as producing none.
             self.stats["infeasible_windows"] += 1
             return None
-        run_id = self.registry.log_run("views", {
-            "algorithm_id": "entropy_pooling_views",
-            "as_of": as_of,
-            "tickers": list(tickers),
-            "source": "qualitative_matrix",
-            "panel_lookback_days": self.panel_lookback_days,
+        spec.update({
             "n_scenarios": int(len(panel)),
-            "views": views,
-            "kl_budget": float(self.kl_budget),
-            "dry": False,
-            "dsr_trial_counted": False,
             "probabilities": [float(x) for x in result.probabilities],
             "kl_total": float(result.kl_total),
-            # Every rule view cites the claim keys of the matrix row it was
-            # counted from, and that matrix is the run logged just above, so
-            # provenance is verified by construction rather than by assertion.
-            "provenance_verified": True,
         })
+        run_id = self.registry.log_run("views", spec)
         return run_id, np.asarray(result.probabilities, dtype=float)
+
+    def _verified(self, matrix: QualitativeMatrix, views: list[dict]) -> bool:
+        """Is every rule view cited to a claim key of the matrix it came from?
+
+        Derived, never asserted: the arm runs the same check
+        ``research.apply_views`` runs over an extractor's views, against the
+        claim keys of the matrix it has just logged. The shared helper raises
+        when a view cites a key the archive does not hold; for a rule-built
+        view that is a derived FALSE — the window is recorded and not
+        conditioned on — rather than a crash mid-walk.
+        """
+        keys = {str(k) for r in matrix.rows.values() for k in r.claim_keys}
+        try:
+            return verify_view_provenance(views, "", keys)
+        except ValueError:
+            return False
 
     def _matrix(self, tickers: list[str], as_of: str) -> QualitativeMatrix:
         items = fetch_news(as_of, list(tickers),
@@ -175,25 +204,53 @@ class MatrixViewsConditioner:
         # point-in-time claim.
         return build_matrix(grounded.claims, list(tickers), as_of, [])
 
+    def _arm_matrices(self) -> list[dict]:
+        """Every matrix THIS arm logged, newest write first. Read-only.
+
+        Ordering by write time is not ordering by window: the baseline is
+        chosen below on the window's own ``as_of``, because a registry may hold
+        windows written out of date order and a walk-forward that trusts write
+        order silently reads its own future.
+        """
+        out: list[dict] = []
+        for run in self.registry.runs_of_kind("qualitative_matrix", 500):
+            spec = run.get("spec") or {}
+            if spec.get("source") != ARM_MATRIX_SOURCE:
+                continue
+            matrix = spec.get("matrix") or {}
+            if matrix.get("rows"):
+                out.append(matrix)
+        return out
+
     def _log_and_previous(self,
                           matrix: QualitativeMatrix
                           ) -> dict[str, MatrixRow] | None:
-        """Log this window, then return the window before it, as rows.
+        """Log this window, then return the arm's own previous window, as rows.
 
-        ``None`` means there is only one window on record, so the whole window
-        is new — right for the first rebalance and wrong for every later one,
-        which is why the previous window is read rather than assumed.
+        "Previous" is three conditions, not one: logged by this arm, dated
+        strictly before this window, and over the same tickers. The second
+        newest ``qualitative_matrix`` run satisfies none of them on a shared
+        registry — the owner logs matrices from today's live news for whatever
+        universe it is running, and reading one as this window's past is
+        look-ahead and a universe swap in the same line.
+
+        ``None`` means this arm has no earlier window for this universe, so the
+        whole window is new — right for the first rebalance, wrong for a later
+        one, which is why the baseline is read rather than assumed.
         """
-        newest = self.registry.newest_run_of_kind("qualitative_matrix")
-        logged = ((newest or {}).get("spec") or {}).get("matrix") or {}
-        if logged.get("window_hash") != matrix.window_hash:
-            self.registry.log_run("qualitative_matrix",
-                                  {"matrix": matrix.to_dict()})
-        rows = self.registry.runs_of_kind("qualitative_matrix", 2)
-        if len(rows) < 2:
+        logged = self._arm_matrices()
+        if not any(m.get("window_hash") == matrix.window_hash
+                   and str(m.get("as_of") or "") == matrix.as_of
+                   for m in logged):
+            self.registry.log_run(
+                "qualitative_matrix",
+                {"source": ARM_MATRIX_SOURCE, "matrix": matrix.to_dict()})
+        tickers = set(matrix.rows)
+        earlier = [m for m in logged
+                   if str(m.get("as_of") or "") < matrix.as_of
+                   and set(m.get("rows") or {}) == tickers]
+        if not earlier:
             return None
-        previous = ((rows[1].get("spec") or {}).get("matrix") or {}).get("rows")
-        if not previous:
-            return None
+        previous = max(earlier, key=lambda m: str(m.get("as_of") or ""))
         return {t: MatrixRow(**r) if not isinstance(r, MatrixRow) else r
-                for t, r in previous.items()}
+                for t, r in (previous.get("rows") or {}).items()}

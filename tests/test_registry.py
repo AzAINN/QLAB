@@ -1143,3 +1143,9 @@ def test_a_moment_sets_lineage_survives_the_round_trip(reg):
 
     plain = MomentSet(tickers=["A", "B"], as_of=date(2021, 6, 30), cov=np.eye(2) * 2)
     assert reg.moment_set(reg.log_moment_set(plain))["provenance"] == {}
+
+    # Every row an existing desk already holds predates the ALTER, so the
+    # column is NULL there. The reader must answer "no lineage", not crash the
+    # referee on the first pre-migration moment set it meets.
+    reg.con.execute("UPDATE moment_sets SET provenance = NULL")
+    assert reg.moment_set(h)["provenance"] == {}

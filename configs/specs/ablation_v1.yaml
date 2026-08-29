@@ -67,6 +67,16 @@ arms:
     # counts into unsigned risk views, and entropy pooling tilts Sigma under a
     # KL budget with every mean pinned. If the record says nothing, the arm
     # reproduces A1 exactly — and that is the comparison, not a failure.
+    #
+    # CONFOUND, stated rather than engineered away: when a rule fires, the
+    # conditioned covariance is the probability-weighted SAMPLE covariance of
+    # the panel, so this arm swaps A1's Ledoit-Wolf-shrunk, MP-denoised
+    # estimator for a raw one at the same moment it applies the views. A5-vs-A1
+    # therefore measures views AND estimator together, exactly as B4's
+    # lambda-mixed covariance does. Tilting the shrunk estimator instead is a
+    # promotion-time design question, not a fix to make here: it would change
+    # what `views_conditioned_min_variance` means before any evidence says the
+    # entry earns a place at all.
     objective: min_variance
     solver: classical
     params: { views_source: qualitative_matrix }

@@ -647,3 +647,40 @@ def test_predictor_board_catalog_entry_is_research_only():
     assert spec.stage == "research"
     assert spec.agent_tool == "research.predictor_board"
     assert spec.agent_usable is False
+
+
+def test_qualitative_matrix_honours_its_as_of_and_its_universe(reg):
+    """A read tool that validates ``as_of`` and then ignores it is look-ahead."""
+    import pytest as _pytest
+
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+
+    app = StubApp()
+    register_lab_tools(app, LabState(offline=True, registry=reg, seed=7))
+    matrix = app.tools["research.qualitative_matrix"]
+
+    assert matrix(as_of="2022-06-30")["status"] == "never_built"
+
+    def log(as_of, window, rows):
+        reg.log_run("qualitative_matrix", {"matrix": {
+            "as_of": as_of, "window_hash": window,
+            "rows": {t: {"ticker": t, "coverage": c, "publishers": 1,
+                         "corroborated": 0, "primary_docs": 0,
+                         "days_to_next_release": None, "claim_keys": [t]}
+                     for t, c in rows.items()}}})
+
+    log("2022-06-30", "w1", {"ACWI": 3, "NOTINUNIVERSE": 9})
+    log("2022-09-30", "w2", {"ACWI": 7})
+
+    # The newest matrix at or before the asked-for date, not the newest logged.
+    early = matrix(as_of="2022-08-01")
+    assert early["status"] == "ok" and early["as_of"] == "2022-06-30"
+    # ... with rows filtered to the requested universe.
+    assert set(early["rows"]) == {"ACWI"}
+    assert matrix(as_of="2022-12-31")["as_of"] == "2022-09-30"
+    assert matrix(as_of="2022-01-01")["status"] == "never_built"
+
+    log("2023-01-31", "w3", {"NOTINUNIVERSE": 4})
+    with _pytest.raises(ValueError, match="no row"):
+        matrix(as_of="2023-06-30")

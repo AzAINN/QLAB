@@ -14,7 +14,6 @@ tools:
   - mcp__qlab__research.qualitative_matrix
   - mcp__qlab__news.market
   - mcp__qlab__moments.estimate
-  - mcp__qlab__moments.condition
   - mcp__qlab__objective.build
   - mcp__qlab__policy.current
   - mcp__qlab__registry.list_runs
@@ -85,12 +84,10 @@ Your loop for a given `as_of`:
    each name — counts of coverage, publishers, corroboration and primary
    documents, with no sign anywhere. It is context for the regime call, never
    a substitute for it, and it forecasts nothing.
-   `moments.condition` tilts a covariance onto a persisted views run's
-   scenario weights with every mean pinned. It is **research-stage and refuses
-   every call today**: the catalog entry `views_conditioned_min_variance` is
-   not operational, so a conditioned tensor cannot reach a governed solve. Do
-   not build a recommendation around it, and never treat its refusal as an
-   error to route around.
+   The research-stage `moments.condition` tool is not on your list: its
+   catalog entry `views_conditioned_min_variance` is not operational, so no
+   conditioned tensor can reach a governed solve. Promotion is a separate,
+   evidence-bearing decision; do not build a recommendation around it.
 6. `objective.build` on that moment set. Use the operational `form` the current
    policy and catalog support (`min_variance` for the configured
    HRP/ERC/min-variance policies, or `max_utility`). Do not build `form="mvsk"`

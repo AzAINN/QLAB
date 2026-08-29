@@ -684,3 +684,28 @@ def test_qualitative_matrix_honours_its_as_of_and_its_universe(reg):
     log("2023-01-31", "w3", {"NOTINUNIVERSE": 4})
     with _pytest.raises(ValueError, match="no row"):
         matrix(as_of="2023-06-30")
+
+
+def test_qualitative_matrix_resolves_an_old_window_on_a_busy_registry(reg):
+    """A bounded scan on the read tool is the same cliff as on the arm."""
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+
+    app = StubApp()
+    register_lab_tools(app, LabState(offline=True, registry=reg, seed=7))
+
+    def log(as_of, ticker, key):
+        reg.log_run("qualitative_matrix", {"matrix": {
+            "as_of": as_of, "window_hash": key,
+            "rows": {ticker: {"ticker": ticker, "coverage": 1,
+                              "publishers": 1, "corroborated": 0,
+                              "primary_docs": 0, "days_to_next_release": None,
+                              "claim_keys": [key]}}}})
+
+    log("2020-06-30", "ACWI", "target")
+    for i in range(250):
+        log(f"2024-01-{i % 28 + 1:02d}", "SPY", f"noise{i}")
+
+    out = app.tools["research.qualitative_matrix"](as_of="2020-12-31")
+    assert out["status"] == "ok" and out["as_of"] == "2020-06-30"
+    assert set(out["rows"]) == {"ACWI"}

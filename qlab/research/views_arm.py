@@ -39,6 +39,10 @@ VIEWS_SOURCE = "qualitative_matrix"
 # those as its own past is reading a later day and another universe: every
 # matrix this module writes is stamped, and only stamped ones are read back.
 ARM_MATRIX_SOURCE = "ablation_a5"
+# How many of the arm's OWN earlier windows may name a different universe
+# before the baseline search gives up. Not a bound on registry traffic: source
+# and date are SQL predicates, so foreign matrices never reach this loop.
+_BASELINE_CANDIDATES = 64
 
 
 def sleeves_for(tickers: list[str]) -> dict[str, list[str]]:
@@ -132,8 +136,6 @@ class MatrixViewsConditioner:
         views = views_from_matrix(matrix, baseline, sleeves_for(list(tickers)))
         if not views:
             return None
-        self.stats["windows_with_views"] += 1
-        self.stats["views_applied"] += len(views)
         spec = {
             "algorithm_id": "entropy_pooling_views",
             "as_of": as_of,
@@ -154,6 +156,11 @@ class MatrixViewsConditioner:
             self.stats["unverified_windows"] += 1
             self.registry.log_run("views", spec)
             return None
+        # Counted only past the gate: a window whose views were refused applied
+        # none of them, and counting them earlier makes the summary claim the
+        # arm acted on evidence it rejected.
+        self.stats["windows_with_views"] += 1
+        self.stats["views_applied"] += len(views)
         panel = self._panel(snapshot, list(tickers))
         try:
             result = apply_views(panel, list(tickers), [_typed(v) for v in views],
@@ -204,24 +211,6 @@ class MatrixViewsConditioner:
         # point-in-time claim.
         return build_matrix(grounded.claims, list(tickers), as_of, [])
 
-    def _arm_matrices(self) -> list[dict]:
-        """Every matrix THIS arm logged, newest write first. Read-only.
-
-        Ordering by write time is not ordering by window: the baseline is
-        chosen below on the window's own ``as_of``, because a registry may hold
-        windows written out of date order and a walk-forward that trusts write
-        order silently reads its own future.
-        """
-        out: list[dict] = []
-        for run in self.registry.runs_of_kind("qualitative_matrix", 500):
-            spec = run.get("spec") or {}
-            if spec.get("source") != ARM_MATRIX_SOURCE:
-                continue
-            matrix = spec.get("matrix") or {}
-            if matrix.get("rows"):
-                out.append(matrix)
-        return out
-
     def _log_and_previous(self,
                           matrix: QualitativeMatrix
                           ) -> dict[str, MatrixRow] | None:
@@ -238,19 +227,22 @@ class MatrixViewsConditioner:
         whole window is new — right for the first rebalance, wrong for a later
         one, which is why the baseline is read rather than assumed.
         """
-        logged = self._arm_matrices()
-        if not any(m.get("window_hash") == matrix.window_hash
-                   and str(m.get("as_of") or "") == matrix.as_of
-                   for m in logged):
-            self.registry.log_run(
-                "qualitative_matrix",
-                {"source": ARM_MATRIX_SOURCE, "matrix": matrix.to_dict()})
+        # log_run content-hashes its spec and inserts ON CONFLICT DO NOTHING,
+        # so re-logging an identical window is already a no-op; a hand-rolled
+        # "have I logged this" check would only add a second bounded scan.
+        self.registry.log_run(
+            "qualitative_matrix",
+            {"source": ARM_MATRIX_SOURCE, "matrix": matrix.to_dict()})
         tickers = set(matrix.rows)
-        earlier = [m for m in logged
-                   if str(m.get("as_of") or "") < matrix.as_of
-                   and set(m.get("rows") or {}) == tickers]
-        if not earlier:
-            return None
-        previous = max(earlier, key=lambda m: str(m.get("as_of") or ""))
-        return {t: MatrixRow(**r) if not isinstance(r, MatrixRow) else r
-                for t, r in (previous.get("rows") or {}).items()}
+        # Source and date are SQL predicates, so the rows that come back are
+        # already only this arm's own earlier windows, newest first. The only
+        # thing left to check here is the universe, and the limit is a bound on
+        # how many of THIS ARM's earlier windows may name a different one.
+        for run in self.registry.matrix_runs(
+                source=ARM_MATRIX_SOURCE, as_of_before=matrix.as_of,
+                limit=_BASELINE_CANDIDATES):
+            rows = ((run.get("spec") or {}).get("matrix") or {}).get("rows") or {}
+            if set(rows) == tickers:
+                return {t: MatrixRow(**r) if not isinstance(r, MatrixRow) else r
+                        for t, r in rows.items()}
+        return None

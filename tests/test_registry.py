@@ -1149,3 +1149,35 @@ def test_a_moment_sets_lineage_survives_the_round_trip(reg):
     # referee on the first pre-migration moment set it meets.
     reg.con.execute("UPDATE moment_sets SET provenance = NULL")
     assert reg.moment_set(h)["provenance"] == {}
+
+
+def test_matrix_runs_filters_in_sql_so_no_caller_scans_a_fixed_window(reg):
+    """The predicates that pick a window are SQL, not a Python pass over N rows."""
+    def log(source, as_of, ticker):
+        spec = {"matrix": {"as_of": as_of, "window_hash": as_of,
+                           "rows": {ticker: {"ticker": ticker}}}}
+        if source:
+            spec["source"] = source
+        reg.log_run("qualitative_matrix", spec)
+
+    log("ablation_a5", "2015-06-30", "ACWI")
+    log("ablation_a5", "2016-06-30", "ACWI")
+    log(None, "2015-09-30", "SPY")
+    for i in range(400):          # foreign traffic, newer than the target
+        log(None, f"2017-01-{i % 28 + 1:02d}", "SPY")
+    # A run of the same kind that carries no matrix at all is not a window.
+    reg.log_run("qualitative_matrix", {"note": "no matrix here"})
+
+    arm = reg.matrix_runs(source="ablation_a5", as_of_before="2015-09-30",
+                          limit=10)
+    assert [r["spec"]["matrix"]["as_of"] for r in arm] == ["2015-06-30"]
+
+    # Unfiltered by source, bounded at or before the date, newest first.
+    any_source = reg.matrix_runs(source=None, as_of_at_or_before="2015-09-30",
+                                 limit=10)
+    assert [r["spec"]["matrix"]["as_of"] for r in any_source] == [
+        "2015-09-30", "2015-06-30"]
+    assert reg.matrix_runs(source=None, as_of_at_or_before="2015-09-30",
+                           limit=1)[0]["spec"]["matrix"]["as_of"] == "2015-09-30"
+    assert reg.matrix_runs(source="ablation_a5",
+                           as_of_before="2015-01-01", limit=10) == []

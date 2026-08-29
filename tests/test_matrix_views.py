@@ -217,6 +217,10 @@ def test_a_view_citing_a_claim_absent_from_the_matrix_is_not_conditioned_on(
     assert out is moment_set_7
     assert cond.stats["windows_conditioned"] == 0
     assert cond.stats["unverified_windows"] == 1
+    # A window whose views were refused applied no views. Counting them before
+    # the gate makes the summary say the arm acted on evidence it rejected.
+    assert cond.stats["windows_with_views"] == 0
+    assert cond.stats["views_applied"] == 0
     spec = reg.newest_run_of_kind("views")["spec"]
     assert spec["provenance_verified"] is False
     assert spec["provenance_source"] == "matrix_rule"
@@ -282,6 +286,35 @@ def test_the_baseline_is_never_a_later_window_or_another_universes_matrix(reg):
     baseline = cond._log_and_previous(now)
     assert set(baseline) == {"ACWI"}
     assert baseline["ACWI"].primary_docs == 4  # the arm's own earlier window
+
+
+def test_the_baseline_survives_a_registry_busier_than_any_python_scan(reg):
+    """The predicates belong in SQL: a bounded scan loses the baseline silently.
+
+    A lost baseline is not a lost view — ``views_from_matrix`` reads a missing
+    previous window as ``prior = 0``, so every primary document counts as
+    excess and the tail rule becomes MORE likely to fire, mid-walk, with no
+    error anywhere.
+    """
+    from qlab.news.matrix import QualitativeMatrix
+
+    cond = _conditioner(reg)
+    earlier = QualitativeMatrix("2015-06-30", "w1",
+                                {"ACWI": row("ACWI", 6, 3, 4, 4, keys=("a",))})
+    assert cond._log_and_previous(earlier) is None
+
+    # 600 matrices the owner logged after it, from live news, for its own
+    # universe: enough to push the arm's own window past any fixed window.
+    for i in range(600):
+        reg.log_run("qualitative_matrix", {"matrix": QualitativeMatrix(
+            f"2015-07-{i % 28 + 1:02d}", f"noise{i}",
+            {"SPY": row("SPY", 1, 1, 0, 0, keys=(f"n{i}",))}).to_dict()})
+
+    now = QualitativeMatrix("2015-09-30", "w2",
+                            {"ACWI": row("ACWI", 8, 3, 6, 6, keys=("b",))})
+    baseline = cond._log_and_previous(now)
+    assert baseline is not None, "the arm's own earlier window is still there"
+    assert baseline["ACWI"].primary_docs == 4
 
 
 def test_an_arm_asking_for_views_with_no_conditioner_refuses_loudly(snapshot):

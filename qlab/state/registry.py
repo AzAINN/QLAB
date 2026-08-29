@@ -1073,6 +1073,44 @@ class Registry:
             "SELECT * FROM runs WHERE kind=? ORDER BY created_at DESC LIMIT ?",
             [str(kind), int(limit)])
 
+    def matrix_runs(self, *, source: str | None,
+                    as_of_before: str | None = None,
+                    as_of_at_or_before: str | None = None,
+                    limit: int = 1) -> list[dict]:
+        """Qualitative-matrix runs, filtered and ordered by the WINDOW's date.
+
+        Every predicate that picks a window lives in SQL. Reading N runs and
+        filtering them in Python is a cliff: on a registry where an owner logs
+        matrices from live news, the caller's own windows are pushed past any
+        fixed N and it silently sees none — and a missing previous window is
+        not a missing view, it is a baseline of zero, which makes the tail rule
+        MORE likely to fire mid-walk with no error anywhere.
+
+        ``source`` is the stamp the writer put on its own matrices, or ``None``
+        for "any source" (the owner stamps nothing). ``as_of_before`` is strict
+        and ``as_of_at_or_before`` inclusive; both compare the window's own
+        ``as_of``, never the write time, because a registry may hold windows
+        written out of date order. Ordered by that ``as_of`` descending, write
+        time breaking ties. Read-only.
+        """
+        where = ["kind='qualitative_matrix'",
+                 "json_extract_string(spec, '$.matrix.as_of') IS NOT NULL"]
+        params: list = []
+        if source is not None:
+            where.append("json_extract_string(spec, '$.source') = ?")
+            params.append(str(source))
+        if as_of_before is not None:
+            where.append("json_extract_string(spec, '$.matrix.as_of') < ?")
+            params.append(str(as_of_before))
+        if as_of_at_or_before is not None:
+            where.append("json_extract_string(spec, '$.matrix.as_of') <= ?")
+            params.append(str(as_of_at_or_before))
+        params.append(int(limit))
+        return self._rows(
+            "SELECT * FROM runs WHERE " + " AND ".join(where) +
+            " ORDER BY json_extract_string(spec, '$.matrix.as_of') DESC, "
+            "created_at DESC LIMIT ?", params)
+
     def get_run(self, run_id: str) -> dict | None:
         """One run by id, spec parsed, or None. Read-only."""
         rows = self._rows("SELECT * FROM runs WHERE run_id=?", [str(run_id)])

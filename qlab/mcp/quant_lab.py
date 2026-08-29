@@ -1439,17 +1439,14 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         st.budget.charge("research.qualitative_matrix")
         d = check_as_of(as_of)
         wanted = set(load_universe().tickers(universe))
-        candidates = []
-        for run in st.registry.runs_of_kind("qualitative_matrix", 200):
-            matrix = (run.get("spec") or {}).get("matrix") or {}
-            stamp = str(matrix.get("as_of") or "")
-            if stamp and stamp <= str(d):
-                candidates.append((stamp, run, matrix))
-        if not candidates:
+        # The date bound is a SQL predicate: scanning the newest N runs and
+        # filtering here loses every older window as soon as N newer ones land.
+        found = st.registry.matrix_runs(source=None,
+                                        as_of_at_or_before=str(d), limit=1)
+        if not found:
             return {"status": "never_built", "rows": {}}
-        # max() keeps the first maximal element, and the scan is newest-write
-        # first, so two matrices for one window resolve to the later write.
-        _, run, matrix = max(candidates, key=lambda c: c[0])
+        run = found[0]
+        matrix = (run.get("spec") or {}).get("matrix") or {}
         rows = {t: r for t, r in (matrix.get("rows") or {}).items()
                 if t in wanted}
         if not rows:

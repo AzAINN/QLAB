@@ -153,11 +153,12 @@ differs in these ways, each deliberate:
   a refusal, never a quiet exemption.
 - **Agent tool lists.** `research.qualitative_matrix` was added to `agents/atlas.md`
   and `agents/moments-analyst.md` and to the owner's `OWNER_LAB_TOOLS`.
-  `moments.condition` was **also** added to `agents/moments-analyst.md`, which the
-  brief said to withhold until the catalog entry is operational. It refuses every
-  call today — the stage check is in the tool — and the role text says so
-  explicitly, so nothing is reachable that was not before; but the list is wider
-  than the brief authorised, and that is recorded here rather than quietly kept.
+  `moments.condition` was briefly added to `agents/moments-analyst.md` on the
+  controller's instruction, against the plan's rule that no role holds it until
+  the catalog entry is operational; that widening was reverted the same day
+  (`fix(agents): withhold moments.condition …`), and `tests/test_agents.py` now
+  pins that no role holds the tool. The tool itself refuses every call on the
+  operational path regardless, so nothing conditioned was ever reachable.
 - **`moments.condition` orders its gates deliberately**: views-run kind, KL
   budget, provenance verified, *then* the stage check last, so the three lineage
   refusals stay reachable and tested while the entry is research-stage.

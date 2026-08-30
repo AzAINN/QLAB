@@ -37,6 +37,13 @@ class MomentsConfig:
     comoment_shrinkage: float | str = 0.5
     comoment_target: str = "isserlis"
     regime_conditional: bool = False
+    # Research-stage views conditioning (Stream E). `views_source` names the
+    # rule chain; `views_conditioner` is the object that runs it and is
+    # supplied by the ablation runner, which owns the registry. An arm that
+    # asks for a source with no conditioner refuses rather than quietly
+    # estimating an unconditioned covariance under a conditioned arm's name.
+    views_source: str | None = None
+    views_conditioner: object | None = None
 
 
 @dataclass
@@ -54,6 +61,16 @@ class Arm:
 # estimation + single-shot solve
 # ---------------------------------------------------------------------------
 def estimate(snapshot: DataSnapshot, cfg: MomentsConfig, *, higher: bool) -> MomentSet:
+    if cfg.views_source and cfg.regime_conditional:
+        # Both write the same slot. The regime tilt was applied and then the
+        # views conditioner was handed the moment set again, overwriting it —
+        # so an arm asking for both measured only the views, under a name that
+        # claimed both. Composing them is a hypothesis about how two tilts
+        # interact, and it has not been stated anywhere.
+        raise ValueError(
+            "views_source and regime_conditional both condition the "
+            "covariance, and the views tilt would silently discard the "
+            "regime-conditioned one; pick one per arm")
     ms = estimate_moments(
         snapshot,
         lookback_days=cfg.lookback_days,
@@ -80,6 +97,25 @@ def estimate(snapshot: DataSnapshot, cfg: MomentsConfig, *, higher: bool) -> Mom
         ms.cov = condition_covariance(X, regime_labels(rets), reg["regime_lambda"])
         ms.diagnostics["regime_lambda"] = reg["regime_lambda"]
         ms.diagnostics["regime"] = reg["regime"]
+    if cfg.views_source:
+        if higher:
+            raise ValueError(
+                "views conditioning is covariance-only: the coskew/cokurt "
+                "targets embed the UNCONDITIONED covariance, so tilting Sigma "
+                "alone would blend two distributions in one MVSK objective "
+                "(same reason regime_conditional refuses it)")
+        from qlab.research.views_arm import VIEWS_SOURCE
+
+        if cfg.views_source != VIEWS_SOURCE:
+            raise ValueError(
+                f"unknown views_source {cfg.views_source!r}; the only rule "
+                f"chain is {VIEWS_SOURCE!r}")
+        if cfg.views_conditioner is None:
+            raise ValueError(
+                "views_source needs a conditioner: building the matrix reads "
+                "and writes the registry, which qlab.arms deliberately does "
+                "not hold. The ablation runner supplies one")
+        ms = cfg.views_conditioner.condition(ms, snapshot)
     return ms
 
 
@@ -95,6 +131,9 @@ def solve_arm(
     if "regime_conditional" in arm.params:
         from dataclasses import replace
         moments = replace(moments, regime_conditional=bool(arm.params["regime_conditional"]))
+    if "views_source" in arm.params:
+        from dataclasses import replace
+        moments = replace(moments, views_source=str(arm.params["views_source"]))
     constraints = constraints or Constraints()
 
     # -- benchmarks: no estimation, no solve --------------------------------

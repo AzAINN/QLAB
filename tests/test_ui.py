@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -2420,25 +2420,31 @@ def test_news_follows_the_data_lane_the_operator_chose(session, monkeypatch):
     # carries a real market and an invented narrative under one heading. News
     # follows the lane, so signing in and running --live is the whole setup.
     monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS", raising=False)
 
     # Offline is always synthetic: it is the demo and must not reach the network.
     monkeypatch.setattr(
         "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: object())
-    assert session.news_provider_for(True) == "synthetic"
+    assert session.news_provider_for(True) == ("synthetic",)
     # Live with a resolvable credential upgrades without being asked.
-    assert session.news_provider_for(False) == "alpaca"
+    assert session.news_provider_for(False) == ("alpaca",)
 
     # Live with no credential stays synthetic rather than failing the desk.
     monkeypatch.setattr(
         "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: None)
-    assert session.news_provider_for(False) == "synthetic"
+    assert session.news_provider_for(False) == ("synthetic",)
 
     # An explicit provider is an instruction and is never second-guessed —
     # including naming synthetic on a live desk on purpose.
     monkeypatch.setenv("QLAB_NEWS_PROVIDER", "synthetic")
     monkeypatch.setattr(
         "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: object())
-    assert session.news_provider_for(False) == "synthetic"
+    assert session.news_provider_for(False) == ("synthetic",)
+
+    # The plural names a stack and wins over the singular; a credential that
+    # resolves does not get to append itself to what the operator asked for.
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "edgar,macro")
+    assert session.news_provider_for(False) == ("edgar", "macro")
 
 
 def test_an_opened_debate_can_be_closed_so_the_reporter_can_run(session):
@@ -4871,3 +4877,270 @@ def test_a_fired_trigger_is_announced_in_the_chat(session):
     chat = session.registry.read_events_of_kind("atlas_message", 10)
     text = chat[0]["payload"]["text"] if chat else ""
     assert "regime_flip" in text and "regime_review" in text, text
+
+
+def test_upcoming_releases_are_served_and_dated(session, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from qlab.news.providers import macro
+
+    soon = datetime.now(timezone.utc) + timedelta(days=3, hours=1)
+    monkeypatch.setattr(macro, "load_news_sources", lambda: {"calendar": [
+        # The 2999 entry is the out-of-horizon control; it also keeps the
+        # calendar from reading as exhausted, which is a loud refusal.
+        {"name": "FOMC", "when": "2999-01-01T18:00:00+00:00", "tickers": ["TLT"],
+         "source": "Federal Reserve"},
+        {"name": "CPI", "when": soon.isoformat(), "tickers": ["TIP"],
+         "source": "BLS"}]})
+    status, out = handle_api(session, "GET", "/api/news/upcoming", {}, {})
+    assert status == 200
+    assert [e["name"] for e in out["upcoming"]] == ["CPI"], "2999 is beyond 14 days"
+    entry = out["upcoming"][0]
+    assert entry["when"].startswith(soon.strftime("%Y-%m-%dT%H:"))
+    assert entry["days_ahead"] == 3 and entry["source"] == "BLS"
+
+
+def test_the_desk_reads_a_stack_and_archives_each_member(session, monkeypatch):
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two")
+    # An instant, not a literal: the desk's window is `now` minus 48h, so a
+    # hard-coded date would make this test pass only in the week it was written.
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    def mk(provider, src):
+        return lambda a, u: [NewsItem(source=src, published=published,
+                                      headline=f"{src} story", summary="", url=f"https://x/{src}",
+                                      tickers=("SPY",), provider=provider)]
+
+    def dead(a, u):
+        raise RuntimeError("feed three is unavailable")
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two,three")
+    monkeypatch.setitem(feed.PROVIDERS, "one", mk("one", "SEC EDGAR"))
+    monkeypatch.setitem(feed.PROVIDERS, "two", mk("two", "reuters.com"))
+    monkeypatch.setitem(feed.PROVIDERS, "three", dead)
+    assert session.news_provider_for(False) == ("one", "two", "three")
+    window = session.fetch_desk_news(False)
+    assert window["outcomes"]["one"] == "ok" and window["outcomes"]["two"] == "ok"
+    # The member that went away is named, not absent: a smaller window with no
+    # explanation is indistinguishable from a quiet wire.
+    assert "unavailable" in window["outcomes"]["three"]
+    result = session.archive_desk_news(window)
+    events = [e for e in session.registry.read_events_of_kind("news_archive", 10)]
+    by_provider = {e["payload"]["provider"]: e["payload"] for e in events}
+    assert set(by_provider) == {"one", "two", "three"}
+    assert "unavailable" in by_provider["three"]["outcome"]
+    assert by_provider["three"]["returned"] == 0
+    assert by_provider["one"]["outcome"] == "ok"
+    assert result["stored"] == 2
+    assert set(result["per_provider"]) == {"one", "two", "three"}
+
+    # And the wire carries the same facts the archive does.
+    status, snapshot = handle_api(session, "GET", "/api/tui", {}, {})
+    assert status == 200
+    news = snapshot["news"]
+    assert news["providers"] == ["one", "two", "three"]
+    assert "unavailable" in news["outcomes"]["three"]
+
+
+def test_news_archive_events_do_not_crowd_the_generic_audit_page(session, monkeypatch):
+    # One event per member per tick, on a fixed-size page: a four-member stack
+    # on the heartbeat pushes everything an operator is auditing off the page
+    # within minutes. Selected by kind at the store, like atlas_chat.
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two")
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    for name in ("one", "two"):
+        monkeypatch.setitem(feed.PROVIDERS, name, lambda a, u, n=name: [NewsItem(
+            source=n, published=published, headline=f"{n} story", summary="",
+            url=f"https://x/{n}", tickers=("SPY",), provider=n)])
+    session.registry.record_event("halt", {"reason": "audited"})
+    session.archive_desk_news(session.fetch_desk_news(False))
+
+    page = session.read_audit_stream_events(50, after=None)
+    assert [e["kind"] for e in page if e["kind"] == "news_archive"] == []
+    assert any(e["kind"] == "halt" for e in page)
+    # The rows still exist; only the generic page declines to carry them.
+    assert len(session.registry.read_events_of_kind("news_archive", 10)) == 2
+
+
+def test_a_malformed_provider_stack_is_a_loud_window_not_a_dead_heartbeat(
+        session, monkeypatch):
+    # news_provider_for now parses, so it can refuse. Called outside the try it
+    # took the whole heartbeat tick down with it — including the parts of the
+    # tick that have nothing to do with news.
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", ",")
+    window = session.fetch_desk_news(False)
+    assert window["items"] == []
+    assert window["error"]
+    assert window["providers"] == []
+    # And the card says "no provider", not an empty gap where a name goes.
+    assert session.news_payload(False)["provider"] == "—"
+
+
+def test_an_archive_window_naming_an_undeclared_provider_is_refused(session):
+    from qlab.news.feed import NewsItem
+
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    window = {
+        "items": [NewsItem(source="X", published=published, headline="h",
+                           summary="", url="https://x/1", tickers=("SPY",),
+                           provider="smuggled")],
+        "outcomes": {"one": "ok"},
+        "providers": ["one"],
+        "provider_name": "one",
+        "error": None,
+    }
+    with pytest.raises(RuntimeError, match="smuggled"):
+        session.archive_desk_news(window)
+
+
+def test_a_partial_member_is_archived_as_a_window_not_as_a_failure(
+        session, monkeypatch):
+    # A batch with records is not a failed batch. Stamping the member's missing
+    # feeds on it as `error` would file real primary records under an outage.
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "macro")
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    def partial(a, u):
+        raise feed.PartialWindow(
+            [NewsItem(source="BEA", published=published, headline="h",
+                      summary="", url="https://x/1", tickers=("SPY",),
+                      provider="macro")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(feed.PROVIDERS, "macro", partial)
+    window = session.fetch_desk_news(False)
+    assert window["outcomes"]["macro"].startswith("partial: ")
+    assert len(window["items"]) == 1
+
+    result = session.archive_desk_news(window)
+    assert result["stored"] == 1
+    payload = session.registry.read_events_of_kind("news_archive", 5)[0]["payload"]
+    assert payload["returned"] == 1
+    assert payload["error"] is None
+    assert "BLS" in payload["outcome"] and "403" in payload["outcome"]
+
+def _pinned_upcoming(monkeypatch, tickers):
+    """A fixed look-ahead. The real one reads a hand-maintained yaml against
+    today's date, so a test that used it would start failing on a calendar
+    edit rather than on a code change."""
+    from qlab.news.providers import macro
+
+    monkeypatch.setattr(macro, "upcoming", lambda as_of, horizon_days=14: [
+        {"name": "FOMC statement", "when": "2026-09-17T18:00:00+00:00",
+         "days_ahead": 7, "tickers": list(tickers), "source": "Federal Reserve"}])
+
+
+def _push_window(session, headlines, ticker):
+    """Publish a news window the way ``fetch_desk_news`` publishes one."""
+    from qlab.news.feed import NewsItem
+
+    published = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    window = {
+        "items": [NewsItem(source=f"reuters.com/{n}", published=published,
+                           headline=headline, summary="", url=f"https://x/{n}",
+                           tickers=(ticker,), provider="gdelt")
+                  for n, headline in enumerate(headlines)],
+        "outcomes": {"gdelt": "ok"}, "providers": ["gdelt"],
+        "provider": "gdelt", "provider_name": "gdelt",
+        "as_of": datetime.now(timezone.utc).isoformat(), "error": None,
+    }
+    with session._news_lock:
+        session._desk_news = window
+    return window
+
+
+class _FixedDate:
+    """`date` with a pinned `today()`, so a second call can be a second day."""
+
+    def __init__(self, iso):
+        self._iso = iso
+
+    def today(self):
+        return date.fromisoformat(self._iso)
+
+    def fromisoformat(self, iso):
+        return date.fromisoformat(iso)
+
+
+def test_the_qualitative_matrix_is_served_and_logged_once_per_window(
+        session, monkeypatch):
+    """One row per WINDOW, and `as_of` is not part of what a window is.
+
+    The discriminating case is the same window read on a later day: the spec
+    differs, so `log_run`'s content hash collapses nothing, and only the
+    window-hash guard stops the registry accumulating a row per day of a tape
+    that never moved.
+    """
+    ticker = session.mandate.universe_whitelist[0]
+    _pinned_upcoming(monkeypatch, [ticker])
+    _push_window(session, ["gold holds its gain after the auction"], ticker)
+
+    status, out = handle_api(session, "GET", "/api/research/qualitative", {}, {})
+    assert status == 200 and set(out["rows"]) == set(session.mandate.universe_whitelist)
+    assert out["rows"][ticker]["coverage"] == 1
+    assert out["rows"][ticker]["days_to_next_release"] == 7
+    first = [r for r in session.registry.list_runs(20) if r["kind"] == "qualitative_matrix"]
+
+    monkeypatch.setattr(ui_server, "date", _FixedDate("2026-09-01"))
+    _, same = handle_api(session, "GET", "/api/research/qualitative", {}, {})
+    again = [r for r in session.registry.list_runs(20) if r["kind"] == "qualitative_matrix"]
+    assert same["run_id"] == out["run_id"]
+    assert len(again) == len(first) == 1
+
+    # Stamped as the desk's own: the ablation arm writes qualitative_matrix
+    # runs to this same registry, and a reader that cannot tell them apart
+    # will serve an arm's research window as the desk's record.
+    assert first[0]["spec"]["source"] == "desk"
+
+    # A different window is a different observation and does get its own row.
+    _push_window(session, ["oil slips as OPEC delays the quota decision"], ticker)
+    _, moved = handle_api(session, "GET", "/api/research/qualitative", {}, {})
+    assert moved["run_id"] != out["run_id"]
+    assert len([r for r in session.registry.list_runs(20)
+                if r["kind"] == "qualitative_matrix"]) == 2
+
+
+def test_an_exhausted_release_calendar_is_named_not_silently_empty(session, monkeypatch):
+    """`upcoming()` refuses loudly once its hand-maintained calendar runs out.
+    The matrix must still be built — coverage is a fact about the window, not
+    about the yaml — but with the gap named rather than rendered as 'no
+    releases ahead', which is a different claim."""
+    from qlab.news.providers import macro
+
+    monkeypatch.setattr(macro, "load_news_sources", lambda: {"calendar": [
+        {"name": "CPI (stale)", "when": "2020-01-02T12:30:00+00:00",
+         "tickers": ["BNDW"], "source": "BLS"}]})
+    status, out = handle_api(session, "GET", "/api/research/qualitative", {}, {})
+    assert status == 200
+    assert "exhausted" in out["calendar_error"]
+    assert all(row["days_to_next_release"] is None for row in out["rows"].values())
+    context = session.atlas_context(True)
+    assert "exhausted" in context["qualitative_matrix"]["calendar_error"]
+
+
+def test_the_reasoner_gets_matrix_counts_and_not_archive_ids(session):
+    context = session.atlas_context(True)
+    rows = context["qualitative_matrix"]["rows"]
+    assert set(rows) == set(session.mandate.universe_whitelist)
+    ticker = sorted(rows)[0]
+    assert "coverage" in rows[ticker] and "claim_keys" not in rows[ticker]
+
+
+def test_a_broken_matrix_does_not_take_the_whole_reasoner_context_down(
+        session, monkeypatch):
+    """`atlas_judgment_request` drops the entire request when composing the
+    context raises, so every surface on it is wrapped — the regime panel two
+    lines up for exactly this reason."""
+    def boom(offline):
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr(session, "qualitative_matrix", boom)
+    context = session.atlas_context(True)
+    assert context["qualitative_matrix"]["rows"] == {}
+    assert "registry unreadable" in context["qualitative_matrix"]["error"]

@@ -51,6 +51,8 @@ from qlab.core.views import (
 from qlab.core.window_evidence import window_evidence
 from qlab.experiment import news_conditioned_arm, recommend
 from qlab.mcp.guardrails import LabState, check_as_of, require_fastmcp
+from qlab.news.matrix import DESK_MATRIX_SOURCE
+from qlab.research.view_provenance import verify_view_provenance
 from qlab.solvers.base import Constraints
 
 
@@ -84,27 +86,45 @@ def _view_number(value: object, field: str, index: int) -> float:
     return number
 
 
-def _verify_view_provenance(canonical_views: list[dict], excerpt: str) -> bool:
-    """Every view's quote must be grounded in the operator's source text.
+def _view_claims(value: object, index: int) -> list[str]:
+    """A view's cited archive claim keys: a non-empty list of non-empty keys."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(
+            f"view {index} field 'source_claims' must be a non-empty list "
+            "of claim keys"
+        )
+    return [_view_string(item, "source_claims", index) for item in value]
 
-    Returns False (unverified, but permitted) when no excerpt was supplied so
-    the audit trail is explicit; raises when an excerpt is supplied and a quote
-    is not a whitespace-normalized substring of it — a fabricated or
-    laundered quote cannot then reach the analyst's context.
+
+# One definition of "grounded", shared with the ablation arm that builds its
+# own views by rule (qlab/research/view_provenance.py).
+_verify_view_provenance = verify_view_provenance
+
+
+def _archive_claim_keys(registry, as_of: str) -> tuple[str | None, set[str]]:
+    """The desk's newest matrix AT OR BEFORE ``as_of``: its run id and claim keys.
+
+    Point-in-time, and the desk's own. Reading "the newest matrix by write
+    time" handed a rebalance at T the claim keys of a window logged for T+7 —
+    look-ahead entering through the provenance gate itself — and, on a registry
+    the ablation shares, let an ``ablation_a5`` window source a desk view.
+    Read-only; ``(None, set())`` when nothing qualifies.
     """
-    normalized_excerpt = " ".join(excerpt.split()).lower()
-    if not normalized_excerpt:
-        return False
-    for index, view in enumerate(canonical_views, start=1):
-        quote = " ".join(str(view.get("source_quote", "")).split()).lower()
-        if not quote or quote not in normalized_excerpt:
-            raise ValueError(
-                f"view {index} source_quote is not found in the supplied "
-                "excerpt; every risk view must quote the operator's text"
-            )
-    return True
+    found = registry.matrix_runs(source=DESK_MATRIX_SOURCE,
+                                 as_of_at_or_before=str(as_of), limit=1)
+    if not found:
+        return None, set()
+    run = found[0]
+    logged = (run.get("spec") or {}).get("matrix")
+    rows = logged.get("rows") if isinstance(logged, dict) else None
+    keys: set[str] = set()
+    for row in (rows or {}).values():
+        if isinstance(row, dict):
+            keys.update(str(key) for key in row.get("claim_keys") or ())
+    return run.get("run_id"), keys
 
 
+_PROVENANCE_FIELDS = {"source_quote", "source_claims"}
 _CORROBORATION_HAIRCUT = 0.5
 
 
@@ -224,17 +244,15 @@ def _validated_risk_views(
             f"got {len(views)}"
         )
 
+    # Provenance is required but may take either shape: an operator's quote,
+    # or the archive claim keys a rule counted. Both are checked later against
+    # their own ground truth; neither is optional.
     fields_by_type = {
-        "vol": {
-            "type", "ticker", "target_vol", "confidence", "source_quote",
-        },
+        "vol": {"type", "ticker", "target_vol", "confidence"},
         "corr": {
             "type", "ticker_a", "ticker_b", "target_corr", "confidence",
-            "source_quote",
         },
-        "tail": {
-            "type", "ticker", "direction", "confidence", "source_quote",
-        },
+        "tail": {"type", "ticker", "direction", "confidence"},
     }
     typed: list[VolView | CorrView | TailView] = []
     canonical: list[dict] = []
@@ -262,7 +280,7 @@ def _validated_risk_views(
             )
 
         required = fields_by_type[view_type]
-        extra = set(raw) - required
+        extra = set(raw) - required - _PROVENANCE_FIELDS
         if extra:
             return_fields = sorted(
                 key for key in extra
@@ -289,9 +307,17 @@ def _validated_risk_views(
                 f"view {index} confidence must be in "
                 f"(0, {_MAX_VIEW_CONFIDENCE}], got {confidence}"
             )
-        source_quote = _view_string(
-            raw["source_quote"], "source_quote", index
-        )
+        provenance: dict[str, object] = {}
+        if "source_quote" in raw:
+            provenance["source_quote"] = _view_string(
+                raw["source_quote"], "source_quote", index
+            )
+        if "source_claims" in raw:
+            provenance["source_claims"] = _view_claims(
+                raw["source_claims"], index
+            )
+        if not provenance:
+            raise ValueError("a view must carry source_quote or source_claims")
 
         if view_type == "vol":
             ticker = _view_string(raw["ticker"], "ticker", index)
@@ -304,7 +330,7 @@ def _validated_risk_views(
                 "ticker": ticker,
                 "target_vol": target_vol,
                 "confidence": confidence,
-                "source_quote": source_quote,
+                **provenance,
             })
         elif view_type == "corr":
             ticker_a = _view_string(raw["ticker_a"], "ticker_a", index)
@@ -321,7 +347,7 @@ def _validated_risk_views(
                 "ticker_b": ticker_b,
                 "target_corr": target_corr,
                 "confidence": confidence,
-                "source_quote": source_quote,
+                **provenance,
             })
         else:
             ticker = _view_string(raw["ticker"], "ticker", index)
@@ -334,7 +360,7 @@ def _validated_risk_views(
                 "ticker": ticker,
                 "direction": direction,
                 "confidence": confidence,
-                "source_quote": source_quote,
+                **provenance,
             })
 
     return typed, canonical
@@ -1141,14 +1167,31 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         Text only — no market numbers, no writes. This is the owner-side feed
         that supplies the quarantined news-extractor's evidence; the extractor
         never fetches. Offline uses the deterministic synthetic provider.
+
+        Reads the whole configured stack. This called the singular
+        ``fetch_news``, which saw only ``QLAB_NEWS_PROVIDER``, so an operator
+        who set the documented ``QLAB_NEWS_PROVIDERS`` got the synthetic
+        fixtures from a desk configured for live sources and nothing in the
+        result said so. Every member's outcome travels with the window: a
+        source that went away is a fact, not a smaller answer.
         """
-        from qlab.news.feed import fetch_news
+        from qlab.news.feed import fetch_news_stacked, parse_provider_stack
 
         st.budget.charge("news.fetch")
         d = check_as_of(as_of)
         tickers = load_universe().tickers(universe)
-        items = fetch_news(
-            str(d), tickers, lookback_hours=lookback_hours, offline=st.offline)
+        # Offline is the demo and must never resolve an operator's live stack.
+        providers = ("synthetic",) if st.offline else parse_provider_stack(None)
+        # A provider that lost one of its feeds returned a smaller window, not
+        # an error. Failing the tool would tell the agent the news lane is down
+        # while the records it did fetch sit inside the exception; the feeds
+        # that went missing are named in the result instead, under the member
+        # that lost them — a flat merge across members would report a dead feed
+        # without saying whose it was.
+        window = fetch_news_stacked(
+            str(d), tickers, providers, lookback_hours=lookback_hours)
+        items = window.items
+        partial = window.partials
         # A single excerpt string the extractor can quote against, plus the
         # structured items for display/provenance.
         excerpt = "\n".join(
@@ -1162,6 +1205,13 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
                                          "summary": it.summary}
                       for it in items],
             "excerpt": excerpt,
+            # Which sources were read, in order, and what each one said. Never
+            # absent: an agent must be able to tell "nothing was missing" from
+            # "nobody said", and "the stack answered" from "one member did".
+            "providers": list(window.providers),
+            "outcomes": dict(window.outcomes),
+            # Empty when every feed of every member answered.
+            "partial": partial,
         }
 
     @app.tool(name="research.window_evidence")
@@ -1249,8 +1299,11 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         ``excerpt`` is the operator-supplied source text. When provided, every
         view's ``source_quote`` must be a whitespace-normalized substring of
         it — a deterministic provenance gate so the quarantine does not rest on
-        the extractor's prompt alone. The audit run records whether provenance
-        was verified.
+        the extractor's prompt alone. A rule-built view may instead carry
+        ``source_claims``, archive claim keys checked against the desk's newest
+        qualitative matrix dated at or before ``as_of``. Every view must carry
+        one of the two. The audit run records whether provenance was verified
+        and, when persisted, which matrix run it was verified against.
         """
         st.budget.charge("research.apply_views")
         if not isinstance(dry, bool):
@@ -1263,9 +1316,21 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         if budget <= 0.0:
             raise ValueError("kl_budget must be positive")
         typed_views, canonical_views = _validated_risk_views(views)
-        provenance_verified = _verify_view_provenance(canonical_views, excerpt)
-
         d = check_as_of(as_of)
+        # The archive is read only when a view actually cites it, so a quoted
+        # view costs no registry read. Bounded by the run's own date: a view
+        # may only cite what the desk had already recorded by then.
+        matrix_run_id: str | None = None
+        claim_keys = None
+        if any(v.get("source_claims") for v in canonical_views):
+            matrix_run_id, claim_keys = _archive_claim_keys(st.registry, str(d))
+        provenance_verified = _verify_view_provenance(
+            canonical_views, excerpt, claim_keys
+        )
+        if not provenance_verified:
+            # The binding names the matrix this run's provenance was actually
+            # established against. An unverified run established none.
+            matrix_run_id = None
         tickers = load_universe().tickers(universe)
         snapshot = market.snapshot(
             tickers,
@@ -1344,6 +1409,20 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         }
         if persist:
             run_spec["persist_applied_views"] = True
+            # Flat, not nested inside `result`: these three are the *gate's*
+            # inputs — the tilt itself, how far it moved, and whether the views
+            # were ever sourced — and a gate that has to guess where its inputs
+            # live is a gate that stops running when the payload is reshaped.
+            # Only on the persisted path: a scenario vector is one float per
+            # panel row, and every dry diagnostic does not need to carry one.
+            run_spec["probabilities"] = [float(x) for x in result.probabilities]
+            run_spec["kl_total"] = float(result.kl_total)
+            run_spec["provenance_verified"] = bool(provenance_verified)
+            # Which matrix sourced it, or None for a quoted excerpt. Always
+            # written on this path, so an ABSENT field means "persisted by
+            # something that never established lineage" rather than "no
+            # matrix" — two facts a downstream gate must not conflate.
+            run_spec["matrix_run_id"] = matrix_run_id
         run_id = st.registry.log_run("views", run_spec)
 
         if arm_result is not None:
@@ -1373,6 +1452,124 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         if persist:
             response["persisted_view_ids"] = persisted_view_ids
         return response
+
+    @app.tool(name="research.qualitative_matrix")
+    def research_qualitative_matrix(as_of: str, universe: str = "core") -> dict:
+        """The qualitative matrix as of a date: counts per name, no sign.
+
+        Read-only and never builds one: the matrix is logged by the owner from
+        the window it already fetched, so building one here would either fetch
+        on a read path or invent a second window for the same day.
+
+        ``as_of`` and ``universe`` are both honoured. Returning the newest
+        matrix whatever the date would hand a point-in-time caller a window
+        from after its own rebalance, and returning every row would hand it
+        names it is not trading. A matrix with no row for the requested
+        universe refuses rather than answering with an empty table.
+
+        Only the desk's own matrices answer. The ablation arm logs its research
+        windows to this same registry, and one of those — another universe,
+        another day, built by rule rather than read from the press — is not the
+        desk's record of what the press said.
+        """
+        st.budget.charge("research.qualitative_matrix")
+        d = check_as_of(as_of)
+        wanted = set(load_universe().tickers(universe))
+        # The date bound is a SQL predicate: scanning the newest N runs and
+        # filtering here loses every older window as soon as N newer ones land.
+        found = st.registry.matrix_runs(source=DESK_MATRIX_SOURCE,
+                                        as_of_at_or_before=str(d), limit=1)
+        if not found:
+            return {"status": "never_built", "rows": {}}
+        run = found[0]
+        matrix = (run.get("spec") or {}).get("matrix") or {}
+        rows = {t: r for t, r in (matrix.get("rows") or {}).items()
+                if t in wanted}
+        if not rows:
+            raise ValueError(
+                f"the qualitative matrix as of {matrix.get('as_of')} has no "
+                f"row for any name in universe {universe!r}; it was built "
+                "over a different universe")
+        return {"status": "ok", "run_id": run.get("run_id"),
+                "source": DESK_MATRIX_SOURCE, **matrix, "rows": rows}
+
+    @app.tool(name="moments.condition")
+    def moments_condition(moment_set_id: str, views_run_id: str) -> dict:
+        """Condition a moment set on a persisted views run. Research-stage.
+
+        Three gates, in this order, before anything is computed: the run must
+        be a views run, it must have stayed inside its own KL budget, and its
+        views must have been provenance-verified — conditioning on an unsourced
+        view is precisely what the quarantine exists to stop. The stage check
+        comes last so the three lineage refusals are reachable while the
+        catalog entry is research; today it refuses every call, and that is the
+        point until the ablation earns a promotion.
+        """
+        st.budget.charge("moments.condition")
+        import numpy as np
+
+        from qlab.algorithms.catalog import require_operational_stage
+        from qlab.core.moments import condition
+
+        views = st.registry.get_run(views_run_id)
+        if views is None or views.get("kind") != "views":
+            raise ValueError(f"{views_run_id!r} is not a persisted views run")
+        spec = views.get("spec") or {}
+        if "probabilities" not in spec:
+            raise ValueError(
+                f"views run {views_run_id!r} was not persisted with its "
+                "scenario probabilities; re-run research.apply_views with "
+                "persist=true")
+        kl_total = float(spec.get("kl_total", 0.0))
+        kl_budget = float(spec.get("kl_budget", 0.0))
+        if kl_total > kl_budget:
+            raise ValueError(
+                f"the views run exceeds its own KL budget ({kl_total:.4f} > "
+                f"{kl_budget:.4f}); relax a view")
+        if spec.get("provenance_verified") is not True:
+            raise ValueError(
+                f"views run {views_run_id!r} has unverified provenance; a view "
+                "with no excerpt and no archive claim behind it may not "
+                "condition a moment set")
+        if "matrix_run_id" not in spec:
+            # Verified, against nothing recorded. Every run research.apply_views
+            # persists carries this field — the matrix it verified against, or
+            # None for a quoted excerpt — so its absence means the run was
+            # written by something that never established lineage at all.
+            raise ValueError(
+                f"views run {views_run_id!r} claims verified provenance but "
+                "carries no matrix_run_id; its lineage is inconsistent and it "
+                "may not condition a moment set")
+        require_operational_stage("views_conditioned_min_variance")
+
+        ms = st.get_moment_set(moment_set_id)
+        panel = _views_panel(spec)
+        out = condition(ms, np.asarray(spec["probabilities"], dtype=float),
+                        panel=panel, views_run_id=views_run_id)
+        return {"moment_set_id": st.put_moment_set(out),
+                "parent": moment_set_id, "kl_total": kl_total,
+                "summary": out.summary()}
+
+    def _views_panel(spec: dict):
+        """Rebuild the exact scenario panel a persisted views run pooled over.
+
+        Deterministic from the run's own spec (as_of, tickers, lookback), so
+        the probabilities are re-applied to the rows they were solved on rather
+        than to whatever window the caller happens to be looking at.
+        """
+        d = check_as_of(str(spec["as_of"]))
+        tickers = list(spec["tickers"])
+        snapshot = market.snapshot(tickers, d, offline=st.offline, seed=st.seed)
+        panel = snapshot.log_returns(
+            lookback_days=int(spec.get("panel_lookback_days",
+                                       _VIEWS_LOOKBACK_DAYS))
+        ).dropna(how="any")
+        if len(panel) != len(spec["probabilities"]):
+            raise ValueError(
+                "the views run's panel does not reproduce: it pooled "
+                f"{len(spec['probabilities'])} scenarios, this window has "
+                f"{len(panel)}")
+        return panel.to_numpy(dtype=float)
 
     # -- backtest -----------------------------------------------------------
     @app.tool(name="backtest.run")

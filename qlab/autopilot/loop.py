@@ -193,6 +193,9 @@ def run_once(
         moments_summary=diag.get("moments"),
         portfolio_state=state_before,
         vols=annualized_asset_vols,
+        # Lineage is checked against the registry, not asserted by the caller:
+        # a conditioned covariance names the views run that moved it.
+        registry=reg,
     )
     reg.log_verdict(decision_id, verdict, reasons, source="deterministic", targets=targets)
     rec = reconcile(reg, broker, tickers)
@@ -498,6 +501,7 @@ def _build_trigger_proposal(
         as_of,
         moments_summary=moments_summary,
         portfolio_state=portfolio_state,
+        registry=registry,
     )
     registry.log_verdict(
         decision_id,

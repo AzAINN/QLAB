@@ -15,6 +15,7 @@ staged runner.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +95,17 @@ def run_ablation(
         comoment_target=m.get("comoment_target", "isserlis"),
     )
     arms = [Arm(**_arm_kwargs(a)) for a in spec.get("arms", [])]
+    # The matrix->views chain reads and writes the registry, so the runner —
+    # not qlab.arms — owns it. One conditioner for the whole matrix: every arm
+    # walks the same rebalance dates, and a window must be logged once.
+    conditioner = None
+    if any(a.params.get("views_source") for a in arms):
+        from qlab.research.views_arm import MatrixViewsConditioner
+
+        conditioner = MatrixViewsConditioner(
+            reg, panel_lookback_days=moments_cfg.lookback_days,
+            offline=offline)
+        moments_cfg = replace(moments_cfg, views_conditioner=conditioner)
     arm_by_id = {a.id: a for a in arms}
     n_trials = max(1, len([a for a in arms if a.objective not in ("sixty_forty",)]))
 
@@ -142,6 +154,23 @@ def run_ablation(
             "objective": arm_by_id[arm_id].objective,
             "solver": arm_by_id[arm_id].solver,
             "metrics": res.metrics, "total_turnover": res.total_turnover}
+    if conditioner is not None:
+        # A null result must be a *measured* null: how many windows the record
+        # spoke in, not the absence of an entry. Zero here and identical
+        # metrics to the unconditioned arm is the arm reproducing its baseline,
+        # which is the honest reading of a silent archive — not a broken sweep.
+        results["views_conditioning"] = dict(conditioner.stats)
+        # ... and a measured null that dies with the process is not a record.
+        # The counts go to the registry under their own kind, readable by
+        # runs_of_kind/matrix_runs, and deliberately NOT into any arm's
+        # metrics: those feed the ranking and the DSR trial accounting, where a
+        # window count is not a performance number.
+        reg.log_run("views_summary", {
+            "ablation_run_id": run_id,
+            "arm": ",".join(a.id for a in arms
+                            if a.params.get("views_source")),
+            **conditioner.stats,
+        })
     results["n_trials_registry"] = reg.backtest_trial_count()
     results["n_trials_dsr"] = n_trials_dsr
 

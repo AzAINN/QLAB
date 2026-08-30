@@ -1089,3 +1089,95 @@ def test_a_news_analyst_phase_cannot_complete_without_its_view():
                 summary="empty", artifacts={})
     finally:
         registry.close()
+
+
+def test_runs_of_kind_is_not_limited_by_how_much_else_ran(reg):
+    """A desk logs solves and backtests continuously. Scanning the newest N
+    runs of ANY kind to find the last matrix stops finding it as soon as N
+    other runs have landed since — and the caller then re-logs a window it
+    already has."""
+    older = reg.log_run("qualitative_matrix", {"matrix": {"window_hash": "old"}})
+    newer = reg.log_run("qualitative_matrix", {"matrix": {"window_hash": "new"}})
+    for i in range(150):
+        reg.log_run("backtest", {"i": i})
+
+    row = reg.runs_of_kind("qualitative_matrix", 1)[0]
+    assert row["run_id"] == newer and row["run_id"] != older
+    # `spec` comes back parsed, like list_runs: a caller reading it must not
+    # have to know whether this path went through the JSON helper.
+    assert row["spec"]["matrix"]["window_hash"] == "new"
+    assert reg.runs_of_kind("never_logged_anything", 1) == []
+
+
+def test_runs_of_kind_returns_the_newest_first_and_only_that_kind(reg):
+    """Views built from a matrix need the PREVIOUS window too, not just the newest."""
+    first = reg.log_run("qualitative_matrix", {"matrix": {"window_hash": "w1"}})
+    second = reg.log_run("qualitative_matrix", {"matrix": {"window_hash": "w2"}})
+    reg.log_run("backtest", {"arm": "A1"})
+
+    rows = reg.runs_of_kind("qualitative_matrix", 2)
+    assert [r["run_id"] for r in rows] == [second, first]
+    assert rows[0]["spec"]["matrix"]["window_hash"] == "w2"
+    assert reg.runs_of_kind("never_logged", 5) == []
+
+
+def test_get_run_reads_one_run_by_id_with_its_spec_parsed(reg):
+    run_id = reg.log_run("views", {"kl_total": 0.1, "kl_budget": 0.25})
+    row = reg.get_run(run_id)
+    assert row["kind"] == "views" and row["spec"]["kl_total"] == 0.1
+    assert reg.get_run("not-a-run") is None
+
+
+def test_a_moment_sets_lineage_survives_the_round_trip(reg):
+    """The referee reads provenance back out; a write-only column proves nothing."""
+    import numpy as np
+
+    from qlab.core.types import MomentSet
+
+    ms = MomentSet(tickers=["A", "B"], as_of=date(2021, 6, 30),
+                   cov=np.eye(2), provenance={"parent": "p", "views_run_id": "v"})
+    h = reg.log_moment_set(ms)
+    row = reg.moment_set(h)
+    assert row["provenance"] == {"parent": "p", "views_run_id": "v"}
+    assert reg.moment_set("nope") is None
+
+    plain = MomentSet(tickers=["A", "B"], as_of=date(2021, 6, 30), cov=np.eye(2) * 2)
+    assert reg.moment_set(reg.log_moment_set(plain))["provenance"] == {}
+
+    # Every row an existing desk already holds predates the ALTER, so the
+    # column is NULL there. The reader must answer "no lineage", not crash the
+    # referee on the first pre-migration moment set it meets.
+    reg.con.execute("UPDATE moment_sets SET provenance = NULL")
+    assert reg.moment_set(h)["provenance"] == {}
+
+
+def test_matrix_runs_filters_in_sql_so_no_caller_scans_a_fixed_window(reg):
+    """The predicates that pick a window are SQL, not a Python pass over N rows."""
+    def log(source, as_of, ticker):
+        spec = {"matrix": {"as_of": as_of, "window_hash": as_of,
+                           "rows": {ticker: {"ticker": ticker}}}}
+        if source:
+            spec["source"] = source
+        reg.log_run("qualitative_matrix", spec)
+
+    log("ablation_a5", "2015-06-30", "ACWI")
+    log("ablation_a5", "2016-06-30", "ACWI")
+    log(None, "2015-09-30", "SPY")
+    for i in range(400):          # foreign traffic, newer than the target
+        log(None, f"2017-01-{i % 28 + 1:02d}", "SPY")
+    # A run of the same kind that carries no matrix at all is not a window.
+    reg.log_run("qualitative_matrix", {"note": "no matrix here"})
+
+    arm = reg.matrix_runs(source="ablation_a5", as_of_before="2015-09-30",
+                          limit=10)
+    assert [r["spec"]["matrix"]["as_of"] for r in arm] == ["2015-06-30"]
+
+    # Unfiltered by source, bounded at or before the date, newest first.
+    any_source = reg.matrix_runs(source=None, as_of_at_or_before="2015-09-30",
+                                 limit=10)
+    assert [r["spec"]["matrix"]["as_of"] for r in any_source] == [
+        "2015-09-30", "2015-06-30"]
+    assert reg.matrix_runs(source=None, as_of_at_or_before="2015-09-30",
+                           limit=1)[0]["spec"]["matrix"]["as_of"] == "2015-09-30"
+    assert reg.matrix_runs(source="ablation_a5",
+                           as_of_before="2015-01-01", limit=10) == []

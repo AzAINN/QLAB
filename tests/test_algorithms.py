@@ -135,3 +135,28 @@ def test_cli_has_no_staged_qaoa_switch() -> None:
 
     with pytest.raises(SystemExit):
         build_parser().parse_args(["run-once", "--qaoa"])
+
+
+def test_views_conditioned_min_variance_is_visible_and_not_agent_runnable(
+    moment_set,
+) -> None:
+    spec = get_algorithm("views_conditioned_min_variance")
+    assert spec.category == "allocation"
+    assert spec.stage == "research"
+    assert spec.agent_tool is None
+    assert spec.agent_usable is False
+
+    objective = build_objective("min_variance", moment_set)
+    with pytest.raises(PermissionError, match="stage='research'"):
+        solve_prepared_objective(
+            "views_conditioned_min_variance", objective, Constraints()
+        )
+
+
+def test_the_staged_stage_gate_is_one_helper_not_two_copies() -> None:
+    """`moments.condition` reuses this check, so it must be callable alone."""
+    from qlab.algorithms.catalog import require_operational_stage
+
+    with pytest.raises(PermissionError, match="staged agent surface"):
+        require_operational_stage("views_conditioned_min_variance")
+    require_operational_stage("hrp")

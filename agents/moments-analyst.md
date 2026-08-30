@@ -11,6 +11,7 @@ tools:
   - mcp__qlab__regime.drawdown
   - mcp__qlab__regime.tail_risk
   - mcp__qlab__research.window_evidence
+  - mcp__qlab__research.qualitative_matrix
   - mcp__qlab__news.market
   - mcp__qlab__moments.estimate
   - mcp__qlab__objective.build
@@ -79,6 +80,14 @@ Your loop for a given `as_of`:
    shrinkage intensity, and the condition number in the summary. Keep
    `higher_moments=false`: the operational covariance policy does not consume
    co-moments (MVSK is research-only).
+   You may read `research.qualitative_matrix` for what the record says about
+   each name — counts of coverage, publishers, corroboration and primary
+   documents, with no sign anywhere. It is context for the regime call, never
+   a substitute for it, and it forecasts nothing.
+   The research-stage `moments.condition` tool is not on your list: its
+   catalog entry `views_conditioned_min_variance` is not operational, so no
+   conditioned tensor can reach a governed solve. Promotion is a separate,
+   evidence-bearing decision; do not build a recommendation around it.
 6. `objective.build` on that moment set. Use the operational `form` the current
    policy and catalog support (`min_variance` for the configured
    HRP/ERC/min-variance policies, or `max_utility`). Do not build `form="mvsk"`

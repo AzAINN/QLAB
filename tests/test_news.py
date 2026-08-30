@@ -41,6 +41,7 @@ def test_synthetic_fetch_is_deterministic_filtered_and_provider_tagged(
     monkeypatch,
 ) -> None:
     as_of = datetime(2025, 1, 15, 12, tzinfo=timezone.utc)
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS", raising=False)
     monkeypatch.setenv("QLAB_NEWS_PROVIDER", "rss")
 
     first = news.fetch_news(as_of, CORE, lookback_hours=48, offline=True)
@@ -311,3 +312,179 @@ def test_the_desk_window_asks_for_an_instant_not_a_calendar_date():
     assert isinstance(as_of, datetime)
     now = datetime.now(timezone.utc)
     assert (now - as_of).total_seconds() < 60
+
+
+def test_every_registered_provider_is_named_in_the_collision_guard():
+    # _FIRST_PARTY is what plugin discovery refuses to let an entry point
+    # shadow. A first-party provider registered but missing from it could be
+    # replaced by a plugin under its own name, so the two must agree.
+    assert set(news.PROVIDERS) <= news._FIRST_PARTY
+
+
+def test_news_check_reports_each_member_of_a_stack(monkeypatch):
+    from qlab.news import check, feed
+    from qlab.news.feed import NewsItem
+    # An instant inside the window, not a literal date: check_news bounds the
+    # window at its own `now`, so a fixed timestamp would make this test pass
+    # only in the week it was written (and a future one is dropped outright).
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    monkeypatch.setitem(feed.PROVIDERS, "good", lambda a, u: [NewsItem(
+        source="BLS", published=published, headline="h", summary="",
+        url="https://bls.gov/x", tickers=("TIP",), provider="good")])
+    monkeypatch.setitem(feed.PROVIDERS, "bad", lambda a, u: (_ for _ in ()).throw(RuntimeError("down")))
+    report = check.check_news(["TIP"], provider="good,bad")
+    assert report["members"]["good"]["ok"] is True
+    assert report["members"]["bad"]["ok"] is False and "down" in report["members"]["bad"]["error"]
+    assert report["ok"] is True, "one living member is a record"
+
+
+def test_render_names_the_status_for_one_provider_and_for_each_member(monkeypatch):
+    # A stack of one must read exactly as the single-provider check always did:
+    # the headline is the line an operator greps for, and losing it left the
+    # whole report indented as if it were nested under something.
+    from qlab.news import check, feed
+
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    monkeypatch.setitem(feed.PROVIDERS, "good", lambda a, u: [NewsItem(
+        source="BLS", published=published, headline="h", summary="",
+        url="https://bls.gov/x", tickers=("TIP",), provider="good")])
+    monkeypatch.setitem(
+        feed.PROVIDERS, "bad",
+        lambda a, u: (_ for _ in ()).throw(RuntimeError("down")))
+
+    one = check.render(check.check_news(["TIP"], provider="good"))
+    assert one.startswith("news integration: OK")
+    assert len([ln for ln in one.splitlines() if "  provider  " in ln]) == 1
+
+    stack = check.render(check.check_news(["TIP"], provider="good,bad"))
+    assert stack.startswith("news integration: OK")
+    members = [ln for ln in stack.splitlines() if "  provider  " in ln]
+    assert len(members) == 2
+    assert "[OK]" in members[0] and "[NOT WORKING]" in members[1]
+
+
+def test_credential_status_reports_the_whole_stack_not_just_the_singular(monkeypatch):
+    # The plural is what the desk reads; a status line naming only the singular
+    # reports a configuration the owner is not running.
+    from qlab.env import credential_status
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "alpaca,edgar,macro")
+    monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+    assert credential_status()["news_provider"] == "alpaca,edgar,macro"
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS")
+    monkeypatch.setenv("QLAB_NEWS_PROVIDER", "rss")
+    assert credential_status()["news_provider"] == "rss"
+
+
+def _rss_payload(headline: str) -> bytes:
+    return (
+        b"<rss version=\"2.0\"><channel><item>"
+        b"<title>" + headline.encode() + b"</title>"
+        b"<description>World stocks show wider dispersion.</description>"
+        b"<link>https://example.test/story</link>"
+        b"<pubDate>Wed, 15 Jan 2025 10:00:00 GMT</pubDate>"
+        b"</item></channel></rss>"
+    )
+
+
+def test_one_dead_feed_does_not_take_its_live_neighbours_with_it(monkeypatch):
+    # Measured on 2026-08-28: bls.gov returned 403 to every request, and the
+    # whole macro provider went dark although BEA was answering. A dead feed
+    # must neither kill the live ones nor disappear without a sentence.
+    class Response:
+        def read(self):
+            return _rss_payload("Global equities face a busier volatility backdrop")
+
+        def close(self):
+            pass
+
+    def urlopen(request, timeout):
+        if "dead" in request.full_url:
+            raise URLError("HTTP Error 403: Forbidden")
+        return Response()
+
+    monkeypatch.setattr(news.urllib.request, "urlopen", urlopen)
+    monkeypatch.setitem(sys.modules, "feedparser", None)
+    feeds = [
+        {"name": "Dead Feed", "url": "https://example.test/dead.xml",
+         "tickers": ["ACWI"]},
+        {"name": "Live Feed", "url": "https://example.test/live.xml",
+         "tickers": ["ACWI"]},
+    ]
+    with pytest.raises(news.PartialWindow) as excinfo:
+        news._fetch_rss_feeds(
+            feeds, datetime(2025, 1, 15, 12, tzinfo=timezone.utc), ("ACWI",))
+    partial = excinfo.value
+    assert [item.source for item in partial.items] == ["Live Feed"]
+    assert "403" in partial.failures["Dead Feed"]
+    assert list(partial.failures) == ["Dead Feed"]
+
+
+def test_every_feed_dead_is_still_the_plain_refusal(monkeypatch):
+    def urlopen(request, timeout):
+        raise URLError("offline")
+
+    monkeypatch.setattr(news.urllib.request, "urlopen", urlopen)
+    feeds = [{"name": "Dead Feed", "url": "https://example.test/dead.xml",
+              "tickers": ["ACWI"]}]
+    with pytest.raises(RuntimeError) as excinfo:
+        news._fetch_rss_feeds(
+            feeds, datetime(2025, 1, 15, 12, tzinfo=timezone.utc), ("ACWI",))
+    assert not isinstance(excinfo.value, news.PartialWindow)
+    assert "requires reachable network feeds" in str(excinfo.value)
+
+
+def test_a_partial_windows_records_still_go_through_the_window_contract(monkeypatch):
+    # Propagating the provider's RAW items would hand the caller records that
+    # skipped the look-ahead gate, the universe mapping and the provider stamp
+    # — the one path into the desk that is not point-in-time.
+    def partial(as_of, universe):
+        return [
+            NewsItem(source="BEA", published="2025-01-15T10:00:00+00:00",
+                     headline="kept", summary="", url="https://x/1",
+                     tickers=("ACWI",), provider="whatever"),
+            NewsItem(source="BEA", published="2025-01-16T10:00:00+00:00",
+                     headline="after as_of", summary="", url="https://x/2",
+                     tickers=("ACWI",), provider="whatever"),
+        ]
+
+    def fetch(as_of, universe):
+        raise news.PartialWindow(partial(as_of, universe), {"BLS": "403"})
+
+    monkeypatch.setitem(news.PROVIDERS, "macro", fetch)
+    with pytest.raises(news.PartialWindow) as excinfo:
+        news.fetch_news("2025-01-15T12:00:00+00:00", ["ACWI"], provider="macro")
+    items = excinfo.value.items
+    assert [i.headline for i in items] == ["kept"]
+    assert items[0].provider == "macro"
+    assert excinfo.value.failures == {"BLS": "403"}
+
+
+def test_check_reports_a_partial_member_as_working_and_names_what_it_lost(
+        monkeypatch):
+    # The generic `except Exception` turned a partial answer into NOT WORKING
+    # and threw the records away — the exact outcome PartialWindow exists to
+    # prevent, in the one place an operator looks to find out what is wrong.
+    from qlab.news import check
+
+    published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    def partial(as_of, universe):
+        raise news.PartialWindow(
+            [NewsItem(source="Bureau of Economic Analysis", published=published,
+                      headline="GDP, second estimate", summary="",
+                      url="https://apps.bea.gov/x", tickers=("TIP",),
+                      provider="macro")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(news.PROVIDERS, "macro", partial)
+    report = check.check_news(["TIP"], provider="macro")
+    assert report["ok"] is True
+    assert report["fetched"] == 1 and report["kept"] == 1
+    flags = report["quality_flags"]
+    assert any(f.startswith("partial: ") and "BLS" in f and "403" in f
+               for f in flags)
+    rendered = check.render(report)
+    assert rendered.startswith("news integration: OK")
+    assert any("partial: " in line and "BLS" in line
+               for line in rendered.splitlines())

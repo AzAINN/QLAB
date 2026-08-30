@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id VARCHAR PRIMARY KEY, kind VARCHAR, spec JSON, created_at VARCHAR);
 CREATE TABLE IF NOT EXISTS moment_sets (
     hash VARCHAR PRIMARY KEY, as_of VARCHAR, n INTEGER, tickers JSON,
-    summary JSON, created_at VARCHAR);
+    summary JSON, created_at VARCHAR, provenance VARCHAR);
 CREATE TABLE IF NOT EXISTS objectives (
     hash VARCHAR PRIMARY KEY, form VARCHAR, tickers JSON, params JSON,
     created_at VARCHAR);
@@ -386,6 +386,10 @@ class Registry:
         # and every one of those is trigger work.
         self.con.execute(
             "ALTER TABLE atlas_tasks ADD COLUMN IF NOT EXISTS origin VARCHAR")
+        # Views-conditioned moment sets carry the run that tilted them. NULL is
+        # a set logged before conditioning existed, i.e. no lineage to check.
+        self.con.execute(
+            "ALTER TABLE moment_sets ADD COLUMN IF NOT EXISTS provenance VARCHAR")
 
     def _partition_account_by_book(self) -> None:
         """Move a pre-book `account` row onto the book key.
@@ -494,11 +498,33 @@ class Registry:
     # -- research objects ---------------------------------------------------
     def log_moment_set(self, ms: MomentSet) -> str:
         h = ms.content_hash()
+        # Named columns, not positional: the lineage column arrives by ALTER on
+        # existing desks, so its ordinal is not the same everywhere.
         self.con.execute(
-            "INSERT INTO moment_sets VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
-            [h, str(ms.as_of), ms.n, _j(ms.tickers), _j(ms.summary()), _now()],
+            "INSERT INTO moment_sets (hash, as_of, n, tickers, summary, "
+            "created_at, provenance) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT DO NOTHING",
+            [h, str(ms.as_of), ms.n, _j(ms.tickers), _j(ms.summary()), _now(),
+             _j(ms.provenance or {})],
         )
         return h
+
+    def moment_set(self, moment_set_hash: str) -> dict | None:
+        """One logged moment set's row, lineage parsed. Read-only.
+
+        The ``provenance`` column is the persisted record of what conditioned a
+        moment set. The referee does NOT read it from here — it reads
+        ``moments_summary["provenance"]`` off the summary it is handed — so
+        this is the audit's way back to a stored set, and the two must agree.
+        """
+        rows = self._rows(
+            "SELECT * FROM moment_sets WHERE hash=?", [str(moment_set_hash)])
+        if not rows:
+            return None
+        row = dict(rows[0])
+        raw = row.get("provenance")
+        row["provenance"] = json.loads(raw) if raw else {}
+        return row
 
     def log_objective(self, obj: Objective) -> str:
         h = obj.content_hash()
@@ -1023,6 +1049,60 @@ class Registry:
     # -- reporting ----------------------------------------------------------
     def list_runs(self, limit: int = 20) -> list[dict]:
         return self._rows("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", [limit])
+
+    def runs_of_kind(self, kind: str, limit: int = 2) -> list[dict]:
+        """The newest ``limit`` runs of one kind, newest first. Read-only.
+
+        ``matrix_runs(limit=1)`` answers "what is the current window"; a rule that
+        compares a window to the one before it needs two, and scanning
+        ``list_runs`` for them fails for the same reason documented there.
+        """
+        return self._rows(
+            "SELECT * FROM runs WHERE kind=? ORDER BY created_at DESC LIMIT ?",
+            [str(kind), int(limit)])
+
+    def matrix_runs(self, *, source: str | None,
+                    as_of_before: str | None = None,
+                    as_of_at_or_before: str | None = None,
+                    limit: int = 1) -> list[dict]:
+        """Qualitative-matrix runs, filtered and ordered by the WINDOW's date.
+
+        Every predicate that picks a window lives in SQL. Reading N runs and
+        filtering them in Python is a cliff: on a registry where an owner logs
+        matrices from live news, the caller's own windows are pushed past any
+        fixed N and it silently sees none — and a missing previous window is
+        not a missing view, it is a baseline of zero, which makes the tail rule
+        MORE likely to fire mid-walk with no error anywhere.
+
+        ``source`` is the stamp the writer put on its own matrices, or ``None``
+        for "any source" (the owner stamps ``desk``, the A5 arm ``ablation_a5``). ``as_of_before`` is strict
+        and ``as_of_at_or_before`` inclusive; both compare the window's own
+        ``as_of``, never the write time, because a registry may hold windows
+        written out of date order. Ordered by that ``as_of`` descending, write
+        time breaking ties. Read-only.
+        """
+        where = ["kind='qualitative_matrix'",
+                 "json_extract_string(spec, '$.matrix.as_of') IS NOT NULL"]
+        params: list = []
+        if source is not None:
+            where.append("json_extract_string(spec, '$.source') = ?")
+            params.append(str(source))
+        if as_of_before is not None:
+            where.append("json_extract_string(spec, '$.matrix.as_of') < ?")
+            params.append(str(as_of_before))
+        if as_of_at_or_before is not None:
+            where.append("json_extract_string(spec, '$.matrix.as_of') <= ?")
+            params.append(str(as_of_at_or_before))
+        params.append(int(limit))
+        return self._rows(
+            "SELECT * FROM runs WHERE " + " AND ".join(where) +
+            " ORDER BY json_extract_string(spec, '$.matrix.as_of') DESC, "
+            "created_at DESC LIMIT ?", params)
+
+    def get_run(self, run_id: str) -> dict | None:
+        """One run by id, spec parsed, or None. Read-only."""
+        rows = self._rows("SELECT * FROM runs WHERE run_id=?", [str(run_id)])
+        return rows[0] if rows else None
 
     def report(self, run_id: str) -> dict:
         return {

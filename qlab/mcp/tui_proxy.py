@@ -274,7 +274,10 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
         """Validate and apply dry research risk views through the owner.
 
         Pass the operator's source text as ``excerpt`` so every view's
-        ``source_quote`` is checked against it deterministically.
+        ``source_quote`` is checked against it deterministically. A rule-built
+        view may instead carry ``source_claims``, archive claim keys the owner
+        checks against the newest logged qualitative matrix; every view must
+        carry one of the two.
         """
         return lab("research.apply_views", {
             "as_of": as_of,
@@ -283,6 +286,23 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
             "kl_budget": kl_budget,
             "dry": dry,
             "excerpt": excerpt,
+        })
+
+    @app.tool(name="research_qualitative_matrix")
+    def research_qualitative_matrix(
+        as_of: str,
+        universe: str = "core",
+    ) -> dict:
+        """Read the owner's logged qualitative matrix as of a date.
+
+        Read-only: the matrix is built by the owner from the window it already
+        fetched, so this never fetches and never builds one. The owner honours
+        both arguments, so a point-in-time caller cannot be handed a window
+        from after its own rebalance.
+        """
+        return lab("research.qualitative_matrix", {
+            "as_of": as_of,
+            "universe": universe,
         })
 
     # -- regime indicators (options for the analyst's regime call) --------

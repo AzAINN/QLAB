@@ -174,6 +174,18 @@ def test_apply_views_persists_applied_target_only_when_requested(reg):
             }
         ], "source_quote"),
         ([_tail_view() for _ in range(4)], "at most 3"),
+        ([{
+            "type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.3, "source_claims": [],
+        }], "source_claims' must be a non-empty list"),
+        ([{
+            "type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.3, "source_claims": "k1",
+        }], "source_claims' must be a non-empty list"),
+        ([{
+            "type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.3, "source_claims": [1],
+        }], "source_claims' must be a non-empty string"),
     ],
 )
 def test_apply_views_refuses_malformed_or_return_flavored_payloads_before_data(
@@ -403,3 +415,268 @@ def test_news_fetch_reaches_extractor_only_via_owner_not_the_extractor_role():
     assert agents["news-extractor"]["tools"] == [_claude_tool("research.apply_views")]
     # The coordinator is the one granted the feed, to fetch and inject.
     assert _claude_tool("news.fetch") in agents["qlab-coordinator"]["tools"]
+
+
+def test_news_fetch_returns_a_partial_window_rather_than_failing_the_agent(
+        reg, monkeypatch):
+    # A provider short one feed is a smaller window, not a tool error. Raising
+    # here told the agent the news lane was down while real records sat in the
+    # exception.
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    from qlab.ui.server import UISession
+
+    def partial(as_of, universe):
+        raise feed.PartialWindow(
+            [NewsItem(source="Bureau of Economic Analysis",
+                      published="2021-06-29T09:00:00+00:00",
+                      headline="GDP, second estimate", summary="",
+                      url="https://apps.bea.gov/x", tickers=("ACWI",),
+                      provider="macro")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(feed.PROVIDERS, "macro", partial)
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS", raising=False)
+    monkeypatch.setenv("QLAB_NEWS_PROVIDER", "macro")
+    session = UISession(offline_default=False, registry=reg)
+    out = session.call_lab_tool(
+        "news.fetch",
+        {"as_of": "2021-06-30", "universe": "core", "lookback_hours": 72},
+        offline=False)
+    assert out["n_items"] == 1
+    assert out["items"][0]["headline"] == "GDP, second estimate"
+    assert out["excerpt"]
+    # Keyed by the member that lost the feed: a one-member stack says the same
+    # thing a flat map did, and a two-member stack can still be read.
+    assert out["partial"] == {"macro": {"BLS": "HTTP Error 403: Forbidden"}}
+    assert out["providers"] == ["macro"]
+
+
+def test_a_view_may_cite_archive_claims_instead_of_an_excerpt(reg):
+    """Provenance can trace to logged claim keys, not only a pasted quote."""
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
+        "as_of": "2021-06-30", "window_hash": "w",
+        "rows": {"ACWI": {"ticker": "ACWI", "coverage": 1, "publishers": 1,
+                          "corroborated": 1, "primary_docs": 1,
+                          "days_to_next_release": None,
+                          "claim_keys": ["k1"]}}}})
+
+    cited = {"type": "tail", "ticker": "ACWI", "direction": "fatter",
+             "confidence": 0.3, "source_claims": ["k1"]}
+    ok = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "views": [cited]},
+        offline=True)
+    assert ok["provenance_verified"] is True
+
+    invented = dict(cited, source_claims=["nope"])
+    with pytest.raises(ValueError, match="not in the archive"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core", "views": [invented]},
+            offline=True)
+
+
+def test_a_view_carrying_neither_quote_nor_claims_is_refused(reg):
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    with pytest.raises(ValueError,
+                       match="must carry source_quote or source_claims"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core",
+             "views": [{"type": "tail", "ticker": "ACWI",
+                        "direction": "fatter", "confidence": 0.3}]},
+            offline=True)
+
+
+def test_cited_claims_are_unverified_when_no_matrix_has_been_logged(reg):
+    """No archive to check against is 'unverified', as a missing excerpt is."""
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    out = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core",
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3, "source_claims": ["k1"]}]},
+        offline=True)
+    assert out["provenance_verified"] is False
+
+
+def test_a_quote_riding_alongside_claims_is_still_checked_against_the_excerpt(reg):
+    """Citing the archive must not launder a fabricated quote into the spec."""
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
+        "as_of": "2021-06-30", "window_hash": "w",
+        "rows": {"ACWI": {"claim_keys": ["k1"]}}}})
+    excerpt = "Dealers report options markets imply unusually wide outcomes."
+    both = {"type": "tail", "ticker": "ACWI", "direction": "fatter",
+            "confidence": 0.3, "source_claims": ["k1"],
+            "source_quote": "options markets imply unusually wide outcomes"}
+    ok = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "views": [both],
+         "excerpt": excerpt}, offline=True)
+    assert ok["provenance_verified"] is True
+
+    fabricated = dict(both, source_quote="ACWI will rally hard next week")
+    with pytest.raises(ValueError, match="not found in the supplied excerpt"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core", "views": [fabricated],
+             "excerpt": excerpt}, offline=True)
+
+
+def test_news_fetch_reads_the_whole_configured_stack(reg, monkeypatch):
+    """The plural env governs the owner's feed tool, as docs/news-setup.md says.
+
+    news.fetch called the singular fetch_news with no provider, which read only
+    QLAB_NEWS_PROVIDER. An operator following the documented setup got the
+    synthetic fixtures from a desk configured for two live sources, and the
+    result said nothing about either.
+    """
+    from qlab.news import feed
+    from qlab.news.feed import NewsItem
+    from qlab.ui.server import UISession
+
+    def one(as_of, universe):
+        return [NewsItem(source="Wire One", published="2021-06-29T09:00:00+00:00",
+                         headline="one speaks", summary="", url="https://x/1",
+                         tickers=("ACWI",), provider="one")]
+
+    def two(as_of, universe):
+        raise feed.PartialWindow(
+            [NewsItem(source="Wire Two", published="2021-06-29T10:00:00+00:00",
+                      headline="two speaks", summary="", url="https://x/2",
+                      tickers=("ACWI",), provider="two")],
+            {"BLS": "HTTP Error 403: Forbidden"})
+
+    monkeypatch.setitem(feed.PROVIDERS, "one", one)
+    monkeypatch.setitem(feed.PROVIDERS, "two", two)
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "one,two")
+    session = UISession(offline_default=False, registry=reg)
+    out = session.call_lab_tool(
+        "news.fetch",
+        {"as_of": "2021-06-30", "universe": "core", "lookback_hours": 72},
+        offline=False)
+    assert out["providers"] == ["one", "two"]
+    assert out["outcomes"]["one"] == "ok"
+    assert out["outcomes"]["two"].startswith("partial: ")
+    assert {i["headline"] for i in out["items"]} == {"one speaks", "two speaks"}
+    # Whose feed went missing, not just which feed: a flat merge across members
+    # would report a failure without saying which source it belonged to.
+    assert out["partial"] == {"two": {"BLS": "HTTP Error 403: Forbidden"}}
+
+
+def test_news_fetch_offline_reads_only_the_synthetic_member(reg, monkeypatch):
+    """Offline is the demo and must never resolve an operator's live stack."""
+    from qlab.ui.server import UISession
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "alpaca,gdelt")
+    session = UISession(offline_default=True, registry=reg)
+    out = session.call_lab_tool(
+        "news.fetch",
+        {"as_of": "2021-06-30", "universe": "core", "lookback_hours": 72},
+        offline=True)
+    assert out["providers"] == ["synthetic"]
+    assert out["outcomes"] == {"synthetic": "ok"}
+
+
+def _desk_matrix(reg, as_of: str, keys: list[str], window_hash: str = "w") -> str:
+    """One desk-stamped qualitative matrix over ACWI, as the owner logs it."""
+    return reg.log_run("qualitative_matrix", {
+        "source": "desk",
+        "matrix": {
+            "as_of": as_of, "window_hash": window_hash,
+            "rows": {"ACWI": {"ticker": "ACWI", "coverage": 1, "publishers": 1,
+                              "corroborated": 1, "primary_docs": 1,
+                              "days_to_next_release": None,
+                              "claim_keys": list(keys)}}}})
+
+
+def test_cited_claim_keys_are_read_point_in_time(reg):
+    """A claim the desk had not recorded yet cannot source a view at T.
+
+    The archive was read as "the newest matrix by write time", so a window
+    logged for a later date — the desk refreshes continuously — supplied claim
+    keys to a rebalance that could not have seen them. That is look-ahead
+    entering through the provenance gate itself.
+    """
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    _desk_matrix(reg, "2021-06-30", ["k1"], "w1")
+    _desk_matrix(reg, "2021-07-07", ["k2"], "w2")
+
+    ok = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core",
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3, "source_claims": ["k1"]}]},
+        offline=True)
+    assert ok["provenance_verified"] is True
+
+    with pytest.raises(ValueError, match="not in the archive"):
+        session.call_lab_tool(
+            "research.apply_views",
+            {"as_of": "2021-06-30", "universe": "core",
+             "views": [{"type": "tail", "ticker": "ACWI",
+                        "direction": "fatter", "confidence": 0.3,
+                        "source_claims": ["k2"]}]},
+            offline=True)
+
+
+def test_a_persisted_views_run_is_bound_to_the_matrix_it_verified_against(reg):
+    """The run says WHICH matrix sourced it, not merely that one did.
+
+    Without the binding the referee can only re-check that provenance was
+    verified, never against what — and 'verified' against a window from after
+    the solve is not verification.
+    """
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    matrix_run = _desk_matrix(reg, "2021-06-30", ["k1"])
+    out = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "persist": True,
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3, "source_claims": ["k1"]}]},
+        offline=True)
+    spec = reg.get_run(out["run_id"])["spec"]
+    assert spec["matrix_run_id"] == matrix_run
+
+    # A quote-sourced view cites no matrix. The field is still written, so an
+    # absent field means "this run predates the binding", not "no matrix".
+    quoted = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "persist": True,
+         "excerpt": "Dealers report unusually wide outcomes.",
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3,
+                    "source_quote": "unusually wide outcomes"}]},
+        offline=True)
+    quoted_spec = reg.get_run(quoted["run_id"])["spec"]
+    assert "matrix_run_id" in quoted_spec and quoted_spec["matrix_run_id"] is None
+
+
+def test_unverified_views_are_bound_to_no_matrix(reg):
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=reg)
+    out = session.call_lab_tool(
+        "research.apply_views",
+        {"as_of": "2021-06-30", "universe": "core", "persist": True,
+         "views": [{"type": "tail", "ticker": "ACWI", "direction": "fatter",
+                    "confidence": 0.3, "source_claims": ["k1"]}]},
+        offline=True)
+    spec = reg.get_run(out["run_id"])["spec"]
+    assert spec["provenance_verified"] is False
+    assert spec["matrix_run_id"] is None

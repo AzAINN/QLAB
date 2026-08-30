@@ -12,21 +12,12 @@ import os
 from datetime import datetime, timezone
 
 
-def check_news(universe: list[str], *, provider: str | None = None,
-               lookback_hours: int = 72) -> dict:
-    """Fetch one live window and report what the configuration actually does.
-
-    Returns a structured diagnosis rather than raising, so a caller can render
-    it. ``ok`` is true only when real records were fetched AND grounded.
-    """
-    from qlab.env import credential_status
-    from qlab.news.feed import fetch_news
+def _check_one(name: str, universe: list[str], *, lookback_hours: int,
+               now: datetime, creds: dict) -> dict:
+    """Diagnose one provider. Never raises; the failure IS the report."""
+    from qlab.news.feed import PartialWindow, fetch_news
     from qlab.news.grounding import ground
 
-    creds = credential_status()
-    name = (provider or os.environ.get("QLAB_NEWS_PROVIDER")
-            or "synthetic").strip().lower()
-    now = datetime.now(timezone.utc)
     report: dict = {
         "provider": name,
         "alpaca_credentials": creds["alpaca_credentials"],
@@ -47,9 +38,17 @@ def check_news(universe: list[str], *, provider: str | None = None,
             "root.")
         return report
 
+    # A provider short one of its feeds answered; it did not fail. Reporting it
+    # as NOT WORKING and dropping the records it did return is the outcome
+    # PartialWindow exists to prevent — and this is the one place an operator
+    # looks to find out what is wrong.
+    partial: dict[str, str] = {}
     try:
         items = fetch_news(now, universe, lookback_hours=lookback_hours,
                            provider=name, offline=False)
+    except PartialWindow as exc:
+        items = exc.items
+        partial = exc.failures
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
         return report
@@ -66,7 +65,10 @@ def check_news(universe: list[str], *, provider: str | None = None,
         "primary_sources": sum(1 for c in grounded.claims if c.tier == "primary"),
         "publishers": sorted({str(getattr(i, "source", "")) for i in grounded.items}),
         "window_hash": grounded.window_hash,
-        "quality_flags": list(grounded.quality_flags),
+        # The missing feeds ride the same channel the grounding uses for
+        # everything else the reader should weigh the window against.
+        "quality_flags": list(grounded.quality_flags) + [
+            f"partial: {feed}: {error}" for feed, error in partial.items()],
         "sample": [
             {"headline": c.headline[:110], "support": c.support,
              "tickers": list(c.tickers)}
@@ -80,12 +82,62 @@ def check_news(universe: list[str], *, provider: str | None = None,
     return report
 
 
+def check_news(universe: list[str], *, provider: str | None = None,
+               lookback_hours: int = 72) -> dict:
+    """Fetch one live window per stack member and report each member.
+
+    Returns a structured diagnosis rather than raising, so a caller can render
+    it. Each member is diagnosed on its own terms under ``members``: a source
+    that has gone away is named, not absorbed into a smaller window. ``ok`` is
+    true when ANY member fetched and grounded real records — one living member
+    is still a record — and the top-level fields stay the first member's, so a
+    stack of one reads exactly as a single-provider check always did.
+    """
+    from qlab.env import credential_status
+    from qlab.news.feed import parse_provider_stack
+
+    creds = credential_status()
+    names = parse_provider_stack(provider)
+    now = datetime.now(timezone.utc)
+    members = {
+        name: _check_one(name, universe, lookback_hours=lookback_hours,
+                         now=now, creds=creds)
+        for name in names
+    }
+    report = dict(members[names[0]])
+    report["members"] = members
+    report["providers"] = list(names)
+    if len(names) > 1:
+        report["provider"] = ",".join(names)
+    report["ok"] = any(m["ok"] for m in members.values())
+    return report
+
+
 def render(report: dict) -> str:
-    """Human-readable diagnosis. Never includes a credential."""
+    """Human-readable diagnosis. Never includes a credential.
+
+    A stack gets one block per member. The overall line reads OK when any
+    member answered, and each block still says which member did not — the
+    whole point of reading several sources is knowing which one went away.
+    """
+    members = report.get("members") or {}
+    if len(members) > 1:
+        status = "OK" if report.get("ok") else "NOT WORKING"
+        lines = [f"news integration: {status}",
+                 f"  stack              {report.get('provider')}"]
+        for member in members.values():
+            lines.append("")
+            lines.append(_render_member(member))
+        return "\n".join(lines)
+    status = "OK" if report.get("ok") else "NOT WORKING"
+    return f"news integration: {status}\n" + _render_member(report)
+
+
+def _render_member(report: dict) -> str:
+    """One provider's diagnosis. Never includes a credential."""
     lines = []
     status = "OK" if report.get("ok") else "NOT WORKING"
-    lines.append(f"news integration: {status}")
-    lines.append(f"  provider           {report.get('provider')}")
+    lines.append(f"  provider           {report.get('provider')}  [{status}]")
     lines.append(
         f"  alpaca credentials {'present' if report.get('alpaca_credentials') else 'absent'}")
     if report.get("error"):

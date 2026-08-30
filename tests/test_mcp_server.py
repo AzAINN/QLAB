@@ -408,8 +408,13 @@ def test_backtest_run_accepts_every_operational_pair_in_ablation_spec(reg):
         )
 
     arms = [arm for arm in spec["arms"] if is_operational_pair(arm)]
+    # A5 shares A1's operational (objective, solver) pair; what makes it a
+    # research arm is `params.views_source`, which `backtest.run` has no
+    # parameter for. Running it here therefore runs an unconditioned
+    # min-variance — the conditioning is unreachable from this tool by
+    # construction, which is exactly the claim.
     assert [arm["id"] for arm in arms] == [
-        "B0", "B1", "B2", "B3", "A1", "B4", "A2",
+        "B0", "B1", "B2", "B3", "A1", "B4", "A5", "A2",
     ]
 
     app = StubApp()
@@ -642,3 +647,130 @@ def test_predictor_board_catalog_entry_is_research_only():
     assert spec.stage == "research"
     assert spec.agent_tool == "research.predictor_board"
     assert spec.agent_usable is False
+
+
+def test_qualitative_matrix_honours_its_as_of_and_its_universe(reg):
+    """A read tool that validates ``as_of`` and then ignores it is look-ahead."""
+    import pytest as _pytest
+
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+
+    app = StubApp()
+    register_lab_tools(app, LabState(offline=True, registry=reg, seed=7))
+    matrix = app.tools["research.qualitative_matrix"]
+
+    assert matrix(as_of="2022-06-30")["status"] == "never_built"
+
+    def log(as_of, window, rows):
+        reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
+            "as_of": as_of, "window_hash": window,
+            "rows": {t: {"ticker": t, "coverage": c, "publishers": 1,
+                         "corroborated": 0, "primary_docs": 0,
+                         "days_to_next_release": None, "claim_keys": [t]}
+                     for t, c in rows.items()}}})
+
+    log("2022-06-30", "w1", {"ACWI": 3, "NOTINUNIVERSE": 9})
+    log("2022-09-30", "w2", {"ACWI": 7})
+
+    # The newest matrix at or before the asked-for date, not the newest logged.
+    early = matrix(as_of="2022-08-01")
+    assert early["status"] == "ok" and early["as_of"] == "2022-06-30"
+    # ... with rows filtered to the requested universe.
+    assert set(early["rows"]) == {"ACWI"}
+    assert matrix(as_of="2022-12-31")["as_of"] == "2022-09-30"
+    assert matrix(as_of="2022-01-01")["status"] == "never_built"
+
+    log("2023-01-31", "w3", {"NOTINUNIVERSE": 4})
+    with _pytest.raises(ValueError, match="no row"):
+        matrix(as_of="2023-06-30")
+
+
+def test_qualitative_matrix_resolves_an_old_window_on_a_busy_registry(reg):
+    """A bounded scan on the read tool is the same cliff as on the arm."""
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+
+    app = StubApp()
+    register_lab_tools(app, LabState(offline=True, registry=reg, seed=7))
+
+    def log(as_of, ticker, key):
+        reg.log_run("qualitative_matrix", {"source": "desk", "matrix": {
+            "as_of": as_of, "window_hash": key,
+            "rows": {ticker: {"ticker": ticker, "coverage": 1,
+                              "publishers": 1, "corroborated": 0,
+                              "primary_docs": 0, "days_to_next_release": None,
+                              "claim_keys": [key]}}}})
+
+    log("2020-06-30", "ACWI", "target")
+    for i in range(250):
+        log(f"2024-01-{i % 28 + 1:02d}", "SPY", f"noise{i}")
+
+    out = app.tools["research.qualitative_matrix"](as_of="2020-12-31")
+    assert out["status"] == "ok" and out["as_of"] == "2020-06-30"
+    assert set(out["rows"]) == {"ACWI"}
+
+
+def test_qualitative_matrix_is_in_owner_proxy_and_analyst_scopes():
+    """A grant nothing forwards is a grant that silently disappears.
+
+    `research.qualitative_matrix` was granted in agents/*.md and served by the
+    owner, but the proxy never registered it and `_LAB_TOOL_BASES` never
+    listed it — so `_proxy_tool` returned None and `build_workforce_agents`
+    dropped it from the role's list without a word. Four things have to agree
+    for a grant to reach an agent, so all four are asserted together.
+    """
+    from qlab.mcp.tui_proxy import register_proxy_tools
+    from qlab.tui.claude import (
+        _LAB_TOOL_BASES,
+        _PROXY_TOOLS,
+        _claude_tool,
+        build_workforce_agents,
+    )
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    base = "research.qualitative_matrix"
+    tool = _claude_tool(base)
+    assert base in OWNER_LAB_TOOLS
+    assert base in _LAB_TOOL_BASES
+    assert tool in _PROXY_TOOLS
+
+    proxy = StubApp()
+    register_proxy_tools(proxy, object())
+    assert "research_qualitative_matrix" in proxy.names
+
+    agents = build_workforce_agents()
+    assert tool in agents["moments-analyst"]["tools"]
+    # Reading the record is not conditioning on it: the roles that neither
+    # choose estimators nor manage the desk stay out.
+    for role in ("optimization-runner", "referee", "reporter", "news-extractor"):
+        assert tool not in agents.get(role, {"tools": []})["tools"]
+
+
+def test_qualitative_matrix_serves_the_desks_own_record_not_an_arms(reg):
+    """The ablation writes matrices to the same registry; they are not the desk's.
+
+    `matrix_runs(source=None, ...)` let an `ablation_a5` window — built over
+    the arm's universe, from the arm's rules, for a research walk — answer as
+    the desk's record of what the press said. The stamp is what separates them.
+    """
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, seed=7, registry=reg)
+    row = {"ticker": "ACWI", "coverage": 1, "publishers": 1, "corroborated": 1,
+           "primary_docs": 1, "days_to_next_release": None, "claim_keys": []}
+    desk = reg.log_run("qualitative_matrix", {
+        "source": "desk",
+        "matrix": {"as_of": "2021-06-28", "window_hash": "desk",
+                   "rows": {"ACWI": dict(row, coverage=3)}}})
+    reg.log_run("qualitative_matrix", {
+        "source": "ablation_a5",
+        "matrix": {"as_of": "2021-06-30", "window_hash": "arm",
+                   "rows": {"ACWI": dict(row, coverage=99)}}})
+
+    out = session.call_lab_tool(
+        "research.qualitative_matrix", {"as_of": "2021-06-30"}, offline=True)
+    assert out["run_id"] == desk
+    assert out["source"] == "desk"
+    assert out["window_hash"] == "desk"
+    assert out["rows"]["ACWI"]["coverage"] == 3

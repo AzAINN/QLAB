@@ -258,3 +258,46 @@ synthetic:
       headline: Listed real estate reprices against long rates
       summary: Listed property is read against the long end rather than the policy rate.
       url: synthetic://qlab/rwo/reit-rates
+
+# SEC EDGAR: the funds themselves always; the issuers below are the operator's
+# curated constituent list per ETF — phase-one holdings knowledge, shared as
+# data. Requires QLAB_EDGAR_CONTACT in .env (the SEC asks who is calling).
+edgar:
+  issuers:
+    QQQ: [AAPL, MSFT, NVDA, AMZN, META, AVGO, GOOGL, TSLA]
+    SPY: [AAPL, MSFT, NVDA, AMZN, META, BRK-B, GOOGL, JPM]
+
+# Official releases: the publisher IS the event, so every record here is
+# primary-tier by name (see grounding.PRIMARY_SOURCE_MARKERS).
+macro:
+  feeds:
+    # BLS (was https://www.bls.gov/feed/bls_latest.rss, tickers TIP/BNDW):
+    # removed 2026-08-28 — 403 Forbidden to every request, with a browser
+    # User-Agent as well, and bls.gov/bls/rss.htm (their own feed index) is
+    # 403 too. Not a moved file: the publisher is refusing automation. No
+    # replacement is shipped because none was verified.
+    # US Treasury (was https://home.treasury.gov/news/press-releases/rss,
+    # tickers TLT/IEF/BNDW): removed 2026-08-28 — 404, and the press-release
+    # page itself links no feed. Restore only against a URL read from
+    # Treasury's own site and verified live.
+    - name: Bureau of Economic Analysis
+      url: https://apps.bea.gov/rss/rss.xml
+      tickers: [ACWI, BNDW]
+
+# Scheduled releases. Dated in the future on purpose and never served as
+# news — they are what Atlas reads as "what is coming". Maintain per quarter.
+calendar:
+  - {name: FOMC statement, when: "2026-09-17T18:00:00+00:00", tickers: [BNDW, TLT, IEF], source: Federal Reserve}
+  - {name: CPI (August), when: "2026-09-11T12:30:00+00:00", tickers: [TIP, BNDW], source: BLS}
+  - {name: Employment situation (August), when: "2026-09-04T12:30:00+00:00", tickers: [BNDW, ACWI], source: BLS}
+
+# GDELT: global press coverage, keyless and English-only, as the many-publisher
+# secondary source. Each article's domain is its source, so corroboration by two
+# outlets is two publishers and not one wire twice.
+gdelt:
+  rules:
+    - {query: "gold OR bullion", tickers: [GLD]}
+    - {query: "crude oil OR OPEC", tickers: [USO, GSG, DBC]}
+    - {query: "treasury yields OR federal reserve", tickers: [TLT, IEF, BNDW]}
+    - {query: "emerging markets debt", tickers: [EMB, EEM]}
+    - {query: "real estate investment trust", tickers: [VNQ, RWO]}

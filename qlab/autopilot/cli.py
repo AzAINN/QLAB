@@ -155,6 +155,14 @@ def _cmd_batch(args) -> int:
         print(f"{row['arm']:>4}  {_f(row.get('sortino')):>9}  "
               f"{_f(row.get('ann_vol')):>8}  {_f(row.get('max_drawdown')):>8}  "
               f"{_f(row.get('deflated_sharpe')):>8}")
+    views = report.get("views_conditioning")
+    if views:
+        # Whether the record spoke at all. Without this line an arm that
+        # reproduced its baseline because no rule fired is indistinguishable
+        # on screen from one that fired and changed nothing.
+        print(f"views: {views['windows']} windows, "
+              f"{views['windows_with_views']} with views, "
+              f"{views['views_applied']} views applied")
     return 0
 
 
@@ -622,6 +630,8 @@ def _cmd_tui(args) -> int:
             mode = startup_desk_mode(flagged)
             offline = True if mode is None else mode.offline
 
+    _news_startup_door(args, offline)
+
     owner = None
     already_open = port_open()
     client = ApiClient(f"http://127.0.0.1:{args.port}")
@@ -856,8 +866,22 @@ def build_parser() -> argparse.ArgumentParser:
         "news-check",
         help="authenticate the news integration and show what it returns")
     nc.add_argument("--provider", default=None,
-                    help="override QLAB_NEWS_PROVIDER for this check")
+                    help="a provider, or a comma-separated stack; overrides "
+                         "QLAB_NEWS_PROVIDERS for this check")
     nc.set_defaults(func=_cmd_news_check)
+
+    ns = sub.add_parser(
+        "news-setup",
+        help="choose which news sources this desk reads, guided")
+    ns.add_argument("--providers", default=None,
+                    help="a comma-separated stack to write without prompting, "
+                         "e.g. alpaca,edgar,macro (or synthetic for fixtures)")
+    ns.add_argument("--edgar-contact", default=None,
+                    help="the contact the SEC requires, 'Your Name "
+                         "<you@example.org>'; sent to the SEC only")
+    ns.add_argument("--no-verify", action="store_true",
+                    help="save without one live check of the chosen sources")
+    ns.set_defaults(func=_cmd_news_setup)
 
     def add_desk_mode(sp):
         # Two words, and the safe defaults need neither: live data with the
@@ -937,6 +961,210 @@ def _cmd_news_check(args) -> int:
     report = check_news(universe, provider=getattr(args, "provider", None))
     print(render(report))
     return 0 if report.get("ok") else 1
+
+
+def _news_universe() -> list[str]:
+    """The names a live check is run against: the mandate's own universe."""
+    from qlab.trader.mandate import load_mandate
+
+    return list(load_mandate().universe_whitelist)
+
+
+def _known_providers() -> list[str]:
+    from qlab.news.feed import PROVIDERS, load_plugin_providers
+
+    try:
+        load_plugin_providers()
+    except Exception:
+        # A broken plugin entry point is not this verb's error to raise; the
+        # first-party names are still nameable, and the feed refuses the rest
+        # with its own sentence.
+        pass
+    return sorted(PROVIDERS)
+
+
+def _persist_news_plan(plan) -> None:
+    """Write the plan and say what was written and how to make it take."""
+    from qlab.news.setup import apply_plan
+
+    root = workspace_root()
+    written = apply_plan(plan, root=root, environ=os.environ)
+    print(f"\n  wrote {', '.join(written)} to {root / '.env'}")
+    print("  Restart the owner to read them: qlab --restart runtime")
+
+
+def _verify_and_prune(plan, *, ask_to_drop: bool):
+    """Check the stack live, print the diagnosis, and settle what to save.
+
+    A member that cannot answer is never saved silently: with a terminal the
+    operator is asked to drop it, and without one it stays in the stack with
+    the failure printed — the scripted caller asked for exactly these names.
+    Returns the plan to persist (or None when nothing usable is left) and the
+    report, because the exit code follows the check rather than the write.
+    """
+    from dataclasses import replace
+
+    from qlab.news.check import render
+    from qlab.news.setup import failed_members, verify_plan
+
+    report = verify_plan(plan, _news_universe(), environ=os.environ)
+    print(render(report))
+    failed = failed_members(report)
+    if not failed or not ask_to_drop:
+        return plan, report
+    keep = list(plan.providers)
+    for name in failed:
+        answer = input(f"  Drop {name} and save the rest? [Y/n] ").strip().lower()
+        if answer in ("", "y", "yes"):
+            keep = [n for n in keep if n != name]
+    if not keep:
+        print("  Every chosen source failed; nothing was saved. Fix one of the "
+              "errors above and run `qlab news-setup` again.")
+        return None, report
+    return replace(plan, providers=tuple(keep)), report
+
+
+def _cmd_news_setup(args) -> int:
+    """Choose what the desk reads, guided — or scripted with --providers."""
+    from qlab.news.setup import (
+        SetupPlan, SetupRefused, run_wizard, validate_contact)
+
+    named = (getattr(args, "providers", None) or "").strip()
+    if not named:
+        if not sys.stdin.isatty():
+            raise SystemExit(
+                "news setup asks which sources to read and there is no "
+                "terminal to ask on; spell it out: qlab news-setup "
+                "--providers alpaca,edgar,macro [--edgar-contact "
+                "'Your Name <you@example.org>'] [--no-verify]")
+        try:
+            plan = run_wizard(ask=input, env=os.environ, say=print)
+        except (EOFError, KeyboardInterrupt):
+            # Ctrl-D and Ctrl-C are an operator leaving, not a fault; this
+            # file answers with a sentence, never a traceback.
+            raise SystemExit(
+                "news setup stopped; nothing was saved.") from None
+        except SetupRefused as exc:
+            raise SystemExit(f"{exc} Nothing was saved.") from None
+    else:
+        names = tuple(n.strip().lower() for n in named.split(",") if n.strip())
+        if not names:
+            raise SystemExit("--providers named no provider")
+        known = _known_providers()
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            raise SystemExit(
+                f"unknown news provider(s) {', '.join(unknown)}; available: "
+                f"{', '.join(known)}")
+        contact = (getattr(args, "edgar_contact", None) or "").strip()
+        if "edgar" in names and not contact and not os.environ.get(
+                "QLAB_EDGAR_CONTACT", "").strip():
+            raise SystemExit(
+                "edgar needs a contact: pass --edgar-contact 'Your Name "
+                "<you@example.org>'. The SEC requires a descriptive "
+                "User-Agent with a contact, and this desk does not send an "
+                "invented one.")
+        try:
+            checked = validate_contact(contact) if contact else None
+        except ValueError as exc:
+            raise SystemExit(f"--edgar-contact: {exc}") from None
+        plan = SetupPlan(
+            read_news=names != ("synthetic",),
+            providers=names,
+            edgar_contact=checked,
+            verify=not getattr(args, "no_verify", False),
+        )
+
+    report = None
+    if plan.verify:
+        plan, report = _verify_and_prune(
+            plan, ask_to_drop=not named and sys.stdin.isatty())
+        if plan is None:
+            return 1
+    _persist_news_plan(plan)
+    # The stack the caller named is saved either way — they named it — but a
+    # scripted caller reads the status, so a NOT WORKING member is a failure
+    # here exactly as it is for `news-check`.
+    return 0 if report is None or report.get("ok") else 1
+
+
+def _news_startup_door(args, offline: bool) -> None:
+    """Offer news setup at startup when the desk would otherwise guess.
+
+    Only where a question can be answered and is worth asking: a terminal, no
+    `--yes`, and a live lane — the offline demo reads fixtures by design. The
+    two cases are "nothing configured" and "a stack that names edgar with no
+    contact"; anything else starts silently, as it always did.
+
+    Nothing that happens in here may stop the launch. The desk was startable
+    before the door asked anything, so an abandoned answer, a Ctrl-D or a
+    mistyped word leaves the configuration alone and starts it as configured —
+    "I typed the wrong word so my desk did not open" would be a bug.
+    """
+    from qlab.news.setup import SetupRefused
+
+    if offline or getattr(args, "yes", False) or not sys.stdin.isatty():
+        return
+    try:
+        _news_door_body()
+    except (EOFError, KeyboardInterrupt, SetupRefused) as exc:
+        detail = f" ({exc})" if isinstance(exc, SetupRefused) else ""
+        print(f"\n  Nothing was changed{detail}; starting the desk as "
+              "configured.")
+
+
+def _news_door_body() -> None:
+    """The two questions the door may ask. Raises rather than exiting."""
+    from qlab.news.feed import parse_provider_stack
+    from qlab.news.setup import apply_contact, ask_contact, run_wizard
+
+    named = (os.environ.get("QLAB_NEWS_PROVIDERS", "").strip()
+             or os.environ.get("QLAB_NEWS_PROVIDER", "").strip())
+    if not named:
+        # Mirrors UISession.news_provider_for: alpaca when a credential
+        # resolves, else the labelled fixtures.
+        would = "alpaca" if _alpaca_credentials_resolve() else (
+            "synthetic — deterministic fixtures, labelled 'synthetic (demo)'")
+        print(f"\n  No news sources are configured; this desk would read: {would}")
+        if input("  Set up news sources now? [y/N] ").strip().lower() not in (
+                "y", "yes"):
+            return
+        plan = run_wizard(ask=input, env=os.environ, say=print)
+        if plan.verify:
+            plan, _report = _verify_and_prune(plan, ask_to_drop=True)
+            if plan is None:
+                return
+        _persist_news_plan(plan)
+        return
+
+    try:
+        stack = parse_provider_stack(None)
+    except ValueError:
+        return
+    if "edgar" not in stack or os.environ.get("QLAB_EDGAR_CONTACT", "").strip():
+        return
+    print("\n  The stack names edgar, which needs QLAB_EDGAR_CONTACT: the SEC")
+    print("  requires a descriptive User-Agent with a contact, and qlab sends")
+    print("  that string to the SEC and nowhere else.")
+    for _ in range(3):
+        answer = input(
+            "  Enter it now, or drop edgar for this run? [enter/drop] ")
+        answer = answer.strip().lower()
+        if answer.startswith("e"):
+            contact = ask_contact(input, print)
+            written = apply_contact(contact, root=workspace_root(),
+                                    environ=os.environ)
+            print(f"  wrote {', '.join(written)} to {workspace_root() / '.env'}")
+            return
+        if answer.startswith("d"):
+            rest = tuple(n for n in stack if n != "edgar") or ("synthetic",)
+            os.environ["QLAB_NEWS_PROVIDERS"] = ",".join(rest)
+            print(f"  edgar dropped for this run only; this desk reads "
+                  f"{','.join(rest)}. Nothing was saved.")
+            return
+        print("  Answer 'enter' or 'drop'.")
+    print("  Nothing was changed; starting the desk as configured. Run "
+          "`qlab news-setup` when you have the contact.")
 
 
 def main(argv: list[str] | None = None) -> int:

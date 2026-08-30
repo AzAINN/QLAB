@@ -999,7 +999,8 @@ def _verify_and_prune(plan, *, ask_to_drop: bool):
     A member that cannot answer is never saved silently: with a terminal the
     operator is asked to drop it, and without one it stays in the stack with
     the failure printed — the scripted caller asked for exactly these names.
-    Returns the plan to persist, or None when nothing usable is left.
+    Returns the plan to persist (or None when nothing usable is left) and the
+    report, because the exit code follows the check rather than the write.
     """
     from dataclasses import replace
 
@@ -1010,7 +1011,7 @@ def _verify_and_prune(plan, *, ask_to_drop: bool):
     print(render(report))
     failed = failed_members(report)
     if not failed or not ask_to_drop:
-        return plan
+        return plan, report
     keep = list(plan.providers)
     for name in failed:
         answer = input(f"  Drop {name} and save the rest? [Y/n] ").strip().lower()
@@ -1019,13 +1020,14 @@ def _verify_and_prune(plan, *, ask_to_drop: bool):
     if not keep:
         print("  Every chosen source failed; nothing was saved. Fix one of the "
               "errors above and run `qlab news-setup` again.")
-        return None
-    return replace(plan, providers=tuple(keep))
+        return None, report
+    return replace(plan, providers=tuple(keep)), report
 
 
 def _cmd_news_setup(args) -> int:
     """Choose what the desk reads, guided — or scripted with --providers."""
-    from qlab.news.setup import SetupPlan, run_wizard, validate_contact
+    from qlab.news.setup import (
+        SetupPlan, SetupRefused, run_wizard, validate_contact)
 
     named = (getattr(args, "providers", None) or "").strip()
     if not named:
@@ -1035,7 +1037,15 @@ def _cmd_news_setup(args) -> int:
                 "terminal to ask on; spell it out: qlab news-setup "
                 "--providers alpaca,edgar,macro [--edgar-contact "
                 "'Your Name <you@example.org>'] [--no-verify]")
-        plan = run_wizard(ask=input, env=os.environ, say=print)
+        try:
+            plan = run_wizard(ask=input, env=os.environ, say=print)
+        except (EOFError, KeyboardInterrupt):
+            # Ctrl-D and Ctrl-C are an operator leaving, not a fault; this
+            # file answers with a sentence, never a traceback.
+            raise SystemExit(
+                "news setup stopped; nothing was saved.") from None
+        except SetupRefused as exc:
+            raise SystemExit(f"{exc} Nothing was saved.") from None
     else:
         names = tuple(n.strip().lower() for n in named.split(",") if n.strip())
         if not names:
@@ -1054,19 +1064,28 @@ def _cmd_news_setup(args) -> int:
                 "<you@example.org>'. The SEC requires a descriptive "
                 "User-Agent with a contact, and this desk does not send an "
                 "invented one.")
+        try:
+            checked = validate_contact(contact) if contact else None
+        except ValueError as exc:
+            raise SystemExit(f"--edgar-contact: {exc}") from None
         plan = SetupPlan(
             read_news=names != ("synthetic",),
             providers=names,
-            edgar_contact=validate_contact(contact) if contact else None,
+            edgar_contact=checked,
             verify=not getattr(args, "no_verify", False),
         )
 
+    report = None
     if plan.verify:
-        plan = _verify_and_prune(plan, ask_to_drop=not named and sys.stdin.isatty())
+        plan, report = _verify_and_prune(
+            plan, ask_to_drop=not named and sys.stdin.isatty())
         if plan is None:
             return 1
     _persist_news_plan(plan)
-    return 0
+    # The stack the caller named is saved either way — they named it — but a
+    # scripted caller reads the status, so a NOT WORKING member is a failure
+    # here exactly as it is for `news-check`.
+    return 0 if report is None or report.get("ok") else 1
 
 
 def _news_startup_door(args, offline: bool) -> None:
@@ -1076,12 +1095,29 @@ def _news_startup_door(args, offline: bool) -> None:
     `--yes`, and a live lane — the offline demo reads fixtures by design. The
     two cases are "nothing configured" and "a stack that names edgar with no
     contact"; anything else starts silently, as it always did.
+
+    Nothing that happens in here may stop the launch. The desk was startable
+    before the door asked anything, so an abandoned answer, a Ctrl-D or a
+    mistyped word leaves the configuration alone and starts it as configured —
+    "I typed the wrong word so my desk did not open" would be a bug.
     """
-    from qlab.news.feed import parse_provider_stack
-    from qlab.news.setup import apply_contact, run_wizard
+    from qlab.news.setup import SetupRefused
 
     if offline or getattr(args, "yes", False) or not sys.stdin.isatty():
         return
+    try:
+        _news_door_body()
+    except (EOFError, KeyboardInterrupt, SetupRefused) as exc:
+        detail = f" ({exc})" if isinstance(exc, SetupRefused) else ""
+        print(f"\n  Nothing was changed{detail}; starting the desk as "
+              "configured.")
+
+
+def _news_door_body() -> None:
+    """The two questions the door may ask. Raises rather than exiting."""
+    from qlab.news.feed import parse_provider_stack
+    from qlab.news.setup import apply_contact, ask_contact, run_wizard
+
     named = (os.environ.get("QLAB_NEWS_PROVIDERS", "").strip()
              or os.environ.get("QLAB_NEWS_PROVIDER", "").strip())
     if not named:
@@ -1095,7 +1131,7 @@ def _news_startup_door(args, offline: bool) -> None:
             return
         plan = run_wizard(ask=input, env=os.environ, say=print)
         if plan.verify:
-            plan = _verify_and_prune(plan, ask_to_drop=True)
+            plan, _report = _verify_and_prune(plan, ask_to_drop=True)
             if plan is None:
                 return
         _persist_news_plan(plan)
@@ -1110,28 +1146,25 @@ def _news_startup_door(args, offline: bool) -> None:
     print("\n  The stack names edgar, which needs QLAB_EDGAR_CONTACT: the SEC")
     print("  requires a descriptive User-Agent with a contact, and qlab sends")
     print("  that string to the SEC and nowhere else.")
-    answer = input("  Enter it now, or drop edgar for this run? [enter/drop] ")
-    answer = answer.strip().lower()
-    if answer.startswith("e"):
-        from qlab.news.setup import SetupRefused, ask_contact
-
-        try:
+    for _ in range(3):
+        answer = input(
+            "  Enter it now, or drop edgar for this run? [enter/drop] ")
+        answer = answer.strip().lower()
+        if answer.startswith("e"):
             contact = ask_contact(input, print)
-        except SetupRefused as exc:
-            raise SystemExit(str(exc)) from exc
-        written = apply_contact(contact, root=workspace_root(),
-                                environ=os.environ)
-        print(f"  wrote {', '.join(written)} to {workspace_root() / '.env'}")
-        return
-    if answer.startswith("d"):
-        rest = tuple(n for n in stack if n != "edgar") or ("synthetic",)
-        os.environ["QLAB_NEWS_PROVIDERS"] = ",".join(rest)
-        print(f"  edgar dropped for this run only; this desk reads "
-              f"{','.join(rest)}. Nothing was saved.")
-        return
-    raise SystemExit(
-        "answer 'enter' or 'drop'; a desk that guesses here would either send "
-        "the SEC no contact or quietly read fewer sources than you asked for.")
+            written = apply_contact(contact, root=workspace_root(),
+                                    environ=os.environ)
+            print(f"  wrote {', '.join(written)} to {workspace_root() / '.env'}")
+            return
+        if answer.startswith("d"):
+            rest = tuple(n for n in stack if n != "edgar") or ("synthetic",)
+            os.environ["QLAB_NEWS_PROVIDERS"] = ",".join(rest)
+            print(f"  edgar dropped for this run only; this desk reads "
+                  f"{','.join(rest)}. Nothing was saved.")
+            return
+        print("  Answer 'enter' or 'drop'.")
+    print("  Nothing was changed; starting the desk as configured. Run "
+          "`qlab news-setup` when you have the contact.")
 
 
 def main(argv: list[str] | None = None) -> int:

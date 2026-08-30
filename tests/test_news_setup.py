@@ -7,6 +7,8 @@ prompts are exercised without a terminal, and nothing here touches the real
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from qlab.news import setup as news_setup
@@ -146,16 +148,32 @@ def test_gdelt_is_taken_only_on_a_second_confirmation(monkeypatch):
 
 def test_an_unparseable_answer_is_re_asked_rather_than_defaulted(monkeypatch):
     _no_alpaca(monkeypatch)
-    plan = news_setup.run_wizard(
-        ask=_scripted([
-            "maybe", "sure",          # read real news: re-asked, then yes
-            "n", "n", "n", "n", "n",  # every source declined
-            "n",                      # check live
-        ]),
-        env={}, say=lambda _line: None)
-    # Nothing real was chosen, so the desk reads fixtures — and says so.
+    asked: list[str] = []
+    answers = iter(["maybe", "y", "n", "n", "n", "n", "n", "n"])
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        return next(answers)
+
+    plan = news_setup.run_wizard(ask=ask, env={}, say=lambda _line: None)
+    # The first question was put twice: 'maybe' answered nothing, and the
+    # wizard neither guessed a default nor fell through to the next question.
+    first = [p for p in asked if "Read real news" in p]
+    assert len(first) == 2, asked
+    assert asked[2].startswith("  Read alpaca?"), asked
+    # Every source was then declined, so the desk reads fixtures — and says so.
     assert plan.providers == ("synthetic",)
     assert plan.read_news is False
+
+
+def test_three_unparseable_answers_refuse_rather_than_default(monkeypatch):
+    _no_alpaca(monkeypatch)
+    with pytest.raises(news_setup.SetupRefused) as refusal:
+        news_setup.run_wizard(
+            ask=_scripted(["maybe", "perhaps", "dunno"]),
+            env={}, say=lambda _line: None)
+    assert "yes or a no" in str(refusal.value)
+    assert "nothing was changed" in str(refusal.value)
 
 
 def test_three_invalid_contacts_refuse_with_the_expected_shape(monkeypatch):
@@ -278,3 +296,136 @@ def test_failed_members_are_named_so_the_caller_can_offer_to_drop_them():
     report = {"members": {"edgar": {"ok": True}, "gdelt": {"ok": False,
                                                           "error": "timeout"}}}
     assert news_setup.failed_members(report) == ["gdelt"]
+
+
+def test_the_macro_line_names_the_publishers_that_actually_ship(monkeypatch):
+    """A hardcoded publisher list goes stale the day a feed is removed.
+
+    BLS (403) and Treasury (404) were removed from the shipped config on
+    2026-08-28; the wizard must not still be offering them.
+    """
+    _no_alpaca(monkeypatch)
+    macro = {c.name: c for c in news_setup.catalog({})}["macro"]
+    assert "Bureau of Economic Analysis" in macro.cost
+    assert "BLS" not in macro.cost and "Treasury" not in macro.cost
+
+    monkeypatch.setattr(
+        "qlab.news.feed.load_news_sources",
+        lambda *a, **k: {"macro": {"feeds": [{"name": "Statistics Canada"}]}})
+    renamed = {c.name: c for c in news_setup.catalog({})}["macro"]
+    assert "Statistics Canada" in renamed.cost
+
+
+def test_the_verify_question_restates_what_gdelt_costs(monkeypatch):
+    _no_alpaca(monkeypatch)
+    asked: list[str] = []
+
+    def run(answers):
+        asked.clear()
+        remaining = list(answers)
+
+        def ask(prompt: str) -> str:
+            asked.append(prompt)
+            return remaining.pop(0)
+
+        return news_setup.run_wizard(ask=ask, env={}, say=lambda _line: None)
+
+    # gdelt taken: the live check will pay its latency, so the prompt says so.
+    plan = run(["y", "n", "n", "n", "n", "y", "y", "n"])
+    assert plan.providers == ("gdelt",)
+    assert "gdelt" in asked[-1] and "minute" in asked[-1]
+
+    # Without it the question stays the short one.
+    run(["y", "n", "n", "y", "n", "n", "n"])
+    assert "gdelt" not in asked[-1]
+
+
+def test_a_crlf_file_round_trips_byte_identical_outside_the_two_lines(tmp_path):
+    original = (
+        "# desk\r\n"
+        "export ALPACA_API_KEY=pk-not-a-real-key\r\n"
+        "QLAB_NEWS_PROVIDERS=rss\r\n"
+        "OTHER=1\r\n")
+    (tmp_path / ".env").write_bytes(original.encode("utf-8"))
+    plan = news_setup.SetupPlan(
+        read_news=True, providers=("macro",), edgar_contact=None, verify=False)
+    news_setup.apply_plan(plan, root=tmp_path, environ={})
+
+    raw = (tmp_path / ".env").read_bytes().decode("utf-8")
+    assert raw == (
+        "# desk\r\n"
+        "export ALPACA_API_KEY=pk-not-a-real-key\r\n"
+        "QLAB_NEWS_PROVIDERS=macro\r\n"
+        "OTHER=1\r\n")
+
+
+def test_a_file_whose_last_line_has_no_newline_keeps_it_that_way(tmp_path):
+    (tmp_path / ".env").write_text("OTHER=1", encoding="utf-8")
+    plan = news_setup.SetupPlan(
+        read_news=True, providers=("macro",), edgar_contact=None, verify=False)
+    news_setup.apply_plan(plan, root=tmp_path, environ={})
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == (
+        "OTHER=1\nQLAB_NEWS_PROVIDERS=macro")
+
+
+def test_a_value_with_a_form_feed_is_not_treated_as_a_line_break(tmp_path):
+    """`str.splitlines` breaks on \x0b/\x0c/\x85; a .env line does not."""
+    (tmp_path / ".env").write_text("NOTE=one\x0ctwo\nOTHER=1\n", encoding="utf-8")
+    plan = news_setup.SetupPlan(
+        read_news=True, providers=("macro",), edgar_contact=None, verify=False)
+    news_setup.apply_plan(plan, root=tmp_path, environ={})
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == (
+        "NOTE=one\x0ctwo\nOTHER=1\nQLAB_NEWS_PROVIDERS=macro\n")
+
+
+def test_a_duplicated_name_is_replaced_once_and_the_stale_copy_removed(tmp_path):
+    """`parse_env` is last-wins, so a surviving later copy would win.
+
+    Replacing only the first line left the desk reading the stale value it was
+    just told to change — the silent kind of wrong this desk refuses.
+    """
+    from qlab.env import parse_env
+
+    (tmp_path / ".env").write_text(
+        "QLAB_NEWS_PROVIDERS=rss\n"
+        "#QLAB_NEWS_PROVIDERS=commented-out\n"
+        "OTHER=1\n"
+        "export QLAB_NEWS_PROVIDERS=alpaca\n",
+        encoding="utf-8")
+    plan = news_setup.SetupPlan(
+        read_news=True, providers=("macro",), edgar_contact=None, verify=False)
+    news_setup.apply_plan(plan, root=tmp_path, environ={})
+
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert text == (
+        "QLAB_NEWS_PROVIDERS=macro\n"
+        "#QLAB_NEWS_PROVIDERS=commented-out\n"
+        "OTHER=1\n")
+    assert parse_env(text)["QLAB_NEWS_PROVIDERS"] == "macro"
+
+
+def test_a_shell_special_value_survives_both_readers(tmp_path):
+    """The file is `source`d by operators and parsed by qlab.env; both must agree."""
+    import subprocess
+
+    from qlab.env import parse_env
+
+    news_setup.write_env_values(
+        [("QLAB_EDGAR_CONTACT", 'Jane $USER `id` <j@x.io>')],
+        root=tmp_path, environ={})
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert parse_env(text)["QLAB_EDGAR_CONTACT"] == 'Jane $USER `id` <j@x.io>'
+    shell = subprocess.run(
+        ["sh", "-c", f'. "{tmp_path / ".env"}"; printf %s "$QLAB_EDGAR_CONTACT"'],
+        capture_output=True, text=True, check=True)
+    assert shell.stdout == 'Jane $USER `id` <j@x.io>'
+
+
+def test_a_quote_in_a_contact_is_refused_rather_than_written_wrong():
+    """`.env` here has no escape syntax; a value it cannot hold is refused."""
+    with pytest.raises(ValueError):
+        news_setup.validate_contact("Jane O'Neill <jane@x.io>")
+    with pytest.raises(ValueError):
+        news_setup.write_env_values(
+            [("QLAB_EDGAR_CONTACT", "Jane 'J' <j@x.io>")],
+            root=pathlib.Path("/nonexistent"), environ={})

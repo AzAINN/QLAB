@@ -75,6 +75,12 @@ lane, a terminal, and no `--yes`:
 
 Anything else starts silently. `qlab owner` never prompts.
 
+The door can never stop a launch: an abandoned answer, a Ctrl-D, or a word it
+cannot read leaves the configuration alone, says so, and starts the desk as
+configured. The scripted verb is the opposite — with `--providers` it saves
+exactly the stack you named, and its exit code follows the live check, so a
+member that came back NOT WORKING is a failing status, not a silent zero.
+
 ## Making it real
 
 News follows the data lane. If the desk is on **live** data and an Alpaca

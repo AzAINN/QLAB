@@ -60,8 +60,7 @@ _SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ("edgar", "primary", "QLAB_EDGAR_CONTACT",
      "SEC filings, dated by acceptance; one request per issuer, rate-limited "
      "to the SEC's 10/second"),
-    ("macro", "primary", "",
-     "official releases (BLS, BEA, EIA, Treasury); a handful of feeds, no key"),
+    ("macro", "primary", "", ""),   # cost derived: see _macro_cost
     ("rss", "secondary", "",
      "public feeds keyword-matched to the universe; cheap, and single-source"),
     ("gdelt", "secondary", "",
@@ -69,6 +68,27 @@ _SOURCES: tuple[tuple[str, str, str, str], ...] = (
      "75s per request on 2026-08-28, and a stack member's fetch runs on the "
      "owner heartbeat"),
 )
+
+
+def _macro_cost() -> str:
+    """The macro line, named from the feeds that actually ship.
+
+    Hardcoding the publishers meant offering BLS and Treasury for weeks after
+    both were removed from the config (403 and 404 on 2026-08-28). Deriving it
+    cannot go stale.
+    """
+    from qlab.news.feed import load_news_sources
+
+    try:
+        feeds = (load_news_sources().get("macro") or {}).get("feeds") or []
+        names = [str(f.get("name")) for f in feeds if f.get("name")]
+    except Exception:
+        # A config this process cannot read is the feed's error to raise where
+        # it is actionable, not a reason the wizard cannot describe the source.
+        names = []
+    if not names:
+        return "official releases; the configured feed list is empty, no key"
+    return f"official releases — {', '.join(names)}; no key"
 
 
 def _alpaca_resolves(env: Mapping[str, str]) -> bool:
@@ -105,8 +125,10 @@ def catalog(env: Mapping[str, str]) -> list[SourceChoice]:
         else:
             available = True
             default = name == "macro"
-        out.append(SourceChoice(name=name, tier=tier, needs=needs, cost=cost,
-                                available=available, default=default))
+        out.append(SourceChoice(
+            name=name, tier=tier, needs=needs,
+            cost=_macro_cost() if name == "macro" else cost,
+            available=available, default=default))
     return out
 
 
@@ -119,6 +141,10 @@ def validate_contact(value: str) -> str:
     raw = (value or "").strip()
     if not raw:
         raise ValueError(f"the EDGAR contact is required, as {CONTACT_SHAPE}")
+    if "'" in raw or '"' in raw:
+        raise ValueError(
+            f"a quote in {raw!r} cannot be written to .env, which has no "
+            f"escape syntax here; the shape is {CONTACT_SHAPE}")
     if len(raw) > _MAX_CONTACT:
         raise ValueError(
             f"the EDGAR contact is longer than {_MAX_CONTACT} characters; "
@@ -232,15 +258,31 @@ def run_wizard(*, ask: Callable[[str], str], env: Mapping[str, str],
             chosen.remove("gdelt")
 
     say("")
-    verify = _ask_bool(ask, "  Check the chosen sources live before saving?",
-                       True)
+    question = "  Check the chosen sources live before saving?"
+    if "gdelt" in chosen:
+        # The check pays the same latency the fetch does; a default-yes
+        # question that hides a minute-long wait is a surprise, not a default.
+        question += " (this includes gdelt: expect a minute or more)"
+    verify = _ask_bool(ask, question, True)
     return SetupPlan(read_news=True, providers=tuple(chosen),
                      edgar_contact=contact, verify=verify)
 
 
 def _env_line(name: str, value: str, *, export: bool) -> str:
+    """One ``.env`` line both readers agree on: this parser, and ``sh``.
+
+    Single quotes, because `$`, a backtick and `"` are all literal inside them
+    and :func:`qlab.env.parse_env` strips exactly one surrounding pair. A value
+    containing a single quote has no spelling both readers would agree on —
+    ``.env`` here has no escape syntax — so it is refused rather than written
+    as something one of them would misread.
+    """
+    if "'" in value:
+        raise ValueError(
+            f"{name} cannot hold a single quote: .env has no escape syntax "
+            "here, and a quoted value would be read back wrong")
     quoted = value if value and not any(
-        c in value for c in " \t\"'#<>$`\\") else f'"{value}"'
+        c in value for c in " \t\"#<>$`\\") else f"'{value}'"
     return f"{'export ' if export else ''}{name}={quoted}"
 
 
@@ -278,31 +320,47 @@ def write_env_values(values: Sequence[tuple[str, str]], *, root: Path,
     """Set ``values`` in ``root/.env`` and ``environ``; return the names."""
     target = root / ".env"
     try:
-        text = target.read_text(encoding="utf-8")
+        text = target.read_text(encoding="utf-8", newline="")
     except FileNotFoundError:
         text = ""
-    lines = text.splitlines()
-    trailing_newline = text.endswith("\n") or not text
+    # `splitlines` is the wrong tool for a file promised back byte for byte: it
+    # also breaks on \x0b, \x0c and \x85, and drops the \r of a CRLF file.
+    newline = "\r\n" if "\r\n" in text else "\n"
+    body = text[:-len(newline)] if text.endswith(newline) else text
+    lines = body.split(newline) if text else []
+    ends_with_newline = text.endswith(newline) or not text
+
+    def names_line(raw: str) -> str:
+        stripped = raw.strip()
+        if stripped.startswith("export "):
+            stripped = stripped[len("export "):].lstrip()
+        return stripped.split("=", 1)[0].strip() if "=" in stripped else ""
 
     for name, value in values:
-        replaced = False
-        for index, raw in enumerate(lines):
-            stripped = raw.strip()
-            body = stripped[len("export "):].lstrip() if stripped.startswith(
-                "export ") else stripped
-            if body.split("=", 1)[0].strip() != name:
+        line = None
+        kept: list[str] = []
+        for raw in lines:
+            if names_line(raw) != name:
+                kept.append(raw)
                 continue
-            lines[index] = _env_line(
-                name, value, export=stripped.startswith("export "))
-            replaced = True
-            break
-        if not replaced:
+            if line is None:
+                # The first occurrence keeps its place and its `export`.
+                line = _env_line(name, value,
+                                 export=raw.strip().startswith("export "))
+                kept.append(line)
+            # Every later copy is dropped: `parse_env` is last-wins, so a
+            # surviving stale duplicate would beat the line just written.
+        lines = kept
+        if line is None:
             lines.append(_env_line(name, value, export=False))
         environ[name] = value
 
     root.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines) + ("\n" if trailing_newline else ""),
-                      encoding="utf-8")
+    rendered = newline.join(lines) + (newline if ends_with_newline else "")
+    # Atomic: a half-written .env is an operator's whole configuration.
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(rendered, encoding="utf-8", newline="")
+    os.replace(tmp, target)
     return [name for name, _ in values]
 
 

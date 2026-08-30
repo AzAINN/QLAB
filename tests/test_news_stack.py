@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import metadata
 
 import pytest
@@ -239,7 +239,10 @@ def test_a_plugin_provider_resolves_by_name_without_a_stack(monkeypatch):
     the common path a dict lookup.
     """
     def fetch(as_of, universe):
-        return [_item("acme", "Acme Wire", "plugin headline")]
+        # check_news reads at wall-clock now; a fixed stamp ages out of its
+        # window, so the plugin dates its item off the as_of it is handed.
+        return [_item("acme", "Acme Wire", "plugin headline",
+                      published=(as_of - timedelta(hours=1)).isoformat())]
 
     class Ep:
         name = "acme"

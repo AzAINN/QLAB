@@ -23,6 +23,58 @@ wire cannot corroborate itself.
 labels it `synthetic (demo)` everywhere it appears, because a deterministic
 narrative next to real prices would be worse than no narrative at all.
 
+## Guided setup
+
+```bash
+qlab news-setup
+```
+
+Asks, in order: whether this desk should read real news at all; then each
+source in turn with its tier, what it needs, and what it costs; then the SEC
+contact when `edgar` is chosen; then a second confirmation for `gdelt`; then
+whether to check the choice live before saving. Nothing is written until the
+last question is answered, and a source that cannot work — `alpaca` with no
+resolvable credential — is refused with the fix rather than saved to fail on
+the first heartbeat.
+
+Answering **no** to the first question is a real answer, not a failure: it
+writes `QLAB_NEWS_PROVIDERS=synthetic`, and the desk then labels its narrative
+`synthetic (demo)` everywhere it appears.
+
+What is written, to `.env` at the workspace root, is exactly two lines —
+`QLAB_NEWS_PROVIDERS` and, when `edgar` is chosen, `QLAB_EDGAR_CONTACT`. Every
+other line in the file is left byte for byte as it was, `export` prefixes
+included. The contact goes into the User-Agent of EDGAR requests and is sent
+to the SEC and nowhere else. The owner reads `.env` at startup, so:
+
+```bash
+qlab --restart runtime      # the running desk picks the new lines up
+```
+
+The scripted spelling takes no prompts and is what a CI-style caller uses:
+
+```bash
+qlab news-setup --providers alpaca,edgar,macro \
+    --edgar-contact "Your Name <you@example.org>" --no-verify
+```
+
+Without a terminal and without `--providers`, the verb refuses rather than
+choosing for you.
+
+### The startup door
+
+Bare `qlab` asks once, and only where the question is worth asking — a live
+lane, a terminal, and no `--yes`:
+
+- **Nothing configured**: it says what the desk would read by default (Alpaca
+  if a credential resolves, otherwise the labelled fixtures) and offers the
+  wizard above.
+- **The stack names `edgar` with no contact**: `enter` prompts for the contact
+  and saves that one line; `drop` runs this session without `edgar` and saves
+  nothing.
+
+Anything else starts silently. `qlab owner` never prompts.
+
 ## Making it real
 
 News follows the data lane. If the desk is on **live** data and an Alpaca

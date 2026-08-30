@@ -6,6 +6,8 @@ process, HTTP client and Textual app stubbed: no network, no owner process.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 pytest.importorskip("rich")
@@ -637,3 +639,165 @@ def test_the_restart_parser_takes_a_tier_or_asks():
     assert p.parse_args(["tui", "--restart=everything", "--yes"]).restart == "everything"
     with pytest.raises(SystemExit):
         p.parse_args(["tui", "--restart=all"])
+
+
+def _no_prompts(monkeypatch):
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": pytest.fail(f"the scripted path prompted: {prompt}"))
+
+
+def test_news_setup_without_a_terminal_refuses_and_names_the_flags(monkeypatch):
+    """No tty and no flags is a question nothing can answer; refuse, don't guess."""
+    from qlab.autopilot import cli
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["news-setup"])
+    assert "--providers" in str(exit_info.value)
+
+
+def test_news_setup_with_flags_persists_without_prompting(monkeypatch, tmp_path):
+    from qlab.autopilot import cli
+    from qlab.env import parse_env
+
+    monkeypatch.setenv("QLAB_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS", raising=False)
+    monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+    monkeypatch.delenv("QLAB_EDGAR_CONTACT", raising=False)
+    _no_prompts(monkeypatch)
+
+    assert cli.main([
+        "news-setup", "--providers", "edgar,macro",
+        "--edgar-contact", "Jane <j@x.io>", "--no-verify"]) == 0
+
+    written = parse_env((tmp_path / ".env").read_text(encoding="utf-8"))
+    assert written == {"QLAB_NEWS_PROVIDERS": "edgar,macro",
+                       "QLAB_EDGAR_CONTACT": "Jane <j@x.io>"}
+    # The process the operator is in sees it too, or the next command lies.
+    assert os.environ["QLAB_NEWS_PROVIDERS"] == "edgar,macro"
+
+
+def test_news_setup_refuses_edgar_without_a_contact_and_an_unknown_provider(
+        monkeypatch, tmp_path):
+    from qlab.autopilot import cli
+
+    monkeypatch.setenv("QLAB_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("QLAB_EDGAR_CONTACT", raising=False)
+    _no_prompts(monkeypatch)
+
+    with pytest.raises(SystemExit) as missing:
+        cli.main(["news-setup", "--providers", "edgar", "--no-verify"])
+    assert "--edgar-contact" in str(missing.value)
+
+    with pytest.raises(SystemExit) as unknown:
+        cli.main(["news-setup", "--providers", "bloomberg", "--no-verify"])
+    assert "bloomberg" in str(unknown.value)
+    assert not (tmp_path / ".env").exists(), "a refusal wrote configuration"
+
+
+def _door_env(monkeypatch, tmp_path, *, providers=None, contact=None):
+    monkeypatch.setenv("QLAB_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+    if providers is None:
+        monkeypatch.delenv("QLAB_NEWS_PROVIDERS", raising=False)
+    else:
+        monkeypatch.setenv("QLAB_NEWS_PROVIDERS", providers)
+    if contact is None:
+        monkeypatch.delenv("QLAB_EDGAR_CONTACT", raising=False)
+    else:
+        monkeypatch.setenv("QLAB_EDGAR_CONTACT", contact)
+
+
+def test_the_startup_door_offers_news_setup_and_takes_no_for_an_answer(
+        monkeypatch, tmp_path):
+    from qlab.autopilot import cli
+
+    _door_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    asked: list[str] = []
+
+    def ask(prompt=""):
+        asked.append(prompt)
+        return "n"
+
+    monkeypatch.setattr("builtins.input", ask)
+    record = _drive_cmd_tui(monkeypatch, tmp_path, ["tui"], owner_running=False)
+
+    assert len(asked) == 1 and "Set up news sources now?" in asked[0]
+    assert not (tmp_path / ".env").exists(), "declining wrote configuration"
+    assert record["spawned"][1:4] == ["-m", "qlab.autopilot.cli", "owner"]
+
+
+def test_the_startup_door_runs_the_wizard_and_persists_the_answer(
+        monkeypatch, tmp_path):
+    from qlab.autopilot import cli
+    from qlab.env import parse_env
+
+    _door_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    # Yes to the door, then no to reading real news: the shortest walk that
+    # still ends in a written stack.
+    answers = iter(["y", "n"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    _drive_cmd_tui(monkeypatch, tmp_path, ["tui"], owner_running=False)
+
+    assert parse_env((tmp_path / ".env").read_text(encoding="utf-8")) == {
+        "QLAB_NEWS_PROVIDERS": "synthetic"}
+    assert os.environ["QLAB_NEWS_PROVIDERS"] == "synthetic"
+
+
+def test_the_startup_door_drops_edgar_for_one_run_without_persisting_it(
+        monkeypatch, tmp_path):
+    from qlab.autopilot import cli
+
+    _door_env(monkeypatch, tmp_path, providers="edgar,macro")
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    asked: list[str] = []
+
+    def ask(prompt=""):
+        asked.append(prompt)
+        return "drop"
+
+    monkeypatch.setattr("builtins.input", ask)
+    _drive_cmd_tui(monkeypatch, tmp_path, ["tui"], owner_running=False)
+
+    assert asked and "drop" in asked[0]
+    assert os.environ["QLAB_NEWS_PROVIDERS"] == "macro"
+    assert not (tmp_path / ".env").exists(), "a one-run drop was persisted"
+
+
+def test_the_startup_door_takes_the_contact_and_writes_only_that_line(
+        monkeypatch, tmp_path):
+    from qlab.autopilot import cli
+    from qlab.env import parse_env
+
+    _door_env(monkeypatch, tmp_path, providers="edgar,macro")
+    (tmp_path / ".env").write_text("QLAB_NEWS_PROVIDERS=edgar,macro\n",
+                                   encoding="utf-8")
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    answers = iter(["enter", "Jane Doe <jane@x.io>"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    _drive_cmd_tui(monkeypatch, tmp_path, ["tui"], owner_running=False)
+
+    assert parse_env((tmp_path / ".env").read_text(encoding="utf-8")) == {
+        "QLAB_NEWS_PROVIDERS": "edgar,macro",
+        "QLAB_EDGAR_CONTACT": "Jane Doe <jane@x.io>"}
+    assert os.environ["QLAB_EDGAR_CONTACT"] == "Jane Doe <jane@x.io>"
+
+
+@pytest.mark.parametrize("argv,tty", [
+    (["tui"], False),          # no terminal to ask on
+    (["tui", "--offline"], True),   # the demo desk reads fixtures by design
+    (["tui", "--yes"], True),       # scripted: never stop to ask
+])
+def test_the_startup_door_stays_quiet_when_it_must(monkeypatch, tmp_path, argv, tty):
+    from qlab.autopilot import cli
+
+    _door_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: tty)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": pytest.fail(f"the door asked anyway: {prompt}"))
+    _drive_cmd_tui(monkeypatch, tmp_path, argv, owner_running=False)
+    assert not (tmp_path / ".env").exists()

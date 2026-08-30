@@ -365,6 +365,7 @@ qlab recommend --as-of 2026-06-30 --offline    # print one allocation (YYYY-MM-D
 ```bash
 qlab batch configs/specs/ablation_v1.yaml --offline   # the reproducible ablation
 qlab prewarm --universe core                          # pre-fill the data cache (core | candidates)
+qlab news-setup                                       # choose news sources, guided
 qlab news-check --provider alpaca                     # authenticate news, show what it returns
 ```
 

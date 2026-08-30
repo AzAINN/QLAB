@@ -630,6 +630,8 @@ def _cmd_tui(args) -> int:
             mode = startup_desk_mode(flagged)
             offline = True if mode is None else mode.offline
 
+    _news_startup_door(args, offline)
+
     owner = None
     already_open = port_open()
     client = ApiClient(f"http://127.0.0.1:{args.port}")
@@ -868,6 +870,19 @@ def build_parser() -> argparse.ArgumentParser:
                          "QLAB_NEWS_PROVIDERS for this check")
     nc.set_defaults(func=_cmd_news_check)
 
+    ns = sub.add_parser(
+        "news-setup",
+        help="choose which news sources this desk reads, guided")
+    ns.add_argument("--providers", default=None,
+                    help="a comma-separated stack to write without prompting, "
+                         "e.g. alpaca,edgar,macro (or synthetic for fixtures)")
+    ns.add_argument("--edgar-contact", default=None,
+                    help="the contact the SEC requires, 'Your Name "
+                         "<you@example.org>'; sent to the SEC only")
+    ns.add_argument("--no-verify", action="store_true",
+                    help="save without one live check of the chosen sources")
+    ns.set_defaults(func=_cmd_news_setup)
+
     def add_desk_mode(sp):
         # Two words, and the safe defaults need neither: live data with the
         # simulated book is what a bare launch runs, so reaching the real
@@ -946,6 +961,177 @@ def _cmd_news_check(args) -> int:
     report = check_news(universe, provider=getattr(args, "provider", None))
     print(render(report))
     return 0 if report.get("ok") else 1
+
+
+def _news_universe() -> list[str]:
+    """The names a live check is run against: the mandate's own universe."""
+    from qlab.trader.mandate import load_mandate
+
+    return list(load_mandate().universe_whitelist)
+
+
+def _known_providers() -> list[str]:
+    from qlab.news.feed import PROVIDERS, load_plugin_providers
+
+    try:
+        load_plugin_providers()
+    except Exception:
+        # A broken plugin entry point is not this verb's error to raise; the
+        # first-party names are still nameable, and the feed refuses the rest
+        # with its own sentence.
+        pass
+    return sorted(PROVIDERS)
+
+
+def _persist_news_plan(plan) -> None:
+    """Write the plan and say what was written and how to make it take."""
+    from qlab.news.setup import apply_plan
+
+    root = workspace_root()
+    written = apply_plan(plan, root=root, environ=os.environ)
+    print(f"\n  wrote {', '.join(written)} to {root / '.env'}")
+    print("  Restart the owner to read them: qlab --restart runtime")
+
+
+def _verify_and_prune(plan, *, ask_to_drop: bool):
+    """Check the stack live, print the diagnosis, and settle what to save.
+
+    A member that cannot answer is never saved silently: with a terminal the
+    operator is asked to drop it, and without one it stays in the stack with
+    the failure printed — the scripted caller asked for exactly these names.
+    Returns the plan to persist, or None when nothing usable is left.
+    """
+    from dataclasses import replace
+
+    from qlab.news.check import render
+    from qlab.news.setup import failed_members, verify_plan
+
+    report = verify_plan(plan, _news_universe(), environ=os.environ)
+    print(render(report))
+    failed = failed_members(report)
+    if not failed or not ask_to_drop:
+        return plan
+    keep = list(plan.providers)
+    for name in failed:
+        answer = input(f"  Drop {name} and save the rest? [Y/n] ").strip().lower()
+        if answer in ("", "y", "yes"):
+            keep = [n for n in keep if n != name]
+    if not keep:
+        print("  Every chosen source failed; nothing was saved. Fix one of the "
+              "errors above and run `qlab news-setup` again.")
+        return None
+    return replace(plan, providers=tuple(keep))
+
+
+def _cmd_news_setup(args) -> int:
+    """Choose what the desk reads, guided — or scripted with --providers."""
+    from qlab.news.setup import SetupPlan, run_wizard, validate_contact
+
+    named = (getattr(args, "providers", None) or "").strip()
+    if not named:
+        if not sys.stdin.isatty():
+            raise SystemExit(
+                "news setup asks which sources to read and there is no "
+                "terminal to ask on; spell it out: qlab news-setup "
+                "--providers alpaca,edgar,macro [--edgar-contact "
+                "'Your Name <you@example.org>'] [--no-verify]")
+        plan = run_wizard(ask=input, env=os.environ, say=print)
+    else:
+        names = tuple(n.strip().lower() for n in named.split(",") if n.strip())
+        if not names:
+            raise SystemExit("--providers named no provider")
+        known = _known_providers()
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            raise SystemExit(
+                f"unknown news provider(s) {', '.join(unknown)}; available: "
+                f"{', '.join(known)}")
+        contact = (getattr(args, "edgar_contact", None) or "").strip()
+        if "edgar" in names and not contact and not os.environ.get(
+                "QLAB_EDGAR_CONTACT", "").strip():
+            raise SystemExit(
+                "edgar needs a contact: pass --edgar-contact 'Your Name "
+                "<you@example.org>'. The SEC requires a descriptive "
+                "User-Agent with a contact, and this desk does not send an "
+                "invented one.")
+        plan = SetupPlan(
+            read_news=names != ("synthetic",),
+            providers=names,
+            edgar_contact=validate_contact(contact) if contact else None,
+            verify=not getattr(args, "no_verify", False),
+        )
+
+    if plan.verify:
+        plan = _verify_and_prune(plan, ask_to_drop=not named and sys.stdin.isatty())
+        if plan is None:
+            return 1
+    _persist_news_plan(plan)
+    return 0
+
+
+def _news_startup_door(args, offline: bool) -> None:
+    """Offer news setup at startup when the desk would otherwise guess.
+
+    Only where a question can be answered and is worth asking: a terminal, no
+    `--yes`, and a live lane — the offline demo reads fixtures by design. The
+    two cases are "nothing configured" and "a stack that names edgar with no
+    contact"; anything else starts silently, as it always did.
+    """
+    from qlab.news.feed import parse_provider_stack
+    from qlab.news.setup import apply_contact, run_wizard
+
+    if offline or getattr(args, "yes", False) or not sys.stdin.isatty():
+        return
+    named = (os.environ.get("QLAB_NEWS_PROVIDERS", "").strip()
+             or os.environ.get("QLAB_NEWS_PROVIDER", "").strip())
+    if not named:
+        # Mirrors UISession.news_provider_for: alpaca when a credential
+        # resolves, else the labelled fixtures.
+        would = "alpaca" if _alpaca_credentials_resolve() else (
+            "synthetic — deterministic fixtures, labelled 'synthetic (demo)'")
+        print(f"\n  No news sources are configured; this desk would read: {would}")
+        if input("  Set up news sources now? [y/N] ").strip().lower() not in (
+                "y", "yes"):
+            return
+        plan = run_wizard(ask=input, env=os.environ, say=print)
+        if plan.verify:
+            plan = _verify_and_prune(plan, ask_to_drop=True)
+            if plan is None:
+                return
+        _persist_news_plan(plan)
+        return
+
+    try:
+        stack = parse_provider_stack(None)
+    except ValueError:
+        return
+    if "edgar" not in stack or os.environ.get("QLAB_EDGAR_CONTACT", "").strip():
+        return
+    print("\n  The stack names edgar, which needs QLAB_EDGAR_CONTACT: the SEC")
+    print("  requires a descriptive User-Agent with a contact, and qlab sends")
+    print("  that string to the SEC and nowhere else.")
+    answer = input("  Enter it now, or drop edgar for this run? [enter/drop] ")
+    answer = answer.strip().lower()
+    if answer.startswith("e"):
+        from qlab.news.setup import SetupRefused, ask_contact
+
+        try:
+            contact = ask_contact(input, print)
+        except SetupRefused as exc:
+            raise SystemExit(str(exc)) from exc
+        written = apply_contact(contact, root=workspace_root(),
+                                environ=os.environ)
+        print(f"  wrote {', '.join(written)} to {workspace_root() / '.env'}")
+        return
+    if answer.startswith("d"):
+        rest = tuple(n for n in stack if n != "edgar") or ("synthetic",)
+        os.environ["QLAB_NEWS_PROVIDERS"] = ",".join(rest)
+        print(f"  edgar dropped for this run only; this desk reads "
+              f"{','.join(rest)}. Nothing was saved.")
+        return
+    raise SystemExit(
+        "answer 'enter' or 'drop'; a desk that guesses here would either send "
+        "the SEC no contact or quietly read fewer sources than you asked for.")
 
 
 def main(argv: list[str] | None = None) -> int:

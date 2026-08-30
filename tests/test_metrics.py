@@ -61,3 +61,21 @@ def test_metric_bundle_is_strict_json_when_omega_is_undefined():
     assert metrics["omega_ratio"] is None
     assert metrics["sortino"] == 0.0
     json.dumps(metrics, allow_nan=False)
+
+
+def test_a_flat_series_has_no_skew_or_kurtosis_rather_than_nan():
+    """An empty book's first days are a constant equity line: skew and
+    kurtosis are 0/0 there. The snapshot carried NaN for both, which is not
+    JSON, and the workstation refused the whole payload on the first one."""
+    from qlab.core.metrics import compute_metrics
+    out = compute_metrics(pd.Series([0.0] * 5))
+    assert out["realized_skew"] is None
+    assert out["realized_kurtosis"] is None
+    assert json.dumps(out, allow_nan=False)
+
+
+def test_the_wire_form_of_a_non_finite_float_is_null():
+    from qlab.core.types import _jsonable
+    payload = _jsonable({"a": float("nan"), "b": np.float64("inf"), "c": [np.nan, 1.5]})
+    assert payload == {"a": None, "b": None, "c": [None, 1.5]}
+    assert json.dumps(payload, allow_nan=False)

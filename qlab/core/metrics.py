@@ -125,6 +125,12 @@ def downside_capture(returns, benchmark_returns) -> float | None:
     )
 
 
+def _finite_or_none(x: float) -> float | None:
+    """A float that exists, or None: a non-finite statistic is an absence."""
+    x = float(x)
+    return x if np.isfinite(x) else None
+
+
 def compute_metrics(
     returns: pd.Series,
     *,
@@ -162,8 +168,10 @@ def compute_metrics(
         "omega_ratio": omega_ratio(r),
         "max_drawdown": max_drawdown(r),
         "cvar_95": cvar(r, 0.95),
-        "realized_skew": float(stats.skew(r, bias=False)) if len(r) > 3 else 0.0,
-        "realized_kurtosis": float(stats.kurtosis(r, fisher=True, bias=False)) if len(r) > 3 else 0.0,
+        # Undefined on a flat series (0/0), which is what an empty book shows for
+        # its first days: None is the honest value, and NaN is not JSON.
+        "realized_skew": _finite_or_none(stats.skew(r, bias=False)) if len(r) > 3 else 0.0,
+        "realized_kurtosis": _finite_or_none(stats.kurtosis(r, fisher=True, bias=False)) if len(r) > 3 else 0.0,
         "deflated_sharpe": deflated_sharpe(
             r, sharpe_periodic=periodic_sharpe(r), n_trials=n_trials,
             trial_sharpe_var=trial_sharpe_var,

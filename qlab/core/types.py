@@ -301,7 +301,12 @@ def _jsonable(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_jsonable(v) for v in obj]
     if isinstance(obj, np.generic):
-        return obj.item()
+        return _jsonable(obj.item())
+    if isinstance(obj, float) and not np.isfinite(obj):
+        # json.dumps writes NaN/Infinity, which no JSON reader accepts; the
+        # Rust client refuses the whole snapshot on the first one. None is
+        # the wire form of "this number does not exist".
+        return None
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, (datetime, date)):

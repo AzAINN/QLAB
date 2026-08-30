@@ -162,7 +162,7 @@ def run_ablation(
         results["views_conditioning"] = dict(conditioner.stats)
         # ... and a measured null that dies with the process is not a record.
         # The counts go to the registry under their own kind, readable by
-        # newest_run_of_kind/runs_of_kind, and deliberately NOT into any arm's
+        # runs_of_kind/matrix_runs, and deliberately NOT into any arm's
         # metrics: those feed the ranking and the DSR trial accounting, where a
         # window count is not a performance number.
         reg.log_run("views_summary", {

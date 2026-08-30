@@ -168,7 +168,7 @@ def test_a_speaking_record_tilts_the_covariance_and_logs_a_checkable_views_run(
     assert spec["provenance_verified"] is True
     assert spec["views"][0]["source_claims"] == ["a", "b", "c", "d"]
     # And the matrix it was counted from is on the record beside it.
-    assert reg.newest_run_of_kind("qualitative_matrix") is not None
+    assert (reg.runs_of_kind("qualitative_matrix", 1) or [None])[0] is not None
 
 
 def test_a_tilt_never_moves_a_mean_the_parent_actually_carried(
@@ -221,7 +221,7 @@ def test_a_view_citing_a_claim_absent_from_the_matrix_is_not_conditioned_on(
     # the gate makes the summary say the arm acted on evidence it rejected.
     assert cond.stats["windows_with_views"] == 0
     assert cond.stats["views_applied"] == 0
-    spec = reg.newest_run_of_kind("views")["spec"]
+    spec = (reg.runs_of_kind("views", 1) or [None])[0]["spec"]
     assert spec["provenance_verified"] is False
     assert spec["provenance_source"] == "matrix_rule"
 
@@ -374,7 +374,7 @@ def test_the_runner_walks_the_arm_and_records_a_queryable_views_summary(reg):
         ],
     }, registry=reg, offline=True)
 
-    summary = reg.newest_run_of_kind("views_summary")
+    summary = (reg.runs_of_kind("views_summary", 1) or [None])[0]
     assert summary is not None, "the walk's counts must survive the run"
     spec = summary["spec"]
     assert spec["ablation_run_id"] == report["run_id"]

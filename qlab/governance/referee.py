@@ -258,8 +258,14 @@ def _matrix_lineage_failures(spec: dict, registry,
     the referee is both the last place it can be caught and the only one
     holding the solve's own date.
     """
+    if "matrix_run_id" not in spec and spec.get("provenance_verified") is True:
+        # Mirrors moments.condition: a run that claims verification but never
+        # recorded what it verified against has no lineage to check.
+        return ["conditioned on a views run that claims provenance_verified "
+                "but records no matrix_run_id"]
     matrix_run_id = spec.get("matrix_run_id")
     if not matrix_run_id:
+        # Present-but-None: a quote-verified run cites no matrix, by design.
         return []
     matrix = registry.get_run(str(matrix_run_id))
     if matrix is None or matrix.get("kind") != "qualitative_matrix":

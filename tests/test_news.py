@@ -41,6 +41,7 @@ def test_synthetic_fetch_is_deterministic_filtered_and_provider_tagged(
     monkeypatch,
 ) -> None:
     as_of = datetime(2025, 1, 15, 12, tzinfo=timezone.utc)
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS", raising=False)
     monkeypatch.setenv("QLAB_NEWS_PROVIDER", "rss")
 
     first = news.fetch_news(as_of, CORE, lookback_hours=48, offline=True)

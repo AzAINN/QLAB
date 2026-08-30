@@ -436,6 +436,7 @@ def test_news_fetch_returns_a_partial_window_rather_than_failing_the_agent(
             {"BLS": "HTTP Error 403: Forbidden"})
 
     monkeypatch.setitem(feed.PROVIDERS, "macro", partial)
+    monkeypatch.delenv("QLAB_NEWS_PROVIDERS", raising=False)
     monkeypatch.setenv("QLAB_NEWS_PROVIDER", "macro")
     session = UISession(offline_default=False, registry=reg)
     out = session.call_lab_tool(

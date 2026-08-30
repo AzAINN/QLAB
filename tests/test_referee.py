@@ -62,8 +62,12 @@ def test_a_conditioned_moment_set_on_unverified_views_fails(reg):
 
 
 def test_a_well_formed_views_run_passes_and_is_named_in_the_audit(reg):
+    # A quote-sourced run: verified against an excerpt, so it cites no matrix
+    # (the key is present and None). Matrix-sourced runs are exercised by the
+    # matrix-date tests below.
     run_id = reg.log_run("views", {"kl_total": 0.01, "kl_budget": 0.25,
-                                   "provenance_verified": True})
+                                   "provenance_verified": True,
+                                   "matrix_run_id": None})
     status, reasons = _referee(reg, _summary(views_run_id=run_id))
     assert status == "PASS"
     assert any(run_id in r for r in reasons)
@@ -159,3 +163,17 @@ def test_a_cited_matrix_that_is_not_in_the_registry_fails(reg):
     status, reasons = _referee(reg, _summary(views_run_id=run_id))
     assert status == "FAIL"
     assert any("'ghost'" in r for r in reasons)
+
+
+def test_a_verified_views_run_that_records_no_matrix_is_refused_like_condition_does(reg):
+    """The referee is the independent re-check of moments.condition's absence
+    rule: verification with nothing recorded to have verified against is not
+    lineage. A present-but-None matrix_run_id is a quote-verified run, which
+    cites no matrix by design and passes this gate."""
+    from datetime import date
+    from qlab.governance.referee import _matrix_lineage_failures
+    absent = _matrix_lineage_failures({"provenance_verified": True}, reg, date(2024, 1, 2))
+    assert absent and "matrix_run_id" in absent[0]
+    quote_sourced = _matrix_lineage_failures(
+        {"provenance_verified": True, "matrix_run_id": None}, reg, date(2024, 1, 2))
+    assert quote_sourced == []

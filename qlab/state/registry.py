@@ -1050,24 +1050,10 @@ class Registry:
     def list_runs(self, limit: int = 20) -> list[dict]:
         return self._rows("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", [limit])
 
-    def newest_run_of_kind(self, kind: str) -> dict | None:
-        """The most recent run of one kind, or None if that kind never ran.
-
-        Read-only, and deliberately not `list_runs` plus a filter: a desk logs
-        solves and backtests continuously, so scanning the newest N runs of any
-        kind stops finding the last board or matrix as soon as N others have
-        landed since — and a caller checking "have I already logged this" then
-        re-logs what it already has.
-        """
-        rows = self._rows(
-            "SELECT * FROM runs WHERE kind=? ORDER BY created_at DESC LIMIT 1",
-            [str(kind)])
-        return rows[0] if rows else None
-
     def runs_of_kind(self, kind: str, limit: int = 2) -> list[dict]:
         """The newest ``limit`` runs of one kind, newest first. Read-only.
 
-        ``newest_run_of_kind`` answers "what is the current window"; a rule that
+        ``matrix_runs(limit=1)`` answers "what is the current window"; a rule that
         compares a window to the one before it needs two, and scanning
         ``list_runs`` for them fails for the same reason documented there.
         """
@@ -1089,7 +1075,7 @@ class Registry:
         MORE likely to fire mid-walk with no error anywhere.
 
         ``source`` is the stamp the writer put on its own matrices, or ``None``
-        for "any source" (the owner stamps nothing). ``as_of_before`` is strict
+        for "any source" (the owner stamps ``desk``, the A5 arm ``ablation_a5``). ``as_of_before`` is strict
         and ``as_of_at_or_before`` inclusive; both compare the window's own
         ``as_of``, never the write time, because a registry may hold windows
         written out of date order. Ordered by that ``as_of`` descending, write

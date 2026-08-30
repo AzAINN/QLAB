@@ -1091,7 +1091,7 @@ def test_a_news_analyst_phase_cannot_complete_without_its_view():
         registry.close()
 
 
-def test_newest_run_of_kind_is_not_limited_by_how_much_else_ran(reg):
+def test_runs_of_kind_is_not_limited_by_how_much_else_ran(reg):
     """A desk logs solves and backtests continuously. Scanning the newest N
     runs of ANY kind to find the last matrix stops finding it as soon as N
     other runs have landed since — and the caller then re-logs a window it
@@ -1101,12 +1101,12 @@ def test_newest_run_of_kind_is_not_limited_by_how_much_else_ran(reg):
     for i in range(150):
         reg.log_run("backtest", {"i": i})
 
-    row = reg.newest_run_of_kind("qualitative_matrix")
+    row = reg.runs_of_kind("qualitative_matrix", 1)[0]
     assert row["run_id"] == newer and row["run_id"] != older
     # `spec` comes back parsed, like list_runs: a caller reading it must not
     # have to know whether this path went through the JSON helper.
     assert row["spec"]["matrix"]["window_hash"] == "new"
-    assert reg.newest_run_of_kind("never_logged_anything") is None
+    assert reg.runs_of_kind("never_logged_anything", 1) == []
 
 
 def test_runs_of_kind_returns_the_newest_first_and_only_that_kind(reg):

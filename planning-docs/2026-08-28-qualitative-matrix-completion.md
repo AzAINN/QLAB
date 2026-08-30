@@ -280,3 +280,20 @@ minimum:
 
 Until then the chain is visible, auditable and inert, which is what it was built
 to be.
+
+## 2026-08-30 — residuals after the branch re-review
+
+The re-review of the branch-review fixes confirmed all eleven items and left
+five minors. Four were closed in `fix(research): the referee mirrors
+condition's absence rule, and the registry drops its callerless lookup`: the
+referee now FAILS a views run that claims `provenance_verified` but records no
+`matrix_run_id` key (a present-but-`None` key is a quote-sourced run and
+passes by design), `Registry.newest_run_of_kind` was deleted because nothing
+in production called it once `matrix_runs` landed (invariant 10), the
+`matrix_runs` docstring says who stamps what, and two tests pin the singular
+env without an ambient plural leaking in. One is parked, deliberately: `qlab
+batch` on a spec containing A5 refuses the **whole** run when invoked without
+`--offline`, because the conditioner is constructed once for the spec and its
+online path is not designed. The refusal names A5 and `--offline`, so it is
+loud; building the conditioner per arm so the other arms still run is a small
+change for whoever designs the online path.

@@ -16,6 +16,9 @@ no other ``.env`` line is read, printed, or reordered.
 from __future__ import annotations
 
 import os
+import re
+import shutil
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, MutableMapping, Sequence
@@ -324,11 +327,17 @@ def write_env_values(values: Sequence[tuple[str, str]], *, root: Path,
     except FileNotFoundError:
         text = ""
     # `splitlines` is the wrong tool for a file promised back byte for byte: it
-    # also breaks on \x0b, \x0c and \x85, and drops the \r of a CRLF file.
-    newline = "\r\n" if "\r\n" in text else "\n"
-    body = text[:-len(newline)] if text.endswith(newline) else text
-    lines = body.split(newline) if text else []
-    ends_with_newline = text.endswith(newline) or not text
+    # also breaks on \x0b, \x0c and \x85, and drops the \r of a CRLF file. Each
+    # line keeps its own terminator, so a mostly-LF file with one CRLF line is
+    # still read line by line rather than fused between the two CRLFs.
+    parts = re.split(r"(\r\n|\n|\r)", text) if text else []
+    rows = [(parts[i], parts[i + 1] if i + 1 < len(parts) else "")
+            for i in range(0, len(parts), 2)]
+    if rows and rows[-1] == ("", ""):
+        rows.pop()  # the file ended with a terminator, not with an empty line
+    terminators = Counter(sep for _, sep in rows if sep)
+    newline = terminators.most_common(1)[0][0] if terminators else "\n"
+    ends_with_newline = bool(rows and rows[-1][1]) or not text
 
     def names_line(raw: str) -> str:
         stripped = raw.strip()
@@ -338,28 +347,36 @@ def write_env_values(values: Sequence[tuple[str, str]], *, root: Path,
 
     for name, value in values:
         line = None
-        kept: list[str] = []
-        for raw in lines:
+        kept: list[tuple[str, str]] = []
+        for raw, sep in rows:
             if names_line(raw) != name:
-                kept.append(raw)
+                kept.append((raw, sep))
                 continue
             if line is None:
-                # The first occurrence keeps its place and its `export`.
+                # The first occurrence keeps its place, its `export` and its
+                # own terminator.
                 line = _env_line(name, value,
                                  export=raw.strip().startswith("export "))
-                kept.append(line)
+                kept.append((line, sep))
             # Every later copy is dropped: `parse_env` is last-wins, so a
             # surviving stale duplicate would beat the line just written.
-        lines = kept
+        rows = kept
         if line is None:
-            lines.append(_env_line(name, value, export=False))
+            if rows and not rows[-1][1]:
+                rows[-1] = (rows[-1][0], newline)
+            rows.append((_env_line(name, value, export=False),
+                         newline if ends_with_newline else ""))
         environ[name] = value
 
     root.mkdir(parents=True, exist_ok=True)
-    rendered = newline.join(lines) + (newline if ends_with_newline else "")
-    # Atomic: a half-written .env is an operator's whole configuration.
+    rendered = "".join(raw + sep for raw, sep in rows)
+    # Atomic: a half-written .env is an operator's whole configuration. And
+    # the file's own mode survives the swap — a 0600 .env holds API keys, and
+    # a fresh tmp file would otherwise hand it the umask's 0644.
     tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(rendered, encoding="utf-8", newline="")
+    if target.exists():
+        shutil.copymode(target, tmp)
     os.replace(tmp, target)
     return [name for name, _ in values]
 

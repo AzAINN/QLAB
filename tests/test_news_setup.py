@@ -429,3 +429,33 @@ def test_a_quote_in_a_contact_is_refused_rather_than_written_wrong():
         news_setup.write_env_values(
             [("QLAB_EDGAR_CONTACT", "Jane 'J' <j@x.io>")],
             root=pathlib.Path("/nonexistent"), environ={})
+
+
+def test_the_env_files_mode_survives_the_atomic_swap(tmp_path):
+    """.env holds API keys; a fresh tmp file carries the umask's 0644, and
+    os.replace would hand that to a 0600 file on every write."""
+    import os, stat
+    if os.name == "nt":
+        pytest.skip("POSIX mode bits")
+    from qlab.news.setup import write_env_values
+    target = tmp_path / ".env"
+    target.write_text("ALPACA_API_KEY=x\n")
+    os.chmod(target, 0o600)
+    write_env_values([("QLAB_NEWS_PROVIDERS", "macro")], root=tmp_path, environ={})
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert "ALPACA_API_KEY=x\n" in target.read_text()
+
+
+def test_a_mostly_lf_file_with_one_crlf_line_is_still_edited_in_place(tmp_path):
+    """A document-global line ending fused every LF line between two CRLFs
+    into one string, so the target name was not matched and a second
+    definition was appended below the stale one."""
+    from qlab.news.setup import write_env_values
+    target = tmp_path / ".env"
+    text = "A=1\nQLAB_NEWS_PROVIDERS=old\nB=2\r\nC=3\n"
+    target.write_bytes(text.encode())
+    write_env_values([("QLAB_NEWS_PROVIDERS", "macro")], root=tmp_path, environ={})
+    out = target.read_bytes().decode()
+    assert out.count("QLAB_NEWS_PROVIDERS") == 1
+    assert out.startswith("A=1\nQLAB_NEWS_PROVIDERS=")
+    assert "B=2\r\nC=3\n" in out and out.endswith("C=3\n")

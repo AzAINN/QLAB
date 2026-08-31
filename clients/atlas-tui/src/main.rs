@@ -778,11 +778,17 @@ struct ScreenHost<'a> {
 #[cfg(feature = "operator")]
 impl handoff::Host for ScreenHost<'_> {
     fn pause_input(&mut self) {
-        // Aborted rather than signalled. The task is parked inside
-        // `EventStream::next`, which is a blocking read on the far side of a
-        // helper thread — there is no cooperative point for a flag to be seen
-        // at, and a reader that checks its flag only after the next keystroke
-        // is a reader that has already eaten one.
+        // Aborted rather than signalled: the task is parked inside
+        // `EventStream::next`, a blocking read on the far side of a helper
+        // thread, so there is no cooperative point a flag would be seen at.
+        //
+        // `abort` is a *request*, and it is not awaited — the task stops soon,
+        // not now, and a read already in flight can still post one event. So
+        // this call is not what makes the hand-off safe: `drain_input` is. Any
+        // keystroke that slips through this gap is discarded there, before the
+        // fresh reader starts and before the first frame back. Pausing is the
+        // half that stops the child and the desk fighting over stdin; the
+        // drain is the half that guarantees nothing stolen reaches the desk.
         self.reader.handle.abort();
     }
 

@@ -125,9 +125,13 @@ Three ways a run starts, and all three end at the same gate:
 - Atlas, from the chat, with `workflow.start` — which requires the `workflows`
   right *and* a registered `template_id`. The mode gate is attached to the
   template, so a start without one is refused by name;
-- the beat, unattended, for the trigger kinds the daily budget counts
-  (`_WORKFLOW_TRIGGERS`). Every other kind is minted, announced, and left
-  `queued` for a human.
+- the beat, unattended, for every trigger kind except those in
+  `_UNBOUNDED_TRIGGERS` — today only `held_record_change`, which can mint one
+  task per held name per window and so is announced and left `queued` for a
+  human (or for Atlas, from the chat) until a mint-site bound exists. Briefs
+  and alerts (`owner_startup`, `data_recovered`, `kill_switch`,
+  `new_research_run`) fire once per condition and start as they always have;
+  `_WORKFLOW_TRIGGERS` is the separate set the daily budget counts.
 
 The ATLAS view's chat box is the desk assistant and the command row at once.
 `/ask` asks the desk what it would do, `/do` takes a proposal it is offering,

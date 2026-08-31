@@ -68,11 +68,21 @@ class _Session:
         self.held = list(held)
         self.blocked = blocked
         self.book_reads = 0
+        self.scans = 0
+        registry.matrix_runs = self._counted(registry.matrix_runs)
         self.atlas = AtlasSupervisor(
             registry, coordinator_available=lambda: True,
             config=AtlasConfig(),
             id_gen=(lambda c=itertools.count(1): f"task-{next(c)}"))
         self._served = 0
+
+    def _counted(self, scan):
+        """Count only the RULE's scans: the stub's own log dedupe is not one."""
+        def wrapped(*a, **k):
+            if k.get("limit") != 1:
+                self.scans += 1
+            return scan(*a, **k)
+        return wrapped
 
     # the tick's news half
     def fetch_desk_news(self, offline):
@@ -131,7 +141,9 @@ def _run(reg, windows, held=("ACWI",), ticks=2, *, fresh=False, blocked=False):
     gone and only the registry's dedupe key can refuse a second task.
     """
     session = _Session(reg, windows, held, blocked=blocked)
-    tick = _tick(session)
+    # Kept on the session so a test can drive the SAME closure again: a fresh
+    # one has an empty cache and would prove nothing about it.
+    session.tick = tick = _tick(session)
     out = []
     for _ in range(ticks):
         out.append((_tick(session) if fresh else tick)())
@@ -429,7 +441,53 @@ def test_an_unchanged_window_costs_the_tick_nothing(reg):
         _Window("w2", "2026-08-31", {"ACWI": _row("ACWI", primary_docs=1)}),
     ], ticks=4)
     assert len(_held_tasks(results[1])) == 1
-    # One book read in four ticks: the first window has nothing to compare
-    # against and returns before reading it, and the two repeats of the second
-    # are the window already examined.
-    assert session.book_reads == 1, session.book_reads
+    # The book is read every tick — a position can be opened while the news
+    # window stands still, and no cheaper tell for that exists — but the two
+    # repeats of the second window cost no registry scan and no mint at all.
+    assert session.book_reads == 4, session.book_reads
+    assert session.scans == 2, session.scans
+
+
+def test_a_position_opened_while_the_window_stands_still_is_evaluated(reg):
+    """The cache is about an unchanged QUESTION, not an unchanged window.
+
+    A name bought this morning has never been compared against anything. Keyed
+    on the window hash alone, the rule skipped the whole mint until the next
+    distinct window arrived — on a quiet tape, potentially a full day of a new
+    holding nobody had looked at.
+    """
+    session, results = _run(reg, [
+        _Window("w1", "2026-08-30", {"ACWI": _row("ACWI", primary_docs=0),
+                                     "BNDW": _row("BNDW", corroborated=0)}),
+        _Window("w2", "2026-08-31", {"ACWI": _row("ACWI", primary_docs=1),
+                                     "BNDW": _row("BNDW", corroborated=2)}),
+    ], held=("ACWI",))
+    assert [t["ticker"] for t in _held_tasks(results[1])] == ["ACWI"]
+
+    # Same window, new position. The record of the name the desk just bought
+    # moved between those two windows and nothing has said so.
+    session.held.append("BNDW")
+    third = session.tick()
+    assert [t["ticker"] for t in _held_tasks(third)] == ["BNDW"]
+    assert _held_tasks(third)[0]["reason"] == "BNDW: primary +0, corroborated +2"
+
+
+def test_the_exhausted_scan_event_carries_the_numbers_it_names(reg):
+    """A free-text reason is not a field. The scan's shape is structured."""
+    from qlab.operator import heartbeat
+
+    session = _Session(reg, [
+        _Window("w1", "2026-08-30", {"ACWI": _row("ACWI", primary_docs=0)}),
+        _Window("w2", "2026-08-31", {"ACWI": _row("ACWI", primary_docs=3)}),
+    ], ("ACWI",))
+    tick = _tick(session)
+    tick()
+    real = reg.matrix_runs
+    reg.matrix_runs = (lambda *a, **k: real(
+        *a, **{**k, "limit": 1}) * heartbeat.MATRIX_SCAN)
+    tick()
+
+    payload = reg.read_events_of_kind(
+        "held_record_change_skipped", limit=10)[-1]["payload"]
+    assert payload["examined"] == heartbeat.MATRIX_SCAN
+    assert payload["scan_limit"] == heartbeat.MATRIX_SCAN

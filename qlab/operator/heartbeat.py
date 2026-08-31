@@ -203,8 +203,8 @@ def held_record_changes(current: Mapping, previous: Mapping,
     return changes
 
 
-def mint_held_record_tasks(session, matrix: Mapping, *,
-                           offline: bool) -> list[dict]:
+def mint_held_record_tasks(session, matrix: Mapping, *, offline: bool,
+                           book: tuple[set[str], str] | None = None) -> list[dict]:
     """Queue one ``held_record_change`` task per held name whose record moved.
 
     Runs beside the matrix log, on the window that log just wrote, because that
@@ -221,6 +221,10 @@ def mint_held_record_tasks(session, matrix: Mapping, *,
     A window that arrived broken is skipped and SAYS so. Comparing a window
     whose feed failed against a healthy one measures the outage, not the
     record, and a silent skip would look exactly like a quiet tape.
+
+    ``book`` is :func:`held_names`' answer when the caller has already read it
+    — the tick has, because the held set is half of its cache key — so one
+    tick never reads the book twice.
     """
     from qlab.news.matrix import DESK_MATRIX_SOURCE
     from qlab.operator.templates import TRIGGER_TEMPLATE
@@ -262,10 +266,15 @@ def mint_held_record_tasks(session, matrix: Mapping, *,
                 {"reason": (f"no earlier window in a scan of {MATRIX_SCAN} "
                             f"desk matrices; the previous window is further "
                             f"back than this rule looks"),
+                 # The numbers as fields, not only inside the sentence: a
+                 # reader deciding whether MATRIX_SCAN is too small cannot
+                 # parse prose to find out how full the scan was.
+                 "examined": len(runs), "scan_limit": MATRIX_SCAN,
                  "window_hash": current_hash})
         return []          # the first window ever has nothing to have changed
 
-    held, book_fault = held_names(session, offline)
+    held, book_fault = book if book is not None else held_names(
+        session, offline)
     if book_fault:
         registry.record_event(HELD_RECORD_TRIGGER + "_skipped",
                               {"reason": book_fault,
@@ -351,13 +360,17 @@ def build_owner_tick(session, lock, *, offline: bool,
     one tick reports no flip.
     """
 
-    # The last window the held-record rule finished examining, for the life of
-    # this owner process. An unchanged window has nothing new to say, and the
-    # answer costs a book read and a registry scan every thirty seconds
-    # forever. The registry's dedupe key is still what makes a second task
-    # impossible — this only stops paying to ask. Written under the same
-    # dispatch lock every other tick state is.
-    examined_window: str | None = None
+    # The last QUESTION the held-record rule finished examining, for the life
+    # of this owner process: the window and the held set together. The window
+    # alone is not the question — a position opened while the news window
+    # stands still is a name nothing has ever compared, and keying on the hash
+    # left it unexamined until the next distinct window, which on a quiet tape
+    # can be the next day. The book is therefore read every tick (there is no
+    # cheaper tell for a position change) and the registry scan and the mint
+    # are what an unchanged question saves. The registry's dedupe key is still
+    # what makes a second task impossible — this only stops paying to ask.
+    # Written under the same dispatch lock every other tick state is.
+    examined: tuple[str, frozenset[str]] | None = None
 
     def tick() -> dict:
         # Network work is deliberately outside the owner dispatch lock. The
@@ -411,17 +424,22 @@ def build_owner_tick(session, lock, *, offline: bool,
             # downstream — the announcement, the autonomous start below — reads
             # a trigger task from that list and from the registry row, not from
             # where it was minted.
-            nonlocal examined_window
+            nonlocal examined
             window_hash = str((matrix_payload or {}).get("window_hash") or "")
-            if matrix_payload is not None and window_hash != examined_window:
+            if matrix_payload is not None:
                 try:
-                    result["created_tasks"] = list(
-                        result.get("created_tasks") or []) + \
-                        mint_held_record_tasks(
-                            session, matrix_payload, offline=offline)
-                    # Only after it returned: a window the rule threw on has
-                    # not been examined, and the next tick must try it again.
-                    examined_window = window_hash
+                    held = held_names(session, offline)
+                    question = (window_hash, frozenset(held[0]))
+                    if question != examined:
+                        result["created_tasks"] = list(
+                            result.get("created_tasks") or []) + \
+                            mint_held_record_tasks(
+                                session, matrix_payload, offline=offline,
+                                book=held)
+                        # Only after it returned: a question the rule threw on
+                        # has not been examined, and the next tick must ask it
+                        # again.
+                        examined = question
                 except Exception as exc:
                     # Its own key, never the value's, for the reason the reap
                     # error above carries one: a field that changes JSON type

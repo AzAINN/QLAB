@@ -150,37 +150,59 @@ pub struct DeskCli {
     env: Vec<(String, String)>,
 }
 
+/// The five, given what the process environment said — which variables are
+/// forwarded, which is forced, and which are dropped for being blank.
+///
+/// A pure function of its inputs rather than four `std::env::var` calls inside
+/// [`DeskCli::from_env`], so the *policy* can be pinned by a test that neither
+/// mutates the environment it runs in nor passes vacuously on a machine that
+/// happens not to set `QLAB_UI_PORT`. `from_env` is its only caller and does
+/// nothing but the reading.
+fn stated_env(
+    launcher: &str,
+    path: Option<String>,
+    home: Option<String>,
+    port: Option<String>,
+) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    // PATH is not merely for the child's convenience: `CommandBuilder` resolves
+    // `argv[0]` against its *own* PATH (`cmdbuilder::search_path`), so which
+    // `qlab` gets started is decided by this value and not by the one `execvp`
+    // would have used. HOME is where the child's own config lives, and is what
+    // `CommandBuilder` falls back to for the working directory.
+    //
+    // A blank value is dropped rather than forwarded: an empty PATH is worse
+    // than an absent one, because it overrides the base environment's with a
+    // list containing nowhere to look.
+    for (key, value) in [("PATH", path), ("HOME", home)] {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            env.push((key.to_string(), value));
+        }
+    }
+    env.push(("TERM".to_string(), TERM.to_string()));
+    // Forwarded only when this process has one. An unset variable means both
+    // sides already agree on the default port, and writing a number here would
+    // pin the child to a port this client had merely guessed.
+    if let Some(port) = port.filter(|port| !port.trim().is_empty()) {
+        env.push(("QLAB_UI_PORT".to_string(), port));
+    }
+    // Always, and always the word this client resolved: a child that starts a
+    // qlab of its own must start the one this desk is running, not whichever a
+    // fresh PATH lookup happens to find.
+    env.push(("QLAB_BIN".to_string(), launcher.to_string()));
+    env
+}
+
 impl DeskCli {
     /// Read this process's environment and keep the answers.
     pub fn from_env() -> Self {
         let launcher = crate::handoff::launcher();
-        let mut env = Vec::new();
-        // PATH is not merely for the child's convenience: `CommandBuilder`
-        // resolves `argv[0]` against its *own* PATH (`cmdbuilder::search_path`),
-        // so which `qlab` gets started is decided by this value and not by the
-        // one `execvp` would have used. HOME is where the child's own config
-        // lives, and is what `CommandBuilder` falls back to for the working
-        // directory.
-        for key in ["PATH", "HOME"] {
-            if let Ok(value) = std::env::var(key) {
-                if !value.is_empty() {
-                    env.push((key.to_string(), value));
-                }
-            }
-        }
-        env.push(("TERM".to_string(), TERM.to_string()));
-        // Forwarded only when this process has one. An unset variable means both
-        // sides already agree on the default port, and writing a number here
-        // would pin the child to a port this client had merely guessed.
-        if let Ok(port) = std::env::var("QLAB_UI_PORT") {
-            if !port.trim().is_empty() {
-                env.push(("QLAB_UI_PORT".to_string(), port));
-            }
-        }
-        // Always, and always the word this client resolved: a child that starts
-        // a qlab of its own must start the one this desk is running, not
-        // whichever a fresh PATH lookup happens to find.
-        env.push(("QLAB_BIN".to_string(), launcher.clone()));
+        let env = stated_env(
+            &launcher,
+            std::env::var("PATH").ok(),
+            std::env::var("HOME").ok(),
+            std::env::var("QLAB_UI_PORT").ok(),
+        );
         Self {
             launcher,
             cwd: std::env::current_dir().ok(),
@@ -405,9 +427,19 @@ impl PtySession {
         }
         self.killed = true;
         if let Err(err) = self.killer.kill() {
-            let _ = self.events.send(PtyEvent::Failed {
-                said: format!("`{}` would not stop: {err}", self.label),
-            });
+            // ESRCH is not a failure to stop — it is the child already being
+            // gone, which is what was asked for. The window is real: the reader
+            // thread reaps before it stores `ended`, so a kill landing between
+            // the two would otherwise put "would not stop" on the desk about a
+            // child that stopped perfectly well. 3 on every platform this
+            // builds for, and spelled here rather than taken from `libc`, which
+            // this crate does not otherwise depend on.
+            const ESRCH: i32 = 3;
+            if err.raw_os_error() != Some(ESRCH) {
+                let _ = self.events.send(PtyEvent::Failed {
+                    said: format!("`{}` would not stop: {err}", self.label),
+                });
+            }
         }
     }
 }
@@ -468,7 +500,19 @@ fn watch(
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            // Any other read error, with the child possibly still alive. Killed
+            // before the loop is left, because from here on nothing drains the
+            // master: BSD `ttyclose` makes a child block until the tty's output
+            // queue is emptied, and this thread is its only drainer — so the
+            // `wait` below would park on a live child forever, `ended` would
+            // stay false, and the desk would go on showing a session that had
+            // in fact stopped. Unreachable today (EIO arrives as `Ok(0)`, EINTR
+            // is handled above), which is exactly why it must not be left to
+            // whichever errno a future platform invents.
+            Err(_) => {
+                let _ = killer.kill();
+                break;
+            }
         }
     }
 
@@ -579,16 +623,178 @@ mod tests {
         assert_eq!(argv(&command), [launcher.clone(), "cli".to_string()]);
         assert_eq!(stated.get("QLAB_BIN"), Some(&launcher.as_str()));
         // PATH is what `CommandBuilder` resolves `qlab` against, so which one
-        // starts is decided by this value.
+        // starts is decided by this value. HOME and QLAB_UI_PORT decide which
+        // owner the pane talks to and where the child's own config is read
+        // from, so each is compared against what this process actually holds
+        // rather than merely asserted present.
         assert_eq!(
             stated.get("PATH").map(|path| path.to_string()),
-            std::env::var("PATH").ok()
+            std::env::var("PATH").ok().filter(|path| !path.is_empty())
+        );
+        assert_eq!(
+            stated.get("HOME").map(|home| home.to_string()),
+            std::env::var("HOME").ok().filter(|home| !home.is_empty())
+        );
+        assert_eq!(
+            stated.get("QLAB_UI_PORT").map(|port| port.to_string()),
+            std::env::var("QLAB_UI_PORT")
+                .ok()
+                .filter(|port| !port.trim().is_empty())
         );
         // And the child runs where the desk does, not in $HOME.
         assert_eq!(
             command.get_cwd().map(PathBuf::from),
             std::env::current_dir().ok()
         );
+    }
+
+    #[test]
+    fn the_five_are_the_five_whatever_the_process_environment_said() {
+        // The wiring test above compares against `std::env`, which makes its
+        // QLAB_UI_PORT arm vacuous on a machine that does not set one — and a
+        // vacuous pin would let the forwarding be deleted without a suite
+        // noticing, leaving the pane talking to 8765 on a desk running
+        // somewhere else. This one states both environments outright.
+        assert_eq!(
+            stated_env(
+                "/opt/qlab/bin/qlab",
+                Some("/bin".to_string()),
+                Some("/home/desk".to_string()),
+                Some("9931".to_string()),
+            ),
+            vec![
+                ("PATH".to_string(), "/bin".to_string()),
+                ("HOME".to_string(), "/home/desk".to_string()),
+                ("TERM".to_string(), TERM.to_string()),
+                ("QLAB_UI_PORT".to_string(), "9931".to_string()),
+                ("QLAB_BIN".to_string(), "/opt/qlab/bin/qlab".to_string()),
+            ]
+        );
+        // Blank is not a value. A port of `"  "` forwarded as itself would pin
+        // the child to a number nobody wrote, and an empty PATH would override
+        // the inherited one with a list containing nowhere to look.
+        assert_eq!(
+            stated_env("qlab", None, Some(String::new()), Some("  ".to_string())),
+            vec![
+                ("TERM".to_string(), TERM.to_string()),
+                ("QLAB_BIN".to_string(), "qlab".to_string()),
+            ]
+        );
+    }
+
+    /// What was done to the child, in the order it was done.
+    #[derive(Debug, Clone, Default)]
+    struct Calls(Arc<Mutex<Vec<&'static str>>>);
+
+    impl Calls {
+        fn saw(&self, what: &'static str) {
+            self.0
+                .lock()
+                .expect("the recorder outlives its writers")
+                .push(what);
+        }
+
+        fn seen(&self) -> Vec<&'static str> {
+            self.0
+                .lock()
+                .expect("the recorder outlives its writers")
+                .clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeKiller(Calls);
+
+    impl ChildKiller for FakeKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.saw("kill");
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(FakeKiller(self.0.clone()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeChild(Calls);
+
+    impl ChildKiller for FakeChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.saw("kill");
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(FakeKiller(self.0.clone()))
+        }
+    }
+
+    impl portable_pty::Child for FakeChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+
+        /// Returns rather than blocking, deliberately: a real one would block
+        /// forever here, and a test that hung would be reporting the bug as a
+        /// timeout instead of as an order.
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            self.0.saw("wait");
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    /// A master that only ever fails — the one thing a real pty will not do on
+    /// demand.
+    struct Broken;
+
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("the master went away"))
+        }
+    }
+
+    #[test]
+    fn a_read_that_fails_kills_the_child_before_it_waits_for_it() {
+        // The one arm no scripted child can reach: EIO arrives as `Ok(0)` and
+        // EINTR is handled, so nothing a test may spawn produces a read error
+        // here. It still has to be right, and the cost of being wrong is the
+        // worst failure this module has — from the moment the loop is left
+        // nothing drains the master, and BSD `ttyclose` makes a child block
+        // until the tty's output queue empties, so a `wait` on a live child
+        // parks this thread forever, `ended` never becomes true, and the desk
+        // shows `Running` for a session that has stopped.
+        //
+        // Pinned as an *order* against a fake, which is how `cli_handoff.rs`
+        // pins the other hand-off and for the same reason.
+        let calls = Calls::default();
+        let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ended = AtomicBool::new(false);
+
+        watch(
+            Box::new(Broken),
+            Box::new(FakeChild(calls.clone())),
+            Box::new(FakeKiller(calls.clone())),
+            "sh",
+            &ended,
+            &events,
+        );
+
+        assert_eq!(
+            calls.seen(),
+            ["kill", "wait"],
+            "the child is stopped before it is waited for"
+        );
+        assert!(ended.load(Ordering::SeqCst), "the session knows it is over");
+        assert!(
+            matches!(rx.try_recv(), Ok(PtyEvent::Exited { status: 0, .. })),
+            "and says so exactly once"
+        );
+        assert!(rx.try_recv().is_err(), "exactly once");
     }
 
     #[test]

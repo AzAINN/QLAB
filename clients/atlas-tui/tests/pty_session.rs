@@ -137,6 +137,10 @@ fn a_child_yields_its_bytes_and_then_says_it_ended() {
         }
         other => panic!("expected an exit, got {other:?}"),
     }
+    // Exactly once. A3 moves its state out of `Running` on this event, so a
+    // second one would either re-enter a state it had left or overwrite the
+    // sentence the first one carried.
+    silence(&mut rx, "a second exit for one child");
     drop(session);
 }
 
@@ -178,6 +182,10 @@ fn a_binary_the_desk_does_not_have_is_refused_by_name() {
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
+    // And nothing more. A child that never started never exits, so an `Exited`
+    // here would take A3's state to `Ended` off a session that was never
+    // `Running` — and would say a status about a process that has none.
+    silence(&mut rx, "an exit for a child that never started");
 }
 
 #[test]

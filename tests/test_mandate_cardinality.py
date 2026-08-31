@@ -71,18 +71,55 @@ def test_cap_equal_to_the_universe_is_allowed():
     assert _mandate(max_holdings=len(UNIVERSE)).max_holdings == len(UNIVERSE)
 
 
-def test_yaml_cap_is_loaded_and_enforced(tmp_path):
+def test_dust_below_the_tolerance_is_not_a_holding():
+    # Pins `> tol` over `!= 0`: a nonzero weight the mandate's own tolerance
+    # treats as noise must not consume a slot under the cap.
+    targets = _equal_weights(8)
+    targets[UNIVERSE[8]] = 5e-5
+    _mandate(max_holdings=8).check_targets(targets)  # no raise
+
+
+def _shipped_yaml_with(tmp_path, **constraints):
     raw = yaml.safe_load(data_path("mandate.yaml").read_text(encoding="utf-8"))
-    raw["constraints"]["max_holdings"] = 8
-    raw.pop("defensive_targets", None)  # 12 names — deliberately over the cap
+    for key, value in constraints.items():
+        if value is _ABSENT:
+            raw["constraints"].pop(key, None)
+        else:
+            raw["constraints"][key] = value
     path = tmp_path / "mandate.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return path
 
+
+_ABSENT = object()
+
+
+def test_yaml_cap_is_loaded_and_enforced(tmp_path):
+    # The shipped 12-name defensive_targets stays in place: the cap governs
+    # proposals, and the mandated safety basket must not refuse the mandate.
+    path = _shipped_yaml_with(tmp_path, max_holdings=8)
     mandate = load_mandate(path)
+
     assert mandate.max_holdings == 8
+    assert len(mandate.defensive_targets) == 12
     names = mandate.universe_whitelist[:9]
     with pytest.raises(MandateViolation):
         mandate.check_targets({t: 1.0 / 9 for t in names})
+
+
+def test_defensive_basket_is_exempt_from_the_cap():
+    mandate = load_mandate()
+    basket = load_mandate().defensive_targets
+    assert len(basket) > 3
+    mandate.max_holdings = 3
+    with pytest.raises(MandateViolation):
+        mandate.check_targets(basket)
+    mandate.check_targets(basket, check_holdings=False)  # no raise
+
+
+def test_absent_key_loads_uncapped(tmp_path):
+    path = _shipped_yaml_with(tmp_path, max_holdings=_ABSENT)
+    assert load_mandate(path).max_holdings is None
 
 
 def test_yaml_cap_of_zero_refused_at_load(tmp_path):

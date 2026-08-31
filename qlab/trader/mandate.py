@@ -221,12 +221,17 @@ class Mandate:
 
     # -- checks -------------------------------------------------------------
     def check_targets(self, targets: dict[str, float], tol: float = 1e-4,
-                      *, allow_liquidation: bool = False) -> None:
+                      *, allow_liquidation: bool = False,
+                      check_holdings: bool = True) -> None:
         """Validate a target weight map. Raises :class:`MandateViolation`.
 
         ``allow_liquidation`` waives the fully-invested requirement so a
         de-risking plan (targets summing below 1, e.g. a move to cash under
         the kill switch) is permitted; every other limit still applies.
+
+        ``check_holdings=False`` waives only the cardinality cap, for the one
+        target map the operator mandated rather than proposed (the defensive
+        basket); every other limit still applies.
         """
         for t in targets:
             if t not in self.universe_whitelist:
@@ -250,7 +255,7 @@ class Mandate:
             if v > self.max_weight_per_asset + tol:
                 raise MandateViolation(
                     f"{t} weight {v:.3f} exceeds cap {self.max_weight_per_asset}")
-        if self.max_holdings is not None:
+        if check_holdings and self.max_holdings is not None:
             # A weight at or below the same tolerance the other checks use is
             # not a holding; only funded names count against the cap.
             held = sum(1 for v in vals if v > tol)
@@ -441,7 +446,11 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     )
     if defensive_targets:
         try:
-            mandate.check_targets(defensive_targets)
+            # The cap governs what a plan may PROPOSE. The defensive basket is
+            # mandated, not proposed, and is deliberately broad; letting the cap
+            # reach it would make any cap below its size refuse the whole
+            # mandate on its own safety basket.
+            mandate.check_targets(defensive_targets, check_holdings=False)
         except MandateViolation as exc:
             raise MandateViolation(f"invalid defensive_targets: {exc}") from exc
     return mandate

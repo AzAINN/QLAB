@@ -47,7 +47,8 @@ constraints:
   # null = uncapped, and it ships uncapped deliberately — the operational
   # policy below is HRP, which funds every name in the whitelist, so any cap
   # here would refuse every plan it produces. Set it from the desk together
-  # with a cardinality-aware policy.
+  # with a cardinality-aware policy. The cap applies to plans; the defensive
+  # basket below is mandated, not proposed, and is exempt.
   max_holdings: null
   stress_vol_limit: 0.30        # annualized correlation-to-one warning threshold
   # 60, not 20: a full rebalance across a 20-name universe can need a sell and

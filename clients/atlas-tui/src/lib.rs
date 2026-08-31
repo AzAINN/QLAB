@@ -16,6 +16,10 @@ pub mod dispatch;
 pub mod format;
 pub mod fx;
 pub mod glyph;
+/// Giving the terminal away to the real Claude CLI and taking it back. Here
+/// rather than in `main.rs` for the same reason `dispatch` is: the order of a
+/// screen hand-off has to be right, and the binary has no test harness.
+pub mod handoff;
 pub mod input;
 pub mod model;
 pub mod net;

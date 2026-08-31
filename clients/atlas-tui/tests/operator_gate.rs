@@ -353,6 +353,54 @@ mod glass {
     }
 
     #[test]
+    fn neither_hand_off_to_the_claude_cli_exists_in_a_monitoring_build() {
+        // A child process is not a `net::write`, so the censuses above would
+        // never have noticed these two — and they are the only keys on this
+        // workstation whose effect is a process rather than a request. Pinned
+        // the way the write half is pinned: on the text of the gate, verbatim,
+        // because a `cfg` naming the wrong feature compiles cleanly and nothing
+        // else here would see it.
+        let cmd = super::source("cmd.rs");
+        for gate in [
+            "#[cfg(feature = \"operator\")]\n    OpenCli,",
+            "#[cfg(feature = \"operator\")]\n    OpenBuild(String),",
+            "#[cfg(feature = \"operator\")]\n    Cli,",
+            "#[cfg(feature = \"operator\")]\n    Build(String),",
+        ] {
+            assert!(
+                cmd.contains(gate),
+                "cmd.rs must gate the hand-offs on the operator feature, verbatim: {gate:?}"
+            );
+        }
+        // And the thing that would act on one is gated too. The module itself
+        // is in both builds — `Child` is a description, and the grammar is one
+        // grammar — but `run`, which spawns, is not.
+        assert!(
+            super::source("handoff.rs").contains("#[cfg(feature = \"operator\")]\npub fn run("),
+            "the hand-off that spawns is gated with the commands that reach it"
+        );
+        // The scopes are still *spelled* in this build, and must still be
+        // unusable: a glass window is offered neither, and typing one in full
+        // is refused rather than silently doing nothing.
+        use atlas::cmd::{parse, resolve, suggestions, Resolved};
+        use atlas::store::{Posture, Store};
+        let store = Store::default();
+        let offered = suggestions(&parse(""), &store, Posture::Glass);
+        for word in ["/cli", "/build"] {
+            assert!(
+                !offered.iter().any(|s| s.value == word),
+                "{word} was offered to a monitoring build"
+            );
+        }
+        for line in ["/cli ", "/build add a visual"] {
+            match resolve(&parse(line), &store, Posture::Glass) {
+                Resolved::Refused(said) => assert!(said.contains("not armed"), "{line}: {said}"),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn the_posture_a_glass_build_can_hold_is_glass_and_only_glass() {
         // One inhabitant, not one branch. `Posture::Operator` does not exist in
         // this build, so there is no value a bug could assign that would put the

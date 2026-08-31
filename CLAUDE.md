@@ -23,6 +23,8 @@ qlab batch configs/specs/ablation_v1.yaml --offline   # staged ablation
 qlab desk                           # one-card desk status (owner must be up)
 qlab workforce run "GOAL"           # headless governed run, streamed live
 qlab events                         # tail the owner's SSE audit bus
+qlab cli                            # interactive Claude as Atlas (proxy tools + read-only web)
+qlab build "add a heatmap visual"   # interactive Claude Code on this checkout
 python -m qlab.agents.loader sync   # regenerate .claude/agents + .bob/personas
 
 cd clients/atlas-tui && cargo test  # the Ratatui client (needs no owner)
@@ -76,6 +78,17 @@ excluded from `[all]`, the staged runtime, and the default ablation.
   highest mode that cannot create a paper plan; `check_startable` refuses every
   plan-creating template below `propose`. Widening what Atlas *researches* must
   never widen what it can *execute*.
+- **The real Claude CLI opens on the desk**, two ways, and the argv for both is
+  built in one place (`qlab/tui/claude.py`, tested in `tests/test_claude_cli.py`).
+  `qlab cli` is interactive Claude wearing `agents/atlas.md`, its tool universe
+  narrowed to `WebSearch,WebFetch` plus the owner-backed proxy — no shell, no
+  filesystem. `qlab build "<request>"` is Claude Code on this checkout with its
+  own default tools and its own interactive permission prompts, because the
+  operator is in the loop. The workstation's `/cli` and `/build` spawn those
+  verbs (`clients/atlas-tui/src/handoff.rs`): leave the alternate screen,
+  disable mouse capture and raw mode, run the child on the inherited terminal,
+  restore, repaint. A build that touched `qlab/` or `clients/atlas-tui/` is
+  *offered* `qlab --restart runtime` and never given it.
 - **Algorithm catalog** (`qlab/algorithms/catalog.py`): every method is
   `operational`, `research`, or `offline`. `algorithms.solve` enforces the
   stage in code — research/offline entries are visible but not agent-runnable.

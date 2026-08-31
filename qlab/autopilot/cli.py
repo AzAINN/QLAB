@@ -14,6 +14,8 @@
     qlab desk                                          one-card desk status
     qlab workforce  run "GOAL" | status | watch        governed runs from any shell
     qlab events     [--kind K]                         tail the live audit bus
+    qlab cli        [--port N]                         the real Claude CLI, as Atlas
+    qlab build      "<request>"                        Claude Code on this checkout
 
 All of it runs with zero external accounts thanks to ``--offline`` and the
 simulated paper broker.
@@ -785,6 +787,125 @@ def _cmd_tui(args) -> int:
     raise SystemExit(f"could not exec the Atlas workstation at {binary}")
 
 
+# -- the Claude CLI, opened on the desk -------------------------------------
+#
+# Two verbs and one shape: resolve the binary, refuse loudly if it is not
+# there, then hand this terminal to an interactive child and carry its exit
+# code back. Nothing here parses a stream or holds a registry handle — the
+# child owns the tty, and the desk is exactly as governed while it runs as it
+# was before, because `qlab cli`'s session reaches the owner through the same
+# read-bounded proxy the workforce already uses.
+
+
+def _owner_answers(runtime_url: str) -> bool:
+    """Whether an owner runtime is actually serving at ``runtime_url``.
+
+    `/api/tui` rather than a bare socket connect: something else listening on
+    the port is not an owner, and a session opened against it would be one
+    whose every tool refuses.
+    """
+    from qlab.tui.client import ApiClient
+
+    try:
+        ApiClient(runtime_url).get("/api/tui", offline=1, event_limit=1)
+    except Exception:
+        return False
+    return True
+
+
+def _run_interactive(argv: list[str], cwd) -> int:
+    """Hand this terminal to a child and wait for it.
+
+    No pipes: the child inherits stdin, stdout and stderr, because it is an
+    interactive CLI and anything else would swallow its own prompts. Its own
+    process group is deliberately NOT taken — Ctrl-C belongs to the child while
+    it holds the terminal, which is what makes the hand-off feel like the
+    shell's own.
+    """
+    return subprocess.run(argv, cwd=str(cwd)).returncode
+
+
+def _shell_wrapped(binary: str, argv: list[str]) -> list[str]:
+    """Windows npm ships `claude.cmd`; CreateProcess will not run it directly."""
+    if os.name == "nt" and binary.lower().endswith((".cmd", ".bat")):
+        return [os.environ.get("ComSpec", "cmd.exe"), "/c", *argv]
+    return argv
+
+
+def _cmd_cli(args) -> int:
+    """Interactive Claude wearing the Atlas persona, against this desk."""
+    from qlab.tui import claude as cc
+
+    binary = cc.resolve_claude_executable()
+    if not binary:
+        raise SystemExit(cc.claude_missing_remedy())
+    runtime_url = f"http://127.0.0.1:{args.port}"
+    if not _owner_answers(runtime_url):
+        raise SystemExit(cc.owner_down_remedy(runtime_url))
+    argv = cc.build_atlas_cli_argv(
+        runtime_url=runtime_url, offline=bool(getattr(args, "offline", False)))
+    # The path already resolved, not a second cwd-dependent lookup — the same
+    # reason `ClaudeSession.start` substitutes argv[0] rather than re-running
+    # `which` from the child's directory.
+    argv[0] = binary
+    return _run_interactive(_shell_wrapped(binary, argv), workspace_root())
+
+
+def _cmd_build(args) -> int:
+    """Interactive Claude Code on this checkout, with the request as turn one.
+
+    No owner probe, deliberately: a build edits the source, so "the desk is
+    down" must never be the reason an operator cannot fix the desk.
+    """
+    from qlab.tui import claude as cc
+
+    binary = cc.resolve_claude_executable()
+    if not binary:
+        raise SystemExit(cc.claude_missing_remedy())
+    try:
+        argv = cc.build_builder_argv(args.request)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    argv[0] = binary
+    code = _run_interactive(_shell_wrapped(binary, argv), workspace_root())
+    # Said, never done. A build that touched the owner's code is invisible to a
+    # long-lived runtime (invariant 8), and restarting it out from under an
+    # operator who was mid-approval is not this verb's decision to make.
+    if _desk_sources_changed():
+        print("\nthis build touched code the desk serves; it keeps running the "
+              "old imports until you restart it:\n    qlab --restart runtime",
+              flush=True)
+    return code
+
+
+# The two trees a change has to be restarted or rebuilt to be seen in: the
+# owner's Python and the workstation's Rust. Anything else a build touches
+# (planning docs, tests, configs read per call) is already live.
+_DESK_SOURCE_PREFIXES = ("qlab/", "clients/atlas-tui/")
+
+
+def _desk_sources_changed() -> bool:
+    """Whether `git status` shows work under the trees the desk serves."""
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(workspace_root()),
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        # Not a git checkout, or no git on PATH. Silence is right: the offer is
+        # a convenience, and a complaint about version control after a build is
+        # noise the operator cannot act on.
+        return False
+    for line in out.splitlines():
+        # Porcelain v1: two status columns, a space, then the path — and for a
+        # rename, "old -> new", where the destination is what was written.
+        path = line[3:].split(" -> ")[-1].strip().strip('"')
+        if path.startswith(_DESK_SOURCE_PREFIXES):
+            return True
+    return False
+
+
 def _cmd_prewarm(args) -> int:
     from qlab.core import data as market
     from qlab.core.universe import load_universe
@@ -943,6 +1064,22 @@ def build_parser() -> argparse.ArgumentParser:
     # tells them where arming moved to.
     tui.add_argument("--operator", action="store_true", help=argparse.SUPPRESS)
     tui.set_defaults(func=_cmd_tui)
+
+    # The two hand-offs to the real Claude CLI. Separate verbs rather than one
+    # with a flag, because the authority is not the same shape: `cli` is Atlas
+    # bounded to the owner's proxy plus read-only web, and `build` is Claude
+    # Code on this checkout with its own interactive prompts. A single verb
+    # would have made "which one am I in" a flag an operator can forget.
+    cli = sub.add_parser(
+        "cli", help="open the real Claude CLI as Atlas, against this desk")
+    cli.add_argument("--port", type=int, default=8765)
+    add_common(cli)
+    cli.set_defaults(func=_cmd_cli)
+
+    build = sub.add_parser(
+        "build", help="open Claude Code on this checkout with a request")
+    build.add_argument("request", help='what to build, e.g. "add a heatmap visual"')
+    build.set_defaults(func=_cmd_build)
 
     from qlab.desk_cli import register_subcommands
 

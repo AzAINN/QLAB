@@ -538,6 +538,20 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
             done(store);
             None
         }
+        // The two lines whose effect is a child process rather than a request.
+        // Handed up as a `Command` like everything else, and acted on nowhere
+        // near here: this module renders and resolves, and the terminal belongs
+        // to the runtime that owns the screen.
+        #[cfg(feature = "operator")]
+        Resolved::Cli => {
+            done(store);
+            Some(Command::OpenCli)
+        }
+        #[cfg(feature = "operator")]
+        Resolved::Build(request) => {
+            done(store);
+            Some(Command::OpenBuild(request))
+        }
         Resolved::Plan(id) => {
             // The jump happens either way: an operator who named a plan is
             // asking to look at the ledger, and BOOK is where it is drawn even

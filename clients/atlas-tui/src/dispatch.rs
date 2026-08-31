@@ -208,6 +208,12 @@ mod armed {
             // read-only — refused" would be a sentence an operator has to
             // parse twice to see nothing changed.
             Command::Posture { .. } => "arm this desk".to_string(),
+            // Named here because the match is over the whole type, exactly like
+            // `Quit`. Neither reaches `perform`: the runtime hands the terminal
+            // to a child and sends no request, so neither has an owner verb
+            // that could refuse it.
+            Command::OpenCli => "open the Claude CLI".to_string(),
+            Command::OpenBuild(_) => "open Claude Code on this checkout".to_string(),
         }
     }
 
@@ -538,14 +544,20 @@ mod armed {
                     said: err.to_string(),
                 },
             },
-            // The three the runtime handles itself. They cannot arrive here
+            // The ones the runtime handles itself. They cannot arrive here
             // through the loop; the arm exists because the match is over the
             // whole type, and `Backends` is a *read* the poller serves — a
             // write outcome for it would put a row on the bus about a request
-            // that changed nothing.
-            Command::Quit | Command::Refresh | Command::Backends | Command::RunLine(_) => {
-                return None
-            }
+            // that changed nothing. The two hand-offs are here for the same
+            // reason and a stronger one: their effect is a child process on the
+            // operator's terminal, and there is no request for this seam to
+            // make on their behalf at all.
+            Command::Quit
+            | Command::Refresh
+            | Command::Backends
+            | Command::RunLine(_)
+            | Command::OpenCli
+            | Command::OpenBuild(_) => return None,
         })
     }
 

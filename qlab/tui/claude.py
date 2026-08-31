@@ -779,6 +779,163 @@ def parse_stream_line(line: str) -> list[ClaudeEvent]:
     return out
 
 
+def proxy_mcp_config(runtime_url: str, *, offline: bool) -> dict:
+    """The one description of the owner-backed proxy every Claude session gets.
+
+    One definition rather than a copy per caller: the workforce, the desk chat
+    and the interactive `qlab cli` all speak to the same `qlab-operator` server,
+    and two spellings of "how the proxy is started" is how one of them ends up
+    pointed at a different desk than the operator is looking at.
+    """
+    return {
+        "mcpServers": {
+            "qlab-operator": {
+                "command": sys.executable,
+                "args": ["-m", "qlab.mcp.tui_proxy"],
+                "env": {
+                    "QLAB_RUNTIME_URL": runtime_url.rstrip("/"),
+                    "QLAB_OFFLINE": "1" if offline else "0",
+                },
+            }
+        }
+    }
+
+
+# Read-only web, and the whole of what `qlab cli` adds to the proxy. Named here
+# so the one place that grants them is also the one place that says why: Atlas
+# reads, cites and reasons; it does not edit this checkout and does not run
+# shells. A `Bash` added to this tuple would be an execution path granted by a
+# constant, which is exactly the shape invariant 3 forbids.
+_WEB_TOOLS = ("WebSearch", "WebFetch")
+
+
+def atlas_persona() -> str:
+    """The desk manager's own brief, out of the one source of truth.
+
+    `agents/atlas.md` is where the role is written (invariant 5), so the
+    interactive CLI wears the same persona the owner's own Atlas does rather
+    than a second, quietly diverging copy pasted into this module.
+    """
+    from qlab.agents.loader import load_agents
+
+    for source in load_agents():
+        if source.name == "atlas":
+            return source.body
+    # Fail loud: a hand-off that silently opened a generic Claude would look
+    # exactly like Atlas to the operator and answer as something else.
+    raise RuntimeError(
+        "agents/atlas.md defines no `atlas` role; `qlab cli` has no persona to "
+        "wear — run `python -m qlab.agents.loader list` to see what parsed")
+
+
+def build_atlas_cli_argv(*, runtime_url: str, offline: bool) -> list[str]:
+    """Interactive Claude, as Atlas, against this desk's owner.
+
+    Not a headless run: there is no `--print` and no stream parser, because the
+    operator is the one at the keyboard. What is bounded instead is authority —
+    the tool *universe* is the two read-only web tools, so anything else is not
+    merely un-allowlisted but absent, and the qlab tools arrive through the
+    proxy that only ever calls the owner's HTTP API.
+    """
+    return [
+        "claude",
+        "--strict-mcp-config",
+        "--mcp-config", json.dumps(proxy_mcp_config(runtime_url,
+                                                    offline=offline)),
+        "--tools", ",".join(_WEB_TOOLS),
+        "--allowedTools", ",".join([*_PROXY_TOOLS, *_WEB_TOOLS]),
+        "--append-system-prompt", atlas_persona(),
+    ]
+
+
+def builder_brief() -> str:
+    """What a Claude Code session opened on this checkout is told first.
+
+    A summary of the conventions, not a copy of CLAUDE.md: the file itself is
+    loaded by the session anyway, and a second full copy in this module is a
+    second thing to keep in step. What is spelled out here is the part a
+    one-request build gets wrong — where a new visual lives, and the two
+    commands that make a change visible on the desk.
+    """
+    return (
+        "You are opened inside the qlab checkout as a builder, at the "
+        "operator's request. qlab is a governed agentic quant research desk: "
+        "AI agents own judgment, algorithms own numbers, deterministic code "
+        "owns rigor. Read README.md and CLAUDE.md before changing anything.\n\n"
+        "Conventions that are not negotiable:\n"
+        "- One DuckDB writer, always. The owner HTTP runtime is the only "
+        "process that opens .lab/registry.duckdb; everything else reaches the "
+        "registry over HTTP.\n"
+        "- Tests never open .lab/registry.duckdb — use Registry(':memory:') — "
+        "and must pass fully offline against synthetic fixtures.\n"
+        "- A referee PASS is bound to the exact targets_hash, and execution "
+        "needs a persisted checked plan plus explicit human confirmation. "
+        "Never add a raw-order tool or an agent-reachable execution path.\n"
+        "- Fail loud: refuse with a clear error rather than falling back "
+        "silently on missing data or credentials.\n"
+        "- agents/*.md is the single source of truth for roles; after editing "
+        "run `python -m qlab.agents.loader sync`.\n"
+        "- Resolve files through qlab/paths.py (data_path, state_path, "
+        "workspace_root) — never Path(__file__).parents[...].\n"
+        "- Anything reachable must have a caller: a new seam needs a call site "
+        "and a test that exercises it.\n"
+        "- Commit messages are imperative with a conventional prefix and "
+        "scope, and carry no AI-attribution trailers.\n\n"
+        "Where a visual goes: a rendering the desk can show lives at "
+        "qlab/visuals/<name>.py, exposing TITLE (a str) and "
+        "render(params) -> str, and nothing else. It must be dependency-free "
+        "text — the desk draws it in a terminal pane — and it reads its "
+        "numbers from what the owner already persisted rather than computing "
+        "its own.\n\n"
+        "How a change becomes visible on the desk:\n"
+        "- Rust client: cd clients/atlas-tui && cargo build --release\n"
+        "- Python owner: it keeps serving pre-change imports until it is "
+        "restarted, so tell the operator to run `qlab --restart runtime` when "
+        "you are done. Never restart it yourself — the operator's desk is "
+        "live.\n\n"
+        "Run the tests you touched before you claim anything works."
+    )
+
+
+def build_builder_argv(request: str) -> list[str]:
+    """Interactive Claude Code on the checkout, with the request as turn one.
+
+    Deliberately unnarrowed. Claude Code's own default tools and its own
+    interactive permission prompts are the gate here, and that is the whole
+    point of the verb: an operator who wanted a governed, tool-bounded session
+    has `qlab cli` and the workforce — this one is for changing the code, with
+    a human answering every prompt.
+    """
+    request = request.strip()
+    if not request:
+        # Fail loud: an empty request opens a session with no subject, which is
+        # a Claude Code the operator could have started themselves.
+        raise ValueError("`qlab build` needs a request: qlab build \"...\"")
+    # "--" so a request beginning with a dash is a request and not a flag.
+    return ["claude", "--append-system-prompt", builder_brief(), "--", request]
+
+
+def claude_missing_remedy() -> str:
+    """Why a hand-off did not open, and the one command that fixes it."""
+    return (
+        "the Claude CLI is not on PATH, so there is nothing to open\n"
+        "    install it: npm install -g @anthropic-ai/claude-code\n"
+        "    then run `claude` once to sign in\n"
+        "($PATH is what this looks at; a nvm shell that has not been sourced "
+        "is the usual cause.)"
+    )
+
+
+def owner_down_remedy(runtime_url: str) -> str:
+    """Why `qlab cli` refuses without an owner: Atlas has nothing to read."""
+    return (
+        f"no qlab owner runtime answered at {runtime_url}\n"
+        "    start one: `qlab` (the desk) or `qlab owner` (headless)\n"
+        "Atlas reads this desk through the owner's API; without one every tool "
+        "in the session would refuse, which is a worse session than none."
+    )
+
+
 def build_claude_argv(
     prompt: str,
     *,
@@ -790,18 +947,7 @@ def build_claude_argv(
 ) -> list[str]:
     """Build an auditable Claude command with no ambient MCP/tool access."""
     if governed or chat:
-        config = {
-            "mcpServers": {
-                "qlab-operator": {
-                    "command": sys.executable,
-                    "args": ["-m", "qlab.mcp.tui_proxy"],
-                    "env": {
-                        "QLAB_RUNTIME_URL": runtime_url.rstrip("/"),
-                        "QLAB_OFFLINE": "1" if offline else "0",
-                    },
-                }
-            }
-        }
+        config = proxy_mcp_config(runtime_url, offline=offline)
     else:
         config = {"mcpServers": {}}
 

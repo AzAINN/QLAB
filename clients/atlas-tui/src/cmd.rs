@@ -240,6 +240,33 @@ pub enum Command {
         /// desk being read rather than about its own default.
         offline: bool,
     },
+    /// Open the real Claude CLI as Atlas, on this terminal.
+    ///
+    /// Not a request and not a write: the runtime hands the screen to a child
+    /// process (`crate::handoff`) and takes it back when it exits, so this
+    /// variant never reaches the dispatch seam at all. What that child may do
+    /// is decided by the desk's own `qlab cli` verb — the owner-backed proxy
+    /// tools plus read-only web, no shell and no filesystem — and this client
+    /// neither composes that command line nor can widen it.
+    ///
+    /// Gated with the writes even so, and offered only to an armed window: the
+    /// session it opens can start research on this desk, and a window the desk
+    /// declined authority to is not where one gets opened from. It books
+    /// nothing either way — the fill gate is untouched, and the child has no
+    /// execution tool to reach it with.
+    #[cfg(feature = "operator")]
+    OpenCli,
+    /// Open Claude Code on this checkout with a request, on this terminal.
+    ///
+    /// The one command on this workstation that changes source rather than
+    /// desk state, and the operator is in the loop for all of it: Claude Code's
+    /// own interactive permission prompts are the gate, answered by the human
+    /// sitting in front of the terminal the child now owns. On return, a build
+    /// that touched the desk's own trees is *offered* `qlab --restart runtime`
+    /// and never given it — invariant 8 says the restart is needed, not that a
+    /// keystroke may perform one on a live desk.
+    #[cfg(feature = "operator")]
+    OpenBuild(String),
     /// Ask the owner what its backends serve.
     ///
     /// A read, and the only one a keystroke asks for: the route probes daemons,
@@ -401,6 +428,10 @@ impl PartialEq for Command {
             (Command::ApproveAction(a), Command::ApproveAction(b)) => a == b,
             #[cfg(feature = "operator")]
             (Command::Actionables, Command::Actionables) => true,
+            #[cfg(feature = "operator")]
+            (Command::OpenCli, Command::OpenCli) => true,
+            #[cfg(feature = "operator")]
+            (Command::OpenBuild(a), Command::OpenBuild(b)) => a == b,
             (Command::Backends, Command::Backends) => true,
             _ => false,
         }
@@ -475,6 +506,16 @@ pub enum Scope {
     /// that takes the last six of the plan's own `targets_hash`. The chat's
     /// spelling of BOOK's `x`, held to the identical ritual.
     Execute,
+    /// Open the real Claude CLI as Atlas, on this terminal.
+    ///
+    /// The two scopes below are the only ones whose effect is a child process
+    /// rather than a request. They are in the grammar in both builds for the
+    /// reason `Mode` is — one parser table, not two, only one of which is ever
+    /// tested — and what they resolve to is gated with everything else an
+    /// unarmed window may not reach.
+    Cli,
+    /// Open Claude Code on this checkout with a request.
+    Build,
     /// Empty this window's chat pane. The one scope that acts without touching
     /// the desk, so it is offered in every posture.
     Clear,
@@ -484,7 +525,7 @@ impl Scope {
     /// Picker order: the three a glass window can use, then the four it
     /// cannot. `/ask` before `/do`, because that is the order they happen in —
     /// there is nothing to approve until the desk has been asked.
-    pub const ALL: [Scope; 10] = [
+    pub const ALL: [Scope; 12] = [
         Scope::View,
         Scope::Ticker,
         Scope::Plan,
@@ -494,6 +535,8 @@ impl Scope {
         Scope::Do,
         Scope::Approve,
         Scope::Execute,
+        Scope::Cli,
+        Scope::Build,
         Scope::Clear,
     ];
 
@@ -510,6 +553,8 @@ impl Scope {
             Scope::Do => "do",
             Scope::Approve => "approve",
             Scope::Execute => "execute",
+            Scope::Cli => "cli",
+            Scope::Build => "build",
             Scope::Clear => "clear",
         }
     }
@@ -526,6 +571,8 @@ impl Scope {
             Scope::Do => "a proposal the desk is offering, in full",
             Scope::Approve => "a pending approval id, or a checked plan id — opens the approve box",
             Scope::Execute => "a checked plan id with its approval on record — opens the hash box",
+            Scope::Cli => "nothing — Enter opens the Claude CLI as Atlas, on this terminal",
+            Scope::Build => "what to build, in a sentence — opens Claude Code on this checkout",
             Scope::Clear => "nothing — Enter empties this window's chat pane",
         }
     }
@@ -535,9 +582,23 @@ impl Scope {
     pub fn writes(self) -> bool {
         // `/clear` is deliberately absent: it empties this window's chat pane
         // and touches nothing on the desk, so a glass window may use it.
+        //
+        // `/cli` and `/build` are deliberately present. Neither sends a request
+        // — the runtime spawns a child — but one opens a session that can start
+        // research on this desk and the other edits the checkout the desk runs
+        // on, and a window the desk declined authority to is not where either
+        // belongs. "It is not an HTTP write" is not the test; "can it change
+        // what the desk does" is.
         matches!(
             self,
-            Scope::Mode | Scope::Model | Scope::Ask | Scope::Do | Scope::Approve | Scope::Execute
+            Scope::Mode
+                | Scope::Model
+                | Scope::Ask
+                | Scope::Do
+                | Scope::Approve
+                | Scope::Execute
+                | Scope::Cli
+                | Scope::Build
         )
     }
 
@@ -704,6 +765,16 @@ pub enum Resolved {
     /// Open the hash box for a checked plan whose approval is on the record.
     #[cfg(feature = "operator")]
     OpenExecute(String),
+    /// Open the real Claude CLI as Atlas on this terminal.
+    #[cfg(feature = "operator")]
+    Cli,
+    /// Open Claude Code on this checkout with this request as its first turn.
+    /// The string is whatever the operator typed, sent whole: what a build is
+    /// allowed to do is Claude Code's own permission prompts to ask, and a
+    /// client that pre-judged the sentence would be a second opinion nobody
+    /// can see.
+    #[cfg(feature = "operator")]
+    Build(String),
     /// Empty this window's chat pane. Local: the bus keeps every row and the
     /// AUDIT view still shows them — what clears is what this window draws,
     /// exactly like Claude Code's own `/clear`.
@@ -805,12 +876,58 @@ fn scoped(scope: Scope, query: &str, store: &Store, posture: Posture) -> Resolve
         Scope::Do => act(query, store, posture),
         Scope::Approve => approve(query, store, posture),
         Scope::Execute => execute(query, store, posture),
+        Scope::Cli => hand_off(Scope::Cli, query, posture),
+        Scope::Build => hand_off(Scope::Build, query, posture),
         Scope::Clear => match query.is_empty() {
             true => Resolved::ClearChat,
             false => {
                 Resolved::Refused("/clear takes no argument — Enter empties the chat pane".into())
             }
         },
+    }
+}
+
+/// The two lines that hand this terminal to a child.
+///
+/// One function for both, because the posture rule and the shape of the
+/// refusal are identical and only the argument differs: `/cli` takes none and
+/// `/build` takes all of it. Split into two would have been two copies of the
+/// gate, which is how one of them comes to be missing it.
+fn hand_off(scope: Scope, query: &str, posture: Posture) -> Resolved {
+    // The posture first, exactly as `/mode` and `/model`: an unarmed window is
+    // refused for being unarmed, whatever it typed.
+    if !posture.writes() {
+        return Resolved::Refused(format!(
+            "/{} opens a Claude session on this desk; this window is {} — the desk is not armed",
+            scope.word(),
+            posture.label()
+        ));
+    }
+    match scope {
+        Scope::Cli if query.is_empty() => {
+            #[cfg(feature = "operator")]
+            return Resolved::Cli;
+            // Unreachable: `posture.writes()` above is false for every
+            // `Posture` this build has. Total over the type, like `mode`.
+            #[cfg(not(feature = "operator"))]
+            Resolved::Refused("this build has no hand-off".into())
+        }
+        Scope::Cli => {
+            Resolved::Refused("/cli takes no argument — Enter opens the Claude CLI as Atlas".into())
+        }
+        Scope::Build if query.is_empty() => {
+            Resolved::Refused("say what to build: /build add a heatmap visual to the desk".into())
+        }
+        Scope::Build => {
+            #[cfg(feature = "operator")]
+            return Resolved::Build(query.to_string());
+            #[cfg(not(feature = "operator"))]
+            Resolved::Refused("this build has no hand-off".into())
+        }
+        // Unreachable: `scoped` calls this with exactly the two scopes above.
+        // Stated rather than assumed — a third scope routed here by a later
+        // edit would otherwise resolve to whichever arm it fell through to.
+        other => Resolved::Refused(format!("/{} is not a hand-off", other.word())),
     }
 }
 
@@ -1479,6 +1596,9 @@ fn values(scope: Scope, query: &str, store: &Store, posture: Posture) -> Vec<Sug
     match scope {
         // Takes nothing; the hint row already says Enter acts.
         Scope::Clear => Vec::new(),
+        // Neither has anything to offer: `/cli` takes no argument, and what to
+        // build is a sentence only the operator has. The hint row carries both.
+        Scope::Cli | Scope::Build => Vec::new(),
         // What can be approved: pending requests first, then checked plans
         // with no request yet — the two things the word answers.
         Scope::Approve => {

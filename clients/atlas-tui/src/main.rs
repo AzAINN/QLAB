@@ -35,6 +35,12 @@ use atlas::bus::{AppEvent, Channel, Tx};
 use atlas::cmd::Command;
 use atlas::dispatch::Writes;
 use atlas::fx::Fx;
+// `handoff` itself only in the build that can act on one: the default build
+// has no `Command` variant that produces a `Child`, so the module is named
+// nowhere in it.
+#[cfg(feature = "operator")]
+use atlas::handoff;
+use atlas::handoff::Child;
 use atlas::net::http::{self, PollerHandle};
 use atlas::net::sse;
 use atlas::store::{should_render, Store, ViewId, TICK};
@@ -226,6 +232,11 @@ async fn run(
             .ok()
             .and_then(|since| i64::try_from(since.as_secs()).ok());
         let mut quit = false;
+        // At most one hand-off per drain. A burst that somehow carried two
+        // would open the second onto a terminal the first has already given
+        // back; the last one asked for wins, which is the one the operator is
+        // still looking at.
+        let mut opening: Option<Child> = None;
         if let Some(first) = next {
             quit |= ingest(
                 first,
@@ -235,6 +246,7 @@ async fn run(
                 &mut views,
                 &mut fx,
                 &mut toasts,
+                &mut opening,
                 now,
             );
         }
@@ -248,9 +260,38 @@ async fn run(
                 &mut views,
                 &mut fx,
                 &mut toasts,
+                &mut opening,
                 now,
             );
         }
+        // Before the frame, not after: the child is about to paint over this
+        // terminal, so a frame drawn first is a frame nobody sees. The screen
+        // is handed over and taken back inside `handoff::run`, which restores
+        // on every path including a child that never started.
+        #[cfg(feature = "operator")]
+        if let Some(child) = opening.take() {
+            let mut host = ScreenHost { terminal };
+            let notes = handoff::run(child, &mut host);
+            for note in notes {
+                // A toast, because there is nowhere else: anything printed
+                // before the screen comes back is wiped by the alternate
+                // screen, and anything after it lands under the frame.
+                toasts.push(
+                    toast::Toast::new(toast::Level::Warn, "CLAUDE", note),
+                    Instant::now(),
+                );
+            }
+            // Painted here rather than left to `should_render`, which diffs
+            // against a buffer the child scrolled away: on a quiet desk nothing
+            // would be judged to have changed, and the operator would come back
+            // from Claude to their own shell's leftovers until the next tick.
+            // `Instant::now()` and not `now`: a build is minutes old by here.
+            let back = Instant::now();
+            terminal.draw(|f| ui::shell::draw(f, store, &views, &fx, back))?;
+            last_frame = back;
+        }
+        #[cfg(not(feature = "operator"))]
+        let _ = opening;
 
         // A decaying flash owes frames nothing else asked for: the 100 ms idle
         // heartbeat would sample a 200 ms step visibly late, and a desk with no
@@ -317,6 +358,11 @@ fn ingest(
     views: &mut Views,
     fx: &mut Fx,
     toasts: &mut toast::ToastQueue,
+    // Out, not in: `ingest` has no terminal, and a hand-off that happened from
+    // inside an event fold would be a child process spawned from the middle of
+    // a drain. What it does is record that one was asked for; the loop, which
+    // owns the screen, is what acts.
+    opening: &mut Option<Child>,
     now: Instant,
 ) -> bool {
     // Carried and unused in the default build: there is no `Command` variant
@@ -324,6 +370,10 @@ fn ingest(
     // runtime that forked on a feature is a runtime only one leg ever runs.
     #[cfg(not(feature = "operator"))]
     let _ = writes;
+    // Carried and never set in the default build, for the same reason: there is
+    // no `Command` variant that could ask for a hand-off there.
+    #[cfg(not(feature = "operator"))]
+    let _ = opening;
     let mut quit = false;
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
@@ -367,6 +417,16 @@ fn ingest(
                 // arm below dispatches to the *writer*, and a read that reached
                 // it would be a request this command never meant.
                 Some(Command::Backends) => {}
+                // The two hand-offs. Recorded, not performed: this function has
+                // no terminal, and the loop above is what owns the screen the
+                // child is about to want. Above the dispatch arm for the same
+                // reason `Backends` is — neither is a request, and a hand-off
+                // that fell through to the writer would be a `Command` sent to
+                // an owner that has no verb for it.
+                #[cfg(feature = "operator")]
+                Some(Command::OpenCli) => *opening = Some(Child::Cli),
+                #[cfg(feature = "operator")]
+                Some(Command::OpenBuild(request)) => *opening = Some(Child::Build(request)),
                 // The only place a keystroke reaches the network. A view
                 // decided what the key means and handed back a `Command`; the
                 // runtime is what acts on it.
@@ -624,6 +684,55 @@ fn restore() {
         cursor::Show
     ) {
         tracing::error!(%err, "could not leave the alternate screen");
+    }
+}
+
+/// The real end of `handoff::Host`: this process's own screen.
+///
+/// It lives here rather than in the library because it is the half that cannot
+/// be tested — there is no tty in a test harness — and everything about the
+/// hand-off that *can* be pinned is in `atlas::handoff` with a fake in front of
+/// it. What is left here is four one-line transcriptions.
+///
+/// `restore` and `TerminalGuard::enter` are reused rather than re-spelled: the
+/// order raw mode, the alternate screen and the mouse capture come down and go
+/// back up in is subtle (see `restore`), and a second copy of it here would be
+/// the copy that drifts.
+#[cfg(feature = "operator")]
+struct ScreenHost<'a> {
+    terminal: &'a mut Terminal<CrosstermBackend<io::Stdout>>,
+}
+
+#[cfg(feature = "operator")]
+impl handoff::Host for ScreenHost<'_> {
+    fn leave_screen(&mut self) -> io::Result<()> {
+        restore();
+        Ok(())
+    }
+
+    fn spawn(&mut self, argv: &[String]) -> io::Result<Option<i32>> {
+        handoff::spawn_inheriting(argv)
+    }
+
+    fn enter_screen(&mut self) -> io::Result<()> {
+        // The guard is dropped immediately and deliberately: `ENTERED` is what
+        // the panic hook and the signal handler read, and it is a static rather
+        // than something this value owns. A guard held here would restore the
+        // screen a second time when it went out of scope.
+        std::mem::forget(TerminalGuard::enter()?);
+        Ok(())
+    }
+
+    fn redraw(&mut self) {
+        // The child scrolled the terminal, so ratatui's record of what is on
+        // screen is fiction and a diffed frame would paint almost nothing.
+        if let Err(err) = self.terminal.clear() {
+            tracing::error!(%err, "could not clear after the hand-off");
+        }
+    }
+
+    fn desk_sources_changed(&mut self) -> bool {
+        handoff::desk_sources_changed()
     }
 }
 

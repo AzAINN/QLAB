@@ -214,3 +214,61 @@ def test_the_proposal_route_serves_the_same_object(session):
 - **Spec coverage:** one click → F2/F4; one proposal → F1; one workflow → F3; cardinality → G1/G2; method choosable → G3/G4; predictors runnable → H1/H2; watch + scout → I2/I3/I4; matrix visible → I1; record → J1.
 - **Placeholders:** the Rust tasks state behaviours, keys, payloads and golden names rather than full code; implementers read the sibling views (the NEWS card precedent) — deliberate, as in the prior two plans.
 - **Type consistency:** `targets_hash` string everywhere; `max_holdings: int | None`; approval kinds `plan` (default) and `universe_change`; policy ids match `_POLICIES` keys; lane names come from `board._validated_models`, not invented.
+
+---
+
+## Stream K — Atlas takes charge (added 2026-08-31 after the operator's second review)
+
+The operator asked Atlas to "create a desk_rebalance_review starter" and Atlas
+answered "I can't create workflows — that's your path, not mine", with fifty
+stale July tasks and a 31-day-old board behind it. Rulings: Atlas starts and
+resumes research workflows itself, from the chat, within the mode gates; only
+booking stays a human click. The real Claude CLI can be opened on the desk —
+as Atlas (the qlab MCP server is the personality provider, Claude runs it) or
+as a builder on the repo. What a build produces gets a place to render.
+Stale work expires on its own. Granite/ollama remain choosable as the Atlas
+reasoner; the CLI hand-offs are Claude-only and say so.
+
+### Task K1: Atlas starts the work itself, and stale work expires
+
+**Files:** `qlab/ui/server.py` (chat tool handlers), `qlab/tui/claude.py` (`_CHAT_TOOLS`), `qlab/operator/atlas.py` + `agents/atlas.md` (persona; then `python -m qlab.agents.loader sync`), `qlab/operator/heartbeat.py` (expiry), tests in `tests/test_ui.py`, `tests/test_agents.py`, `tests/test_heartbeat.py` (or the tick tests' module).
+
+**Interfaces:**
+- Chat tools for the Atlas reasoner: `workflow.start(template_id, goal="")` → `check_startable(template, mode, facts)`; research templates start at once (one at a time — F3's rule; a second is queued and named), plan-creating templates start in `propose` mode and end at a checked plan (the single proposal), nothing ever executes; `workflow.resume(workflow_id)`; `atlas.task.create(kind, reason)`; `approvals.list()`. Each is a thin owner method the existing `/api/workflows/start`, resume and task routes already implement — no second code path.
+- Expiry: on the tick, Atlas tasks older than the trigger cutoff (find the existing 5-day constant) become `expired` with reason `older than the N-day cutoff`, once; workflows with no phase progress in 7 days become `stale` (never deleted); `system_status` carries `expired_tasks` and `stale_workflows` counts.
+- Persona: "You create and run research workflows yourself and say what you started; you never book — booking is the one click the operator makes."
+
+- [ ] Tests: `workflow.start` from the chat starts a research template and returns its id; a plan-creating template in `research` mode is refused by name (the mode gate, unchanged); in `propose` mode it starts; a second start while one runs is queued and named; 50 stale tasks expire in one tick and a fresh one stays; `agents/atlas.md`'s tool list gains exactly the new names; `role_scopes` shows no trader scope.
+- [ ] Commit `feat(atlas): the desk manager starts its own research, and stale work expires`
+
+### Task K2: `/cli` and `/build` — the real Claude CLI on the desk
+
+**Files:** `qlab/autopilot/cli.py` (verbs `qlab cli` and `qlab build "<request>"`), `qlab/tui/claude.py` (argv builders), Rust `src/ui/shell.rs` + `src/cmd.rs` + `src/dispatch.rs` (commands `/cli`, `/build <request>`: leave the alternate screen, disable mouse capture, spawn the child in the repo root, wait, restore), `input.rs`, docs.
+
+**Interfaces:**
+- `qlab cli`: interactive `claude` with `--mcp-config <the qlab-operator proxy config the workforce already writes>`, `--append-system-prompt <Atlas persona>`, `--allowedTools <proxy tools + WebSearch,WebFetch>`; refuses with a named remedy when the `claude` binary is absent or the owner is down.
+- `qlab build "<request>"`: interactive `claude` in the repo root with a builder system prompt (repo conventions from CLAUDE.md; where a visual goes — Task K3; how to rebuild: `cd clients/atlas-tui && cargo build --release`, then `qlab --restart runtime`), Claude Code's own default tools and permission prompts (the operator is in the loop); the request is the first message.
+- The TUI's `/cli` and `/build` suspend and restore the terminal; on return from `/build`, if `git status` shows changes under `qlab/` or `clients/atlas-tui/`, one line offers `qlab --restart runtime`. GLASS: neither command exists (census).
+
+- [ ] Tests: exact argv for both builders; absent-binary refusal; the suspend/restore sequence with a fake spawner; glass census unchanged.
+- [ ] Commit `feat(cli): open the real Claude CLI on the desk — as Atlas, or as a builder`
+
+### Task K3: VISUALS — what a build produced, rendered in the desk
+
+**Files:** `qlab/visuals/__init__.py` (registry: every module in `qlab/visuals/` exposing `TITLE: str` and `render(params: dict) -> str`), `qlab/visuals/quantum_circuit.py` (dependency-free ASCII drawer of the angle-encoding circuit the kernel lane uses: one wire per feature, `RY(θ)` then a ZZ entangler row, parameters read from the last predictor run), `qlab/ui/server.py` (`GET /api/visuals`, `GET /api/visuals/<name>?param=…`), Rust `src/ui/views/visuals.rs` (new view, key `0`/next free: list + render pane, Up/Down pick, Enter render, scrollable), `model.rs`, `net/http.rs`, goldens; the K2 builder prompt names this as where a visual goes.
+
+- [ ] Tests: the registry discovers a module and refuses one without `render`; the circuit for 3 features has 3 wires and the gate glyphs; the route serves text; goldens both postures.
+- [ ] Commit `feat(visuals): a place for what a build draws, starting with the circuit`
+
+### Task K4: Rights — who may do what, set on the desk
+
+**Files:** `qlab/ui/server.py` (`GET/POST /api/atlas/rights` → `{web: bool, workflows: bool, build: bool}`, persisted in `state_path("atlas_rights.json")` with an audit event; defaults `web: true, workflows: true, build: true`), `qlab/tui/claude.py` (reads rights when building the chat tools and the `/cli` argv), Rust MODELS card (rights rows, Space/click toggles beside the existing backend picker; a line that the CLI hand-offs are Claude-only when granite/ollama is the reasoner), tests both sides.
+
+- [ ] Tests: rights persist and reload; `web: false` removes the web tools from the chat argv; `workflows: false` makes `workflow.start` refuse by name; goldens.
+- [ ] Commit `feat(atlas): rights are set on the desk, not in a file`
+
+### Task K5 (controller, done 2026-08-31): clean slate
+
+`.lab` (108 MB, July–August state) archived to `.lab-archive/20260830-235115`; the owner restarted on a fresh registry. K1's expiry keeps stale work from re-accumulating.
+
+**Order amendment:** K2 may run at once (its files are disjoint from F/G); K1 after F2 (both edit `server.py`); K3 and K4 after K1.

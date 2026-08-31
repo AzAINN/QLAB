@@ -263,10 +263,15 @@ pub fn for_event(ev: &AppEvent) -> Option<Toast> {
         // is naming the keyboard rather than the news. A refusal an operator
         // cannot see is the hung-key reading this workstation refuses
         // everywhere else.
+        //
+        // The stamp is ignored on purpose: a refusal belongs to no pane
+        // (`store::NO_PANE`), and one that arrived from a pane since closed is
+        // still a keystroke that went nowhere.
         #[cfg(feature = "operator")]
-        AppEvent::Pty(crate::pty::PtyEvent::Failed { said }) => {
-            Some(Toast::new(Level::Alarm, "qlab cli", said.clone()))
-        }
+        AppEvent::Pty {
+            event: crate::pty::PtyEvent::Failed { said },
+            ..
+        } => Some(Toast::new(Level::Alarm, crate::store::CHILD, said.clone())),
         _ => None,
     }
 }

@@ -123,11 +123,25 @@ pub enum AppEvent {
     /// `(store, fx, instant)`: the `vt100::Parser` lives in the store and
     /// advances here, on an event, never inside a `draw`.
     ///
+    /// **It says which pane said it, because the bus outlives the pane.**
+    /// `close_pty` signals the child and returns — it does not join the reader
+    /// thread — so a closed session's last bytes and its ending are still in
+    /// flight while the next `/cli` is opening. Anonymous, they land on
+    /// whatever pane is open when they arrive: the desk reports a live child as
+    /// ended, and the store *drops that live session to say it*, killing the
+    /// Claude the sentence was never about. The staleness lives in this queue,
+    /// so the identity has to travel on the event.
+    ///
     /// **Gated with the module that produces it.** `PtyEvent` lives in `pty`,
     /// which the monitoring build does not compile at all: it has no command
     /// that opens a pane, so it has no child to hear from.
     #[cfg(feature = "operator")]
-    Pty(crate::pty::PtyEvent),
+    Pty {
+        /// The pane this came from, stamped by the forwarder that opened it.
+        /// `store::NO_PANE` for a refusal, which belongs to no pane at all.
+        pane: u64,
+        event: crate::pty::PtyEvent,
+    },
     /// What the owner said about a write this client asked for.
     ///
     /// On the bus rather than handled where it is awaited: a write runs in its

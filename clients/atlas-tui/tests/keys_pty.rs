@@ -68,6 +68,17 @@ async fn desk_with(child: &'static Script) -> (Store, Views, Bus) {
     (store, views, (tx, rx))
 }
 
+/// The stamp `desk_with`'s pane is given: every test here opens exactly one.
+///
+/// An event on the bus names the pane it came from, because the bus outlives
+/// the pane — see `store_pty.rs`, where the rule and its numbering are pinned.
+const FIRST: u64 = 1;
+
+/// One event as it leaves that pane.
+fn from_pane(pane: u64, event: PtyEvent) -> AppEvent {
+    AppEvent::Pty { pane, event }
+}
+
 /// One keystroke, routed exactly as the runtime routes it.
 fn press(store: &mut Store, views: &mut Views, code: KeyCode) -> Option<Command> {
     atlas::ui::shell::on_key(KeyEvent::new(code, KeyModifiers::NONE), store, views)
@@ -230,10 +241,13 @@ async fn a_child_that_has_ended_takes_no_keys_and_says_nothing_per_keystroke() {
     store.pty_focus(true);
 
     store.apply(
-        AppEvent::Pty(PtyEvent::Exited {
-            status: 0,
-            said: "`qlab cli` ended on its own".to_string(),
-        }),
+        from_pane(
+            FIRST,
+            PtyEvent::Exited {
+                status: 0,
+                said: "`qlab cli` ended on its own".to_string(),
+            },
+        ),
         Instant::now(),
     );
     assert!(
@@ -247,7 +261,11 @@ async fn a_child_that_has_ended_takes_no_keys_and_says_nothing_per_keystroke() {
         press(&mut store, &mut views, code);
     }
     while let Ok(ev) = rx.try_recv() {
-        if let AppEvent::Pty(PtyEvent::Failed { said }) = &ev {
+        if let AppEvent::Pty {
+            event: PtyEvent::Failed { said },
+            ..
+        } = &ev
+        {
             assert!(
                 !said.contains("did not reach it"),
                 "a keystroke was forwarded to a child that had ended: {said}"
@@ -372,10 +390,13 @@ async fn a_dead_pane_does_not_hand_the_focus_key_to_a_row_nobody_can_see() {
     store.posture = Posture::Operator;
     store.nav.view = ViewId::Atlas;
     store.apply(
-        AppEvent::Pty(PtyEvent::Exited {
-            status: 0,
-            said: "`qlab cli` ended on its own".to_string(),
-        }),
+        from_pane(
+            FIRST,
+            PtyEvent::Exited {
+                status: 0,
+                said: "`qlab cli` ended on its own".to_string(),
+            },
+        ),
         Instant::now(),
     );
 

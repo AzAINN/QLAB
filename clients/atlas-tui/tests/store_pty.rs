@@ -72,6 +72,24 @@ impl Spawn for Missing {
     }
 }
 
+/// The stamps `open_pty` gives the first and second panes of a run.
+///
+/// Nothing in production reads a pane's id back — the store hands it to the
+/// forwarder and compares it in the fold, and that is the whole of it — so a
+/// test that hands the fold an event *by hand* has to agree with the store's
+/// own numbering. Nothing here asserts that numbering directly, and nothing
+/// has to: every test below that stamps `FIRST` while the first pane is open
+/// fails if the store started counting anywhere else, and the two at the bottom
+/// fail if `SECOND` is not a different number from it.
+const FIRST: u64 = 1;
+const SECOND: u64 = 2;
+
+/// One event as it leaves a pane, for a test that is not waiting on a child to
+/// produce the real thing.
+fn from_pane(pane: u64, event: PtyEvent) -> AppEvent {
+    AppEvent::Pty { pane, event }
+}
+
 type Bus = (UnboundedSender<AppEvent>, UnboundedReceiver<AppEvent>);
 
 /// A desk with a pane in it, and the bus its child writes onto.
@@ -125,9 +143,18 @@ async fn next(rx: &mut UnboundedReceiver<AppEvent>, what: &str) -> AppEvent {
 /// The sentence a pty event carries, whatever shape it came in.
 fn said(ev: &AppEvent) -> String {
     match ev {
-        AppEvent::Pty(PtyEvent::Failed { said }) => said.clone(),
-        AppEvent::Pty(PtyEvent::Exited { said, .. }) => said.clone(),
-        AppEvent::Pty(PtyEvent::Bytes(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        AppEvent::Pty {
+            event: PtyEvent::Failed { said },
+            ..
+        } => said.clone(),
+        AppEvent::Pty {
+            event: PtyEvent::Exited { said, .. },
+            ..
+        } => said.clone(),
+        AppEvent::Pty {
+            event: PtyEvent::Bytes(bytes),
+            ..
+        } => String::from_utf8_lossy(bytes).into_owned(),
         _ => panic!("not a pty event"),
     }
 }
@@ -143,7 +170,10 @@ async fn the_childs_bytes_reach_the_screen_and_owe_a_frame() {
     store.take_dirty();
 
     store.apply(
-        AppEvent::Pty(PtyEvent::Bytes(b"the desk is up on :8765\r\n".to_vec())),
+        from_pane(
+            FIRST,
+            PtyEvent::Bytes(b"the desk is up on :8765\r\n".to_vec()),
+        ),
         Instant::now(),
     );
 
@@ -164,7 +194,7 @@ async fn bytes_with_no_pane_to_draw_them_are_not_a_pane() {
     // put a terminal back on the desk that the operator had just closed.
     let (mut store, (_tx, _rx)) = desk();
     store.apply(
-        AppEvent::Pty(PtyEvent::Bytes(b"orphan\r\n".to_vec())),
+        from_pane(FIRST, PtyEvent::Bytes(b"orphan\r\n".to_vec())),
         Instant::now(),
     );
     assert_eq!(store.pty_state(), PtyState::Absent);
@@ -210,10 +240,13 @@ async fn a_non_zero_exit_keeps_its_own_status_in_the_sentence() {
     store.open_pty(&WAITING, 40, 10, tx).expect("started");
 
     store.apply(
-        AppEvent::Pty(PtyEvent::Exited {
-            status: 3,
-            said: "`qlab cli` exited 3".to_string(),
-        }),
+        from_pane(
+            FIRST,
+            PtyEvent::Exited {
+                status: 3,
+                said: "`qlab cli` exited 3".to_string(),
+            },
+        ),
         Instant::now(),
     );
 
@@ -236,10 +269,13 @@ async fn an_ending_heard_after_the_pane_was_closed_does_not_put_it_back() {
     // arrives after the pane is gone. A store that acted on it would draw a
     // terminal nobody has open.
     store.apply(
-        AppEvent::Pty(PtyEvent::Exited {
-            status: 0,
-            said: "`qlab cli` ended on its own".to_string(),
-        }),
+        from_pane(
+            FIRST,
+            PtyEvent::Exited {
+                status: 0,
+                said: "`qlab cli` ended on its own".to_string(),
+            },
+        ),
         Instant::now(),
     );
     assert_eq!(store.pty_state(), PtyState::Absent);
@@ -254,7 +290,7 @@ async fn a_second_child_is_refused_by_name() {
         .open_pty(&WAITING, 40, 10, tx.clone())
         .expect("the first child started");
     store.apply(
-        AppEvent::Pty(PtyEvent::Bytes(b"the first child\r\n".to_vec())),
+        from_pane(FIRST, PtyEvent::Bytes(b"the first child\r\n".to_vec())),
         Instant::now(),
     );
 
@@ -309,10 +345,13 @@ async fn the_keyboard_goes_back_to_the_desk_when_the_child_ends() {
     assert!(store.pty_focused(), "a live child can hold the keyboard");
 
     store.apply(
-        AppEvent::Pty(PtyEvent::Exited {
-            status: 0,
-            said: "`qlab cli` ended on its own".to_string(),
-        }),
+        from_pane(
+            FIRST,
+            PtyEvent::Exited {
+                status: 0,
+                said: "`qlab cli` ended on its own".to_string(),
+            },
+        ),
         Instant::now(),
     );
 
@@ -333,10 +372,13 @@ async fn the_keyboard_is_only_ever_a_live_childs() {
 
     store.open_pty(&WAITING, 40, 10, tx).expect("started");
     store.apply(
-        AppEvent::Pty(PtyEvent::Exited {
-            status: 0,
-            said: "`qlab cli` ended on its own".to_string(),
-        }),
+        from_pane(
+            FIRST,
+            PtyEvent::Exited {
+                status: 0,
+                said: "`qlab cli` ended on its own".to_string(),
+            },
+        ),
         Instant::now(),
     );
     store.pty_focus(true);
@@ -411,8 +453,14 @@ async fn closing_the_pane_ends_the_child_and_takes_the_pane_with_it() {
     // And the child is really gone rather than orphaned on a pty nobody reads.
     loop {
         match next(&mut rx, "the closed child to end").await {
-            AppEvent::Pty(PtyEvent::Exited { .. }) => break,
-            AppEvent::Pty(PtyEvent::Bytes(_)) => continue,
+            AppEvent::Pty {
+                event: PtyEvent::Exited { .. },
+                ..
+            } => break,
+            AppEvent::Pty {
+                event: PtyEvent::Bytes(_),
+                ..
+            } => continue,
             other => panic!("expected the child to end, got {:?}", said(&other)),
         }
     }
@@ -425,14 +473,20 @@ async fn a_child_started_after_another_ended_gets_a_clean_screen() {
         .open_pty(&WAITING, 40, 10, tx.clone())
         .expect("the first child started");
     store.apply(
-        AppEvent::Pty(PtyEvent::Bytes(b"what the last one said\r\n".to_vec())),
+        from_pane(
+            FIRST,
+            PtyEvent::Bytes(b"what the last one said\r\n".to_vec()),
+        ),
         Instant::now(),
     );
     store.apply(
-        AppEvent::Pty(PtyEvent::Exited {
-            status: 0,
-            said: "`qlab cli` ended on its own".to_string(),
-        }),
+        from_pane(
+            FIRST,
+            PtyEvent::Exited {
+                status: 0,
+                said: "`qlab cli` ended on its own".to_string(),
+            },
+        ),
         Instant::now(),
     );
 
@@ -458,9 +512,12 @@ async fn a_keystroke_that_never_reached_the_child_is_said() {
     // The pane's border can only carry a sentence about a child that has
     // *ended* — while one is live the border is naming the keyboard — so a
     // keystroke that went nowhere has no surface but a toast.
-    let ev = AppEvent::Pty(PtyEvent::Failed {
-        said: "`qlab cli` has ended — what you typed did not reach it".to_string(),
-    });
+    let ev = from_pane(
+        FIRST,
+        PtyEvent::Failed {
+            said: "`qlab cli` has ended — what you typed did not reach it".to_string(),
+        },
+    );
     let toast = toast::for_event(&ev).expect("a lost keystroke is said somewhere");
     assert!(
         toast.message.contains("did not reach it"),
@@ -469,11 +526,103 @@ async fn a_keystroke_that_never_reached_the_child_is_said() {
     );
 
     // And a byte batch is not news: fifty a second, each one already on screen.
-    assert!(toast::for_event(&AppEvent::Pty(PtyEvent::Bytes(b"x".to_vec()))).is_none());
+    assert!(toast::for_event(&from_pane(FIRST, PtyEvent::Bytes(b"x".to_vec()))).is_none());
     // Nor is an ending, which the pane's own border states.
-    assert!(toast::for_event(&AppEvent::Pty(PtyEvent::Exited {
-        status: 0,
-        said: "`qlab cli` ended on its own".to_string(),
-    }))
+    assert!(toast::for_event(&from_pane(
+        FIRST,
+        PtyEvent::Exited {
+            status: 0,
+            said: "`qlab cli` ended on its own".to_string(),
+        }
+    ))
     .is_none());
+}
+
+// -- one pane's news is not another's ----------------------------------------
+
+#[tokio::test]
+async fn a_dead_childs_ending_must_not_end_the_child_that_replaced_it() {
+    let (mut store, (tx, mut rx)) = desk();
+    store
+        .open_pty(&WAITING, 40, 10, tx.clone())
+        .expect("the first child started");
+    // `close_pty` signals and returns — it does not join the reader thread — so
+    // the ending it asked for is still in flight while the next child opens.
+    store.close_pty();
+    let ending = loop {
+        let ev = next(&mut rx, "the closed child's own ending").await;
+        if matches!(
+            &ev,
+            AppEvent::Pty {
+                event: PtyEvent::Exited { .. },
+                ..
+            }
+        ) {
+            break ev;
+        }
+    };
+
+    store
+        .open_pty(
+            &Script("read x; printf 'the second child is alive: %s\\r\\n' \"$x\""),
+            40,
+            10,
+            tx,
+        )
+        .expect("the second child started");
+    store.apply(ending, Instant::now());
+
+    // Two failures at once if this is dispatched on "is there a pane": the desk
+    // reports a live session as ended, carrying a sentence about a different
+    // child — and writing `Gone` over the live arm drops that `PtySession`,
+    // whose `Drop` kills it. The store would be making its own false report
+    // true, on a session somebody is working in.
+    assert_eq!(store.pty_state(), PtyState::Running);
+    store.pty_write(b"yes\n");
+    until(&mut store, &mut rx, "the second child to answer", |store| {
+        screen(store).contains("the second child is alive: yes")
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_dead_childs_last_bytes_must_not_land_on_the_new_childs_screen() {
+    let (mut store, (tx, _rx)) = desk();
+    store
+        .open_pty(&WAITING, 40, 10, tx.clone())
+        .expect("the first child started");
+    store.close_pty();
+    store
+        .open_pty(&WAITING, 40, 10, tx)
+        .expect("the second child started");
+
+    store.apply(
+        from_pane(
+            FIRST,
+            PtyEvent::Bytes(b"what the dead child was saying\r\n".to_vec()),
+        ),
+        Instant::now(),
+    );
+
+    assert!(
+        !screen(&store).contains("what the dead child was saying"),
+        "a closed child's trailing bytes painted into the pane that replaced it: {:?}",
+        screen(&store)
+    );
+
+    // And the open pane's own bytes still arrive. Without this the rule under
+    // test could be "drop everything" and read as passing — which is a terminal
+    // that never draws, discovered by an operator rather than here.
+    store.apply(
+        from_pane(
+            SECOND,
+            PtyEvent::Bytes(b"what the new child is saying\r\n".to_vec()),
+        ),
+        Instant::now(),
+    );
+    assert!(
+        screen(&store).contains("what the new child is saying"),
+        "the open pane's own bytes are not stale: {:?}",
+        screen(&store)
+    );
 }

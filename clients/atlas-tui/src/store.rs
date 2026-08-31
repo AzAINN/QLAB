@@ -456,7 +456,17 @@ impl Posture {
 /// child is always the desk's own verb, so a sentence that could name something
 /// else would be the place that claim quietly stopped being true.
 #[cfg(feature = "operator")]
-const CHILD: &str = "qlab cli";
+pub(crate) const CHILD: &str = "qlab cli";
+
+/// The stamp on a sentence that belongs to no pane.
+///
+/// A refusal is posted with no session behind it — there is no pane to have
+/// come from, and [`Store::open_pty`] sends one before it has taken an id at
+/// all. Zero is never given to a pane, so a `Failed` cannot be mistaken for
+/// news from one; the fold exempts `Failed` from the staleness check anyway,
+/// and this is what keeps the field from having to be filled with a lie.
+#[cfg(feature = "operator")]
+pub(crate) const NO_PANE: u64 = 0;
 
 /// What the desk adds to an ending `pty.rs` wrote.
 ///
@@ -488,6 +498,16 @@ pub enum PtyState {
 /// The pane: one screen, and whatever is left of the child that wrote it.
 #[cfg(feature = "operator")]
 struct Pane {
+    /// Which pane this is, in a run's own monotonic numbering.
+    ///
+    /// The desk can hold one pane at a time, so this is not an index into
+    /// anything — it is an *identity*, and it exists because the bus outlives
+    /// the pane. Every event a session posts is stamped with the id its pane
+    /// had, and the fold drops the ones addressed to a pane that is no longer
+    /// this one. Without it a closed child's queued ending lands on its
+    /// successor: the desk reports a live session as over, and dropping the
+    /// live `PtySession` to say so kills it.
+    id: u64,
     /// Advanced in the fold and nowhere else. A parser stepped from a `draw`
     /// would make a frame a function of how many times it had been drawn.
     parser: vt100::Parser,
@@ -522,6 +542,7 @@ impl std::fmt::Debug for Pane {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (rows, cols) = self.parser.screen().size();
         f.debug_struct("Pane")
+            .field("id", &self.id)
             .field("screen", &format_args!("{cols}x{rows}"))
             .field("child", &self.child)
             .finish()
@@ -536,9 +557,10 @@ impl std::fmt::Debug for Pane {
 /// caller and a desk need different things from one refusal.
 #[cfg(feature = "operator")]
 fn refuse_pty(tx: &crate::bus::Tx, said: String) -> String {
-    let _ = tx.send(AppEvent::Pty(crate::pty::PtyEvent::Failed {
-        said: said.clone(),
-    }));
+    let _ = tx.send(AppEvent::Pty {
+        pane: NO_PANE,
+        event: crate::pty::PtyEvent::Failed { said: said.clone() },
+    });
     said
 }
 
@@ -810,6 +832,15 @@ pub struct Store {
     /// whole protocol.
     #[cfg(feature = "operator")]
     pty: Option<Pane>,
+    /// The id the last pane of this run was given.
+    ///
+    /// Monotonic and never reused, including across a refused open: an id that
+    /// came round again would make a stale event indistinguishable from a live
+    /// one, which is the whole thing `Pane::id` exists to tell apart. Bounded
+    /// only by `u64`, which one `/cli` per nanosecond would take six hundred
+    /// years to exhaust.
+    #[cfg(feature = "operator")]
+    next_pane: u64,
 }
 
 impl Default for Store {
@@ -864,6 +895,8 @@ impl Store {
             door_forced: false,
             #[cfg(feature = "operator")]
             pty: None,
+            #[cfg(feature = "operator")]
+            next_pane: NO_PANE,
         }
     }
 
@@ -1003,13 +1036,19 @@ impl Store {
                 format!("`{CHILD}` is already running in this pane"),
             ));
         }
+        // The id, taken after the guard so a refused open never spends one, and
+        // moved into the forwarder below so that every event this session posts
+        // carries the pane it came from — including the ones still in flight
+        // after that pane has been closed and another opened.
+        self.next_pane += 1;
+        let pane = self.next_pane;
         let (pty_tx, mut pty_rx) = tokio::sync::mpsc::unbounded_channel::<crate::pty::PtyEvent>();
         tokio::spawn(async move {
             while let Some(event) = pty_rx.recv().await {
                 // The desk is gone, so there is nobody left to tell. The
                 // session is dropped with the store that held it, which stops
                 // the child; this task just stops with it.
-                if tx.send(AppEvent::Pty(event)).is_err() {
+                if tx.send(AppEvent::Pty { pane, event }).is_err() {
                     break;
                 }
             }
@@ -1023,6 +1062,7 @@ impl Store {
         // No scrollback, because the pane offers no way to scroll into it — a
         // multiplexer inside the pane is out of scope by decision.
         self.pty = Some(Pane {
+            id: pane,
             parser: vt100::Parser::new(rows, cols, 0),
             child: PaneChild::Live {
                 session,
@@ -1126,6 +1166,17 @@ impl Store {
         {
             session.write(bytes);
         }
+    }
+
+    /// The pane an event is addressed to, if that pane is still the open one.
+    ///
+    /// The whole staleness rule, in one place so the two arms that fold a
+    /// child's news in cannot come to disagree about it. `None` covers both
+    /// ways an event can arrive too late — no pane at all, and a *different*
+    /// pane — because the desk owes the same answer to each: nothing.
+    #[cfg(feature = "operator")]
+    fn pane_for(&mut self, pane: u64) -> Option<&mut Pane> {
+        self.pty.as_mut().filter(|open| open.id == pane)
     }
 
     /// The pane changed shape: tell the child, and the screen it is parsed onto.
@@ -1281,16 +1332,18 @@ impl Store {
             // — so this fold never has to reason about a byte that outran an
             // exit or a second announcement of one ending.
             #[cfg(feature = "operator")]
-            AppEvent::Pty(event) => {
+            AppEvent::Pty { pane, event } => {
                 use crate::pty::PtyEvent;
                 match event {
                     PtyEvent::Bytes(bytes) => {
-                        // No pane is not an error: closing one drops the
-                        // session while bytes already on the channel are still
-                        // in flight, and a store that built a pane out of them
-                        // would put a terminal back that the operator closed.
-                        if let Some(pane) = &mut self.pty {
-                            pane.parser.process(&bytes);
+                        // Silence for a pane that is not the open one, and that
+                        // covers two arrivals rather than one: no pane at all —
+                        // a store that built one out of stray bytes would put
+                        // back a terminal the operator closed — and bytes from
+                        // a *closed* child, which would otherwise paint into
+                        // the session that replaced it.
+                        if let Some(open) = self.pane_for(pane) {
+                            open.parser.process(&bytes);
                             // Without this the pane repaints on the 100 ms idle
                             // floor, which is a terminal that lags every
                             // keystroke by up to a tenth of a second.
@@ -1302,19 +1355,30 @@ impl Store {
                         // keyboard back to the desk: focus is a field of the
                         // live arm. The *screen* stays, because the last thing
                         // a failing session printed is where it said why.
-                        if let Some(pane) = &mut self.pty {
-                            pane.child = PaneChild::Gone {
+                        //
+                        // Checked against the pane the ending came from, and
+                        // this is the arm where getting it wrong is worst:
+                        // writing `Gone` over a *live* arm drops that
+                        // `PtySession`, and its `Drop` kills the child. A stale
+                        // ending would not merely misreport a running session —
+                        // it would end it, to make its own report true.
+                        if let Some(open) = self.pane_for(pane) {
+                            open.child = PaneChild::Gone {
                                 said: format!("{said}{AGAIN}"),
                             };
                             self.dirty = true;
                         }
                     }
-                    // Nothing to hold: a `Failed` says something did **not**
-                    // happen — a child that never started, a keystroke that
-                    // went nowhere — and the pane's border can only speak for a
-                    // child that *ended*. It reaches the operator as a toast
-                    // (`toast::for_event`), which is this crate's own answer
-                    // for a failure with no surface of its own.
+                    // Nothing to hold, and — alone among the three — nothing
+                    // to check the stamp of either. A `Failed` says something
+                    // did **not** happen: a child that never started, a
+                    // keystroke that went nowhere. It changes no pane's state,
+                    // so a stale one can do no harm; and it is posted for
+                    // refusals that never had a pane at all ([`NO_PANE`]), so a
+                    // staleness check here would silence exactly the sentences
+                    // invariant 4 exists for. It reaches the operator as a
+                    // toast (`toast::for_event`), which is this crate's own
+                    // answer for a failure with no surface of its own.
                     PtyEvent::Failed { .. } => {}
                 }
             }

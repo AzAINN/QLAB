@@ -286,8 +286,18 @@ fn the_parser_that_holds_a_childs_screen_is_gated_wherever_it_is_named() {
         "the pane the store holds must be gated, verbatim"
     );
     assert!(
-        source("bus.rs").contains("#[cfg(feature = \"operator\")]\n    Pty(crate::pty::PtyEvent),"),
+        source("bus.rs").contains("#[cfg(feature = \"operator\")]\n    Pty {"),
         "the bus variant that carries a child's bytes must be gated, verbatim"
+    );
+    // And that variant says which pane it came from. Pinned here rather than
+    // left to the fold's own tests because it is the *shape* that makes the
+    // rule expressible: the bus outlives the pane, and an anonymous event is
+    // one the fold has no way to refuse — it would land on whichever pane is
+    // open when it arrives, and an ending landing that way drops a live
+    // `PtySession` and kills the child it was never about.
+    assert!(
+        source("bus.rs").contains("        pane: u64,\n        event: crate::pty::PtyEvent,"),
+        "a child's news must name the pane it came from"
     );
     // And the session is held in the store rather than in the runtime. `main.rs`
     // is in no test binary, so a child's lifecycle kept there would put "one
@@ -297,6 +307,25 @@ fn the_parser_that_holds_a_childs_screen_is_gated_wherever_it_is_named() {
         production_files_mentioning("PtySession"),
         vec!["pty.rs".to_string(), "store.rs".to_string()],
         "the session is opened where the state machine that refuses a second one lives"
+    );
+    // And the child has one name. `store::CHILD`'s own comment argues that a
+    // second spelling is where "the pane runs always the desk's own verb"
+    // quietly stops being true — so a toast, a refusal or a log line reads the
+    // constant, and the bare literal lives in exactly one production file.
+    assert_eq!(
+        production_files_mentioning("qlab cli\""),
+        vec!["store.rs".to_string()],
+        "the child is named from one constant"
+    );
+    // The single deliberate exception, asserted rather than tolerated: the
+    // border's title is the same name padded, which is a *different* string for
+    // a layout reason and cannot borrow this one. Naming it here is also the
+    // anchor proving this walk reaches the widget at all — and it means a
+    // second padded copy cannot appear quietly either.
+    assert_eq!(
+        production_files_mentioning("\" qlab cli \""),
+        vec!["ui/widgets/terminal.rs".to_string()],
+        "the pane's title is the one padded spelling"
     );
 }
 

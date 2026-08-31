@@ -409,8 +409,10 @@ class UISession:
         self._archive_stats_cache = None
         # (monotonic stamp, run revision, payload) per summary. These three are
         # recomposed on every /api/tui poll under the dispatch lock and each
-        # one scans hundreds of run rows; the registry's run revision is what
-        # makes the cache exact rather than merely timely. Same locking reason
+        # one scans hundreds of run rows. The registry's run revision makes the
+        # cache exact against new RUNS; a backtest row written under an
+        # existing run does not move it, so the ablation metrics are
+        # TTL-bounded (<= 30s) rather than exact. Same locking reason
         # as the archive cache above.
         self._research_lock = threading.Lock()
         self._research_cache: dict[str, tuple[float, int, object]] = {}
@@ -3030,6 +3032,8 @@ class UISession:
         with self._news_lock:
             cached = self._grounded_news
             if cached is not None and cached[0] == key:
+                # Handed out shared, not copied: GroundedNews is read-only by
+                # convention, the same rule the handler payloads follow.
                 return cached[1]
         # Grounding runs outside the lock: it is pure over its arguments, and
         # holding the news lock across it would serialize a fetcher behind it.

@@ -50,11 +50,18 @@ def test_two_threads_through_one_throttle_never_interleave_the_stamp():
         t.join()
 
     assert len(stamps) == 12
+    # Deliberately NOT asserting the append order: `wait()` returns before the
+    # caller appends, so the order of the list is a race the throttle does not
+    # govern. What it does govern is the VALUES, and they carry the whole
+    # claim -- twelve distinct stamps, each a full interval past the last, is
+    # exactly "no two callers stamped inside one window".
     ordered = sorted(stamps)
-    assert ordered == stamps          # no thread stamped out of turn
-    # The first call is free; every later one is spaced by the full interval.
+    assert len(set(stamps)) == 12
     gaps = [b - a for a, b in zip(ordered, ordered[1:])]
     assert all(gap >= 0.5 - 1e-9 for gap in gaps), gaps
+    # The first call is free, so eleven waits of one interval and no more.
+    assert ordered[0] == 0.0
+    assert ordered[-1] == 11 * 0.5
 
 
 def test_the_first_call_does_not_wait():

@@ -18,6 +18,7 @@ Design commitments:
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import uuid
@@ -358,6 +359,11 @@ class Registry:
         # Bumped by log_run; read by anything caching a summary of the runs
         # table. In-process only, and deliberately so: it answers "did a run
         # land since I looked", which is a question about this writer's life.
+        # The value comes from a counter rather than `+= 1`, which is a read,
+        # an add and a store that two threads can interleave into one lost
+        # increment. `next()` on itertools.count is atomic, so every logger
+        # takes a value no other logger will take.
+        self._run_revisions = itertools.count(1)
         self.run_revision = 0
         # Both default to TRUE. One stray PRAGMA inside the single-writer
         # process would then download an extension over the network — a silent
@@ -498,11 +504,14 @@ class Registry:
             [run_id, kind, _j(spec), _now()],
         )
         # The invalidation seam for anything that caches a summary OF the runs
-        # table. There is one writer, so every run in this process passes here;
-        # a caller that saw revision N and still sees N knows no run landed in
-        # between. A re-logged identical run bumps it too, which costs one
-        # rebuild and never serves a stale answer.
-        self.run_revision += 1
+        # table. There is one writer, so every run in this process passes here.
+        # The guarantee is exactly this and no more: any read AFTER a log_run
+        # returns something different from any observation taken BEFORE it, so
+        # a cache that still sees its own recorded value knows no run landed in
+        # between. It is not a run count and it need not be ordered across
+        # concurrent loggers. A re-logged identical run moves it too, which
+        # costs one rebuild and never serves a stale answer.
+        self.run_revision = next(self._run_revisions)
         return run_id
 
     # -- research objects ---------------------------------------------------
@@ -2424,7 +2433,7 @@ class Registry:
         """
         if not as_of:
             raise ValueError(
-                "search_news requires an explicit as_of; defaulting it to now "
+                "a news query requires an explicit as_of; defaulting it to now "
                 "would make every historical query a present-tense one")
         where = ["published <= ?"]
         params: list = [as_of]

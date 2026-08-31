@@ -694,3 +694,23 @@ def test_counting_matches_is_a_count_and_never_a_million_row_page():
             as_of=as_of, include_synthetic=True) == len(rows)
     finally:
         session.registry.close()
+
+
+def test_both_news_query_entry_points_refuse_a_missing_as_of_by_their_own_name():
+    """The point-in-time boundary is required on every path into the archive.
+    The refusal comes from the shared WHERE builder, so it must name the rule
+    and not one of the two callers -- a count caller told 'search_news requires'
+    is sent to read the wrong function."""
+    import pytest
+
+    from qlab.state.registry import Registry
+
+    registry = Registry(":memory:")
+    try:
+        for call in (lambda: registry.search_news(as_of=""),
+                     lambda: registry.count_news_matches(as_of="")):
+            with pytest.raises(ValueError, match="a news query requires an "
+                                                 "explicit as_of"):
+                call()
+    finally:
+        registry.close()

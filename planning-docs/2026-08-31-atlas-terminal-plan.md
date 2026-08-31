@@ -110,6 +110,8 @@
 
 **Files:** `clients/atlas-tui/src/ui/views/atlas.rs`, `clients/atlas-tui/src/cmd.rs` (`Scope::Cli` resolves to opening the pane), `clients/atlas-tui/src/dispatch.rs` or `main.rs` (the open/kill call sites); goldens.
 
+**From A3's review (binding):** `open_pty` uses `tokio::spawn` and therefore PANICS rather than refusing if called outside the runtime (`store.rs:1006`). Every call site you add must be on the runtime's own loop; if you ever need one that might not be, it owes a sentence instead of a panic (invariant 4).
+
 **Resize (ruled, binding).** `pty_resize` deliberately cannot be called from `draw`, and the pane's size is only known there. Use this client's own idiom: the pane records its INNER rect into a `Cell<Rect>` during draw exactly as `atlas.rs` already does for `input_row` (`:92`) and `book_word` (`:137`); after the frame the runtime compares it with what the pty was last told and calls `store.pty_resize(cols, rows)` only when it differs. One source of truth for the geometry — the layout code — and no mutation of the store inside a draw. A terminal resize needs no special case: the next frame reports the new rect.
 
 **Leaving a dead pane (ruled, binding).** `Ended` keeps the pane up and only `close_pty` removes it, so the operator owes a way out: `/cli` on an `Ended` pane restarts in place (close, then open), and one key — free in `input::KEYMAP`, owed a help row — closes the pane and gives the column back to the chat. **Exception to "A2 owns the border copy":** A5 writes the one new border line for the `Ended` state naming that key, because it is a new state's sentence rather than a rewording of A2's two. A retry that fails REPLACES the pane's sentence rather than adding a second: one frame, one story about one child.

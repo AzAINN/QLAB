@@ -507,3 +507,28 @@ def test_the_atlas_persona_places_the_action_tools_on_the_desk_not_in_a_subagent
     assert ("These four reach the owner through the desk chat and `qlab cli`; "
             "a subagent run against the combined MCP server does not have "
             "them.") in body
+
+
+def test_only_atlas_grants_a_chat_action_tool():
+    """The chat actions are the desk manager's, and no one else's.
+
+    `_proxy_tool` now resolves these four, so a workforce role that named one
+    would quietly receive it in its built grant rather than being dropped. The
+    mapper answering is what makes this assertion necessary: before it did,
+    the same mistake failed loudly.
+    """
+    from qlab.tui.claude import CHAT_ACTION_BASES
+
+    for agent in load_agents():
+        if agent.name == "atlas":
+            continue
+        for tool in agent.tools:
+            assert tool_base_name(tool) not in CHAT_ACTION_BASES, (
+                f"{agent.name} grants {tool}")
+
+
+def test_the_atlas_role_says_what_the_web_may_and_may_not_become():
+    body = " ".join(_by_name()["atlas"].body.split())
+    assert ("Search and fetch are read-only: cite the URL for anything you "
+            "take from them") in body
+    assert ("never as a weight, a size, or a price direction") in body

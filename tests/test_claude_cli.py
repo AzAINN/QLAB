@@ -493,3 +493,105 @@ def test_with_the_build_right_qlab_build_opens_as_before(monkeypatch):
     monkeypatch.setattr(verbs, "_run_interactive", record)
     assert verbs._cmd_build(type("A", (), {"request": "add a heatmap"})()) == 0
     assert seen["argv"][0] == "/usr/bin/claude"
+
+
+# -- fix round 1: the web the operator asked for, declared ------------------
+
+def test_the_chat_prompt_states_the_web_boundary_only_when_the_web_is_granted():
+    """A tool granted without a boundary is a tool with no boundary.
+
+    `web: true` gives the desk chat WebSearch/WebFetch it did not have before
+    this task, so the prompt has to say what the web is for and — more
+    importantly — what a web finding may never become on this desk.
+    """
+    _write_rights({"web": True, "workflows": True, "build": True})
+    granted = cc.chat_system_prompt()
+    for phrase in ("read-only", "cite", "news"):
+        assert phrase in granted.lower(), phrase
+    # The boundary that matters: nothing off the web becomes a number here.
+    assert "never as a weight, a size, or a price direction" in granted
+
+    _write_rights({"web": False, "workflows": True, "build": True})
+    withheld = cc.chat_system_prompt()
+    assert "never as a weight, a size, or a price direction" not in withheld
+    assert "WebSearch" not in withheld
+    # Everything else about the desk is unchanged: the web paragraph is added,
+    # not a different prompt.
+    assert withheld in granted
+
+
+def test_the_chat_agent_definition_carries_the_prompt_for_its_own_rights():
+    _write_rights({"web": False, "workflows": True, "build": True})
+    agent = cc._chat_agent()["qlab-desk"]
+    assert agent["prompt"] == cc.chat_system_prompt()
+    assert "WebSearch" not in agent["tools"]
+
+
+# -- fix round 1: a corrupt rights file never crashes a launcher ------------
+
+def test_a_corrupt_rights_file_leaves_the_chat_launcher_saying_the_remedy(
+        monkeypatch):
+    path = _write_rights("{not json")
+    session = cc.ClaudeSession(lambda event: None,
+                               runtime_url="http://127.0.0.1:8765",
+                               offline=True)
+    monkeypatch.setattr(cc, "resolve_claude_executable", lambda: "/usr/bin/claude")
+
+    def never(*a, **k):
+        raise AssertionError("nothing may be spawned on an unreadable rights file")
+
+    monkeypatch.setattr(cc.subprocess, "Popen", never)
+    # Refused, not raised: the owner thread that calls this has no handler, and
+    # a traceback there is a desk whose chat is simply dead with no sentence.
+    assert session.start("hello", chat=True) is False
+    assert str(path) in session.last_error
+    assert "delete it to restore the defaults" in session.last_error
+
+
+def test_the_chat_launch_reads_the_rights_once_for_both_halves(monkeypatch):
+    """One read per launch: the argv and the agent file must not disagree.
+
+    A POST landing between two reads would otherwise produce a session whose
+    allowlist and whose agent definition were built from different rights,
+    which is a grant nobody chose.
+    """
+    reads = []
+    real = cc.load_atlas_rights
+
+    def counted():
+        reads.append(1)
+        return real()
+
+    monkeypatch.setattr(cc, "load_atlas_rights", counted)
+    monkeypatch.setattr(cc, "resolve_claude_executable", lambda: "/usr/bin/claude")
+
+    def refuse_to_spawn(*a, **k):
+        # Both readers — the argv's `chat_tools` and the agent definition's —
+        # run before this, so a launch that dies here has still exercised the
+        # pair. Nothing is spawned in a test.
+        raise OSError("not spawning anything in a test")
+
+    monkeypatch.setattr(cc.subprocess, "Popen", refuse_to_spawn)
+    session = cc.ClaudeSession(lambda event: None,
+                               runtime_url="http://127.0.0.1:8765",
+                               offline=True)
+    assert session.start("hello", chat=True) is False
+    assert "not spawning" in session.last_error
+    assert len(reads) == 1, reads
+
+
+def test_the_verbs_refuse_a_corrupt_rights_file_rather_than_traceback(monkeypatch):
+    from qlab.autopilot import cli as verbs
+
+    _write_rights("{not json")
+    monkeypatch.setattr(cc, "resolve_claude_executable", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(verbs, "_owner_answers", lambda url: True)
+    monkeypatch.setattr(verbs, "_run_interactive", lambda *a, **k: 0)
+
+    for call in (
+        lambda: verbs._cmd_build(type("A", (), {"request": "x"})()),
+        lambda: verbs._cmd_cli(type("A", (), {"port": 8765, "offline": True})()),
+    ):
+        with pytest.raises(SystemExit) as err:
+            call()
+        assert "delete it to restore the defaults" in str(err.value)

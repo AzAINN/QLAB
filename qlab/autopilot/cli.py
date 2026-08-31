@@ -872,6 +872,20 @@ def _shell_wrapped(binary: str, argv: list[str]) -> list[str]:
     return argv
 
 
+def _rights_or_refuse(cc):
+    """The operator's rights, or a refusal in the shape these verbs already use.
+
+    `load_atlas_rights` raises on a file this desk did not write, and its
+    message already names the path and the remedy. Every other refusal on these
+    two verbs is a `SystemExit` carrying a sentence; a traceback here would be
+    the one that is not.
+    """
+    try:
+        return cc.load_atlas_rights()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def _cmd_cli(args) -> int:
     """Interactive Claude wearing the Atlas persona, against this desk."""
     from qlab.tui import claude as cc
@@ -882,6 +896,7 @@ def _cmd_cli(args) -> int:
     runtime_url = f"http://127.0.0.1:{args.port}"
     if not _owner_answers(runtime_url):
         raise SystemExit(cc.owner_down_remedy(runtime_url))
+    _rights_or_refuse(cc)  # read here so an unreadable file refuses, not raises
     argv = cc.build_atlas_cli_argv(
         runtime_url=runtime_url, offline=bool(getattr(args, "offline", False)))
     # The path already resolved, not a second cwd-dependent lookup — the same
@@ -903,7 +918,7 @@ def _cmd_build(args) -> int:
     # own default tools on a live checkout — by some distance the widest
     # authority any key on this desk offers — so an operator who switched it
     # off should see the refusal, not a missing-binary message first.
-    if not cc.load_atlas_rights().get("build", True):
+    if not _rights_or_refuse(cc).get("build", True):
         raise SystemExit(
             "`qlab build` is switched off: the desk's rights panel has the "
             "`build` right withdrawn, and this verb opens Claude Code with "

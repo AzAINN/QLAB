@@ -159,9 +159,16 @@ _PHASE_ARTIFACT_CONTRACT = {
     ),
 }
 
-# The one role with eyes outside this desk, and the only one _WEB_TOOLS is
-# granted to. Named here because two places have to agree about it: the role's
-# own grant, and the single `--allowedTools` list the whole dispatch shares.
+# The one WORKFORCE role with eyes outside this desk. Named here because two
+# places have to agree about it: the role's own grant, and the single
+# `--allowedTools` list the whole dispatch shares — the web is opened per
+# graph, and only for a graph that actually carries the scout.
+#
+# It is no longer the only holder of `_WEB_TOOLS`: the desk chat's Atlas gets
+# them too when the operator grants the `web` right (`chat_tools`), and so does
+# `qlab cli`. Those are the operator's own session, at their own keyboard,
+# under a boundary the prompt states; this constant is about the unattended
+# workforce, where nothing but the scout may browse.
 _WEB_ROLE = "contender-scout"
 
 _TRADER_PROXY_MAP = {
@@ -212,6 +219,25 @@ _CHAT_TOOLS = [_claude_tool(base) for base in (
     "registry.recent_decisions", "data.fetch_universe",
     "data.snapshot_summary",
 )] + _CHAT_ACTION_TOOLS
+
+# Said only when the `web` right is granted. A tool handed over without a
+# boundary is a tool with no boundary, and the boundary that matters here is
+# not "be careful": it is that nothing read off the web may become a number on
+# this desk. The provenance-gated news lane is the ONE way outside material
+# enters the record, and it produces risk views under an admission gate — not
+# weights, not sizes, not a direction.
+_CHAT_WEB_BOUNDARY = (
+    "\n\nYou can search and fetch the open web. Use it for context the desk "
+    "does not hold — what happened, who reported it, what a filing or a "
+    "central-bank statement actually says. Search and fetch are read-only: "
+    "cite the URL for anything you take from them, name the publisher and the "
+    "date, and say plainly when a claim rests on one source. What you read "
+    "there is never evidence on this desk by itself: a web finding enters the "
+    "record only through the provenance-gated news lane, as a qualitative "
+    "reading or a dry risk view under its admission gate — never as a weight, "
+    "a size, or a price direction. You have no return model and the web is not "
+    "one. Do not let a headline move a number you quote."
+)
 
 _CHAT_SYSTEM_PROMPT = (
     "You are the qlab desk assistant, chatting inside a quant operator "
@@ -704,15 +730,32 @@ QLAB REGIME CALL (analyst only):
     return agents
 
 
-def _chat_agent() -> dict[str, dict]:
+def chat_system_prompt(rights: dict[str, bool] | None = None) -> str:
+    """The desk assistant's brief, with the web boundary iff the web is granted.
+
+    Appended rather than always present: telling an Atlas that has no
+    `WebSearch` what it may not do with the web is instruction about a tool it
+    cannot see, and a prompt that describes absent authority is how a model
+    ends up claiming it.
+    """
+    rights = _rights(rights)
+    if not rights.get("web", True):
+        return _CHAT_SYSTEM_PROMPT
+    return _CHAT_SYSTEM_PROMPT + _CHAT_WEB_BOUNDARY
+
+
+def _chat_agent(rights: dict[str, bool] | None = None) -> dict[str, dict]:
+    rights = _rights(rights)
     return {
         "qlab-desk": {
             "description": "Conversational read-only qlab desk assistant.",
-            "prompt": _CHAT_SYSTEM_PROMPT,
+            "prompt": chat_system_prompt(rights),
             # Rights-shaped: the agent definition's tools field IS the chat's
             # surface, so a right the operator withdrew has to be absent here
-            # as well as from the allowlist.
-            "tools": chat_tools(),
+            # as well as from the allowlist. The caller passes the rights it
+            # built the argv from, so the two cannot be built from different
+            # reads of a file the operator may be writing.
+            "tools": chat_tools(rights),
             "model": "inherit",
             "permissionMode": "dontAsk",
             "maxTurns": 16,
@@ -1169,8 +1212,14 @@ def build_claude_argv(
     resume_session: str | None = None,
     chat: bool = False,
     roles: tuple[str, ...] = (),
+    rights: dict[str, bool] | None = None,
 ) -> list[str]:
     """Build an auditable Claude command with no ambient MCP/tool access.
+
+    ``rights`` is the operator's rights panel, read once by the caller and
+    threaded here so this argv and the session's agent definition are built
+    from the same three switches; ``None`` reads the file (chat only — the
+    workforce grant does not consult them).
 
     ``roles`` are the graph's phases as agent names. One ``--allowedTools``
     list serves the whole dispatch, so a tool granted for one role is reachable
@@ -1210,10 +1259,13 @@ def build_claude_argv(
         argv.extend(["--setting-sources", "project"])
     elif chat:
         # Same restriction mechanism as the workforce (verified live): the
-        # selected agent's tools field IS the surface — read-only qlab tools,
-        # no Agent dispatch, no built-ins.
+        # selected agent's tools field IS the surface — the read-only qlab
+        # tools, the action tools the `workflows` right leaves in place, and
+        # the two web built-ins when the `web` right is granted. No Agent
+        # dispatch, no Bash, no Write: `chat_tools` is the whole list, and it
+        # names built-ins one at a time or not at all.
         argv[argv.index("--tools") + 1] = "default"
-        argv.extend(["--allowedTools", ",".join(chat_tools())])
+        argv.extend(["--allowedTools", ",".join(chat_tools(rights))])
         argv.extend(["--agent", "qlab-desk"])
         argv.extend(["--permission-mode", "dontAsk"])
         argv.extend(["--name", "qlab-chat"])
@@ -1376,18 +1428,26 @@ class ClaudeSession:
             return False
         self.mode = ("workforce" if governed
                      else "chat" if chat else "read-only")
-        argv = build_claude_argv(
-            prompt,
-            governed=governed,
-            runtime_url=self.runtime_url,
-            offline=self.offline,
-            resume_session=resume_session,
-            chat=chat,
-            roles=tuple(roles),
-        )
         env = os.environ.copy()
         process_cwd = self.cwd
         try:
+            # Inside the try, and read ONCE. `load_atlas_rights` refuses a
+            # rights file this desk did not write, and the owner thread that
+            # calls `start` has no handler — a traceback there is a chat that
+            # is simply dead with no sentence, when the remedy is one line.
+            # Once, because a POST landing between two reads would build the
+            # allowlist and the agent definition from different rights.
+            rights = load_atlas_rights() if chat else None
+            argv = build_claude_argv(
+                prompt,
+                governed=governed,
+                runtime_url=self.runtime_url,
+                offline=self.offline,
+                resume_session=resume_session,
+                chat=chat,
+                roles=tuple(roles),
+                rights=rights,
+            )
             if governed or chat:
                 env["CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS"] = "1"
                 env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
@@ -1400,7 +1460,7 @@ class ClaudeSession:
                 write_session_agents(
                     process_cwd,
                     build_workforce_agents(prompt, fast=self.fast)
-                    if governed else _chat_agent(),
+                    if governed else _chat_agent(rights),
                 )
             # Use the exact path already resolved by the availability check. This
             # avoids a second, cwd-dependent executable lookup on Windows.
@@ -1424,7 +1484,7 @@ class ClaudeSession:
                 env=env,
                 **_process_group_options(),
             )
-        except (OSError, ValueError, yaml.YAMLError) as exc:
+        except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
             self.process = None
             if self._session_dir is not None:
                 self._session_dir.cleanup()

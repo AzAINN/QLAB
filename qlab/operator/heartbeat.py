@@ -241,8 +241,8 @@ def mint_held_record_tasks(session, matrix: Mapping, *,
     # so keying the dedupe on the clock would re-mint the same finding daily.
     as_of = str(matrix.get("as_of") or "")
     previous: Mapping = {}
-    for run in registry.matrix_runs(source=DESK_MATRIX_SOURCE,
-                                    limit=MATRIX_SCAN):
+    runs = registry.matrix_runs(source=DESK_MATRIX_SOURCE, limit=MATRIX_SCAN)
+    for run in runs:
         spec = run.get("spec")
         logged = spec.get("matrix") if isinstance(spec, Mapping) else None
         if not isinstance(logged, Mapping):
@@ -253,6 +253,16 @@ def mint_held_record_tasks(session, matrix: Mapping, *,
         previous = logged
         break
     if not previous:
+        if len(runs) >= MATRIX_SCAN:
+            # A FULL scan that found no other window is not the first window
+            # ever — the previous one is further back than this scan reaches,
+            # and the two facts must not be reported by the same silence.
+            registry.record_event(
+                HELD_RECORD_TRIGGER + "_skipped",
+                {"reason": (f"no earlier window in a scan of {MATRIX_SCAN} "
+                            f"desk matrices; the previous window is further "
+                            f"back than this rule looks"),
+                 "window_hash": current_hash})
         return []          # the first window ever has nothing to have changed
 
     held, book_fault = held_names(session, offline)
@@ -261,6 +271,15 @@ def mint_held_record_tasks(session, matrix: Mapping, *,
                               {"reason": book_fault,
                                "window_hash": current_hash})
         return []
+    # A position outside the mandate universe has no row in either window, so
+    # the comparison below passes over it — correctly, there is nothing to
+    # compare. Saying nothing about it would be the lie: the desk is carrying
+    # a name its own qualitative record does not cover.
+    unwatched = sorted(set(held) - set(current_rows))
+    if unwatched:
+        registry.record_event(
+            HELD_RECORD_TRIGGER + "_unwatched",
+            {"tickers": unwatched, "window_hash": current_hash})
     previous_hash = str(previous.get("window_hash") or "")
     previous_rows = previous.get("rows")
     changes = held_record_changes(
@@ -332,6 +351,14 @@ def build_owner_tick(session, lock, *, offline: bool,
     one tick reports no flip.
     """
 
+    # The last window the held-record rule finished examining, for the life of
+    # this owner process. An unchanged window has nothing new to say, and the
+    # answer costs a book read and a registry scan every thirty seconds
+    # forever. The registry's dedupe key is still what makes a second task
+    # impossible — this only stops paying to ask. Written under the same
+    # dispatch lock every other tick state is.
+    examined_window: str | None = None
+
     def tick() -> dict:
         # Network work is deliberately outside the owner dispatch lock. The
         # returned payload contains no registry state; grounding and composition
@@ -384,12 +411,17 @@ def build_owner_tick(session, lock, *, offline: bool,
             # downstream — the announcement, the autonomous start below — reads
             # a trigger task from that list and from the registry row, not from
             # where it was minted.
-            if matrix_payload is not None:
+            nonlocal examined_window
+            window_hash = str((matrix_payload or {}).get("window_hash") or "")
+            if matrix_payload is not None and window_hash != examined_window:
                 try:
                     result["created_tasks"] = list(
                         result.get("created_tasks") or []) + \
                         mint_held_record_tasks(
                             session, matrix_payload, offline=offline)
+                    # Only after it returned: a window the rule threw on has
+                    # not been examined, and the next tick must try it again.
+                    examined_window = window_hash
                 except Exception as exc:
                     # Its own key, never the value's, for the reason the reap
                     # error above carries one: a field that changes JSON type

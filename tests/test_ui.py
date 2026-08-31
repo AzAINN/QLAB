@@ -5696,3 +5696,86 @@ def test_booking_refuses_when_no_pass_covers_the_hash(session):
     assert session.registry.get_approval_request(approval_id)["status"] == (
         "pending")
     assert session.registry.list_orders(50) == []
+
+
+def test_a_blocked_data_revalidation_answers_200_and_leaves_the_approval(session,
+                                                                        monkeypatch):
+    """`booked: false` is not one shape. This one is retryable.
+
+    The execute gate refuses on stale execution data BEFORE it touches the
+    approval, so the request is still approved and unspent — the operator can
+    fix the data and book the same proposal. Answering this the same way as an
+    invalidated approval would send them to re-propose a plan that is fine.
+    """
+    from types import SimpleNamespace
+
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    monkeypatch.setattr(session, "data_policy",
+                        lambda offline: SimpleNamespace(execution_eligible=True))
+    monkeypatch.setattr(
+        session, "data_health",
+        lambda offline, purpose=None: {"blocked": True,
+                                       "eligible_for_execution": False})
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {},
+        _book_body(session, plan_id))
+
+    assert status == 200
+    assert out["booked"] is False
+    assert out["execution"]["blocked_by"] == "data_revalidation"
+    # Retryable: the approval the human just gave is still live and unspent.
+    approval = session.registry.get_approval_request(approval_id)
+    assert (approval["status"], approval["consumed_at"]) == ("approved", None)
+    assert session.registry.list_orders(50) == []
+    assert _booked_events(session) == []
+
+
+def test_a_mandate_violation_answers_200_and_leaves_the_approval(session,
+                                                                 monkeypatch):
+    # The third shape: the plan violated the mandate at submission. Like a
+    # data refusal and unlike an invalidated approval, nothing was withdrawn.
+    from qlab.trader.mandate import MandateViolation
+
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+
+    def _refuse(*args, **kwargs):
+        raise MandateViolation("gross exposure over the cap")
+
+    monkeypatch.setattr("qlab.trader.plan.execute_plan", _refuse)
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {},
+        _book_body(session, plan_id))
+
+    assert (status, out["booked"]) == (200, False)
+    assert "gross exposure" in out["execution"]["mandate_violation"]
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "approved")
+    assert _booked_events(session) == []
+
+
+def test_an_execution_that_raises_does_not_leave_a_live_approval(session,
+                                                                 monkeypatch):
+    # An approval granted a microsecond ago and never consumed is live
+    # authority to book. An exception on the way to the broker used to leave it
+    # behind — a spendable approval for a plan that just proved it cannot
+    # execute. The failure still reaches the caller; the authority does not
+    # survive it.
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("incomplete persisted legs; re-propose")
+
+    monkeypatch.setattr("qlab.trader.plan.execute_plan", _boom)
+
+    with pytest.raises(RuntimeError, match="incomplete persisted legs"):
+        session.book_current_proposal(_book_body(session, plan_id), True)
+
+    approval = session.registry.get_approval_request(approval_id)
+    assert approval["status"] == "invalidated"
+    assert "incomplete persisted legs" in approval["invalidated_reason"]
+    assert _booked_events(session) == []

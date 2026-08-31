@@ -4190,19 +4190,26 @@ class UISession:
           chat says so, naming the state it withdrew. Once per superseded
           plan, because a second pass finds those rows already terminal and
           has nothing left to name.
+        * A live request whose plan is no longer `checked` is withdrawn with
+          its own reason, once. Supersession cannot reach it: that runs only
+          when there IS a current proposal, and a request on a plan refused
+          after it opened leaves the desk with none.
         * A trigger task minted this tick is named with its reason and the
           template the lookup maps it to. `created_tasks` is per-tick and
           deduped upstream, so a strong indicator is announced once.
         """
         from qlab.governance.proposal import (
+            ORPHAN_REASON,
             current_proposal,
             live_requests,
             supersede,
+            withdraw_orphans,
         )
         from qlab.operator.templates import TRIGGER_TEMPLATE
 
         announced: dict = {"approvals_opened": [], "superseded": [],
-                           "supersede_failures": [], "triggers": []}
+                           "supersede_failures": [], "orphans_withdrawn": [],
+                           "orphan_failures": [], "triggers": []}
         asked = {str(a.get("plan_id") or "")
                  for a in self.registry.list_approval_requests(200)}
         for plan in self.registry.list_plans(20):
@@ -4226,6 +4233,26 @@ class UISession:
                 f"is open — in chat: `/approve {aid[:8]}` to approve it, then "
                 f"`/execute {pid[:8]}` to book it; each opens the confirm box.")
             announced["approvals_opened"].append(aid)
+        # Orphans first, and unconditionally: a live request whose plan is no
+        # longer checked has no keeper, so the supersession below never reaches
+        # it — that runs only when there IS a current proposal, and an orphan
+        # is exactly the case where there is none. It carries its own reason
+        # rather than `superseded by …`, because nothing replaced it.
+        orphans, orphan_failures = withdraw_orphans(self.registry)
+        for row in orphans:
+            self._record_atlas_reply(
+                f"\u2691 Plan {row['plan_id'][:8]} is {row['plan_state']}, not "
+                f"checked; approval {row['approval_id'][:8]} "
+                f"({row['status'] or 'live'}) is invalidated as "
+                f"{ORPHAN_REASON} \u2014 it can no longer book anything.")
+        for failed in orphan_failures:
+            self._record_atlas_reply(
+                f"\u2691 Approval {failed['approval_id'][:8]} for plan "
+                f"{failed['plan_id'][:8]} ({failed['plan_state']}, not checked) "
+                f"could not be withdrawn: {failed['error']}. It is still "
+                f"{failed['status'] or 'live'} \u2014 reject it by hand.")
+        announced["orphans_withdrawn"].extend(row["plan_id"] for row in orphans)
+        announced["orphan_failures"].extend(orphan_failures)
         # One proposal. Run every tick, not only when a request was opened
         # here: a desk that came up holding two live requests has two open
         # questions and nothing else would ever close the older one.
@@ -4577,9 +4604,17 @@ class UISession:
         the two steps must not be separated by a lock release — they are not.
         The whole route runs under the owner dispatch lock (`_LOCK`) exactly as
         ``/api/plans/execute`` does, and this method takes no lock of its own
-        because `_LOCK` is not reentrant. The paper broker is in-process, so
-        holding it across the fill costs a dispatch turn, not a network round
-        trip; an out-of-process broker would have to be revisited here.
+        because `_LOCK` is not reentrant.
+
+        On the *simulated* book the broker is in-process, so holding `_LOCK`
+        across the fill costs a dispatch turn and nothing else. On an Alpaca
+        book it is venue I/O under the lock — inherited, not introduced here:
+        ``/api/plans/execute`` has always held `_LOCK` across the same call,
+        and this route reaches the same ``execute_plan_with_approval``. Adding
+        the approve step in front of it lengthens that hold by one registry
+        write. If the lock is ever narrowed for the Alpaca book, both routes
+        move together, and whatever replaces it must still guarantee that the
+        approval granted here is the one the execute gate reads.
         """
         from qlab.governance.proposal import current_proposal
 
@@ -4617,9 +4652,24 @@ class UISession:
         elif status != "approved":
             raise ValueError(f"the approval request is {status!r}, not live")
 
-        result = self.execute_plan_with_approval(
-            plan_id, {"approval_id": approval_id, "human_confirmed": True},
-            offline)
+        # No `human_confirmed` in this body: the gate consumes the approval
+        # record, never a boolean, and passing one would suggest the callee
+        # reads it. The confirmation was checked at the top of this method.
+        try:
+            result = self.execute_plan_with_approval(
+                plan_id, {"approval_id": approval_id}, offline)
+        except Exception as exc:
+            # An approval granted a moment ago and never consumed is live
+            # authority to book. An exception on the way to the broker — the
+            # incomplete-legs RuntimeError, say — would otherwise leave it
+            # spendable against a plan that just proved it cannot execute.
+            # Withdraw it naming the fault, then re-raise: the caller still
+            # gets the failure, and a transition that fails here chains onto
+            # it rather than replacing it.
+            self.registry.transition_approval(
+                approval_id, "invalidated",
+                invalidated_reason=f"execution raised: {exc}"[:200])
+            raise
         booked = result.get("executed") is True
         if booked:
             # Only a fill is a booking. Recording `proposal_booked` for a
@@ -5206,6 +5256,19 @@ def handle_api(session: UISession, method: str, path: str,
             return 404, {"error": str(exc)}
         except (ValueError, PermissionError) as exc:
             return 400, {"error": str(exc)}
+        # `booked: false` is 200, and it is three different facts. Only one
+        # of them means re-propose:
+        #   execution.blocked_by == "approval"      -> the request was
+        #       invalidated (book drift, expiry, a plan/targets mismatch). The
+        #       authority is gone; the plan must be re-proposed.
+        #   execution.blocked_by == "data_revalidation"  -> refused before the
+        #       approval was touched. It is still approved and unspent: fix the
+        #       data and book the same proposal again.
+        #   execution.mandate_violation present     -> same, refused at
+        #       submission with the approval intact; retrying is valid.
+        # A client that reads every `booked: false` as "re-propose" throws away
+        # a live approval in two cases out of three.
+        #
         # Only a fill moved the book; a refused execution must not forge an
         # "execution"-sourced mark.
         if result.get("booked") is True:

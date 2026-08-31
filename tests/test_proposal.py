@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from qlab.governance.proposal import current_proposal, supersede
+from qlab.governance.proposal import (
+    current_proposal,
+    live_requests,
+    supersede,
+)
 from qlab.state.registry import Registry
 from qlab.ui.server import UISession, handle_api
 
@@ -340,3 +344,53 @@ def test_the_proposal_route_serves_the_same_object(session):
     assert status == 200
     assert out["proposal"] == current_proposal(session.registry)
     assert out["proposal"]["plan_id"] == plan_id
+
+
+def test_a_live_request_on_a_plan_no_longer_checked_is_withdrawn(session):
+    """An orphan has no keeper, so supersession never reaches it.
+
+    Supersede runs only when there IS a current proposal. A desk whose only
+    live request sits on a plan that was refused after the approval opened has
+    none — so the request stayed live, bookable, with nothing on screen asking
+    about it.
+    """
+    plan_id = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    approval_id = next(iter(live_requests(session.registry).values()))["approval_id"]
+    handle_api(session, "POST", f"/api/approvals/{approval_id}/approve", {}, {})
+    # The plan is refused after the human approved it.
+    session.registry.set_plan_state(plan_id, "refused")
+
+    session.announce_desk_work(True, [])
+
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "invalidated")
+    assert session.registry.get_approval_request(approval_id)[
+        "invalidated_reason"] == "plan no longer checked"
+    assert live_requests(session.registry) == {}
+    assert current_proposal(session.registry) is None
+    said = _said(session)
+    assert "no longer checked" in said and plan_id[:8] in said
+
+
+def test_withdrawing_orphans_is_announced_once(session):
+    plan_id = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    session.registry.set_plan_state(plan_id, "refused")
+    session.announce_desk_work(True, [])
+    once = _said(session).count("no longer checked")
+    session.announce_desk_work(True, [])
+    assert (once, _said(session).count("no longer checked")) == (1, 1)
+
+
+def test_an_orphan_does_not_withdraw_the_live_proposal_beside_it(session):
+    # The withdrawal is scoped to orphans; the desk's real question survives.
+    orphan = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    session.registry.set_plan_state(orphan, "refused")
+    keeper = _checked_plan(session, tilt=0.02)
+
+    session.announce_desk_work(True, [])
+
+    assert (current_proposal(session.registry) or {}).get("plan_id") == keeper
+    assert list(live_requests(session.registry)) == [keeper]

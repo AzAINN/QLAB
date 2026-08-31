@@ -202,3 +202,47 @@ def current_proposal(registry, now_iso: str | None = None) -> dict | None:
         "created_at": plan.get("created_at"),
         "superseded": superseded,
     }
+
+
+# A live request whose plan is gone or no longer `checked` carries this. Not
+# `superseded by …`: nothing replaced it, the plan it asked about stopped being
+# answerable, and an audit that conflated the two would claim a successor that
+# does not exist.
+ORPHAN_REASON = "plan no longer checked"
+
+
+def withdraw_orphans(registry) -> tuple[list[dict], list[dict]]:
+    """Invalidate live requests whose plan is missing or no longer ``checked``.
+
+    An orphan has no keeper, so ``supersede`` never reaches it: supersession
+    runs only when there IS a current proposal, and a desk whose only live
+    request sits on a plan refused after the approval opened has none. The
+    request stayed live forever with nothing on screen asking about it — and an
+    *approved* orphan stayed bookable against a plan the desk had already
+    refused, which is a live authority to trade something no longer checked.
+
+    Returns ``(withdrawn, failures)`` under the same one-row-at-a-time contract
+    as ``supersede``: a row that will not move is reported, never swallowed,
+    because a request the desk failed to withdraw is still bookable and the
+    operator has to be told. Each withdrawn entry carries the plan state and
+    the status it held, which is what the announcement has to name.
+    """
+    withdrawn: list[dict] = []
+    failures: list[dict] = []
+    for plan_id, row in live_requests(registry).items():
+        plan = registry.get_plan(plan_id)
+        if plan is not None and plan.get("state") == "checked":
+            continue
+        approval_id = str(row.get("approval_id") or "")
+        entry = {"plan_id": plan_id, "approval_id": approval_id,
+                 "status": str(row.get("status") or ""),
+                 "plan_state": ("missing" if plan is None
+                                else str(plan.get("state") or "?"))}
+        try:
+            registry.transition_approval(approval_id, "invalidated",
+                                         invalidated_reason=ORPHAN_REASON)
+        except Exception as exc:  # one bad row must not hide the good ones
+            failures.append({**entry, "error": str(exc)[:200]})
+            continue
+        withdrawn.append(entry)
+    return withdrawn, failures

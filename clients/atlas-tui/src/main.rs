@@ -164,9 +164,37 @@ async fn main() -> Result<()> {
     let _guard = TerminalGuard::enter()?;
     // After raw mode, not before: a key pressed while the tty is still
     // line-buffered would sit in the kernel until Enter.
-    spawn_terminal_events(tx);
+    //
+    // The handle is kept, and the sender with it, because the reader has to be
+    // stoppable: `/cli` and `/build` hand this same stdin to a child, and a
+    // reader still on it steals the operator's keystrokes and then replays them
+    // into the desk's command line. See `handoff`.
+    let reader = spawn_terminal_events(tx.clone());
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    run(&mut terminal, &mut store, &mut rx, &poller, &writes).await
+    run(
+        &mut terminal,
+        &mut store,
+        &mut rx,
+        &poller,
+        &writes,
+        Reader { handle: reader, tx },
+    )
+    .await
+}
+
+/// The stdin reader, held so it can be stopped and started again.
+///
+/// A struct rather than two loose locals because the two halves are only ever
+/// useful together: aborting the task without keeping the sender that respawns
+/// it leaves a workstation that has stopped listening to its keyboard.
+///
+/// Built in both builds so the runtime loop keeps one shape, and read in only
+/// one: the default build has no command that can ask for a hand-off, so its
+/// reader runs untouched for the life of the process.
+#[cfg_attr(not(feature = "operator"), allow(dead_code))]
+struct Reader {
+    handle: tokio::task::JoinHandle<()>,
+    tx: Tx,
 }
 
 async fn run(
@@ -175,7 +203,12 @@ async fn run(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     poller: &PollerHandle,
     writes: &Writes,
+    #[cfg_attr(not(feature = "operator"), allow(unused_variables))] mut reader: Reader,
 ) -> Result<()> {
+    // Carried and never stopped in the default build: nothing there can ask for
+    // a hand-off, so the reader runs for the life of the process.
+    #[cfg(not(feature = "operator"))]
+    let _ = &mut reader;
     // Effect state lives here rather than on the `Store`: the store is what the
     // owner said plus the diff of it, and a decaying animation stamp is neither.
     // Keeping it out is what lets a golden frame be a pure function of the store
@@ -270,8 +303,35 @@ async fn run(
         // on every path including a child that never started.
         #[cfg(feature = "operator")]
         if let Some(child) = opening.take() {
-            let mut host = ScreenHost { terminal };
-            let notes = handoff::run(child, &mut host);
+            // What survived the drain: desk news that arrived while the
+            // operator was inside Claude. Folded in after the host is dropped,
+            // because `ingest` needs the views and the host holds the terminal.
+            let mut kept = Vec::new();
+            let notes = {
+                let mut host = ScreenHost {
+                    terminal,
+                    reader: &mut reader,
+                    rx,
+                    kept: &mut kept,
+                };
+                handoff::run(child, &handoff::launcher(), &mut host)
+            };
+            for ev in kept {
+                quit |= ingest(
+                    ev,
+                    store,
+                    poller,
+                    writes,
+                    &mut views,
+                    &mut fx,
+                    &mut toasts,
+                    &mut opening,
+                    now,
+                );
+            }
+            // A hand-off cannot open a hand-off: the only events replayed here
+            // are the ones the drain kept, and it keeps no keys.
+            debug_assert!(opening.is_none());
             for note in notes {
                 // A toast, because there is nowhere else: anything printed
                 // before the screen comes back is wiped by the alternate
@@ -571,7 +631,14 @@ fn unknown_args(args: &[String]) -> Result<(), Vec<String>> {
 // -- producers -------------------------------------------------------------
 
 /// Keys and resizes onto the bus, so the loop has exactly one drain point.
-fn spawn_terminal_events(tx: Tx) {
+/// The stdin reader, as a handle the runtime can stop.
+///
+/// It returns its `JoinHandle` because `/cli` and `/build` hand this same stdin
+/// to a child process: a reader left on it competes for the operator's
+/// keystrokes and posts what it wins onto the bus, where the desk resolves it
+/// as a command line the moment the screen comes back.
+fn spawn_terminal_events(tx: Tx) -> tokio::task::JoinHandle<()> {
+    // Returned, not detached: see the doc comment above.
     tokio::spawn(async move {
         let mut stream = EventStream::new();
         while let Some(next) = stream.next().await {
@@ -604,7 +671,7 @@ fn spawn_terminal_events(tx: Tx) {
                 return;
             }
         }
-    });
+    })
 }
 
 fn spawn_ticker(tx: Tx) {
@@ -701,10 +768,45 @@ fn restore() {
 #[cfg(feature = "operator")]
 struct ScreenHost<'a> {
     terminal: &'a mut Terminal<CrosstermBackend<io::Stdout>>,
+    reader: &'a mut Reader,
+    rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    /// What the drain kept: desk news that arrived while the operator was
+    /// away. Written here and folded in by the loop, which owns the views.
+    kept: &'a mut Vec<AppEvent>,
 }
 
 #[cfg(feature = "operator")]
 impl handoff::Host for ScreenHost<'_> {
+    fn pause_input(&mut self) {
+        // Aborted rather than signalled. The task is parked inside
+        // `EventStream::next`, which is a blocking read on the far side of a
+        // helper thread — there is no cooperative point for a flag to be seen
+        // at, and a reader that checks its flag only after the next keystroke
+        // is a reader that has already eaten one.
+        self.reader.handle.abort();
+    }
+
+    fn resume_input(&mut self) {
+        // A fresh `EventStream`, not the old one resumed: the aborted task's
+        // stream is gone with it, and a new one starts by reading the fd as it
+        // is now. Cheap — it is a task and a channel, not a terminal mode.
+        self.reader.handle = spawn_terminal_events(self.reader.tx.clone());
+    }
+
+    fn drain_input(&mut self) {
+        // Two queues, in the order they fill. What the terminal still holds is
+        // upstream of the bus, so swallowing the bus first would leave the tty
+        // to hand the same bytes to the fresh reader a moment later.
+        // `Ok(true)` and nothing else: a terminal that says nothing is pending,
+        // or cannot say at all, has nothing more to throw away here either way.
+        while let Ok(true) = crossterm::event::poll(Duration::ZERO) {
+            if crossterm::event::read().is_err() {
+                break;
+            }
+        }
+        self.kept.extend(handoff::drain_input(self.rx));
+    }
+
     fn leave_screen(&mut self) -> io::Result<()> {
         restore();
         Ok(())

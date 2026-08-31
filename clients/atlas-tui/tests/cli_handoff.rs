@@ -8,6 +8,14 @@
 //! live; restarting it out from under an operator mid-approval is not a thing a
 //! keystroke may decide.
 //!
+//! Third, and the one that was missing on the first pass: this client has a
+//! background task reading the *same stdin* the child is about to want. Left
+//! running, it competes with Claude for every keystroke and then replays what
+//! it stole into the desk's own command line when the screen comes back —
+//! under Operator posture, a sentence typed at Claude becomes a line the
+//! palette resolves. So the reader is paused around the child and whatever
+//! queued behind it is thrown away, and both are pinned here by position.
+//!
 //! The spawner is fake, deliberately: what a real `qlab cli` does with an
 //! inherited tty cannot be observed from a test harness that has no tty, so
 //! what is testable is the sequence around it, and that is what this file is.
@@ -28,6 +36,18 @@ struct Fake {
 }
 
 impl Host for Fake {
+    fn pause_input(&mut self) {
+        self.calls.push("pause".into());
+    }
+
+    fn resume_input(&mut self) {
+        self.calls.push("resume".into());
+    }
+
+    fn drain_input(&mut self) {
+        self.calls.push("drain".into());
+    }
+
     fn leave_screen(&mut self) -> std::io::Result<()> {
         self.calls.push("leave".into());
         Ok(())
@@ -67,16 +87,19 @@ fn the_screen_is_given_up_before_the_child_and_taken_back_after_it() {
         exit: Some(0),
         ..Default::default()
     };
-    let notes = handoff::run(Child::Cli, &mut host);
+    let notes = handoff::run(Child::Cli, "qlab", &mut host);
     assert_eq!(
         host.calls,
         vec![
+            "pause".to_string(),
             "leave".to_string(),
             "spawn:qlab cli".to_string(),
             "enter".to_string(),
+            "drain".to_string(),
+            "resume".to_string(),
             "redraw".to_string(),
         ],
-        "the child may only run between a leave and an enter"
+        "the reader stops before the screen comes down and starts after it goes back"
     );
     // A clean run says nothing: the operator watched it happen.
     assert!(notes.is_empty(), "{notes:?}");
@@ -92,15 +115,19 @@ fn a_child_that_never_started_still_gets_the_screen_back_and_says_why() {
         spawn_fails: true,
         ..Default::default()
     };
-    let notes = handoff::run(Child::Cli, &mut host);
+    let notes = handoff::run(Child::Cli, "qlab", &mut host);
     assert_eq!(
         host.calls,
         vec![
+            "pause".to_string(),
             "leave".to_string(),
             "spawn:qlab cli".to_string(),
             "enter".to_string(),
+            "drain".to_string(),
+            "resume".to_string(),
             "redraw".to_string(),
-        ]
+        ],
+        "a child that never started still hands the terminal back"
     );
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains("qlab"), "{notes:?}");
@@ -115,7 +142,7 @@ fn a_child_that_refused_carries_its_own_exit_code_back() {
         exit: Some(2),
         ..Default::default()
     };
-    let notes = handoff::run(Child::Cli, &mut host);
+    let notes = handoff::run(Child::Cli, "qlab", &mut host);
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains('2'), "{notes:?}");
 }
@@ -126,8 +153,12 @@ fn a_build_carries_the_request_through_to_the_child() {
         exit: Some(0),
         ..Default::default()
     };
-    handoff::run(Child::Build("add a heatmap visual".into()), &mut host);
-    assert_eq!(host.calls[1], "spawn:qlab build add a heatmap visual");
+    handoff::run(
+        Child::Build("add a heatmap visual".into()),
+        "qlab",
+        &mut host,
+    );
+    assert_eq!(host.calls[2], "spawn:qlab build add a heatmap visual");
 }
 
 #[test]
@@ -137,7 +168,7 @@ fn a_build_that_touched_the_desks_code_offers_a_restart_and_never_performs_one()
         dirty: true,
         ..Default::default()
     };
-    let notes = handoff::run(Child::Build("add a visual".into()), &mut host);
+    let notes = handoff::run(Child::Build("add a visual".into()), "qlab", &mut host);
     assert!(host.calls.contains(&"git".to_string()));
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains("qlab --restart runtime"), "{notes:?}");
@@ -158,7 +189,7 @@ fn a_build_that_changed_nothing_the_desk_serves_offers_nothing() {
         exit: Some(0),
         ..Default::default()
     };
-    let notes = handoff::run(Child::Build("read the code".into()), &mut host);
+    let notes = handoff::run(Child::Build("read the code".into()), "qlab", &mut host);
     assert!(host.calls.contains(&"git".to_string()));
     assert!(notes.is_empty(), "{notes:?}");
 }
@@ -172,9 +203,88 @@ fn the_cli_never_asks_git_anything() {
         dirty: true,
         ..Default::default()
     };
-    let notes = handoff::run(Child::Cli, &mut host);
+    let notes = handoff::run(Child::Cli, "qlab", &mut host);
     assert!(!host.calls.contains(&"git".to_string()));
     assert!(notes.is_empty(), "{notes:?}");
+}
+
+// -- what the child left in the queue ---------------------------------------
+
+/// The keystrokes of one sentence, as the reader would have posted them.
+fn typed(text: &str) -> Vec<atlas::bus::AppEvent> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    text.chars()
+        .map(|c| atlas::bus::AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+        .collect()
+}
+
+#[test]
+fn what_was_typed_at_claude_is_thrown_away_and_everything_else_is_kept() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for ev in typed("/exec") {
+        tx.send(ev).unwrap();
+    }
+    tx.send(atlas::bus::AppEvent::Tick).unwrap();
+    tx.send(atlas::bus::AppEvent::Resize).unwrap();
+
+    let kept = handoff::drain_input(&mut rx);
+
+    // Input is gone. Everything else survives, in order: a snapshot or a
+    // stream event that arrived while the operator was in Claude is news about
+    // the desk, and dropping it would leave the frame stale for a whole beat.
+    assert!(
+        !kept.iter().any(|ev| matches!(
+            ev,
+            atlas::bus::AppEvent::Key(_) | atlas::bus::AppEvent::Mouse(_)
+        )),
+        "a keystroke survived the drain"
+    );
+    // `AppEvent` is deliberately neither `Debug` nor `Clone` — see `bus` — so
+    // the assertion counts what came back rather than printing it.
+    assert_eq!(kept.len(), 2, "the two non-input events must both survive");
+    // And the channel is empty afterwards, not merely peeked at.
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn a_sentence_typed_at_claude_never_lands_in_the_desks_command_line() {
+    // The bug this exists for, proved by contrast: the same queue twice, once
+    // without the drain and once with. Under Operator posture the first one
+    // resolves — `/exec` is four characters from a scope that opens the box in
+    // front of a fill — which is why "the reader was still running" is a
+    // Critical and not an annoyance.
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn replay(events: Vec<atlas::bus::AppEvent>) -> String {
+        let mut store = armed();
+        let mut views = atlas::ui::views::Views::new();
+        for ev in events {
+            if let atlas::bus::AppEvent::Key(key) = ev {
+                atlas::ui::shell::on_key(key, &mut store, &mut views);
+            }
+        }
+        store.cmd.text().to_string()
+    }
+
+    // Built twice rather than cloned: `AppEvent` is not `Clone`, on purpose.
+    let queued = || {
+        let mut evs = typed("/exec");
+        evs.push(atlas::bus::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        evs
+    };
+
+    // Undrained, it is a command line the operator never opened.
+    assert_eq!(replay(queued()), "/execx");
+
+    // Drained, there is nothing left to replay.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for ev in queued() {
+        tx.send(ev).unwrap();
+    }
+    assert_eq!(replay(handoff::drain_input(&mut rx)), "");
 }
 
 // -- the argv ---------------------------------------------------------------
@@ -185,10 +295,12 @@ fn the_child_is_the_desks_own_verb_and_never_claude_directly() {
     // Python verb: which tools, which MCP config, which persona. A client that
     // built a `claude` command line itself would be a second, unreviewed answer
     // to that question living where nothing tests it.
-    assert_eq!(handoff::argv(&Child::Cli), vec!["qlab", "cli"]);
+    // The launcher is a parameter and not an env read, so this asserts the
+    // same thing in a shell that has `QLAB_BIN` set as in one that does not.
+    assert_eq!(handoff::argv(&Child::Cli, "qlab"), vec!["qlab", "cli"]);
     assert_eq!(
-        handoff::argv(&Child::Build("do it".into())),
-        vec!["qlab", "build", "do it"]
+        handoff::argv(&Child::Build("do it".into()), "/opt/qlab/bin/qlab"),
+        vec!["/opt/qlab/bin/qlab", "build", "do it"]
     );
 }
 

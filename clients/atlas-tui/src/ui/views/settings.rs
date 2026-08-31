@@ -82,9 +82,12 @@ use crate::cmd::Command;
 use crate::cmd::{self, ModelChoice};
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
+/// Only the picker names one: the card reads the entries off the payload it was
+/// handed, and a glass build has no picker to build a list for.
+#[cfg(feature = "operator")]
+use crate::model::MethodEntry;
 use crate::model::{
-    Constraints, DeskMode, LlmConfig, LlmSurface, MethodEntry, MethodSettings, NewsSettings,
-    NewsSource, System,
+    Constraints, DeskMode, LlmConfig, LlmSurface, MethodSettings, NewsSettings, NewsSource, System,
 };
 use crate::store::Store;
 use crate::theme::{palette, theme};
@@ -241,7 +244,11 @@ const CONFIRM: &str = "CONFIRM";
 /// One string for both, because they are one statement: the card is busy, and
 /// the key that was just pressed did nothing. Two wordings would let the wait
 /// line and the refusal drift into disagreeing about whether anything was sent.
-#[cfg(feature = "operator")]
+///
+/// Ungated, unlike the keys that set it: `method_card` is one renderer for both
+/// builds and it is the function that draws the wait line, so the constant has
+/// to exist in a binary that can never be waiting. Gating it was how the glass
+/// build stopped compiling — see the note on [`Card::Method`]'s own state.
 const ASKING: &str = "asking the owner…";
 
 /// One card of this pane, as a thing a key can be aimed at.
@@ -1754,6 +1761,14 @@ impl SettingsView {
             // Digits only, and bounded. A letter in a numeric field is a
             // refusal the operator would only hear about on Enter, and a held
             // key would push the digits they typed out of an `i64` entirely.
+            //
+            // **A non-digit is dropped in silence, deliberately.** The field is
+            // one number wide: there is no sentence to write about `q` that is
+            // not "this box takes digits", which the box already says on the
+            // line under the field — and a note that appeared and retired on
+            // every stray keystroke would flicker over the bound an operator is
+            // reading. What must not happen is the field *changing*, and a test
+            // pins that rather than this comment.
             KeyCode::Char(c) => {
                 let typed = self.method.cap_box.as_mut()?;
                 if c.is_ascii_digit() && typed.chars().count() < CAP_DIGITS {
@@ -2712,8 +2727,6 @@ fn contact_lines(typed: &str, stored: bool, width: u16) -> Vec<Line<'static>> {
     ]
 }
 
-/// The owner's question, and the word that answers it.
-#[cfg(feature = "operator")]
 /// The holdings-cap box's lines: what is typed, what it will be held to, and
 /// what an empty box means.
 ///
@@ -2779,6 +2792,8 @@ fn cap_lines(typed: &str, store: &Store, note: Option<&str>) -> Vec<Line<'static
     lines
 }
 
+/// The owner's question, and the word that answers it.
+#[cfg(feature = "operator")]
 fn consent_lines(said: &str, typed: &str) -> Vec<Line<'static>> {
     let t = theme();
     vec![
@@ -3247,10 +3262,19 @@ fn method_card(
         // plan will refuse") is the half an operator acts on. What decides how
         // much is drawn is the budget below, and a sentence the rows cannot
         // hold is marked rather than trailing off.
-        let said = format::bounded(&said, WARNING_MAX);
-        let lines = wrap_to(&said, wide.max(1));
-        let cut = lines.len() > budget;
-        let shown = lines.len().min(budget);
+        let bounded = format::bounded(&said, WARNING_MAX);
+        let lines = wrap_to(&bounded, wide.max(1));
+        // One row held back for the lists, always. The warning outranks them —
+        // it is on this card and nowhere else — but "there are methods here"
+        // is what tells an operator a key is worth pressing, and a warning long
+        // enough to eat the whole body would otherwise leave a card that looks
+        // like it has nothing else on it at all.
+        let room = match method.operational.is_empty() && method.research.is_empty() {
+            true => budget,
+            false => budget.saturating_sub(1),
+        };
+        let cut = lines.len() > room;
+        let shown = lines.len().min(room);
         for (i, line) in lines.into_iter().take(shown).enumerate() {
             take(
                 &mut rows,
@@ -3261,11 +3285,15 @@ fn method_card(
                         false => format!(" {line}"),
                     },
                     Style::default()
-                        .fg(match (note.is_some(), sending) {
-                            // The owner's warning and this card's own refusal
-                            // are both warnings; a request in flight is not.
-                            (false, true) => t.accent,
-                            _ => t.warning,
+                        // Toned by what the line *says*, not by which flag put
+                        // it there. A request in flight is not a warning, and
+                        // it reaches this row two ways — as the wait itself,
+                        // and as the note a second press leaves — so a tone
+                        // read off `sending` alone drew the same sentence in
+                        // two colours depending on how the operator got there.
+                        .fg(match said == ASKING {
+                            true => t.accent,
+                            false => t.warning,
                         })
                         .add_modifier(ratatui::style::Modifier::BOLD),
                 )),
@@ -3291,7 +3319,7 @@ fn method_card(
             &mut budget,
             absent("the owner named no method this desk can solve with"),
         );
-    } else if budget == 1 && !entries.is_empty() && !research.is_empty() {
+    } else if budget <= 1 && !entries.is_empty() && !research.is_empty() {
         take(
             &mut rows,
             &mut budget,

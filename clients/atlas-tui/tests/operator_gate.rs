@@ -3,16 +3,21 @@
 //!
 //! Two legs, and both are part of "done":
 //!
-//! * `cargo test` — the glass build. The assertions here are about the
-//!   *artifact*: there is no POST call site outside the gated module, and the
-//!   gate is spelled the way the compiler reads it. CLAUDE.md's claim about this
-//!   client is "read-only by construction — no order path … so invariant 3 holds
-//!   there by absence", and absence is a property a test can only pin
+//! * `cargo test --no-default-features` — the glass build. **That flag is the
+//!   whole leg.** `operator` is in `default`, so a bare `cargo test` and
+//!   `cargo test --features operator` are the same armed binary compiled twice,
+//!   and a change that broke the monitoring artifact outright would pass both
+//!   of them — which is exactly how this crate once shipped a `cfg` that left
+//!   the glass build failing to compile at all. The assertions here are about
+//!   the *artifact*: there is no POST call site outside the gated module, and
+//!   the gate is spelled the way the compiler reads it. CLAUDE.md's claim about
+//!   this client is "read-only by construction — no order path … so invariant 3
+//!   holds there by absence", and absence is a property a test can only pin
 //!   structurally.
-//! * `cargo test --features operator` — the write half. Every method is checked
-//!   against a canned owner on a loopback socket, so the paths and bodies are
-//!   pinned against what `qlab/ui/server.py` actually dispatches on rather than
-//!   against a hand-copied note that can rot.
+//! * `cargo test` (or, explicitly, `--features operator`) — the write half.
+//!   Every method is checked against a canned owner on a loopback socket, so
+//!   the paths and bodies are pinned against what `qlab/ui/server.py` actually
+//!   dispatches on rather than against a hand-copied note that can rot.
 
 /// Where the crate's source lives, for the structural pins below.
 const SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");

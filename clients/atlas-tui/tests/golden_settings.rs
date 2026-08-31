@@ -2382,6 +2382,31 @@ mod method {
         );
     }
 
+    /// A key the field cannot take changes nothing — and *nothing* is the
+    /// claim: not the value, not the caret, not the bound under it.
+    #[test]
+    fn a_key_the_cap_field_cannot_take_leaves_it_exactly_as_it_was() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        press(&mut client, KeyCode::Char('4'));
+        assert!(line_with(&client.frame(120, 36), "names").contains("4▏"));
+        let before = client.frame(120, 36);
+        for stray in ['q', '-', '.', ' '] {
+            assert_eq!(press(&mut client, KeyCode::Char(stray)), None);
+        }
+        assert_eq!(
+            client.frame(120, 36),
+            before,
+            "a key the field cannot take moved something on the screen"
+        );
+        // And Enter still sends what survived, so the guard did not wedge it.
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::SetMethod(MethodChange::Cap(Some(4)))),
+        );
+    }
+
     #[test]
     fn one_request_at_a_time_and_the_card_says_it_is_waiting() {
         let mut client = armed();
@@ -2414,15 +2439,24 @@ mod method {
         let mut client = armed();
         on_method(&mut client);
         press(&mut client, KeyCode::Char('k'));
-        press(&mut client, KeyCode::Char('3'));
+        press(&mut client, KeyCode::Char('6'));
         assert!(press(&mut client, KeyCode::Enter).is_some());
         client.views.wrote(&Wrote::MethodRefused {
             said: "max_holdings must be between 1 and 20 (the size of the mandated universe)"
                 .to_string(),
         });
-        let body = content(&client.frame(120, 36));
+        let frame = client.frame(120, 36);
+        let body = content(&frame);
         assert!(body.contains("between 1 and 20"), "{body}");
-        assert!(body.contains("3"), "the box lost what was typed:\n{body}");
+        // The box's own field row, and the caret that follows the value — not
+        // `contains("6")` over the whole frame, which is a digit on nine other
+        // rows of this desk and an assertion that could never fail. Every cap
+        // the fixture universe allows is one character wide, so *where* the
+        // digit is drawn is the only thing that can carry the claim.
+        assert!(
+            line_with(&frame, "names").contains("6▏"),
+            "the box lost what was typed:\n{frame}"
+        );
 
         // And an answer that says the desk moved closes it — what the card then
         // draws is the owner's own refetched answer, not a copy of the request.

@@ -887,3 +887,44 @@ def test_one_tick_expires_the_backlog_and_leaves_today_alone():
 
     assert len(result["expired"]["expired_tasks"]) == 50
     assert session.registry.count_atlas_tasks("expired") == 50
+
+
+def test_the_queued_line_is_said_once_however_many_beats_pass():
+    """A line per beat is not an announcement; it is the noise being removed."""
+    session = _research_session()
+    session.coordinator_status = lambda: {
+        "driving": True, "workflow_id": "wf-busy", "can_drive": True,
+        "reason": ""}
+    from qlab.operator.atlas import _utc_today
+
+    _queued_trigger(session, "task-a", _utc_today()[:10])
+
+    session.atlas_run_startable(True)
+    session.atlas_run_startable(True)
+    session.atlas_run_startable(True)
+
+    said = [event for event in session.registry.read_events(200)
+            if event.get("kind") == "atlas_message"
+            and "stays queued" in str((event.get("payload") or {}).get("text"))]
+    assert len(said) == 1
+    assert "task-a"[:8] in said[0]["payload"]["text"]
+    assert "regime_review" in said[0]["payload"]["text"]
+
+
+def test_a_different_running_workflow_earns_its_own_line():
+    """The memo is keyed on the pair, so a new holder of the slot is new news."""
+    session = _research_session()
+    from qlab.operator.atlas import _utc_today
+
+    _queued_trigger(session, "task-a", _utc_today()[:10])
+    session.coordinator_status = lambda: {
+        "driving": True, "workflow_id": "wf-one", "can_drive": True, "reason": ""}
+    session.atlas_run_startable(True)
+    session.coordinator_status = lambda: {
+        "driving": True, "workflow_id": "wf-two", "can_drive": True, "reason": ""}
+    session.atlas_run_startable(True)
+
+    said = [event for event in session.registry.read_events(200)
+            if event.get("kind") == "atlas_message"
+            and "stays queued" in str((event.get("payload") or {}).get("text"))]
+    assert len(said) == 2

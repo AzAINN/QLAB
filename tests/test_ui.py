@@ -5858,7 +5858,7 @@ def test_the_same_template_starts_in_propose_mode(session):
     # paper-proposal-eligible, and this test is about the MODE half.
     facts = session.atlas_facts(True)
     facts["data"]["eligible_for_paper_proposal"] = True
-    session.atlas_facts = lambda offline: facts
+    session.atlas_facts = lambda offline, *, consume_flip=False: facts
     session.atlas.set_mode("propose")
     status, started = handle_api(
         session, "POST", "/api/workflows/start", {},
@@ -5960,3 +5960,196 @@ def test_the_desk_task_list_does_not_show_an_expired_trigger_as_pending(session)
 
     shown = {row["task_id"] for row in session.atlas_task_rows(10)}
     assert shown == {"fresh"}
+
+
+# --- fix round 1 --------------------------------------------------------------
+
+
+def _stale_workflow(session, goal: str = "[regime_review] stalled") -> str:
+    """A workflow the owner has already marked stale."""
+    from datetime import datetime, timedelta, timezone
+
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": goal})["workflow_id"]
+    session.registry.con.execute(
+        "UPDATE workflows SET updated_at=? WHERE workflow_id=?",
+        [(datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
+         workflow_id])
+    session.expire_stale_atlas_work()
+    assert session.registry.get_workflow(workflow_id)["status"] == "stale"
+    return workflow_id
+
+
+def test_the_operator_can_resume_a_workflow_the_desk_marked_stale(session):
+    workflow_id = _stale_workflow(session)
+    status, resumed = handle_api(
+        session, "POST", f"/api/workflows/{workflow_id}/resume", {}, {})
+    assert status == 200
+    assert resumed["status"] == "running" and resumed["status"] != "stale"
+
+
+def test_a_stale_workflow_frees_the_task_bound_to_it(session):
+    """`stale` is in the unsuccessful set so reconciliation can act on it.
+
+    Without this the task waits on a run nobody will ever walk again, and the
+    drive sweep keeps spawning a coordinator for it every beat.
+    """
+    workflow_id = _stale_workflow(session)
+    session.registry.create_atlas_task(
+        "task-bound", "regime_flip|2026-07-01|ACWI|x", "regime_flip", {},
+        "regime_review")
+    session.registry.update_atlas_task(
+        "task-bound", status="running", workflow_id=workflow_id)
+
+    session.atlas_observe(True)
+
+    task = session.registry.get_atlas_task("task-bound")
+    assert task["status"] == "failed"
+    assert workflow_id in task["error"] and "stale" in task["error"]
+
+
+def test_a_request_path_read_does_not_eat_the_regime_flip(session):
+    """Assembling facts to answer a question must not consume a state change.
+
+    `_atlas_regime_facts` latches the robust state it saw. While every caller
+    latched, a chat-initiated start between the panel refresh and the next
+    observe swallowed the flip, and `regime_review` was never queued — the
+    exact bug the hardcoded-regime fix was written to remove.
+    """
+    session._desk_read = {"panel": {"robust_state": "calm"}}
+    session.atlas_facts(True, consume_flip=True)
+
+    session._desk_read = {"panel": {"robust_state": "stress"}}
+    # Three request-path reads. Each reports the flip; none may consume it.
+    assert session.atlas_facts(True)["regime"]["flip"] is True
+    handle_api(session, "GET", "/api/atlas/startable", {}, {})
+    session.atlas_actionables(True)
+
+    assert session.atlas_facts(True, consume_flip=True)["regime"]["flip"] is True
+    # And the observe DID consume it: the next one is not a second flip.
+    assert session.atlas_facts(True, consume_flip=True)["regime"]["flip"] is False
+
+
+def test_starting_a_template_from_the_chat_leaves_the_flip_for_the_observe(session):
+    session.drive_workflow = lambda wid, goal, roles=(): {
+        "driving": False, "reason": "pinned off in tests"}
+    session.coordinator_status = lambda: {"driving": False, "workflow_id": ""}
+    session.atlas.set_mode("research")
+    session._desk_read = {"panel": {"robust_state": "calm"}}
+    session.atlas_facts(True, consume_flip=True)
+    session._desk_read = {"panel": {"robust_state": "stress"}}
+
+    handle_api(session, "POST", "/api/workflows/start", {},
+               {"template_id": "regime_review", "offline": True})
+
+    assert session.atlas_facts(True, consume_flip=True)["regime"]["flip"] is True
+
+
+def test_open_workflows_does_not_count_work_that_is_already_resolved(session):
+    _stale_workflow(session)
+    assert session.atlas_facts(True)["open_workflows"] == 0
+    session.registry.start_workflow("portfolio_review", {"goal": "live one"})
+    assert session.atlas_facts(True)["open_workflows"] == 1
+
+
+def test_a_chat_created_proposal_does_not_outlive_the_day_it_answered(session):
+    """`atlas_create_task` is a second minter; it must sweep like the first."""
+    from datetime import date, timedelta
+
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    universe = ",".join(sorted(session.mandate.universe_whitelist))
+    session.registry.create_atlas_task(
+        "yesterdays", f"proposal:regime_review|{yesterday}|{universe}|regime_review",
+        "proposal:regime_review", {}, "regime_review", origin="proposal")
+
+    session.atlas_create_task("research_review", "a fresh question")
+
+    assert session.registry.get_atlas_task("yesterdays")["status"] == "expired"
+
+
+def test_the_tick_also_sweeps_a_proposal_nobody_minted_over(session):
+    from datetime import date, timedelta
+
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    session.registry.create_atlas_task(
+        "yesterdays", f"proposal:regime_review|{yesterday}|ACWI|regime_review",
+        "proposal:regime_review", {}, "regime_review", origin="proposal")
+
+    session.expire_stale_atlas_work()
+
+    assert session.registry.get_atlas_task("yesterdays")["status"] == "expired"
+
+
+def test_resume_is_refused_by_name_for_a_plan_creating_run_below_propose(session):
+    """Research mode may not resume its way into a plan.
+
+    A `desk_rebalance_review` started in Propose and interrupted is a run that
+    ends at a checked plan. Resuming it in Research would walk that graph to
+    its plan under a mode that may not create one.
+    """
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review",
+        {"goal": "[desk_rebalance_review] the full review"})["workflow_id"]
+    session.registry.interrupt_workflow(workflow_id, "stopped for the test")
+
+    session.atlas.set_mode("research")
+    status, refused = handle_api(
+        session, "POST", f"/api/workflows/{workflow_id}/resume", {}, {})
+    assert status == 400
+    assert "desk_rebalance_review" in refused["error"]
+    assert "Propose" in refused["error"]
+
+    session.atlas.set_mode("propose")
+    status, resumed = handle_api(
+        session, "POST", f"/api/workflows/{workflow_id}/resume", {}, {})
+    assert status == 200 and resumed["status"] == "running"
+
+
+def test_a_research_run_resumes_in_research_mode(session):
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "[regime_review] read it again"})["workflow_id"]
+    session.registry.interrupt_workflow(workflow_id, "stopped for the test")
+    session.atlas.set_mode("research")
+
+    status, resumed = handle_api(
+        session, "POST", f"/api/workflows/{workflow_id}/resume", {}, {})
+    assert status == 200 and resumed["status"] == "running"
+
+
+def test_a_registered_but_undriven_run_says_why_it_is_not_moving(session):
+    """The window between the 409 check and the drive is real; it must speak."""
+    session.coordinator_status = lambda: {"driving": False, "workflow_id": ""}
+    session.drive_workflow = lambda wid, goal, roles=(): {
+        "driving": False, "reason": "a coordinator is already driving wf-other"}
+    session.atlas.set_mode("research")
+
+    status, started = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"template_id": "regime_review", "offline": True})
+
+    assert status == 200
+    assert started["driving"] is False
+    assert started["drive_reason"] == "a coordinator is already driving wf-other"
+
+
+def test_the_409_names_the_phase_the_goal_and_falls_back_to_the_kind(session):
+    stamped = session.registry.start_workflow(
+        "portfolio_review", {"goal": "[regime_review] re-read the panel"})
+    _driving(session, stamped["workflow_id"])
+    status, refused = handle_api(
+        session, "POST", "/api/workflows/start", {}, {"goal": "x", "offline": True})
+    assert status == 409
+    assert refused["running"]["current_phase"] == "analyst"
+    assert refused["running"]["goal"] == "[regime_review] re-read the panel"
+
+    # A run a human started carries no template stamp; the kind is the name.
+    bare = session.registry.start_workflow(
+        "portfolio_review", {"goal": "just have a look"})
+    _driving(session, bare["workflow_id"])
+    status, refused = handle_api(
+        session, "POST", "/api/workflows/start", {}, {"goal": "x", "offline": True})
+    assert status == 409
+    assert refused["running"]["template"] == "portfolio_review"
+    assert refused["error"] == (
+        "a research workflow is already running: portfolio_review "
+        f"({bare['workflow_id']})")

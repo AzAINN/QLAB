@@ -316,6 +316,29 @@ def test_atlas_holds_exactly_the_four_new_desk_manager_tools():
     assert "execute_plan" not in scopes["lab"]
     assert "propose_rebalance" not in scopes["lab"]
 
+    # And the four new grants are grants of something that EXISTS. "not a
+    # trader tool" is satisfied by a name nothing serves, which is how a grant
+    # silently disappears rather than being refused.
+    from qlab.mcp.tui_proxy import register_proxy_tools
+
+    class _Recorder:
+        def __init__(self):
+            self.names: list[str] = []
+
+        def tool(self, *, name):
+            def register(fn):
+                self.names.append(name)
+                return fn
+
+            return register
+
+    proxy = _Recorder()
+    register_proxy_tools(proxy, object())
+    for base in ("workflow.start", "workflow.resume", "atlas.task.create",
+                 "approvals.list"):
+        assert base.replace(".", "_") in proxy.names, base
+        assert base in scopes["lab"]
+
 
 def test_the_atlas_persona_says_it_starts_work_and_never_books():
     # Whitespace-normalized: the sentence is wrapped in the source, and a test

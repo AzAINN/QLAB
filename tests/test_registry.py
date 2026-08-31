@@ -1181,3 +1181,35 @@ def test_matrix_runs_filters_in_sql_so_no_caller_scans_a_fixed_window(reg):
                            limit=1)[0]["spec"]["matrix"]["as_of"] == "2015-09-30"
     assert reg.matrix_runs(source="ablation_a5",
                            as_of_before="2015-01-01", limit=10) == []
+
+
+def test_a_stale_workflow_can_still_be_resumed():
+    """`stale` is a diagnosis, not a grave.
+
+    Marking a week-idle run stale must not close the operator's only route
+    back to it: the phases are all still there, and resuming is exactly what
+    an operator who sees the mark would want to do.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from qlab.state.registry import WORKFLOW_RESUMABLE_STATUSES, Registry
+
+    assert "stale" in WORKFLOW_RESUMABLE_STATUSES
+
+    reg = Registry(":memory:")
+    try:
+        workflow_id = reg.start_workflow(
+            "portfolio_review", {"goal": "[regime_review] stalled"})["workflow_id"]
+        long_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        reg.con.execute("UPDATE workflows SET updated_at=? WHERE workflow_id=?",
+                        [long_ago, workflow_id])
+        assert reg.mark_idle_workflows_stale(
+            "no phase progress in 7 days", updated_before=(
+                datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
+        assert reg.get_workflow(workflow_id)["status"] == "stale"
+
+        resumed = reg.resume_workflow(workflow_id)
+        assert resumed["status"] == "running"
+        assert resumed["current_phase"] == "analyst"
+    finally:
+        reg.close()

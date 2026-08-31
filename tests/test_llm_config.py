@@ -1076,7 +1076,8 @@ def _canned_facts(**over) -> dict:
 
 
 def _pin_facts(owner, monkeypatch, facts: dict) -> None:
-    monkeypatch.setattr(owner, "atlas_facts", lambda offline: dict(facts))
+    monkeypatch.setattr(owner, "atlas_facts",
+                        lambda offline, *, consume_flip=False: dict(facts))
     # The host must not decide the verdict: with no `claude` on PATH the
     # supervisor reports DEGRADED before any backend under test is consulted,
     # so a state assertion would be about the machine, not about the desk.
@@ -1398,24 +1399,31 @@ def test_a_broken_desk_composition_cannot_take_the_deterministic_tick_down(
 
 
 def _pin_consuming_facts(owner, monkeypatch, facts: dict) -> dict:
-    """`atlas_facts` as it really behaves: the reader CONSUMES the flip.
+    """`atlas_facts` as it really behaves: a CONSUMING read spends the flip.
 
-    `_atlas_regime_facts` records the robust state it saw, so the first
-    assembly in a tick reports the flip and every one after it reports none.
-    A fixture that hands back the same dict forever cannot tell facts that were
-    *preserved* across the two lock phases from facts that were *recomputed* —
-    which is the entire difference the inner guard exists to make. Both guards
-    look identical under a constant mock; under this one they do not.
+    `_atlas_regime_facts` records the robust state it saw when it is asked to
+    latch, so the first *consuming* assembly in a tick reports the flip and
+    every one after it reports none. A fixture that hands back the same dict
+    forever cannot tell facts that were *preserved* across the two lock phases
+    from facts that were *recomputed* — which is the entire difference the
+    inner guard exists to make. Both guards look identical under a constant
+    mock; under this one they do not.
+
+    Only `consume_flip=True` spends it, which is the tick's own rule: a request
+    path may read the same flip as often as it likes and must leave it there.
 
     Returns the call counter, so a test can say which assembly it got.
     """
     seen = {"n": 0}
+    spent = {"yes": False}
     regime = dict(facts.get("regime") or {})
 
-    def assembled(offline):
+    def assembled(offline, *, consume_flip=False):
         out = dict(facts)
-        out["regime"] = dict(regime, flip=seen["n"] == 0)
+        out["regime"] = dict(regime, flip=not spent["yes"])
         seen["n"] += 1
+        if consume_flip:
+            spent["yes"] = True
         return out
 
     # Same host-independence pin as _pin_facts: the machine's PATH must

@@ -544,6 +544,57 @@ class UISession:
             return self.registry.start_workflow(kind, request, phases=phases)
         return self.registry.start_workflow(kind, request)
 
+    def _stamped_template(self, workflow: dict) -> str:
+        """The template id a workflow's goal was stamped with, or "".
+
+        `atlas_workflow_runner` and `start_template_workflow` both write
+        `[template_id] …` as the goal, and that stamp is the only place a
+        registered template survives on the workflow row. One reader, because
+        two would disagree the first time the stamp moved — the 409 path names
+        the running run from this, and the resume gate below authorises from it.
+        """
+        goal = str((workflow.get("request") or {}).get("goal") or "")
+        if goal.startswith("[") and "]" in goal:
+            return goal[1:goal.index("]")].strip()
+        return ""
+
+    def _check_resumable_under_mode(self, workflow_id: str) -> None:
+        """Refuse, by name, to resume a plan-creating run below Propose.
+
+        Resuming is starting, for every purpose the mode gate cares about: a
+        `desk_rebalance_review` interrupted in Propose still ends at a checked
+        plan, and walking it to that plan under Research would create one in a
+        mode that may not. `check_authority` is the same gate `start_task` and
+        `start_template_workflow` ask, asked here about the template the run
+        was stamped with — so there is one rule about plans, not two.
+
+        A run with no stamp is not refused. Every template-started run carries
+        one; an unstamped run is a human's own workflow, and its graph cannot
+        be inferred from a goal string. The plan it might reach is still
+        refused where it matters — a plan needs a referee PASS and an approval,
+        neither of which this gate is standing in for.
+        """
+        from qlab.operator.templates import (
+            TEMPLATES, TemplateNotAllowed, check_authority)
+
+        workflow = self.registry.get_workflow(workflow_id)
+        if workflow is None:
+            raise KeyError(f"unknown workflow_id {workflow_id!r}")
+        template_id = self._stamped_template(workflow)
+        if not template_id or template_id not in TEMPLATES:
+            return
+        if not TEMPLATES[template_id].creates_plan:
+            # Only the plan boundary is enforced here. Refusing to resume a
+            # research run because the desk sits in Observe would strand work
+            # the operator started, and Observe is a claim about what Atlas
+            # starts unattended, not about what a human may pick back up.
+            return
+        try:
+            check_authority(template_id, self.atlas.mode)
+        except TemplateNotAllowed as exc:
+            raise TemplateNotAllowed(
+                f"{exc}; workflow {workflow_id} cannot be resumed") from exc
+
     def update_workflow(self, phase: str, body: dict) -> dict:
         return self.registry.update_workflow_phase(
             str(body.get("workflow_id") or ""),
@@ -567,6 +618,7 @@ class UISession:
                 reason or "operator stopped the coordinator before completion",
             )
         if action == "resume":
+            self._check_resumable_under_mode(workflow_id)
             return self.registry.resume_workflow(workflow_id)
         if action == "abandon":
             return self.registry.abandon_workflow(
@@ -2531,12 +2583,26 @@ class UISession:
                 entry[key] = matrix[key]
         return entry
 
-    def atlas_facts(self, offline: bool) -> dict:
+    def atlas_facts(self, offline: bool, *, consume_flip: bool = False) -> dict:
         """Assemble the deterministic owner facts Atlas observes (no LLM).
 
         Deliberately narrow. This is `check_startable`'s input — the authority
         gate — so it stays booleans and counts. The reasoning surface is
         `atlas_context`; do not enrich this one.
+
+        ``consume_flip`` is the tick's, and only the tick's. A regime flip is
+        computed against a LATCHED previous state, so whoever latches gets the
+        flip and everyone after them sees none. While every caller latched, a
+        chat-initiated start — or any request that merely wanted to know what
+        was startable — landing between the panel refresh and the next observe
+        ate the flip, and `regime_review` was never queued. That is the same
+        failure the hardcoded regime once caused, rebuilt out of a read.
+
+        So: reads do not consume. ``atlas_observe`` and the heartbeat's
+        judgment request pass True, because they are the tick and the tick is
+        what acts on a change. Everything else — the chat's tools,
+        `/api/atlas/startable`, `atlas_actionables`, the reasoner's context —
+        sees the same flip and leaves it where it lies.
         """
         port = self.portfolio(offline)
         health = self.data_health(offline)
@@ -2572,8 +2638,8 @@ class UISession:
             # had the desk brief report zero pending approvals with approvals
             # sitting in the table — a confident wrong number rather than a
             # missing one.
-            "regime": self._atlas_regime_facts(),
-            "open_workflows": len(self.registry.list_workflows(50)),
+            "regime": self._atlas_regime_facts(latch=consume_flip),
+            "open_workflows": self._open_workflow_count(),
             "pending_approvals": len(
                 self.registry.list_approval_requests(50, "pending")),
             "order_anomaly": anomaly,
@@ -2588,7 +2654,7 @@ class UISession:
                 .get("hashes", [])),
         }
 
-    def _atlas_regime_facts(self) -> dict:
+    def _atlas_regime_facts(self, *, latch: bool = False) -> dict:
         """The robust regime and whether it just changed.
 
         Read from the panel the heartbeat already composed rather than
@@ -2598,6 +2664,11 @@ class UISession:
         `flip` compares against the previous observation only. A restart
         therefore reports no flip rather than inventing one from a cold start,
         which is the safe direction: a spurious flip launches a workflow.
+
+        ``latch`` records the state just read as the new previous one, which is
+        what makes the flip a one-shot. Only the observe tick may do that — see
+        ``atlas_facts``. A read that latched would answer a question and
+        silently spend the answer.
         """
         cached = self._desk_read or {}
         panel = cached.get("panel") if isinstance(cached.get("panel"), dict) else {}
@@ -2607,9 +2678,24 @@ class UISession:
             state and self._last_robust_state
             and state != self._last_robust_state
             and state != "unknown" and self._last_robust_state != "unknown")
-        if state:
+        if state and latch:
             self._last_robust_state = state
         return {"robust_state": state, "flip": flip}
+
+    def _open_workflow_count(self) -> int:
+        """How many workflows are actually still in flight.
+
+        Not `len(list_workflows(...))`: that counts every row the window holds,
+        finished ones included, so the number Atlas reasons about grew forever
+        and never shrank. Resolved is `reconcile_tasks`' own set, so a status
+        added there cannot leave a second opinion here — and `stale`, which
+        this branch introduced, is open work by no definition.
+        """
+        from qlab.operator.atlas import WORKFLOW_RESOLVED_STATUSES
+
+        return sum(
+            1 for workflow in self.registry.list_workflows(50)
+            if str(workflow.get("status") or "") not in WORKFLOW_RESOLVED_STATUSES)
 
     def atlas_observe(self, offline: bool, *, facts: dict | None = None,
                       judgments: dict | None = None) -> dict:
@@ -2634,7 +2720,9 @@ class UISession:
         """
         reconciled = self.atlas.reconcile_tasks()
         if facts is None:
-            facts = self.atlas_facts(offline)
+            # The tick, and the only other latching caller is the judgment
+            # request that hands its facts straight back to this method.
+            facts = self.atlas_facts(offline, consume_flip=True)
         observed = self.atlas.observe(facts, trading_date=date.today().isoformat(),
                                       judgments=judgments)
         if reconciled:
@@ -2655,7 +2743,9 @@ class UISession:
         """
         if not self.llm_config.reasoner_enabled:
             return {}
-        facts = self.atlas_facts(offline)
+        # Latches, because these facts ARE the observe's facts: they are handed
+        # back to `atlas_observe`, which then does not assemble its own.
+        facts = self.atlas_facts(offline, consume_flip=True)
         # The facts are in the request before anything that can fail, and they
         # stay there on every path out. `atlas_facts` has already CONSUMED this
         # tick's regime flip by the time the composition below runs, so a
@@ -3845,6 +3935,10 @@ class UISession:
                 f"({sorted(TRIGGER_TEMPLATE)}) or a registered template "
                 f"({sorted(TEMPLATES)})")
         trading_date = date.today().isoformat()
+        # Sweep before minting, exactly as `atlas_actionables` does. This is the
+        # desk's second proposal minter; a minter that does not clean up is how
+        # one set per template per day accumulates in the window the gate scans.
+        self._expire_stale_proposals(trading_date)
         universe = ",".join(sorted(self.mandate.universe_whitelist))
         task_kind = f"proposal:{template_id}"
         dedupe = f"{task_kind}|{trading_date}|{universe}|{template_id}"
@@ -3951,9 +4045,7 @@ class UISession:
         workflow = (self.registry.get_workflow(workflow_id)
                     if workflow_id else None) or {}
         goal = str((workflow.get("request") or {}).get("goal") or "")
-        template = ""
-        if goal.startswith("[") and "]" in goal:
-            template = goal[1:goal.index("]")].strip()
+        template = self._stamped_template(workflow)
         return {
             "workflow_id": workflow_id,
             "template": template or str(workflow.get("kind") or "") or "a workflow",
@@ -4338,9 +4430,15 @@ class UISession:
         drops off the end of it.
 
         Bounded on purpose: one pass over the same window everything else
-        reads, writing only to the rows that need it. Minting is the only call
-        site because minting is the only thing that creates proposals, so the
-        pile-up cannot outpace the cleanup.
+        reads, writing only to the rows that need it.
+
+        Two call sites, and they cover different failures. Every mint sweeps
+        first, so the pile-up can never outpace the cleanup — that includes
+        `atlas_create_task`, the chat's own minter, which would otherwise be a
+        second producer with no consumer. And the beat sweeps
+        (`expire_stale_atlas_work`), because a desk that is asked nothing for a
+        week mints nothing, and yesterday's unapproved answer must not still be
+        sitting in today's queue because nobody happened to ask again.
         """
         # The supervisor's own parser and window, deliberately: one reader of
         # the dedupe key's shape, so a change to it cannot silently disagree
@@ -4415,12 +4513,18 @@ class UISession:
             self.registry.record_event(
                 "atlas_tasks_expired",
                 {"task_ids": expired, "cutoff_days": cutoff_days, "as_of": day})
+        # Proposals age out on a different clock — a proposal answers "what
+        # should this desk do TODAY", so yesterday's is not an answer at all.
+        # Their own sweep already knows that rule; this is what runs it on a
+        # desk nobody asks, where nothing mints and so nothing swept.
+        expired_proposals = self._expire_stale_proposals(date.today().isoformat())
         stale = self.registry.mark_idle_workflows_stale(
             f"no phase progress in {_WORKFLOW_IDLE_STALE_DAYS} days",
             updated_before=(datetime.now(timezone.utc)
                             - timedelta(days=_WORKFLOW_IDLE_STALE_DAYS)
                             ).isoformat())
         return {"expired_tasks": expired,
+                "expired_proposals": expired_proposals,
                 "stale_workflows": [str(row["workflow_id"]) for row in stale]}
 
     def atlas_task_rows(self, limit: int = 10) -> list[dict]:
@@ -6152,6 +6256,13 @@ def handle_api(session: UISession, method: str, path: str,
                     workflow_id, action, body)
             except KeyError as exc:
                 return 404, {"error": str(exc)}
+            except PermissionError as exc:
+                # TemplateNotAllowed: the mode gate refusing a resume that
+                # would walk a plan-creating graph to its plan. Named, and 400
+                # for the same reason `/api/atlas/tasks/<id>/start` is — it is
+                # a refusal about authority the operator can change, not a
+                # conflict with something else in flight.
+                return 400, {"error": str(exc)}
             except RuntimeError as exc:
                 return 409, {"error": str(exc)}
             except ValueError as exc:

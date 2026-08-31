@@ -35,7 +35,11 @@ from qlab.paths import state_path
 
 WORKFORCE_PHASES = ("analyst", "challenger", "optimizer", "referee", "reporter")
 WORKFLOW_RESUMABLE_STATUSES = frozenset({
-    "interrupted", "failed", "blocked",
+    # `stale` is the owner's week-without-progress mark, and it is a diagnosis
+    # rather than a grave: every phase is still on the row, so resuming is
+    # exactly what an operator who reads the mark would want to do. Leaving it
+    # out closed the only route back to a run nobody deleted.
+    "interrupted", "failed", "blocked", "stale",
 })
 WORKFLOW_TERMINAL_STATUSES = frozenset({
     "complete", "abandoned",

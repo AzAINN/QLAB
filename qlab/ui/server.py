@@ -1136,8 +1136,9 @@ class UISession:
 
         unknown = sorted(set(body) - set(ATLAS_RIGHTS_KEYS))
         if unknown:
+            named = "is not a right" if len(unknown) == 1 else "are not rights"
             raise ValueError(
-                f"{', '.join(unknown)} is not a right this desk has — the "
+                f"{', '.join(unknown)} {named} this desk has — the "
                 f"rights are {', '.join(ATLAS_RIGHTS_KEYS)}")
         for key, value in body.items():
             if not isinstance(value, bool):
@@ -6230,26 +6231,39 @@ def _known_news_providers() -> list[str]:
     return sorted(PROVIDERS)
 
 
-# The header the MCP proxy stamps on every call it makes, and the only thing
-# that tells an Atlas tool call apart from the operator's own click: both are
-# unauthenticated HTTP on the same port, and the chat's requests otherwise look
-# exactly like the workstation's. It is a statement of ORIGIN, not a credential
-# — anyone who can reach the port can send it or omit it, the same way the desk
-# posture is intent and not a boundary. It exists so a right the operator
-# withdrew from the chat does not also disarm the human at the keyboard or the
-# heartbeat's own dispatch. Set in `qlab/mcp/tui_proxy.py`.
+# The header the MCP proxy stamps on every call it makes, carrying WHICH
+# surface the session speaks for. It is the only thing that tells an Atlas tool
+# call at the desk apart from a governed workforce run and from the operator's
+# own click at the workstation: all three are unauthenticated HTTP on the same
+# port and otherwise look identical.
+#
+# A value, not a boolean. The desk chat and a `qlab workforce run` both reach
+# the owner through the same proxy, and the coordinator's `workflow.start` is
+# how a governed run is CREATED — so a gate keyed on "came through the proxy"
+# refused a headless run with a sentence pointing it at a settings panel. The
+# vocabulary is `qlab.tui.claude.ORIGIN_CHAT` / `ORIGIN_WORKFORCE`, set into
+# the proxy's env by `proxy_mcp_config`; this module gates `chat` alone.
+#
+# It states an ORIGIN, not a credential — anyone who can reach the port can
+# send it or omit it, the same way the desk posture is intent and not a
+# boundary.
 CHAT_ORIGIN_HEADER = "X-Qlab-Origin"
 CHAT_ORIGIN = "chat"
 
 WORKFLOWS_RIGHT_REFUSAL = (
     "the workflows right is off — turn it on in Settings ▸ MODELS")
+RIGHTS_ARE_THE_OPERATORS = (
+    "Atlas does not set its own rights — the operator sets them on the desk, "
+    "in Settings ▸ MODELS")
 
 
 def _from_chat(headers) -> bool:
-    """Did this request come through the desk chat's MCP proxy?
+    """Did this request come from the desk chat's Atlas?
 
-    Absent headers mean no: every in-process caller (the tests, the heartbeat)
-    passes none, and an unstated origin must never be read as the chat's.
+    True for `chat` and nothing else. A governed workforce session carries
+    `workforce`, and absent headers — every in-process caller, the heartbeat,
+    a proxy nobody launched through `proxy_mcp_config` — are no: an unstated
+    origin must never be read as the one origin that is gated.
     """
     if not headers:
         return False
@@ -6260,19 +6274,35 @@ def _from_chat(headers) -> bool:
 
 
 def _refuse_without_workflows_right(headers) -> tuple[int, dict] | None:
-    """403 by name when the chat asks for work the operator withdrew.
+    """403 by name when the desk chat asks for work the operator withdrew.
 
     This is the PRIMARY enforcement of the `workflows` right, not a second
     belt: `chat_tools` shapes a session's grant when the session starts, so a
     right withdrawn mid-conversation lands on the next one and the tool is
     still offered for a turn. The owner is what covers that window.
 
-    Only chat-originated calls are gated. The heartbeat's autonomous dispatch
-    and the workstation's own buttons are the operator acting, and rights bound
-    the chat Atlas, not the operator. `web` and `build` have no owner-side
-    enforcement at all: nothing on this runtime serves a web fetch or spawns a
-    build, so those two are withdrawn where they are held — in the chat's tool
-    grant and in `qlab build` — by the tools half of this task.
+    **Scope: the desk chat's Atlas, and nothing else.** The right is about
+    Atlas starting work from the chat, not about a human-started governed run.
+    A `qlab workforce run` and the owner's own `Coordinator.drive` carry the
+    `workforce` origin and are never gated here — their coordinator holds
+    `workflow.start` because creating the workflow IS the run, so gating them
+    would refuse a headless shell with a sentence about a settings panel it
+    cannot open. The heartbeat's autonomous dispatch and the workstation's own
+    buttons are the operator acting and carry no origin at all.
+
+    Two asymmetries a reader of the rights panel has to know about:
+
+    * `web` and `build` have NO owner-side enforcement. Nothing on this runtime
+      serves a web fetch or spawns a build, so those two are withdrawn where
+      they are held — in the chat's tool grant and in `qlab build` — by
+      `qlab/tui/claude.py` and `qlab/autopilot/cli.py`.
+    * A non-Claude reasoner is ungated by construction. The granite/ollama role
+      (`qlab/operator/ollama_role.py::_owner_post`) reaches the owner with its
+      own `urllib` call and stamps no origin header, so nothing it does is
+      bound by this gate. Harmless today — its whole owner surface is
+      `/api/lab/*`, which starts no work — but it is an absence, not a check,
+      and it would stop being harmless the day that role is granted an action
+      tool.
     """
     if not _from_chat(headers):
         return None
@@ -6455,6 +6485,15 @@ def handle_api(session: UISession, method: str, path: str,
             return 500, {"error": str(exc)}
 
     if method == "POST" and path == "/api/atlas/rights":
+        if _from_chat(headers):
+            # The panel is the operator's, and only the operator's. Nothing in
+            # the chat's grant reaches this route today, so this refuses
+            # something that cannot yet be asked — deliberately: the day a
+            # rights tool exists, a narrowed Atlas must not be able to hand
+            # itself back the right the operator just took away, and the check
+            # that prevents it should predate the tool rather than be
+            # remembered alongside it.
+            return 403, {"error": RIGHTS_ARE_THE_OPERATORS}
         try:
             return 200, session.set_rights(body)
         except ValueError as exc:

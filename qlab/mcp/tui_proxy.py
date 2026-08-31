@@ -39,13 +39,31 @@ def _refusal(path: str, exc: httpx.HTTPStatusError) -> OwnerRefused:
     )
 
 
-# Every request this proxy makes carries it, so the owner can tell an Atlas
-# tool call apart from the operator's own click at the workstation — both are
-# unauthenticated HTTP on the same port and are otherwise indistinguishable.
-# The owner reads it (`qlab/ui/server.py::_from_chat`) to apply the desk's
-# rights panel to the chat and not to the human. It states an ORIGIN; it is not
-# a credential, and nothing that protects a fill depends on it.
-CHAT_ORIGIN_HEADERS = {"X-Qlab-Origin": "chat"}
+ORIGIN_HEADER = "X-Qlab-Origin"
+
+
+def _origin_headers() -> dict[str, str]:
+    """Which surface this proxy session speaks for, as the launcher set it.
+
+    Every request carries it, so the owner can tell an Atlas tool call at the
+    desk apart from a governed workforce run and from the operator's own click
+    at the workstation — all three are unauthenticated HTTP on the same port
+    and are otherwise indistinguishable. The owner reads it
+    (`qlab/ui/server.py::_from_chat`) to apply the operator's rights panel to
+    the desk chat ALONE.
+
+    The value comes from `QLAB_ORIGIN`, set by `proxy_mcp_config` — passed
+    through verbatim rather than re-derived, because a proxy that decided its
+    own origin would be a second opinion about which sessions the rights panel
+    binds. Unset means a proxy nobody launched through that seam: no header at
+    all, which the owner reads as "not the chat" — an unstated origin must
+    never be read as the one that is gated, in either direction.
+
+    It states an ORIGIN; it is not a credential, and nothing that protects a
+    fill depends on it.
+    """
+    origin = os.environ.get("QLAB_ORIGIN", "").strip()
+    return {ORIGIN_HEADER: origin} if origin else {}
 
 
 class RuntimeClient:
@@ -60,7 +78,7 @@ class RuntimeClient:
         try:
             response = httpx.get(
                 self.base_url + path, params=params,
-                headers=CHAT_ORIGIN_HEADERS, timeout=httpx.Timeout(30.0))
+                headers=_origin_headers(), timeout=httpx.Timeout(30.0))
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise _refusal(path, exc) from exc
@@ -75,7 +93,7 @@ class RuntimeClient:
         try:
             response = httpx.post(
                 self.base_url + path, json=body or {},
-                headers=CHAT_ORIGIN_HEADERS,
+                headers=_origin_headers(),
                 timeout=httpx.Timeout(900.0, connect=10.0))
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

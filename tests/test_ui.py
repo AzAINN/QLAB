@@ -7105,3 +7105,61 @@ def test_the_trigger_line_carries_the_reason_the_task_was_minted_for(session):
     fired = [line for line in lines if "held_record_change fired" in line]
     assert fired, lines
     assert "ACWI: primary +1" in fired[0]
+
+
+_WORKFORCE = {"X-Qlab-Origin": "workforce"}
+
+
+def test_a_governed_run_is_not_bound_by_the_chats_workflows_right(session):
+    """The right is about Atlas starting work from the desk, not about a
+    human-started governed run.
+
+    `qlab workforce run` and the owner's own coordinator reach the owner
+    through the same proxy the chat does, and their coordinator holds
+    `workflow.start` because creating the workflow IS the run. Gating on "came
+    through the proxy" refused a headless shell with a sentence pointing it at
+    a settings panel it cannot open — so the origin is a value, and only `chat`
+    is gated.
+    """
+    handle_api(session, "POST", "/api/atlas/rights", {}, {"workflows": False})
+    status, out = handle_api(session, "POST", "/api/atlas/tasks", {},
+                             {"kind": "held_record_change", "reason": "r"},
+                             headers=_WORKFORCE)
+    assert status == 200 and out.get("task_id")
+    # The chat, at the same moment, is refused: the origin is what differs.
+    status, refused = handle_api(session, "POST", "/api/atlas/tasks", {},
+                                 {"kind": "held_record_change", "reason": "r"},
+                                 headers=_CHAT)
+    assert status == 403
+    assert refused["error"] == ui_server.WORKFLOWS_RIGHT_REFUSAL
+    # And the route that actually starts a run, which is the one that mattered.
+    status, started = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"goal": "review the core portfolio's regime exposure and risk",
+         "kind": "portfolio_review"}, headers=_WORKFORCE)
+    assert status == 200, started
+
+
+def test_atlas_may_not_set_its_own_rights(session):
+    """The panel is the operator's. Nothing in the chat's grant reaches this
+    route today; the refusal predates the tool on purpose, because a narrowed
+    Atlas handing itself back the right just taken away is the one move a
+    rights panel exists to prevent."""
+    status, out = handle_api(session, "POST", "/api/atlas/rights", {},
+                             {"workflows": True}, headers=_CHAT)
+    assert status == 403
+    assert out["error"] == ui_server.RIGHTS_ARE_THE_OPERATORS
+    # Reading is not setting: the chat may still see what it is allowed.
+    status, payload = handle_api(session, "GET", "/api/atlas/rights", {}, {},
+                                 headers=_CHAT)
+    assert status == 200 and payload["rights"]["workflows"] is True
+
+
+def test_two_unknown_rights_are_refused_in_the_plural(session):
+    status, one = handle_api(session, "POST", "/api/atlas/rights", {},
+                             {"execute": False})
+    assert status == 400 and "execute is not a right" in one["error"]
+    status, two = handle_api(session, "POST", "/api/atlas/rights", {},
+                             {"execute": False, "trade": False})
+    assert status == 400
+    assert "execute, trade are not rights" in two["error"]

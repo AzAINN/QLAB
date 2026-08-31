@@ -27,7 +27,7 @@ def test_the_atlas_cli_argv_is_exactly_this():
         "claude",
         "--strict-mcp-config",
         "--mcp-config", json.dumps(cc.proxy_mcp_config(
-            "http://127.0.0.1:8765", offline=True)),
+            "http://127.0.0.1:8765", offline=True, origin=cc.ORIGIN_CHAT)),
         "--tools", "WebSearch,WebFetch",
         "--allowedTools", ",".join(cc.atlas_cli_tools()),
         "--append-system-prompt", cc.atlas_persona(),
@@ -50,13 +50,24 @@ def test_the_cli_grants_the_atlas_grant_and_read_only_web_and_nothing_else():
 
 def test_the_cli_speaks_to_the_same_proxy_the_workforce_writes():
     # One config, not a second copy that can drift: the workforce's governed
-    # argv and this one must name the same server, command and environment.
-    governed = cc.build_claude_argv(
+    # argv and this one must name the same server, command and environment —
+    # except for the one env key that says which surface the session speaks
+    # for, which is the whole point of carrying it (the owner gates `chat`
+    # alone, and a governed run is not the desk chat).
+    argv = cc.build_claude_argv(
         "goal", governed=True, runtime_url="http://127.0.0.1:9", offline=True)
+    governed = json.loads(argv[argv.index("--mcp-config") + 1])
     mine = cc.build_atlas_cli_argv(
         runtime_url="http://127.0.0.1:9", offline=True)
-    assert (json.loads(governed[governed.index("--mcp-config") + 1])
-            == json.loads(mine[mine.index("--mcp-config") + 1]))
+    mine = json.loads(mine[mine.index("--mcp-config") + 1])
+    theirs = governed["mcpServers"]["qlab-operator"]
+    ours = mine["mcpServers"]["qlab-operator"]
+    assert theirs["command"] == ours["command"]
+    assert theirs["args"] == ours["args"]
+    assert ({k: v for k, v in theirs["env"].items() if k != "QLAB_ORIGIN"}
+            == {k: v for k, v in ours["env"].items() if k != "QLAB_ORIGIN"})
+    assert theirs["env"]["QLAB_ORIGIN"] == cc.ORIGIN_WORKFORCE
+    assert ours["env"]["QLAB_ORIGIN"] == cc.ORIGIN_CHAT
 
 
 def test_the_cli_carries_the_desk_managers_own_persona():
@@ -595,3 +606,54 @@ def test_the_verbs_refuse_a_corrupt_rights_file_rather_than_traceback(monkeypatc
         with pytest.raises(SystemExit) as err:
             call()
         assert "delete it to restore the defaults" in str(err.value)
+
+
+# -- which surface a proxy session speaks for --------------------------------
+
+def test_the_origin_each_session_hands_the_proxy_is_pinned_at_the_config():
+    """Pinned where the value is decided, not only where it is sent.
+
+    The owner gates `chat` alone, so the one thing that decides whether a
+    session is bound by the operator's rights panel is the value
+    `proxy_mcp_config` writes into the proxy's environment. A governed run
+    carrying `chat` would refuse `qlab workforce run` with a settings-panel
+    sentence; a chat session carrying `workforce` would make the panel a
+    decoration.
+    """
+    def origin_of(argv):
+        config = json.loads(argv[argv.index("--mcp-config") + 1])
+        return config["mcpServers"]["qlab-operator"]["env"]["QLAB_ORIGIN"]
+
+    chat = cc.build_claude_argv(
+        "hello", governed=False, chat=True,
+        runtime_url="http://127.0.0.1:9", offline=True)
+    governed = cc.build_claude_argv(
+        "goal", governed=True, runtime_url="http://127.0.0.1:9", offline=True)
+    cli = cc.build_atlas_cli_argv(
+        runtime_url="http://127.0.0.1:9", offline=True)
+
+    assert origin_of(chat) == cc.ORIGIN_CHAT == "chat"
+    assert origin_of(governed) == cc.ORIGIN_WORKFORCE == "workforce"
+    # `qlab cli` is the same Atlas at a different keyboard, so it is the chat.
+    assert origin_of(cli) == cc.ORIGIN_CHAT
+
+
+def test_the_config_will_not_be_built_without_saying_which_surface_it_is_for():
+    """No default. A default would decide, silently and at a distance, whether
+    a future session is bound by the rights panel."""
+    with pytest.raises(TypeError):
+        cc.proxy_mcp_config("http://127.0.0.1:9", offline=True)
+
+
+def test_the_proxy_stamps_the_origin_it_was_given_and_nothing_when_unset(
+        monkeypatch):
+    from qlab.mcp import tui_proxy
+
+    monkeypatch.setenv("QLAB_ORIGIN", "workforce")
+    assert tui_proxy._origin_headers() == {"X-Qlab-Origin": "workforce"}
+    monkeypatch.setenv("QLAB_ORIGIN", "chat")
+    assert tui_proxy._origin_headers() == {"X-Qlab-Origin": "chat"}
+    # A proxy nobody launched through `proxy_mcp_config` states no origin at
+    # all, which the owner reads as "not the chat".
+    monkeypatch.delenv("QLAB_ORIGIN", raising=False)
+    assert tui_proxy._origin_headers() == {}

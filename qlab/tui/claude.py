@@ -893,13 +893,36 @@ def parse_stream_line(line: str) -> list[ClaudeEvent]:
     return out
 
 
-def proxy_mcp_config(runtime_url: str, *, offline: bool) -> dict:
+# Which surface a proxy session speaks for. The proxy stamps the value on
+# every request as `X-Qlab-Origin`, and the owner gates the operator's rights
+# panel on `chat` ALONE — because the `workflows` right is about Atlas starting
+# work from the desk, not about a human-started governed run. A single boolean
+# "came through the proxy" would have made `workflows: false` refuse
+# `qlab workforce run` and the owner's own coordinator, whose sessions use the
+# same proxy and whose `workflow.start` is how a governed run is created at
+# all; a headless shell would then have been handed a sentence pointing it at
+# a settings panel it cannot open. The origin is a VALUE for that reason.
+#
+# It states an origin, never a credential: it rides in an unauthenticated
+# header on an unauthenticated port, exactly as the desk posture is intent and
+# not a boundary.
+ORIGIN_CHAT = "chat"
+ORIGIN_WORKFORCE = "workforce"
+
+
+def proxy_mcp_config(runtime_url: str, *, offline: bool, origin: str) -> dict:
     """The one description of the owner-backed proxy every Claude session gets.
 
     One definition rather than a copy per caller: the workforce, the desk chat
     and the interactive `qlab cli` all speak to the same `qlab-operator` server,
     and two spellings of "how the proxy is started" is how one of them ends up
     pointed at a different desk than the operator is looking at.
+
+    ``origin`` is required rather than defaulted, and that is deliberate: a
+    default would decide, silently and at a distance, whether a future session
+    is bound by the operator's rights panel. `ORIGIN_CHAT` for the desk chat
+    and for `qlab cli` (the same Atlas at a different keyboard);
+    `ORIGIN_WORKFORCE` for a governed run.
     """
     return {
         "mcpServers": {
@@ -909,6 +932,7 @@ def proxy_mcp_config(runtime_url: str, *, offline: bool) -> dict:
                 "env": {
                     "QLAB_RUNTIME_URL": runtime_url.rstrip("/"),
                     "QLAB_OFFLINE": "1" if offline else "0",
+                    "QLAB_ORIGIN": origin,
                 },
             }
         }
@@ -1111,7 +1135,8 @@ def build_atlas_cli_argv(*, runtime_url: str, offline: bool,
         "claude",
         "--strict-mcp-config",
         "--mcp-config", json.dumps(proxy_mcp_config(runtime_url,
-                                                    offline=offline)),
+                                                    offline=offline,
+                                                    origin=ORIGIN_CHAT)),
         "--tools", ",".join(universe),
         "--allowedTools", ",".join(atlas_cli_tools(rights)),
         "--append-system-prompt", atlas_persona(),
@@ -1230,7 +1255,12 @@ def build_claude_argv(
     that actually carries the scout, and never for a review that does not.
     """
     if governed or chat:
-        config = proxy_mcp_config(runtime_url, offline=offline)
+        # A governed run is the operator's own workforce, not the desk chat:
+        # its coordinator holds `workflow.start` because creating the workflow
+        # IS the run, and the rights panel must not reach it.
+        config = proxy_mcp_config(
+            runtime_url, offline=offline,
+            origin=ORIGIN_WORKFORCE if governed else ORIGIN_CHAT)
     else:
         config = {"mcpServers": {}}
 

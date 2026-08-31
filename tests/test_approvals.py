@@ -199,3 +199,21 @@ def test_kind_migration_is_idempotent_and_old_rows_read_plan(tmp_path):
         assert listed["old"]["kind"] == "plan"
     finally:
         reopened.close()
+
+
+def test_the_mandate_refuses_a_single_name_override_at_load(tmp_path, monkeypatch):
+    """The door is not the only gate: a hand-edited override file must not put
+    a name past the tier the mandate permits either."""
+    import json
+
+    from qlab.core.universe import load_universe
+    from qlab.paths import state_path
+    from qlab.trader.mandate import load_mandate
+
+    single_name = load_universe().stock_tickers[0]
+    path = state_path("mandate_overrides.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"universe_add": [single_name]}),
+                    encoding="utf-8")
+    with pytest.raises(ValueError, match="promotion"):
+        load_mandate()

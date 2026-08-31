@@ -6407,3 +6407,205 @@ def test_visual_route_400s_more_features_than_the_drawer_will_draw(session):
         {"features": [features]}, {})
     assert status == 400
     assert "13" in refused["error"] and "12" in refused["error"]
+
+
+def _watch_workflow(session, contenders, memo="dec-memo"):
+    """A portfolio_watch run with its analyst done, ready for the scout."""
+    started = session.start_workflow(
+        {"kind": "portfolio_review", "goal": "[portfolio_watch] watch"},
+        phases=("analyst", "scout", "reporter"))
+    workflow_id = started["workflow_id"]
+    handle_api(session, "POST", "/api/workflows/analyst", {}, {
+        "workflow_id": workflow_id, "status": "done", "summary": "read",
+        "artifacts": {"moment_set_id": "m", "objective_id": "o",
+                      "decision_id": "d", "regime": "neutral",
+                      "regime_summary": "steady"}})
+    return workflow_id
+
+
+def _complete_scout(session, workflow_id, contenders, memo="dec-memo"):
+    return handle_api(session, "POST", "/api/workflows/scout", {}, {
+        "workflow_id": workflow_id, "status": "done", "summary": "scouted",
+        "artifacts": {"memo_decision_id": memo, "contenders": contenders}})
+
+
+def _pending_universe_changes(session):
+    return [row for row in session.registry.list_approval_requests(300, "pending")
+            if row["kind"] == "universe_change"]
+
+
+def test_a_second_approve_of_a_universe_change_does_not_undo_the_first(session):
+    """Read -> widen -> transition is one critical section (invariant 9). Two
+    approvals racing used to leave the loser rolling back the winner's ticker."""
+    from qlab.trader.mandate import load_mandate_overrides
+
+    contender = _a_contender_outside(session)
+    _, opened = handle_api(session, "POST", "/api/approvals", {}, {
+        "kind": "universe_change", "ticker": contender,
+        "memo_decision_id": "dec-scout"})
+    approval_id = opened["approval_id"]
+    status, _ = handle_api(
+        session, "POST", f"/api/approvals/{approval_id}/approve", {}, {})
+    assert status == 200
+
+    status, refused = handle_api(
+        session, "POST", f"/api/approvals/{approval_id}/approve", {}, {})
+    assert status == 400
+    assert "not pending" in refused["error"]
+    assert load_mandate_overrides()["universe_add"] == [contender]
+    assert contender in session.mandate.universe_whitelist
+
+
+def test_a_single_name_outside_the_permitted_tiers_is_refused_at_the_door(session):
+    """`universe_tier` permits core and extended only; a stocks-tier name needs
+    catalog promotion before it can be paper-traded, so it may not enter the
+    mandate by one approval."""
+    from qlab.core.universe import load_universe
+
+    single_name = load_universe().stock_tickers[0]
+    status, refused = handle_api(session, "POST", "/api/approvals", {}, {
+        "kind": "universe_change", "ticker": single_name,
+        "memo_decision_id": "d"})
+    assert status == 400
+    assert single_name in refused["error"]
+    assert "promotion" in refused["error"]
+
+
+def test_the_dedupe_sees_past_a_busy_pending_queue(session):
+    """A windowed scan is not a dedupe: the desk's oldest open question must
+    still block a second copy of itself."""
+    from qlab.governance.approval import build_universe_change_request
+
+    contender = _a_contender_outside(session)
+    _, opened = handle_api(session, "POST", "/api/approvals", {}, {
+        "kind": "universe_change", "ticker": contender,
+        "memo_decision_id": "dec-scout"})
+    for i in range(250):
+        session.registry.create_approval_request(
+            build_universe_change_request(f"ZZ{i}", memo_decision_id="d"))
+
+    _, again = handle_api(session, "POST", "/api/approvals", {}, {
+        "kind": "universe_change", "ticker": contender,
+        "memo_decision_id": "dec-scout"})
+    assert again["deduped"] is True
+    assert again["approval_id"] == opened["approval_id"]
+
+
+def test_rejecting_a_universe_change_leaves_the_universe_untouched(session):
+    from qlab.trader.mandate import load_mandate_overrides
+
+    contender = _a_contender_outside(session)
+    _, opened = handle_api(session, "POST", "/api/approvals", {}, {
+        "kind": "universe_change", "ticker": contender,
+        "memo_decision_id": "dec-scout"})
+    status, decided = handle_api(
+        session, "POST", f"/api/approvals/{opened['approval_id']}/reject", {}, {})
+    assert status == 200 and decided["status"] == "rejected"
+    assert contender not in session.mandate.universe_whitelist
+    assert load_mandate_overrides().get("universe_add") is None
+
+
+def test_re_asking_an_approved_ticker_is_refused_as_already_held(session):
+    contender = _a_contender_outside(session)
+    _, opened = handle_api(session, "POST", "/api/approvals", {}, {
+        "kind": "universe_change", "ticker": contender,
+        "memo_decision_id": "dec-scout"})
+    handle_api(session, "POST", f"/api/approvals/{opened['approval_id']}/approve",
+               {}, {})
+    status, refused = handle_api(session, "POST", "/api/approvals", {}, {
+        "kind": "universe_change", "ticker": contender,
+        "memo_decision_id": "dec-scout-2"})
+    assert status == 400
+    assert "already in the mandate" in refused["error"]
+
+
+# --- the scout step files the operator's questions ---------------------------
+
+
+def test_the_scout_step_files_one_question_per_contender(session):
+    """Filed on the SCOUT's completion, from that step's own persisted
+    artifacts: the memo is durable there, and a reporter that fails afterwards
+    must not take the operator's questions down with it."""
+    from qlab.core.universe import load_universe
+
+    held = set(session.mandate.universe_whitelist)
+    outside = [t for t in load_universe().extended_tickers if t not in held][:2]
+    assert len(outside) == 2
+    workflow_id = _watch_workflow(session, outside)
+    status, _ = _complete_scout(session, workflow_id, [
+        {"ticker": t, "thesis": "a. b.", "urls": ["u1", "u2"]} for t in outside])
+    assert status == 200
+
+    rows = _pending_universe_changes(session)
+    assert sorted(r["summary"]["ticker"] for r in rows) == sorted(outside)
+    assert {r["summary"]["memo_decision_id"] for r in rows} == {"dec-memo"}
+    # A watch run creates no plan and no plan approval.
+    assert not [r for r in session.registry.list_approval_requests(50)
+                if r["kind"] == "plan"]
+
+    events = session.registry.read_events_of_kind("universe_questions_filed")
+    assert len(events) == 1
+    assert sorted(events[0]["payload"]["opened_tickers"]) == sorted(outside)
+
+
+def test_completing_the_scout_phase_twice_opens_no_second_question(session):
+    from qlab.core.universe import load_universe
+
+    held = set(session.mandate.universe_whitelist)
+    contender = next(t for t in load_universe().extended_tickers if t not in held)
+    workflow_id = _watch_workflow(session, [contender])
+    artifacts = [{"ticker": contender, "thesis": "a. b.", "urls": ["u1", "u2"]}]
+    _complete_scout(session, workflow_id, artifacts)
+    _complete_scout(session, workflow_id, artifacts)     # the resume replay
+    assert len(_pending_universe_changes(session)) == 1
+
+
+def test_a_refused_contender_is_skipped_with_its_reason_beside_a_good_one(session):
+    from qlab.core.universe import load_universe
+
+    held = set(session.mandate.universe_whitelist)
+    good = next(t for t in load_universe().extended_tickers if t not in held)
+    bad = load_universe().stock_tickers[0]
+    workflow_id = _watch_workflow(session, [good, bad])
+    status, workflow = _complete_scout(session, workflow_id, [
+        {"ticker": bad, "thesis": "a. b.", "urls": ["u1", "u2"]},
+        {"ticker": good, "thesis": "a. b.", "urls": ["u1", "u2"]}])
+    assert status == 200
+    steps = {s["phase"]: s for s in workflow["steps"]}
+    assert steps["scout"]["status"] == "done"
+
+    rows = _pending_universe_changes(session)
+    assert [r["summary"]["ticker"] for r in rows] == [good]
+    payload = session.registry.read_events_of_kind(
+        "universe_questions_filed")[0]["payload"]
+    assert payload["opened_tickers"] == [good]
+    skipped = {s["ticker"]: s["reason"] for s in payload["skipped"]}
+    assert bad in skipped and "promotion" in skipped[bad]
+
+
+def test_the_scout_files_at_most_three_questions(session):
+    from qlab.core.universe import load_universe
+
+    held = set(session.mandate.universe_whitelist)
+    outside = [t for t in load_universe().extended_tickers if t not in held]
+    assert len(outside) >= 4
+    workflow_id = _watch_workflow(session, outside)
+    _complete_scout(session, workflow_id, [
+        {"ticker": t, "thesis": "a. b.", "urls": ["u1", "u2"]}
+        for t in outside])
+    assert len(_pending_universe_changes(session)) == 3
+
+
+def test_a_review_reporter_files_nothing(session):
+    """No scout step, no questions — and no accidental read of a reporter
+    summary as if it were a memo."""
+    started = session.start_workflow(
+        {"kind": "portfolio_review", "goal": "[regime_review] review"})
+    workflow_id = started["workflow_id"]
+    handle_api(session, "POST", "/api/workflows/analyst", {}, {
+        "workflow_id": workflow_id, "status": "done", "summary": "read",
+        "artifacts": {"moment_set_id": "m", "objective_id": "o",
+                      "decision_id": "d", "regime": "neutral",
+                      "regime_summary": "steady"}})
+    assert _pending_universe_changes(session) == []
+    assert session.registry.read_events_of_kind("universe_questions_filed") == []

@@ -217,6 +217,39 @@ def _validate_stock_metadata(entries: list[Any]) -> None:
             raise ValueError(f"stocks universe entry {ticker!r} missing: {joined}")
 
 
+# The tiers a mandate may run on. A single name is research material until the
+# algorithm catalog promotes it (``load_mandate`` refuses any other tier), so
+# these two are also the only tiers a name may enter the mandate FROM — by an
+# approved universe_change or otherwise.
+PERMITTED_UNIVERSE_TIERS = ("core", "extended")
+
+
+def permitted_universe_names(path: str | Path | None = None) -> set[str]:
+    """Every ticker a mandate may hold without a catalog promotion.
+
+    The union of the permitted tiers rather than the widest one: ``core`` is
+    not a subset of ``extended`` (QQQ and SLV are core-only), so asking
+    ``extended`` alone would refuse a core name for a reason that is not true
+    of it. One function because two callers ask the same question — the door
+    (``POST /api/approvals``) and the merge (``load_mandate``) — and a second
+    copy of the union is how they would come to disagree about what a
+    universe_change may admit.
+    """
+    universe = load_universe(path)
+    names: set[str] = set()
+    for tier in PERMITTED_UNIVERSE_TIERS:
+        names |= set(universe.tickers(tier))
+    return names
+
+
+def promotion_required_reason(ticker: str) -> str:
+    """Why a catalogued name still may not enter the mandate. Operator-facing."""
+    return (f"{ticker} is not in the mandate's permitted universe tiers "
+            f"({', '.join(PERMITTED_UNIVERSE_TIERS)}); it is research material "
+            "until an algorithm-catalog promotion admits its tier, and one "
+            "approval is not that promotion")
+
+
 @lru_cache(maxsize=4)
 def load_universe(path: str | Path | None = None) -> Universe:
     """Load the universe config (cached). Pass ``path`` to override the default."""

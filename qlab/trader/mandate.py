@@ -22,10 +22,19 @@ from qlab.core.costs import (
     DEFAULT_IMPACT_K,
     DEFAULT_SPREAD_BPS,
 )
-from qlab.core.universe import load_universe
+from qlab.core.universe import (
+    PERMITTED_UNIVERSE_TIERS,
+    load_universe,
+    permitted_universe_names,
+    promotion_required_reason,
+)
 from qlab.paths import data_path, replace_file, state_path
 
-_PERMITTED_UNIVERSE_TIERS = frozenset({"core", "extended"})
+# Read from the catalog module, not written down again here: the same two
+# tiers decide which mandate may load and which names an approved
+# universe_change may admit, and one of those answers moving without the other
+# is how a single name would enter a book that may not trade it.
+_PERMITTED_UNIVERSE_TIERS = frozenset(PERMITTED_UNIVERSE_TIERS)
 _OVERRIDE_FILE = "mandate_overrides.json"
 # The only two limits an operator may set from the desk. The shipped
 # ``mandate.yaml`` is the governance document and the runtime never edits it;
@@ -367,21 +376,22 @@ def _load_max_holdings(raw: object, source: str = "constraints") -> int | None:
 
 
 def _load_universe_add(raw: object, source: str = "override") -> list[str]:
-    """Validate an approved universe extension against the catalog.
+    """Validate an approved universe extension against the permitted tiers.
 
-    Every added name must be one the data layer already knows how to price and
-    describe, so a widened universe cannot be a ticker nobody can fetch. A name
-    outside the catalog is refused loudly rather than dropped: an override the
-    operator believes is in force and that nothing merges is the failure this
-    whole record is written to avoid.
+    Two gates, both loud. Every added name must be one the data layer knows how
+    to price and describe, so a widened universe cannot be a ticker nobody can
+    fetch; and it must sit in a tier this mandate may actually run on, because
+    ``universe_tier`` refuses the others outright — admitting a single name
+    through the side door would put a name in the whitelist that the same file
+    forbids as a tier.
     """
     if raw is None:
         return []
     if not isinstance(raw, list):
         raise ValueError(f"mandate {source}.universe_add must be a list")
+    permitted = permitted_universe_names()
     catalog = load_universe()
-    known = set(catalog.core_tickers) | set(catalog.candidates) \
-        | set(catalog.extended_tickers) | set(catalog.stock_tickers)
+    known = (permitted | set(catalog.candidates) | set(catalog.stock_tickers))
     out: list[str] = []
     for entry in raw:
         if not isinstance(entry, str) or not entry.strip():
@@ -392,6 +402,11 @@ def _load_universe_add(raw: object, source: str = "override") -> list[str]:
             raise ValueError(
                 f"{ticker!r} is not in the universe catalog; add it to "
                 "universe.yaml before it can enter the mandate")
+        # Checked here as well as at the door, and for the file's sake: the
+        # door is one writer, and a hand-edited overrides file must not be able
+        # to put a name past the tier gate either.
+        if ticker not in permitted:
+            raise ValueError(promotion_required_reason(ticker))
         if ticker not in out:
             out.append(ticker)
     return out

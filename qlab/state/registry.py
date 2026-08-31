@@ -129,6 +129,17 @@ def _phase_type(phase: str) -> str:
     return phase
 
 
+def phase_type(phase: str) -> str:
+    """Public name for a phase's base type: ``'analyst-3'`` -> ``'analyst'``.
+
+    The owner asks the same question this module answers internally — "is the
+    phase that just completed a scout" — and a panel branch spells its phase
+    with a suffix. Exported rather than copied for ``agent_for_phase``'s
+    reason: one map, one parser, one answer.
+    """
+    return _phase_type(phase)
+
+
 def validate_phase_graph(
     phases: tuple[str, ...],
     deps: dict[str, tuple[str, ...]] | None = None,
@@ -2421,15 +2432,22 @@ class Registry:
         One pending request per name: a second scout memo naming the same
         contender must not put a second identical question on the operator's
         desk, and answering one of two would leave the other live forever.
+
+        Selected in SQL, over the whole table. The first version filtered the
+        200 newest pending rows in Python, which is not a dedupe but a window:
+        a busy queue would push the desk's oldest open question out of view and
+        the same contender would be asked again — the exact failure
+        ``read_events_of_kind`` was written to fix one table over.
         """
         wanted = str(ticker or "").strip().upper()
-        for row in self.list_approval_requests(200, "pending"):
-            if row.get("kind") != APPROVAL_KIND_UNIVERSE_CHANGE:
-                continue
-            summary = row.get("summary") or {}
-            if str(summary.get("ticker") or "").upper() == wanted:
-                return row
-        return None
+        if not wanted:
+            return None
+        rows = self._kinded(self._rows(
+            "SELECT * FROM approval_requests WHERE status = 'pending' "
+            "AND kind = ? AND upper(json_extract_string(summary, '$.ticker')) "
+            "= ? ORDER BY created_at ASC LIMIT 1",
+            [APPROVAL_KIND_UNIVERSE_CHANGE, wanted]))
+        return rows[0] if rows else None
 
     def transition_approval(self, approval_id: str, status: str, *,
                             challenge_digest: str | None = None,

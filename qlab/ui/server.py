@@ -227,6 +227,11 @@ is worse than none. Keep it to what fits on a desk card."""
 # but is written only by an approved universe_change, never from this route.
 _METHOD_FIELDS = ("operational_policy", "max_holdings")
 
+# How many contenders one scout memo may put on the operator's desk. The same
+# number the role's own prompt states, enforced here because a prompt is not a
+# gate — a memo with thirty names must not become thirty questions.
+_MAX_CONTENDERS = 3
+
 _MARKET_EVENT_LIMIT = 500
 # How many approvals of *each* actionable status ride in one /api/tui payload.
 # Per status, not shared — see `UISession.actionable_approvals`.
@@ -353,6 +358,15 @@ class UISession:
         # but the heartbeat also reads `self.mandate`, so the swap still needs
         # one (invariant 9).
         self._mandate_lock = threading.Lock()
+        # Serialises the universe_change lifecycle: the check-then-create in
+        # `create_universe_change_approval` and the whole read -> widen ->
+        # transition in `decide_approval`. The owner is threaded (invariant 9),
+        # and both are read-decide-write sequences over the same two records —
+        # unlocked, two approvals of one request both passed `pending`, both
+        # widened, and the loser's rollback removed a ticker the registry had
+        # already recorded as approved. Always taken OUTSIDE `_mandate_lock`,
+        # which stays the leaf around the override file itself.
+        self._universe_lock = threading.Lock()
         # The operator's explicit choice; the persisted value is authoritative
         # when the caller passes none, and ``offline_default`` only seeds the
         # mode nobody has chosen yet — never a second opinion about it.
@@ -618,13 +632,89 @@ class UISession:
                 f"{exc}; workflow {workflow_id} cannot be resumed") from exc
 
     def update_workflow(self, phase: str, body: dict) -> dict:
-        return self.registry.update_workflow_phase(
+        from qlab.state.registry import phase_type as _phase_type
+
+        workflow = self.registry.update_workflow_phase(
             str(body.get("workflow_id") or ""),
             phase,
             str(body.get("status") or "working"),
             str(body.get("summary") or ""),
             body.get("artifacts") if isinstance(body.get("artifacts"), dict) else {},
         )
+        if (str(body.get("status") or "") == "done"
+                and _phase_type(phase) == "scout"):
+            self._file_universe_questions(workflow)
+        return workflow
+
+    def _file_universe_questions(self, workflow: dict) -> dict:
+        """Turn the scout's persisted contenders into the operator's questions.
+
+        Filed on the SCOUT's completion, not the reporter's. The memo is
+        durable the moment that phase is done, and a reporter that fails
+        afterwards must not take the operator's questions down with it — the
+        contenders would then exist only in a conversation nobody can replay.
+
+        Read from the scout step's own artifacts, never from a summary and
+        never from anything the coordinator retyped: the ticker in an approval
+        is the ticker the memo was written about, or the audit trail from
+        `scout_memo` to `universe_change` is a claim rather than a link.
+
+        Every name is filed in its own try/except and a refusal skips only that
+        one — an unpermitted tier, a name already held, a duplicate already
+        pending. One event carries both halves, because a contender that was
+        silently dropped looks exactly like one the scout never found. Nothing
+        here may fail the phase update that has already committed.
+        """
+        from qlab.state.registry import phase_type as _phase_type
+
+        steps = {str(step.get("phase") or ""): step
+                 for step in (workflow.get("steps") or ())}
+        scout = next((step for phase, step in steps.items()
+                      if _phase_type(phase) == "scout"
+                      and step.get("status") == "done"), None)
+        if scout is None:
+            return {"opened": [], "skipped": []}
+        artifacts = scout.get("artifacts") or {}
+        memo_decision_id = str(artifacts.get("memo_decision_id") or "")
+        contenders = artifacts.get("contenders")
+        if not isinstance(contenders, list) or not contenders:
+            return {"opened": [], "skipped": []}
+        task_id = (workflow.get("request") or {}).get("task_id")
+
+        opened: list[dict] = []
+        skipped: list[dict] = []
+        # The scout's own ceiling, enforced here too: a role prompt is not a
+        # gate, and thirty contenders must not become thirty questions.
+        for contender in contenders[:_MAX_CONTENDERS]:
+            ticker = ""
+            if isinstance(contender, dict):
+                ticker = str(contender.get("ticker") or "").strip().upper()
+            elif isinstance(contender, str):
+                ticker = contender.strip().upper()
+            if not ticker:
+                skipped.append({"ticker": "", "reason": "no ticker named"})
+                continue
+            try:
+                filed = self.create_universe_change_approval({
+                    "ticker": ticker, "memo_decision_id": memo_decision_id,
+                    "task_id": task_id})
+            except Exception as exc:
+                skipped.append({"ticker": ticker, "reason": str(exc)[:300]})
+                continue
+            if filed.get("deduped"):
+                skipped.append({"ticker": ticker,
+                                "reason": "already an open question"})
+                continue
+            opened.append({"ticker": ticker,
+                           "approval_id": str(filed.get("approval_id") or "")})
+        self.registry.record_event("universe_questions_filed", {
+            "workflow_id": str(workflow.get("workflow_id") or ""),
+            "memo_decision_id": memo_decision_id,
+            "opened": opened,
+            "opened_tickers": [entry["ticker"] for entry in opened],
+            "skipped": skipped,
+        })
+        return {"opened": opened, "skipped": skipped}
 
     def control_workflow(
         self,
@@ -5182,53 +5272,72 @@ class UISession:
         believes it opened a request and did not would file the same contender
         every week and never know.
 
-        The ticker is checked against the universe catalog here, at the door,
-        rather than at approval time: a question the desk could not honour if
-        answered yes is not a question worth asking a human.
+        The ticker is checked against the universe catalog and the mandate's
+        permitted tiers here, at the door, rather than at approval time: a
+        question the desk could not honour if answered yes is not a question
+        worth asking a human.
+
+        The check and the create are one critical section. Two scout runs
+        filing the same contender at once would both find no pending row and
+        both create one, which is the duplicate this dedupe exists to prevent.
         """
         from qlab.governance.approval import build_universe_change_request
 
         ticker = str(body.get("ticker") or "").strip().upper()
         if not ticker:
             raise ValueError("a universe_change request needs a ticker")
-        if ticker in {str(t).upper() for t in self.mandate.universe_whitelist}:
-            raise ValueError(
-                f"{ticker} is already in the mandate's universe; there is "
-                "nothing for the operator to answer")
-        self._check_catalog_ticker(ticker)
-        existing = self.registry.pending_universe_change(ticker)
-        if existing is not None:
-            return {"approval_id": str(existing["approval_id"]),
-                    "status": str(existing["status"]),
-                    "kind": str(existing["kind"]), "ticker": ticker,
-                    "expires_at": existing.get("expires_at"),
-                    "deduped": True}
-        approval = build_universe_change_request(
-            ticker,
-            memo_decision_id=str(body.get("memo_decision_id") or ""),
-            task_id=body.get("task_id"))
-        self.registry.create_approval_request(approval)
-        self.registry.record_event(
-            "approval_created",
-            {"approval_id": approval["approval_id"], "plan_id": None,
-             "kind": approval["kind"], "ticker": ticker})
-        return {"approval_id": approval["approval_id"], "status": "pending",
-                "kind": approval["kind"], "ticker": ticker,
-                "expires_at": approval["expires_at"], "deduped": False}
+        with self._universe_lock:
+            # Inside the lock: the held-set is read from `self.mandate`, which
+            # an approval landing beside this one replaces.
+            if ticker in {str(t).upper()
+                          for t in self.mandate.universe_whitelist}:
+                raise ValueError(
+                    f"{ticker} is already in the mandate's universe; there is "
+                    "nothing for the operator to answer")
+            self._check_catalog_ticker(ticker)
+            existing = self.registry.pending_universe_change(ticker)
+            if existing is not None:
+                return {"approval_id": str(existing["approval_id"]),
+                        "status": str(existing["status"]),
+                        "kind": str(existing["kind"]), "ticker": ticker,
+                        "expires_at": existing.get("expires_at"),
+                        "deduped": True}
+            approval = build_universe_change_request(
+                ticker,
+                memo_decision_id=str(body.get("memo_decision_id") or ""),
+                task_id=body.get("task_id"))
+            self.registry.create_approval_request(approval)
+            self.registry.record_event(
+                "approval_created",
+                {"approval_id": approval["approval_id"], "plan_id": None,
+                 "kind": approval["kind"], "ticker": ticker})
+            return {"approval_id": approval["approval_id"], "status": "pending",
+                    "kind": approval["kind"], "ticker": ticker,
+                    "expires_at": approval["expires_at"], "deduped": False}
 
     @staticmethod
     def _check_catalog_ticker(ticker: str) -> None:
-        """Refuse a name the data layer cannot price or describe."""
-        from qlab.core.universe import load_universe
+        """Refuse a name the desk could not honour if the answer were yes.
 
+        Two reasons, and they are different facts: a name outside the catalog
+        cannot be priced or described at all, while a catalogued single name
+        sits in a tier ``load_mandate`` refuses to run on. The same check runs
+        again at load — this one keeps the question off the operator's desk.
+        """
+        from qlab.core.universe import (
+            load_universe, permitted_universe_names, promotion_required_reason)
+
+        permitted = permitted_universe_names()
         catalog = load_universe()
-        known = (set(catalog.core_tickers) | set(catalog.candidates)
-                 | set(catalog.extended_tickers) | set(catalog.stock_tickers))
+        known = (permitted | set(catalog.candidates)
+                 | set(catalog.stock_tickers))
         if ticker not in known:
             raise ValueError(
                 f"{ticker} is not in the universe catalog, so the desk could "
                 "not price or describe it if the answer were yes; add it to "
                 "universe.yaml first")
+        if ticker not in permitted:
+            raise ValueError(promotion_required_reason(ticker))
 
     def list_approvals(self, status: str | None = None) -> dict:
         self.registry.expire_due_approvals(self._now_iso())
@@ -5284,33 +5393,25 @@ class UISession:
 
     def decide_approval(self, approval_id: str, decision: str) -> dict:
         """Approve or reject a pending approval (the human decision)."""
-        approval = self.registry.get_approval_request(approval_id)
-        if approval is None:
-            raise KeyError(f"unknown approval_id {approval_id!r}")
-        if approval.get("status") != "pending":
-            raise PermissionError(
-                f"approval is {approval.get('status')!r}, not pending")
         from qlab.state.registry import (
             APPROVAL_KIND_PLAN, APPROVAL_KIND_UNIVERSE_CHANGE)
 
         status = {"approve": "approved", "reject": "rejected"}[decision]
+        approval = self.registry.get_approval_request(approval_id)
+        if approval is None:
+            raise KeyError(f"unknown approval_id {approval_id!r}")
         kind = str(approval.get("kind") or APPROVAL_KIND_PLAN)
-        ticker = ""
         if kind == APPROVAL_KIND_UNIVERSE_CHANGE and status == "approved":
-            # Applied BEFORE the transition, and rolled back if the transition
-            # will not take: an approval marked approved whose widening never
-            # landed would tell the operator a name is in the mandate when it
-            # is not, and every later read would disagree with the record.
-            ticker = self._widen_universe(approval)
-            try:
-                self.registry.transition_approval(
-                    approval_id, status, decided_at=self._now_iso())
-            except Exception:
-                self._narrow_universe(ticker)
-                raise
-        else:
-            self.registry.transition_approval(
-                approval_id, status, decided_at=self._now_iso())
+            # The one decision that changes state outside the approvals table,
+            # so the read that authorises it and the write that records it are
+            # one critical section rather than three unlocked steps.
+            return self._approve_universe_change(approval_id)
+
+        if approval.get("status") != "pending":
+            raise PermissionError(
+                f"approval is {approval.get('status')!r}, not pending")
+        self.registry.transition_approval(
+            approval_id, status, decided_at=self._now_iso())
         self.registry.record_event("approval_" + status,
                                    {"approval_id": approval_id, "kind": kind})
         out = {"approval_id": approval_id, "status": status, "kind": kind}
@@ -5319,7 +5420,36 @@ class UISession:
                 (approval.get("summary") or {}).get("ticker") or "")
         return out
 
-    def _widen_universe(self, approval: dict) -> str:
+    def _approve_universe_change(self, approval_id: str) -> dict:
+        """Admit one contender: check, widen, record — all under one lock.
+
+        The status is re-read INSIDE the lock, so a second approval of the same
+        request is refused rather than widening again. That is what makes the
+        rollback safe: it undoes only an append this call actually made, so a
+        loser can never remove a ticker the winner just recorded as approved.
+        """
+        with self._universe_lock:
+            approval = self.registry.get_approval_request(approval_id)
+            if approval is None:
+                raise KeyError(f"unknown approval_id {approval_id!r}")
+            if approval.get("status") != "pending":
+                raise PermissionError(
+                    f"approval is {approval.get('status')!r}, not pending")
+            ticker, appended = self._widen_universe(approval)
+            try:
+                self.registry.transition_approval(
+                    approval_id, "approved", decided_at=self._now_iso())
+            except Exception:
+                if appended:
+                    self._narrow_universe(ticker)
+                raise
+            self.registry.record_event(
+                "approval_approved",
+                {"approval_id": approval_id, "kind": approval.get("kind")})
+            return {"approval_id": approval_id, "status": "approved",
+                    "kind": str(approval.get("kind") or ""), "ticker": ticker}
+
+    def _widen_universe(self, approval: dict) -> tuple[str, bool]:
         """Record an approved contender in the override file and reload.
 
         Under the mandate lock, like every other write to that record: the
@@ -5330,6 +5460,10 @@ class UISession:
         Rolls the file back if the merged mandate will not load — a persisted
         override the mandate refuses is a desk that cannot start, which is a
         worse failure than a refused approval.
+
+        Returns ``(ticker, appended)``. ``appended`` is False when the name was
+        already in the record, and it is what bounds the caller's rollback to
+        its own write.
         """
         from qlab.trader.mandate import (
             load_mandate_overrides, save_mandate_overrides)
@@ -5343,7 +5477,8 @@ class UISession:
         with self._mandate_lock:
             stored_before = load_mandate_overrides()
             added = list(stored_before.get("universe_add") or [])
-            if ticker not in added:
+            appended = ticker not in added
+            if appended:
                 added.append(ticker)
             save_mandate_overrides({**stored_before, "universe_add": added})
             try:
@@ -5358,7 +5493,7 @@ class UISession:
                 "memo_decision_id": str(summary.get("memo_decision_id") or ""),
                 "universe_size": len(self.mandate.universe_whitelist),
             })
-        return ticker
+        return ticker, appended
 
     def _narrow_universe(self, ticker: str) -> None:
         """Undo one widening. Only the rollback path calls this."""

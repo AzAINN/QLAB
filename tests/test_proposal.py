@@ -421,3 +421,18 @@ def test_a_universe_change_request_is_not_one_of_the_desks_proposals(session):
     assert withdrawn == []
     assert session.registry.get_approval_request(
         approval_id)["status"] == "pending"
+
+
+def test_withdraw_orphans_leaves_a_universe_change_alone(session):
+    """An orphan is a live request whose PLAN went away. A universe question
+    has no plan to lose, and withdrawing it would drop a question nothing
+    replaced."""
+    from qlab.governance.approval import build_universe_change_request
+    from qlab.governance.proposal import withdraw_orphans
+
+    request = build_universe_change_request("XLK", memo_decision_id="dec-scout")
+    session.registry.create_approval_request(request)
+    withdrawn, failures = withdraw_orphans(session.registry)
+    assert (withdrawn, failures) == ([], [])
+    assert session.registry.get_approval_request(
+        request["approval_id"])["status"] == "pending"

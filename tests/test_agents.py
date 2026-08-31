@@ -412,3 +412,41 @@ def test_the_coordinator_argv_opens_the_web_only_for_a_scout_graph():
     assert "WebSearch" not in review and "WebFetch" not in review
     # Nothing else was widened: the web is the only difference.
     assert set(watch) - set(review) == {"WebSearch", "WebFetch"}
+
+
+def test_the_scouts_built_grant_is_exactly_its_six_names():
+    """The full set, not a membership check: a tool that appeared here without
+    being noticed is the whole risk of the one role with web access."""
+    from qlab.tui.claude import build_workforce_agents
+
+    agents = build_workforce_agents("watch the holdings and scout contenders")
+    assert agents["contender-scout"]["tools"] == [
+        "WebSearch",
+        "WebFetch",
+        "mcp__qlab-operator__registry_recent_decisions",
+        "mcp__qlab-operator__registry_log_decision",
+        "mcp__qlab-operator__workflow_scout",
+        "mcp__qlab-operator__workflow_status",
+    ]
+
+
+def test_the_coordinator_does_not_browse_and_walks_the_persisted_graph():
+    """The session allowlist carries the web on a watch run, so the coordinator
+    can reach it; the prompt is what says the web belongs to the scout."""
+    from qlab.tui.claude import build_workforce_agents
+
+    prompt = build_workforce_agents("watch the holdings")["qlab-coordinator"]["prompt"]
+    assert "the web belongs to the scout phase; you do not browse" in prompt
+    assert "dispatch exactly the phases workflow_status lists" in prompt
+    assert "each step's `agent`" in prompt
+
+
+def test_atlas_can_name_every_registered_template():
+    """The desk manager may start only registered templates, so its own list
+    has to be the registry's — a template missing from the prose is one Atlas
+    never offers."""
+    from qlab.operator.templates import TEMPLATES
+
+    body = _by_name()["atlas"].body
+    for template_id in TEMPLATES:
+        assert f"`{template_id}`" in body, template_id

@@ -36,8 +36,11 @@ value is judgment and plain language, not arithmetic and not authority.
    evidence behind them before forming a view.
 2. **Choose one registered template**, or none. You may name only templates the
    operator has registered (`desk_brief`, `regime_review`, `estimation_panel`,
-   `research_review`, `risk_event`, `news_risk_review`,
-   `desk_rebalance_review`). You cannot invent a workflow, and asking for one
+   `research_review`, `risk_event`, `news_read`, `news_risk_review`,
+   `portfolio_watch`, `desk_rebalance_review`). `portfolio_watch` reads what
+   changed for the names the desk holds and scouts contenders outside the
+   universe; it creates no plan, and each contender reaches the operator as a
+   `universe_change` approval they answer — never as a weight. You cannot invent a workflow, and asking for one
    that your current mode forbids is refused in code — so say what you want and
    why, and accept the refusal as the answer.
 3. **Say why in one paragraph.** Name the facts that decided it. "Turbulence at

@@ -21,6 +21,15 @@ pub mod proposal;
 pub mod pulse;
 mod refusal;
 pub mod table_cell;
+// The child's screen, drawn on the desk. Gated with the module that obtains one:
+// a monitoring build has no pty, so it has no `vt100::Screen` to hand this widget
+// and no key that could open a pane to hold one. Ungated it would also link the
+// parser and the terminal widget into the artifact whose manifest states that
+// nothing in it references either — and a renderer with no reachable caller is
+// the unreachable seam invariant 10 forbids. The attribute and the declaration
+// are pinned verbatim by `tests/operator_gate.rs`.
+#[cfg(feature = "operator")]
+pub mod terminal;
 pub mod ticker;
 pub mod toast;
 pub mod tristate_spark;

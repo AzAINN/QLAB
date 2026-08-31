@@ -228,6 +228,31 @@ fn only_the_two_gated_modules_can_start_a_child() {
 }
 
 #[test]
+fn the_childs_screen_is_drawn_in_one_gated_place() {
+    // A renderer is not a spawn, so the census above would never have noticed
+    // this one. It is gated anyway, for two reasons the compiler cannot state:
+    // a monitoring build obtains no `vt100::Screen` and has no key that could
+    // open a pane to hold one, so the widget would be a seam with no reachable
+    // caller; and naming the parser and the terminal widget outside `pty.rs`
+    // would link both into the artifact whose manifest says nothing in it
+    // references either. Pinned on the text of the gate, because a `cfg`
+    // naming the wrong feature compiles cleanly in both legs.
+    assert!(
+        source("ui/widgets/mod.rs").contains("#[cfg(feature = \"operator\")]\npub mod terminal;"),
+        "widgets/mod.rs must gate `terminal` on the operator feature, verbatim"
+    );
+    // And there is one renderer rather than two. This pane's border is the only
+    // row the desk still owns once a child is drawing inside it, and a second
+    // pane drawing its own would be a second chance for one of them to name a
+    // key the runtime does not implement.
+    assert_eq!(
+        production_files_mentioning("PseudoTerminal"),
+        vec!["ui/widgets/terminal.rs".to_string()],
+        "the child's screen is drawn in one place"
+    );
+}
+
+#[test]
 fn the_one_click_book_is_gated_in_every_place_it_is_spelled() {
     // The card itself is ungated — a monitoring window shows the desk's open
     // question, which is what a monitoring window is *for* — so the gate is on

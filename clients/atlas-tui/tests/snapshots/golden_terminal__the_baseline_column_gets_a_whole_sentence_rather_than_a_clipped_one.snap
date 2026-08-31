@@ -1,0 +1,12 @@
+---
+source: tests/golden_terminal.rs
+expression: frame
+---
+"┌ ▌ ATLAS ──────────────────────── qlab cli ┐"
+"│the desk is up on :8765                    │"
+"│> what changed in the regime read?         │"
+"│                                           │"
+"│                                           │"
+"│                                           │"
+"│                                           │"
+"└ desk's keyboard · i or click to give it ──┘"

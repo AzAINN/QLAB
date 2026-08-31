@@ -44,7 +44,16 @@ Verified against `main` at `222c293`:
   hand-off.
   What the chosen mind decides is whether a child can be started at all:
   Claude offers `/cli`, a local reasoner refuses it by name with the reason
-  (`qlab cli` is a Claude verb). Keying the column on the child rather than on
+  (`qlab cli` is a Claude verb).
+  **The pane takes the room the chat cannot use.** Measured on the real frame
+  at 120×36, ATLAS is rail 8 · chat 45 · WOULD DO 32 · sidebar 33. A terminal
+  confined to the chat's 45 columns would make Claude unusable, so while a
+  child runs the pane spans the chat *and* WOULD DO columns (77 at 120 wide,
+  117 at 160) and the sidebar stays. WOULD DO is a proposal ranking that DESK
+  and BOOK also carry; the sidebar is the desk context that makes this a desk
+  and not a terminal, so it is the last thing to go. Below 60 columns for the
+  pane the sidebar goes too and the pane takes the whole content width; below
+  the widget's own floor it refuses with a sentence naming the width it needs. Keying the column on the child rather than on
   the config keeps one less piece of state, leaves a Claude desk with no
   session behaving exactly as it does today, and means no frame can claim a
   terminal that is not there.

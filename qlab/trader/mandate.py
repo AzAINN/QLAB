@@ -23,7 +23,7 @@ from qlab.core.costs import (
     DEFAULT_SPREAD_BPS,
 )
 from qlab.core.universe import load_universe
-from qlab.paths import data_path, state_path
+from qlab.paths import data_path, replace_file, state_path
 
 _PERMITTED_UNIVERSE_TIERS = frozenset({"core", "extended"})
 _OVERRIDE_FILE = "mandate_overrides.json"
@@ -374,17 +374,25 @@ def load_mandate_overrides() -> dict:
     force, and silently dropping it would make the desk lie about its own
     limits. Same for an unreadable file — this one governs what may be traded,
     so "treat it as absent" is not available the way it is for the desk mode.
+
+    Every refusal names the remedy. This function runs at every entry point
+    (owner, CLI, MCP), so a file it will not read stops all of them: an
+    operator who is told only *that* it is broken has a bricked desk and no
+    next step.
     """
     path = overrides_path()
     if not path.exists():
         return {}
+    remedy = f"— delete {path} to clear the desk's overrides"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(
-            f"mandate overrides at {path} could not be read: {exc}") from exc
+            f"mandate overrides at {path} could not be read: {exc} "
+            f"{remedy}") from exc
     if not isinstance(raw, dict):
-        raise ValueError(f"mandate overrides at {path} must be a JSON object")
+        raise ValueError(
+            f"mandate overrides at {path} must be a JSON object {remedy}")
     unknown = sorted(set(raw) - set(OVERRIDABLE_FIELDS))
     if unknown:
         named = ", ".join(repr(key) for key in unknown)
@@ -392,7 +400,7 @@ def load_mandate_overrides() -> dict:
         raise ValueError(
             f"mandate overrides at {path} carry unsupported key(s) {named}; "
             f"only {allowed} may be set from the desk — every other limit "
-            "lives in mandate.yaml")
+            f"lives in mandate.yaml {remedy}")
     return {key: raw[key] for key in OVERRIDABLE_FIELDS if key in raw}
 
 
@@ -401,6 +409,13 @@ def save_mandate_overrides(overrides: dict) -> dict:
 
     Returns the stored mapping. Writing ``{}`` removes the file, so "no
     override" is the absence of a record rather than a record of nothing.
+
+    The write is temp-file-then-replace, unlike the desk mode's plain write:
+    a half-written desk mode is treated as "not chosen yet", while a
+    half-written override file refuses LOUDLY at every entry point — so a crash
+    mid-write would leave a desk that cannot start at all. No mode preservation
+    is needed on the temp file: this record holds two governance settings and
+    no secret.
     """
     unknown = sorted(set(overrides) - set(OVERRIDABLE_FIELDS))
     if unknown:
@@ -413,7 +428,9 @@ def save_mandate_overrides(overrides: dict) -> dict:
         path.unlink(missing_ok=True)
         return {}
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(stored, indent=2), encoding="utf-8")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(stored, indent=2), encoding="utf-8")
+    replace_file(tmp, path)
     return stored
 
 
@@ -442,7 +459,13 @@ def _load_defensive_targets(raw: object) -> dict[str, float]:
 
 
 def load_mandate(path: str | Path | None = None) -> Mandate:
-    """Load and flatten ``mandate.yaml`` into a :class:`Mandate`."""
+    """Load and flatten ``mandate.yaml`` into a :class:`Mandate`.
+
+    With no ``path`` this is the desk's own mandate: the shipped yaml merged
+    with the operator's persisted overrides (``mandate_overrides.json``). An
+    explicit ``path`` is read as written — the overrides record a choice about
+    the shipped mandate, not about every yaml anyone hands this function.
+    """
     p = Path(path) if path else data_path("mandate.yaml")
     with open(p, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
@@ -489,10 +512,13 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     # The desk's two choices are merged after the yaml and before validation,
     # so an override that the mandate itself would refuse (a cap of zero, a cap
     # wider than the universe) is refused here rather than persisted into a
-    # runtime that cannot start.
-    overrides = load_mandate_overrides()
+    # runtime that cannot start. Only for the default path: the file records
+    # the operator's choice over the SHIPPED mandate, and a yaml handed in by
+    # name is a different document — a test fixture, an ablation spec — which
+    # must read exactly as written.
+    overrides = load_mandate_overrides() if path is None else {}
     max_holdings = _load_max_holdings(con.get("max_holdings"))
-    if "max_holdings" in overrides:
+    if overrides.get("max_holdings") is not None:
         max_holdings = _load_max_holdings(overrides["max_holdings"], "override")
     operational_policy = str(allocation.get("operational_policy", "hrp"))
     if overrides.get("operational_policy") is not None:

@@ -943,19 +943,34 @@ class UISession:
         A warning, never a refusal (G3 ruling): the operator may legitimately
         set the cap first and the method second, and a desk that refuses the
         first half of a two-step change is a desk that cannot be reconfigured.
-        """
-        if cap is None or policy_id not in _FULL_UNIVERSE_POLICIES:
-            return None
-        if cap >= len(self.mandate.universe_whitelist):
-            return None
-        from qlab.algorithms.policy import get_operational_policy
 
-        try:
-            label = get_operational_policy(policy_id).label
-        except (ValueError, RuntimeError):
-            label = policy_id
-        return (f"{label} holds every name; a cap of {cap} will refuse its "
+        Two independent ways a cap bites, and both may apply at once:
+        the chosen method funds every name, and — whatever the method — too few
+        names cannot add up to a fully invested book under the per-asset cap.
+        """
+        if cap is None:
+            return None
+        mandate = self.mandate
+        warnings: list[str] = []
+        if policy_id in _FULL_UNIVERSE_POLICIES and (
+                cap < len(mandate.universe_whitelist)):
+            from qlab.algorithms.policy import get_operational_policy
+
+            try:
+                label = get_operational_policy(policy_id).label
+            except (ValueError, RuntimeError):
+                label = policy_id
+            warnings.append(
+                f"{label} holds every name; a cap of {cap} will refuse its "
                 "plans — choose a policy that honours the cap or raise it")
+        # Method-independent arithmetic: k names at the per-asset cap must be
+        # able to reach 1.0, or a fully invested plan cannot exist at all.
+        if mandate.fully_invested and cap * mandate.max_weight_per_asset < 1.0:
+            warnings.append(
+                f"a cap of {cap} cannot reach 100% at a "
+                f"{mandate.max_weight_per_asset:.0%} per-asset cap; every plan "
+                "will refuse")
+        return " · ".join(warnings) or None
 
     def method_payload(self) -> dict:
         """The chosen method and cap, what may be chosen, and what may not.
@@ -1036,8 +1051,7 @@ class UISession:
         it was already in force.
         """
         from qlab.trader.mandate import (
-            OVERRIDABLE_FIELDS, load_mandate, load_mandate_overrides,
-            save_mandate_overrides)
+            OVERRIDABLE_FIELDS, load_mandate_overrides, save_mandate_overrides)
 
         if not isinstance(body, dict) or not body:
             raise ValueError(
@@ -1050,7 +1064,10 @@ class UISession:
                 f"desk; refusing {named} — every other limit lives in "
                 "mandate.yaml")
         with self._mandate_lock:
-            overrides = dict(load_mandate_overrides())
+            # Snapshot before anything is mutated: this is what goes back if
+            # the merged mandate turns out not to load.
+            stored_before = load_mandate_overrides()
+            overrides = dict(stored_before)
             previous = {
                 "operational_policy": self.mandate.operational_policy,
                 "max_holdings": self.mandate.max_holdings,
@@ -1069,28 +1086,38 @@ class UISession:
                     overrides.pop(field_name, None)
                 else:
                     overrides[field_name] = value
-            stored_before = load_mandate_overrides()
             save_mandate_overrides(overrides)
             # Re-load rather than mutate: the merge, and every validation the
             # mandate does over the merged result, lives in `load_mandate`. If
             # the merged mandate does not load, the file must go back: a
             # persisted override the mandate refuses is a desk that cannot
-            # start, which is a worse failure than a refused POST.
+            # start, which is a worse failure than a refused POST. The route's
+            # own bounds should make this unreachable, so the branch is pinned
+            # by a test that injects the failure rather than by a real one.
             try:
-                self.mandate = load_mandate()
+                self.mandate = self._reload_mandate()
             except Exception as exc:
                 save_mandate_overrides(stored_before)
-                raise ValueError(
-                    f"refusing that change: {exc}") from exc
-        for field_name, value in changes:
-            self.registry.record_event("mandate_override", {
-                "field": field_name,
-                # What is in force now, which for a cleared override is the
-                # shipped mandate's own value — not the null that cleared it.
-                "value": getattr(self.mandate, field_name),
-                "previous": previous[field_name],
-            })
-        return self.method_payload()
+                raise ValueError(f"refusing that change: {exc}") from exc
+            # Inside the lock: the row says what replaced what, and a second
+            # writer landing between the swap and the row would make that pair
+            # describe a state nobody was ever in.
+            for field_name, value in changes:
+                self.registry.record_event("mandate_override", {
+                    "field": field_name,
+                    # What is in force now, which for a cleared override is the
+                    # shipped mandate's own value — not the null that cleared it.
+                    "value": getattr(self.mandate, field_name),
+                    "previous": previous[field_name],
+                })
+            return self.method_payload()
+
+    @staticmethod
+    def _reload_mandate():
+        """Seam: the one call `set_method` rolls back around (invariant 10)."""
+        from qlab.trader.mandate import load_mandate
+
+        return load_mandate()
 
     # -- live quote stream ---------------------------------------------------
     def attach_market_stream_runner(self, runner) -> None:

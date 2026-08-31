@@ -9,10 +9,11 @@ would refuse is refused at the door rather than persisted.
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
-from qlab.paths import state_path
+from qlab.paths import data_path, state_path
 from qlab.state.registry import Registry
 from qlab.trader.mandate import MandateViolation, load_mandate
 from qlab.ui.server import UISession, handle_api
@@ -182,3 +183,108 @@ def test_an_empty_post_is_refused(session):
     status, payload = _post(session, {})
     assert status == 400
     assert payload["error"]
+
+
+# -- fix round 1 -------------------------------------------------------------
+
+
+def test_a_corrupt_override_file_refuses_with_the_remedy_named():
+    path = state_path(OVERRIDES)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"max_holdings": 5', encoding="utf-8")  # torn mid-write
+    with pytest.raises(ValueError) as exc:
+        load_mandate()
+    message = str(exc.value)
+    assert str(path) in message
+    # A refusal an operator cannot act on is a bricked desk.
+    assert "delete" in message
+
+
+def test_an_unsupported_key_refusal_also_names_the_remedy():
+    path = state_path(OVERRIDES)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"paper_capital": 1.0}), encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        load_mandate()
+    assert "delete" in str(exc.value)
+
+
+def test_the_override_file_is_written_atomically(session, monkeypatch):
+    import qlab.trader.mandate as mandate_mod
+
+    seen = []
+    real = mandate_mod.replace_file
+    monkeypatch.setattr(mandate_mod, "replace_file",
+                        lambda src, dst: (seen.append((src, dst)), real(src, dst))[1])
+    _post(session, {"max_holdings": 5})
+    assert seen, "the override file must land through an atomic replace"
+    src, dst = seen[0]
+    assert str(dst).endswith(OVERRIDES)
+    assert not pathlib.Path(src).exists()   # the temp file does not linger
+    assert _written() == {"max_holdings": 5}
+
+
+def test_an_explicit_path_load_ignores_the_desks_overrides(session, tmp_path):
+    _post(session, {"operational_policy": "min_variance", "max_holdings": 5})
+    # The override file records the operator's choice over the SHIPPED mandate.
+    # A yaml handed in by name is somebody else's document.
+    shipped = data_path("mandate.yaml")
+    copy = tmp_path / "mandate.yaml"
+    copy.write_text(shipped.read_text(encoding="utf-8"), encoding="utf-8")
+    loaded = load_mandate(copy)
+    assert loaded.operational_policy == "hrp"
+    assert loaded.max_holdings is None
+    assert load_mandate().operational_policy == "min_variance"
+
+
+def test_a_cap_below_the_per_asset_reach_warns_for_every_policy(session):
+    # 0.40 per-asset cap: two names cannot reach 100%, whatever the method.
+    _post(session, {"operational_policy": "min_variance"})
+    status, payload = _post(session, {"max_holdings": 2})
+    assert status == 200, payload
+    warning = payload["warning"]
+    assert warning and "cannot reach 100%" in warning
+    assert "40%" in warning
+
+
+def test_both_warnings_are_said_when_both_apply(session):
+    status, payload = _post(session, {"max_holdings": 2})   # policy is hrp
+    assert status == 200, payload
+    warning = payload["warning"]
+    assert "holds every name" in warning
+    assert "cannot reach 100%" in warning
+
+
+def test_get_alone_surfaces_a_live_warning(session):
+    _post(session, {"max_holdings": 5})
+    fresh = UISession(offline_default=True, registry=Registry(":memory:"))
+    payload = _get(fresh)   # no POST in this runtime at all
+    assert payload["warning"] and "holds every name" in payload["warning"]
+
+
+def test_a_research_catalog_id_outside_the_policy_table_names_its_stage(session):
+    # `regime_min_variance` is an allocation entry in the catalog and is NOT in
+    # the operational policy table, so the stage message must win over the
+    # policy table's "unknown policy" — the operator needs to know it exists
+    # and why it cannot be chosen.
+    status, payload = _post(session, {"operational_policy": "regime_min_variance"})
+    assert status == 400
+    assert "research" in payload["error"]
+    assert "regime_min_variance" in payload["error"]
+
+
+def test_a_failed_reload_restores_the_previous_override_file(session, monkeypatch):
+    _post(session, {"max_holdings": 5})
+    import qlab.ui.server as server_mod
+
+    def boom():
+        raise RuntimeError("mandate is unloadable")
+
+    monkeypatch.setattr(server_mod.UISession, "_reload_mandate",
+                        staticmethod(boom))
+    status, payload = _post(session, {"max_holdings": 7})
+    assert status == 400
+    assert "unloadable" in payload["error"]
+    # The desk still starts: the file is what it was before the refused change.
+    assert _written() == {"max_holdings": 5}
+    assert session.mandate.max_holdings == 5

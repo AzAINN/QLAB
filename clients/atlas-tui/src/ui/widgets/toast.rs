@@ -324,6 +324,16 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
                 None => format!("the desk blocked this fill ({blocked_by})"),
             },
         ),
+        // `Alarm` like every other broken request, and it names the plan: the
+        // answer never came, so whether the fill happened is unknown — which is
+        // a different thing from the refusal above and must not be toned like
+        // one. The card carries the same sentence, because this box is gone in
+        // four seconds and the question is not.
+        Wrote::BookFailed { plan_id, said } => Toast::new(
+            Level::Alarm,
+            "booking failed",
+            format!("plan {plan_id} — {said}"),
+        ),
         Wrote::Decided {
             approval_id,
             decision,
@@ -549,6 +559,9 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
         Wrote::NewsRefused { said } => {
             Toast::new(Level::Warn, "news sources refused", said.clone())
         }
+        // `Alarm`, unlike the refusal above: the desk decided nothing and the
+        // stack's state is unknown until the next snapshot says.
+        Wrote::NewsFailed { said } => Toast::new(Level::Alarm, "news sources failed", said.clone()),
         // The owner's own merged pair, never the request's: a cap the mandate
         // clamped and a method the overrides resolved differently would both
         // read as applied-as-typed in a receipt composed here.
@@ -584,6 +597,11 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
         // the one that says a research-stage method is not promoted from here.
         Wrote::MethodRefused { said } => {
             Toast::new(Level::Warn, "desk method refused", said.clone())
+        }
+        // `Alarm`, unlike the refusal above, for `NewsFailed`'s reason: nothing
+        // was decided and what the desk now solves with is unknown here.
+        Wrote::MethodFailed { said } => {
+            Toast::new(Level::Alarm, "desk method failed", said.clone())
         }
         // The owner's own object, never the request's echo: it writes all
         // three keys and answers with what is on disk, so a receipt composed

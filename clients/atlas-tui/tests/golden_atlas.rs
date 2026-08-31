@@ -738,3 +738,64 @@ fn the_chat_approve_word_opens_the_universe_box_the_audit_key_opens() {
         "the chat drew the plan box for a universe change: {frame}"
     );
 }
+
+/// A desk with nothing proposed and two questions of different kinds waiting:
+/// one plan approval, one widening. Both draw a `/word` in the your-call list,
+/// which is what the clamp below is about.
+const YOUR_CALL: &str = r#"{"approvals": [
+     {"approval_id": "uc11223344556677", "kind": "universe_change", "status": "pending",
+      "plan_id": null, "expires_at": null,
+      "summary": {"ticker": "NVDA", "memo_decision_id": "memo1234abcd"}},
+     {"approval_id": "ap99887766554433", "kind": "plan", "status": "pending",
+      "plan_id": "5a6978aabbccddee", "expires_at": null, "summary": {}}]}"#;
+
+/// The rule `book_word` is clamped by, on the three rects the your-call list
+/// registers: the sidebar is drawn with a `take(inner.height)`, so a rect
+/// computed from the unclipped line list lands *under* the pane — over the
+/// footer — and a click there runs a word the frame never drew.
+///
+/// Asserted on the line the click would run rather than on a box, because a
+/// clicked `/word` leaves this view as a `RunLine` for the runtime to resolve —
+/// and written as "a click may only run a word that was on screen" rather than
+/// "nothing runs at short heights", because both halves matter: the affordance
+/// has to keep working wherever the list did fit.
+///
+/// Ungated: the rects are registered in both builds, and so is the bug.
+#[test]
+fn a_your_call_word_the_short_sidebar_clipped_off_is_not_clickable() {
+    use atlas::cmd::Command;
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let mut client = Client::new(store_from(YOUR_CALL));
+    client.press(KeyCode::Char('1'));
+    let mut ran = 0;
+    for height in 8..40u16 {
+        let frame = client.frame(120, height);
+        for row in 0..height {
+            let acted = atlas::ui::shell::on_mouse(
+                crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    // Inside the sidebar column at this width, where the
+                    // rects are; the pulse rail to its right registers none.
+                    column: 60,
+                    row,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                &mut client.store,
+                &mut client.views,
+            );
+            let Some(Command::RunLine(line)) = acted else {
+                continue;
+            };
+            assert!(
+                frame.contains(&line),
+                "at {height} rows a click on row {row} would run `{line}`, which the frame \
+                 had clipped:\n{frame}"
+            );
+            ran += 1;
+        }
+    }
+    // And the search really ran: a click path that produced nothing anywhere
+    // would satisfy the assertion above while proving nothing at all.
+    assert!(ran > 0, "no click ever ran a word");
+}

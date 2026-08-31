@@ -355,8 +355,12 @@ mod armed {
                         reasons,
                         survives: None,
                     },
-                    Err(err) => Wrote::Failed {
-                        what: format!("book {plan_id}"),
+                    // Its own failure variant, carrying the plan. See
+                    // `Wrote::BookFailed`: the card claims this outcome by the
+                    // plan it names, not by reading the subject back out of
+                    // `names`' prose.
+                    Err(err) => Wrote::BookFailed {
+                        plan_id,
                         said: err.to_string(),
                     },
                 }
@@ -529,12 +533,6 @@ mod armed {
                 verify,
                 offline,
             } => {
-                let what = names(&Command::NewsSettings {
-                    providers: providers.clone(),
-                    contact: None,
-                    verify,
-                    offline,
-                });
                 match client
                     .set_news(
                         &providers,
@@ -554,8 +552,9 @@ mod armed {
                     // bury "edgar needs a contact" under a transport error
                     // nobody can act on.
                     Ok(News::Rejected(said)) => Wrote::NewsRefused { said },
-                    Err(err) => Wrote::Failed {
-                        what,
+                    // Its own failure variant. See `Wrote::NewsFailed`: the
+                    // card retires its wait on this outcome and no other.
+                    Err(err) => Wrote::NewsFailed {
                         said: err.to_string(),
                     },
                 }
@@ -579,8 +578,9 @@ mod armed {
                 // carries the remedy — including the one sentence that says a
                 // research-stage method is not promoted by a desk setting.
                 Ok(Mandate::Rejected(said)) => Wrote::MethodRefused { said },
-                Err(err) => Wrote::Failed {
-                    what: names(&Command::SetMethod(change)),
+                // Its own failure variant. See `Wrote::MethodFailed`: the card
+                // retires its wait on this outcome and no other.
+                Err(err) => Wrote::MethodFailed {
                     said: err.to_string(),
                 },
             },

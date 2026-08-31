@@ -1639,12 +1639,13 @@ impl SettingsView {
             }
             _ => {}
         }
-        // Any answer at all retires both waits. A failure is carried by the
-        // toast rather than by these cards — it is a broken request rather than
-        // a decision about the stack — but a card still saying "asking the
-        // owner…" over one would read as a client that had hung.
-        self.news.sending = None;
-        self.method.sending = false;
+        // Each of the two cards below retires its wait on its own three
+        // outcomes and on nothing else, for the reason the rights wait above
+        // does. The blanket retirement this replaced was harmless while every
+        // write answered in milliseconds; a predictor board is fitted for up to
+        // a minute, so a `PredictorRan` lands mid-flight, blanks the cap box's
+        // "asking the owner…", and re-arms an Enter that writes a second
+        // override row for one decision.
         match outcome {
             // The owner's answer replaces the draft wholesale, and the refetch
             // behind it is what the card then draws. A draft left standing
@@ -1652,6 +1653,7 @@ impl SettingsView {
             Wrote::NewsSaved {
                 checked, verified, ..
             } => {
+                self.news.sending = None;
                 self.news.picked = None;
                 self.news.contact = None;
                 self.news.note = None;
@@ -1668,6 +1670,16 @@ impl SettingsView {
             // Its own sentence, on the card that asked. It carries the remedy,
             // and the toast that carries it too is gone in four seconds.
             Wrote::NewsRefused { said } => {
+                self.news.sending = None;
+                self.news.note = Some(format::bounded(said, SAID_MAX));
+                return;
+            }
+            // A request that never landed. The card must not stay waiting over
+            // one — a card still saying "asking the owner…" after a timeout
+            // reads as a client that has hung — and the sentence is the owner's
+            // own words, because this client knows nothing about what happened.
+            Wrote::NewsFailed { said } => {
+                self.news.sending = None;
                 self.news.note = Some(format::bounded(said, SAID_MAX));
                 return;
             }
@@ -1676,6 +1688,7 @@ impl SettingsView {
             // the owner recomputed, which is why nothing here copies the pair
             // out of the answer onto the card.
             Wrote::MethodSet { .. } => {
+                self.method.sending = false;
                 self.method.cap_box = None;
                 self.method.note = None;
                 return;
@@ -1684,6 +1697,16 @@ impl SettingsView {
             // the change and declined it, so the box stays up with the number
             // still in it and the owner's sentence under the field.
             Wrote::MethodRefused { said } => {
+                self.method.sending = false;
+                self.method.note = Some(format::bounded(said, SAID_MAX));
+                return;
+            }
+            // A request that never landed, for `NewsFailed`'s reason. The box
+            // stays up with the number still in it: nothing here says the
+            // change did not land, so re-reading the card and pressing again is
+            // the remedy.
+            Wrote::MethodFailed { said } => {
+                self.method.sending = false;
                 self.method.note = Some(format::bounded(said, SAID_MAX));
                 return;
             }

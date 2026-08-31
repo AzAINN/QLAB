@@ -97,8 +97,12 @@ pub enum ViewId {
     Research,
     /// The predictor board's own pane: every evaluated model, where RESEARCH
     /// keeps a one-row readout. Beside RESEARCH because the board is a
-    /// research artifact — its models are visible here and runnable only
-    /// through the owner's governed tool, never from this client.
+    /// research artifact — and, since H2, one an armed window can *ask for*:
+    /// `r` posts a lane to `/api/research/predictors/run`, which fits a risk
+    /// model and writes a `predictor_board` row. That is not a hole in the
+    /// execution gate and cannot become one — the route touches no plan, no
+    /// approval and no posture — but it is a write this client makes, and the
+    /// pane must not be described as read-only.
     Predictors,
     Workforce,
     Audit,
@@ -1015,6 +1019,19 @@ impl Store {
                         self.booking =
                             Some(Booking::refused(plan_id, &blocked_by, &reasons, survives));
                     }
+                    // A failed booking is kept for the reason a refused one is,
+                    // and one more: the answer never arrived, so the fill's
+                    // state is unknown and no poll can settle it. Claimed by
+                    // the plan the outcome names — the loose shape this
+                    // replaced recovered it from `dispatch::names`' prose, so
+                    // any other failure worded "book …" would have landed here.
+                    Wrote::BookFailed { plan_id, said } => {
+                        self.booking = Some(Booking {
+                            plan_id,
+                            said,
+                            kind: BookingKind::Failed,
+                        });
+                    }
                     // Nothing for the store to hold. A decision, a question, a
                     // workflow handle and a failed request all leave their
                     // trace in the owner's own record, which the next poll
@@ -1083,8 +1100,10 @@ impl Store {
                     | Wrote::PredictorRefused { .. }
                     | Wrote::PredictorFailed { .. }
                     | Wrote::MethodRefused { .. }
+                    | Wrote::MethodFailed { .. }
                     | Wrote::NewsSaved { .. }
                     | Wrote::NewsRefused { .. }
+                    | Wrote::NewsFailed { .. }
                     | Wrote::Armed { .. }
                     | Wrote::Proposed { .. }
                     | Wrote::ProposalStarted { .. }
@@ -1099,20 +1118,12 @@ impl Store {
                     | Wrote::LoggedIn { .. }
                     | Wrote::LoginNeedsConsent { .. }
                     | Wrote::LoginRefused { .. }
-                    | Wrote::Tested { .. } => {}
-                    // A failure is a toast like every other, except when it
-                    // was *this* request: a booking whose answer never arrived
-                    // leaves the fill's state unknown, and the card is the
-                    // surface an operator is about to press the key on again.
-                    Wrote::Failed { what, said } => {
-                        if let Some(plan_id) = what.strip_prefix("book ") {
-                            self.booking = Some(Booking {
-                                plan_id: plan_id.to_string(),
-                                said,
-                                kind: BookingKind::Failed,
-                            });
-                        }
-                    }
+                    | Wrote::Tested { .. }
+                    // A failure with no surface of its own is a toast and
+                    // nothing else. The three that a card is waiting on —
+                    // `BookFailed`, `MethodFailed`, `NewsFailed` — are their
+                    // own variants precisely so this one may be ignored here.
+                    | Wrote::Failed { .. } => {}
                 }
                 self.dirty = true;
             }

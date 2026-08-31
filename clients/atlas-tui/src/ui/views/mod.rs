@@ -200,20 +200,15 @@ impl Views {
     /// here — every other outcome is a toast and a refetch — rather than asking
     /// ten views a question seven of them have no state for.
     ///
-    /// **Known hazard, not fixed here.** Every outcome is fanned to *every*
-    /// surface, and `SettingsView::wrote` retires both of its waits on any
-    /// answer at all — so an outcome belonging to another pane clears a
-    /// SETTINGS card that is still asking. That was harmless while every write
-    /// answered in milliseconds; a predictor board is fitted for up to a
-    /// minute, so a `PredictorRan` now lands *after* a news save or a method
-    /// change that an operator started in the meantime, and blanks that card's
-    /// "asking the owner…" for a request still in flight. The card recovers on
-    /// its own answer, so nothing is lost but the honesty of one frame.
-    ///
-    /// The fix is for SETTINGS to match on the outcomes that are its own — the
-    /// discipline `PredictorsView::wrote` already holds to, and the reason it
-    /// does. It is not made here because it is a change to another surface's
-    /// state machine, and it is listed as a follow-up in the H2 fix report.
+    /// Every outcome is fanned to *every* surface, so each one claims only the
+    /// answers that are its own. That discipline is the whole of what keeps
+    /// the fan-out safe, and it is structural in all three: METHOD and NEWS
+    /// retire on their own set/refused/failed variants, RIGHTS compares the
+    /// `field` it is waiting on, and PREDICTORS compares the `lane`. Nothing
+    /// here matches `dispatch::names`' prose, and nothing retires a wait on a
+    /// bare `Wrote::Failed` — a board is fitted for up to a minute, so some
+    /// other write *will* answer while a card is still asking, and a blanket
+    /// retirement re-arms a key over a request still in flight.
     #[cfg(feature = "operator")]
     pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
         self.settings.wrote(outcome);

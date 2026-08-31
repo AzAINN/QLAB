@@ -2008,6 +2008,43 @@ mod news {
     }
 
     #[test]
+    fn the_save_wait_is_retired_by_its_own_answer_and_never_by_another_panes() {
+        // Every outcome is fanned to every surface, and this card used to
+        // retire its wait on any of them. A predictor board is fitted for up to
+        // a minute, so a `PredictorRan` lands while a checked save is still
+        // running, blanks "asking the owner…", and re-arms the key that sends a
+        // second save for one decision.
+        let mut client = armed();
+        on_news(&mut client);
+        assert!(press(&mut client, KeyCode::Char('s')).is_some());
+        client.views.wrote(&Wrote::PredictorRan {
+            run_id: "pb-1".to_string(),
+            models: vec!["ridge:none".to_string()],
+            champion: None,
+        });
+        assert_eq!(
+            press(&mut client, KeyCode::Char('s')),
+            None,
+            "another pane's answer retired this card's wait"
+        );
+        // Refused out loud, in the card's own words for a request still out.
+        assert!(
+            content(&client.frame(120, 36)).contains("still asking"),
+            "{}",
+            content(&client.frame(120, 36))
+        );
+
+        // Its own failure does retire it — a card still asking after a timeout
+        // reads as a client that has hung — and the sentence is the owner's.
+        client.views.wrote(&Wrote::NewsFailed {
+            said: "no answer from the owner".to_string(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("no answer from the owner"), "{body}");
+        assert!(press(&mut client, KeyCode::Char('s')).is_some());
+    }
+
+    #[test]
     fn a_catalog_taller_than_the_card_keeps_its_note_row_and_bounds_the_cursor() {
         // The card has room for five sources at this height. A sixth used to
         // push the note row off the bottom — which is where every refusal
@@ -2531,6 +2568,43 @@ mod method {
         // same reason, on the card rather than in a box.
         assert_eq!(press(&mut client, KeyCode::Char('m')), None);
         assert!(content(&client.frame(120, 36)).contains("asking the owner"));
+    }
+
+    #[test]
+    fn the_cap_wait_is_retired_by_its_own_answer_and_never_by_another_panes() {
+        // The same defect as NEWS', and worse where it lands: a wait retired by
+        // another pane's answer re-arms the Enter that writes a second
+        // `mandate_override` row for one decision.
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        press(&mut client, KeyCode::Char('4'));
+        assert!(press(&mut client, KeyCode::Enter).is_some());
+        client.views.wrote(&Wrote::PredictorRan {
+            run_id: "pb-1".to_string(),
+            models: vec!["ridge:none".to_string()],
+            champion: None,
+        });
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            None,
+            "another pane's answer retired this card's wait"
+        );
+        assert!(
+            content(&client.frame(120, 36)).contains("asking the owner"),
+            "{}",
+            content(&client.frame(120, 36))
+        );
+
+        // Its own failure does retire it, and the box keeps what was typed:
+        // nothing here says the change did not land, so pressing again is the
+        // remedy.
+        client.views.wrote(&Wrote::MethodFailed {
+            said: "the owner did not answer: connection refused".to_string(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("connection refused"), "{body}");
+        assert!(press(&mut client, KeyCode::Enter).is_some());
     }
 
     #[test]

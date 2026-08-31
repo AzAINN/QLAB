@@ -707,24 +707,19 @@ impl Modal {
     /// Wrapped against [`W`] rather than the area, because `height` is asked
     /// before the rect exists — and a note counted at one width and drawn at
     /// another is a box whose last row falls outside its own border.
+    ///
+    /// The card's own wrapper, not a second one beside it: this box's note is
+    /// the owner's sentence and can carry a token longer than the box is wide —
+    /// a `targets_hash`, a route, a refusal quoting an id — and the fold this
+    /// replaced put such a word on a row of its own whatever its length, which
+    /// the paragraph then clipped past the border.
     fn note_rows(&self) -> Vec<String> {
         let Some(note) = self.note.as_deref() else {
             return Vec::new();
         };
-        let width = (W - 2) as usize;
-        let mut rows = vec![String::new()];
-        for word in note.split_whitespace() {
-            let row = rows.last_mut().expect("seeded with one row");
-            if row.is_empty() {
-                row.push_str(word);
-            } else if row.chars().count() + 1 + word.chars().count() <= width {
-                row.push(' ');
-                row.push_str(word);
-            } else {
-                rows.push(word.to_string());
-            }
-        }
-        rows
+        // Against [`W`] rather than the area, for the reason the doc above
+        // gives: `height` is asked before the rect exists.
+        crate::ui::widgets::proposal::wrap(note, (W - 2) as usize)
     }
 
     /// Whether the last frame drew this box's arming words under that cell.
@@ -927,6 +922,30 @@ mod tests {
             ..Approval::default()
         };
         (plan, approval)
+    }
+
+    #[test]
+    fn a_note_word_wider_than_the_box_is_broken_rather_than_drawn_past_the_border() {
+        // The note is the owner's sentence and this client owns none of its
+        // wording: a refusal quoting a `targets_hash`, a route, a run id can
+        // all be one token longer than the box is wide. The fold this replaced
+        // put such a word on a row of its own whatever its length, so `height`
+        // counted one row for it and the paragraph drew it clipped past the
+        // border — the box's own last row outside its own frame.
+        let token = "targets_hash=".to_string() + &"0123456789abcdef".repeat(6);
+        let modal = Modal::action("REFUSED", Vec::new()).with_note(&token);
+        let rows = modal.note_rows();
+        let width = (W - 2) as usize;
+        assert!(rows.len() > 1, "the token was never broken: {rows:?}");
+        for row in &rows {
+            assert!(
+                row.chars().count() <= width,
+                "{row:?} is wider than {width}"
+            );
+        }
+        // And nothing was dropped on the way: a wrap that clipped would be the
+        // same defect wearing a different hat.
+        assert_eq!(rows.concat(), token);
     }
 
     #[test]

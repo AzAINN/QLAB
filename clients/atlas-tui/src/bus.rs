@@ -173,6 +173,17 @@ pub enum Wrote {
         reasons: Vec<String>,
         survives: Option<bool>,
     },
+    /// The one-click book never got an answer: no owner, a timeout, a non-2xx.
+    ///
+    /// **Its own variant rather than a `Failed` the card matches by name**, for
+    /// the reason `RightFailed` and `PredictorFailed` give, and here with the
+    /// most at stake of the three: the fill's state is *unknown*, and the card
+    /// an operator is about to press the key on again is the surface that says
+    /// so. `plan_id` is what makes the match structural — the card compares it
+    /// with the proposal on screen, where the old shape recovered the plan by
+    /// slicing `dispatch::names`' prose, so any rewording of that sentence
+    /// silently retargeted the note.
+    BookFailed { plan_id: String, said: String },
     /// A human decision reached the record. `decision` is the owner's own word
     /// for it — `approved` or `rejected`.
     Decided {
@@ -300,6 +311,10 @@ pub enum Wrote {
     /// it cannot reach, a missing or malformed contact. Its own sentence,
     /// which carries the remedy and never the contact.
     NewsRefused { said: String },
+    /// The request to change the news stack never got an answer. Its own
+    /// variant for `MethodFailed`'s reason: the NEWS card retires its wait on
+    /// this outcome and no other.
+    NewsFailed { said: String },
     /// The owner changed which method this desk solves with, or its cap.
     ///
     /// **The owner's own account of what is now in force**, read off the answer
@@ -321,6 +336,13 @@ pub enum Wrote {
     /// is still research stage, a cap outside the universe. Its own sentence,
     /// which carries the remedy.
     MethodRefused { said: String },
+    /// The request to change the method never got an answer.
+    ///
+    /// Its own variant for `RightFailed`'s reason: the METHOD card retires its
+    /// wait on this outcome and no other, and a wait retired by some unrelated
+    /// broken request would re-arm the cap box over a change still in flight —
+    /// one decision, two override rows.
+    MethodFailed { said: String },
     /// The owner recorded a right.
     ///
     /// **The owner's own answer, never the request's echo**, for the reason

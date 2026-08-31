@@ -2117,8 +2117,8 @@ mod booking {
         let mut client = armed();
         answered(
             &mut client,
-            Wrote::Failed {
-                what: "book b92a58fa5c1d4e7f".to_string(),
+            Wrote::BookFailed {
+                plan_id: "b92a58fa5c1d4e7f".to_string(),
                 said: "the owner refused with 400: not the current proposal".to_string(),
             },
         );
@@ -2137,10 +2137,10 @@ mod booking {
 
     #[test]
     fn a_failure_about_some_other_request_never_lands_on_this_card() {
-        // `Wrote::Failed` is the shape every failed write in this client comes
-        // back as, so the card claims only the ones whose subject is a booking
-        // — and only its own plan's. A news save that timed out is not news
-        // about the desk's open question.
+        // `Wrote::Failed` is what a write with no card of its own comes back
+        // as, and this card claims none of them: a booking that never landed
+        // has its own variant. A news save that timed out is not news about
+        // the desk's open question.
         let mut client = armed();
         answered(
             &mut client,
@@ -2151,6 +2151,30 @@ mod booking {
         );
         let frame = client.frame(120, 36);
         assert!(!frame.contains("connection refused"), "{frame}");
+        assert!(frame.contains("book ↵"), "{frame}");
+    }
+
+    #[test]
+    fn a_generic_failure_worded_like_a_booking_never_lands_on_this_card() {
+        // The probe for the shape this replaced. A booking failure used to be
+        // recovered by slicing `"book "` off `dispatch::names`' prose, so any
+        // *other* failure whose subject happened to start that way landed on
+        // this card as a booking of unknown outcome — and a reworded `names`
+        // would have silently taken the real one away. The match is now the
+        // `BookFailed` variant, so this sentence is a toast and nothing more.
+        let mut client = armed();
+        answered(
+            &mut client,
+            Wrote::Failed {
+                what: "book b92a58fa5c1d4e7f".to_string(),
+                said: "a sentence no card may claim by its wording".to_string(),
+            },
+        );
+        let frame = client.frame(120, 36);
+        assert!(
+            !frame.contains("no card may claim"),
+            "a prose match put a generic failure on the booking card:\n{frame}"
+        );
         assert!(frame.contains("book ↵"), "{frame}");
     }
 

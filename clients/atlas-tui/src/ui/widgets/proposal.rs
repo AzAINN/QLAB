@@ -608,7 +608,7 @@ fn clipped(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
 /// card is a single line, clipped rather than wrapped, because a fact that ran
 /// onto a second row would make the card's height a function of the desk.
 #[cfg(feature = "operator")]
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
     let mut line = String::new();

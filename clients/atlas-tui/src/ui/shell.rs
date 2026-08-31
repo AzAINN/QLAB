@@ -658,12 +658,6 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
     }
 }
 
-/// Which view to show a symbol on: the one the operator is already looking at
-/// when it holds the row, otherwise the one that does.
-///
-/// Staying put matters more than it sounds. An operator working through the
-/// blotter who types a symbol is naming a position, and being thrown to MARKETS
-/// for it would lose the column they had sorted by.
 /// The approve box the chat's `/approve` puts up — built by the same function
 /// AUDIT's own `a` calls, so the two paths cannot come to say different things
 /// about one request. An id the snapshot is no longer serving still gets a box
@@ -678,6 +672,12 @@ fn approval_modal(store: &Store, approval_id: &str) -> crate::ui::widgets::confi
     crate::ui::widgets::confirm::Modal::for_approval(approval_id, approval, "approve")
 }
 
+/// Which view to show a symbol on: the one the operator is already looking at
+/// when it holds the row, otherwise the one that does.
+///
+/// Staying put matters more than it sounds. An operator working through the
+/// blotter who types a symbol is naming a position, and being thrown to MARKETS
+/// for it would lose the column they had sorted by.
 fn landing(current: ViewId, hit: Selected) -> Option<ViewId> {
     match (current, hit) {
         (ViewId::Markets, Selected { markets: true, .. }) => Some(ViewId::Markets),

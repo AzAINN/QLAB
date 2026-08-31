@@ -1212,10 +1212,17 @@ impl AtlasView {
             {
                 if let Some(id) = approval.approval_id.as_deref() {
                     let word = format!("/approve {}", &id[..8.min(id.len())]);
-                    self.affordances.borrow_mut().push((
-                        Rect::new(inner.x, inner.y + lines.len() as u16, inner.width, 1),
-                        word.clone(),
-                    ));
+                    // Clamped to the pane, for `book_word`'s reason: this
+                    // sidebar is drawn with a `take(inner.height)`, so a rect
+                    // computed from the unclipped list lands *under* the pane —
+                    // over the footer — and a click there runs a word the frame
+                    // never drew. Absence is not permission.
+                    if lines.len() < inner.height as usize {
+                        self.affordances.borrow_mut().push((
+                            Rect::new(inner.x, inner.y + lines.len() as u16, inner.width, 1),
+                            word.clone(),
+                        ));
+                    }
                     lines.push(Line::from(Span::styled(
                         word,
                         Style::default().fg(t.accent),
@@ -1237,10 +1244,13 @@ impl AtlasView {
                     None if store.approval_for(id).is_none() => format!("/approve {short}"),
                     None => continue,
                 };
-                self.affordances.borrow_mut().push((
-                    Rect::new(inner.x, inner.y + lines.len() as u16, inner.width, 1),
-                    word.clone(),
-                ));
+                // Clamped for the reason the approvals above are.
+                if lines.len() < inner.height as usize {
+                    self.affordances.borrow_mut().push((
+                        Rect::new(inner.x, inner.y + lines.len() as u16, inner.width, 1),
+                        word.clone(),
+                    ));
+                }
                 lines.push(Line::from(Span::styled(
                     word,
                     Style::default().fg(t.accent),
@@ -1372,7 +1382,10 @@ impl AtlasView {
                 // The click lands on the row the word is actually on, for the
                 // rule the acts panel states: a word the frame did not draw
                 // whole is not something a click may run.
-                if row.contains(&word) {
+                // And on a row the pane has room for: the sidebar is clipped
+                // with a `take(inner.height)`, so a rect from the unclipped
+                // list would sit under the pane over the footer.
+                if row.contains(&word) && lines.len() < inner.height as usize {
                     self.affordances.borrow_mut().push((
                         Rect::new(inner.x, inner.y + lines.len() as u16, inner.width, 1),
                         word.clone(),

@@ -105,6 +105,7 @@ import os
 import threading
 import time
 import uuid
+import warnings
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -231,6 +232,11 @@ _METHOD_FIELDS = ("operational_policy", "max_holdings")
 # number the role's own prompt states, enforced here because a prompt is not a
 # gate — a memo with thirty names must not become thirty questions.
 _MAX_CONTENDERS = 3
+
+# How many terminal approvals are read back when checking whether a universe
+# question was already answered. Generous because it spans every kind, not
+# just this one — see `_check_not_already_answered` for what it cannot promise.
+_ANSWERED_WINDOW = 500
 
 _MARKET_EVENT_LIMIT = 500
 # How many approvals of *each* actionable status ride in one /api/tui payload.
@@ -643,10 +649,37 @@ class UISession:
         )
         if (str(body.get("status") or "") == "done"
                 and _phase_type(phase) == "scout"):
-            self._file_universe_questions(workflow)
+            # After the commit, so nothing here may raise back to the caller:
+            # the phase IS done, and a 500 would have the coordinator
+            # re-dispatch a phase the registry has already closed (and, on a
+            # graph whose next phase is gated on this one, park the run). The
+            # failure is recorded rather than swallowed — questions that were
+            # never filed are questions the operator will never see, and that
+            # has to be visible in the audit rather than inferred from an
+            # empty desk.
+            try:
+                self._file_universe_questions(workflow, phase)
+            except Exception as exc:
+                self._record_event_quietly("universe_questions_failed", {
+                    "workflow_id": str(body.get("workflow_id") or ""),
+                    "phase": phase, "error": str(exc)[:300]})
         return workflow
 
-    def _file_universe_questions(self, workflow: dict) -> dict:
+    def _record_event_quietly(self, kind: str, payload: dict) -> None:
+        """Record one event, absorbing a failure of the recorder itself.
+
+        Only for the post-commit paths: the reason they cannot raise is the
+        reason their own failure report cannot either. A registry that will
+        not take this row has a problem no second attempt here can fix, and
+        `warnings` keeps the fact on the operator's console.
+        """
+        try:
+            self.registry.record_event(kind, payload)
+        except Exception as exc:  # pragma: no cover - the recorder's own fault
+            warnings.warn(f"could not record {kind}: {exc}", RuntimeWarning,
+                          stacklevel=2)
+
+    def _file_universe_questions(self, workflow: dict, phase: str) -> dict:
         """Turn the scout's persisted contenders into the operator's questions.
 
         Filed on the SCOUT's completion, not the reporter's. The memo is
@@ -661,18 +694,23 @@ class UISession:
 
         Every name is filed in its own try/except and a refusal skips only that
         one — an unpermitted tier, a name already held, a duplicate already
-        pending. One event carries both halves, because a contender that was
-        silently dropped looks exactly like one the scout never found. Nothing
-        here may fail the phase update that has already committed.
+        pending, a question the operator already answered no to. One event
+        carries both halves, because a contender that was silently dropped
+        looks exactly like one the scout never found. Nothing here may fail the
+        phase update that has already committed; the caller guards the whole
+        call for the cases this cannot foresee.
         """
         from qlab.state.registry import phase_type as _phase_type
 
         steps = {str(step.get("phase") or ""): step
                  for step in (workflow.get("steps") or ())}
-        scout = next((step for phase, step in steps.items()
-                      if _phase_type(phase) == "scout"
-                      and step.get("status") == "done"), None)
-        if scout is None:
+        # THE step that just completed, not any done scout in the graph. A
+        # suffixed graph has more than one, and picking the first would refile
+        # branch one's contenders every time another branch finished — while
+        # that branch's own names never reached the operator at all.
+        scout = steps.get(str(phase))
+        if (scout is None or _phase_type(str(phase)) != "scout"
+                or scout.get("status") != "done"):
             return {"opened": [], "skipped": []}
         artifacts = scout.get("artifacts") or {}
         memo_decision_id = str(artifacts.get("memo_decision_id") or "")
@@ -5255,9 +5293,10 @@ class UISession:
                         "kind": str(existing["kind"]), "ticker": ticker,
                         "expires_at": existing.get("expires_at"),
                         "deduped": True}
+            memo_decision_id = str(body.get("memo_decision_id") or "")
+            self._check_not_already_answered(ticker, memo_decision_id)
             approval = build_universe_change_request(
-                ticker,
-                memo_decision_id=str(body.get("memo_decision_id") or ""),
+                ticker, memo_decision_id=memo_decision_id,
                 task_id=body.get("task_id"))
             self.registry.create_approval_request(approval)
             self.registry.record_event(
@@ -5267,6 +5306,45 @@ class UISession:
             return {"approval_id": approval["approval_id"], "status": "pending",
                     "kind": approval["kind"], "ticker": ticker,
                     "expires_at": approval["expires_at"], "deduped": False}
+
+    def _check_not_already_answered(self, ticker: str,
+                                    memo_decision_id: str) -> None:
+        """Refuse a question this exact memo already had answered no.
+
+        A rejection the desk can undo by replaying a phase is not a rejection.
+        A resumed scout re-completing its step hands the same
+        (ticker, memo) pair back, and the pending dedupe cannot see it: the
+        row it would match is terminal, which is precisely the point.
+
+        Bound to the pair, not to the ticker forever. A LATER memo — new
+        evidence, a new scout run — is a new question the operator is entitled
+        to be asked; only the answered one may not be re-asked.
+
+        Read over the two terminal statuses rather than by a registry query,
+        because this round owns the owner and not the registry. The window is
+        the honest limitation: on a desk with more than `_ANSWERED_WINDOW`
+        rejected or expired approvals of any kind, an old answer could fall out
+        of view. A `Registry.answered_universe_change` selecting on the pair in
+        SQL is the follow-up, and it belongs in a change that owns that file.
+        """
+        from qlab.state.registry import APPROVAL_KIND_UNIVERSE_CHANGE
+
+        if not memo_decision_id:
+            return
+        for status in ("rejected", "expired"):
+            for row in self.registry.list_approval_requests(
+                    _ANSWERED_WINDOW, status):
+                if row.get("kind") != APPROVAL_KIND_UNIVERSE_CHANGE:
+                    continue
+                summary = row.get("summary") or {}
+                if (str(summary.get("ticker") or "").upper() != ticker
+                        or str(summary.get("memo_decision_id") or "")
+                        != memo_decision_id):
+                    continue
+                raise ValueError(
+                    f"the operator already answered this question about "
+                    f"{ticker} — the request was {status}. A later scout memo "
+                    "with new evidence may ask again; this one may not.")
 
     @staticmethod
     def _check_catalog_ticker(ticker: str) -> None:

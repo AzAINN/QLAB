@@ -15,6 +15,8 @@ GET  /api/system               runtime health and authority state
 GET  /api/desk_mode            the chosen data source and book + credential status
 POST /api/desk_mode            choose the data source and the book
 POST /api/desk/posture         arm the desk, or put it back to read-only
+GET  /api/desk/method          the operational method + holdings cap, and the choices
+POST /api/desk/method          choose the operational method and/or the cap
 POST /api/alpaca/credentials   store an Alpaca paper login (never switches book)
 POST /api/alpaca/test          ask the venue whether the stored login works
 GET  /api/llm/backends         model backends, availability, and what they serve
@@ -126,6 +128,12 @@ _AWAITING_OPERATOR = frozenset({"blocked", "failed", "interrupted"})
 # anything reachable from one must be treated as replace-never-mutate: editing
 # a dict in place is a write racing that serialization, with no lock over it.
 _LOCK = threading.Lock()
+# Operational policies that fund every whitelisted name by construction, so any
+# cap below the size of the universe refuses every plan they produce. The desk
+# still accepts the cap — an operator may be setting it before the method — but
+# it says what will happen. Minimum variance can hold fewer names, so it is not
+# here and carries no such warning.
+_FULL_UNIVERSE_POLICIES = frozenset({"hrp", "risk_parity"})
 # How long a stream poll waits for the dispatch lock before proving the socket
 # is alive instead. Must stay comfortably under the client's stream read
 # deadline, or a long owner action expires the client before it hears anything.
@@ -316,6 +324,13 @@ class UISession:
         self.registry.interrupt_running_workflows(
             "owner runtime restarted before the coordinator completed")
         self.mandate = load_mandate()
+        # The mandate is loaded once here and read by every plan check, so the
+        # desk's method/cap change is a read-modify-write of the override file
+        # plus a swap of this attribute. Its own lock, not `_LOCK`: the route
+        # already runs under the dispatch lock and `_LOCK` is not reentrant —
+        # but the heartbeat also reads `self.mandate`, so the swap still needs
+        # one (invariant 9).
+        self._mandate_lock = threading.Lock()
         # The operator's explicit choice; the persisted value is authoritative
         # when the caller passes none, and ``offline_default`` only seeds the
         # mode nobody has chosen yet — never a second opinion about it.
@@ -868,6 +883,162 @@ class UISession:
             self._posture = posture
         self.registry.record_event("desk.posture_chosen", {"armed": posture.armed})
         return self.posture_payload()
+
+    # -- the method and the cap ----------------------------------------------
+    def _cap_warning(self, policy_id: str, cap: int | None) -> str | None:
+        """What a cap will do to the plans the chosen method produces.
+
+        A warning, never a refusal (G3 ruling): the operator may legitimately
+        set the cap first and the method second, and a desk that refuses the
+        first half of a two-step change is a desk that cannot be reconfigured.
+        """
+        if cap is None or policy_id not in _FULL_UNIVERSE_POLICIES:
+            return None
+        if cap >= len(self.mandate.universe_whitelist):
+            return None
+        from qlab.algorithms.policy import get_operational_policy
+
+        try:
+            label = get_operational_policy(policy_id).label
+        except (ValueError, RuntimeError):
+            label = policy_id
+        return (f"{label} holds every name; a cap of {cap} will refuse its "
+                "plans — choose a policy that honours the cap or raise it")
+
+    def method_payload(self) -> dict:
+        """The chosen method and cap, what may be chosen, and what may not.
+
+        The research entries are listed with their stage precisely so the desk
+        can say *why* an operator cannot pick one, rather than leaving a method
+        the catalog knows about missing from the card with no explanation.
+        """
+        from qlab.algorithms.catalog import list_algorithms
+        from qlab.algorithms.policy import list_operational_policies
+        from qlab.trader.mandate import load_mandate_overrides
+
+        current = self.mandate.operational_policy
+        operational = [
+            {"id": row["id"], "label": row["label"], "arm_id": row["arm_id"],
+             "rationale": row["rationale"], "current": row["id"] == current}
+            for row in list_operational_policies()
+        ]
+        research = [
+            {"id": spec["id"], "label": spec["label"], "stage": spec["stage"],
+             "choosable": False}
+            for spec in list_algorithms(category="allocation")
+            if spec["stage"] != "operational"
+        ]
+        return {
+            "current": {"operational_policy": current,
+                        "max_holdings": self.mandate.max_holdings},
+            "operational": operational,
+            "research": research,
+            "overrides": load_mandate_overrides(),
+            "warning": self._cap_warning(current, self.mandate.max_holdings),
+        }
+
+    def _validated_policy(self, value: object) -> str:
+        """The requested method, or a refusal that names why it is not one."""
+        from qlab.algorithms.catalog import get_algorithm
+        from qlab.algorithms.policy import get_operational_policy
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("operational_policy must be a method id or null")
+        policy_id = value.strip()
+        try:
+            spec = get_algorithm(policy_id)
+        except KeyError:
+            spec = None
+        if spec is not None and spec.stage != "operational":
+            # The desk must say the stage, not merely "unknown": a research arm
+            # an operator has read about in the ablation is exactly what they
+            # will try, and "cardinal_min_variance is not a method" would be a
+            # lie about why. Promotion is an evidence decision, not a POST.
+            raise ValueError(
+                f"{policy_id!r} is stage={spec.stage!r} and is not an "
+                "operational method; promotion out of research takes evidence "
+                "and a catalog change, not a desk setting")
+        try:
+            get_operational_policy(policy_id)
+        except (ValueError, RuntimeError) as exc:
+            raise ValueError(str(exc)) from exc
+        return policy_id
+
+    def _validated_cap(self, value: object) -> int:
+        """The requested cap, bounded by the universe it has to fit in."""
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("max_holdings must be an integer or null")
+        ceiling = len(self.mandate.universe_whitelist)
+        if not 1 <= value <= ceiling:
+            raise ValueError(
+                f"max_holdings must be between 1 and {ceiling} (the size of "
+                f"the mandated universe), got {value}")
+        return value
+
+    def set_method(self, body: dict) -> dict:
+        """Record the operator's method and/or cap, and re-load the mandate.
+
+        Persisting is not enough: `self.mandate` is loaded once at construction
+        and is what every plan check reads, so a saved override that did not
+        replace it would take effect only after a restart — while the desk said
+        it was already in force.
+        """
+        from qlab.trader.mandate import (
+            OVERRIDABLE_FIELDS, load_mandate, load_mandate_overrides,
+            save_mandate_overrides)
+
+        if not isinstance(body, dict) or not body:
+            raise ValueError(
+                "send operational_policy, max_holdings, or both (null clears)")
+        unknown = sorted(set(body) - set(OVERRIDABLE_FIELDS))
+        if unknown:
+            named = ", ".join(repr(key) for key in unknown)
+            raise ValueError(
+                f"only operational_policy and max_holdings may be set from the "
+                f"desk; refusing {named} — every other limit lives in "
+                "mandate.yaml")
+        with self._mandate_lock:
+            overrides = dict(load_mandate_overrides())
+            previous = {
+                "operational_policy": self.mandate.operational_policy,
+                "max_holdings": self.mandate.max_holdings,
+            }
+            changes: list[tuple[str, object]] = []
+            if "operational_policy" in body:
+                value = body["operational_policy"]
+                value = None if value is None else self._validated_policy(value)
+                changes.append(("operational_policy", value))
+            if "max_holdings" in body:
+                value = body["max_holdings"]
+                value = None if value is None else self._validated_cap(value)
+                changes.append(("max_holdings", value))
+            for field_name, value in changes:
+                if value is None:
+                    overrides.pop(field_name, None)
+                else:
+                    overrides[field_name] = value
+            stored_before = load_mandate_overrides()
+            save_mandate_overrides(overrides)
+            # Re-load rather than mutate: the merge, and every validation the
+            # mandate does over the merged result, lives in `load_mandate`. If
+            # the merged mandate does not load, the file must go back: a
+            # persisted override the mandate refuses is a desk that cannot
+            # start, which is a worse failure than a refused POST.
+            try:
+                self.mandate = load_mandate()
+            except Exception as exc:
+                save_mandate_overrides(stored_before)
+                raise ValueError(
+                    f"refusing that change: {exc}") from exc
+        for field_name, value in changes:
+            self.registry.record_event("mandate_override", {
+                "field": field_name,
+                # What is in force now, which for a cleared override is the
+                # shipped mandate's own value — not the null that cleared it.
+                "value": getattr(self.mandate, field_name),
+                "previous": previous[field_name],
+            })
+        return self.method_payload()
 
     # -- live quote stream ---------------------------------------------------
     def attach_market_stream_runner(self, runner) -> None:
@@ -5541,6 +5712,18 @@ def handle_api(session: UISession, method: str, path: str,
         if result.get("booked") is True:
             _mark_after_mutation(session, "execution", clamped_off)
         return 200, result
+
+    if method == "GET" and path == "/api/desk/method":
+        return 200, session.method_payload()
+
+    if method == "POST" and path == "/api/desk/method":
+        # A refusal here is the whole point of the route: the cap and the
+        # method are mandate limits, so an invalid one must never reach disk
+        # and leave the next start unable to load its own mandate.
+        try:
+            return 200, session.set_method(body)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
 
     if method == "POST" and path == "/api/desk/posture":
         # Arming a desk takes an explicit true: "yes", 1 and [] are refused

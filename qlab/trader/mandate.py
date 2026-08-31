@@ -8,6 +8,7 @@ agent authors targets, but the mandate — not the model — decides what is all
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,9 +23,18 @@ from qlab.core.costs import (
     DEFAULT_SPREAD_BPS,
 )
 from qlab.core.universe import load_universe
-from qlab.paths import data_path
+from qlab.paths import data_path, state_path
 
 _PERMITTED_UNIVERSE_TIERS = frozenset({"core", "extended"})
+_OVERRIDE_FILE = "mandate_overrides.json"
+# The only two limits an operator may set from the desk. The shipped
+# ``mandate.yaml`` is the governance document and the runtime never edits it;
+# these are recorded beside it, in state, and merged at load. The tuple is
+# deliberately short and deliberately enforced rather than "whatever the file
+# carries": a desk-writable ``paper_capital`` or ``universe_whitelist`` would
+# let the desk widen its own mandate, which is the one thing the mandate exists
+# to prevent.
+OVERRIDABLE_FIELDS = ("operational_policy", "max_holdings")
 _DRAWDOWN_EPSILON = 1e-9
 DrawdownTier = Literal["none", "warning", "control", "breaker"]
 
@@ -341,13 +351,70 @@ def _load_costs(raw: object) -> CostConfig:
     )
 
 
-def _load_max_holdings(raw: object) -> int | None:
+def _load_max_holdings(raw: object, source: str = "constraints") -> int | None:
     """Parse the cardinality cap; ``None``/absent means uncapped."""
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ValueError("mandate constraints.max_holdings must be an integer or null")
+        raise ValueError(
+            f"mandate {source}.max_holdings must be an integer or null")
     return raw
+
+
+def overrides_path() -> Path:
+    """Where the desk's two choices are recorded, outside the mandate."""
+    return state_path(_OVERRIDE_FILE)
+
+
+def load_mandate_overrides() -> dict:
+    """The operator's persisted overrides, or ``{}``.
+
+    Refuses loudly (invariant 4) rather than ignoring what it does not
+    understand: a key nobody merges is an override the operator believes is in
+    force, and silently dropping it would make the desk lie about its own
+    limits. Same for an unreadable file — this one governs what may be traded,
+    so "treat it as absent" is not available the way it is for the desk mode.
+    """
+    path = overrides_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"mandate overrides at {path} could not be read: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"mandate overrides at {path} must be a JSON object")
+    unknown = sorted(set(raw) - set(OVERRIDABLE_FIELDS))
+    if unknown:
+        named = ", ".join(repr(key) for key in unknown)
+        allowed = ", ".join(repr(key) for key in OVERRIDABLE_FIELDS)
+        raise ValueError(
+            f"mandate overrides at {path} carry unsupported key(s) {named}; "
+            f"only {allowed} may be set from the desk — every other limit "
+            "lives in mandate.yaml")
+    return {key: raw[key] for key in OVERRIDABLE_FIELDS if key in raw}
+
+
+def save_mandate_overrides(overrides: dict) -> dict:
+    """Persist the desk's overrides, validating the key set on the way in.
+
+    Returns the stored mapping. Writing ``{}`` removes the file, so "no
+    override" is the absence of a record rather than a record of nothing.
+    """
+    unknown = sorted(set(overrides) - set(OVERRIDABLE_FIELDS))
+    if unknown:
+        named = ", ".join(repr(key) for key in unknown)
+        raise ValueError(f"unsupported mandate override key(s) {named}")
+    stored = {key: overrides[key] for key in OVERRIDABLE_FIELDS
+              if key in overrides and overrides[key] is not None}
+    path = overrides_path()
+    if not stored:
+        path.unlink(missing_ok=True)
+        return {}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stored, indent=2), encoding="utf-8")
+    return stored
 
 
 def _load_defensive_targets(raw: object) -> dict[str, float]:
@@ -419,6 +486,17 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     )
     costs = _load_costs(raw.get("costs", {}))
     defensive_targets = _load_defensive_targets(raw.get("defensive_targets"))
+    # The desk's two choices are merged after the yaml and before validation,
+    # so an override that the mandate itself would refuse (a cap of zero, a cap
+    # wider than the universe) is refused here rather than persisted into a
+    # runtime that cannot start.
+    overrides = load_mandate_overrides()
+    max_holdings = _load_max_holdings(con.get("max_holdings"))
+    if "max_holdings" in overrides:
+        max_holdings = _load_max_holdings(overrides["max_holdings"], "override")
+    operational_policy = str(allocation.get("operational_policy", "hrp"))
+    if overrides.get("operational_policy") is not None:
+        operational_policy = str(overrides["operational_policy"])
     mandate = Mandate(
         paper_capital=float(acct.get("paper_capital", 10000.0)),
         base_currency=acct.get("base_currency", "USD"),
@@ -430,7 +508,7 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
         min_weight_per_asset=float(con.get("min_weight_per_asset", 0.0)),
         max_turnover_per_rebalance=float(con.get("max_turnover_per_rebalance", 0.50)),
         max_orders_per_day=int(con.get("max_orders_per_day", 20)),
-        max_holdings=_load_max_holdings(con.get("max_holdings")),
+        max_holdings=max_holdings,
         order_type=con.get("order_type", "marketable_limit"),
         max_gross_exposure=float(con.get("max_gross_exposure", 1.0)),
         stress_vol_limit=float(con.get("stress_vol_limit", 0.30)),
@@ -441,7 +519,7 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
         regime_triggered=bool(rb.get("regime_triggered", True)),
         defensive_targets=defensive_targets,
         allow_fractional=bool(ex.get("allow_fractional", True)),
-        operational_policy=str(allocation.get("operational_policy", "hrp")),
+        operational_policy=operational_policy,
         costs=costs,
     )
     if defensive_targets:

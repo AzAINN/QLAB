@@ -460,6 +460,30 @@ pub struct Store {
     /// apart from an answered window with no rows in it: one says this client
     /// has not looked, the other says the desk's record is empty.
     qualitative: Option<QualitativeMatrix>,
+    /// The desk's single current proposal, on the snapshot's own beat.
+    ///
+    /// `None` here is two facts this client cannot tell apart and does not
+    /// need to: the poller has not answered yet, or the owner said
+    /// `{"proposal": null}`. The card renders "no open proposal" for both,
+    /// which is honest of each — a desk with a question always has one within
+    /// a poll, and a card that claimed to be waiting would be inventing a
+    /// state the owner never described.
+    ///
+    /// Private with one reader for the reason `templates` is: what may be
+    /// booked has to be the owner's own answer, and a public field is one
+    /// anything could write a proposal into.
+    proposal: Option<crate::model::Proposal>,
+    /// What the last one-click booking did, until the card is asked again.
+    ///
+    /// Held for `refusals`' reason and one more. A refusal is invisible in the
+    /// next snapshot — the owner declines with 200 and, for two of the three
+    /// shapes, changes nothing at all — and the *sentence* differs by shape:
+    /// a withdrawn approval means re-propose, a surviving one means retry.
+    /// Without this the card an operator just pressed `b` on would go back to
+    /// offering the key with nothing said about why the last press did not
+    /// book.
+    #[cfg(feature = "operator")]
+    pub booking: Option<Booking>,
     /// The newest chat timestamp at the moment `/clear` ran. The bus keeps
     /// every row and AUDIT still draws them — this window just stops drawing
     /// rows at or before the mark. A timestamp rather than a count, because
@@ -633,6 +657,9 @@ impl Store {
             predictor_detail: None,
             news: None,
             qualitative: None,
+            proposal: None,
+            #[cfg(feature = "operator")]
+            booking: None,
             chat_cleared_through: None,
             nav: Nav::default(),
             cmd: CmdLine::default(),
@@ -813,6 +840,25 @@ impl Store {
                 self.qualitative = Some(*matrix);
                 self.dirty = true;
             }
+            // Replaced wholesale, `None` included: the route answers about the
+            // *one* question the desk is asking, so a proposal held because the
+            // newest answer carried none would be this client keeping a
+            // question the owner has withdrawn — the exact stale offer the beat
+            // exists to retire.
+            AppEvent::Proposal(proposal) => {
+                let arrived = proposal.map(|boxed| *boxed);
+                // A booking note is about the proposal it was answered for. The
+                // moment the desk's question changes — booked, superseded,
+                // withdrawn — the note stops describing what is on screen, and
+                // a "re-propose" sentence beside a fresh proposal reads as a
+                // verdict on that one.
+                #[cfg(feature = "operator")]
+                if booking_stale(self.booking.as_ref(), arrived.as_ref()) {
+                    self.booking = None;
+                }
+                self.proposal = arrived;
+                self.dirty = true;
+            }
             // A keystroke may move a selection and a resize moves everything;
             // both owe a frame even though neither is desk news. A mouse event
             // is a keystroke's shape: a wheel moved a scroll, a click moved
@@ -857,6 +903,27 @@ impl Store {
                     }
                     Wrote::Executed { plan_id } => {
                         self.refusals.remove(&plan_id);
+                    }
+                    // The one-click book's own answer, kept because it is the
+                    // only place it is said: two of the three refusals leave
+                    // the registry exactly as it was, so the next poll cannot
+                    // carry the news.
+                    Wrote::Booked { plan_id, summary } => {
+                        self.refusals.remove(&plan_id);
+                        self.booking = Some(Booking {
+                            plan_id,
+                            said: summary,
+                            kind: BookingKind::Filled,
+                        });
+                    }
+                    Wrote::BookRefused {
+                        plan_id,
+                        blocked_by,
+                        reasons,
+                        survives,
+                    } => {
+                        self.booking =
+                            Some(Booking::refused(plan_id, &blocked_by, &reasons, survives));
                     }
                     // Nothing for the store to hold. A decision, a question, a
                     // workflow handle and a failed request all leave their
@@ -920,8 +987,20 @@ impl Store {
                     | Wrote::LoggedIn { .. }
                     | Wrote::LoginNeedsConsent { .. }
                     | Wrote::LoginRefused { .. }
-                    | Wrote::Tested { .. }
-                    | Wrote::Failed { .. } => {}
+                    | Wrote::Tested { .. } => {}
+                    // A failure is a toast like every other, except when it
+                    // was *this* request: a booking whose answer never arrived
+                    // leaves the fill's state unknown, and the card is the
+                    // surface an operator is about to press the key on again.
+                    Wrote::Failed { what, said } => {
+                        if let Some(plan_id) = what.strip_prefix("book ") {
+                            self.booking = Some(Booking {
+                                plan_id: plan_id.to_string(),
+                                said,
+                                kind: BookingKind::Failed,
+                            });
+                        }
+                    }
                 }
                 self.dirty = true;
             }
@@ -1036,6 +1115,17 @@ impl Store {
     /// apart: a blank pane cannot say which one it is.
     pub fn qualitative(&self) -> Option<&QualitativeMatrix> {
         self.qualitative.as_ref()
+    }
+
+    /// The desk's single current proposal, if the poller has one.
+    ///
+    /// The owner's own answer, composed from a checked plan, the live approval
+    /// covering it and the referee verdict held to that plan's `targets_hash`.
+    /// Nothing here re-derives which plan is current: this client would be a
+    /// second opinion about the desk's one open question, and the book route
+    /// refuses anything but the owner's own.
+    pub fn proposal(&self) -> Option<&crate::model::Proposal> {
+        self.proposal.as_ref()
     }
 
     /// Today's proposals, as the owner last served them.
@@ -1702,6 +1792,105 @@ fn read_as_of(snap: &Snapshot) -> Option<&str> {
 
 fn drawdown_tier(snap: &Snapshot) -> Option<&str> {
     text(snap.stress.as_ref()?.drawdown_tier.as_ref())
+}
+
+/// What the last one-click booking did, in the words the card says it in.
+///
+/// A composed sentence rather than the raw outcome, and composed *here* rather
+/// than in the two views that draw it: BOOK and ATLAS render the same card, and
+/// two spellings of "the approval is gone" is how one of them comes to offer a
+/// retry the other refuses.
+#[cfg(feature = "operator")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Booking {
+    /// The plan this is about, so the card never draws a note beside a
+    /// proposal it was not answered for.
+    pub plan_id: String,
+    /// The owner's own reasons, wrapped in the one clause that says what to do
+    /// next. Never a paraphrase of the reasons themselves.
+    pub said: String,
+    pub kind: BookingKind,
+}
+
+/// The four things a booking answer can mean to the operator.
+///
+/// Four rather than "booked / not booked", because F2's corrected contract puts
+/// three different afterwards behind one `booked: false` — and the difference
+/// between them is the whole content of the sentence.
+#[cfg(feature = "operator")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookingKind {
+    /// The desk booked it.
+    Filled,
+    /// The gate declined and withdrew the approval with it. The question is
+    /// gone; a new plan has to be proposed.
+    RePropose,
+    /// The gate declined without touching the approval. The same proposal is
+    /// still bookable.
+    Retry,
+    /// The owner declined and did not say which of the two it was.
+    Unclear,
+    /// The request never got an answer, so the fill's state is unknown.
+    Failed,
+}
+
+#[cfg(feature = "operator")]
+impl Booking {
+    /// The note for a `200 booked: false`.
+    ///
+    /// The clause after the reasons is the only thing this composes, and it is
+    /// the actionable half: "re-propose" and "retry" are different instructions
+    /// about the same status code, and the difference is `survives`.
+    fn refused(
+        plan_id: String,
+        blocked_by: &str,
+        reasons: &[String],
+        survives: Option<bool>,
+    ) -> Booking {
+        let why = match reasons.is_empty() {
+            // The gate always carries something; a refusal with no words is a
+            // broken contract, and its own blocker is the reason of last
+            // resort rather than a blank line.
+            true => format!("the desk blocked this fill ({blocked_by})"),
+            false => reasons.join("; "),
+        };
+        let (kind, said) = match survives {
+            Some(false) => (
+                BookingKind::RePropose,
+                format!("not booked: {why}. The approval is spent — re-propose."),
+            ),
+            Some(true) => (
+                BookingKind::Retry,
+                format!("not booked: {why}. The proposal stands — retry when that clears."),
+            ),
+            None => (
+                BookingKind::Unclear,
+                format!(
+                    "not booked ({blocked_by}), and the desk did not say whether the \
+                     proposal survives: {why}"
+                ),
+            ),
+        };
+        Booking {
+            plan_id,
+            said,
+            kind,
+        }
+    }
+}
+
+/// Whether a booking note has stopped describing the proposal on screen.
+///
+/// True when the desk's question has moved on — a different plan, or no
+/// proposal at all. A note kept past that reads as a verdict on whatever
+/// arrived next, which for a "re-propose" sentence beside a freshly proposed
+/// plan is exactly backwards.
+#[cfg(feature = "operator")]
+fn booking_stale(booking: Option<&Booking>, arrived: Option<&crate::model::Proposal>) -> bool {
+    let Some(booking) = booking else {
+        return false;
+    };
+    arrived.and_then(|p| p.plan_id.as_deref()) != Some(booking.plan_id.as_str())
 }
 
 /// Whether a plan state means the desk sent it to a broker.

@@ -295,6 +295,35 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
                 None => format!("the desk blocked this fill ({blocked_by})"),
             },
         ),
+        // Worded as the stream's own `plan_executed` toast is, for the reason
+        // `Executed` is: the owner publishes one too, and the queue drops an
+        // identical box so one fill is one toast.
+        Wrote::Booked { plan_id, summary } => Toast::new(
+            Level::Info,
+            "plan executed",
+            format!("plan {plan_id} booked a paper fill — {summary}"),
+        ),
+        // The card carries the actionable sentence; this says which of the two
+        // it is, because the difference — a spent approval or a standing one —
+        // is what an operator does next and a toast that flattened them would
+        // send half of them to the wrong place.
+        Wrote::BookRefused {
+            blocked_by,
+            reasons,
+            survives,
+            ..
+        } => Toast::new(
+            Level::Alarm,
+            match survives {
+                Some(true) => "booking refused — the proposal stands",
+                Some(false) => "booking refused — re-propose",
+                None => "booking refused",
+            },
+            match reasons.first() {
+                Some(why) => format!("{blocked_by}: {why}"),
+                None => format!("the desk blocked this fill ({blocked_by})"),
+            },
+        ),
         Wrote::Decided {
             approval_id,
             decision,

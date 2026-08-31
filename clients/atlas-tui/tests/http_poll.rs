@@ -21,6 +21,7 @@ enum Seen {
     Snapshot,
     Regime,
     Backends,
+    Proposal(bool),
     Malformed(String),
     Other,
 }
@@ -32,6 +33,11 @@ fn seen(ev: &AppEvent) -> Seen {
         AppEvent::Snapshot(_) => Seen::Snapshot,
         AppEvent::RegimePanel(_) => Seen::Regime,
         AppEvent::Backends(_) => Seen::Backends,
+        // Both answers, kept apart: `{"proposal": null}` is the owner saying
+        // the desk has no open question, which is what retires a card, and a
+        // test that could not tell it from a payload that never arrived could
+        // not pin that at all.
+        AppEvent::Proposal(proposal) => Seen::Proposal(proposal.is_some()),
         AppEvent::Http(HttpResult::Malformed { url, .. }) => Seen::Malformed(url.clone()),
         _ => Seen::Other,
     }
@@ -143,6 +149,17 @@ fn regime_fixture() -> (&'static str, String) {
     (
         "/api/regime/panel",
         include_str!("fixtures/regime_panel.json").to_string(),
+    )
+}
+
+fn proposal_fixture() -> (&'static str, String) {
+    (
+        "/api/desk/proposal",
+        r#"{"proposal": {"plan_id": "b92a58fa5c1d4e7f", "approval_state": "pending",
+             "targets": {"ACWI": 0.3}, "targets_hash": "0f1e2d3c4b5a6978",
+             "referee": {"verdict": "PASS", "source": "referee-agent",
+                         "targets_hash": "0f1e2d3c4b5a6978"}}}"#
+            .to_string(),
     )
 }
 
@@ -539,4 +556,58 @@ async fn an_owner_that_never_answers_reports_down_rather_than_hanging_quiet() {
 
     let seen = drain(&mut rx, 1, Duration::from_secs(5)).await;
     assert_eq!(seen.first(), Some(&Seen::ConnDown), "{seen:?}");
+}
+
+#[tokio::test]
+async fn the_desks_open_question_rides_the_snapshot_beat_and_carries_no_lane() {
+    // The ruling this pins, and it is not the obvious one. The board and the
+    // news settings are fetched on a *pane entry*; the proposal is not, because
+    // its card is mirrored on ATLAS — the view this client opens on, with no
+    // entry to hang a first fetch on — and because what retires a proposal
+    // happens on the owner's heartbeat rather than in response to anything an
+    // operator does here. A card fetched once would go on offering to book a
+    // question the desk had already withdrawn.
+    //
+    // And no `offline` lane: the proposal is a plan, an approval request and a
+    // verdict, all registry rows, identical whichever data the desk reads. A
+    // query parameter the route does not read would be this client claiming a
+    // distinction the owner does not make.
+    let owner = spawn_owner(vec![ready(), snapshot_fixture(), proposal_fixture()]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _poller = spawn_poller(owner.base.clone(), true, tx);
+
+    let seen = drain(&mut rx, 3, Duration::from_secs(5)).await;
+    assert!(
+        seen.contains(&Seen::Proposal(true)),
+        "the proposal never reached the bus: {seen:?}"
+    );
+    let targets = owner.targets();
+    assert!(
+        targets.iter().any(|t| t == "/api/desk/proposal"),
+        "{targets:?}"
+    );
+    assert!(
+        !targets.iter().any(|t| t.starts_with("/api/desk/proposal?")),
+        "the proposal was asked for with a lane it does not read: {targets:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_desk_with_no_open_question_says_so_on_the_bus() {
+    // `{"proposal": null}` is an answer, not a missing one: the card retires a
+    // proposal the owner has withdrawn, and it can only do that if the absence
+    // reaches it.
+    let owner = spawn_owner(vec![
+        ready(),
+        snapshot_fixture(),
+        ("/api/desk/proposal", r#"{"proposal": null}"#.to_string()),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _poller = spawn_poller(owner.base.clone(), true, tx);
+
+    let seen = drain(&mut rx, 3, Duration::from_secs(5)).await;
+    assert!(
+        seen.contains(&Seen::Proposal(false)),
+        "an empty proposal never reached the bus: {seen:?}"
+    );
 }

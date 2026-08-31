@@ -12,7 +12,8 @@
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
 use crate::model::{
-    LlmCatalog, NewsSettings, PredictorDetail, QualitativeMatrix, RegimePanel, Snapshot, Templates,
+    LlmCatalog, NewsSettings, PredictorDetail, ProposalPayload, QualitativeMatrix, RegimePanel,
+    Snapshot, Templates,
 };
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
@@ -238,6 +239,9 @@ async fn poll_loop(
     // desk reads the synthetic feed, and a matrix fetched without the flag
     // would be a reading of a window this client is not pointed at.
     let qualitative_url = format!("{base}/api/research/qualitative?offline={lane}");
+    // No lane: the proposal is a plan, an approval request and a verdict, all
+    // registry rows, identical whichever data the desk reads.
+    let proposal_url = format!("{base}/api/desk/proposal");
 
     // Two facts, not one. `up` is what the chips read — a payload this client
     // could actually use — and `reachable` is what the socket said.
@@ -301,6 +305,43 @@ async fn poll_loop(
                     // "connection refused" and "404".
                     reachable = Some(false);
                     mark(&tx, Channel::Owner, &mut up, false, &error)?;
+                }
+            }
+
+            // The desk's single open question, on the snapshot's own beat
+            // rather than on a pane entry or a beat of its own.
+            //
+            // The card is mirrored on ATLAS, which is the view this client
+            // opens on, so there is no entry to hang a first fetch on. And what
+            // makes a proposal stop being the proposal — a newer plan
+            // superseding it, an expiry, an orphan withdrawn — happens on the
+            // *owner's* heartbeat, with nothing here to prompt a refetch: a
+            // card fetched once would go on offering to book a question the
+            // desk had already withdrawn. One registry read per poll beside a
+            // `/api/tui` that costs far more, and `Refetch::Now` — the `r` key
+            // and every write outcome — brings it forward with the snapshot,
+            // which is why this owes no `Refetch` variant of its own.
+            if up == Some(true) {
+                match fetch::<ProposalPayload>(&client, &proposal_url).await {
+                    Fetched::Decoded(payload) => {
+                        emit(&tx, AppEvent::Proposal(payload.proposal.map(Box::new)))?
+                    }
+                    Fetched::Malformed(error) => emit(
+                        &tx,
+                        AppEvent::Http(HttpResult::Malformed {
+                            url: proposal_url.clone(),
+                            error,
+                        }),
+                    )?,
+                    // A question the desk is asking is not whether the desk is
+                    // there: a failure here must not tell the operator the
+                    // owner went away when the snapshot that decides that is
+                    // still arriving. Same reasoning as the panel and the
+                    // templates — and the card says for itself that it holds
+                    // no proposal.
+                    Fetched::Failed(error) => {
+                        tracing::warn!(%error, "desk proposal poll failed")
+                    }
                 }
             }
 

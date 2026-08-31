@@ -1705,3 +1705,439 @@ mod armed {
         );
     }
 }
+
+// -- the desk's current proposal --------------------------------------------
+//
+// The card BOOK and ATLAS both draw. What runs through these is that a
+// proposal is *one* question with *one* answer: the numbers it would move, the
+// verdict that covers exactly those numbers, and — when the desk declines —
+// which of two different things the operator should do next.
+
+/// A book with a live proposal on it and nothing else to distract the frame.
+fn proposed() -> Client {
+    let mut store = store_from(
+        r#"{"live_portfolio": {"equity": 1000000.0, "positions": [
+        {"ticker": "ACWI", "weight": 0.20}, {"ticker": "SPY", "weight": 0.35},
+        {"ticker": "QQQ", "weight": 0.20}, {"ticker": "XLK", "weight": 0.15}]}}"#,
+    );
+    harness::with_proposal(&mut store, harness::PROPOSAL);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('4'));
+    client
+}
+
+/// The unarmed frame in a binary that *could* book — the card in full, ending
+/// in the sentence that says why this window may not.
+///
+/// Its own golden per leg rather than one shared with the monitoring build,
+/// because the two really do differ and the difference is the point: an armed
+/// binary on an unarmed desk states its posture, and a monitoring binary has
+/// no such row to state — the last line of the card is absent, not disabled.
+#[cfg(feature = "operator")]
+#[test]
+fn the_proposal_card_renders_the_diff_the_verdict_and_the_hash_at_120x36() {
+    insta::assert_snapshot!(proposed().frame(120, 36));
+}
+
+#[cfg(not(feature = "operator"))]
+mod glass {
+    use super::*;
+
+    #[test]
+    fn the_card_renders_with_no_booking_row_at_all_at_120x36() {
+        insta::assert_snapshot!(proposed().frame(120, 36));
+    }
+
+    #[test]
+    fn a_monitoring_build_shows_the_question_and_offers_no_way_to_answer_it() {
+        // What the desk is asking is exactly what a monitoring window is for.
+        // What it must not carry is the word, the key or the box.
+        let frame = proposed().frame(120, 36);
+        line_with(&frame, "b92a58fa5c1");
+        line_with(&frame, "referee PASS");
+        assert!(!frame.contains("book"), "{frame}");
+        assert!(
+            line_with(&frame, "YOUR CALL").contains("view-only"),
+            "{frame}"
+        );
+    }
+}
+
+#[test]
+fn the_card_states_what_the_plan_would_move_against_what_the_book_holds() {
+    let client = proposed();
+    let frame = client.frame(120, 36);
+    line_with(&frame, "b92a58fa5c1");
+    // Every leg is a weight the live book reports moving to the plan's target.
+    // SPY comes down, ACWI goes up, and the numbers are the owner's own.
+    // Read off the card's own rows, not the blotter's: the blotter draws a
+    // `SPY` row too, and a needle that could match either would pass on a card
+    // that never rendered.
+    let spy = line_with(&frame, "SPY    35.0%");
+    assert!(spy.contains("25.0%"), "{spy}");
+    let acwi = line_with(&frame, "ACWI   20.0%");
+    assert!(acwi.contains("30.0%"), "{acwi}");
+    // And the plan's own pre_trade, which is the record the gate reads.
+    let numbers = line_with(&frame, "turnover");
+    assert!(
+        numbers.contains("42.0%") && numbers.contains("5 legs"),
+        "{numbers}"
+    );
+}
+
+#[test]
+fn a_name_the_book_does_not_hold_moves_from_nothing_rather_than_from_zero() {
+    // XLF is in the targets and not in the fixture's positions. Absent is not
+    // zero: a row reading `0.0% → 10.0%` states a holding the owner never
+    // reported, and this client's whole model rule is that it must not.
+    let client = proposed();
+    let frame = client.frame(120, 36);
+    let xlf = line_with(&frame, "XLF ");
+    assert!(xlf.contains("--"), "{xlf}");
+    assert!(xlf.contains("10.0%"), "{xlf}");
+}
+
+#[test]
+fn the_card_names_the_verdict_and_the_six_characters_it_is_bound_to() {
+    let frame = proposed().frame(120, 36);
+    let referee = line_with(&frame, "referee PASS");
+    assert!(referee.contains("referee-agent"), "{referee}");
+    // The tail of the owner's own targets_hash, which is what the confirm box
+    // binds to and the owner re-validates.
+    assert!(referee.contains("5a6978"), "{referee}");
+}
+
+#[test]
+fn a_pass_that_covers_other_targets_is_not_a_pass_for_these() {
+    // The owner holds the verdict to the plan's own hash, so a block naming a
+    // different one is a payload this client must not believe. Rendered as a
+    // refusal, never as absence: an operator has to see why there is no key.
+    let mut store = store_from(r#"{"live_portfolio": {"equity": 1.0}}"#);
+    harness::with_proposal(
+        &mut store,
+        r#"{"plan_id": "b92a58fa5c1d4e7f", "approval_state": "pending",
+            "targets": {"ACWI": 0.30}, "targets_hash": "0f1e2d3c4b5a6978",
+            "referee": {"verdict": "PASS", "source": "referee-agent",
+                        "targets_hash": "ffffffffffffffff"}}"#,
+    );
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('4'));
+    let frame = client.frame(120, 36);
+    // The PASS is named *and* refused in one row: "there is no verdict" and
+    // "there is a verdict about other numbers" are different facts, and the
+    // second is the one that must never read as approval.
+    line_with(&frame, "referee PASS does not cover 5a6978");
+}
+
+#[test]
+fn a_failed_verdict_says_so_rather_than_reading_as_no_verdict_at_all() {
+    let mut store = store_from(r#"{"live_portfolio": {"equity": 1.0}}"#);
+    harness::with_proposal(
+        &mut store,
+        r#"{"plan_id": "b92a58fa5c1d4e7f", "approval_state": "pending",
+            "targets": {"ACWI": 0.30}, "targets_hash": "0f1e2d3c4b5a6978",
+            "referee": {"verdict": "FAIL", "source": "referee-agent",
+                        "targets_hash": "0f1e2d3c4b5a6978"}}"#,
+    );
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('4'));
+    let frame = client.frame(120, 36);
+    line_with(&frame, "referee FAIL does not cover");
+}
+
+#[test]
+fn a_superseded_plan_is_struck_and_named_as_withdrawn() {
+    // The only place an operator learns an approval they had already given was
+    // revoked — the owner says it once in the chat, and scrollback is not a
+    // record. Struck *and* worded: `CROSSED_OUT` is a modifier plenty of
+    // terminals ignore.
+    let client = proposed();
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "c453496ae7a");
+    assert!(row.contains("superseded by b92a58fa"), "{row}");
+    let style = body_style_of(&client.buffer(120, 36), "c453496ae7a");
+    assert!(
+        style.add_modifier.contains(Modifier::CROSSED_OUT),
+        "the withdrawn plan is not struck: {style:?}"
+    );
+}
+
+#[test]
+fn a_desk_with_no_proposal_says_so_and_draws_no_card_at_all() {
+    // Two claims. The band is not claimed at all when there is nothing to ask
+    // about, so a quiet desk draws exactly the frame it drew before this card
+    // existed — and the plan ledger, which is the record rather than the
+    // question, is still there.
+    let mut store = store_from(r#"{"live_portfolio": {"equity": 1.0}}"#);
+    harness::with_no_proposal(&mut store);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('4'));
+    let frame = client.frame(120, 36);
+    assert!(!frame.contains("YOUR CALL"), "{frame}");
+    line_with(&frame, "PLANS");
+}
+
+#[test]
+fn a_pane_too_narrow_for_a_diff_refuses_rather_than_drawing_half_of_one() {
+    let client = proposed();
+    for (w, h) in [(40u16, 12u16), (20, 8), (80, 10), (200, 60), (1, 1)] {
+        let _ = client.frame(w, h);
+    }
+}
+
+/// The one-click book, in a window the desk has armed.
+///
+/// Its own module rather than rows in `armed` above, because it is a different
+/// route with a different ritual: no typed challenge, one box, and three
+/// answers to a status code that reads the same in all of them.
+#[cfg(feature = "operator")]
+mod booking {
+    use super::*;
+    use atlas::bus::Wrote;
+    use atlas::cmd::Command;
+    use atlas::store::Posture;
+    use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+
+    fn armed() -> Client {
+        let mut client = super::proposed();
+        client.store.posture = Posture::Operator;
+        client
+    }
+
+    fn press(client: &mut Client, code: KeyCode) -> Option<Command> {
+        atlas::ui::shell::on_key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        )
+    }
+
+    /// The answer the owner gives, folded the way the runtime folds it.
+    fn answered(client: &mut Client, outcome: Wrote) {
+        client
+            .store
+            .apply(atlas::bus::AppEvent::Wrote(outcome), client.now);
+    }
+
+    #[test]
+    fn an_armed_window_offers_the_book_key_on_the_card() {
+        let frame = armed().frame(120, 36);
+        assert!(line_with(&frame, "YOUR CALL").contains("b book"), "{frame}");
+        assert!(
+            line_with(&frame, "book ↵").contains("one confirm"),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn the_book_key_opens_one_box_that_shows_the_diff_the_verdict_and_the_hash() {
+        // The whole of F4 in one frame: `b` sends nothing, and what it puts up
+        // states the three things a human is being asked to vouch for.
+        let mut client = armed();
+        assert_eq!(press(&mut client, KeyCode::Char('b')), None);
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("BOOK THE PROPOSAL"), "{frame}");
+        // The hash in full, and the six characters it is bound by — displayed,
+        // never asked for. No field, and no `type … to confirm` line.
+        assert!(line_with(&frame, "targets hash").contains("0f1e2d3c4b5a6978"));
+        assert!(line_with(&frame, "confirming").contains("5a6978"));
+        assert!(frame.contains("book it"), "{frame}");
+        assert!(
+            !frame.contains("to confirm"),
+            "the box asked for typing:\n{frame}"
+        );
+        // The referee's word, and the allocation it covers. Read off the
+        // box's own label column — the card behind it states the same facts,
+        // and a needle that could match either would pass on a box that never
+        // opened.
+        assert!(line_with(&frame, "referee       ").contains("PASS · referee-agent"));
+        assert!(
+            line_with(&frame, "SPY           ").contains("35.0% → 25.0%"),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn the_box_renders_at_120x36() {
+        let mut client = armed();
+        press(&mut client, KeyCode::Char('b'));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn enter_sends_the_hash_the_box_displayed_and_nothing_a_caller_chose() {
+        let mut client = armed();
+        press(&mut client, KeyCode::Char('b'));
+        let Some(Command::Book(token)) = press(&mut client, KeyCode::Enter) else {
+            panic!("Enter did not mint a booking");
+        };
+        assert_eq!(token.plan_id(), "b92a58fa5c1d4e7f");
+        assert_eq!(token.targets_hash(), "0f1e2d3c4b5a6978");
+        // One human decision, one booking: the box is spent by the answer.
+        assert!(press(&mut client, KeyCode::Enter).is_none());
+        assert!(!client.frame(120, 36).contains("BOOK THE PROPOSAL"));
+    }
+
+    #[test]
+    fn a_click_on_the_cards_word_opens_the_box_and_a_click_in_it_books() {
+        // Two clicks, no keystrokes: the affordance the card draws is real,
+        // and the box's own words are the click target — the same answer Enter
+        // gives, routed the same way.
+        let mut client = armed();
+        let frame = client.frame(120, 36);
+        let row = frame
+            .lines()
+            .position(|line| line.contains("book ↵"))
+            .expect("the card drew no book word") as u16;
+        // The frame's rows include the tape; the click's row is the same index.
+        client.mouse(MouseEventKind::Down(MouseButton::Left), 20, row);
+        assert!(
+            client.frame(120, 36).contains("BOOK THE PROPOSAL"),
+            "the click on `book` opened no box"
+        );
+        let frame = client.frame(120, 36);
+        let arm = frame
+            .lines()
+            .position(|line| line.contains("book it"))
+            .expect("the box drew no arming row") as u16;
+        let column = frame
+            .lines()
+            .nth(arm as usize)
+            .unwrap()
+            .find("book it")
+            .unwrap() as u16;
+        atlas::ui::shell::on_mouse(
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row: arm,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut client.store,
+            &mut client.views,
+        );
+        assert!(!client.frame(120, 36).contains("BOOK THE PROPOSAL"));
+    }
+
+    #[test]
+    fn a_refusal_that_withdrew_the_approval_says_re_propose() {
+        // `blocked_by == "approval"` — the gate invalidated it. The authority
+        // is gone and a retry would be a request the owner has already refused.
+        let mut client = armed();
+        answered(
+            &mut client,
+            Wrote::BookRefused {
+                plan_id: "b92a58fa5c1d4e7f".to_string(),
+                blocked_by: "approval".to_string(),
+                reasons: vec!["book moved since approval (revision mismatch)".to_string()],
+                survives: Some(false),
+            },
+        );
+        let frame = client.frame(120, 36);
+        let note = line_with(&frame, "not booked");
+        assert!(note.contains("book moved since approval"), "{note}");
+        assert!(frame.contains("re-propose"), "{frame}");
+        assert!(!frame.contains("retry when"), "{frame}");
+    }
+
+    #[test]
+    fn a_refusal_that_left_the_approval_alive_says_retry() {
+        // `data_revalidation` and a mandate violation are refused *before* the
+        // approval is touched, so the same proposal is still bookable. A card
+        // that said "re-propose" here would throw a live approval away.
+        let mut client = armed();
+        answered(
+            &mut client,
+            Wrote::BookRefused {
+                plan_id: "b92a58fa5c1d4e7f".to_string(),
+                blocked_by: "data_revalidation".to_string(),
+                reasons: vec!["stale quotes on 3 names".to_string()],
+                survives: Some(true),
+            },
+        );
+        let frame = client.frame(120, 36);
+        let note = line_with(&frame, "not booked");
+        assert!(note.contains("stale quotes on 3 names"), "{note}");
+        assert!(frame.contains("retry when"), "{frame}");
+        assert!(!frame.contains("re-propose"), "{frame}");
+        // And the key is still on offer, because the question still stands.
+        assert!(frame.contains("book ↵"), "{frame}");
+    }
+
+    #[test]
+    fn a_refusal_the_owner_did_not_explain_claims_neither_outcome() {
+        let mut client = armed();
+        answered(
+            &mut client,
+            Wrote::BookRefused {
+                plan_id: "b92a58fa5c1d4e7f".to_string(),
+                blocked_by: "something_new".to_string(),
+                reasons: vec![],
+                survives: None,
+            },
+        );
+        let frame = client.frame(120, 36);
+        assert!(
+            frame.contains("did not say whether"),
+            "a blocker with no ruling was guessed at:\n{frame}"
+        );
+        assert!(
+            !frame.contains("re-propose") && !frame.contains("retry when"),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn a_note_is_retired_when_the_desk_asks_a_different_question() {
+        // A "re-propose" sentence beside a freshly proposed plan reads as a
+        // verdict on that one, which is exactly backwards.
+        let mut client = armed();
+        answered(
+            &mut client,
+            Wrote::BookRefused {
+                plan_id: "b92a58fa5c1d4e7f".to_string(),
+                blocked_by: "approval".to_string(),
+                reasons: vec!["expired".to_string()],
+                survives: Some(false),
+            },
+        );
+        assert!(client.frame(120, 36).contains("re-propose"));
+        harness::with_proposal(
+            &mut client.store,
+            r#"{"plan_id": "1111222233334444", "approval_state": "pending",
+                "targets": {"ACWI": 0.30}, "targets_hash": "0f1e2d3c4b5a6978",
+                "referee": {"verdict": "PASS", "source": "referee-agent",
+                            "targets_hash": "0f1e2d3c4b5a6978"}}"#,
+        );
+        let frame = client.frame(120, 36);
+        assert!(
+            !frame.contains("re-propose"),
+            "a stale note outlived its plan:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn a_proposal_no_pass_covers_offers_no_key_and_opens_no_box() {
+        // The owner refuses to book without a PASS covering this hash, so a
+        // box armed here would ask a human to vouch for a request the desk has
+        // already decided against.
+        let mut store = super::store_from(r#"{"live_portfolio": {"equity": 1.0}}"#);
+        harness::with_proposal(
+            &mut store,
+            r#"{"plan_id": "b92a58fa5c1d4e7f", "approval_state": "pending",
+                "targets": {"ACWI": 0.30}, "targets_hash": "0f1e2d3c4b5a6978"}"#,
+        );
+        store.posture = Posture::Operator;
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('4'));
+        assert_eq!(press(&mut client, KeyCode::Char('b')), None);
+        let frame = client.frame(120, 36);
+        assert!(!frame.contains("BOOK THE PROPOSAL"), "{frame}");
+        // And the key is not silently dead: the card says why, and the command
+        // line carries the same sentence.
+        assert!(
+            frame.contains("no referee PASS covers these targets"),
+            "{frame}"
+        );
+    }
+}

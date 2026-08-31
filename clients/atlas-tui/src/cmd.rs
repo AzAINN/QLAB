@@ -24,7 +24,7 @@
 
 use crate::store::{Posture, Store, ViewId};
 #[cfg(feature = "operator")]
-use crate::ui::widgets::confirm::ConfirmToken;
+use crate::ui::widgets::confirm::{BookToken, ConfirmToken};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// What a surface asks the runtime to do.
@@ -71,6 +71,16 @@ pub enum Command {
     /// key handler that never put the box on screen.
     #[cfg(feature = "operator")]
     Execute(ConfirmToken),
+    /// Book the desk's current proposal, in one confirmed call.
+    ///
+    /// The token is the confirmation itself — see `ui::widgets::confirm` — so
+    /// this variant, like `Execute`, cannot be constructed by a key handler
+    /// that never put the box on screen. It carries no approval id, because
+    /// the owner's route resolves the current proposal itself and refuses a
+    /// plan that is not it: naming one here would be this client choosing
+    /// which question it is answering.
+    #[cfg(feature = "operator")]
+    Book(BookToken),
     /// Put a question to the desk manager.
     ///
     /// The one write verb on this workstation with no confirmation ritual in
@@ -360,6 +370,10 @@ impl PartialEq for Command {
             (Command::Reject(a), Command::Reject(b)) => a == b,
             #[cfg(feature = "operator")]
             (Command::Execute(_), Command::Execute(_)) => false,
+            // Never equal, for `Execute`'s reason: comparing two confirmations
+            // is only ever a prelude to substituting one for the other.
+            #[cfg(feature = "operator")]
+            (Command::Book(_), Command::Book(_)) => false,
             #[cfg(feature = "operator")]
             (Command::Message(a), Command::Message(b)) => a == b,
             #[cfg(feature = "operator")]

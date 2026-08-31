@@ -23,7 +23,7 @@ mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
     use crate::net::write::{
-        Choice, Execution, Login, News, Proposed, Start, WriteClient, WriteError,
+        Booked, Choice, Execution, Login, News, Proposed, Start, WriteClient, WriteError,
     };
     use crate::store::Posture;
     use std::sync::Arc;
@@ -184,6 +184,7 @@ mod armed {
             Command::RequestApproval(plan) => format!("open an approval for {plan}"),
             Command::Reject(id) => format!("reject {id}"),
             Command::Execute(token) => format!("execute {}", token.plan_id()),
+            Command::Book(token) => format!("book {}", token.plan_id()),
             Command::Message(_) => "ask the desk".to_string(),
             Command::StartWorkflow { template, .. } => format!("start {template}"),
             Command::DeskMode { data, book } => format!("point the desk at {data} · {book}"),
@@ -280,6 +281,57 @@ mod armed {
                     },
                     Err(err) => Wrote::Failed {
                         what: format!("execute {plan_id}"),
+                        said: err.to_string(),
+                    },
+                }
+            }
+            // The one-click book. It composes nothing the owner did not say:
+            // `booked` decides whether this was a fill, and the three shapes a
+            // `booked: false` comes in are three outcomes here because they
+            // are three different things for the operator to do next — F2's
+            // own fix round is about a client that read them as one.
+            Command::Book(token) => {
+                // Read before the token is spent by the call, for the reason
+                // `Execute` reads it: the outcome has to name the plan it was
+                // about whichever way it goes.
+                let plan_id = token.plan_id().to_string();
+                match client.book(token).await {
+                    Ok(Booked::Filled(body)) => Wrote::Booked {
+                        plan_id,
+                        summary: fill_summary(&body),
+                    },
+                    Ok(Booked::Invalidated {
+                        blocked_by,
+                        reasons,
+                    }) => Wrote::BookRefused {
+                        plan_id,
+                        blocked_by,
+                        reasons,
+                        survives: Some(false),
+                    },
+                    Ok(Booked::Standing {
+                        blocked_by,
+                        reasons,
+                    }) => Wrote::BookRefused {
+                        plan_id,
+                        blocked_by,
+                        reasons,
+                        survives: Some(true),
+                    },
+                    // The owner declined and did not say what happens to the
+                    // proposal. Reported as exactly that rather than guessed
+                    // either way — see `Booked::Unstated`.
+                    Ok(Booked::Unstated {
+                        blocked_by,
+                        reasons,
+                    }) => Wrote::BookRefused {
+                        plan_id,
+                        blocked_by,
+                        reasons,
+                        survives: None,
+                    },
+                    Err(err) => Wrote::Failed {
+                        what: format!("book {plan_id}"),
                         said: err.to_string(),
                     },
                 }
@@ -559,6 +611,29 @@ mod armed {
             | Command::OpenCli
             | Command::OpenBuild(_) => return None,
         })
+    }
+
+    /// What a booked proposal is worth saying, out of the owner's own body.
+    ///
+    /// The orders it reported, and nothing composed from the request. A
+    /// receipt written from what was *sent* would say "booked" for a 200 whose
+    /// execution the caller never looked at — the shape this client refuses
+    /// everywhere else — and the count is the one number that says the desk
+    /// actually placed something.
+    fn fill_summary(body: &serde_json::Value) -> String {
+        let execution = body.get("execution").unwrap_or(body);
+        match execution
+            .get("orders")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len)
+        {
+            Some(1) => "the desk booked it — 1 order".to_string(),
+            Some(n) => format!("the desk booked it — {n} orders"),
+            // An owner that booked without listing orders is still a fill; the
+            // next poll carries the blotter. Silence about the count is not
+            // silence about the booking.
+            None => "the desk booked it".to_string(),
+        }
     }
 
     /// What the owner said about the credentials of the book it just accepted.

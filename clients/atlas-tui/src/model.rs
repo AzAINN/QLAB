@@ -996,6 +996,108 @@ pub struct Verdict {
     pub reasons: Vec<String>,
 }
 
+// -- the desk's single current question ------------------------------------
+
+/// One `GET /api/desk/proposal` response.
+///
+/// A wrapper rather than a bare `Option`, because the owner's route answers
+/// `{"proposal": null}` for a quiet desk: the envelope is what says the desk
+/// was asked and had no question, and decoding straight into an `Option` would
+/// accept a payload with no `proposal` key at all as the same fact.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProposalPayload {
+    #[serde(default)]
+    pub proposal: Option<Proposal>,
+}
+
+/// The one allocation the desk is waiting on a human for.
+///
+/// Composed by the owner from a checked plan, the live approval request that
+/// covers it, and the referee verdict held to the plan's own `targets_hash`
+/// (`qlab/governance/proposal.py`). Every field is the owner's; nothing here is
+/// derived, and `targets_hash` in particular is *the* hash the confirm box
+/// binds to and the owner re-validates on the way back in.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Proposal {
+    pub plan_id: Option<String>,
+    pub approval_id: Option<String>,
+    /// `pending` or `approved` — the two states the owner's `live_requests`
+    /// admits. Never a terminal one: a consumed, rejected, expired or
+    /// superseded request is not the proposal.
+    pub approval_state: Option<String>,
+    pub expires_at: Option<String>,
+    pub decision_id: Option<String>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub targets: BTreeMap<String, f64>,
+    pub targets_hash: Option<String>,
+    pub pre_trade: Option<Value>,
+    /// `None` when no PASS covers these exact targets. Not "no verdict yet" and
+    /// not a FAIL — the owner holds the verdict to `targets_hash(plan.targets)`
+    /// exactly as `rebalance_preview` does, so a verdict about different
+    /// numbers arrives here as absence.
+    #[serde(default, deserialize_with = "object_or_none")]
+    pub referee: Option<ProposalVerdict>,
+    pub created_at: Option<String>,
+    /// The plans this one withdrew, newest first. The only place an operator
+    /// learns that an approval they had already given was revoked — the owner
+    /// says it once in the chat, and scrollback is not a record a card may rely
+    /// on.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub superseded: Vec<String>,
+}
+
+/// The referee's word on one proposal, as the owner attaches it.
+///
+/// Its own struct rather than [`Verdict`]: this one carries the `targets_hash`
+/// the verdict was bound to and the stamp it was written at, and the whole
+/// point of the block is that those travel with the word.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProposalVerdict {
+    pub verdict_id: Option<String>,
+    pub verdict: Option<String>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub reasons: Vec<String>,
+    pub source: Option<String>,
+    pub targets_hash: Option<String>,
+    pub created_at: Option<String>,
+}
+
+impl Proposal {
+    /// Whether the referee passed *these* targets.
+    ///
+    /// Both halves: the word, and that the block the word came in names the
+    /// same hash the plan does. The owner already holds the verdict to the
+    /// plan's hash, so the second check can only fail on a payload this client
+    /// should not have believed — which is exactly when it must offer no key.
+    pub fn referee_passed(&self) -> bool {
+        let Some(referee) = self.referee.as_ref() else {
+            return false;
+        };
+        if referee.verdict.as_deref() != Some("PASS") {
+            return false;
+        }
+        match (
+            self.targets_hash.as_deref(),
+            referee.targets_hash.as_deref(),
+        ) {
+            (Some(plan), Some(pass)) => plan == pass,
+            // The owner always sends both. An answer missing either is a
+            // contract this client cannot read, and a PASS it cannot bind is
+            // not a PASS it may act on. Invariant 4.
+            _ => false,
+        }
+    }
+
+    /// One `pre_trade` number, when the owner computed it.
+    pub fn pre_trade_f64(&self, key: &str) -> Option<f64> {
+        self.pre_trade.as_ref()?.get(key)?.as_f64()
+    }
+
+    pub fn pre_trade_i64(&self, key: &str) -> Option<i64> {
+        self.pre_trade.as_ref()?.get(key)?.as_i64()
+    }
+}
+
 // -- the workforce ---------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Deserialize)]

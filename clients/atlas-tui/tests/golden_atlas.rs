@@ -473,3 +473,141 @@ mod armed {
         assert!(body.contains("requires Propose mode"), "{body}");
     }
 }
+
+// -- the desk's current proposal, mirrored ----------------------------------
+
+/// The fixture desk with a live proposal on it, on ATLAS.
+fn with_proposal() -> Client {
+    let mut store = harness::fixture_store();
+    harness::with_proposal(&mut store, harness::PROPOSAL);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('1'));
+    client
+}
+
+/// The mirrored card, in a binary that could book but has not been armed.
+///
+/// One golden per leg for the reason BOOK's is: the last row of the card
+/// states this window's posture in an armed build and is absent altogether in
+/// a monitoring one, and a shared snapshot could only be blessed for one.
+#[cfg(feature = "operator")]
+#[test]
+fn the_sidebar_mirrors_the_proposal_card_at_120x36() {
+    insta::assert_snapshot!(with_proposal().frame(120, 36));
+}
+
+#[cfg(not(feature = "operator"))]
+mod glass {
+    use super::*;
+
+    #[test]
+    fn the_sidebar_mirrors_the_card_with_no_booking_row_at_120x36() {
+        insta::assert_snapshot!(with_proposal().frame(120, 36));
+    }
+}
+
+#[test]
+fn the_proposal_replaces_the_your_call_list_rather_than_sitting_beside_it() {
+    // It *is* the your-call item — one question, stated with the numbers it is
+    // about instead of as a word to type. Two lists under one header would be
+    // two accounts of what the desk is waiting for.
+    let client = with_proposal();
+    let frame = client.frame(120, 36);
+    let body = content(&frame);
+    assert_eq!(
+        body.matches("YOUR CALL").count(),
+        1,
+        "the sidebar drew the slot twice:\n{body}"
+    );
+    line_with(&frame, "b92a58fa5c1");
+    // The fixture desk has a checked plan whose word the old list drew. It is
+    // gone while there is a proposal, and the card is what stands in its place.
+    assert!(!body.contains("/execute 9661b0e8"), "{body}");
+}
+
+#[test]
+fn the_mirrored_card_is_the_same_card_book_draws() {
+    // Same verdict row, same binding, same numbers — one widget, so a rule
+    // that changes changes on both panes at once.
+    let frame = with_proposal().frame(120, 36);
+    // The binding survives the sidebar's 32 cells; the authority behind it is
+    // what a narrow pane drops, which is the right way round — a verdict with
+    // no binding could be about any allocation at all.
+    let referee = line_with(&frame, "referee PASS");
+    assert!(referee.contains("5a6978"), "{referee}");
+    line_with(&frame, "turnover 42.0%");
+}
+
+#[cfg(feature = "operator")]
+mod booking {
+    use super::*;
+    use atlas::cmd::Command;
+    use atlas::store::Posture;
+    use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+
+    fn armed() -> Client {
+        let mut store = harness::fixture_store();
+        harness::with_proposal(&mut store, harness::PROPOSAL);
+        store.posture = Posture::Operator;
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('1'));
+        client
+    }
+
+    fn press(client: &mut Client, code: KeyCode) -> Option<Command> {
+        atlas::ui::shell::on_key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        )
+    }
+
+    #[test]
+    fn b_opens_the_same_box_here_as_it_does_on_book() {
+        let mut client = armed();
+        assert_eq!(press(&mut client, KeyCode::Char('b')), None);
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("BOOK THE PROPOSAL"), "{frame}");
+        assert!(
+            line_with(&frame, "confirming").contains("5a6978"),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn a_question_being_typed_keeps_its_own_letter() {
+        // The corner this pane already lives with: the ask row claims every
+        // printable key once it holds text or has been focused, and the
+        // booking key is claimed only while the row is idle. A question that
+        // starts with it is focused first.
+        let mut client = armed();
+        press(&mut client, KeyCode::Char('i'));
+        for c in "buy or sell".chars() {
+            press(&mut client, KeyCode::Char(c));
+        }
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("buy or sell"), "{body}");
+        assert!(!body.contains("BOOK THE PROPOSAL"), "{body}");
+    }
+
+    #[test]
+    fn a_click_on_the_cards_word_opens_the_box_here_too() {
+        let mut client = armed();
+        let frame = client.frame(120, 36);
+        let row = frame
+            .lines()
+            .position(|line| line.contains("book ↵"))
+            .expect("the sidebar drew no book word") as u16;
+        let column = frame
+            .lines()
+            .nth(row as usize)
+            .unwrap()
+            .find("book ↵")
+            .unwrap() as u16;
+        client.mouse(MouseEventKind::Down(MouseButton::Left), column, row);
+        assert!(
+            client.frame(120, 36).contains("BOOK THE PROPOSAL"),
+            "the click on `book` opened no box"
+        );
+    }
+}

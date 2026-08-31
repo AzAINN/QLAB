@@ -30,7 +30,7 @@ use crate::theme::theme;
 use crate::ui::views::View;
 #[cfg(feature = "operator")]
 use crate::ui::widgets::confirm;
-use crate::ui::widgets::{md, panel_block, panel_header, pipeline, refuse};
+use crate::ui::widgets::{md, panel_block, panel_header, pipeline, proposal, refuse};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -127,11 +127,23 @@ pub struct AtlasView {
     /// the only remedy is a taller terminal.
     #[cfg(feature = "operator")]
     asked: Option<String>,
+    /// Where the last frame drew the proposal card's `book` word.
+    ///
+    /// Published by `draw` the way `input_row` is, retracted by every frame
+    /// that draws no card, and read by nothing but the click handler: a click
+    /// is answered about the frame in front of the operator, never about one
+    /// not yet painted.
+    #[cfg(feature = "operator")]
+    book_word: std::cell::Cell<Rect>,
 }
 
 impl View for AtlasView {
     fn draw(&self, f: &mut Frame, area: Rect, store: &Store, _fx: &FlashTracker, _now: Instant) {
         self.affordances.borrow_mut().clear();
+        // Retracted here and re-published only by a frame that draws the card,
+        // for the reason `drew` is: a rect that outlived its frame would let a
+        // click book off a screen nobody is looking at.
+        self.no_book_word();
         if area.width < CHAT_MIN || area.height < 4 {
             // Nothing is on screen, so nothing may be approved off the back of
             // it. Every path out of this function settles `drew`, because the
@@ -238,6 +250,15 @@ impl View for AtlasView {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // The card's own word, which is not a `/word`: booking is not a
+                // command-line scope, and routing it through the resolver would
+                // be a second path to a fill that does not go through the box.
+                // A click here does exactly what `b` does.
+                #[cfg(feature = "operator")]
+                if store.posture.writes() && self.book_word_at(m.column, m.row) {
+                    self.ask_to_book(store);
+                    return None;
+                }
                 // A click on a `/word` runs that line — the same resolver the
                 // palette and the chat box use, so a click can do exactly
                 // what typing the word would and nothing else.
@@ -298,12 +319,55 @@ impl AtlasView {
             _ => {
                 #[cfg(feature = "operator")]
                 if store.posture.writes() {
+                    // The booking key, claimed only while the ask row is idle
+                    // — the same corner the focus key sits in, and the same
+                    // rule: an empty unfocused row yields the letter, a row
+                    // being typed into keeps it. A question that starts with
+                    // this letter is focused first.
+                    if k.code == KeyCode::Char('b') && self.ask.is_empty() && !self.focused {
+                        self.ask_to_book(store);
+                        return None;
+                    }
                     return self.ask_key(k);
                 }
                 None
             }
         }
     }
+
+    /// Put the booking question up, from the card in this sidebar.
+    ///
+    /// The same producer BOOK's `b` calls, so the two keys open one box stating
+    /// one set of facts — and the refusal, when there is one, is the same
+    /// sentence on both panes.
+    #[cfg(feature = "operator")]
+    fn ask_to_book(&mut self, store: &mut Store) {
+        match proposal::modal(store) {
+            Ok(modal) => self.confirm.open(modal, confirm::Pending::Book),
+            Err(why) => store.cmd.say(why),
+        }
+    }
+
+    /// Whether the last frame drew the card's `book` word under that cell.
+    #[cfg(feature = "operator")]
+    fn book_word_at(&self, column: u16, row: u16) -> bool {
+        let rect = self.book_word.get();
+        rect.height > 0
+            && row == rect.y
+            && column >= rect.x
+            && column < rect.x.saturating_add(rect.width)
+    }
+
+    /// This frame drew no `book` word. Two bodies rather than a `cfg` at the
+    /// call site: a monitoring build has nothing to publish and nothing to
+    /// clear.
+    #[cfg(feature = "operator")]
+    fn no_book_word(&self) {
+        self.book_word.set(Rect::default());
+    }
+
+    #[cfg(not(feature = "operator"))]
+    fn no_book_word(&self) {}
 
     /// Move the conversation window, walls at both ends like every other
     /// cursor on this workstation. Positive is towards older messages.
@@ -748,6 +812,15 @@ const STATUS_MAX: usize = 12;
 /// the pane by mid-afternoon. What does not fit is counted on the last row.
 const ACTS_MAX_H: usize = 12;
 
+/// The most rows the proposal card may take out of the sidebar.
+///
+/// Ten: the plan, a readable slice of the allocation, the numbers, the
+/// verdict, a withdrawal and the row that books. The card counts what it drops
+/// rather than cutting it, and BOOK draws the same card with more room — so a
+/// narrow sidebar is a summary of the question, never a partial statement of
+/// it.
+const PROPOSAL_MAX_H: usize = 10;
+
 /// The indent a wrapped sentence sits at, matching the board's own rows.
 const ACT_INDENT: usize = 2;
 
@@ -1008,6 +1081,43 @@ impl AtlasView {
         #[cfg(feature = "operator")]
         self.drew.replace(acts.shown);
         let mut lines = acts.lines;
+
+        // The desk's single current proposal, mirrored from BOOK, and drawn
+        // **above** the board rather than under it. It replaces the your-call
+        // list whenever there is one, because it *is* the your-call item: one
+        // question, stated with the numbers it is about rather than as a word
+        // to type. The list further down is what remains for a desk with no
+        // proposal — a checked plan nobody has opened a request for, or a
+        // request the beat has not resolved into one yet.
+        //
+        // Its position is the ruling: the sidebar is clamped to the pane at
+        // the end, so whatever is last is what a short terminal loses, and the
+        // one thing on this pane that is waiting on a human may not be it. The
+        // board is evidence and the manager's status is context; both can be
+        // scrolled to on their own panes, and the question cannot.
+        if store.proposal().is_some() {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(panel_header("your call"));
+            // A third of the sidebar at most. The board below is why this
+            // column exists, and a twelve-leg allocation would otherwise push
+            // the evidence the question should be read against off the pane.
+            // What does not fit is counted by the card itself, never cut.
+            let room = PROPOSAL_MAX_H.min(inner.height as usize / 3);
+            let card = proposal::card(store, inner.width, room);
+            #[cfg(feature = "operator")]
+            if let Some(row) = card.book_row {
+                self.book_word.set(Rect::new(
+                    inner.x,
+                    inner.y + (lines.len() + row) as u16,
+                    inner.width,
+                    1,
+                ));
+            }
+            lines.extend(card.lines);
+        }
+
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
@@ -1069,7 +1179,7 @@ impl AtlasView {
             .iter()
             .filter(|p| p.state.as_deref() == Some("checked"))
             .count();
-        if approvals_waiting + plans_checked > 0 {
+        if store.proposal().is_none() && approvals_waiting + plans_checked > 0 {
             lines.push(Line::from(""));
             lines.push(panel_header("your call"));
             // The chat's own words, one per item: what to type, right here.

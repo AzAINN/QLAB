@@ -217,6 +217,46 @@ pub fn fixture_store_with_panel() -> Store {
     store
 }
 
+/// The desk's single current proposal, folded the way the poller folds it.
+///
+/// Through `Store::apply` rather than by assigning a field, for `fixture_store`'s
+/// reason: a fixture that bypassed the fold would render a state the running
+/// client can never be in — and the fold is where a stale booking note is
+/// retired, which is exactly what a card test needs to be true.
+pub fn with_proposal(store: &mut Store, json: &str) {
+    let proposal: atlas::model::Proposal = serde_json::from_str(json).unwrap();
+    let now = store.last_snapshot_at.unwrap_or_else(Instant::now);
+    store.apply(AppEvent::Proposal(Some(Box::new(proposal))), now);
+}
+
+/// The owner's own answer for a desk with no open question.
+pub fn with_no_proposal(store: &mut Store) {
+    let now = store.last_snapshot_at.unwrap_or_else(Instant::now);
+    store.apply(AppEvent::Proposal(None), now);
+}
+
+/// One checked plan, its live approval request, and the referee PASS held to
+/// the same `targets_hash` — the shape `qlab/governance/proposal.py` composes.
+///
+/// Five targets, so a card that can only draw four legs has something to
+/// count; one superseded plan, because a withdrawn approval is the fact the
+/// card exists to surface.
+pub const PROPOSAL: &str = r#"{
+    "plan_id": "b92a58fa5c1d4e7f",
+    "approval_id": "5e92e0d9aa1b2c3d",
+    "approval_state": "pending",
+    "expires_at": "2026-07-30T15:42:00+00:00",
+    "decision_id": "d40cf1b2",
+    "targets": {"ACWI": 0.30, "QQQ": 0.20, "SPY": 0.25, "XLF": 0.10, "XLK": 0.15},
+    "targets_hash": "0f1e2d3c4b5a6978",
+    "pre_trade": {"n_legs": 5, "turnover": 0.42},
+    "referee": {"verdict_id": "v7c1", "verdict": "PASS", "reasons": ["within mandate"],
+                "source": "referee-agent", "targets_hash": "0f1e2d3c4b5a6978",
+                "created_at": "2026-07-30T15:31:00+00:00"},
+    "created_at": "2026-07-30T15:30:00+00:00",
+    "superseded": ["c453496ae7a7aefa"]
+}"#;
+
 /// One shell frame, rendered at `w`×`h` and read back as text.
 ///
 /// Drawn at the instant the snapshot arrived, so a frame is never a function of

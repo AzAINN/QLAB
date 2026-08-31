@@ -45,10 +45,21 @@ use ratatui::{
     Frame,
 };
 
-/// The modal's fixed size. Wide enough for a sixteen-character hash beside its
-/// label, tall enough for the title, four facts, the challenge, and the rule.
+/// The modal's width, and the height it never goes under. Wide enough for a
+/// sixteen-character hash beside its label, tall enough for the title, four
+/// facts, the challenge, and the rule.
+///
+/// `H` became a *floor* when the book box arrived: that one states an
+/// allocation diff, and a fixed twelve rows would have shown a human three of
+/// the legs they were vouching for and hidden the rest — a confirmation given
+/// against numbers the box did not draw. Every box still asks for `H` at
+/// minimum, so the execute box is the 50×12 it has always been.
 const W: u16 = 50;
 const H: u16 = 12;
+
+/// The chrome a box spends on something other than its facts: the two borders,
+/// the title, and the blank row above the prompt.
+const CHROME_H: u16 = 4;
 
 /// How much of the hash the human types. Six characters is 24 bits of the
 /// owner's digest — far beyond what a mistyped or replayed confirmation lands on
@@ -109,6 +120,47 @@ impl ConfirmToken {
     }
 }
 
+/// Proof that a human confirmed the desk's current proposal.
+///
+/// A second capability rather than a reuse of [`ConfirmToken`], and the
+/// difference is what each one can spend. `ConfirmToken` names an approval and
+/// buys one `POST /api/plans/execute`; this names no approval at all, because
+/// `POST /api/desk/proposal/book` resolves the current proposal itself and
+/// refuses a plan that is not it. One type for both would have let a
+/// confirmation given for one route be spent on the other, where the owner
+/// checks a different set of things.
+///
+/// Constructible only inside this module, and — like its neighbour —
+/// deliberately not `Clone`, taken by value by the writer, and minted at most
+/// once per box.
+///
+/// **What the human confirmed is a hash they were shown, not one they typed.**
+/// That is the whole distinction of this box, and it is a ruling rather than a
+/// convenience: the desk's proposal card puts the allocation, the referee's
+/// verdict and the hash's last six on screen together, and the box repeats them
+/// immediately above the word that arms it. The replay a typed challenge
+/// defends against is defended here by the binding instead — the token carries
+/// the hash the box *displayed*, and the owner refuses it against anything but
+/// the proposal it currently holds.
+#[derive(Debug)]
+pub struct BookToken {
+    plan_id: String,
+    targets_hash: String,
+}
+
+impl BookToken {
+    pub fn plan_id(&self) -> &str {
+        &self.plan_id
+    }
+
+    /// The hash the box showed the human. Carried rather than re-derived at the
+    /// call site for `ConfirmToken::targets_hash`'s reason: the consent and what
+    /// it was given for travel together.
+    pub fn targets_hash(&self) -> &str {
+        &self.targets_hash
+    }
+}
+
 /// What the modal is asking about.
 #[derive(Debug, Clone)]
 enum Binding {
@@ -127,6 +179,17 @@ enum Binding {
         approval_id: String,
         targets_hash: String,
     },
+    /// The desk's current proposal, bound to the hash the box displays.
+    ///
+    /// The one binding that arms without a typed challenge. What it gives up in
+    /// keystrokes it takes back in what is on screen: the box states the
+    /// allocation, the verdict and the hash together, and the owner then
+    /// re-derives the proposal from its own registry and refuses this plan if
+    /// it is no longer the question being asked.
+    Book {
+        plan_id: String,
+        targets_hash: String,
+    },
 }
 
 /// A centred, blocking question.
@@ -142,6 +205,15 @@ pub struct Modal {
     challenge: String,
     typed: String,
     binding: Binding,
+    /// Where the last frame drew the words that arm this box, so a click on
+    /// them can do exactly what Enter does and nothing else.
+    ///
+    /// Published by `draw` the way the views publish their own rects, and for
+    /// the same reason: a click is answered about the frame in front of the
+    /// operator, never about one not yet painted. `Rect::default()` — which no
+    /// click can be inside — until a frame has drawn the row, and only ever set
+    /// by a box that actually offers a click.
+    arm_row: std::cell::Cell<Rect>,
 }
 
 impl Modal {
@@ -229,6 +301,70 @@ impl Modal {
                 approval_id: approval_id.to_string(),
                 targets_hash: hash.to_string(),
             },
+            arm_row: std::cell::Cell::new(Rect::default()),
+        })
+    }
+
+    /// The modal for booking the desk's current proposal, or `None` if there is
+    /// nothing here to bind the consent to.
+    ///
+    /// **The one box on this workstation that arms without a typed challenge**,
+    /// and the reason is what is on screen rather than what is missing. The
+    /// execute box asks for six characters because it is opened off a plan card
+    /// that states an id and a turnover: the hash exists nowhere else, so typing
+    /// it is what proves the human read *this* plan's. The proposal card states
+    /// the allocation, the referee's verdict and the hash together, this box
+    /// repeats all three immediately above the word that arms it, and the owner
+    /// then re-derives which plan is the current proposal and refuses anything
+    /// else. The binding is carried, not typed — and a click, like Enter, can
+    /// only ever send the hash this box displayed.
+    ///
+    /// Two refusals, and each is a substitution it prevents:
+    ///
+    /// * no plan id — there is nothing to bind the consent *to*;
+    /// * a hash absent or shorter than the six characters the box shows — there
+    ///   is nothing to bind it *with*, and a box that armed against a hash it
+    ///   could not display would be a ritual with no content.
+    ///
+    /// `facts` is the caller's: the card composes the diff, and a box that
+    /// re-derived it would be a second account of the same numbers. What this
+    /// function owns is the row that names the last six, which is prepended
+    /// here so no caller can open a book box without it.
+    pub fn book(plan_id: &str, targets_hash: &str, facts: Vec<(String, String)>) -> Option<Modal> {
+        if plan_id.is_empty() {
+            return None;
+        }
+        if targets_hash.chars().count() < CHALLENGE_LEN {
+            return None;
+        }
+        let shown: String = targets_hash
+            .chars()
+            .skip(targets_hash.chars().count() - CHALLENGE_LEN)
+            .collect();
+        let mut rows = vec![
+            ("plan".to_string(), plan_id.to_string()),
+            ("targets hash".to_string(), targets_hash.to_string()),
+            // The six characters the execute box would have asked for, shown
+            // rather than requested. Its own row so it is beside the full hash
+            // it is the tail of, and so a test can read what the box bound to
+            // without parsing the prompt.
+            ("confirming".to_string(), shown.clone()),
+        ];
+        rows.extend(facts);
+        Some(Modal {
+            title: "BOOK THE PROPOSAL".into(),
+            facts: rows,
+            // The characters the prompt displays. Not something to be typed —
+            // `armed` never compares against it for this binding — but the box
+            // has one string it is bound by, and two spellings of it would be
+            // two chances to show one and send the other.
+            challenge: shown,
+            typed: String::new(),
+            binding: Binding::Book {
+                plan_id: plan_id.to_string(),
+                targets_hash: targets_hash.to_string(),
+            },
+            arm_row: std::cell::Cell::new(Rect::default()),
         })
     }
 
@@ -241,7 +377,18 @@ impl Modal {
             challenge: STATIC_CHALLENGE.into(),
             typed: String::new(),
             binding: Binding::Action,
+            arm_row: std::cell::Cell::new(Rect::default()),
         }
+    }
+
+    /// Whether this box is answered by reading rather than by typing.
+    ///
+    /// Derived from the binding and settable nowhere, which is the point: a
+    /// flag a caller could pass would let an execute box be opened without its
+    /// challenge, and the difference between the two rituals would become an
+    /// argument rather than a type.
+    fn displayed_only(&self) -> bool {
+        matches!(self.binding, Binding::Book { .. })
     }
 
     /// What the human has to type. Public so a test can pin that it is the
@@ -263,19 +410,38 @@ impl Modal {
         &self.facts
     }
 
-    /// Whether the challenge has been met exactly.
+    /// Whether this box is ready to be answered.
     ///
-    /// Case-sensitive and whole-string. A case-insensitive compare would halve
-    /// the entropy of a hex challenge for no gain — the characters are on screen
-    /// directly above the field.
+    /// Three arms rather than one comparison, and the middle one is what keeps
+    /// the whole thing honest:
+    ///
+    /// * a book box is armed from the moment it opens — its ritual is reading,
+    ///   and Enter is the answer;
+    /// * a **spent** box is never armed again, whatever it holds. Without this
+    ///   arm a spent book box would compare an empty `typed` against an empty
+    ///   challenge and read as armed for ever;
+    /// * everything else is the typed challenge, case-sensitive and
+    ///   whole-string. A case-insensitive compare would halve the entropy of a
+    ///   hex challenge for no gain — the characters are on screen directly
+    ///   above the field.
     pub fn armed(&self) -> bool {
-        self.typed == self.challenge
+        match self.binding {
+            Binding::Book { .. } => true,
+            Binding::Spent => false,
+            Binding::Action | Binding::Plan { .. } => self.typed == self.challenge,
+        }
     }
 
     /// One typed character. Bounded by the challenge's length so a held key
     /// cannot grow the buffer without limit, and so overtyping is visibly
     /// refused rather than silently accumulating behind the field.
+    ///
+    /// A book box takes none: it has no field, and a buffer filling up behind a
+    /// box that shows one would be state nothing on screen accounts for.
     pub fn push(&mut self, c: char) {
+        if self.displayed_only() {
+            return;
+        }
         if self.typed.chars().count() < self.challenge.chars().count() {
             self.typed.push(c);
         }
@@ -326,7 +492,44 @@ impl Modal {
             }),
             // An action modal is spent by the same call, so a confirmed mode
             // change cannot be replayed either. It never had a token to give.
-            Binding::Action | Binding::Spent => None,
+            //
+            // And a *book* binding is spent here too rather than passed over.
+            // Enter routes by the `Pending` beside the modal, so this arm is
+            // only reached if the two disagreed — a box bound to the proposal
+            // and a pending that says "execute" — and the safe reading of that
+            // is to consume the consent and mint nothing, never to hand the
+            // execute path a token it was not given.
+            Binding::Action | Binding::Book { .. } | Binding::Spent => None,
+        }
+    }
+
+    /// The booking capability, if this box is bound to the desk's current
+    /// proposal — **once**.
+    ///
+    /// The same contract as [`Modal::token`], for the same reason: `&mut self`,
+    /// the binding moved out, and the state left behind terminal. A refused
+    /// booking is something an operator re-reads the card about, never
+    /// something a caller quietly repeats — and here that matters more than on
+    /// the execute path, because two of the three refusals this route can
+    /// return *leave the approval alive*, so a retry loop would find a
+    /// genuinely bookable proposal waiting for it.
+    ///
+    /// `None` for every other binding, including a spent one: a token minted
+    /// from an execute box would carry a hash the human typed against a
+    /// different question.
+    pub fn book_token(&mut self) -> Option<BookToken> {
+        if !self.armed() {
+            return None;
+        }
+        match std::mem::replace(&mut self.binding, Binding::Spent) {
+            Binding::Book {
+                plan_id,
+                targets_hash,
+            } => Some(BookToken {
+                plan_id,
+                targets_hash,
+            }),
+            Binding::Action | Binding::Plan { .. } | Binding::Spent => None,
         }
     }
 
@@ -336,7 +539,11 @@ impl Modal {
     /// times a second, and a half-transparent question about an order would let
     /// a moving number sit inside the box a human is reading before they commit.
     pub fn draw(&self, f: &mut Frame, area: Rect) {
-        let rect = centred(area);
+        // Retracted first, and on every path out of this function. A rect left
+        // over from a frame that drew the row would let a click arm a box the
+        // frame in front of the operator never offered one on.
+        self.arm_row.set(Rect::default());
+        let rect = centred(area, self.height());
         if rect.width == 0 || rect.height == 0 {
             return;
         }
@@ -360,33 +567,92 @@ impl Modal {
             ])
         }));
         lines.push(Line::default());
-        lines.push(Line::from(vec![
-            Span::styled("type ", Style::default().fg(t.text_secondary)),
-            // The one place these six characters appear. Bold and in the warning
-            // colour because they are the thing being read off, not chrome.
-            Span::styled(
-                self.challenge.clone(),
-                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to confirm", Style::default().fg(t.text_secondary)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("> ", Style::default().fg(t.text_tertiary)),
-            Span::styled(
-                self.typed.clone(),
-                Style::default()
-                    .fg(if self.armed() {
-                        t.positive
-                    } else {
-                        t.text_primary
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        if self.displayed_only() {
+            // No field, and therefore one row rather than two. The words that
+            // arm it are named as words because they are also the click target:
+            // what a mouse can do here is exactly what Enter does, and the row
+            // says so rather than leaving the click undiscoverable.
+            self.arm_row.set(Rect {
+                x: inner.x,
+                y: inner.y + lines.len() as u16,
+                width: inner.width,
+                height: 1,
+            });
+            lines.push(Line::from(vec![
+                Span::styled("↵ ", Style::default().fg(t.text_tertiary)),
+                Span::styled(
+                    ARM_WORD,
+                    Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" · bound to ", Style::default().fg(t.text_secondary)),
+                // The six characters, shown rather than asked for. Bold and in
+                // the warning colour for the reason the typed challenge is:
+                // they are the thing being read, not chrome.
+                Span::styled(
+                    self.challenge.clone(),
+                    Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" · Esc", Style::default().fg(t.text_dim)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("type ", Style::default().fg(t.text_secondary)),
+                // The one place these six characters appear. Bold and in the
+                // warning colour because they are the thing being read off, not
+                // chrome.
+                Span::styled(
+                    self.challenge.clone(),
+                    Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to confirm", Style::default().fg(t.text_secondary)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("> ", Style::default().fg(t.text_tertiary)),
+                Span::styled(
+                    self.typed.clone(),
+                    Style::default()
+                        .fg(if self.armed() {
+                            t.positive
+                        } else {
+                            t.text_primary
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
 
         f.render_widget(Paragraph::new(lines), inner);
     }
+
+    /// The rows this box needs, never under [`H`].
+    ///
+    /// Counted from what it actually draws rather than assumed, because the
+    /// book box states an allocation diff and the number of legs is the desk's,
+    /// not this module's.
+    fn height(&self) -> u16 {
+        let prompt = if self.displayed_only() { 1 } else { 2 };
+        H.max(CHROME_H + self.facts.len() as u16 + prompt)
+    }
+
+    /// Whether the last frame drew this box's arming words under that cell.
+    ///
+    /// `false` for every box that offers no click, and for every box before its
+    /// first frame — a rect of zero width contains nothing.
+    fn armed_at(&self, column: u16, row: u16) -> bool {
+        let rect = self.arm_row.get();
+        rect.height > 0
+            && row == rect.y
+            && column >= rect.x
+            && column < rect.x.saturating_add(rect.width)
+    }
 }
+
+/// The words that arm a book box, and the words a click on the card runs.
+///
+/// One constant for both because they are one affordance seen twice: the card
+/// says `book`, the box says `book it`, and an operator who learns the word on
+/// one surface has learned it on the other.
+pub const ARM_WORD: &str = "book it";
 
 /// What the runtime is asked to do once the human has typed the challenge.
 ///
@@ -400,6 +666,11 @@ pub enum Pending {
     /// The plan case. The command's payload is the token the modal mints, so
     /// there is nothing to carry here — the binding is inside the modal.
     Execute,
+    /// The desk's current proposal, booked in one call. Carries nothing for
+    /// `Execute`'s reason: the plan and the hash are inside the modal, and a
+    /// pair repeated out here would be a second copy of the binding that could
+    /// disagree with the one the token is minted from.
+    Book,
 }
 
 /// One view's modal slot: at most one question on screen, and the keystrokes
@@ -461,6 +732,11 @@ impl Host {
                     // the modal could not bind the plan after all, which is a
                     // refusal to execute rather than a fill with no consent.
                     Pending::Execute => modal.token().map(Command::Execute),
+                    // The same mint-and-spend, on the other capability. `None`
+                    // here means the box was not bound to the proposal after
+                    // all, which is a refusal to book rather than a fill with
+                    // no consent.
+                    Pending::Book => modal.book_token().map(Command::Book),
                     Pending::Approve(id) => Some(Command::Approve(id)),
                     Pending::Reject(id) => Some(Command::Reject(id)),
                 }
@@ -481,6 +757,44 @@ impl Host {
         }
     }
 
+    /// One click while a question is up.
+    ///
+    /// **The only mouse event a modal answers, and it answers exactly one
+    /// thing**: a left click on the words the box drew to arm itself. Anything
+    /// else — a click elsewhere in the box, a click on the desk behind it, a
+    /// wheel — is swallowed, which is what a blocking question owes: a scroll
+    /// that moved the pane underneath would let a human answer about a frame
+    /// they can no longer see.
+    ///
+    /// It cannot reach a box that draws no such words. `armed_at` reads a rect
+    /// only the book box ever publishes, so the typed-challenge boxes have no
+    /// click path at all rather than one guarded by a condition.
+    pub fn on_mouse(&mut self, m: crossterm::event::MouseEvent) -> Option<Command> {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return None;
+        }
+        if !self
+            .open
+            .as_ref()
+            .is_some_and(|(modal, _)| modal.armed_at(m.column, m.row))
+        {
+            return None;
+        }
+        // Taken, not borrowed, and routed by the same `Pending` Enter is: a
+        // click and a keystroke are two spellings of one answer, and two
+        // routings of it would be two chances for one to widen.
+        let (mut modal, pending) = self.open.take()?;
+        match pending {
+            Pending::Book => modal.book_token().map(Command::Book),
+            // Unreachable today — no other box publishes an arming rect — and
+            // deliberately not an `unreachable!`: the safe reading of a box
+            // that somehow offered a click it was not built for is to consume
+            // the consent and send nothing.
+            Pending::Execute | Pending::Approve(_) | Pending::Reject(_) => None,
+        }
+    }
+
     pub fn draw(&self, f: &mut Frame, area: Rect) {
         if let Some(modal) = self.showing() {
             modal.draw(f, area);
@@ -493,9 +807,9 @@ impl Host {
 /// Clamped rather than assumed: a 50×12 box drawn into a 40-column terminal
 /// would be laid out off the right edge, and the field the human types into is
 /// the part that would leave the screen.
-fn centred(area: Rect) -> Rect {
+fn centred(area: Rect, height: u16) -> Rect {
     let w = W.min(area.width);
-    let h = H.min(area.height);
+    let h = height.min(area.height);
     Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -645,10 +959,139 @@ mod tests {
 
     #[test]
     fn the_box_is_clamped_into_a_terminal_too_small_to_hold_it() {
-        let tiny = centred(Rect::new(0, 0, 30, 6));
+        let tiny = centred(Rect::new(0, 0, 30, 6), H);
         assert_eq!((tiny.width, tiny.height), (30, 6));
-        let roomy = centred(Rect::new(0, 0, 120, 36));
+        let roomy = centred(Rect::new(0, 0, 120, 36), H);
         assert_eq!((roomy.width, roomy.height), (W, H));
         assert_eq!((roomy.x, roomy.y), ((120 - W) / 2, (36 - H) / 2));
+    }
+
+    fn a_proposal_box(legs: usize) -> Modal {
+        let facts = (0..legs)
+            .map(|i| (format!("ASSET{i}"), format!("{i}.0% → {}.0%", i + 1)))
+            .collect();
+        Modal::book("b92a58fa5c1d4e7f", "0f1e2d3c4b5a6978", facts).unwrap()
+    }
+
+    #[test]
+    fn a_book_box_arms_on_enter_and_its_token_carries_the_hash_it_displayed() {
+        // The whole ruling in one test: no typing, and what the owner is sent
+        // is what the box put on screen.
+        let mut host = Host::default();
+        host.open(a_proposal_box(2), Pending::Book);
+        let shown = host
+            .showing()
+            .unwrap()
+            .facts()
+            .iter()
+            .find(|(label, _)| label == "confirming")
+            .map(|(_, value)| value.clone())
+            .expect("the box names the six characters it is bound by");
+        assert_eq!(shown, "5a6978", "the tail of the owner's own hash");
+        assert!(host.showing().unwrap().armed(), "a book box opens armed");
+
+        let Some(Command::Book(token)) = host.on_key(key(KeyCode::Enter)) else {
+            panic!("Enter did not mint a booking")
+        };
+        assert_eq!(token.targets_hash(), "0f1e2d3c4b5a6978");
+        assert!(token.targets_hash().ends_with(&shown));
+        assert_eq!(token.plan_id(), "b92a58fa5c1d4e7f");
+        assert!(host.showing().is_none(), "answering closes the box");
+        assert!(host.on_key(key(KeyCode::Enter)).is_none());
+    }
+
+    #[test]
+    fn a_spent_book_box_is_never_armed_again() {
+        // The arm that stops an empty `typed` from matching an empty challenge
+        // for ever. Read off the modal directly rather than through the host,
+        // which takes the box out and would hide the state being pinned.
+        let mut modal = a_proposal_box(1);
+        assert!(modal.book_token().is_some());
+        assert!(!modal.armed(), "a spent consent re-armed itself");
+        assert!(modal.book_token().is_none());
+        assert!(modal.token().is_none(), "and it minted no execute token");
+    }
+
+    #[test]
+    fn a_book_box_takes_no_typing_and_an_execute_token_is_not_one_of_its_answers() {
+        let mut modal = a_proposal_box(1);
+        for c in "5a6978".chars() {
+            modal.push(c);
+        }
+        assert_eq!(modal.typed(), "", "a box with no field buffered keystrokes");
+        // And the two capabilities do not cross: this binding mints a booking
+        // and never a fill against a named approval.
+        assert!(modal.token().is_none());
+    }
+
+    #[test]
+    fn a_hash_too_short_to_show_opens_no_book_box() {
+        // Nothing to bind the consent *with*. A box that armed against five
+        // characters would teach an operator that reading them means the desk
+        // checked something.
+        assert!(Modal::book("b92a58fa", "12345", vec![]).is_none());
+        assert!(Modal::book("", "0f1e2d3c4b5a6978", vec![]).is_none());
+        assert!(Modal::book("b92a58fa", "123456", vec![]).is_some());
+    }
+
+    #[test]
+    fn a_book_box_grows_for_its_diff_and_never_shrinks_under_the_floor() {
+        // A fixed twelve rows would have drawn three legs of a twelve-leg
+        // allocation and hidden the rest — a confirmation given against numbers
+        // the box did not show.
+        assert_eq!(a_proposal_box(1).height(), H);
+        let tall = a_proposal_box(12);
+        assert!(tall.height() > H, "{}", tall.height());
+        assert_eq!(tall.height(), CHROME_H + 15 + 1);
+    }
+
+    #[test]
+    fn only_the_arming_row_of_a_book_box_answers_a_click() {
+        // Published by the frame, so a box that has never been drawn answers
+        // nothing — and a click anywhere else is swallowed rather than passed
+        // to the desk underneath.
+        let mut host = Host::default();
+        host.open(a_proposal_box(2), Pending::Book);
+        assert!(
+            host.on_mouse(click(10, 10)).is_none(),
+            "a box nobody has drawn armed on a click"
+        );
+
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+        term.draw(|f| host.draw(f, f.area())).unwrap();
+        let row = host.showing().unwrap().arm_row.get();
+        assert!(row.height > 0, "the frame published no arming row");
+        assert!(host.on_mouse(click(row.x + 2, row.y + 1)).is_none());
+        assert!(matches!(
+            host.on_mouse(click(row.x + 2, row.y)),
+            Some(Command::Book(_))
+        ));
+        assert!(host.showing().is_none(), "a click did not spend the box");
+    }
+
+    #[test]
+    fn a_typed_challenge_box_has_no_click_path_at_all() {
+        // Absence, not a guard: only the book box publishes an arming rect, so
+        // there is no cell of an EXECUTE box a click can answer.
+        let (plan, approval) = plan_and_approval();
+        let mut host = Host::default();
+        host.open(Modal::for_plan(&plan, &approval).unwrap(), Pending::Execute);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+        term.draw(|f| host.draw(f, f.area())).unwrap();
+        for y in 0..36 {
+            for x in (0..120).step_by(7) {
+                assert!(host.on_mouse(click(x, y)).is_none(), "({x},{y})");
+            }
+        }
+        assert!(host.showing().is_some(), "a click answered a typed box");
+    }
+
+    fn click(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
     }
 }

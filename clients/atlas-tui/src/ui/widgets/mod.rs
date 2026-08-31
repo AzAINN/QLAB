@@ -14,6 +14,10 @@ pub mod help;
 pub mod md;
 mod panel_header;
 pub mod pipeline;
+// The desk's current proposal, as one card. Ungated: a monitoring window shows
+// the open question exactly as an armed one does, and what the gate removes is
+// the word that opens the box and the box itself.
+pub mod proposal;
 pub mod pulse;
 mod refusal;
 pub mod table_cell;

@@ -42,7 +42,7 @@ use crate::ui::widgets::confirm;
 use crate::ui::widgets::table_cell::{cell, head, LEFT, RIGHT};
 use crate::ui::widgets::tristate_spark::{self, SPARK_W};
 use crate::ui::widgets::{
-    braille_chart, header_keys, heat_cell, panel_block, panel_header, refuse,
+    braille_chart, header_keys, heat_cell, panel_block, panel_header, proposal, refuse,
 };
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -99,6 +99,21 @@ const CHIP_LABEL_W: usize = 6;
 /// ratatui that solves differently fails there rather than in the field, where
 /// it would cost a digit off a percentage.
 const RIBBON_W: u16 = 74;
+
+/// The rows the desk's current proposal takes when there is one.
+///
+/// Twelve: a header, the plan, a readable slice of the allocation diff, the
+/// numbers, the referee's word, what the last press did, and the row that
+/// books. It is claimed *before* the plan ledger and the footer, because it is
+/// the one thing on this view that is waiting on a human — the ledger is a
+/// record and the curve is context, and neither outranks the desk's open
+/// question. Nothing at all when there is no proposal, so a quiet desk draws
+/// exactly the frame it drew before this card existed.
+const PROPOSAL_H: u16 = 12;
+
+/// Under this the card cannot state a plan id beside its approval state and a
+/// leg's two weights at once, which is the least that makes it a diff.
+const PROPOSAL_W: u16 = 30;
 
 /// The rows the footer takes from the blotter's share.
 ///
@@ -168,6 +183,17 @@ pub struct BookView {
     /// The execute question, while it is up.
     #[cfg(feature = "operator")]
     confirm: confirm::Host,
+    /// Where the last frame drew the proposal card's `book` word, so a click
+    /// on it opens exactly the box `b` opens.
+    ///
+    /// A `Cell` under the same geometry-only contract as `page_rows` and
+    /// `blotter`: it records what a paint put where, never anything the
+    /// operator set. `Rect::default()` on every frame that draws no such word,
+    /// including the frames that draw no card — a rect left over from a frame
+    /// that offered the key would let a click book off a screen nobody is
+    /// looking at.
+    #[cfg(feature = "operator")]
+    book_word: Cell<Rect>,
 }
 
 impl View for BookView {
@@ -185,17 +211,26 @@ impl View for BookView {
         // is context, and the card is the only place a pending trade is visible
         // at all.
         let spare = rows[1].height.saturating_sub(BLOTTER_H);
-        let plans = PLANS_H.min(spare);
-        let bottom = BOTTOM_H.min(spare - plans);
+        // The proposal first out of what is left over, then the ledger, then
+        // the footer. A question waiting on a human outranks the record of
+        // questions already answered, which outranks the curve.
+        let proposal = match store.proposal().is_some() {
+            true => PROPOSAL_H.min(spare),
+            false => 0,
+        };
+        let plans = PLANS_H.min(spare - proposal);
+        let bottom = BOTTOM_H.min(spare - proposal - plans);
         let under = Layout::vertical([
             Constraint::Min(0),
+            Constraint::Length(proposal),
             Constraint::Length(plans),
             Constraint::Length(bottom),
         ])
         .split(rows[1]);
         self.draw_blotter(f, under[0], store, fx, now);
-        self.draw_plans(f, under[1], store);
-        self.draw_footer(f, under[2], store);
+        self.draw_proposal(f, under[1], store);
+        self.draw_plans(f, under[2], store);
+        self.draw_footer(f, under[3], store);
     }
 
     // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
@@ -227,6 +262,13 @@ impl View for BookView {
             // PASS was bound to.
             #[cfg(feature = "operator")]
             KeyCode::Char('x') if store.posture.writes() => self.ask_to_execute(store),
+            // The one-click book, and the second key on this workstation that
+            // can move money. Like `x` it opens a question rather than sending
+            // anything, and what it may open is narrower still: the owner
+            // decides which plan is the current proposal, and this cannot name
+            // another one.
+            #[cfg(feature = "operator")]
+            KeyCode::Char('b') if store.posture.writes() => self.ask_to_book(store),
             // Cycling the column resets the scroll and the cursor: after a
             // re-sort, row 4 is a different position, and carrying the index
             // would leave the marker on a row the operator did not choose.
@@ -262,6 +304,14 @@ impl View for BookView {
                 self.select((self.cursor(rows) + 1).min(rows.saturating_sub(1)), page)
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // The card's own word first: it is a smaller target than the
+                // blotter and sits outside it, so order settles nothing, but
+                // asking about it first keeps the two reads independent.
+                #[cfg(feature = "operator")]
+                if self.book_word_at(m.column, m.row) {
+                    self.ask_to_book(store);
+                    return None;
+                }
                 // The published rect's first row is the column header, so a
                 // click's row is its offset past it, plus the page the scroll
                 // is holding. Only a row the frame actually drew: a click in
@@ -1782,6 +1832,108 @@ impl BookView {
         };
         self.confirm.open(modal, confirm::Pending::Execute);
     }
+
+    /// The desk's single current proposal, and the one key that books it.
+    ///
+    /// Drawn from `widgets::proposal`, which ATLAS's sidebar draws from too:
+    /// the card a human reads before confirming a fill may not have two
+    /// renderings, or one surface comes to offer a key the other refuses.
+    ///
+    /// Every path out publishes where the `book` word landed, including the
+    /// paths that draw no word at all. A rect left standing from a wider frame
+    /// is the same lie one resize later — the rule the blotter's own `Cell`
+    /// already keeps.
+    fn draw_proposal(&self, f: &mut Frame, area: Rect, store: &Store) {
+        self.no_book_word();
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        if area.width < PROPOSAL_W {
+            refuse(
+                f,
+                area,
+                format!(
+                    "the proposal card needs {PROPOSAL_W} columns to state a plan beside \
+                     what it would move — this pane has {}",
+                    area.width
+                ),
+            );
+            return;
+        }
+        let block = panel_block();
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+        // The header states this window's posture, read off the store rather
+        // than off the feature: the binary says what it *can* do, the flag says
+        // whether the human armed it, and the status line may not disagree with
+        // the keys on offer.
+        let keys = vec![Span::styled(
+            if store.posture.writes() {
+                "b book"
+            } else {
+                "view-only"
+            },
+            Style::default().fg(theme().text_dim),
+        )];
+        let header = header_keys("your call", keys, inner.width);
+        let card = proposal::card(store, inner.width, inner.height.saturating_sub(1) as usize);
+        #[cfg(feature = "operator")]
+        if let Some(row) = card.book_row {
+            // The header takes the first row, so the card's own index is one
+            // below it. Read off what the packer published rather than found
+            // again here: a second derivation of "where the word went" is free
+            // to disagree with the frame.
+            self.book_word
+                .set(Rect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1));
+        }
+        let mut lines = vec![header];
+        lines.extend(card.lines);
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
+    /// Put the booking question up for the desk's current proposal.
+    ///
+    /// Two gates before the box exists, and neither is this view's judgment:
+    /// the owner has to be offering a proposal at all, and
+    /// `widgets::proposal::modal` has to be able to bind the hash its referee
+    /// PASS covers. A proposal that fails either gets no box — a confirmation
+    /// ritual armed against a request the owner would refuse teaches an
+    /// operator that answering it means nothing — and the reason is said on the
+    /// command line rather than swallowed, because a key that returns in
+    /// silence reads as a hung client.
+    #[cfg(feature = "operator")]
+    fn ask_to_book(&mut self, store: &mut Store) {
+        match proposal::modal(store) {
+            Ok(modal) => self.confirm.open(modal, confirm::Pending::Book),
+            Err(why) => store.cmd.say(why),
+        }
+    }
+
+    /// Whether the last frame drew the card's `book` word under that cell.
+    #[cfg(feature = "operator")]
+    fn book_word_at(&self, column: u16, row: u16) -> bool {
+        let rect = self.book_word.get();
+        rect.height > 0
+            && row == rect.y
+            && column >= rect.x
+            && column < rect.x.saturating_add(rect.width)
+    }
+
+    /// This frame drew no `book` word.
+    ///
+    /// Two bodies rather than a `cfg` at each call site, and called from every
+    /// path through the card: a monitoring build has nothing to publish and
+    /// nothing to clear.
+    #[cfg(feature = "operator")]
+    fn no_book_word(&self) {
+        self.book_word.set(Rect::default());
+    }
+
+    #[cfg(not(feature = "operator"))]
+    fn no_book_word(&self) {}
 
     /// The plan ledger: what the desk has proposed, and what each one is waiting
     /// on.

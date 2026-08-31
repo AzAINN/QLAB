@@ -1,6 +1,7 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
 use crate::model::{
-    LlmCatalog, NewsSettings, PredictorDetail, QualitativeMatrix, RegimePanel, Snapshot, Template,
+    LlmCatalog, NewsSettings, PredictorDetail, Proposal, QualitativeMatrix, RegimePanel, Snapshot,
+    Template,
 };
 
 pub enum AppEvent {
@@ -49,6 +50,22 @@ pub enum AppEvent {
     /// RESEARCH would sit unchanged on screen while the record moved. Boxed
     /// like the board: one row per universe name, each carrying its claim keys.
     Qualitative(Box<QualitativeMatrix>),
+    /// The desk's single current proposal, from `GET /api/desk/proposal`.
+    ///
+    /// `None` is the owner's own `{"proposal": null}` — a desk with no open
+    /// question — and never "not fetched": the poller only sends this once the
+    /// route answered and decoded.
+    ///
+    /// It rides the **snapshot's own beat** rather than a pane entry, unlike
+    /// the board and the news settings. Two reasons, and both are about where
+    /// the card is: it is mirrored on ATLAS, which is the view this client
+    /// opens on, so there is no entry to hang a first fetch on; and what makes
+    /// a proposal stop being the proposal — a newer plan superseding it, an
+    /// expiry, an orphan withdrawn — happens on the *owner's* heartbeat, with
+    /// nothing this client does to prompt a refetch. A card fetched once on
+    /// entry would go on offering to book a question the desk had already
+    /// withdrawn. Boxed because the payload carries the whole target vector.
+    Proposal(Option<Box<Proposal>>),
     Sse(SseEvent),
     Http(HttpResult),
     ConnUp(Channel),
@@ -81,6 +98,38 @@ pub enum Wrote {
         plan_id: String,
         blocked_by: String,
         reasons: Vec<String>,
+    },
+    /// The desk booked its current proposal in one confirmed call.
+    ///
+    /// `summary` is composed from the owner's own execution body — what it
+    /// reported, never a receipt written from the request. Separate from
+    /// `Executed` because the two are different routes with different
+    /// afterwards: `POST /api/desk/proposal/book` approves and executes inside
+    /// one lock, and its refusals do not all mean the same thing (see
+    /// `BookRefused`).
+    Booked { plan_id: String, summary: String },
+    /// The desk answered the one-click book with **200 and `booked: false`**.
+    ///
+    /// **Not a failure, and not one fact.** F2's corrected contract has three
+    /// shapes behind this status, and they part company on what happens to the
+    /// approval:
+    ///
+    /// * `blocked_by == "approval"` — the gate invalidated it. The authority is
+    ///   gone and the plan has to be re-proposed.
+    /// * `blocked_by == "data_revalidation"`, or a `mandate_violation` — the
+    ///   refusal landed *before* the approval was touched, so the proposal
+    ///   stands and the same click is valid again once the reason clears.
+    ///
+    /// `survives` carries that, and it is an `Option` because a blocker the
+    /// owner has not named is a third answer rather than a guess between the
+    /// two: a client that read every refusal as "re-propose" throws away a live
+    /// approval in two cases out of three, and one that read them all as
+    /// "retry" sends the operator back at a question that no longer exists.
+    BookRefused {
+        plan_id: String,
+        blocked_by: String,
+        reasons: Vec<String>,
+        survives: Option<bool>,
     },
     /// A human decision reached the record. `decision` is the owner's own word
     /// for it — `approved` or `rejected`.

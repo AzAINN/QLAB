@@ -40,7 +40,7 @@
 //! matters — see `execute_plan` and `approve`.
 
 use crate::secret::Secret;
-use crate::ui::widgets::confirm::ConfirmToken;
+use crate::ui::widgets::confirm::{BookToken, ConfirmToken};
 use serde_json::{json, Value};
 
 /// What the owner said when it would not do the thing.
@@ -183,6 +183,129 @@ impl Execution {
             // indefensible: one invents a fill, the other hides one.
             None => Err(WriteError::Unreadable(format!(
                 "the owner answered 200 for an execution without saying whether it executed: {body}"
+            ))),
+        }
+    }
+}
+
+/// What became of the desk's current proposal, booked in one confirmed call.
+///
+/// **Four outcomes, and three of them are 200s.** `POST /api/desk/proposal/book`
+/// answers 200 with `booked: false` when the gate declined after the approval
+/// was granted, and F2's corrected contract says those refusals are not one
+/// fact: the approval is *gone* for a `blocked_by == "approval"` — the gate
+/// invalidated it — and *still standing* for a `data_revalidation` or a
+/// `mandate_violation`, which are refused before it is touched.
+///
+/// So the split here is on what the operator may do next, which is the only
+/// thing the card can act on. Folding all three into one variant is what F2's
+/// own fix round exists to prevent: a client reading every refusal as
+/// "re-propose" discards a live approval in two cases out of three.
+#[derive(Debug)]
+pub enum Booked {
+    /// The desk booked it. Carries the whole body — the execution, its
+    /// approval id, whatever the owner reported.
+    Filled(Value),
+    /// The gate declined and consumed the question with it. Re-propose.
+    Invalidated {
+        blocked_by: String,
+        /// Never empty — a refusal an operator cannot read is not actionable.
+        reasons: Vec<String>,
+    },
+    /// The gate declined without spending the approval. The same proposal is
+    /// still bookable once the reason clears.
+    Standing {
+        blocked_by: String,
+        reasons: Vec<String>,
+    },
+    /// The owner said it did not book and did not say what stopped it.
+    ///
+    /// Its own variant rather than a default into either neighbour, and this is
+    /// the deliberate part: both defaults are wrong in a way that costs
+    /// something. "Re-propose" throws away an approval that may still be live;
+    /// "retry" sends a human back at a question that no longer exists. Invariant
+    /// 4 — say that the answer could not be read, and let the next poll settle
+    /// it.
+    Unstated {
+        blocked_by: String,
+        reasons: Vec<String>,
+    },
+}
+
+impl Booked {
+    /// Read one 200 body from `/api/desk/proposal/book`.
+    ///
+    /// Keyed on `booked`, never on the status code: the route's own refusals
+    /// (`not the current proposal`, a hash mismatch, no covering PASS) are
+    /// 400s and reach the caller as [`WriteError::Refused`], while a gate
+    /// refusal *after* the approval was granted is this 200.
+    fn read(body: Value) -> Result<Booked, WriteError> {
+        match body.get("booked").and_then(Value::as_bool) {
+            Some(true) => Ok(Booked::Filled(body)),
+            Some(false) => {
+                // The execution the owner composed the answer from. Absent is
+                // not empty: a `booked: false` with no execution block has said
+                // nothing about which of the three shapes it is.
+                let execution = body.get("execution").unwrap_or(&Value::Null).clone();
+                // The mandate violation carries its reason in its own key
+                // rather than in `reasons` (`server.py:1909`), exactly as the
+                // two-call execute path does — and it is one of the two shapes
+                // that leave the approval alive, so keying on `blocked_by`
+                // alone would call it a re-propose.
+                if let Some(violation) = execution
+                    .get("mandate_violation")
+                    .and_then(Value::as_str)
+                    .filter(|said| !said.is_empty())
+                {
+                    return Ok(Booked::Standing {
+                        blocked_by: "mandate_violation".into(),
+                        reasons: vec![violation.to_string()],
+                    });
+                }
+                let blocked_by = execution
+                    .get("blocked_by")
+                    .and_then(Value::as_str)
+                    .filter(|said| !said.is_empty())
+                    .unwrap_or("unstated")
+                    .to_string();
+                let mut reasons: Vec<String> = execution
+                    .get("reasons")
+                    .and_then(Value::as_array)
+                    .map(|rs| {
+                        rs.iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if reasons.is_empty() {
+                    // `data_revalidation` refuses with a `data_health` object
+                    // and no `reasons` list, exactly as on the execute route.
+                    reasons.push(match execution.get("data_health") {
+                        Some(health) => format!("the desk blocked this fill: {health}"),
+                        None => format!("the desk blocked this fill ({blocked_by})"),
+                    });
+                }
+                Ok(match blocked_by.as_str() {
+                    "approval" => Booked::Invalidated {
+                        blocked_by,
+                        reasons,
+                    },
+                    "data_revalidation" => Booked::Standing {
+                        blocked_by,
+                        reasons,
+                    },
+                    _ => Booked::Unstated {
+                        blocked_by,
+                        reasons,
+                    },
+                })
+            }
+            // Fail loud, for `Execution::read`'s reason: the owner always sets
+            // `booked` on this route, and both guesses are indefensible — one
+            // invents a fill, the other hides one.
+            None => Err(WriteError::Unreadable(format!(
+                "the owner answered 200 for a booking without saying whether it booked: {body}"
             ))),
         }
     }
@@ -576,6 +699,89 @@ impl WriteClient {
                 plan = token.plan_id(),
                 error = %err,
                 "the execution request failed; the fill's state is unknown"
+            ),
+        }
+        outcome
+    }
+
+    /// Book the desk's current proposal, in one confirmed call.
+    ///
+    /// The second method in this file that takes a capability rather than
+    /// strings, and for the same reason: the plan and the hash come out of a
+    /// [`BookToken`] together, minted only by the box a human read them in.
+    /// There is no argument a caller can vary, so "confirm one allocation and
+    /// book another" is not a mistake that can be made here.
+    ///
+    /// **It sends no `approval_id`, unlike `execute_plan`, and that is the
+    /// owner's contract rather than a shortcut.** The route resolves the
+    /// current proposal itself and refuses a `plan_id` that is not it, so
+    /// naming the approval here would be this client choosing which question it
+    /// is answering. `human_confirmed: true` records that a human asked; the
+    /// persisted approval the owner finds is what authorises the fill, and the
+    /// owner re-validates the hash, the referee's PASS and the book revision
+    /// before anything is placed.
+    ///
+    /// Returns four outcomes, and a 200 is not a fill: see [`Booked`].
+    pub async fn book(&self, token: BookToken) -> Result<Booked, WriteError> {
+        // On the record before it is attempted, exactly as `execute_plan` is:
+        // the owner writes the authoritative audit event, but only if the
+        // request arrived, and a request that timed out leaves this as the only
+        // trace that the operator asked at all.
+        tracing::warn!(
+            plan = token.plan_id(),
+            targets_hash = token.targets_hash(),
+            owner = %self.base,
+            "human-confirmed one-click booking requested"
+        );
+        let plan = token.plan_id().to_string();
+        let outcome = self
+            .post(
+                "/api/desk/proposal/book",
+                json!({
+                    "plan_id": token.plan_id(),
+                    "targets_hash": token.targets_hash(),
+                    "human_confirmed": true,
+                }),
+            )
+            .await
+            .and_then(Booked::read);
+
+        // The other half of the pair: an audit trail ending at "requested"
+        // reads as an attempt of unknown outcome, which is the one thing an
+        // execution record may not be. All four outcomes land here.
+        match &outcome {
+            Ok(Booked::Filled(_)) => tracing::warn!(plan, "the owner booked the proposal"),
+            Ok(Booked::Invalidated {
+                blocked_by,
+                reasons,
+            }) => tracing::warn!(
+                plan,
+                blocked_by,
+                reasons = reasons.join("; "),
+                "the desk refused the fill and withdrew the approval"
+            ),
+            Ok(Booked::Standing {
+                blocked_by,
+                reasons,
+            }) => tracing::warn!(
+                plan,
+                blocked_by,
+                reasons = reasons.join("; "),
+                "the desk refused the fill; the proposal stands"
+            ),
+            Ok(Booked::Unstated {
+                blocked_by,
+                reasons,
+            }) => tracing::error!(
+                plan,
+                blocked_by,
+                reasons = reasons.join("; "),
+                "the desk refused the fill without saying whether the proposal survives"
+            ),
+            Err(err) => tracing::error!(
+                plan,
+                error = %err,
+                "the booking request failed; the fill's state is unknown"
             ),
         }
         outcome

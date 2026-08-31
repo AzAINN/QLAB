@@ -351,6 +351,12 @@ pub const KEYMAP: &[Binding] = &[
         Source::View(ViewId::Atlas),
         "a page down",
     ),
+    w(
+        "Char('b')",
+        "b",
+        Source::View(ViewId::Atlas),
+        "book the desk's current proposal — only while the ask row is empty",
+    ),
     // -- ATLAS, the ask row -----------------------------------------------
     w(
         "Char('i')",
@@ -452,6 +458,12 @@ pub const KEYMAP: &[Binding] = &[
         "x",
         Source::View(ViewId::Book),
         "ask to execute the selected plan — opens the confirmation box",
+    ),
+    w(
+        "Char('b')",
+        "b",
+        Source::View(ViewId::Book),
+        "book the desk's current proposal — opens the confirmation box",
     ),
     // -- WORK -------------------------------------------------------------
     w(

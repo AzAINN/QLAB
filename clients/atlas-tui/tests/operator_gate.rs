@@ -187,6 +187,64 @@ fn no_write_call_site_exists_outside_the_gated_module() {
 }
 
 #[test]
+fn the_one_click_book_is_gated_in_every_place_it_is_spelled() {
+    // The card itself is ungated — a monitoring window shows the desk's open
+    // question, which is what a monitoring window is *for* — so the gate is on
+    // the three things that can act on it, and each is pinned on the text of
+    // its own attribute. A `cfg` naming the wrong feature compiles cleanly, and
+    // nothing else in this suite would see it.
+    for (file, gate) in [
+        // The capability, the binding it comes from, and the box that mints it.
+        (
+            "ui/widgets/confirm.rs",
+            "#[derive(Debug)]\npub struct BookToken {",
+        ),
+        // The command that carries it to the runtime.
+        (
+            "cmd.rs",
+            "#[cfg(feature = \"operator\")]\n    Book(BookToken),",
+        ),
+        // The row on the card that offers the key, and the box producer behind
+        // it. Both inside an ungated module, so the attribute is the whole gate.
+        (
+            "ui/widgets/proposal.rs",
+            "#[cfg(feature = \"operator\")]\npub fn bookable(",
+        ),
+        (
+            "ui/widgets/proposal.rs",
+            "#[cfg(feature = \"operator\")]\npub fn modal(",
+        ),
+        (
+            "ui/widgets/proposal.rs",
+            "#[cfg(not(feature = \"operator\"))]\nfn action_row(",
+        ),
+    ] {
+        assert!(
+            source(file).contains(gate),
+            "{file} must gate the booking path verbatim: {gate:?}"
+        );
+    }
+    // `BookToken` lives in the module the feature gate removes whole, so the
+    // monitoring build cannot name it however it is spelled.
+    assert!(
+        source("ui/widgets/mod.rs").contains("#[cfg(feature = \"operator\")]\npub mod confirm;"),
+        "the box that mints a booking is in the gated module"
+    );
+    // And the route itself is one POST in one file — the same census the
+    // execute path is held to, restated on the verb rather than on the method,
+    // because a second module building this body would be a second place that
+    // has to be reasoned about.
+    // The literal as the *call* spells it, quotes and all: the route is named
+    // in prose in four files, and a bare path would count the documentation
+    // that explains the gate as a breach of it.
+    assert_eq!(
+        production_files_mentioning("\"/api/desk/proposal/book\","),
+        vec!["net/write.rs".to_string()],
+        "the booking route is called from one place"
+    );
+}
+
+#[test]
 fn no_view_or_widget_can_reach_the_writer() {
     // `ui/` renders and returns `Command`s; the runtime acts. A view holding a
     // `WriteClient` would put an order path behind a keystroke with no
@@ -401,6 +459,42 @@ mod glass {
     }
 
     #[test]
+    fn a_monitoring_build_has_no_booking_key_no_word_and_no_box() {
+        // Absence at every layer, checked where each one lives.
+        //
+        // The keymap first: `b` is a `writes` row, so the overlay a monitoring
+        // window renders does not offer it — and this leg has no
+        // `Posture::Operator` to ask the other question with.
+        use atlas::input::{bindings, Binding};
+        use atlas::store::{Posture, ViewId};
+        let offered: Vec<&Binding> = bindings(Posture::Glass)
+            .filter(|b| b.code == "Char('b')")
+            .collect();
+        assert!(
+            offered.is_empty(),
+            "a monitoring window was offered the booking key: {offered:?}"
+        );
+        // The table still *carries* the rows, in both builds, so this leg is
+        // checking the same source text the armed one does rather than a
+        // smaller table that would pass for the wrong reason.
+        for view in [ViewId::Book, ViewId::Atlas] {
+            assert!(
+                atlas::input::KEYMAP
+                    .iter()
+                    .any(|b| b.code == "Char('b')" && b.source == atlas::input::Source::View(view)),
+                "{view:?} lost its booking row from the table"
+            );
+        }
+        // Then the module that would act on it. `atlas::net::write` cannot be
+        // named in this leg at all, so what is left to check is that the file
+        // the gate removes is really the one holding the booking call.
+        assert!(
+            super::source("net/write.rs").contains("pub async fn book(&self, token: BookToken)"),
+            "the gated module is the one that books"
+        );
+    }
+
+    #[test]
     fn the_posture_a_glass_build_can_hold_is_glass_and_only_glass() {
         // One inhabitant, not one branch. `Posture::Operator` does not exist in
         // this build, so there is no value a bug could assign that would put the
@@ -416,7 +510,7 @@ mod glass {
 #[cfg(feature = "operator")]
 mod operator {
     use atlas::model::Snapshot;
-    use atlas::net::write::{Choice, Execution, WriteClient};
+    use atlas::net::write::{Booked, Choice, Execution, WriteClient};
     use atlas::store::Posture;
     use atlas::ui::widgets::confirm::Modal;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -872,6 +966,124 @@ mod operator {
         assert_eq!(body["approval_id"], serde_json::json!("1a2b3c4d5e6f7081"));
     }
 
+    /// A booking capability, minted the way the desk mints one: a box that
+    /// displays the hash, and Enter.
+    fn book_token() -> atlas::ui::widgets::confirm::BookToken {
+        let mut modal = Modal::book("b92a58fa5c1d4e7f", "0f1e2d3c4b5a6978", vec![]).unwrap();
+        modal.book_token().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_booking_carries_the_hash_the_box_displayed_and_no_approval_id() {
+        // The owner's route resolves the current proposal itself and refuses a
+        // plan that is not it, so naming an approval here would be this client
+        // choosing which question it is answering. What it does send is the
+        // human's confirmation and the hash the box put on screen — neither of
+        // which a caller can vary, because both come out of the token.
+        let owner = spawn_owner(
+            200,
+            r#"{"booked": true, "approval_id": "5e92e0d9",
+                "execution": {"executed": true, "orders": [1, 2, 3]}}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let outcome = client.book(book_token()).await.unwrap();
+        assert!(matches!(outcome, Booked::Filled(_)), "{outcome:?}");
+
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/desk/proposal/book");
+        let body: serde_json::Value = serde_json::from_str(&seen.body).unwrap();
+        assert_eq!(body["human_confirmed"], serde_json::json!(true));
+        assert_eq!(body["plan_id"], serde_json::json!("b92a58fa5c1d4e7f"));
+        assert_eq!(body["targets_hash"], serde_json::json!("0f1e2d3c4b5a6978"));
+        assert!(body.get("approval_id").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_three_shapes_of_a_refused_booking_are_three_different_answers() {
+        // F2's corrected contract, and the reason this is a four-variant enum:
+        // a `blocked_by == "approval"` withdrew the approval, while a data
+        // revalidation and a mandate violation left it standing. A client that
+        // read every `booked: false` as "re-propose" throws away a live
+        // approval in two cases out of three.
+        let cases: [(&str, &str); 3] = [
+            (
+                r#"{"booked": false, "execution": {"executed": false, "blocked_by": "approval",
+                    "reasons": ["book moved since approval (revision mismatch)"]}}"#,
+                "invalidated",
+            ),
+            (
+                r#"{"booked": false, "execution": {"executed": false,
+                    "blocked_by": "data_revalidation", "data_health": {"stale": 3}}}"#,
+                "standing",
+            ),
+            (
+                r#"{"booked": false, "execution": {"executed": false,
+                    "mandate_violation": "single-name cap exceeded on XLK"}}"#,
+                "standing",
+            ),
+        ];
+        for (body, expected) in cases {
+            let owner = spawn_owner(200, body);
+            let client = WriteClient::new(&owner.base).unwrap();
+            let outcome = client.book(book_token()).await.unwrap();
+            let (got, reasons) = match &outcome {
+                Booked::Invalidated { reasons, .. } => ("invalidated", reasons),
+                Booked::Standing { reasons, .. } => ("standing", reasons),
+                Booked::Unstated { reasons, .. } => ("unstated", reasons),
+                Booked::Filled(_) => panic!("a refusal was read as a fill: {body}"),
+            };
+            assert_eq!(got, expected, "{body}");
+            // Never empty: a refusal an operator cannot read is not actionable,
+            // and the `data_revalidation` shape carries no `reasons` list at
+            // all — its own health object is the reason of last resort.
+            assert!(!reasons.is_empty(), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blocker_the_owner_did_not_name_is_neither_guess() {
+        // Both defaults cost something: "re-propose" throws away an approval
+        // that may still be live, "retry" sends a human back at a question that
+        // no longer exists. Invariant 4 — say the answer could not be read.
+        let owner = spawn_owner(
+            200,
+            r#"{"booked": false, "execution": {"executed": false, "blocked_by": "something_new"}}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(matches!(
+            client.book(book_token()).await.unwrap(),
+            Booked::Unstated { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_say_whether_it_booked_is_refused_not_assumed() {
+        // The same floor `executed` has on the other route: both guesses are
+        // indefensible — one invents a fill, the other hides one.
+        let owner = spawn_owner(200, r#"{"approval_id": "5e92e0d9"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        let err = client.book(book_token()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("without saying whether it booked"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owners_own_refusal_sentence_is_what_a_four_hundred_carries() {
+        // The route's own refusals are 400s — "not the current proposal", a
+        // hash mismatch, no covering PASS — and the sentence is what tells the
+        // operator what to do next.
+        let owner = spawn_owner(400, r#"{"error": "not the current proposal"}"#);
+        let client = WriteClient::new(&owner.base).unwrap();
+        let err = client.book(book_token()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not the current proposal"),
+            "{err}"
+        );
+    }
+
     /// An armed token, for the outcome tests below.
     /// `AppEvent` has no `Debug` — the bus carries a typed credential — so a
     /// failing assertion names the variant rather than dumping the value.
@@ -1133,6 +1345,55 @@ mod operator {
         let body: serde_json::Value = serde_json::from_str(&seen.body).unwrap();
         assert_eq!(body["human_confirmed"], serde_json::json!(true));
         assert_eq!(body["approval_id"], serde_json::json!("1a2b3c4d5e6f7081"));
+    }
+
+    #[tokio::test]
+    async fn a_booking_routes_to_the_desks_own_verb_and_its_outcome_survives_the_seam() {
+        // Which method a `Command` reaches and which `Wrote` each answer
+        // becomes is the part that decides what happens to money, and inside a
+        // `tokio::spawn` it could only be observed through the bus. Both halves
+        // here: the route, and the three-way split a card renders two different
+        // sentences from.
+        let owner = spawn_owner(
+            200,
+            r#"{"booked": true, "approval_id": "5e92e0d9",
+                "execution": {"executed": true, "orders": [1, 2]}}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let outcome = perform(&client, Command::Book(book_token())).await;
+        match outcome {
+            Some(Wrote::Booked { plan_id, summary }) => {
+                assert_eq!(plan_id, "b92a58fa5c1d4e7f");
+                // The owner's own orders, never a receipt composed from what
+                // was sent.
+                assert!(summary.contains("2 orders"), "{summary}");
+            }
+            other => panic!("a fill did not survive the seam: {other:?}"),
+        }
+        assert_eq!(owner.only().path, "/api/desk/proposal/book");
+
+        // And the refusal that leaves the approval standing keeps that fact:
+        // `survives` is what the card turns into "retry" rather than
+        // "re-propose", and losing it here would flatten the two.
+        let owner = spawn_owner(
+            200,
+            r#"{"booked": false, "execution": {"executed": false,
+                "mandate_violation": "single-name cap exceeded"}}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(&client, Command::Book(book_token())).await {
+            Some(Wrote::BookRefused {
+                blocked_by,
+                survives,
+                reasons,
+                ..
+            }) => {
+                assert_eq!(blocked_by, "mandate_violation");
+                assert_eq!(survives, Some(true));
+                assert_eq!(reasons, vec!["single-name cap exceeded".to_string()]);
+            }
+            other => panic!("a refusal was not reported as one: {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -327,9 +327,13 @@ pub fn on_mouse(m: MouseEvent, store: &mut Store, views: &mut Views) -> Option<C
         return None;
     }
     #[cfg(feature = "operator")]
-    if let Some(host) = views.confirm(store.nav.view) {
+    if let Some(host) = views.confirm_mut(store.nav.view) {
         if host.showing().is_some() {
-            return None;
+            // The box answers exactly one click — the words it drew to arm
+            // itself — and swallows everything else. A wheel that scrolled the
+            // pane underneath would let a human answer about a frame they can
+            // no longer see, which is the reason this branch existed at all.
+            return host.on_mouse(m);
         }
     }
     // The nav rail's geometry, restated from `draw`'s own constants rather

@@ -99,6 +99,8 @@
 
 **Files:** `clients/atlas-tui/src/input.rs` (new `Source`, `KEYMAP` rows, the `[Source; N]` bump), `clients/atlas-tui/src/ui/shell.rs` (the Ctrl-C rule), `clients/atlas-tui/src/ui/views/atlas.rs` (routing while focused); tests in `clients/atlas-tui/tests/keys_pty.rs` and the existing keymap-equivalence test.
 
+**Carried from A1 (binding):** once the child's state is `Ended`, STOP forwarding keystrokes — `pty.rs`'s `write` to a dead child emits one sentence per keystroke, so a pane left focused after an exit would fill the desk with them. The keyboard returns to the desk when the child ends, and the border says so.
+
 - [ ] **Step 1: Failing tests** — with the pane focused, `q`, `/`, a digit and `Ctrl-C` all reach the child as bytes and produce no `Command`; `Ctrl-]` returns focus and the next `q` quits; with the pane unfocused, every key behaves exactly as today (regression pin).
 - [ ] **Step 2: Run, watch fail.**
 - [ ] **Step 3: Implement.** Note in `shell.rs` why Ctrl-C is no longer unconditional and what the exchange is. Every new key owes a `KEYMAP` row and a help-overlay row (`Source::ALL` equivalence).

@@ -182,3 +182,17 @@ def test_gate_columns_line_up():
     starts = {line.index("[") for line in wires}
     ends = {line.index("]") for line in wires}
     assert len(starts) == 1 and len(ends) == 1
+
+
+def test_the_prose_never_runs_wider_than_the_wires():
+    """The wires cannot be re-wrapped without moving gates off them, so the
+    sentences around them are the ones that must fit the drawing's width —
+    a 52-column pane showed the wires and clipped the line that said no
+    circuit was executed."""
+    from qlab.visuals import quantum_circuit as qc
+    text = qc.render({"features": ["a", "b", "c"]})
+    lines = text.splitlines()
+    wires = [l for l in lines if "|0>" in l]
+    width = max(max(len(w) for w in wires), 40)
+    prose = [l for l in lines if l and "|0>" not in l and not l.startswith("ZZ entangler")]
+    assert prose and all(len(l) <= width for l in prose)

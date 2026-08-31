@@ -16,6 +16,8 @@ so the row reads in the column order of the map it depicts.
 
 from __future__ import annotations
 
+import textwrap
+
 import math
 
 from qlab.research.kernels import KERNELS
@@ -24,6 +26,8 @@ TITLE = "Quantum kernel circuit (angle encoding)"
 
 # A wider drawing stops being a drawing: twelve wires and their 66 ZZ pairs
 # already run past a narrow terminal, and the lane's feature set is smaller.
+# Prose never wraps narrower than this even for one short wire.
+_MIN_PROSE_WIDTH = 40
 MAX_WIRES = 12
 
 _DEFAULT_FEATURES = ("x0", "x1", "x2")
@@ -103,16 +107,22 @@ def render(params: dict) -> str:
     gate_width = max(len(gate) for gate in gates)
 
     entangled = kind == "zz" and len(names) > 1
-    lines = [
-        "angle encoding: one wire per feature, "
-        "θi = (π/2) · unit-scaled feature",
-        "",
-    ]
+    wires = []
     for name, gate in zip(names, gates):
         tail = "--*--" if entangled else "-----"
-        lines.append(
+        wires.append(
             f"{name:<{label_width}} |0> --[ {gate:<{gate_width}} ]-{tail}"
         )
+    # Prose wraps to the drawing's own width: the wires cannot be re-wrapped
+    # without moving gates off them, so the sentences around them must not
+    # be the thing that runs off a narrow pane.
+    width = max(max(len(w) for w in wires), _MIN_PROSE_WIDTH)
+    lines = textwrap.wrap(
+        "angle encoding: one wire per feature, θi = (π/2) · unit-scaled feature",
+        width=width,
+    )
+    lines.append("")
+    lines.extend(wires)
     if entangled:
         pairs = " ".join(f"({a},{b})" for a, b in _pairs(names))
         lines.append(f"ZZ entangler, phase (π-θi)(π-θj) over: {pairs}")
@@ -124,5 +134,5 @@ def render(params: dict) -> str:
         caption += "  (one wire: the ZZ map has no pair and is zero)"
     if angles is None:
         caption += "  (no angles recorded; gates shown symbolically)"
-    lines.append(caption)
+    lines.extend(textwrap.wrap(caption, width=width))
     return "\n".join(lines)

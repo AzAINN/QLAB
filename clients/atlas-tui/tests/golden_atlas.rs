@@ -591,6 +591,40 @@ mod booking {
     }
 
     #[test]
+    fn a_word_the_short_sidebar_clipped_off_is_not_clickable() {
+        // The sidebar renders `lines.into_iter().take(inner.height)`, so a card
+        // whose rows run past the pane is drawn clipped — and the rect that
+        // says where the booking word went is computed from the *unclipped*
+        // index. Left unclamped it lands below the pane, over the footer, and a
+        // click there opens the box for a word nobody can see. The same rule
+        // the acts panel's `drew()` already documents: absence is not
+        // permission, and neither is a word off the screen.
+        let mut client = armed();
+        for height in 8..40u16 {
+            let frame = client.frame(120, height);
+            if frame.contains("book ↵") {
+                continue;
+            }
+            for row in 0..height {
+                atlas::ui::shell::on_mouse(
+                    crossterm::event::MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: 90,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    &mut client.store,
+                    &mut client.views,
+                );
+                assert!(
+                    !client.frame(120, height).contains("BOOK THE PROPOSAL"),
+                    "at {height} rows a click at row {row} booked off a clipped word"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_click_on_the_cards_word_opens_the_box_here_too() {
         let mut client = armed();
         let frame = client.frame(120, 36);

@@ -17,6 +17,21 @@
 //! referee's verdict to the plan's own `targets_hash`, and re-validates every
 //! one of these facts when the booking arrives; this module turns its answer
 //! into rows and, in an armed build, into the facts the confirm box states.
+//!
+//! **There is no in-flight guard, and what stands in for one is the owner.**
+//! A second `b` while the first POST is still outstanding opens a second box
+//! and, answered, sends a second request. Nothing here can prevent that: the
+//! flag would have to be raised by the view and cleared by the *outcome*, and
+//! the outcome arrives on the bus into the store, which this module only
+//! reads. What bounds the damage is the route itself — `book_current_proposal`
+//! resolves the current proposal on the way in and refuses any `plan_id` that
+//! is not it (`not the current proposal`, 400), and a successful book consumes
+//! the approval — so the second request cannot produce a second fill; it
+//! produces a refusal the card then renders. That is a real guarantee and it
+//! is the owner's, not this client's, which is the right way round for
+//! anything that moves money. It is still one round trip that did not need to
+//! happen, and a client-side latch belongs in the store beside `booking`
+//! whenever that file is next open.
 
 use crate::format::{self, MISSING};
 use crate::model::Proposal;
@@ -59,8 +74,11 @@ pub struct Card {
     /// disagree with the packer that put it there.
     ///
     /// `None` in a monitoring build always, and in an armed one whenever the
-    /// desk would refuse the booking anyway — the card says why on that row
-    /// instead.
+    /// last row is a sentence rather than the word — an unarmed window, an
+    /// owner that has gone quiet, a proposal no referee PASS covers, or a card
+    /// clamped so short the row fell off it. The card says why on that row
+    /// instead, and a row that explains why there is no key may never *be*
+    /// one.
     pub book_row: Option<usize>,
 }
 
@@ -115,9 +133,13 @@ pub fn card(store: &Store, width: u16, room: usize) -> Card {
         }
     }
     lines.extend(tail);
-    let book_row = action.map(|line| {
+    // Only the row that actually carries `BOOK_WORD` is a click target. The
+    // other two shapes of this row are sentences saying why there is no key,
+    // and publishing a rect for those made them into buttons that contradict
+    // themselves.
+    let book_row = action.and_then(|(line, offers)| {
         lines.push(line);
-        lines.len() - 1
+        offers.then(|| lines.len() - 1)
     });
     // The clamp is last and takes from the end, so the action row goes before
     // any fact does. A `book_row` past the clamp is retracted with it: a word
@@ -342,35 +364,71 @@ fn note_rows(_store: &Store, _proposal: &Proposal, _width: u16) -> Vec<Line<'sta
     Vec::new()
 }
 
-/// The last row: the word that books, or why there is none.
+/// The last row: the word that books, or why there is none — **and which of the
+/// two it is**.
+///
+/// The flag is the whole point of the pair. This row has three shapes and only
+/// one of them is an affordance: the other two are sentences explaining why
+/// there is no key (`view-only …`, `no referee PASS …`, `the owner is not
+/// answering …`). A caller that published a click target for "whichever row
+/// ended the card" made those sentences into buttons — a row that contradicts
+/// its own text, and an operator told they may act being refused a layer later
+/// is worse than one never offered the key. So the answer travels with the row
+/// rather than being inferred from its presence.
 ///
 /// `None` in a monitoring build — there is no key, no word and no box, and a
 /// row that named one would be the binary claiming an authority it does not
 /// have. In an armed one it is always *some* row, because a key that does
 /// nothing in silence reads as a hung client.
 #[cfg(feature = "operator")]
-fn action_row(store: &Store, proposal: &Proposal, width: u16) -> Option<Line<'static>> {
+fn action_row(store: &Store, proposal: &Proposal, width: u16) -> Option<(Line<'static>, bool)> {
     let t = theme();
     if !store.posture.writes() {
-        return Some(dim("view-only — booking needs an armed window", width));
+        return Some((
+            dim("view-only — booking needs an armed window", width),
+            false,
+        ));
+    }
+    // An owner that has stopped answering is the one refusal that is not about
+    // the proposal at all. The poller deliberately does not retire a proposal
+    // on a failed fetch — a lane that reported the desk gone every time one
+    // request timed out would be worse than a stale card, and the panel, the
+    // templates and the board all take the same line — so what the card holds
+    // may be a question the desk has already withdrawn, and nothing in the
+    // posture says so: `posture` comes from the last snapshot that *did*
+    // arrive, and stays `Operator` for as long as the process lives. Offering
+    // the word here would be offering to book against a screen nobody can
+    // vouch for. The connection chip is already red; this row says what that
+    // costs.
+    if !store.conn.owner {
+        return Some((
+            dim(
+                "the owner is not answering — this proposal may already be withdrawn",
+                width,
+            ),
+            false,
+        ));
     }
     Some(match bookable(proposal) {
-        Ok(_) => Line::from(vec![
-            Span::styled(
-                BOOK_WORD,
-                Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " ↵ or b — one confirm",
-                Style::default().fg(t.text_secondary),
-            ),
-        ]),
-        Err(why) => dim(&why, width),
+        Ok(_) => (
+            Line::from(vec![
+                Span::styled(
+                    BOOK_WORD,
+                    Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " ↵ or b — one confirm",
+                    Style::default().fg(t.text_secondary),
+                ),
+            ]),
+            true,
+        ),
+        Err(why) => (dim(&why, width), false),
     })
 }
 
 #[cfg(not(feature = "operator"))]
-fn action_row(_store: &Store, _proposal: &Proposal, _width: u16) -> Option<Line<'static>> {
+fn action_row(_store: &Store, _proposal: &Proposal, _width: u16) -> Option<(Line<'static>, bool)> {
     None
 }
 

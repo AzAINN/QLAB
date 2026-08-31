@@ -1880,6 +1880,19 @@ fn a_desk_with_no_proposal_says_so_and_draws_no_card_at_all() {
 #[test]
 fn a_pane_too_narrow_for_a_diff_refuses_rather_than_drawing_half_of_one() {
     let client = proposed();
+    // The refusal is *stated*, not merely survived. At 60 columns the pane this
+    // view hands the card is 17 cells — under `PROPOSAL_W` — and a card that
+    // quietly drew a plan id with no diff beside it would read as a whole
+    // statement of a question it had only half rendered. The refusal names the
+    // number it wants and the number it got, wrapped to the pane.
+    let narrow = client.frame(60, 36);
+    assert!(
+        narrow.contains("needs 30 columns") && narrow.contains("pane has 17"),
+        "the card neither drew its diff nor refused at 60x36:\n{narrow}"
+    );
+    assert!(!narrow.contains("→"), "half a diff was drawn:\n{narrow}");
+    // And at 40 the view has no content column at all, so nothing reaches the
+    // card. Every one of these is a frame that must not panic.
     for (w, h) in [(40u16, 12u16), (20, 8), (80, 10), (200, 60), (1, 1)] {
         let _ = client.frame(w, h);
     }
@@ -2088,6 +2101,60 @@ mod booking {
     }
 
     #[test]
+    fn a_request_that_never_landed_says_so_on_the_card_and_offers_the_key_again() {
+        // The fourth shape, and the one that is not a governance answer at
+        // all: a 400 the route itself wrote, a dead owner, a timeout — and the
+        // posture refusal, which the dispatch seam reports through this same
+        // outcome. What they share is that the fill's state is *unknown*,
+        // which is why the sentence is the owner's own words verbatim rather
+        // than a verdict this client composed about what happened.
+        //
+        // The key stays on offer, deliberately: nothing here says the question
+        // is gone, and a card that withdrew the affordance would leave a live
+        // proposal with no way to answer it. Re-reading the desk and pressing
+        // again is the correct remedy — the owner refuses a plan that is no
+        // longer the current proposal.
+        let mut client = armed();
+        answered(
+            &mut client,
+            Wrote::Failed {
+                what: "book b92a58fa5c1d4e7f".to_string(),
+                said: "the owner refused with 400: not the current proposal".to_string(),
+            },
+        );
+        let frame = client.frame(120, 36);
+        let note = line_with(&frame, "not the current proposal");
+        assert!(note.contains("the owner refused with 400"), "{note}");
+        // Not read as either governance answer — those are the desk deciding,
+        // and this is the desk not having answered.
+        assert!(!frame.contains("re-propose"), "{frame}");
+        assert!(!frame.contains("retry when"), "{frame}");
+        assert!(
+            frame.contains("book ↵"),
+            "the card withdrew the key:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn a_failure_about_some_other_request_never_lands_on_this_card() {
+        // `Wrote::Failed` is the shape every failed write in this client comes
+        // back as, so the card claims only the ones whose subject is a booking
+        // — and only its own plan's. A news save that timed out is not news
+        // about the desk's open question.
+        let mut client = armed();
+        answered(
+            &mut client,
+            Wrote::Failed {
+                what: "save the news sources".to_string(),
+                said: "the owner did not answer: connection refused".to_string(),
+            },
+        );
+        let frame = client.frame(120, 36);
+        assert!(!frame.contains("connection refused"), "{frame}");
+        assert!(frame.contains("book ↵"), "{frame}");
+    }
+
+    #[test]
     fn a_note_is_retired_when_the_desk_asks_a_different_question() {
         // A "re-propose" sentence beside a freshly proposed plan reads as a
         // verdict on that one, which is exactly backwards.
@@ -2114,6 +2181,83 @@ mod booking {
             !frame.contains("re-propose"),
             "a stale note outlived its plan:\n{frame}"
         );
+    }
+
+    /// Every row of the frame, clicked at a column inside the content pane.
+    ///
+    /// A blunt instrument on purpose: the claim these tests make is that
+    /// *nothing on this frame* opens the box, and a test that clicked only the
+    /// row it expected to be inert would pass on a rect published one row off.
+    fn click_every_row(client: &mut Client) {
+        for row in 0..36u16 {
+            client.mouse(MouseEventKind::Down(MouseButton::Left), 30, row);
+            assert!(
+                !client.frame(120, 36).contains("BOOK THE PROPOSAL"),
+                "a click at row {row} opened the booking box"
+            );
+        }
+    }
+
+    #[test]
+    fn the_row_that_says_view_only_is_not_a_button_that_books() {
+        // An armed *binary* on a desk the human has not armed. The card still
+        // states the question — that is what a read-only window is for — and
+        // the last row says why this window may not answer it. A click there
+        // that opened the box would be an affordance contradicting its own
+        // sentence, and the dispatch seam refusing the command afterwards is
+        // not a defence: the operator was already told they could act.
+        let mut client = super::proposed();
+        assert!(!client.store.posture.writes());
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("view-only — booking needs an armed window"));
+        click_every_row(&mut client);
+    }
+
+    #[test]
+    fn the_row_that_says_no_pass_covers_these_targets_is_not_a_button_either() {
+        // The other refusal sentence the card can end on, in an armed window.
+        // Same rule: a row that explains why there is no key may not *be* one.
+        let mut store = super::store_from(r#"{"live_portfolio": {"equity": 1.0}}"#);
+        harness::with_proposal(
+            &mut store,
+            r#"{"plan_id": "b92a58fa5c1d4e7f", "approval_state": "pending",
+                "targets": {"ACWI": 0.30}, "targets_hash": "0f1e2d3c4b5a6978"}"#,
+        );
+        store.posture = Posture::Operator;
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('4'));
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("no referee PASS covers these targets"));
+        click_every_row(&mut client);
+    }
+
+    #[test]
+    fn an_owner_that_stopped_answering_withdraws_the_key_and_says_why() {
+        // The poller does not retire a proposal on a failed fetch — a lane
+        // that reported the desk gone on one timeout would be worse than a
+        // stale card, and the panel, the templates and the board all take the
+        // same line. The consequence has to be said *somewhere*, and the
+        // posture cannot say it: `posture` comes from the last snapshot that
+        // arrived and stays `Operator` for the life of the process. So the
+        // card says it, and withdraws the word: what is on screen may be a
+        // question the desk has already withdrawn, and nobody can vouch for it.
+        let mut client = armed();
+        assert!(client.frame(120, 36).contains("book ↵"));
+
+        client.store.apply(
+            atlas::bus::AppEvent::ConnDown(atlas::bus::Channel::Owner),
+            client.now,
+        );
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("the owner is not answering"), "{frame}");
+        assert!(!frame.contains("book ↵"), "{frame}");
+        // And the row that explains it is not itself a button.
+        click_every_row(&mut client);
+        // The question is still stated in full, because it is still the last
+        // thing the desk said — withdrawing the key is not withdrawing the
+        // facts.
+        line_with(&frame, "b92a58fa5c1");
+        line_with(&frame, "referee PASS");
     }
 
     #[test]

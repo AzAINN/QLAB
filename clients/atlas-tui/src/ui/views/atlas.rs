@@ -1108,12 +1108,19 @@ impl AtlasView {
             let card = proposal::card(store, inner.width, room);
             #[cfg(feature = "operator")]
             if let Some(row) = card.book_row {
-                self.book_word.set(Rect::new(
-                    inner.x,
-                    inner.y + (lines.len() + row) as u16,
-                    inner.width,
-                    1,
-                ));
+                // Clamped to the pane, because the sidebar is rendered with a
+                // `take(inner.height)` at the end: a card whose rows run past
+                // it is drawn clipped, while this index is computed from the
+                // unclipped list. Unclamped, the rect lands under the pane —
+                // over the footer — and a click there books off a word nobody
+                // can see. The rule `drew()` already states for the acts
+                // panel: absence is not permission, and neither is a word the
+                // frame cut off.
+                let at = lines.len() + row;
+                if at < inner.height as usize {
+                    self.book_word
+                        .set(Rect::new(inner.x, inner.y + at as u16, inner.width, 1));
+                }
             }
             lines.extend(card.lines);
         }

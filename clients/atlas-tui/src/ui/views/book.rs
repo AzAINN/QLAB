@@ -307,8 +307,15 @@ impl View for BookView {
                 // The card's own word first: it is a smaller target than the
                 // blotter and sits outside it, so order settles nothing, but
                 // asking about it first keeps the two reads independent.
+                //
+                // The posture is checked here as well as at the key, and as
+                // well as at the dispatch seam. Not belt-and-braces: a mouse
+                // arm that trusted the published rect alone was how a click on
+                // the row reading `view-only` opened the box, and the rect is
+                // published by a *paint* while the posture can move under it
+                // between two frames.
                 #[cfg(feature = "operator")]
-                if self.book_word_at(m.column, m.row) {
+                if store.posture.writes() && self.book_word_at(m.column, m.row) {
                     self.ask_to_book(store);
                     return None;
                 }

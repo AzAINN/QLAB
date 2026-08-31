@@ -159,13 +159,32 @@ def register_trader_tools(app, st: TraderState) -> None:
 
     @app.tool(name="halt")
     def halt() -> dict:
-        """Halt trading (kill-switch). Only liquidation permitted while halted."""
+        """Halt trading (kill-switch). Only liquidation permitted while halted.
+
+        Deliberately ungated: it only ever moves the desk to the safe side, and
+        an agent that can stop trading faster than a human is a feature.
+        """
         st.registry.set_halt(True)
         st.registry.record_event("halt", {"by": "tool"})
         return {"halted": True}
 
     @app.tool(name="resume")
     def resume() -> dict:
+        """Clear the kill switch. Gated exactly as ``execute_plan`` is.
+
+        Re-arming tradability reopens the execution path, so it is an authority
+        act and not a research call: a bare tool invocation an agent can make
+        must not undo a halt. The operator authorizes THIS process out of band
+        with ``QLAB_HEADLESS_EXECUTE=1``, which an agent connected over MCP
+        cannot set.
+        """
+        if os.environ.get("QLAB_HEADLESS_EXECUTE") != "1":
+            # The real state, not a hardcoded True: the refusal must describe
+            # the switch as it stands, or a caller learns the wrong fact.
+            return {"halted": bool(st.registry.get_account().get("halted")),
+                    "error": "clearing the kill switch is not agent-reachable: "
+                             "the operator must authorize this process out of "
+                             "band (QLAB_HEADLESS_EXECUTE=1)"}
         st.registry.set_halt(False)
         st.registry.record_event("resume", {"by": "tool"})
         return {"halted": False}

@@ -79,3 +79,14 @@ def test_the_wire_form_of_a_non_finite_float_is_null():
     payload = _jsonable({"a": float("nan"), "b": np.float64("inf"), "c": [np.nan, 1.5]})
     assert payload == {"a": None, "b": None, "c": [None, 1.5]}
     assert json.dumps(payload, allow_nan=False)
+
+
+def test_a_numpy_array_of_nan_serializes_as_null_not_literal_nan():
+    """`tolist()` hands back raw Python floats, NaN included. Without
+    re-entering the converter the array branch reintroduced exactly the
+    literal `NaN` the scalar branch above exists to remove."""
+    from qlab.core.types import _jsonable
+    payload = _jsonable({"a": np.array([1.0, np.nan]),
+                         "b": np.array([[np.inf, 2.0]])})
+    assert payload == {"a": [1.0, None], "b": [[None, 2.0]]}
+    assert json.dumps(payload, allow_nan=False)

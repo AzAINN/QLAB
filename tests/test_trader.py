@@ -574,6 +574,45 @@ def test_execute_plan_tool_is_not_agent_reachable_without_human(tmp_registry,
     assert "not agent-reachable" in out["error"]
 
 
+def test_resume_needs_the_same_out_of_band_authorization_execution_does(
+        tmp_registry, monkeypatch):
+    """Re-arming tradability is an authority act, not a research call.
+
+    `halt` stays ungated -- it only ever moves the desk to the safe side --
+    but clearing the kill switch reopens execution, so it takes the same
+    out-of-band operator gate `execute_plan` does.
+    """
+    from qlab.mcp.quant_trader import TraderState, register_trader_tools
+
+    class _App:
+        def __init__(self):
+            self.tools = {}
+
+        def tool(self, name):
+            def deco(fn):
+                self.tools[name] = fn
+                return fn
+            return deco
+
+    st = TraderState(registry=tmp_registry, offline=True)
+    app = _App()
+    register_trader_tools(app, st)
+
+    monkeypatch.delenv("QLAB_HEADLESS_EXECUTE", raising=False)
+    assert app.tools["halt"]() == {"halted": True}
+    assert bool(tmp_registry.get_account().get("halted")) is True
+
+    refused = app.tools["resume"]()
+    assert refused["halted"] is True
+    assert "QLAB_HEADLESS_EXECUTE=1" in refused["error"]
+    # The refusal is real: the kill switch did not move.
+    assert bool(tmp_registry.get_account().get("halted")) is True
+
+    monkeypatch.setenv("QLAB_HEADLESS_EXECUTE", "1")
+    assert app.tools["resume"]() == {"halted": False}
+    assert bool(tmp_registry.get_account().get("halted")) is False
+
+
 def test_daily_order_cap_is_cumulative_across_plans(reg_and_broker):
     import dataclasses
 

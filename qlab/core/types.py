@@ -316,7 +316,10 @@ def _jsonable(obj: Any) -> Any:
         # the wire form of "this number does not exist".
         return None
     if isinstance(obj, np.ndarray):
-        return obj.tolist()
+        # Re-entered, not returned raw: `tolist()` yields plain Python floats,
+        # so a NaN inside an array would sail past the non-finite branch above
+        # and reach json.dumps as a literal `NaN` no JSON reader accepts.
+        return [_jsonable(v) for v in obj.tolist()]
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     return obj

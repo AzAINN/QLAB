@@ -77,6 +77,7 @@ GET  /api/approvals            list approval requests (optionally by status)
 GET  /api/approvals/<id>       one approval request
 POST /api/approvals/<id>/approve|reject|challenge   the human decision
 POST /api/plans/<id>/execute   execute by consuming a matching human approval
+GET  /api/desk/proposal        the single checked plan the desk is asking about
 POST /api/performance/backfill merge the broker's own equity history into the marks
 POST /api/recommend            an operational allocation recommendation
 POST /api/run_once             one autopilot iteration (analyze -> solve -> trade)
@@ -4182,13 +4183,20 @@ class UISession:
           `x` returned in silence for want of a covering approval. Any prior
           request (pending, approved, consumed, expired) means the desk has
           already asked; it asks once.
+        * The desk holds ONE open question. Once the newest checked plan has
+          its request, every older pending one is invalidated with a reason
+          naming its successor, and the chat says so — once per superseded
+          plan, because a second pass finds those rows already terminal and
+          has nothing left to name.
         * A trigger task minted this tick is named with its reason and the
           template the lookup maps it to. `created_tasks` is per-tick and
           deduped upstream, so a strong indicator is announced once.
         """
+        from qlab.governance.proposal import current_proposal, supersede
         from qlab.operator.templates import TRIGGER_TEMPLATE
 
-        announced: dict = {"approvals_opened": [], "triggers": []}
+        announced: dict = {"approvals_opened": [], "superseded": [],
+                           "triggers": []}
         asked = {str(a.get("plan_id") or "")
                  for a in self.registry.list_approval_requests(200)}
         for plan in self.registry.list_plans(20):
@@ -4212,6 +4220,25 @@ class UISession:
                 f"is open — in chat: `/approve {aid[:8]}` to approve it, then "
                 f"`/execute {pid[:8]}` to book it; each opens the confirm box.")
             announced["approvals_opened"].append(aid)
+        # One proposal. Run every tick, not only when a request was opened
+        # here: a desk that came up holding two pending requests has two open
+        # questions and nothing else would ever close the older one.
+        proposal = current_proposal(self.registry)
+        if proposal is not None:
+            keep = str(proposal["plan_id"])
+            try:
+                gone = supersede(self.registry, keep)
+            except (KeyError, ValueError, PermissionError) as exc:
+                self._record_atlas_reply(
+                    f"⚑ Plan {keep[:8]} is the current proposal but the older "
+                    f"ones could not be withdrawn: {exc}")
+                gone = []
+            for old in gone:
+                self._record_atlas_reply(
+                    f"⚑ Plan {keep[:8]} supersedes {old[:8]}: one proposal "
+                    f"at a time. The older approval is invalidated as "
+                    f"superseded — it can no longer book anything.")
+            announced["superseded"].extend(gone)
         for task in created_tasks or []:
             kind = str(task.get("trigger") or "trigger")
             action = str(task.get("action") or "")
@@ -5066,6 +5093,14 @@ def handle_api(session: UISession, method: str, path: str,
             return 400, {"error": str(exc)}
         session.set_desk_mode(mode)
         return 200, session.desk_mode_payload()
+
+    if method == "GET" and path == "/api/desk/proposal":
+        # The one question the desk is asking, or None. Read-only: what makes
+        # the older ones go away is the tick's supersede, so a client polling
+        # this route never changes what it is looking at.
+        from qlab.governance.proposal import current_proposal
+
+        return 200, {"proposal": current_proposal(session.registry)}
 
     if method == "POST" and path == "/api/desk/posture":
         # Arming a desk takes an explicit true: "yes", 1 and [] are refused

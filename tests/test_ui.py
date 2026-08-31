@@ -4871,6 +4871,34 @@ def test_a_checked_plan_gets_its_approval_opened_and_announced_once(session):
                 if a.get("plan_id") == plan_id]) == 1
 
 
+def test_the_tick_leaves_one_proposal_and_the_route_serves_it(session):
+    """Two checked plans are two open questions; the tick closes the older."""
+    older = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    newer = _checked_plan(session, tilt=0.02)
+    out = session.announce_desk_work(True, [])
+
+    assert out["superseded"] == [older]
+    states = {a["plan_id"]: a["status"]
+              for a in session.registry.list_approval_requests(50)}
+    assert states[older] == "invalidated" and states[newer] == "pending"
+
+    status, payload = handle_api(session, "GET", "/api/desk/proposal", {}, {})
+    assert status == 200
+    assert payload["proposal"]["plan_id"] == newer
+    assert payload["proposal"]["superseded"] == [older]
+    assert payload["proposal"]["referee"]["verdict"] == "PASS"
+
+    # A superseded plan is named in the chat, once.
+    said = " ".join(str(e["payload"]["text"]) for e
+                    in session.registry.read_events_of_kind("atlas_message", 50))
+    assert said.count(f"supersedes {older[:8]}") == 1
+    assert session.announce_desk_work(True, [])["superseded"] == []
+    said = " ".join(str(e["payload"]["text"]) for e
+                    in session.registry.read_events_of_kind("atlas_message", 50))
+    assert said.count(f"supersedes {older[:8]}") == 1
+
+
 def test_a_fired_trigger_is_announced_in_the_chat(session):
     out = session.announce_desk_work(True, [
         {"task_id": "abc123def456", "trigger": "regime_flip", "action": "workflow"},

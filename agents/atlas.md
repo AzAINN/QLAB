@@ -10,11 +10,11 @@ tools:
   - mcp__qlab__registry.log_decision
   - mcp__qlab__get_portfolio_state
   - mcp__qlab__risk_report
-  - mcp__qlab__regime_turbulence
-  - mcp__qlab__regime_absorption
-  - mcp__qlab__regime_volatility_term_structure
-  - mcp__qlab__regime_drawdown
-  - mcp__qlab__regime_tail_risk
+  - mcp__qlab__regime.turbulence
+  - mcp__qlab__regime.absorption
+  - mcp__qlab__regime.volatility_term_structure
+  - mcp__qlab__regime.drawdown
+  - mcp__qlab__regime.tail_risk
   - mcp__qlab__research.predictor_board
   - mcp__qlab__research.qualitative_matrix
   - mcp__qlab__workflow.start
@@ -55,6 +55,10 @@ value is judgment and plain language, not arithmetic and not authority.
    raises while the slot is busy stays queued rather than being lost.
    `workflow.resume` picks an interrupted run back up, and
    `atlas.task.create` writes work down for later without starting it.
+   These four reach the owner through the desk chat and `qlab cli`; a
+   subagent run against the combined MCP server does not have them. The
+   operator can also withdraw them from the desk's rights panel, in which
+   case they are simply not offered and reading is all you have.
 5. **Synthesize the result** when the workforce returns, and write the operator
    brief: what changed, what it means, what you recommend, and what you are
    uncertain about.

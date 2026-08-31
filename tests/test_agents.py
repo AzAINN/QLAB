@@ -298,11 +298,11 @@ def test_atlas_holds_exactly_the_four_new_desk_manager_tools():
         "mcp__qlab__registry.log_decision",
         "mcp__qlab__get_portfolio_state",
         "mcp__qlab__risk_report",
-        "mcp__qlab__regime_turbulence",
-        "mcp__qlab__regime_absorption",
-        "mcp__qlab__regime_volatility_term_structure",
-        "mcp__qlab__regime_drawdown",
-        "mcp__qlab__regime_tail_risk",
+        "mcp__qlab__regime.turbulence",
+        "mcp__qlab__regime.absorption",
+        "mcp__qlab__regime.volatility_term_structure",
+        "mcp__qlab__regime.drawdown",
+        "mcp__qlab__regime.tail_risk",
         "mcp__qlab__research.predictor_board",
         "mcp__qlab__research.qualitative_matrix",
         "mcp__qlab__workflow.start",
@@ -450,3 +450,60 @@ def test_atlas_can_name_every_registered_template():
     body = _by_name()["atlas"].body
     for template_id in TEMPLATES:
         assert f"`{template_id}`" in body, template_id
+
+
+def test_every_qlab_grant_names_a_tool_something_actually_serves():
+    """No `agents/*.md` grant may resolve to nothing.
+
+    A grant nothing forwards looks exactly like one that works: the role file
+    reads as though the ability is there, and the model simply never sees the
+    tool. Two things may satisfy a `mcp__qlab__*` grant — a name the combined
+    MCP server registers (either leg of `register_lab_tools`, plus the trader
+    tools), or the ONE named exemption, `qlab.tui.claude.CHAT_ACTION_BASES`.
+    Those four are owner *routes* reached through the `qlab-operator` proxy —
+    real for the desk chat and `qlab cli`, and absent from the combined server
+    by design, which is why they are exempted by name here rather than left to
+    pass silently.
+    """
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+    from qlab.mcp.quant_trader import TraderState, register_trader_tools
+    from qlab.state.registry import Registry
+    from qlab.tui.claude import CHAT_ACTION_BASES
+
+    class _Recorder:
+        def __init__(self):
+            self.names: set[str] = set()
+
+        def tool(self, name):
+            def register(fn):
+                self.names.add(name)
+                return fn
+
+            return register
+
+    reg = Registry(":memory:")
+    served = _Recorder()
+    # Both legs: `research.predictor_board` is a real, served tool mounted only
+    # on owner surfaces, so an agent-facing-only census would refuse a grant
+    # that resolves perfectly well through the owner and its proxy.
+    register_lab_tools(served, LabState(offline=True, registry=reg))
+    register_lab_tools(served, LabState(offline=True, registry=reg),
+                       owner_only=True)
+    register_trader_tools(served, TraderState(registry=reg, offline=True))
+    reg.close()
+
+    allowed = served.names | set(CHAT_ACTION_BASES)
+    for agent in load_agents():
+        for tool in agent.tools:
+            if not tool.startswith("mcp__qlab__"):
+                continue  # a built-in (WebSearch) is not an MCP registration
+            base = tool_base_name(tool)
+            assert base in allowed, f"{agent.name} grants {tool}, served by nothing"
+
+
+def test_the_atlas_persona_places_the_action_tools_on_the_desk_not_in_a_subagent():
+    body = " ".join(_by_name()["atlas"].body.split())
+    assert ("These four reach the owner through the desk chat and `qlab cli`; "
+            "a subagent run against the combined MCP server does not have "
+            "them.") in body

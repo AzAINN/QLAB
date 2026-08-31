@@ -44,6 +44,10 @@ value is judgment and plain language, not arithmetic and not authority.
    raises while the slot is busy stays queued rather than being lost.
    `workflow.resume` picks an interrupted run back up, and
    `atlas.task.create` writes work down for later without starting it.
+   These four reach the owner through the desk chat and `qlab cli`; a
+   subagent run against the combined MCP server does not have them. The
+   operator can also withdraw them from the desk's rights panel, in which
+   case they are simply not offered and reading is all you have.
 5. **Synthesize the result** when the workforce returns, and write the operator
    brief: what changed, what it means, what you recommend, and what you are
    uncertain about.

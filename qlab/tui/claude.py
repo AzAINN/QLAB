@@ -185,9 +185,25 @@ _COORDINATOR_TOOLS = [
 # one-at-a-time refusal on a second, and no execution surface anywhere — there
 # is no tool here that creates, approves, or consumes an approval, because
 # booking is the operator's click and nothing else.
-_CHAT_ACTION_TOOLS = [_claude_tool(base) for base in (
+#
+# These four are owner ROUTES reached through the qlab-operator proxy, not
+# tools the combined MCP server registers, so an `agents/*.md` grant of one is
+# real for the desk chat and `qlab cli` and empty for a subagent run against
+# that server. That asymmetry is the "a grant nothing forwards" smell, so it is
+# named here rather than left implicit: tests/test_agents.py's grant census
+# exempts exactly this tuple by name, and nothing else.
+CHAT_ACTION_BASES = (
     "workflow.start", "workflow.resume", "atlas.task.create", "approvals.list",
-)]
+)
+
+# The three of those that DO something. `approvals.list` is reading what is
+# already waiting, which is not an act, so the `workflows` right does not
+# withdraw it — an Atlas that cannot start work can still say what is pending.
+WORKFLOW_RIGHT_BASES = (
+    "workflow.start", "workflow.resume", "atlas.task.create",
+)
+
+_CHAT_ACTION_TOOLS = [_claude_tool(base) for base in CHAT_ACTION_BASES]
 
 _CHAT_TOOLS = [_claude_tool(base) for base in (
     "portfolio.state", "market.snapshot", "policy.current", "audit.events",
@@ -272,8 +288,19 @@ def resolve_claude_executable() -> str | None:
 
 
 def _proxy_tool(tool: str) -> str | None:
+    """One `agents/*.md` tool name as Claude will see it, or None.
+
+    The ONE mapper. It answers from two tables — the lab/chat-action bases the
+    proxy serves under their own name, and `_TRADER_PROXY_MAP` for the trader
+    names that reach a differently-named route (`risk_report` ->
+    `portfolio.state`). There was briefly a second lookup layered on top of it,
+    because `agents/atlas.md` spelled five regime tools with underscores while
+    these tables are keyed on the dotted base; that is fixed at source instead,
+    since a resolver that answers yes two different ways has an authority which
+    is the union of two lists nobody reads together.
+    """
     base = tool.rsplit("__", 1)[-1]
-    if base in _LAB_TOOL_BASES:
+    if base in _LAB_TOOL_BASES or base in CHAT_ACTION_BASES:
         return _claude_tool(base)
     mapped = _TRADER_PROXY_MAP.get(base)
     return _claude_tool(mapped) if mapped else None
@@ -682,7 +709,10 @@ def _chat_agent() -> dict[str, dict]:
         "qlab-desk": {
             "description": "Conversational read-only qlab desk assistant.",
             "prompt": _CHAT_SYSTEM_PROMPT,
-            "tools": list(_CHAT_TOOLS),
+            # Rights-shaped: the agent definition's tools field IS the chat's
+            # surface, so a right the operator withdrew has to be absent here
+            # as well as from the allowlist.
+            "tools": chat_tools(),
             "model": "inherit",
             "permissionMode": "dontAsk",
             "maxTurns": 16,
@@ -849,40 +879,102 @@ def proxy_mcp_config(runtime_url: str, *, offline: bool) -> dict:
 # constant, which is exactly the shape invariant 3 forbids.
 _WEB_TOOLS = ("WebSearch", "WebFetch")
 
-# Every Claude-visible name the owner-backed proxy can actually serve, across
-# both grants this module builds. Used to *check* a role's declared tool, never
-# to widen one: a name that is not in here names nothing, and is refused.
-_KNOWN_PROXY_TOOLS = frozenset(_PROXY_TOOLS) | frozenset(_CHAT_TOOLS)
+
+# -- the operator's rights panel --------------------------------------------
+#
+# Three switches the operator sets on the desk, persisted as JSON in the state
+# root. This module defines the SHAPE — the owner route that writes the file
+# imports these two names rather than spelling the keys a second time, because
+# a writer and a reader that disagree about a key is a right the operator
+# believes they set and nothing honours.
+#
+# Rights are an operator's stated intent, exactly like the desk posture: they
+# decide what Atlas is *offered*, never what the owner will accept. Nothing
+# here is a security boundary — a fill is protected by the hash-bound confirm,
+# the referee pin and the owner's own re-validation, and none of those consults
+# this file.
+ATLAS_RIGHTS_DEFAULTS: dict[str, bool] = {
+    "web": True, "workflows": True, "build": True,
+}
+ATLAS_RIGHTS_KEYS: tuple[str, ...] = tuple(ATLAS_RIGHTS_DEFAULTS)
+ATLAS_RIGHTS_FILE = "atlas_rights.json"
 
 
-def role_proxy_tool(tool: str) -> str | None:
-    """One `agents/*.md` tool name as Claude will see it, or None.
+def atlas_rights_path() -> Path:
+    """Where the rights live. One resolver, through `qlab.paths` (invariant 6)."""
+    from qlab.paths import state_path
 
-    `_proxy_tool` is tried first and keeps its trader mapping, so a role that
-    asks for `risk_report` still gets `portfolio.state`. What this adds is the
-    second lookup that mapper cannot do: `_LAB_TOOL_BASES` is keyed on the
-    *dotted* base, and `agents/atlas.md` spells five of its tools with
-    underscores (`regime_turbulence`), while four more — the K1 additions
-    `workflow.start`, `workflow.resume`, `atlas.task.create`, `approvals.list` —
-    are real proxy tools that were never in that set at all. Nine of atlas's
-    eighteen answered None, and a grant built by dropping them silently would
-    have shipped a desk manager with no regime panel and no way to start work,
-    looking exactly like one that had both.
+    return state_path(ATLAS_RIGHTS_FILE)
 
-    So the fallback asks the question that actually matters — does the proxy
-    serve a tool by this name — against the union of what this module grants
-    anywhere. It cannot invent authority: a name outside that union is None.
+
+def load_atlas_rights() -> dict[str, bool]:
+    """The three rights as the operator last set them.
+
+    No file means a desk nobody has narrowed, which is all three granted — that
+    is a *documented default*, not a fallback, and the same is true of a key the
+    file omits. What is refused loudly is a file this desk did not write:
+    unreadable JSON, a value that is not a boolean, or a key outside
+    `ATLAS_RIGHTS_KEYS`. An unknown key is an operator who believes they
+    switched something off; silently ignoring it would grant an authority they
+    thought they had withdrawn, which is the one failure mode a rights panel
+    exists to prevent.
     """
-    mapped = _proxy_tool(tool)
-    if mapped:
-        return mapped
-    # `_claude_tool` sanitizes dots to underscores, which is exactly how the
-    # proxy registers its own names, so both spellings land on one string.
-    candidate = _claude_tool(tool.rsplit("__", 1)[-1])
-    return candidate if candidate in _KNOWN_PROXY_TOOLS else None
+    path = atlas_rights_path()
+    remedy = f"delete it to restore the defaults ({sorted(ATLAS_RIGHTS_KEYS)} "
+    remedy += "all true), or set it from the desk's rights panel"
+
+    def refuse(why: str) -> RuntimeError:
+        return RuntimeError(f"{path} {why}; {remedy}")
+
+    if not path.exists():
+        return dict(ATLAS_RIGHTS_DEFAULTS)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise refuse(f"is not readable as JSON ({exc})") from exc
+    if not isinstance(raw, dict):
+        raise refuse(f"holds a {type(raw).__name__}, not an object of rights")
+    unknown = sorted(set(raw) - set(ATLAS_RIGHTS_KEYS))
+    if unknown:
+        raise refuse(
+            f"names {', '.join(unknown)}, which this desk has no right by — "
+            f"the rights are {', '.join(ATLAS_RIGHTS_KEYS)}")
+    rights = dict(ATLAS_RIGHTS_DEFAULTS)
+    for key in ATLAS_RIGHTS_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if not isinstance(value, bool):
+            raise refuse(f"gives {key} the value {value!r}, which is not true "
+                         "or false")
+        rights[key] = value
+    return rights
 
 
-def atlas_cli_tools() -> list[str]:
+def _rights(rights: dict[str, bool] | None) -> dict[str, bool]:
+    """Caller-supplied rights, or the file. One place decides which."""
+    return load_atlas_rights() if rights is None else rights
+
+
+def chat_tools(rights: dict[str, bool] | None = None) -> list[str]:
+    """What the desk chat's Atlas is offered, after the operator's rights.
+
+    Withdrawing a right does not forbid the underlying route — the owner still
+    serves it and still refuses it on its own gates. It removes the tool from
+    the session, so the model is not carrying an ability the operator asked it
+    not to have. That is the whole claim, and it is deliberately a modest one.
+    """
+    rights = _rights(rights)
+    tools = list(_CHAT_TOOLS)
+    if not rights.get("workflows", True):
+        withdrawn = {_claude_tool(base) for base in WORKFLOW_RIGHT_BASES}
+        tools = [tool for tool in tools if tool not in withdrawn]
+    if rights.get("web", True):
+        tools.extend(_WEB_TOOLS)
+    return tools
+
+
+def atlas_cli_tools(rights: dict[str, bool] | None = None) -> list[str]:
     """What an interactive `qlab cli` session may reach, in full.
 
     **Derived from the atlas role's own `tools:` front matter**, not from
@@ -898,7 +990,9 @@ def atlas_cli_tools() -> list[str]:
     answering. Least privilege, and then a human.
 
     Refuses loudly on a role tool the proxy cannot serve. A silent drop is the
-    exact failure this function exists to have noticed once already.
+    exact failure this function exists to have noticed once already. The
+    operator's rights narrow the resolved grant AFTER that check, so a right
+    withdrawn can never be mistaken for a name that resolved to nothing.
     """
     from qlab.agents.loader import load_agents
 
@@ -909,7 +1003,7 @@ def atlas_cli_tools() -> list[str]:
             "grant to build — run `python -m qlab.agents.loader list`")
     granted: list[str] = []
     for tool in source.tools:
-        resolved = role_proxy_tool(tool)
+        resolved = _proxy_tool(tool)
         if resolved is None:
             raise RuntimeError(
                 f"agents/atlas.md grants {tool!r}, which the qlab-operator "
@@ -918,6 +1012,15 @@ def atlas_cli_tools() -> list[str]:
                 "dropped it would look identical to one that worked")
         if resolved not in granted:
             granted.append(resolved)
+    rights = _rights(rights)
+    if not rights.get("workflows", True):
+        # The same three the chat loses. `qlab cli` is the same Atlas at a
+        # different keyboard, and a right that held on one surface and not the
+        # other would be a rights panel the operator cannot read.
+        withdrawn = {_claude_tool(base) for base in WORKFLOW_RIGHT_BASES}
+        granted = [tool for tool in granted if tool not in withdrawn]
+    if not rights.get("web", True):
+        return granted
     return [*granted, *_WEB_TOOLS]
 
 
@@ -948,15 +1051,23 @@ def build_atlas_cli_argv(*, runtime_url: str, offline: bool) -> list[str]:
     the tool *universe* is the two read-only web tools, so anything else is not
     merely un-allowlisted but absent, and the qlab tools arrive through the
     proxy that only ever calls the owner's HTTP API. The allowlist is the atlas
-    role's own grant (`atlas_cli_tools`), never the workforce union.
+    role's own grant (`atlas_cli_tools`), never the workforce union — narrowed
+    once more by the operator's rights, read here so both halves of the argv
+    see the same three switches within one call.
     """
+    rights = _rights(None)
+    # Withdrawing `web` empties the tool universe rather than just dropping the
+    # two names from the allowlist: an un-allowlisted built-in still exists to
+    # be prompted for, and a right the operator switched off should not be one
+    # keystroke away.
+    universe = _WEB_TOOLS if rights.get("web", True) else ()
     return [
         "claude",
         "--strict-mcp-config",
         "--mcp-config", json.dumps(proxy_mcp_config(runtime_url,
                                                     offline=offline)),
-        "--tools", ",".join(_WEB_TOOLS),
-        "--allowedTools", ",".join(atlas_cli_tools()),
+        "--tools", ",".join(universe),
+        "--allowedTools", ",".join(atlas_cli_tools(rights)),
         "--append-system-prompt", atlas_persona(),
     ]
 
@@ -1102,7 +1213,7 @@ def build_claude_argv(
         # selected agent's tools field IS the surface — read-only qlab tools,
         # no Agent dispatch, no built-ins.
         argv[argv.index("--tools") + 1] = "default"
-        argv.extend(["--allowedTools", ",".join(_CHAT_TOOLS)])
+        argv.extend(["--allowedTools", ",".join(chat_tools())])
         argv.extend(["--agent", "qlab-desk"])
         argv.extend(["--permission-mode", "dontAsk"])
         argv.extend(["--name", "qlab-chat"])

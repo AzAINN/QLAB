@@ -219,29 +219,19 @@ def test_the_cli_grants_the_atlas_roles_own_tools_and_not_the_workforces():
 
     # And what the role does name is all there.
     for tool in _atlas_role_tools():
-        resolved = cc.role_proxy_tool(tool)
+        resolved = cc._proxy_tool(tool)
         assert resolved in granted, f"{tool} -> {resolved}"
 
     assert {"WebSearch", "WebFetch"} <= granted
     # Nothing else at all: the set is exactly the role plus the web.
     assert granted == {
-        *(cc.role_proxy_tool(t) for t in _atlas_role_tools()),
+        *(cc._proxy_tool(t) for t in _atlas_role_tools()),
         "WebSearch", "WebFetch",
     }
 
 
-def test_every_tool_the_atlas_role_names_is_one_the_proxy_actually_serves():
-    # `_proxy_tool` alone answers None for nine of the role's eighteen — the
-    # five regime tools (spelled with underscores in agents/atlas.md, keyed
-    # with dots in _LAB_TOOL_BASES) and the four K1 additions. Silently
-    # dropping them would ship an Atlas with no regime panel and no way to
-    # start work, looking exactly like one that had them.
-    for tool in _atlas_role_tools():
-        assert cc.role_proxy_tool(tool) is not None, tool
-
-
 def test_a_role_tool_the_proxy_cannot_serve_refuses_rather_than_vanishes():
-    assert cc.role_proxy_tool("mcp__qlab__not.a.tool") is None
+    assert cc._proxy_tool("mcp__qlab__not.a.tool") is None
     from qlab.agents.loader import AgentDef
 
     bogus = AgentDef(name="atlas", description="", body="x",
@@ -335,3 +325,171 @@ def test_a_rename_into_the_desks_trees_counts_and_a_quoted_path_is_unquoted(
     monkeypatch.setattr(verbs.subprocess, "run",
                         porcelain(' M planning-docs/notes.md\n'))
     assert verbs._desk_sources_changed() is False
+
+
+# -- one mapper, no second lookup -------------------------------------------
+
+def test_every_atlas_role_tool_resolves_through_the_one_mapper():
+    """`_proxy_tool` alone answers for all eighteen, after the source fix.
+
+    The workaround it replaces (`role_proxy_tool`, a second lookup against the
+    union of what this module grants anywhere) existed because nine of atlas's
+    tools were spelled wrong in the role file or missing from the table. Both
+    are fixed at source, so the fallback is gone — and its absence is asserted,
+    because a resolver that answers "yes" two different ways is a resolver
+    whose authority is the union of two lists nobody reads together.
+    """
+    for tool in _atlas_role_tools():
+        assert cc._proxy_tool(tool) is not None, tool
+    assert not hasattr(cc, "role_proxy_tool")
+    assert not hasattr(cc, "_KNOWN_PROXY_TOOLS")
+
+
+def test_the_five_regime_tools_project_to_the_names_claude_sees():
+    """The respell must not move the Claude-visible name by one character."""
+    for base in ("regime.turbulence", "regime.absorption",
+                 "regime.volatility_term_structure", "regime.drawdown",
+                 "regime.tail_risk"):
+        assert (cc._proxy_tool(f"mcp__qlab__{base}")
+                == f"mcp__qlab-operator__{base.replace('.', '_')}")
+
+
+# -- the rights file --------------------------------------------------------
+
+def _write_rights(payload):
+    from qlab.paths import state_path
+
+    path = state_path("atlas_rights.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload),
+                    encoding="utf-8")
+    return path
+
+
+def test_a_desk_that_never_set_rights_has_all_three():
+    from qlab.paths import state_path
+
+    assert not state_path("atlas_rights.json").exists()
+    assert cc.load_atlas_rights() == {"web": True, "workflows": True,
+                                      "build": True}
+    assert cc.load_atlas_rights() == cc.ATLAS_RIGHTS_DEFAULTS
+    assert set(cc.ATLAS_RIGHTS_KEYS) == {"web", "workflows", "build"}
+
+
+def test_rights_written_to_the_file_are_what_comes_back():
+    _write_rights({"web": False, "workflows": True, "build": False})
+    assert cc.load_atlas_rights() == {"web": False, "workflows": True,
+                                      "build": False}
+
+
+def test_a_corrupt_rights_file_refuses_by_name_with_the_remedy():
+    path = _write_rights("{not json at all")
+    with pytest.raises(RuntimeError) as err:
+        cc.load_atlas_rights()
+    assert str(path) in str(err.value)
+    assert "delete it to restore the defaults" in str(err.value)
+
+
+def test_an_unknown_right_refuses_rather_than_being_ignored():
+    # A key nobody reads is an operator who believes they set something. The
+    # panel writes exactly three names; anything else is a file this desk did
+    # not write and cannot honour.
+    path = _write_rights({"web": True, "workflows": True, "build": True,
+                          "execute": True})
+    with pytest.raises(RuntimeError) as err:
+        cc.load_atlas_rights()
+    assert "execute" in str(err.value)
+    assert str(path) in str(err.value)
+    assert "delete it to restore the defaults" in str(err.value)
+
+
+def test_a_right_that_is_not_a_boolean_refuses():
+    _write_rights({"web": "yes", "workflows": True, "build": True})
+    with pytest.raises(RuntimeError, match="delete it to restore the defaults"):
+        cc.load_atlas_rights()
+
+
+# -- what the rights actually withdraw --------------------------------------
+
+def test_without_the_web_right_neither_surface_offers_a_web_tool():
+    _write_rights({"web": False, "workflows": True, "build": True})
+
+    chat = cc.chat_tools()
+    assert "WebSearch" not in chat and "WebFetch" not in chat
+
+    argv = cc.build_atlas_cli_argv(
+        runtime_url="http://127.0.0.1:8765", offline=True)
+    # Absent from the tool *universe*, not merely un-allowlisted: `--tools`
+    # is what decides whether the tool exists in the session at all.
+    assert argv[argv.index("--tools") + 1] == ""
+    assert "WebSearch" not in argv[argv.index("--allowedTools") + 1]
+    assert "WebFetch" not in argv[argv.index("--allowedTools") + 1]
+
+
+def test_with_the_web_right_both_surfaces_offer_it():
+    _write_rights({"web": True, "workflows": True, "build": True})
+    assert {"WebSearch", "WebFetch"} <= set(cc.chat_tools())
+    argv = cc.build_atlas_cli_argv(
+        runtime_url="http://127.0.0.1:8765", offline=True)
+    assert argv[argv.index("--tools") + 1] == "WebSearch,WebFetch"
+
+
+def test_without_the_workflows_right_the_chat_cannot_start_or_write_work():
+    _write_rights({"web": True, "workflows": False, "build": True})
+    chat = cc.chat_tools()
+    for base in ("workflow.start", "workflow.resume", "atlas.task.create"):
+        assert cc._claude_tool(base) not in chat, base
+    # Reading what is waiting is not doing anything: `approvals.list` stays.
+    assert cc._claude_tool("approvals.list") in chat
+    # And the reading tools are untouched.
+    assert cc._claude_tool("portfolio.state") in chat
+
+
+def test_with_the_workflows_right_the_three_action_tools_are_offered():
+    _write_rights({"web": True, "workflows": True, "build": True})
+    chat = cc.chat_tools()
+    for base in ("workflow.start", "workflow.resume", "atlas.task.create"):
+        assert cc._claude_tool(base) in chat, base
+
+
+def test_the_chat_argv_carries_exactly_the_rights_shaped_grant():
+    _write_rights({"web": False, "workflows": False, "build": True})
+    argv = cc.build_claude_argv(
+        "hello", governed=False, runtime_url="http://127.0.0.1:8765",
+        offline=True, chat=True)
+    assert argv[argv.index("--allowedTools") + 1] == ",".join(cc.chat_tools())
+    assert "workflow_start" not in argv[argv.index("--allowedTools") + 1]
+
+
+def test_without_the_build_right_qlab_build_refuses_naming_the_panel(monkeypatch):
+    from qlab.autopilot import cli as verbs
+
+    _write_rights({"web": True, "workflows": True, "build": False})
+    monkeypatch.setattr(cc, "resolve_claude_executable", lambda: "/usr/bin/claude")
+
+    def never(*a, **k):
+        raise AssertionError("a refused build must not open a session")
+
+    monkeypatch.setattr(verbs, "_run_interactive", never)
+    with pytest.raises(SystemExit) as err:
+        verbs._cmd_build(type("A", (), {"request": "add a heatmap"})())
+    message = str(err.value)
+    assert "build" in message
+    assert "rights" in message.lower()
+
+
+def test_with_the_build_right_qlab_build_opens_as_before(monkeypatch):
+    from qlab.autopilot import cli as verbs
+
+    _write_rights({"web": True, "workflows": True, "build": True})
+    monkeypatch.setattr(cc, "resolve_claude_executable", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(verbs, "_desk_sources_changed", lambda: False)
+    seen = {}
+
+    def record(argv, cwd):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(verbs, "_run_interactive", record)
+    assert verbs._cmd_build(type("A", (), {"request": "add a heatmap"})()) == 0
+    assert seen["argv"][0] == "/usr/bin/claude"

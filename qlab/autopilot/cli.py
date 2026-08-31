@@ -899,6 +899,17 @@ def _cmd_build(args) -> int:
     """
     from qlab.tui import claude as cc
 
+    # Read before anything else starts. This verb opens Claude Code with its
+    # own default tools on a live checkout — by some distance the widest
+    # authority any key on this desk offers — so an operator who switched it
+    # off should see the refusal, not a missing-binary message first.
+    if not cc.load_atlas_rights().get("build", True):
+        raise SystemExit(
+            "`qlab build` is switched off: the desk's rights panel has the "
+            "`build` right withdrawn, and this verb opens Claude Code with "
+            "its own default tools on this checkout.\n"
+            "    grant it again from the rights panel on the desk, or in "
+            f"{cc.atlas_rights_path()}")
     binary = cc.resolve_claude_executable()
     if not binary:
         raise SystemExit(cc.claude_missing_remedy())

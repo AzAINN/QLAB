@@ -453,7 +453,12 @@ mod armed {
                     offline,
                 });
                 match client
-                    .set_news(&providers, contact.as_deref(), verify, offline)
+                    .set_news(
+                        &providers,
+                        contact.as_ref().map(crate::cmd::Contact::as_str),
+                        verify,
+                        offline,
+                    )
                     .await
                 {
                     Ok(News::Applied { stack, verified }) => Wrote::NewsSaved {

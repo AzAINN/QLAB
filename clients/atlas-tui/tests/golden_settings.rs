@@ -211,7 +211,7 @@ fn every_card_answers_for_itself_and_no_card_is_marked_as_listening() {
         "{body}"
     );
     assert!(
-        body.contains("read-only — cannot change this desk"),
+        body.contains("read-only — cannot change what is read"),
         "{body}"
     );
     assert_eq!(
@@ -1351,7 +1351,7 @@ fn the_news_card_is_read_only_in_a_glass_window() {
     // And the rule says there is nothing to press, rather than naming keys
     // this window would refuse.
     assert!(
-        body.contains("read-only — cannot change this desk"),
+        body.contains("read-only — cannot change what is read"),
         "{body}"
     );
     assert!(!body.contains("s save"), "{body}");
@@ -1547,7 +1547,7 @@ mod news {
             press(&mut client, KeyCode::Char('s')),
             Some(Command::NewsSettings {
                 providers: vec!["edgar".into(), "macro".into(), "rss".into()],
-                contact: Some("Jane Quant <jane@x.io>".into()),
+                contact: Some(atlas::cmd::Contact::new("Jane Quant <jane@x.io>".into())),
                 verify: false,
                 // The lane the card is drawing, which is the lane the answer in
                 // front of the operator is about.
@@ -1624,11 +1624,14 @@ mod news {
         let mut client = client;
         on_news(&mut client);
         let body = content(&client.frame(120, 36));
-        assert!(body.contains("has not said what this desk"), "{body}");
+        assert!(
+            body.contains("nothing has said what this desk reads"),
+            "{body}"
+        );
         // And every key on the card declines rather than pretending.
         assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
         assert_eq!(press(&mut client, KeyCode::Char('s')), None);
-        assert!(content(&client.frame(120, 36)).contains("has not said"));
+        assert!(content(&client.frame(120, 36)).contains("nothing has said"));
     }
 
     #[test]
@@ -1843,6 +1846,128 @@ mod news {
     }
 
     #[test]
+    fn a_save_in_flight_is_drawn_and_a_second_press_says_why() {
+        // The state that was set, guarded on, and never painted: a checked
+        // save is one live fetch per source and can run for minutes, and a
+        // card that drew nothing for it left an operator pressing the key
+        // again at a request that was still going.
+        let mut client = armed();
+        on_news(&mut client);
+        assert!(press(&mut client, KeyCode::Char('s')).is_some());
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("asking the owner"), "{body}");
+
+        // A second press is refused *out loud*. Silence here reads as a dead
+        // key, which is the failure invariant 4 exists for.
+        assert_eq!(press(&mut client, KeyCode::Char('s')), None);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("one request at a time"), "{body}");
+
+        // And the checked save names its own cost, because it is a different
+        // wait: the owner reads one window per source, and `gdelt` alone is
+        // 43-75s of it.
+        client.views.wrote(&Wrote::NewsSaved {
+            stack: vec!["macro".into(), "rss".into()],
+            checked: false,
+            verified: Vec::new(),
+        });
+        client.frame(120, 36);
+        assert!(press(&mut client, KeyCode::Char('v')).is_some());
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("one window per source"), "{body}");
+        assert!(body.contains("minutes"), "{body}");
+    }
+
+    #[test]
+    fn a_catalog_taller_than_the_card_keeps_its_note_row_and_bounds_the_cursor() {
+        // The card has room for five sources at this height. A sixth used to
+        // push the note row off the bottom — which is where every refusal
+        // lands — and left the cursor addressing a row no click rectangle
+        // covered, so the keyboard and the mouse disagreed about the catalog.
+        let mut news = payload();
+        news.catalog.push(atlas::model::NewsSource {
+            name: Some("newswire".into()),
+            tier: Some("wide".into()),
+            available: Some(true),
+            ..Default::default()
+        });
+        let mut client = armed_with(news);
+        on_news(&mut client);
+        let frame = client.frame(120, 36);
+        // The overflow is stated rather than silent, exactly as the model
+        // switcher states its own.
+        // Two hidden, not one: the marker costs a row of its own, which is
+        // reserved before anything is dropped rather than after.
+        assert!(content(&frame).contains("▾ 2 more"), "{frame}");
+        assert!(!content(&frame).contains("newswire"), "{frame}");
+        assert!(!content(&frame).contains("gdelt"), "{frame}");
+
+        // The note row survived, and a refusal still reaches it.
+        assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
+        assert!(
+            content(&client.frame(120, 36)).contains("alpaca needs an Alpaca credential"),
+            "the note row was pushed off the card:\n{}",
+            client.frame(120, 36)
+        );
+
+        // And the cursor stops at the last row the card actually drew: a
+        // Space against a row nobody can see is a change nobody chose.
+        for _ in 0..8 {
+            press(&mut client, KeyCode::Down);
+        }
+        let body = content(&client.frame(120, 36));
+        assert!(
+            !body.contains("s save"),
+            "the walk never left a card it could not fill:\n{body}"
+        );
+    }
+
+    #[test]
+    fn the_first_source_row_is_where_the_card_draws_it() {
+        // The offset from the card's top to its first source is arithmetic —
+        // the header, the lane and the stack — and a row added above the
+        // catalog would move every click rectangle without moving the
+        // constant. This pins the two together by name: the row the frame
+        // says is alpaca's is the row a click ticks alpaca on.
+        let mut client = armed();
+        let row = row_of(&client, "alpaca  secondary");
+        assert_eq!(click(&mut client, 70, row), None);
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("alpaca needs an Alpaca credential"),
+            "a click on alpaca's row addressed some other row:\n{body}"
+        );
+    }
+
+    #[test]
+    fn the_focused_rows_whole_note_is_drawn_where_its_column_cut_it() {
+        // The note column is fifteen cells at this width, which is exactly
+        // where `needs QLAB_EDGAR_CONTACT` and a verify detail get cut — the
+        // two strings an operator acts on. The always-reserved row under the
+        // catalog carries the focused row's note whole when it has nothing
+        // more urgent to say, so the remedy is one arrow away rather than one
+        // resize.
+        let mut client = armed();
+        on_news(&mut client);
+        press(&mut client, KeyCode::Down); // edgar
+        let frame = client.frame(120, 36);
+        assert!(
+            line_with(&frame, "[ ] edgar").contains("needs QLAB_EDG…"),
+            "{frame}"
+        );
+        assert!(
+            content(&frame).contains("needs QLAB_EDGAR_CONTACT"),
+            "the whole note never reached the row that has room for it:\n{frame}"
+        );
+        // A refusal outranks it: an operator who has just been refused needs
+        // the reason, not a description of the row they are standing on.
+        press(&mut client, KeyCode::Up);
+        press(&mut client, KeyCode::Char(' '));
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("alpaca needs an Alpaca credential"), "{body}");
+    }
+
+    #[test]
     fn the_news_card_renders_armed_at_120x36() {
         let mut client = armed();
         on_news(&mut client);
@@ -1858,6 +1983,28 @@ mod news {
         press(&mut client, KeyCode::Down);
         press(&mut client, KeyCode::Down);
         press(&mut client, KeyCode::Char(' '));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn a_catalog_taller_than_the_card_renders_at_120x36() {
+        let mut news = payload();
+        news.catalog.push(atlas::model::NewsSource {
+            name: Some("newswire".into()),
+            tier: Some("wide".into()),
+            available: Some(true),
+            ..Default::default()
+        });
+        let mut client = armed_with(news);
+        on_news(&mut client);
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn a_checked_save_in_flight_renders_at_120x36() {
+        let mut client = armed();
+        on_news(&mut client);
+        press(&mut client, KeyCode::Char('v'));
         insta::assert_snapshot!(client.frame(120, 36));
     }
 

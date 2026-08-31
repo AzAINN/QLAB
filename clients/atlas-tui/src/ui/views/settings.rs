@@ -255,7 +255,11 @@ impl Card {
             // The pane-level line the cards inherited, kept whole on the two
             // cards it was always about.
             (false, Card::Desk) => "read-only — cannot switch the desk",
-            (false, Card::News) => "read-only — cannot change this desk",
+            // What this card changes is what the desk *reads*, which is not
+            // what it can do — and the rule has 38 cells at this width, which
+            // is why the sentence is this one rather than the longer one that
+            // says "what this desk reads".
+            (false, Card::News) => "read-only — cannot change what is read",
             (false, _) => "read-only",
         }
     }
@@ -422,9 +426,17 @@ struct Draft {
     /// look*. Discarded by the next save, which is a request about a stack this
     /// answer may no longer describe.
     verified: Vec<NewsMember>,
-    /// Whether a save is in flight. One request at a time, so a held key
-    /// cannot put two writes of the operator's `.env` on the wire.
-    sending: bool,
+    /// The request in flight, if there is one, and whether it asked for a
+    /// check.
+    ///
+    /// One request at a time, so a held key cannot put two writes of the
+    /// operator's `.env` on the wire — and the payload is what the card draws
+    /// while it waits. `Some(false)` and `Some(true)` are two different waits:
+    /// a save is one round trip, and a check is one live window per source,
+    /// which the owner's own catalog puts at 43–75s for `gdelt` alone. A card
+    /// that drew the same sentence for both would leave an operator watching a
+    /// still frame for minutes with nothing saying why.
+    sending: Option<bool>,
     /// What this card, or the owner, last said about a change. Retired by the
     /// next keystroke, like the switcher's note.
     note: Option<String>,
@@ -1012,7 +1024,10 @@ impl SettingsView {
         let Some(news) = store.news() else {
             return;
         };
-        let at = self.news.at.min(news.catalog.len().saturating_sub(1));
+        // The rows the last frame *drew*, not the catalog: a card too short
+        // for the whole of it stops the cursor at its last visible row, and a
+        // tick against a source nobody can see is a change nobody chose.
+        let at = self.news.at.min(self.news_rows.get().saturating_sub(1));
         self.news.at = at;
         let Some(source) = news.catalog.get(at) else {
             return;
@@ -1079,7 +1094,12 @@ impl SettingsView {
         };
         // One request at a time. The route writes the operator's `.env`, and a
         // held key would put two of those on the wire for one decision.
-        if self.news.sending {
+        //
+        // Refused out loud. A checked save runs for minutes, so this is the
+        // guard an operator is most likely to hit — and a key that silently
+        // did nothing there reads as a dead card rather than as a busy one.
+        if self.news.sending.is_some() {
+            self.news.note = Some("one request at a time — still asking".to_string());
             return None;
         }
         let providers = self.picked(news);
@@ -1090,14 +1110,14 @@ impl SettingsView {
             self.news.note = Some("edgar needs a contact — press c".to_string());
             return None;
         }
-        self.news.sending = true;
+        self.news.sending = Some(verify);
         // The last check described the last request. Kept on screen through
         // one it no longer describes, it would be a verdict about a stack
         // nobody sent.
         self.news.verified.clear();
         Some(Command::NewsSettings {
             providers,
-            contact: self.news.contact.clone(),
+            contact: self.news.contact.clone().map(cmd::Contact::new),
             verify,
             // The lane this card is drawing, which is the lane the answer in
             // front of the operator is about. The route defaults it to the
@@ -1273,7 +1293,7 @@ impl SettingsView {
         // toast rather than by this card — it is a broken request rather than
         // a decision about the stack — but a card still saying "asking the
         // owner…" over one would read as a client that had hung.
-        self.news.sending = false;
+        self.news.sending = None;
         match outcome {
             // The owner's answer replaces the draft wholesale, and the refetch
             // behind it is what the card then draws. A draft left standing
@@ -1581,6 +1601,7 @@ impl SettingsView {
             &self.news.verified,
             (at == Some(Card::News)).then_some(self.news.at),
             self.news.note.as_deref(),
+            self.news.sending,
             self.edited(store),
         );
         self.news_rows.set(drawn);
@@ -2218,7 +2239,7 @@ impl SettingsView {
     /// The card without a draft over it. Every rule on it is the owner's, and
     /// in this build there is nothing that could hold a different answer.
     fn draw_news(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
-        news_card(f, area, store, at, None, &[], None, None, false);
+        news_card(f, area, store, at, None, &[], None, None, None, false);
     }
 
     fn focused(&self, _store: &Store) -> Option<Card> {
@@ -2347,6 +2368,7 @@ fn news_card(
     verified: &[NewsMember],
     cursor: Option<usize>,
     note: Option<&str>,
+    sending: Option<bool>,
     edited: bool,
 ) -> usize {
     let t = theme();
@@ -2360,7 +2382,11 @@ fn news_card(
             // Not "this desk reads nothing": the payload's own `configured`
             // says that, and it has not arrived. The two are a desk nobody set
             // up and a route nobody has answered yet.
-            vec![absent("the owner has not said what this desk reads")],
+            // One line at the card's own width. Wrapped, the continuation
+            // landed unindented beside DESK's value column and read as part
+            // of *that* card's rows — and this is the state every desk is in
+            // until the first fetch answers.
+            vec![absent("nothing has said what this desk reads")],
         );
         return 0;
     };
@@ -2390,8 +2416,28 @@ fn news_card(
             t.text_primary,
         ),
     ];
+    // **How many sources this card can actually draw**, with the note row
+    // reserved before anything is laid out rather than after.
+    //
+    // The rows above are fixed ([`NEWS_TOP`] names them), the note row is one,
+    // and the block reserves its own rule — so a card of `H` rows holds `H-5`
+    // sources. Counting the catalog instead was the bug this replaces twice
+    // over: a sixth entry pushed the note row (which is where every refusal
+    // lands) off the bottom, and it let the cursor and the space bar address a
+    // row no click rectangle covered, so the keyboard and the mouse disagreed
+    // about what the catalog was.
+    let budget = (area.height as usize).saturating_sub(5);
+    let (shown, hidden) = match news.catalog.len() <= budget {
+        true => (news.catalog.len(), 0),
+        // The marker costs a row and is reserved *before* anything is dropped,
+        // which is the reservation `draw_models` makes for the same reason.
+        false => {
+            let shown = budget.saturating_sub(1);
+            (shown, news.catalog.len() - shown)
+        }
+    };
     let room = (area.width as usize).saturating_sub(NOTE_X);
-    for (i, source) in news.catalog.iter().enumerate() {
+    for (i, source) in news.catalog.iter().enumerate().take(shown) {
         rows.push(source_row(
             source,
             &ticked,
@@ -2401,28 +2447,120 @@ fn news_card(
             room,
         ));
     }
-    // The last row is the note's, whether or not there is one: a card that grew
-    // a row when it had something to say would move every row above it, and the
-    // cursor with them.
-    rows.push(match note {
-        Some(said) => Line::from(Span::styled(
-            format!(" {}", format::bounded(said, SAID_MAX)),
-            Style::default()
-                .fg(t.warning)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        )),
-        None => Line::from(""),
-    });
+    if hidden > 0 {
+        rows.push(Line::from(Span::styled(
+            format!(" ▾ {hidden} more"),
+            Style::default().fg(t.text_dim),
+        )));
+    }
+    // The last row is the note's, whether or not there is one to put in it: a
+    // card that grew a row when it had something to say would move every row
+    // above it, and the cursor and the click rectangles with them.
+    //
+    // Three things can claim it, in the operator's own order. A refusal or a
+    // local message outranks everything — it is the answer to the key that was
+    // just pressed. A request in flight comes next, and names its own cost,
+    // because a checked save runs for minutes. And with neither, the row
+    // carries the **focused source's own note, whole**: the column beside a
+    // row is fifteen cells at this width, which is exactly where
+    // `needs QLAB_EDGAR_CONTACT` and a verify detail get cut, and those are
+    // the two strings an operator acts on.
+    let wide = (area.width as usize).saturating_sub(2);
+    rows.push(
+        match (note, sending, cursor.and_then(|at| news.catalog.get(at))) {
+            (Some(said), _, _) => Line::from(Span::styled(
+                format!(" {}", to_room(&format::bounded(said, SAID_MAX), wide)),
+                Style::default()
+                    .fg(t.warning)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )),
+            (None, Some(checking), _) => Line::from(Span::styled(
+                format!(
+                    " {}",
+                    to_room(
+                        match checking {
+                            // The cost, not just the wait. A check is one live
+                            // fetch per source and the owner's catalog puts
+                            // `gdelt` alone at 43–75s of it, so a line that said
+                            // only "asking" would leave an operator watching a
+                            // still frame with nothing saying why.
+                            true => "reading one window per source… minutes",
+                            false => "asking the owner…",
+                        },
+                        wide,
+                    )
+                ),
+                Style::default().fg(t.accent),
+            )),
+            (None, None, Some(source)) => Line::from(Span::styled(
+                format!(" {}", to_room(&source_note(source, news, verified).0, wide)),
+                Style::default().fg(t.text_dim),
+            )),
+            (None, None, None) => Line::from(""),
+        },
+    );
     card(f, area, Card::News, title, at, rows);
-    news.catalog.len()
+    shown
+}
+
+/// What one source has to say for itself, and whether it is a problem.
+///
+/// **Four facts in one column, in the operator's own order.** What the source
+/// is *waiting for* outranks what a check just *found*, which outranks what
+/// the desk's own window last *did*, which outranks what it *costs* — a source
+/// the desk cannot read at all is not the place to print its price, and a
+/// verify the operator just asked for is newer than the window's last outcome.
+///
+/// Split out of the row because two surfaces draw it: the fifteen-cell column
+/// beside the row, and the full-width line under the catalog that carries the
+/// focused row's copy whole. Two derivations of "what is wrong with this
+/// source" is two chances for one of them to be the one that drifted.
+///
+/// The `bool` is *a problem*, not *unavailable*: a `partial:` flag on a source
+/// that answered is a fact about a feed rather than a warning about the desk,
+/// and toning it as one would train an operator to read past the rows that are.
+fn source_note(
+    source: &NewsSource,
+    news: &NewsSettings,
+    verified: &[NewsMember],
+) -> (String, bool) {
+    let name = or_missing(source.name.as_ref());
+    // `Some(false)` only. A source nothing has answered about is not one the
+    // desk has refused.
+    //
+    // The second half is the one thing this client can tell the owner has not
+    // been given: edgar's contact. The owner reports the *want* (`needs`) and
+    // separately whether one is stored, and a row that printed a cost over an
+    // unmet requirement would leave the operator ticking a source that cannot
+    // be saved.
+    let wanting = source.available == Some(false)
+        || (name == EDGAR
+            && news.edgar_contact_set != Some(true)
+            && format::text(source.needs.as_ref()).is_some());
+    if wanting {
+        return (
+            format::text(source.needs.as_ref())
+                .map(|needs| format!("needs {needs}"))
+                .unwrap_or_else(|| "the desk cannot read it".to_string()),
+            true,
+        );
+    }
+    if let Some(member) = verified.iter().find(|member| member.name == name) {
+        return member.said();
+    }
+    if let Some(outcome) = news.outcomes.get(&name) {
+        return (outcome.clone(), false);
+    }
+    if name == EDGAR && news.edgar_contact_set == Some(true) {
+        return ("contact set".to_string(), false);
+    }
+    (
+        format::text(source.cost.as_ref()).unwrap_or("").to_string(),
+        false,
+    )
 }
 
 /// One source, as the owner describes it and as the draft has it.
-///
-/// The note is three different facts in one column, in the operator's own
-/// order: what the source is *waiting for* outranks what it last *did*, which
-/// outranks what it *costs* — a source the desk cannot read at all is not the
-/// place to print its price.
 #[allow(clippy::too_many_arguments)]
 fn source_row(
     source: &NewsSource,
@@ -2435,45 +2573,8 @@ fn source_row(
     let t = theme();
     let name = or_missing(source.name.as_ref());
     let held = ticked.contains(&name);
-    // `Some(false)` only. A source nothing has answered about is not one the
-    // desk has refused, and toning it as a problem would train an operator to
-    // read past the row that is one.
-    //
-    // The second half is the one thing this client can tell the owner has not
-    // been given: edgar's contact. The owner reports the *want* (`needs`) and
-    // separately whether one is stored, and a row that printed a cost over an
-    // unmet requirement would leave the operator ticking a source that cannot
-    // be saved.
-    let wanting = source.available == Some(false)
-        || (name == EDGAR
-            && news.edgar_contact_set != Some(true)
-            && format::text(source.needs.as_ref()).is_some());
-    // What the owner found when the operator *asked it to look* outranks what
-    // the desk's own window last did: it is the newer answer and the one the
-    // key was pressed for. It carries its own verdict — a member can answer and
-    // still be degraded — so the tone comes from the member rather than from
-    // any flag beside it.
-    let checked = verified.iter().find(|member| member.name == name);
-    let (said, bad) = if wanting {
-        (
-            format::text(source.needs.as_ref())
-                .map(|needs| format!("needs {needs}"))
-                .unwrap_or_else(|| "the desk cannot read it".to_string()),
-            true,
-        )
-    } else if let Some(member) = checked {
-        member.said()
-    } else if let Some(outcome) = news.outcomes.get(&name) {
-        (outcome.clone(), false)
-    } else if name == EDGAR && news.edgar_contact_set == Some(true) {
-        ("contact set".to_string(), false)
-    } else {
-        (
-            format::text(source.cost.as_ref()).unwrap_or("").to_string(),
-            false,
-        )
-    };
-    let out = wanting;
+    let (said, out) = source_note(source, news, verified);
+    let bad = out;
     Line::from(vec![
         // A glyph and not only a colour, for the switcher's reason: on a
         // 256-colour terminal a highlight is a shade, and a shade is not an

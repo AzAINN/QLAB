@@ -224,14 +224,15 @@ pub enum Command {
     /// sources" is `["synthetic"]`, exactly as its wizard writes it.
     ///
     /// `contact` is an identity the SEC asks EDGAR callers to send rather than
-    /// a credential, so it is a `String` and not a `Secret`. It still lives in
-    /// exactly two places — the box it is typed into and this body — and
-    /// `Debug` on this variant is the reason it is named rather than quoted
-    /// anywhere the dispatcher can log.
+    /// a credential, so it is not a [`crate::secret::Secret`] and there is no
+    /// `expose` on it. It is still a newtype and not a `String`, for the one
+    /// reason [`Contact`] gives: this enum derives `Debug`, a derive prints
+    /// every field of every variant, and a claim that the value lives in two
+    /// places is not a claim while a `{:?}` anywhere can falsify it.
     #[cfg(feature = "operator")]
     NewsSettings {
         providers: Vec<String>,
-        contact: Option<String>,
+        contact: Option<Contact>,
         /// Whether to ask the owner to fetch one live window per member before
         /// reporting. Off by default: it is minutes with `gdelt` chosen.
         verify: bool,
@@ -247,6 +248,51 @@ pub enum Command {
     /// same way `Scope::Mode`'s value list is compiled into a glass build and
     /// never reached there.
     Backends,
+}
+
+/// An EDGAR contact on its way to the owner.
+///
+/// A newtype for exactly one reason, and it is the same reason
+/// [`crate::secret::Secret`] is one: `Command` derives `Debug`, a derive prints
+/// every field of every variant, and this variant's own documentation claims
+/// the contact lives in the box it was typed into and in the request body and
+/// nowhere else. A claim a `{:?}` on a `Command` could falsify — in a tracing
+/// line, a panic message, a toast — is not a claim, it is a hope. Nothing
+/// formats a `Command` today; the redaction is what keeps that from being the
+/// load-bearing half.
+///
+/// **Not a `Secret`, deliberately.** A contact is an identity a public archive
+/// is told, not a credential: it needs no `expose`, and `operator_gate`'s
+/// census of where plaintext credentials are readable stays a census of one
+/// file. `as_str` is the whole reader, and the module that puts a body on the
+/// wire is its whole caller — which this file may not name, by the same rule
+/// the header states: the pin is a plain text search, so even a comment here
+/// may not spell what is on the far side of the seam.
+///
+/// Gated with the command that carries it: the glass build has no route to
+/// send one to.
+#[cfg(feature = "operator")]
+#[derive(Clone, PartialEq, Eq)]
+pub struct Contact(String);
+
+#[cfg(feature = "operator")]
+impl Contact {
+    pub fn new(said: String) -> Self {
+        Self(said)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Hand-written, and that is the point of the type. A derive here would print
+/// the contact, and would do it from inside whatever holds a `Command`.
+#[cfg(feature = "operator")]
+impl std::fmt::Debug for Contact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Contact(<redacted>)")
+    }
 }
 
 /// What one `/model` line asks for.

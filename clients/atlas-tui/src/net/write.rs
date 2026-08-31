@@ -422,6 +422,24 @@ pub struct TestVerdict {
 /// margin a slow model needs to serialize its answer onto the bus.
 const ASK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// How long a **checked** news save may take.
+///
+/// A verify is one live fetch per member, and the owner's own catalog puts
+/// `gdelt` at 43–75s per request — five members at the bad end of that is over
+/// six minutes, which is longer than this waits. The bound is deliberate: past
+/// it, a wedged owner has to be reported rather than hung on, and the residual
+/// is that a worst-case five-source check can still come back as a failed
+/// write for a save that applied. What it buys is the common case, which the
+/// poller's eight seconds got wrong every time: the request gave up while the
+/// owner was still reading feeds, and this client reported a `.env` it had
+/// already written as a write that failed.
+///
+/// **Only the checked save takes it.** A plain save is one `.env` write with
+/// no network of its own, so it keeps the eight-second failure signal — five
+/// minutes of silence for that one would hide a dead owner behind a card that
+/// looks busy.
+const NEWS_VERIFY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub struct WriteClient {
     base: String,
     client: reqwest::Client,
@@ -875,7 +893,17 @@ impl WriteClient {
         if let Some(contact) = contact {
             body["edgar_contact"] = json!(contact);
         }
-        match self.post("/api/news/settings", body).await {
+        // The deadline follows the question, not the route: see
+        // [`NEWS_VERIFY_DEADLINE`] for why a check gets minutes and a plain
+        // save keeps the eight seconds that say the owner is gone.
+        let answered = match verify {
+            true => {
+                self.post_within("/api/news/settings", body, NEWS_VERIFY_DEADLINE)
+                    .await
+            }
+            false => self.post("/api/news/settings", body).await,
+        };
+        match answered {
             Ok(said) => Ok(News::Applied {
                 // The owner's own resolution, read off the answer. A 200 with
                 // no stack is not a contract failure worth refusing the whole

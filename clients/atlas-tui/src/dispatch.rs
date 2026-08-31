@@ -23,8 +23,8 @@ mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
     use crate::net::write::{
-        Board, Booked, Choice, Execution, Login, Mandate, News, Proposed, Start, WriteClient,
-        WriteError,
+        Board, Booked, Choice, Execution, Login, Mandate, News, Proposed, Rights, Start,
+        WriteClient, WriteError,
     };
     use crate::store::Posture;
     use std::sync::Arc;
@@ -210,6 +210,13 @@ mod armed {
                 crate::cmd::MethodChange::Cap(None) => {
                     "clear the holdings cap this desk was given".to_string()
                 }
+            },
+            // The right, in the operator's own terms, and which way it was
+            // being moved: a failed write that said only "web" would leave an
+            // operator unable to tell which half of a toggle did not land.
+            Command::SetRight { field, value } => match value {
+                true => format!("grant atlas {}", field.as_str()),
+                false => format!("withdraw atlas {}", field.as_str()),
             },
             // The lane, and only the lane. The baseline the route runs beside
             // it is the owner's own decision, not something that was asked
@@ -577,6 +584,35 @@ mod armed {
                     said: err.to_string(),
                 },
             },
+            // Not a governance decision either, and it books nothing: it
+            // chooses what Atlas is *offered*. Two of the three are not even
+            // enforced — `web` and `build` shape the tool grant a chat or a
+            // hand-off is launched with, and the owner refuses neither — so
+            // this moves no plan, no approval and no posture. The owner owns
+            // the file and its shape; the field travels whole and its own
+            // answer comes back either way.
+            Command::SetRight { field, value } => {
+                match client.set_right(field.as_str(), value).await {
+                    Ok(Rights::Applied(rights)) => Wrote::RightSet {
+                        field: field.as_str(),
+                        rights,
+                    },
+                    // A considered no, not a broken request: the owner's
+                    // sentence names the rights this desk does have.
+                    Ok(Rights::Rejected(said)) => Wrote::RightRefused {
+                        field: field.as_str(),
+                        said,
+                    },
+                    // Its own failure variant, carrying the field. See
+                    // `Wrote::RightFailed`: the card retires its wait on this
+                    // outcome, and a generic failure would retire it over some
+                    // other key's broken request.
+                    Err(err) => Wrote::RightFailed {
+                        field: field.as_str(),
+                        said: err.to_string(),
+                    },
+                }
+            }
             // A research run, and the only write here that spends the owner's
             // CPU rather than touching the book. Governance is not involved
             // and cannot be: the route fits a risk model and writes one

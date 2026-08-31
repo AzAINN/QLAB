@@ -87,7 +87,8 @@ use crate::fx::FlashTracker;
 #[cfg(feature = "operator")]
 use crate::model::MethodEntry;
 use crate::model::{
-    Constraints, DeskMode, LlmConfig, LlmSurface, MethodSettings, NewsSettings, NewsSource, System,
+    Constraints, DeskMode, LlmConfig, LlmSurface, MethodSettings, NewsSettings, NewsSource,
+    RightsFlags, System,
 };
 use crate::store::Store;
 use crate::theme::{palette, theme};
@@ -227,6 +228,25 @@ const NOTE_X: usize = 3 + 4 + 8 + 10;
 #[cfg(feature = "operator")]
 const NEWS_TOP: u16 = 3;
 
+/// Where the first rights row is drawn inside the MODELS card: the header, then
+/// the four rows the reading and its stamp take.
+///
+/// A constant rather than a count the card returns, because these three rows
+/// are inside [`MODELS_MIN_H`]: a card too short for them draws a refusal and
+/// no rows at all, which is the one state the caller checks for.
+///
+/// Gated with the click it answers: the glass build draws the rows and records
+/// no rectangle over them, because there is nothing a pointer could press.
+#[cfg(feature = "operator")]
+const RIGHTS_TOP: u16 = 5;
+
+/// How many rights the owner has. Three, and the model is what says so — a
+/// second list here is how a reader and a writer come to disagree about a key.
+///
+/// Ungated: the glass build draws the same three rows and simply cannot press
+/// any of them.
+const RIGHTS_ROWS: usize = RightsFlags::FIELDS.len();
+
 /// The word a login that would destroy another one asks for.
 ///
 /// Static, unlike the execution modal's six characters of a `targets_hash`.
@@ -305,7 +325,11 @@ impl Card {
             // names rather than wrapping.
             (true, Card::Desk) => "a login · t test · m switch lane",
             (true, Card::News) => "space · c contact · s save · v verify",
-            (true, Card::Models) => "m switches a model",
+            // Two keys at the card's own width. The rule has 38 cells here and
+            // a `Paragraph` clips it from the right, so the longer sentence
+            // ("m switches a model") lost the key that grants a right — which
+            // is the one key on this card that changes the desk.
+            (true, Card::Models) => "m model · ↑↓ space grants a right",
             // Two keys and two words, at the card's own width. `k` rather than
             // `c`, which the NEWS card already claims one card up, and rather
             // than `h` — the pane has no vim walk to collide with, but a key
@@ -325,6 +349,10 @@ impl Card {
             // not what it may book — and the rule has 38 cells here, which is
             // what picks this sentence over the longer one.
             (false, Card::Method) => "read-only — cannot change the method",
+            // What this card changes is what Atlas is *offered*, which is not
+            // what the owner will accept — and the rule has 38 cells here,
+            // which is what picks this sentence over a longer one.
+            (false, Card::Models) => "read-only — cannot grant a right",
             (false, _) => "read-only",
         }
     }
@@ -345,7 +373,7 @@ impl Card {
         match self {
             Card::Desk => &[("switch", 'm')],
             Card::News => &[("contact", 'c'), ("save", 's'), ("verify", 'v')],
-            Card::Models => &[("switches", 'm')],
+            Card::Models => &[("model", 'm')],
             Card::Method => &[("method", 'm'), ("cap", 'k')],
             _ => &[],
         }
@@ -400,6 +428,10 @@ pub struct SettingsView {
     /// request in flight, and whatever was last said back.
     #[cfg(feature = "operator")]
     method: MethodDraft,
+    /// Which right the cursor is on, the one toggle in flight, and whatever
+    /// was last said back.
+    #[cfg(feature = "operator")]
+    rights: RightsDraft,
     /// How many source rows the last frame drew, published the way `area` is:
     /// the cursor is clamped against the catalog that is on screen, and the
     /// catalog moves under it every time the owner answers.
@@ -434,7 +466,11 @@ pub struct SettingsView {
 #[derive(Default)]
 struct Hits {
     headers: Vec<(Rect, Card)>,
-    rows: Vec<(Rect, usize)>,
+    /// The card is carried beside the index because two cards now draw rows a
+    /// click may press, and the index alone is ambiguous between them: a
+    /// rectangle recorded by MODELS and read as NEWS' would tick a news source
+    /// from a click on a right.
+    rows: Vec<(Rect, Card, usize)>,
     words: Vec<(Rect, Card, char)>,
 }
 
@@ -442,7 +478,7 @@ struct Hits {
 #[cfg(feature = "operator")]
 enum Hit {
     Header(Card),
-    Row(usize),
+    Row(Card, usize),
     Word(Card, char),
 }
 
@@ -459,8 +495,8 @@ impl Hits {
         if let Some((_, card, key)) = self.words.iter().find(|(r, _, _)| over(r)) {
             return Some(Hit::Word(*card, *key));
         }
-        if let Some((_, at)) = self.rows.iter().find(|(r, _)| over(r)) {
-            return Some(Hit::Row(*at));
+        if let Some((_, card, at)) = self.rows.iter().find(|(r, _, _)| over(r)) {
+            return Some(Hit::Row(*card, *at));
         }
         self.headers
             .iter()
@@ -507,6 +543,32 @@ struct Draft {
     /// that drew the same sentence for both would leave an operator watching a
     /// still frame for minutes with nothing saying why.
     sending: Option<bool>,
+    /// What this card, or the owner, last said about a change. Retired by the
+    /// next keystroke, like the switcher's note.
+    note: Option<String>,
+}
+
+/// What the MODELS card is holding while the owner is asked about a right.
+///
+/// **No draft of the rights themselves.** Nothing here is staged: a right is
+/// sent the moment `Space` is pressed on it, so there is nothing for `Esc` to
+/// discard and nothing that can disagree with what the desk reports. The card
+/// draws the owner's own answer and only the owner's, which is what lets a row
+/// say what Atlas is being offered rather than what somebody pressed.
+#[cfg(feature = "operator")]
+#[derive(Default)]
+struct RightsDraft {
+    /// Which of the three rows the cursor is on.
+    at: usize,
+    /// The field of the toggle in flight, if there is one.
+    ///
+    /// The **field**, not a bool, so the wait is retired by its own answer and
+    /// never by another key's broken request — the distinction
+    /// `bus::Wrote::RightFailed` exists for. One at a time, so a held key
+    /// cannot put two `desk.rights_changed` rows on the owner's audit bus for
+    /// one decision — and refused *out loud*, because a key that silently did
+    /// nothing reads as a dead card rather than a busy one.
+    sending: Option<&'static str>,
     /// What this card, or the owner, last said about a change. Retired by the
     /// next keystroke, like the switcher's note.
     note: Option<String>,
@@ -642,7 +704,7 @@ impl View for SettingsView {
         ])
         .split(cols[1]);
         draw_system(f, right[0], store, at);
-        draw_models(f, right[1], store, at);
+        self.draw_models(f, right[1], store, at);
         draw_universe(f, right[2], store, at);
 
         // Last, and over every rect the cards were actually given: what a
@@ -975,7 +1037,17 @@ impl SettingsView {
                 self.method.note = None;
                 None
             }
-            Hit::Row(at) => {
+            // A click on a rights row does what `Space` on it does, for the
+            // reason a news row does: a click that only moved a cursor would
+            // leave the operator reaching for the keyboard to finish what they
+            // started. It is the same `Command` through the same producer, so
+            // a pointer can never grant what a key could not.
+            Hit::Row(Card::Models, at) => {
+                self.focus.set(Card::Models);
+                self.rights.at = at;
+                self.grant(store)
+            }
+            Hit::Row(_, at) => {
                 self.focus.set(Card::News);
                 self.news.at = at;
                 self.pick(store);
@@ -1126,6 +1198,12 @@ impl SettingsView {
             // build a stack out of four keystrokes instead of four writes of
             // their `.env`.
             KeyCode::Char(' ') if self.focus.get() == Card::News => self.pick(store),
+            // The one key on this card that reaches the owner. It is sent
+            // immediately, for the reason the method picker's Enter is: the
+            // owner writes the file and records one audit row per changed
+            // field, so there is nothing to stage and nothing a second key
+            // could confirm.
+            KeyCode::Char(' ') if self.focus.get() == Card::Models => return self.grant(store),
             KeyCode::Char('c') if self.focus.get() == Card::News => {
                 self.news.note = None;
                 self.news.contact_box = Some(self.news.contact.clone().unwrap_or_default());
@@ -1150,6 +1228,7 @@ impl SettingsView {
     fn step(&mut self, by: isize) {
         self.news.note = None;
         self.method.note = None;
+        self.rights.note = None;
         let last = self.news_rows.get().saturating_sub(1);
         if self.focus.get() == Card::News && self.news_rows.get() > 0 {
             let at = self.news.at.min(last);
@@ -1163,6 +1242,28 @@ impl SettingsView {
                 return;
             }
         }
+        // The same walk over the three rights, and the same wall at each end:
+        // the cursor stops rather than wrapping, and the arrow that would pass
+        // the end walks out of the card instead. A row cursor an operator
+        // cannot leave would put UNIVERSE beyond reach of the arrows.
+        //
+        // Not gated on the rows having been *drawn*, unlike NEWS': the rights
+        // are three rows inside `MODELS_MIN_H` and a card too short for them
+        // draws a refusal, which is a state `grant` refuses out loud rather
+        // than one the cursor has to model.
+        if self.focus.get() == Card::Models {
+            let last = RIGHTS_ROWS - 1;
+            let at = self.rights.at.min(last);
+            self.rights.at = at;
+            if by > 0 && at < last {
+                self.rights.at = at + 1;
+                return;
+            }
+            if by < 0 && at > 0 {
+                self.rights.at = at - 1;
+                return;
+            }
+        }
         self.walk(by);
         if self.focus.get() == Card::News {
             self.news.at = match by > 0 {
@@ -1170,6 +1271,59 @@ impl SettingsView {
                 false => self.news_rows.get().saturating_sub(1),
             };
         }
+        // Entering MODELS puts the cursor on the edge it was entered from, so
+        // a held arrow reads as one continuous walk rather than as a jump to
+        // wherever it was last left. The same rule NEWS states one card up.
+        if self.focus.get() == Card::Models {
+            self.rights.at = match by > 0 {
+                true => 0,
+                false => RIGHTS_ROWS - 1,
+            };
+        }
+    }
+
+    /// Grant or withdraw the right the cursor is on, and send it.
+    ///
+    /// **Nothing is inverted from a value this client made up.** A right the
+    /// owner has not named yet has no opposite, so the key refuses out loud
+    /// rather than sending `true` for it — a toggle computed from a default
+    /// would be this client deciding what the desk's rights are and then
+    /// writing that decision to the owner's file.
+    fn grant(&mut self, store: &Store) -> Option<Command> {
+        self.rights.note = None;
+        if let Some(field) = self.rights.sending {
+            // Out loud, and it names which one: two rights toggled in quick
+            // succession would otherwise read as the second key doing nothing.
+            self.rights.note = Some(format!("{ASKING} about {field}"));
+            return None;
+        }
+        let at = self.rights.at.min(RIGHTS_ROWS - 1);
+        self.rights.at = at;
+        let right = cmd::Right::at(at)?;
+        let Some(rights) = store.rights() else {
+            // Said rather than swallowed. Nothing has answered, so there is no
+            // value to invert and no request this client may compose — and a
+            // key that silently did nothing reads as a dead card.
+            self.rights.note = Some(format!("nothing has said where {} stands", right.as_str()));
+            return None;
+        };
+        if let Some(said) = &rights.error {
+            // The owner could not read the file it would be writing into.
+            // Refused here rather than sent, because the change would land on
+            // top of whatever is wrong with it — and the sentence already on
+            // the card is the remedy.
+            self.rights.note = Some(format::bounded(said, SAID_MAX));
+            return None;
+        }
+        let Some(held) = rights.rights.get(right.as_str()) else {
+            self.rights.note = Some(format!("nothing has said where {} stands", right.as_str()));
+            return None;
+        };
+        self.rights.sending = Some(right.as_str());
+        Some(Command::SetRight {
+            field: right,
+            value: !held,
+        })
     }
 
     /// Tick or untick the row the cursor is on, in the draft and nowhere else.
@@ -1452,6 +1606,39 @@ impl SettingsView {
     /// into it now.
     pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
         use crate::bus::Wrote;
+        // The rights wait is retired **before** the blanket retirement below
+        // and only by its own three outcomes, each matched on the field it
+        // carries. The card is one keystroke from a second write, and a wait
+        // retired by an unrelated broken request would re-arm `Space` over a
+        // toggle still in flight — one decision, two audit rows. `field` is
+        // what makes the match structural rather than a comparison of prose.
+        match outcome {
+            Wrote::RightSet { field, .. } if self.rights.sending == Some(*field) => {
+                self.rights.sending = None;
+                // Nothing is copied onto the card: the refetch behind this
+                // outcome is what the rows then draw, and a receipt composed
+                // here would be a second account of a file only the owner read.
+                self.rights.note = None;
+                return;
+            }
+            // Not confirmable and not a broken request: the owner considered
+            // the change and declined it, so its sentence stands on the card
+            // beside the row that is still where it was.
+            Wrote::RightRefused { field, said } if self.rights.sending == Some(*field) => {
+                self.rights.sending = None;
+                self.rights.note = Some(format::bounded(said, SAID_MAX));
+                return;
+            }
+            // A request that never landed. The card must not stay waiting over
+            // one — a key that refuses forever after a timeout is a client that
+            // looks broken — and the sentence says which right it was about.
+            Wrote::RightFailed { field, said } if self.rights.sending == Some(*field) => {
+                self.rights.sending = None;
+                self.rights.note = Some(format::bounded(said, SAID_MAX));
+                return;
+            }
+            _ => {}
+        }
         // Any answer at all retires both waits. A failure is carried by the
         // toast rather than by these cards — it is a broken request rather than
         // a decision about the stack — but a card still saying "asking the
@@ -2014,8 +2201,48 @@ impl SettingsView {
             if y + 1 >= area.y + area.height {
                 break;
             }
-            hits.rows
-                .push((Rect::new(area.x, y, area.width, 1), row as usize));
+            hits.rows.push((
+                Rect::new(area.x, y, area.width, 1),
+                Card::News,
+                row as usize,
+            ));
+        }
+    }
+
+    /// The MODELS card, with the cursor over its rights only while it is the
+    /// card the keys are aimed at.
+    ///
+    /// The rectangles are recorded from the constant rather than from what the
+    /// card returned, because these three rows are inside [`MODELS_MIN_H`]: a
+    /// card that had no room for them drew a refusal instead and returns no
+    /// rows at all, which the height check below is what rules out.
+    fn draw_models(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+        let cursor = (at == Some(Card::Models)).then_some(self.rights.at);
+        // The wait is a note like every refusal: a card that drew nothing while
+        // a toggle was in flight reads as a key that did nothing, which is the
+        // silent-key shape invariant 4 exists to close.
+        let waiting = self
+            .rights
+            .sending
+            .map(|field| format!("{ASKING} about {field}"));
+        let note = self.rights.note.as_deref().or(waiting.as_deref());
+        if !draw_models(f, area, store, at, cursor, note) || at.is_none() {
+            return;
+        }
+        let mut hits = self.hits.borrow_mut();
+        for row in 0..RIGHTS_ROWS as u16 {
+            let y = area.y + RIGHTS_TOP + row;
+            // Never past the rule the block reserves, for the reason NEWS
+            // states: a rectangle over a row the card had no room to draw is a
+            // click on something that is not there.
+            if y + 1 >= area.y + area.height {
+                break;
+            }
+            hits.rows.push((
+                Rect::new(area.x, y, area.width, 1),
+                Card::Models,
+                row as usize,
+            ));
         }
     }
 
@@ -2857,6 +3084,13 @@ impl SettingsView {
         news_card(f, area, store, at, None, &[], None, None, None, false);
     }
 
+    /// The MODELS card with the rights drawn and no cursor over them. The rows
+    /// are the owner's answer and this build can post nothing, so there is no
+    /// row to point at and no click to record.
+    fn draw_models(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+        let _ = draw_models(f, area, store, at, None, None);
+    }
+
     fn focused(&self, _store: &Store) -> Option<Card> {
         None
     }
@@ -2889,16 +3123,26 @@ const POLICY_H: u16 = 10;
 const METHOD_H: u16 = 9;
 /// Header, seven rows, and the rule.
 const SYSTEM_H: u16 = 9;
-/// Header, four rows, four of slack, and the rule.
+/// Header, eight rows, one of slack, and the rule.
 ///
-/// The slack is for the availability reasons, which are the owner's sentences
-/// rather than values. "ollama is running at 127.0.0.1:11434 but no models are
-/// pulled — pull one with `ollama pull granite3.3:8b`" is three wrapped rows in
-/// a half-width card, and the remedy is the last third of it. A card sized for
-/// the four fixed rows alone would clip exactly the state where the sentence is
-/// the whole message, which is the class of refusal this pane spends rows to
-/// avoid.
-const MODELS_H: u16 = 10;
+/// **Eleven is every row the right column has**, not what the card would like.
+/// SYSTEM is nine, UNIVERSE's floor is four, and the column is twenty-four at
+/// the baseline — so the rights arrived on the one spare row this pane had, and
+/// took UNIVERSE down to the floor it states. A twelfth row here is not
+/// available at 120x36 without pushing a card below its own floor, which is why
+/// the rights are rows on this card rather than a card of their own: a separate
+/// block would owe a header and a rule as well, and there are no two rows to
+/// spend on chrome for three switches.
+///
+/// Five rows of slack, and the rights take four of them: three switches and
+/// the line that says which of the three the owner actually enforces. The fifth
+/// is what the availability reasons and the hand-off note share, and they are
+/// counted rather than clipped: "ollama is running at 127.0.0.1:11434 but no
+/// models are pulled — pull one with `ollama pull granite3.3:8b`" is three
+/// wrapped rows in a half-width card and the remedy is the last third of it, so
+/// a sentence that does not fit whole is replaced by the count that says how
+/// many are hidden.
+const MODELS_H: u16 = 11;
 /// The card's own floor: the header, the four rows that may not be split from
 /// one another, and the rule the block reserves.
 ///
@@ -2913,6 +3157,13 @@ const MODELS_H: u16 = 10;
 /// does below [`FORM_MIN_H`], and the stamp moved to the top so that even a
 /// clipped draw cannot show a tone the stamp has not already dated. Both, not
 /// either: the ordering is what holds if a later row is ever added below.
+///
+/// **The rights are not inside it**, and that is deliberate: the floor is what
+/// the *reading* needs, and a card that refused outright because three switches
+/// would not fit would take the reasoner row and its stamp off a 30-row
+/// terminal to make room for a section that is not the card's first answer. So
+/// the rights are the first claim on the slack instead, all four rows or none,
+/// and a column too short for them is told what it is missing.
 const MODELS_MIN_H: u16 = 6;
 /// Header, the count, the symbol list, and the rule. A floor rather than a
 /// fixed height: this card is the one that takes the column's remainder.
@@ -3852,7 +4103,14 @@ fn availability(flag: Option<bool>) -> String {
 /// owner's own route, and D4 brings the keys that reach it; until then this
 /// pane claims none, so a key pressed on it falls through to whoever claims it
 /// next.
-fn draw_models(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+fn draw_models(
+    f: &mut Frame,
+    area: Rect,
+    store: &Store,
+    at: Option<Card>,
+    cursor: Option<usize>,
+    note: Option<&str>,
+) -> bool {
     let t = theme();
     let Some(llm) = store.llm() else {
         card(
@@ -3863,16 +4121,24 @@ fn draw_models(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
             at,
             vec![absent("the owner sent no model routing")],
         );
-        return;
+        return false;
     };
     // The value column this card actually has, rather than the one it has at
     // the baseline. A composed value wider than this wraps onto an unindented
     // second row and spends a slack row the reasons need.
     let room = (area.width as usize).saturating_sub(LABEL_W + 1);
-    let reasons = unreachable_reasons(llm);
-    // A reason that exists is either shown whole or counted, and the count
-    // needs a row of its own.
-    let floor = MODELS_MIN_H + u16::from(!reasons.is_empty());
+    let inner_w = area.width.max(1) as usize;
+    let cost = |reason: &String| wrapped_rows(reason.chars().count() + 1, inner_w);
+    let mut notes = unreachable_reasons(llm);
+    // The hand-off asymmetry, and only where it is one: `/cli` and `/build`
+    // start the real Claude CLI, so a desk reasoning on anything else has two
+    // minds in it and the `build` row above says nothing about which one the
+    // key opens. Silent on a claude reasoner, where there is no distinction to
+    // draw.
+    let handoff = handoff_note(llm);
+    // A note that exists is either shown whole or counted, and the count needs
+    // a row of its own.
+    let floor = MODELS_MIN_H + u16::from(!notes.is_empty() || handoff.is_some());
     if area.height < floor {
         refuse(
             f,
@@ -3883,7 +4149,7 @@ fn draw_models(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
                 area.height
             ),
         );
-        return;
+        return false;
     }
     let mut rows = vec![
         // **First, and that is the point.** This row dates every tone under it,
@@ -3912,19 +4178,50 @@ fn draw_models(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
         ),
         surface_row("workforce", llm.workforce.as_ref(), llm, room),
     ];
+    // The rights take their four rows out of the slack, before the sentences
+    // and never instead of the reading: three switches drawn over a reasoner
+    // row this column had to drop would be a card that answered the *second*
+    // question and not the first.
+    //
+    // All four or none of them. Two rights and a cut qualifier is the one shape
+    // this section may not take — a right shown as granted, with the sentence
+    // that says the owner enforces only one of the three left off the bottom,
+    // reads as a gate the desk holds shut. So a column that cannot hold the
+    // section is told what it is missing, in the count this card already uses
+    // for everything it could not draw whole.
+    let mut budget = (area.height - MODELS_MIN_H) as usize;
+    let (rights, spent) = rights_rows(store, cursor, note, inner_w, budget);
+    let drawn = spent <= budget;
+    match drawn {
+        true => {
+            rows.extend(rights);
+            budget -= spent;
+        }
+        false => notes.insert(0, format!("▾ {RIGHTS_ROWS} rights need {spent} rows")),
+    }
     // Whole sentences or a count, never half of one: the remedy is the last
     // third of the owner's longest reason, so a clipped one is a fix an
     // operator cannot run. The marker costs a row, and it is reserved before
     // anything is dropped rather than after — `views::desk::fit` makes the same
     // reservation, for the same reason.
-    let mut budget = (area.height - MODELS_MIN_H) as usize;
-    let inner_w = area.width.max(1) as usize;
-    let cost = |reason: &String| wrapped_rows(reason.chars().count() + 1, inner_w);
-    if reasons.iter().map(cost).sum::<usize>() > budget {
+    // The hand-off note joins the queue last, and only when the sentences the
+    // *owner* wrote have room to spare. It is this client's own copy about a
+    // distinction that does not move, and a card with one row of slack and a
+    // down daemon would otherwise count both and draw neither — trading the
+    // remedy an operator can act on for a line that says the same thing on
+    // every desk.
+    if let Some(said) = handoff {
+        let spent: usize = notes.iter().map(cost).sum();
+        if spent + cost(&said) <= budget {
+            notes.push(said);
+        }
+    }
+    let room_for_marker = budget > 0;
+    if notes.iter().map(cost).sum::<usize>() > budget {
         budget = budget.saturating_sub(1);
     }
     let mut hidden = 0usize;
-    for reason in &reasons {
+    for reason in &notes {
         match cost(reason) <= budget {
             true => {
                 budget -= cost(reason);
@@ -3938,14 +4235,240 @@ fn draw_models(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
             false => hidden += 1,
         }
     }
-    if hidden > 0 {
+    // The guard is not decoration: the rights spend the slack ahead of the
+    // sentences, so unlike before there is a state with notes and no row left
+    // for the count — and a marker pushed into a row the card does not have is
+    // clipped by the `Paragraph` without a word.
+    if hidden > 0 && room_for_marker {
         rows.push(Line::from(Span::styled(
             format!(" ▾ {hidden} more"),
             Style::default().fg(t.text_dim),
         )));
     }
     card(f, area, Card::Models, "models", at, rows);
+    // Whether the three rows a click may press are on screen. Answered by the
+    // draw rather than derived from the constants by the caller, for the reason
+    // `record` states: a rectangle list built from what the layout *asked for*
+    // would answer about a frame the column's height refused.
+    drawn && !broken_rights(store)
 }
+
+/// Whether the owner could not read the rights file at all.
+///
+/// One reader for the two places that ask — the card, which puts the sentence
+/// where the switches would be, and the click map, which must record nothing
+/// over it.
+fn broken_rights(store: &Store) -> bool {
+    store.rights().is_some_and(|rights| rights.error.is_some())
+}
+
+/// The three authorities the operator lends Atlas, and one line saying how far
+/// any of it goes.
+///
+/// **Four rows inside [`MODELS_MIN_H`], never in the slack.** A right drawn as
+/// granted, with nothing beside it, reads as a gate the desk holds shut — and
+/// two of the three are not gates at all. So the sentence that says which one
+/// the owner enforces is as fixed as the rows it qualifies, and a column too
+/// short for both refuses the card rather than dropping the qualifier.
+///
+/// The rights the owner could not read are the one state where the rows
+/// themselves are dropped: a file this desk did not write is refused by the
+/// owner's reader with the remedy in the sentence, and three `--` rows over it
+/// would bury the one thing an operator can act on. Invariant 4.
+fn rights_rows(
+    store: &Store,
+    cursor: Option<usize>,
+    note: Option<&str>,
+    inner_w: usize,
+    slack: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let t = theme();
+    let Some(rights) = store.rights() else {
+        // Nothing has answered. The rows still draw — the card says which
+        // authorities exist whether or not the desk has named them — and the
+        // mark is the missing one rather than the owner's default, which would
+        // be this client asserting a desk state nobody confirmed.
+        return unanswered_rights(cursor, note, inner_w);
+    };
+    if let Some(said) = &rights.error {
+        // The owner's sentence, bounded like every other foreign text on this
+        // card, in the four rows the rights would have taken. Warning-toned:
+        // the desk is running on a rights file nobody can read, and what Atlas
+        // is actually being offered is unknown until it is fixed.
+        // Bounded to the rows this card actually has rather than to
+        // [`SAID_MAX`], and the METHOD card's warning states the reason: the
+        // guard is against foreign text running away, and what decides how much
+        // is *drawn* is the card's own budget. The reader's sentence carries
+        // the remedy in its last third, and 112 cells cuts it off mid-word on a
+        // card with five rows of slack to give it.
+        let said = to_room(said, slack.max(1) * inner_w - 1);
+        return (
+            vec![Line::from(Span::styled(
+                format!(" {said}"),
+                Style::default().fg(t.warning),
+            ))],
+            // One line, as many rows as it wraps to. It takes the section's
+            // place whole: there is nothing to say about three switches whose
+            // file cannot be read.
+            wrapped_rows(said.chars().count() + 1, inner_w),
+        );
+    }
+    let mut rows: Vec<Line<'static>> = RightsFlags::FIELDS
+        .iter()
+        .enumerate()
+        .map(|(at, field)| right_row(field, rights.rights.get(field), cursor == Some(at)))
+        .collect();
+    let (line, spent) = last_rights_line(note, inner_w);
+    rows.push(line);
+    (rows, RIGHTS_ROWS + spent)
+}
+
+/// The line under the three rows: the asymmetry, or whatever was last said
+/// about a change.
+///
+/// The note **replaces** the asymmetry rather than being drawn under it. The
+/// row is the one this card has, and a sentence that had to win a row from the
+/// availability reasons would be the first thing a short column dropped — which
+/// is the one thing a refusal must never be silent about.
+///
+/// Bounded to two rows rather than to [`SAID_MAX`] because that is what the
+/// card can actually give it: one row of its own and one out of the slack. The
+/// whole sentence is on the toast the same outcome raised.
+fn last_rights_line(note: Option<&str>, inner_w: usize) -> (Line<'static>, usize) {
+    let t = theme();
+    let Some(said) = note else {
+        return (
+            Line::from(Span::styled(
+                format!(" {ASYMMETRY}"),
+                // Dim: it qualifies the three rows above it rather than
+                // competing with them, and a warning colour on a desk nobody
+                // has narrowed would tone the default state as a problem.
+                Style::default().fg(t.text_dim),
+            )),
+            1,
+        );
+    };
+    let said = to_room(said, inner_w.saturating_mul(2).saturating_sub(1));
+    let rows = wrapped_rows(said.chars().count() + 1, inner_w);
+    (
+        Line::from(Span::styled(
+            format!(" {said}"),
+            Style::default()
+                .fg(t.warning)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )),
+        rows,
+    )
+}
+
+/// The rights rows before anything has answered, with the same line under them.
+fn unanswered_rights(
+    cursor: Option<usize>,
+    note: Option<&str>,
+    inner_w: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let mut rows: Vec<Line<'static>> = RightsFlags::FIELDS
+        .iter()
+        .enumerate()
+        .map(|(at, field)| right_row(field, None, cursor == Some(at)))
+        .collect();
+    let (line, spent) = last_rights_line(note, inner_w);
+    rows.push(line);
+    (rows, RIGHTS_ROWS + spent)
+}
+
+/// One right: the cursor mark, the name, where it stands, and what it shapes.
+///
+/// The tone is on the **state token alone**. What the right shapes is a fact
+/// about the desk whichever way the switch is thrown, so colouring the whole
+/// value would make "off · the /build key" read as a broken hand-off rather
+/// than as one the operator closed.
+fn right_row(field: &str, held: Option<bool>, on_cursor: bool) -> Line<'static> {
+    let t = theme();
+    Line::from(vec![
+        // The mark takes the leading space every other row on this card has, so
+        // the value column stays where `kv` puts it — a cursor that shifted the
+        // rows sideways would make the card jump under the arrows.
+        Span::styled(
+            // `▸` where NEWS puts it, and a space of the same width where it
+            // is not: a mark that changed the row's width would make the value
+            // column jump under the arrows.
+            format!(
+                "{}{field:<w$}",
+                if on_cursor { "▸" } else { " " },
+                w = LABEL_W
+            ),
+            Style::default().fg(match on_cursor {
+                true => t.accent,
+                false => t.text_secondary,
+            }),
+        ),
+        Span::styled(
+            match held {
+                Some(true) => "on".to_string(),
+                Some(false) => "off".to_string(),
+                None => MISSING.to_string(),
+            },
+            Style::default().fg(match held {
+                Some(true) => t.accent,
+                _ => t.text_secondary,
+            }),
+        ),
+        Span::styled(shapes(field).to_string(), Style::default().fg(t.text_dim)),
+    ])
+}
+
+/// What one right actually reaches, in the owner's own division of it.
+///
+/// `workforce` is not among them and cannot be: the gate binds the desk chat
+/// and `qlab cli`, never a human-started `qlab workforce run`, which the owner
+/// tags with an origin of its own.
+fn shapes(field: &str) -> &'static str {
+    match field {
+        "web" => " · chat, /cli tools",
+        // The one the owner refuses by name — `workflow.start`, `resume` and
+        // `atlas.task.create` from the chat — which is why this row's word is
+        // about the owner and the other two are about what is handed over.
+        "workflows" => " · owner-enforced",
+        "build" => " · the /build key",
+        _ => "",
+    }
+}
+
+/// The line the three rows may not be drawn without.
+///
+/// **It states the asymmetry, and the asymmetry is the whole caveat.** Only
+/// `workflows` is refused by the owner when it is off; `web` and `build` shape
+/// the tool grant a chat or a hand-off is launched with and nothing else, so a
+/// desk with those two withdrawn is a desk that was not *handed* them — not one
+/// the owner will stop. Rights are an operator's stated intent, exactly like
+/// the posture, and this card may never read as more than that.
+///
+/// Written to one row at the card's own width: the block draws 38 cells here,
+/// and a second row is one this column does not have (see [`MODELS_H`]).
+const ASYMMETRY: &str = "only workflows off is owner-refused";
+
+/// What one surface's reasoner means for the two keys that hand off.
+///
+/// `/cli` and `/build` start the real Claude CLI whatever this desk reasons
+/// with, so a granite or ollama reasoner is a second mind the `build` row says
+/// nothing about. Silent on a claude reasoner and silent when nothing has named
+/// one: a note that fires on every desk is a note nobody reads, and one that
+/// fires on an unnamed backend would be a distinction this client invented.
+fn handoff_note(llm: &LlmConfig) -> Option<String> {
+    let backend = surface_backend(llm.reasoner.as_ref())?;
+    if backend == CLAUDE {
+        return None;
+    }
+    Some(format!("/cli, /build: {CLAUDE}, not {backend}"))
+}
+
+/// The backend the two hand-off keys open, whatever this desk reasons with.
+///
+/// Its own constant beside the row that renders `claude · tiers decide`, and
+/// the same string: the owner's `model_routing.CLAUDE_BACKEND`, which is what
+/// `qlab cli` and `qlab --build` launch however the reasoner is configured.
+const CLAUDE: &str = "claude";
 
 /// The owner's reason for every backend a surface runs on and cannot reach.
 ///

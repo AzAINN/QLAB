@@ -544,6 +544,28 @@ pub enum Mandate {
     Rejected(String),
 }
 
+/// What the owner did with one right. Two outcomes, and the second is not an
+/// error — the same split [`News`], [`Mandate`] and [`Choice`] make, for the
+/// same reason.
+///
+/// The route refuses with **400 and a sentence** for a key this desk has no
+/// right by and for a value that is not a bool, and with **403** for the chat
+/// asking for its own authority back. Neither can be provoked from this
+/// client — the field is a closed set and the value is a `bool` — so the
+/// refusal arm exists for the shape of the seam rather than for a keystroke
+/// that can reach it, and it renders the owner's own words if one ever does.
+///
+/// `Applied` carries the **whole** object the owner answered with rather than
+/// the field that was sent, for the reason [`Mandate::Applied`] carries the
+/// merged pair: the route writes all three keys, and a receipt composed from
+/// the request would report a grant a partial write never made.
+#[derive(Debug)]
+pub enum Rights {
+    Applied(crate::model::RightsFlags),
+    /// The owner would not record it. Its own sentence.
+    Rejected(String),
+}
+
 /// What the owner did with a predictor lane. Two outcomes, and the second is
 /// not an error — the same split [`News`], [`Mandate`] and [`Choice`] make,
 /// for the same reason.
@@ -1304,6 +1326,45 @@ impl WriteClient {
             Err(WriteError::Refused { status: 400, said }) => {
                 Ok(Mandate::Rejected(sentence(&said)))
             }
+            Err(err) => Err(err),
+        }
+    }
+
+    // -- the rights the operator lends atlas ------------------------------
+
+    /// Grant or withdraw one of the three authorities the operator lends Atlas.
+    ///
+    /// One key per call, because [`crate::cmd::Right`] can name no more than
+    /// one: the owner takes any subset of the three and records one audit row
+    /// per changed field, and a call that could send two would put two
+    /// decisions behind one keystroke.
+    ///
+    /// A right re-set to the value it already holds is not refused and is not
+    /// news — the owner writes the file and records nothing — so this client
+    /// does not pre-empt it either. What is *sent* is a bool, never a string:
+    /// the route reads `"yes"` and `1` as neither true nor false and refuses
+    /// them, which is the posture's own precedent.
+    pub async fn set_right(&self, field: &str, value: bool) -> Result<Rights, WriteError> {
+        match self
+            .post("/api/atlas/rights", json!({ field: value }))
+            .await
+        {
+            // The owner's own object, read off `rights`. A 200 that does not
+            // carry one is not a contract failure worth refusing the change
+            // over — the change *happened* — so the flags come back absent and
+            // the refetch behind it says where the rights now stand.
+            Ok(said) => Ok(Rights::Applied(
+                said.get("rights")
+                    .and_then(|rights| serde_json::from_value(rights.clone()).ok())
+                    .unwrap_or_default(),
+            )),
+            Err(WriteError::Refused { status: 400, said }) => Ok(Rights::Rejected(sentence(&said))),
+            // The one refusal an operator could actually see, and it is not a
+            // 400: the route answers 403 when the *chat's* Atlas asks for its
+            // own authority back. Rendered as the owner's sentence rather than
+            // as a broken request, because it is a considered answer with the
+            // remedy in it — the operator sets rights here, on this card.
+            Err(WriteError::Refused { status: 403, said }) => Ok(Rights::Rejected(sentence(&said))),
             Err(err) => Err(err),
         }
     }

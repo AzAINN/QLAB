@@ -267,6 +267,24 @@ pub enum Command {
     /// nobody can tell apart afterwards.
     #[cfg(feature = "operator")]
     SetMethod(MethodChange),
+    /// Grant or withdraw one of the three authorities the operator lends Atlas.
+    ///
+    /// **It changes what Atlas is offered, never what the owner will accept.**
+    /// Rights are an operator's stated intent, exactly like the desk posture:
+    /// two of the three (`web`, `build`) only shape the tool grant a chat or a
+    /// hand-off is launched with, and the owner enforces neither. It opens no
+    /// plan, touches no approval and moves no posture, and every gate between a
+    /// plan and a fill is unmoved by it.
+    ///
+    /// One field per command, because the owner records one
+    /// `desk.rights_changed` audit row per changed field: a command that could
+    /// carry two would put two decisions behind one keystroke, which is the
+    /// reason [`MethodChange`] carries one key too.
+    #[cfg(feature = "operator")]
+    SetRight {
+        field: Right,
+        value: bool,
+    },
     /// Fit one predictor lane, against the board's own baseline.
     ///
     /// **A research run, and the only write on this workstation whose cost is
@@ -352,6 +370,43 @@ pub enum Command {
 pub enum MethodChange {
     Policy(String),
     Cap(Option<i64>),
+}
+
+/// One of the three authorities the operator lends Atlas.
+///
+/// A closed set rather than a `String`, because the owner refuses an unknown
+/// key **by name** rather than ignoring it: an operator who thought they
+/// withdrew something would otherwise be left holding an authority they
+/// believe is gone. A typed field cannot compose a fourth name, so that
+/// refusal is one this client can never provoke.
+///
+/// Not gated, unlike the command that carries it: the glass build draws the
+/// three rows, and the names they are drawn by are one list in both builds.
+/// [`Right::as_str`] is what puts one on the wire, and it agrees with
+/// `model::RightsFlags::FIELDS` by test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Right {
+    Web,
+    Workflows,
+    Build,
+}
+
+impl Right {
+    /// The owner's own key for this right.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Right::Web => "web",
+            Right::Workflows => "workflows",
+            Right::Build => "build",
+        }
+    }
+
+    /// The right at one row of the card, in the order the owner declares them.
+    pub fn at(row: usize) -> Option<Right> {
+        [Right::Web, Right::Workflows, Right::Build]
+            .get(row)
+            .copied()
+    }
 }
 
 /// An EDGAR contact on its way to the owner.
@@ -505,6 +560,11 @@ impl PartialEq for Command {
             ) => a == b && x == y && p == q && o == n,
             #[cfg(feature = "operator")]
             (Command::SetMethod(a), Command::SetMethod(b)) => a == b,
+            #[cfg(feature = "operator")]
+            (
+                Command::SetRight { field: a, value: x },
+                Command::SetRight { field: b, value: y },
+            ) => a == b && x == y,
             #[cfg(feature = "operator")]
             (
                 Command::RunPredictor {

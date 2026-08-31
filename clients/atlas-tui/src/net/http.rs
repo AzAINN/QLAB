@@ -12,8 +12,9 @@
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
 use crate::model::{
-    LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, ProposalPayload, QualitativeMatrix,
-    RegimePanel, Snapshot, Templates, Visual, VisualAnswer, VisualError, VisualResult, VisualsList,
+    AtlasRights, LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, ProposalPayload,
+    QualitativeMatrix, RegimePanel, Snapshot, Templates, Visual, VisualAnswer, VisualError,
+    VisualResult, VisualsList,
 };
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
@@ -160,6 +161,13 @@ pub enum Refetch {
     /// merges the override, so the answer to the write is the only thing that
     /// can say what the desk is now holding to.
     Method,
+    /// The three authorities the operator lends Atlas. No beat behind it for
+    /// the method answer's reason — it changes when an operator changes it —
+    /// but asked for at *startup* rather than on a pane entry: the file is read
+    /// when a chat session is launched, so what it says is a fact about the
+    /// desk before anybody opens SETTINGS. Asked for again on `r` there and
+    /// after the card's own POST, which is the only thing that moves it.
+    Rights,
     /// What the owner can draw. No beat behind it, and the strongest version
     /// of the board's reason: the registry is a walk over the owner's own
     /// `qlab/visuals/` package, so it changes when the owner is *deployed*.
@@ -212,6 +220,11 @@ impl PollerHandle {
     /// Ask which method the desk solves with, once. Same shape again.
     pub fn method(&self) {
         let _ = self.refetch.send(Refetch::Method);
+    }
+
+    /// Ask which rights this desk lends Atlas, once. Same shape again.
+    pub fn rights(&self) {
+        let _ = self.refetch.send(Refetch::Rights);
     }
 
     /// Ask what the owner can draw, once. Same shape again.
@@ -278,6 +291,9 @@ async fn poll_loop(
     // a query parameter the route does not read would be this client claiming a
     // distinction the owner does not make.
     let method_url = format!("{base}/api/desk/method");
+    // No lane: the rights are a file in the state root, identical whichever
+    // data the desk reads.
+    let rights_url = format!("{base}/api/atlas/rights");
     // The lane, because the route reads it and the answer differs: an offline
     // desk reads the synthetic feed, and a matrix fetched without the flag
     // would be a reading of a window this client is not pointed at.
@@ -493,6 +509,7 @@ async fn poll_loop(
                         let mut predictors = first == Refetch::Predictors;
                         let mut news = first == Refetch::News;
                         let mut method = first == Refetch::Method;
+                        let mut rights = first == Refetch::Rights;
                         let mut visuals = first == Refetch::Visuals;
                         let mut visual = match &first {
                             Refetch::Visual(name) => Some(name.clone()),
@@ -504,6 +521,7 @@ async fn poll_loop(
                             predictors |= next == Refetch::Predictors;
                             news |= next == Refetch::News;
                             method |= next == Refetch::Method;
+                            rights |= next == Refetch::Rights;
                             visuals |= next == Refetch::Visuals;
                             if let Refetch::Visual(name) = next {
                                 visual = Some(name);
@@ -595,6 +613,40 @@ async fn poll_loop(
                                 // decides that is still arriving.
                                 Fetched::Failed(error) => {
                                     tracing::warn!(%error, "desk method fetch failed")
+                                }
+                            }
+                        }
+                        if rights {
+                            // Its own fetch rather than `fetch::<AtlasRights>`,
+                            // and for `render_visual`'s reason: the shared path
+                            // turns every non-2xx into `Failed` *without
+                            // reading the body*, and the body is where the
+                            // owner's reader puts the remedy for a rights file
+                            // this desk did not write. A card built on the
+                            // shared path could only say "owner answered 500",
+                            // which names no fix at all — and dropping the
+                            // fetch would leave three rows drawing a default
+                            // the file does not hold (invariant 4).
+                            match read_rights(&client, &rights_url).await {
+                                Fetched::Decoded(payload) => {
+                                    emit(&tx, AppEvent::Rights(Box::new(payload)))?
+                                }
+                                // A 2xx this client cannot read is a broken
+                                // contract with the owner rather than a broken
+                                // desk, and it owes the chip.
+                                Fetched::Malformed(error) => emit(
+                                    &tx,
+                                    AppEvent::Http(HttpResult::Malformed {
+                                        url: rights_url.clone(),
+                                        error,
+                                    }),
+                                )?,
+                                // What Atlas may do is not whether the desk is
+                                // there. Same reasoning as the panel and the
+                                // templates — and the card says for itself that
+                                // nothing has answered.
+                                Fetched::Failed(error) => {
+                                    tracing::warn!(%error, "atlas rights fetch failed")
                                 }
                             }
                         }
@@ -763,6 +815,56 @@ async fn render_visual(client: &reqwest::Client, url: &str) -> Rendered {
     Rendered {
         result: not_drawn(status, &body),
         malformed: None,
+    }
+}
+
+/// One rights read, with the non-2xx body read rather than thrown away.
+///
+/// Its own fetch for [`render_visual`]'s reason, and the split it makes is
+/// narrower: a **500 is the answer**, not a failure. The owner's reader refuses
+/// a rights file this desk did not write and puts the whole remedy in the
+/// sentence — which file, and that deleting it restores the defaults or that
+/// the panel can set them — so that sentence reaches the card as the payload
+/// rather than as a log line nobody sees.
+///
+/// A 4xx is not modelled apart: the GET takes no parameters, so there is
+/// nothing an operator could have asked wrongly. Anything that is not a 2xx and
+/// carries a sentence is drawn as the owner's own words, and one that carries
+/// none says so rather than having one invented for it.
+async fn read_rights(client: &reqwest::Client, url: &str) -> Fetched<AtlasRights> {
+    let resp = match client.get(url).send().await {
+        Ok(resp) => resp,
+        Err(err) => return Fetched::Failed(because(&err)),
+    };
+    let status = resp.status();
+    let body = match resp.text().await {
+        Ok(body) => body,
+        Err(err) => return Fetched::Failed(because(&err)),
+    };
+    if status.is_success() {
+        return match serde_json::from_str::<AtlasRights>(&body) {
+            Ok(rights) => Fetched::Decoded(rights),
+            Err(err) => Fetched::Malformed(err.to_string()),
+        };
+    }
+    Fetched::Decoded(AtlasRights {
+        error: Some(rights_error(status, &body)),
+        ..AtlasRights::default()
+    })
+}
+
+/// What the card says when the owner would not answer with the rights.
+///
+/// The owner's sentence verbatim when there is one — it names the file and the
+/// remedy, and this client owns none of that wording. The status rides in front
+/// of it because "the owner failed at 500" and "the owner refused" are
+/// different fixes, and a client that flattened them would send an operator to
+/// edit a request that has no parameters to edit.
+fn rights_error(status: reqwest::StatusCode, body: &str) -> String {
+    let code = status.as_u16();
+    match owner_said(body) {
+        Some(said) => format!("the owner answered {code}: {said}"),
+        None => format!("the owner answered {code} and said nothing about why"),
     }
 }
 
@@ -977,6 +1079,27 @@ mod tests {
         assert_eq!(encode_segment("a/b"), "a%2Fb");
         assert_eq!(encode_segment(".."), "..");
         assert_eq!(encode_segment("a b?x=1"), "a%20b%3Fx%3D1");
+    }
+
+    #[test]
+    fn a_rights_read_the_owner_would_not_answer_carries_its_own_words_and_its_status() {
+        // The reader's refusal *is* the remedy: it names the file and says to
+        // delete it or set the rights from the panel. A client that reduced it
+        // to "the rights could not be read" would leave the operator with
+        // nothing to do, and one that fell back to the owner's defaults would
+        // draw three granted rights over a file that grants something else.
+        let said = rights_error(
+            reqwest::StatusCode::from_u16(500).unwrap(),
+            r#"{"error": "/state/atlas_rights.json is not readable as JSON; delete it to restore the defaults"}"#,
+        );
+        assert!(said.contains("500"), "{said}");
+        assert!(said.contains("atlas_rights.json"), "{said}");
+        assert!(said.contains("delete it"), "{said}");
+        // A body with nothing in it says so rather than having a reason
+        // invented for it — the same rule `owner_said` states one function up.
+        let quiet = rights_error(reqwest::StatusCode::from_u16(502).unwrap(), "");
+        assert!(quiet.contains("502"), "{quiet}");
+        assert!(quiet.contains("said nothing about why"), "{quiet}");
     }
 
     #[test]

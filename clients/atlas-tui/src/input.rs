@@ -677,13 +677,13 @@ pub const KEYMAP: &[Binding] = &[
         "Up",
         "↑",
         Source::View(ViewId::Settings),
-        "the card above, or the source above inside NEWS",
+        "the card above, the source above inside NEWS, or the right above inside MODELS",
     ),
     w(
         "Down",
         "↓",
         Source::View(ViewId::Settings),
-        "the card below, or the source below inside NEWS",
+        "the card below, the source below inside NEWS, or the right below inside MODELS",
     ),
     w(
         "Char('a')",
@@ -726,6 +726,12 @@ pub const KEYMAP: &[Binding] = &[
         "Space",
         Source::View(ViewId::Settings),
         "on NEWS: tick the source under the cursor — nothing is sent",
+    ),
+    w(
+        "Char(' ')",
+        "Space",
+        Source::View(ViewId::Settings),
+        "on MODELS: grant or withdraw the right under the cursor — sent at once",
     ),
     w(
         "Char('c')",

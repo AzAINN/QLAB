@@ -1,7 +1,7 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
 use crate::model::{
-    LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, Proposal, QualitativeMatrix,
-    RegimePanel, Snapshot, Template, VisualAnswer, VisualEntry,
+    AtlasRights, LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, Proposal,
+    QualitativeMatrix, RegimePanel, Snapshot, Template, VisualAnswer, VisualEntry,
 };
 
 pub enum AppEvent {
@@ -53,6 +53,20 @@ pub enum AppEvent {
     /// out, and a card left drawing the pre-change answer would be showing a
     /// mandate nobody is running.
     Method(Box<MethodSettings>),
+    /// The three authorities the operator lends Atlas, from
+    /// `/api/atlas/rights`.
+    ///
+    /// Fetched at startup — the file is read at the moment a chat session is
+    /// launched, so the card must be able to say what is in force before the
+    /// operator opens SETTINGS — and again after the card's own POST, because
+    /// the owner writes the **full** three-key object and answers with what is
+    /// now on disk.
+    ///
+    /// **Its 500 arrives here too**, as `AtlasRights::error` rather than as a
+    /// dropped fetch: a rights file this desk did not write is refused by the
+    /// owner's reader with the remedy in the sentence, and a client that showed
+    /// three granted rights over it would be inventing a desk state nobody set.
+    Rights(Box<AtlasRights>),
     /// The qualitative matrix, from `/api/research/qualitative`.
     ///
     /// The one of these four that rides a beat, and deliberately: the window
@@ -307,6 +321,32 @@ pub enum Wrote {
     /// is still research stage, a cap outside the universe. Its own sentence,
     /// which carries the remedy.
     MethodRefused { said: String },
+    /// The owner recorded a right.
+    ///
+    /// **The owner's own answer, never the request's echo**, for the reason
+    /// `MethodSet` carries the merged pair: the route writes all three keys and
+    /// answers with the object that is now on disk, so a receipt composed here
+    /// would report a grant a partial write never made.
+    ///
+    /// `field` rides along so the card can retire the wait it started, and so
+    /// this outcome cannot be confused with the two beside it.
+    RightSet {
+        field: &'static str,
+        rights: crate::model::RightsFlags,
+    },
+    /// The owner would not record it — a key it has no right by, a value that
+    /// is not a bool, or the chat asking for its own authority back. Its own
+    /// sentence, which names the rights this desk does have.
+    RightRefused { field: &'static str, said: String },
+    /// The request to record a right never got an answer.
+    ///
+    /// **Its own variant rather than a `Failed` the card matches by name**, for
+    /// the reason `PredictorFailed` states: the card retires its `sending` wait
+    /// on this outcome, and a generic failure would retire it over some other
+    /// key's broken request — re-arming Space over a toggle still in flight.
+    /// `field` is what makes the match structural rather than a comparison of
+    /// `dispatch::names`' prose.
+    RightFailed { field: &'static str, said: String },
     /// The owner fitted a predictor board.
     ///
     /// **The owner's own answer, never the request's echo.** `models` is what

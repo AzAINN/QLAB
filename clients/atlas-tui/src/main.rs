@@ -152,6 +152,12 @@ async fn main() -> Result<()> {
     // route rides no beat, so without this the door's line would be `--` until
     // somebody opened SETTINGS — which is after the door is gone.
     poller.news();
+    // And once at startup for the rights, which is the *only* moment they are
+    // owed one: the file is read when a chat session is launched, so what it
+    // says is a fact about this desk before anybody opens SETTINGS, and nothing
+    // outside the card that sets them ever moves it. `r` on the pane and the
+    // card's own POST are the other two, and there is no third.
+    poller.rights();
     // The stream holds the poller so the two feeds are one story: an event that
     // says the desk moved brings the next snapshot forward instead of letting
     // the frame show a plan that already executed for another whole interval.
@@ -466,6 +472,7 @@ fn ingest(
                     if store.nav.view == ViewId::Settings {
                         poller.news();
                         poller.method();
+                        poller.rights();
                     }
                     // And on VISUALS: the registry is a walk over the owner's
                     // own package, so nothing but a deploy changes it and no
@@ -585,6 +592,14 @@ fn ingest(
     #[cfg(feature = "operator")]
     if matches!(&ev, AppEvent::Wrote(atlas::bus::Wrote::MethodSet { .. })) {
         poller.method();
+    }
+    // And the rights, for the news answer's reason: the route writes the full
+    // three-key object and answers with what is now on disk, so the card must
+    // read the owner's own file rather than the toggle it just sent. The
+    // snapshot nudge above carries none of it.
+    #[cfg(feature = "operator")]
+    if matches!(&ev, AppEvent::Wrote(atlas::bus::Wrote::RightSet { .. })) {
+        poller.rights();
     }
     // And the board the run above just replaced. The nudge is the snapshot's,
     // and a snapshot carries only the one-row `predictors` summary — the full

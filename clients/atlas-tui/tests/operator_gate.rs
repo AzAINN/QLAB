@@ -515,7 +515,7 @@ mod glass {
 #[cfg(feature = "operator")]
 mod operator {
     use atlas::model::Snapshot;
-    use atlas::net::write::{Board, Booked, Choice, Execution, WriteClient};
+    use atlas::net::write::{Board, Booked, Choice, Execution, Rights, WriteClient};
     use atlas::store::Posture;
     use atlas::ui::widgets::confirm::Modal;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -3153,6 +3153,89 @@ mod operator {
         // And the value is still there to be sent — a redaction that lost it
         // would pass this test and store nothing.
         assert_eq!(secret.expose(), "s3cret/abcdefghijklmnopqrstuv");
+    }
+
+    // -- the rights the operator lends atlas --------------------------------
+
+    #[tokio::test]
+    async fn one_right_travels_as_one_boolean_key_on_the_owners_own_route() {
+        // One key per call, because the owner records one `desk.rights_changed`
+        // row per changed field: a body carrying two would put two decisions
+        // behind one keystroke. And a *boolean*, never "yes" or 1 — the route
+        // refuses those rather than reading them as a grant, which is the
+        // posture's precedent.
+        let owner = spawn_owner(
+            200,
+            r#"{"rights": {"web": true, "workflows": false, "build": true},
+                "path": "/state/atlas_rights.json"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let applied = client.set_right("workflows", false).await.unwrap();
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/atlas/rights");
+        assert_eq!(seen.body, r#"{"workflows":false}"#);
+        // The owner's own object, never the request's echo: it writes all three
+        // keys, and a receipt composed here would report a grant a partial
+        // write never made.
+        match applied {
+            Rights::Applied(flags) => {
+                assert_eq!(flags.web, Some(true));
+                assert_eq!(flags.workflows, Some(false));
+                assert_eq!(flags.build, Some(true));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_right_the_owner_will_not_record_is_a_refusal_and_not_a_failure() {
+        // Both of the owner's considered noes, and neither is a broken request:
+        // the 400 names the rights this desk has, and the 403 says who sets
+        // them. Folded into `Err` they would arrive as "the owner refused with
+        // 400: {…}" — the remedy buried in a transport error nobody can act on.
+        for (status, said) in [
+            (
+                400,
+                "banana is not a right this desk has — the rights are web, workflows, build",
+            ),
+            (
+                403,
+                "Atlas does not set its own rights — the operator sets them on the desk, \
+                 in Settings ▸ MODELS",
+            ),
+        ] {
+            let owner = spawn_owner(status, serde_json::json!({"error": said}).to_string());
+            let client = WriteClient::new(&owner.base).unwrap();
+            match client.set_right("web", true).await {
+                Ok(Rights::Rejected(back)) => assert_eq!(back, said),
+                other => panic!("{status}: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_broken_owner_is_an_error_and_a_200_with_no_rights_still_applied() {
+        // A 500 is the owner breaking mid-write, which is not a decision about
+        // the request: it reaches the card as a failed write and the toggle is
+        // never reported as landed.
+        let owner = spawn_owner(
+            500,
+            r#"{"error": "the rights file is not readable as JSON"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert!(client.set_right("build", false).await.is_err());
+
+        // But a 200 that did not say where the rights stand is not a contract
+        // failure worth refusing the change over — the change *happened*. The
+        // flags come back absent and the refetch behind the write is what says
+        // what is now on disk.
+        let quiet = spawn_owner(200, "{}");
+        let client = WriteClient::new(&quiet.base).unwrap();
+        match client.set_right("build", false).await {
+            Ok(Rights::Applied(flags)) => assert_eq!(flags.build, None),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

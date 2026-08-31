@@ -1658,3 +1658,69 @@ pub enum VisualResult {
         said: String,
     },
 }
+
+// -- /api/atlas/rights -----------------------------------------------------
+
+/// The three authorities the operator lends Atlas, and where they are kept.
+///
+/// Its own payload rather than a section of the snapshot, for
+/// [`NewsSettings`]' reason: the owner reads them off a JSON file in the state
+/// root and `/api/tui` carries none of it. Fetched at startup and on
+/// `Refetch::Rights` — see `bus::AppEvent::Rights`.
+///
+/// **`error` is not a field the owner sends.** The route answers 500 with the
+/// reader's own remedy when the file is one this desk did not write, and that
+/// sentence is the whole message: it names the file and says to delete it or
+/// set the rights from this panel. A client that fell back to the defaults
+/// there would show three granted rights over a file that grants something
+/// else, which is the one failure a rights panel exists to prevent
+/// (invariant 4). So the poller composes this variant itself, and the flags
+/// stay absent under it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AtlasRights {
+    #[serde(default)]
+    pub rights: RightsFlags,
+    /// The file the rights live in, so the corrupt-file sentence has something
+    /// to name. The owner sends it on every 200.
+    pub path: Option<String>,
+    /// The owner's own sentence when it could not read the file at all. Never
+    /// deserialised: the 200 payload has no such key, and a body that grew one
+    /// must not be able to fake a broken desk.
+    #[serde(skip)]
+    pub error: Option<String>,
+}
+
+/// One right per field, and every one an `Option`.
+///
+/// Absent is not `false`. A right nobody has answered for yet is unknown, and
+/// drawing it as withdrawn would tell an operator their desk is narrower than
+/// it is — the same reason every scalar in [`Policy`]'s constraints is an
+/// `Option`. The owner's own default is all three granted, and it says so on
+/// the wire rather than leaving this client to assume it.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+pub struct RightsFlags {
+    pub web: Option<bool>,
+    pub workflows: Option<bool>,
+    pub build: Option<bool>,
+}
+
+impl RightsFlags {
+    /// The three, in the order the owner declares them. Named here rather than
+    /// in the view because the glass build draws the rows and holds no
+    /// `Command` to read them off: a second list beside the model's is how a
+    /// reader and a writer come to disagree about a key, which is a right the
+    /// operator believes they set and nothing honours.
+    pub const FIELDS: [&'static str; 3] = ["web", "workflows", "build"];
+
+    /// One right, by the owner's own key. `None` for both "not answered" and
+    /// "not a right this desk has" — every caller asks with a name out of
+    /// [`RightsFlags::FIELDS`], so the second cannot arise.
+    pub fn get(&self, field: &str) -> Option<bool> {
+        match field {
+            "web" => self.web,
+            "workflows" => self.workflows,
+            "build" => self.build,
+            _ => None,
+        }
+    }
+}

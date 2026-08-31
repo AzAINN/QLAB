@@ -314,15 +314,23 @@ fn a_backend_that_cannot_serve_is_toned_and_carries_the_owners_own_reason() {
                                 "reason": "ollama is not running at 127.0.0.1:11434 — start it with `ollama serve`"}}],
              "probed_at": "{PROBED}"}}"#
     ));
-    let frame = client.frame(120, 36);
+    // Two hundred columns rather than the baseline's hundred and twenty, and
+    // the width is the point: this sentence is 74 cells and the card at 120 is
+    // 38, so it wraps to three rows — more than the one row of slack the card
+    // has left once the rights have taken theirs (see `MODELS_H`). At the
+    // baseline it is *counted*, which is what
+    // `a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half`
+    // pins; what this test is about is the tone the reason carries when it is
+    // drawn, and a wider card is where that happens.
+    let frame = client.frame(200, 36);
     assert_eq!(
-        body_style_of(&client.buffer(120, 36), "ollama · granite3.3:8b").fg,
+        body_style_of(&client.buffer(200, 36), "ollama · granite3.3:8b").fg,
         Some(Theme::truecolor().warning),
         "a mind the desk cannot reach is not a quiet fact"
     );
     assert!(content(&frame).contains("ollama serve"), "{frame}");
     assert_eq!(
-        body_style_of(&client.buffer(120, 36), "ollama is not running").fg,
+        body_style_of(&client.buffer(200, 36), "ollama is not running").fg,
         Some(Theme::truecolor().text_dim),
         "the reason explains the tone; it does not compete with it"
     );
@@ -343,11 +351,19 @@ fn an_owner_string_on_this_card_is_bounded_rather_than_left_to_run() {
              "probed_at": "{PROBED}"}}"#,
         "verbose ".repeat(400)
     ));
-    let body = content(&client.frame(120, 36));
+    // Wide enough that the *bounded* sentence is one row, so what is being
+    // pinned is the bound rather than the count: at 120 columns a 112-cell
+    // sentence wraps past the card's one row of slack (see `MODELS_H`) and is
+    // counted, which says nothing about whether it was cut at the boundary.
+    let body = content(&client.frame(280, 36));
     assert!(body.contains('…'), "{body}");
     // The card ends where it always did — the theme card under it is still on
     // the frame, which is the property an unbounded reason would take away.
     assert!(body.contains("palette"), "{body}");
+    // And at the baseline the unbounded sentence still cannot push a row off
+    // the card, which is the other half of the same claim.
+    let narrow = content(&client.frame(120, 36));
+    assert!(narrow.contains("palette"), "{narrow}");
 }
 
 #[test]
@@ -429,19 +445,46 @@ fn a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half() {
                                 "reason": "ollama is running at 127.0.0.1:11434 but no models are pulled — pull one with `ollama pull granite3.3:8b`"}}],
              "probed_at": "{PROBED}"}}"#
     ));
-    // Whole at the baseline: the remedy is on the frame.
-    assert!(
-        content(&client.frame(120, 36)).contains("ollama pull"),
-        "{}",
-        client.frame(120, 36)
-    );
+    // Counted at the baseline, where the card's one row of slack cannot hold
+    // three wrapped rows of sentence.
+    //
+    // **This is where the rights were paid for.** The card had four slack rows
+    // and this sentence took three of them; the three switches and the line
+    // that qualifies them took four, and the right column had exactly one spare
+    // row to give (see `MODELS_H`). So the longest reason the owner writes is
+    // now counted at 120x36 rather than drawn, and the count is what says so —
+    // which is the trade, stated rather than discovered.
+    let baseline = content(&client.frame(120, 36));
+    assert!(baseline.contains("▾"), "{baseline}");
+    assert!(!baseline.contains("ollama is running at"), "{baseline}");
+    // And whole wherever it does fit, which is the other half of the property:
+    // a card that had quietly stopped drawing reasons altogether would pass the
+    // count assertion above on its own.
+    // A claude reasoner, so the hand-off note is silent and the one row of
+    // slack is the reason's alone.
+    let brief = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "claude", "model": "inherit"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "claude", "available": false,
+                                "reason": "no claude CLI on PATH"}}],
+             "probed_at": "{PROBED}"}}"#
+    ));
+    let whole = content(&brief.frame(120, 36));
+    assert!(whole.contains("no claude CLI on PATH"), "{whole}");
+    assert!(!whole.contains("▾"), "{whole}");
     // Counted where it will not fit. Unconditional and without an `||`: the
     // first version of this test allowed either outcome at a height where only
     // one is possible, and deleting the marker altogether still passed it — the
     // reason then vanished silently, which is the failure the count exists to
     // prevent.
+    // Two at thirty rows, not one: the column hands the card seven rows there,
+    // so the three switches do not fit in its one row of slack either and are
+    // counted beside the reason. The hand-off note is not among them — it is
+    // this client's own copy and yields to the owner's sentences. The number is
+    // exact on purpose (see above).
     let short = content(&client.frame(120, 30));
-    assert!(short.contains("▾ 1 more"), "{short}");
+    assert!(short.contains("▾ 2 more"), "{short}");
     // And no half of it survives beside the count.
     assert!(!short.contains("ollama is running at"), "{short}");
     // The four rows it qualifies are untouched — the reason is the section that
@@ -465,7 +508,6 @@ fn a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half() {
                                 "reason": "the claude CLI exited 1: Invalid API key · Please run /login — the desk cannot start a workforce session"}}],
              "probed_at": "{PROBED}"}}"#
     ));
-    // At the baseline, where a single reason of this size fits whole.
     let body = content(&both.frame(120, 36));
     assert!(body.contains("▾ 2 more"), "{body}");
     // And neither half-sentence survives beside the count.
@@ -953,7 +995,7 @@ mod cards {
         // And the card the picker lives on names the key that opens it.
         focus_on(&mut client, "MODELS");
         let body = content(&client.frame(120, 36));
-        assert!(body.contains("m switches a model"), "{body}");
+        assert!(body.contains("m model · ↑↓ space grants a right"), "{body}");
         // Both ends of the walk, because the clamp is a comparison and a case
         // that only reaches it proves nothing: a mutation that wrapped at the
         // *bottom* survived a version of this test that walked only to the
@@ -2571,6 +2613,449 @@ mod method {
         );
         let mut client = armed_with(method);
         on_method(&mut client);
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+}
+
+// -- the three authorities the operator lends atlas --------------------------
+
+/// The owner's own answer, with every right granted.
+fn rights_payload(web: bool, workflows: bool, build: bool) -> atlas::model::AtlasRights {
+    serde_json::from_str(&format!(
+        r#"{{"rights": {{"web": {web}, "workflows": {workflows}, "build": {build}}},
+             "path": "/state/atlas_rights.json"}}"#
+    ))
+    .unwrap()
+}
+
+fn with_rights(store: &mut Store, rights: atlas::model::AtlasRights) {
+    store.apply(AppEvent::Rights(Box::new(rights)), Instant::now());
+}
+
+/// A glass window reads all three switches, and still cannot touch one.
+#[test]
+fn the_rights_are_read_only_in_a_glass_window() {
+    let mut store = harness::fixture_store();
+    with_rights(&mut store, rights_payload(true, false, true));
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    let frame = client.frame(120, 36);
+    assert!(line_with(&frame, "web").contains("on"), "{frame}");
+    assert!(line_with(&frame, "workflows").contains("off"), "{frame}");
+    assert!(line_with(&frame, "build").contains("on"), "{frame}");
+    // The card says what it cannot do rather than offering a key it would
+    // refuse — the greyed-affordance claim this client declines everywhere.
+    let body = content(&frame);
+    assert!(body.contains("read-only — cannot grant a right"), "{body}");
+    assert!(!body.contains("space grants a right"), "{body}");
+}
+
+#[cfg(feature = "operator")]
+mod rights {
+    use super::*;
+    use atlas::bus::Wrote;
+    use atlas::cmd::{Command, Right};
+    use atlas::store::Posture;
+    use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+
+    fn armed_with(rights: Option<atlas::model::AtlasRights>) -> Client {
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        if let Some(rights) = rights {
+            with_rights(&mut store, rights);
+        }
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
+        client.frame(120, 36);
+        client
+    }
+
+    fn armed() -> Client {
+        armed_with(Some(rights_payload(true, true, true)))
+    }
+
+    fn press(client: &mut Client, code: KeyCode) -> Option<Command> {
+        let acted = atlas::ui::shell::on_key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        );
+        client.frame(120, 36);
+        acted
+    }
+
+    fn click(client: &mut Client, column: u16, row: u16) -> Option<Command> {
+        let acted = atlas::ui::shell::on_mouse(
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut client.store,
+            &mut client.views,
+        );
+        client.frame(120, 36);
+        acted
+    }
+
+    fn row_of(client: &Client, needle: &str) -> u16 {
+        client
+            .frame(120, 36)
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row contains {needle}")) as u16
+    }
+
+    /// Walk the focus onto MODELS. Down rather than a jump, because that is the
+    /// only way an operator reaches it — and it crosses NEWS' row cursor on the
+    /// way, which is what makes the count more than the card index.
+    fn on_models(client: &mut Client) {
+        for _ in 0..24 {
+            if body_style_of(&client.buffer(120, 36), "MODELS").fg
+                == Some(Theme::truecolor().accent)
+            {
+                return;
+            }
+            press(client, KeyCode::Down);
+        }
+        panic!("the focus never reached MODELS:\n{}", client.frame(120, 36));
+    }
+
+    #[test]
+    fn each_right_reads_where_it_stands_and_a_granted_one_is_not_a_quiet_fact() {
+        let client = armed_with(Some(rights_payload(true, false, true)));
+        let buffer = client.buffer(120, 36);
+        // The accent is the tone of an authority Atlas is *carrying*, and the
+        // secondary is the one it is not: a card that toned both alike would
+        // make the operator read the word rather than the card.
+        assert_eq!(
+            body_style_of(&buffer, "on · chat").fg,
+            Some(Theme::truecolor().accent)
+        );
+        assert_eq!(
+            body_style_of(&buffer, "off · owner-enforced").fg,
+            Some(Theme::truecolor().text_secondary)
+        );
+        assert_eq!(
+            body_style_of(&buffer, "on · the /build key").fg,
+            Some(Theme::truecolor().accent)
+        );
+        // And the line that keeps the three rows honest. Without it a right
+        // shown as granted reads as a gate the desk holds shut, and two of the
+        // three are not gates at all.
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("only workflows off is owner-refused"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn nothing_has_answered_is_the_missing_mark_and_never_the_owners_default() {
+        // The owner's documented default is all three granted. Drawing it
+        // before the fetch answers would be this client asserting a desk state
+        // nobody confirmed — the `max_weight` lesson one card over.
+        let client = armed_with(None);
+        let frame = client.frame(120, 36);
+        for field in ["web", "workflows", "build"] {
+            assert!(line_with(&frame, field).contains("--"), "{field}: {frame}");
+        }
+    }
+
+    #[test]
+    fn a_rights_file_the_owner_cannot_read_is_its_sentence_and_never_three_dashes() {
+        // Invariant 4. The reader's refusal names the file and the remedy, and
+        // it is the whole message: three `--` rows over it would bury the one
+        // thing an operator can act on, and three `on` rows would be a lie
+        // about a file nobody could read.
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        let mut broken = rights_payload(true, true, true);
+        broken.rights = Default::default();
+        broken.error = Some(
+            "the owner answered 500: /state/atlas_rights.json is not readable as JSON; \
+             delete it to restore the defaults"
+                .to_string(),
+        );
+        with_rights(&mut store, broken);
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("atlas_rights.json"), "{body}");
+        assert!(body.contains("delete it"), "{body}");
+        assert!(!body.contains("only workflows off"), "{body}");
+
+        // And the key refuses rather than writing on top of a file the owner
+        // could not read.
+        let mut client = client;
+        on_models(&mut client);
+        assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
+    }
+
+    #[test]
+    fn space_sends_the_opposite_of_what_the_owner_said_for_the_row_under_the_cursor() {
+        // Three presses, one per row, because the cursor is an index and a test
+        // that only ever pressed the first row would pass on a card that had
+        // wired every row to `web`.
+        for (steps, right, held) in [
+            (0, Right::Web, true),
+            (1, Right::Workflows, false),
+            (2, Right::Build, true),
+        ] {
+            let mut client = armed_with(Some(rights_payload(true, false, true)));
+            on_models(&mut client);
+            for _ in 0..steps {
+                press(&mut client, KeyCode::Down);
+            }
+            assert_eq!(
+                press(&mut client, KeyCode::Char(' ')),
+                Some(Command::SetRight {
+                    field: right,
+                    value: !held,
+                }),
+                "row {steps} sent the wrong right"
+            );
+        }
+    }
+
+    #[test]
+    fn a_right_the_owner_has_not_named_has_no_opposite_and_is_refused_out_loud() {
+        // Nothing is inverted from a value this client made up: a toggle
+        // computed from the owner's documented default would be this client
+        // deciding what the desk's rights are and then writing that decision
+        // into the owner's file.
+        let mut client = armed_with(None);
+        on_models(&mut client);
+        assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("nothing has said where web stands"), "{body}");
+    }
+
+    #[test]
+    fn one_toggle_at_a_time_and_the_card_says_which_one_it_is_waiting_on() {
+        // The owner records one audit row per changed field, so a held key
+        // would put two decisions on the record for one press. Refused *out
+        // loud*: a key that silently did nothing reads as a dead card.
+        let mut client = armed();
+        on_models(&mut client);
+        assert!(press(&mut client, KeyCode::Char(' ')).is_some());
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("asking the owner"), "{body}");
+        assert!(body.contains("web"), "{body}");
+        assert_eq!(
+            press(&mut client, KeyCode::Char(' ')),
+            None,
+            "a second press queued a write while one was in flight"
+        );
+    }
+
+    #[test]
+    fn the_wait_is_retired_by_its_own_answer_and_never_by_another_keys_failure() {
+        // The defect `bus::Wrote::PredictorFailed` was added for, on a card one
+        // keystroke from a second write: a wait retired by an unrelated broken
+        // request re-arms Space over a toggle still in flight — one decision,
+        // two audit rows.
+        let mut client = armed();
+        on_models(&mut client);
+        assert!(press(&mut client, KeyCode::Char(' ')).is_some());
+        client.views.wrote(&Wrote::Failed {
+            what: "save the news sources".to_string(),
+            said: "the owner did not answer".to_string(),
+        });
+        client.views.wrote(&Wrote::RightFailed {
+            field: "build",
+            said: "the owner did not answer".to_string(),
+        });
+        assert_eq!(
+            press(&mut client, KeyCode::Char(' ')),
+            None,
+            "another request's failure retired this card's wait"
+        );
+        // Its own outcome does retire it, and the sentence says which right it
+        // was about.
+        client.views.wrote(&Wrote::RightFailed {
+            field: "web",
+            said: "the owner did not answer".to_string(),
+        });
+        client.frame(120, 36);
+        assert!(press(&mut client, KeyCode::Char(' ')).is_some());
+    }
+
+    #[test]
+    fn the_owners_refusal_stands_on_the_card_and_the_row_is_left_where_it_was() {
+        let mut client = armed();
+        on_models(&mut client);
+        press(&mut client, KeyCode::Char(' '));
+        client.views.wrote(&Wrote::RightRefused {
+            field: "web",
+            said: "banana is not a right this desk has".to_string(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("banana is not a right"), "{body}");
+        // Nothing was copied onto the row: the owner's answer is what the card
+        // draws, and it still says the right stands where it did.
+        assert!(
+            line_with(&client.frame(120, 36), "web").contains("on"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_walks_the_three_rows_and_walks_out_of_the_card_at_either_end() {
+        // Both ends, because the clamp is a comparison and a case that only
+        // reaches one of them proves nothing. A cursor that wrapped would send
+        // an operator holding an arrow back to `web` from `build`; one that
+        // trapped would put UNIVERSE beyond reach of the arrows entirely.
+        let mut client = armed();
+        on_models(&mut client);
+        for _ in 0..2 {
+            press(&mut client, KeyCode::Down);
+        }
+        assert_eq!(
+            press(&mut client, KeyCode::Char(' ')),
+            Some(Command::SetRight {
+                field: Right::Build,
+                value: false,
+            }),
+            "two downs did not land on the last right"
+        );
+        // One more Down leaves the card rather than wrapping to `web`.
+        let mut client = armed();
+        on_models(&mut client);
+        for _ in 0..3 {
+            press(&mut client, KeyCode::Down);
+        }
+        assert_eq!(
+            body_style_of(&client.buffer(120, 36), "UNIVERSE").fg,
+            Some(Theme::truecolor().accent),
+            "the cursor did not walk out of the bottom of the card"
+        );
+        // And back in from below puts it on the edge it was entered from, so a
+        // held arrow reads as one continuous walk.
+        press(&mut client, KeyCode::Up);
+        assert_eq!(
+            press(&mut client, KeyCode::Char(' ')),
+            Some(Command::SetRight {
+                field: Right::Build,
+                value: false,
+            }),
+            "re-entering from below did not land on the last right"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_row_grants_it_rather_than_only_moving_the_cursor() {
+        // A click that only moved a cursor would leave the operator reaching
+        // for the keyboard to finish what they started — the rule the NEWS
+        // rows already state. And it is the same `Command` through the same
+        // producer, so a pointer can never grant what a key could not.
+        let mut client = armed_with(Some(rights_payload(true, false, true)));
+        on_models(&mut client);
+        let row = row_of(&client, "workflows    off");
+        assert_eq!(
+            click(&mut client, 60, row),
+            Some(Command::SetRight {
+                field: Right::Workflows,
+                value: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_rights_row_is_never_read_as_a_news_row() {
+        // Two cards now record row rectangles, and the index alone is ambiguous
+        // between them: a MODELS row read as NEWS' would tick a news source
+        // from a click on a right, which is a change nobody chose.
+        let mut client = armed_with(Some(rights_payload(true, true, true)));
+        on_models(&mut client);
+        let before = content(&client.frame(120, 36));
+        let row = row_of(&client, "build");
+        assert_eq!(
+            click(&mut client, 60, row),
+            Some(Command::SetRight {
+                field: Right::Build,
+                value: false,
+            })
+        );
+        // The news draft is untouched — no edit mark appeared on the card one
+        // band up.
+        assert_eq!(
+            before.contains("news ·edited"),
+            content(&client.frame(120, 36)).contains("news ·edited")
+        );
+    }
+
+    #[test]
+    fn the_hand_off_line_names_the_second_mind_and_is_silent_when_there_is_only_one() {
+        // `/cli` and `/build` start the real Claude CLI whatever this desk
+        // reasons with, so a granite or ollama reasoner is a mind the `build`
+        // row says nothing about. The fixture desk reasons on ollama.
+        let client = armed();
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("/cli, /build: claude, not ollama"), "{body}");
+
+        // And silent on a claude reasoner, where there is no distinction to
+        // draw: a note that fires on every desk is a note nobody reads.
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        with_rights(&mut store, rights_payload(true, true, true));
+        store.apply(
+            AppEvent::Snapshot(Box::new(
+                serde_json::from_str::<Snapshot>(
+                    r#"{"llm": {"reasoner": {"backend": "claude", "model": "inherit"},
+                                "workforce": {"backend": "claude", "model": "inherit"},
+                                "reasoner_enabled": true}}"#,
+                )
+                .unwrap(),
+            )),
+            Instant::now(),
+        );
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
+        let body = content(&client.frame(120, 36));
+        assert!(!body.contains("/cli, /build:"), "{body}");
+    }
+
+    #[test]
+    fn an_unarmed_window_sends_nothing_on_space_however_the_rows_are_drawn() {
+        // The posture, not the build: a featured binary the desk has not armed
+        // hears nothing, and the rows it draws are a reading rather than an
+        // affordance.
+        let mut store = harness::fixture_store();
+        with_rights(&mut store, rights_payload(true, true, true));
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
+        client.frame(120, 36);
+        for _ in 0..10 {
+            assert_eq!(press(&mut client, KeyCode::Down), None);
+            assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
+        }
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("web"), "{body}");
+    }
+
+    #[test]
+    fn the_focused_card_renders_its_rights_at_120x36() {
+        let mut client = armed_with(Some(rights_payload(true, false, true)));
+        on_models(&mut client);
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn a_rights_file_the_owner_could_not_read_renders_at_120x36() {
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        let mut broken = rights_payload(true, true, true);
+        broken.rights = Default::default();
+        broken.error = Some(
+            "the owner answered 500: /state/atlas_rights.json is not readable as JSON \
+             (Expecting value: line 1 column 1); delete it to restore the defaults"
+                .to_string(),
+        );
+        with_rights(&mut store, broken);
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
         insta::assert_snapshot!(client.frame(120, 36));
     }
 }

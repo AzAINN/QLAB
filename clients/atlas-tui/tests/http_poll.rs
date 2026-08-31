@@ -21,6 +21,14 @@ enum Seen {
     Snapshot,
     Regime,
     Backends,
+    /// The three flags as they arrived, or the sentence that says the owner
+    /// would not answer with them.
+    ///
+    /// Both shapes, because the failure this pins is silence: a rights fetch
+    /// that dropped the owner's 500 would leave the card drawing the defaults
+    /// over a file that grants something else, and a `Seen::Rights` carrying
+    /// only "an answer arrived" would be satisfied by exactly that.
+    Rights(Option<bool>, Option<String>),
     Visuals(usize),
     /// The name that was asked for **and what came back**.
     ///
@@ -60,6 +68,7 @@ fn seen(ev: &AppEvent) -> Seen {
         AppEvent::Snapshot(_) => Seen::Snapshot,
         AppEvent::RegimePanel(_) => Seen::Regime,
         AppEvent::Backends(_) => Seen::Backends,
+        AppEvent::Rights(rights) => Seen::Rights(rights.rights.workflows, rights.error.clone()),
         AppEvent::Visuals(list) => Seen::Visuals(list.len()),
         // The name that was *asked for*, not one read off the payload: a
         // refusal carries no payload, and which drawing was declined is the
@@ -519,6 +528,79 @@ async fn the_backend_catalog_is_fetched_when_it_is_asked_for_and_never_on_the_be
         window < POLL_INTERVAL,
         "the window has to sit inside the cadence, or the beat itself answers it"
     );
+}
+
+#[tokio::test]
+async fn the_rights_ride_no_beat_and_a_refused_read_arrives_as_the_owners_sentence() {
+    // Two claims, and the second is the one invariant 4 is about. The route is
+    // a file read the *owner* does on every chat launch, so it changes only
+    // when this card writes it — a beat behind it would spend a request per
+    // poll re-reading an answer this client already holds. And a read the owner
+    // will not answer must reach the store as a sentence: three rows drawing
+    // the owner's own default over a file it refused to read is the one failure
+    // a rights panel exists to prevent.
+    let owner = spawn_owner(vec![
+        ready(),
+        snapshot_fixture(),
+        regime_fixture(),
+        (
+            "/api/atlas/rights",
+            r#"{"rights": {"web": true, "workflows": false, "build": true},
+                "path": "/state/atlas_rights.json"}"#
+                .to_string(),
+        ),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let poller = spawn_poller(owner.base.clone(), true, tx);
+
+    drain_until_owner(&mut rx, || owner.asked_for("/api/tui").len() >= 2, CEILING).await;
+    assert!(
+        owner.asked_for("/api/atlas/rights").is_empty(),
+        "the rights rode a poll: {:?}",
+        owner.targets()
+    );
+
+    poller.rights();
+    let seen = drain_until(
+        &mut rx,
+        |ev| matches!(ev, Seen::Rights(..)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        seen.contains(&Seen::Rights(Some(false), None)),
+        "the owner's own flags have to reach the bus typed: {seen:?}"
+    );
+    assert_eq!(owner.asked_for("/api/atlas/rights").len(), 1);
+
+    // And the route the owner does not serve. A 404 here stands in for the
+    // reader's 500 — what is being pinned is that a non-2xx is *answered*
+    // rather than dropped, with the status in the sentence.
+    let broken = spawn_owner(vec![ready(), snapshot_fixture(), regime_fixture()]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let poller = spawn_poller(broken.base.clone(), true, tx);
+    drain_until_owner(
+        &mut rx,
+        || !broken.asked_for("/api/tui").is_empty(),
+        CEILING,
+    )
+    .await;
+    poller.rights();
+    let seen = drain_until(
+        &mut rx,
+        |ev| matches!(ev, Seen::Rights(..)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let said = seen
+        .iter()
+        .find_map(|ev| match ev {
+            Seen::Rights(flags, Some(said)) => Some((*flags, said.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a refused rights read reached nobody: {seen:?}"));
+    assert_eq!(said.0, None, "a refused read may not carry a flag");
+    assert!(said.1.contains("404"), "{}", said.1);
 }
 
 #[tokio::test]

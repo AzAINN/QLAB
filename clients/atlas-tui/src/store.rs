@@ -11,9 +11,9 @@ use crate::cmd::CmdLine;
 use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
-    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig,
-    MethodSettings, NewsSettings, Plan, Policy, PredictorDetail, QualitativeMatrix, RegimePanel,
-    Run, Snapshot, System, Template, VisualAnswer, VisualEntry, Workflow,
+    Algorithm, Approval, Asset, AtlasRights, Coordinator, DeskMode, LeaderboardRow, LlmCatalog,
+    LlmConfig, MethodSettings, NewsSettings, Plan, Policy, PredictorDetail, QualitativeMatrix,
+    RegimePanel, Run, Snapshot, System, Template, VisualAnswer, VisualEntry, Workflow,
 };
 use crate::net::http;
 use crate::ui::door::Door;
@@ -480,6 +480,14 @@ pub struct Store {
     /// No arrival stamp either, for `news`' reason: the fetch is edge-triggered
     /// on entering the pane, on `r` there, and on the card's own POST.
     method: Option<MethodSettings>,
+    /// The three authorities the operator lends Atlas, fetched at startup and
+    /// after the MODELS card's own POST.
+    ///
+    /// `None` is "not asked yet or not answered yet", and the card draws the
+    /// missing mark for it rather than the owner's default: three rows reading
+    /// `on` before anything answered would be this client stating a desk state
+    /// nobody has confirmed.
+    rights: Option<AtlasRights>,
     /// What the owner can draw, fetched when VISUALS opens.
     ///
     /// `None` is "not asked yet or not answered yet"; `Some([])` is the owner
@@ -703,6 +711,7 @@ impl Store {
             visual: None,
             news: None,
             method: None,
+            rights: None,
             qualitative: None,
             proposal: None,
             #[cfg(feature = "operator")]
@@ -904,6 +913,15 @@ impl Store {
                 self.method = Some(*method);
                 self.dirty = true;
             }
+            // Replaced wholesale again, and here the replacement is the whole
+            // point: the owner writes all three keys on every change and its
+            // 500 arrives in the same variant with the flags absent, so a
+            // merge would leave a stale grant standing beside the sentence that
+            // says the file cannot be read at all.
+            AppEvent::Rights(rights) => {
+                self.rights = Some(*rights);
+                self.dirty = true;
+            }
             // Replaced wholesale for the same reason again: the route serves
             // one window's whole matrix, and merging two of them would draw a
             // name counted in one window beside a name counted in another,
@@ -1052,7 +1070,15 @@ impl Store {
                     // endpoint and the pane that asked keeps its own in-flight
                     // line (`ui::views::predictors`), so a copy of either here
                     // would be a second account of a fit only the owner did.
-                    Wrote::MethodSet { .. }
+                    // And so are the rights. The owner writes the full
+                    // three-key object and answers with what is now on disk,
+                    // and the refetch behind the write is what the card draws —
+                    // a client copy would be a second account of a file only
+                    // the owner has read.
+                    Wrote::RightSet { .. }
+                    | Wrote::RightRefused { .. }
+                    | Wrote::RightFailed { .. }
+                    | Wrote::MethodSet { .. }
                     | Wrote::PredictorRan { .. }
                     | Wrote::PredictorRefused { .. }
                     | Wrote::PredictorFailed { .. }
@@ -1231,6 +1257,16 @@ impl Store {
     /// it is in rather than drawing a blank where a policy belongs.
     pub fn method(&self) -> Option<&MethodSettings> {
         self.method.as_ref()
+    }
+
+    /// The three authorities the operator lends Atlas, if the fetch has
+    /// answered.
+    ///
+    /// `None` is "not asked yet or not answered yet", never "this desk has no
+    /// rights" — every desk has all three by default, and the card says which
+    /// of the two states it is in rather than drawing the default as a fact.
+    pub fn rights(&self) -> Option<&AtlasRights> {
+        self.rights.as_ref()
     }
 
     /// The qualitative matrix, if the beat has brought one back.

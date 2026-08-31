@@ -402,3 +402,45 @@ fn a_universe_change_approval_carries_its_kind_and_no_plan_columns() {
     assert!(!legacy.is_universe_change());
     assert_eq!(legacy.summary_str("ticker"), None);
 }
+
+#[test]
+fn the_rights_decode_whole_and_a_key_the_owner_left_out_is_unknown_rather_than_off() {
+    // The owner writes all three keys on every change, so a body missing one is
+    // not a shape it produces — but absence must still be *unknown* rather than
+    // withdrawn. A `false` invented here would tell an operator their desk is
+    // narrower than it is, which is the same fault as a `max_weight` defaulted
+    // to zero one payload up.
+    let whole: atlas::model::AtlasRights = serde_json::from_str(
+        r#"{"rights": {"web": true, "workflows": false, "build": true},
+            "path": "/state/atlas_rights.json"}"#,
+    )
+    .unwrap();
+    assert_eq!(whole.rights.web, Some(true));
+    assert_eq!(whole.rights.workflows, Some(false));
+    assert_eq!(whole.rights.build, Some(true));
+    assert_eq!(whole.path.as_deref(), Some("/state/atlas_rights.json"));
+    // Never deserialised: the 200 payload has no such key, and a body that grew
+    // one must not be able to fake a desk whose rights cannot be read.
+    assert_eq!(whole.error, None);
+
+    let partial: atlas::model::AtlasRights =
+        serde_json::from_str(r#"{"rights": {"web": false}, "error": "invented"}"#).unwrap();
+    assert_eq!(partial.rights.web, Some(false));
+    assert_eq!(partial.rights.workflows, None);
+    assert_eq!(partial.rights.build, None);
+    assert_eq!(partial.path, None);
+    assert_eq!(
+        partial.error, None,
+        "a body may not compose this client's own failure"
+    );
+
+    // And the accessor the card reads rows by agrees with the list it draws
+    // them from — a reader and a writer that disagree about a key is a right
+    // the operator believes they set and nothing honours.
+    for field in atlas::model::RightsFlags::FIELDS {
+        assert!(
+            whole.rights.get(field).is_some(),
+            "{field} is drawn but cannot be read"
+        );
+    }
+}

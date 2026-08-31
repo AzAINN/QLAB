@@ -585,6 +585,42 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
         Wrote::MethodRefused { said } => {
             Toast::new(Level::Warn, "desk method refused", said.clone())
         }
+        // The owner's own object, never the request's echo: it writes all
+        // three keys and answers with what is on disk, so a receipt composed
+        // here would report a grant a partial write never made.
+        //
+        // `Info` in both directions. Withdrawing a right narrows what Atlas is
+        // offered and is a change an operator meant to make; toning it as a
+        // warning would put an alarm colour on the safe half of the pair.
+        Wrote::RightSet { field, rights } => Toast::new(
+            Level::Info,
+            "atlas rights",
+            match rights.get(field) {
+                Some(true) => format!("{field} is granted"),
+                Some(false) => format!("{field} is withdrawn"),
+                // A 200 that did not say what is now in force. Reported rather
+                // than guessed from the request: the change happened, and the
+                // refetch behind it is what says where the right stands.
+                None => format!("the owner did not say where {field} stands"),
+            },
+        ),
+        // `Warn`, not `Alarm`: the desk considered the change and declined it,
+        // and nothing was written. The sentence names the rights this desk
+        // does have, which is the whole remedy.
+        Wrote::RightRefused { field, said } => Toast::new(
+            Level::Warn,
+            "atlas right refused",
+            format!("{field} — {said}"),
+        ),
+        // `Alarm` like every other broken request, and it names the field for
+        // `PredictorFailed`'s reason: the operator toggled one right and the
+        // answer never came, so which one is the half they need to decide
+        // whether to press the key again.
+        Wrote::RightFailed { field, said } => Toast::new(
+            Level::Alarm,
+            "atlas right failed",
+            format!("{field} — {said}"),
+        ),
         // What the owner *ran* and what it *admitted*, which are two facts and
         // are reported as two. A board that fitted three lanes and admitted
         // none is a result — the augmentation did not earn its place — and a

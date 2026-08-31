@@ -143,3 +143,24 @@ def test_config_requires_every_calendar_field():
              "tickers": [], "source": "Federal Reserve"}]))
     with pytest.raises(ValueError, match=r"news calendar entry 0 must be a mapping"):
         news._validate_config(_base_config(calendar=["FOMC"]))
+
+
+def test_calendar_days_left_counts_down_to_the_last_entry(monkeypatch):
+    """The look-ahead expires silently: `upcoming` refuses only once the last
+    entry is already past, which is a day too late to be told. The remaining
+    life of the file is a number the desk can show before that."""
+    monkeypatch.setattr(macro, "load_news_sources", lambda: CONFIG)
+    now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    assert macro.calendar_days_left(now) == 7          # to the FOMC entry
+    # Exhausted and empty are both "no life left", and both are None rather
+    # than a negative number pretending to be a countdown.
+    assert macro.calendar_days_left(
+        datetime(2026, 9, 30, tzinfo=timezone.utc)) is None
+    monkeypatch.setattr(macro, "load_news_sources", lambda: _calendar([]))
+    assert macro.calendar_days_left(now) is None
+
+
+def test_calendar_days_left_needs_an_aware_as_of(monkeypatch):
+    monkeypatch.setattr(macro, "load_news_sources", lambda: CONFIG)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        macro.calendar_days_left(datetime(2026, 9, 10))

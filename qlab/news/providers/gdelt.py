@@ -16,12 +16,12 @@ never a wall-clock ``timespan``.
 from __future__ import annotations
 
 import json
-import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from qlab.news.feed import NewsItem, _validate_gdelt_rules, load_news_sources
+from qlab.news.providers._throttle import Throttle
 
 _DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 # Measured 2026-08-28: the DOC API answered a two-rule window in ~31s from a
@@ -41,14 +41,11 @@ _WINDOW_FORMAT = "%Y%m%d%H%M%S"
 # shows, and a silent cap on a news feed reads as "that is all there was".
 _MAX_RECORDS = 75
 _MIN_INTERVAL_S = 1.0                # GDELT answers a burst with a non-JSON body
-_last_request = 0.0
+_THROTTLE = Throttle(_MIN_INTERVAL_S)
 
 
 def _get_json(url: str) -> dict:
-    global _last_request
-    wait = _MIN_INTERVAL_S - (time.monotonic() - _last_request)
-    if wait > 0:
-        time.sleep(wait)
+    _THROTTLE.wait()
     # User-Agent only, as feed._fetch_rss sends. urlopen does not decode
     # content encodings, so negotiating gzip would hand compressed bytes
     # straight to json.loads on the first live call.
@@ -59,7 +56,6 @@ def _get_json(url: str) -> dict:
         payload = response.read()
     finally:
         response.close()
-    _last_request = time.monotonic()
     return json.loads(payload)
 
 

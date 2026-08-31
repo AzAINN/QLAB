@@ -1,7 +1,10 @@
 """Official releases as a primary source, and the calendar of what is ahead.
 
-The publishers here ARE the events — BLS, BEA, EIA, Treasury — so every
-record is primary-tier by name. The calendar is not news: a scheduled
+The publishers here ARE the events — whichever official sources
+``news_sources.yaml`` lists under ``macro.feeds`` — so every record is
+primary-tier by name. The shipped list is BEA alone: BLS and the US Treasury
+were removed on 2026-08-28, dead at 403 and 404, and nothing was named to
+replace them that had been verified live. The calendar is not news: a scheduled
 release is a future-dated fact, and the look-ahead gate would drop it, and
 rightly. It is served to Atlas as ``upcoming`` so the desk can say what is
 coming without pretending it has happened.
@@ -22,6 +25,31 @@ def fetch(as_of: datetime, universe: tuple[str, ...]) -> list[NewsItem]:
                            "news_sources.yaml: macro.feeds")
     items = _fetch_rss_feeds(feeds, as_of, universe)
     return [replace(item, provider="macro") for item in items]
+
+
+def calendar_days_left(as_of: datetime) -> int | None:
+    """Whole days from ``as_of`` to the last dated entry, or ``None``.
+
+    ``upcoming`` refuses only once the calendar is ALREADY exhausted, which is
+    the first day it is too late to hear about. This is the same fact one day
+    earlier, so a status line can show the file running out while there is
+    still time to extend it. ``None`` is "no life left" -- empty or expired --
+    never a negative number dressed up as a countdown.
+    """
+    if as_of.tzinfo is None:
+        raise ValueError("calendar_days_left() needs a timezone-aware as_of; a "
+                         "naive datetime has no instant to count from")
+    as_of = as_of.astimezone(timezone.utc)
+    latest: datetime | None = None
+    for entry in load_news_sources().get("calendar") or []:
+        when = datetime.fromisoformat(str(entry["when"]))
+        if when.tzinfo is None:
+            raise ValueError(f"calendar entry {entry['name']!r} needs a timezone")
+        when = when.astimezone(timezone.utc)
+        latest = when if latest is None else max(latest, when)
+    if latest is None or latest < as_of:
+        return None
+    return (latest - as_of).days
 
 
 def upcoming(as_of: datetime, horizon_days: int = 14) -> list[dict]:

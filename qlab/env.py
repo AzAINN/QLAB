@@ -107,15 +107,20 @@ def credential_status() -> dict:
         stack = parse_provider_stack(None)
     except ValueError:
         stack = ()
+    edgar_contact = bool(os.environ.get("QLAB_EDGAR_CONTACT", "").strip())
     return {
         "alpaca_credentials": alpaca,
         "market_data_provider": os.environ.get("QLAB_DATA_PROVIDER") or "yfinance",
         "news_provider": ",".join(stack) or "synthetic",
         "alpaca_feed": os.environ.get("ALPACA_FEED") or "iex",
         # Ready when any member can actually answer: alpaca needs its
-        # credential, every other real provider needs none, and synthetic is
-        # fixtures rather than news.
+        # credential, edgar needs the SEC contact (without it every edgar fetch
+        # refuses, so counting it ready promises a window the desk cannot get),
+        # every other real provider needs none, and synthetic is fixtures
+        # rather than news.
         "news_ready": any(
-            (name == "alpaca" and alpaca) or name not in ("alpaca", "synthetic")
+            (name == "alpaca" and alpaca)
+            or (name == "edgar" and edgar_contact)
+            or name not in ("alpaca", "edgar", "synthetic")
             for name in stack),
     }

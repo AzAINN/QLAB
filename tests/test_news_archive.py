@@ -654,3 +654,43 @@ def test_an_empty_archive_reports_no_span_rather_than_a_fake_one():
         assert stats["begins"] is None and stats["newest_published"] is None
     finally:
         session.registry.close()
+
+
+def test_counting_matches_is_a_count_and_never_a_million_row_page():
+    """The total is aggregated in SQL. Materializing up to a million rows to
+    call ``len`` on them put the whole archive through the driver on every
+    search, and the two paths could disagree only by drifting apart -- which
+    is why the WHERE is built once and shared."""
+    from datetime import datetime, timezone
+
+    from qlab.news.archive import canonical_timestamp
+
+    session = _session()
+    try:
+        session.archive_desk_news(session.fetch_desk_news(True))
+        as_of = canonical_timestamp(datetime.now(timezone.utc))
+        registry = session.registry
+
+        rows = registry.search_news(as_of=as_of, include_synthetic=True,
+                                    limit=10_000)
+        assert len(rows) > 1
+        assert registry.count_news_matches(
+            as_of=as_of, include_synthetic=True) == len(rows)
+        # Same WHERE, exercised through a term filter that excludes nothing
+        # and one that excludes everything.
+        assert registry.count_news_matches(
+            as_of=as_of, terms=("zzz-no-such-term",),
+            include_synthetic=True) == 0
+        # Default excludes synthetic, and the count must agree with the page.
+        assert registry.count_news_matches(as_of=as_of) == len(
+            registry.search_news(as_of=as_of, limit=10_000))
+
+        # The count does not reach the paging query at all.
+        def refuse(*a, **k):
+            raise AssertionError("count_news_matches must not page rows")
+
+        registry.search_news = refuse
+        assert registry.count_news_matches(
+            as_of=as_of, include_synthetic=True) == len(rows)
+    finally:
+        session.registry.close()

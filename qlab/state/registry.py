@@ -355,6 +355,10 @@ class Registry:
             p.parent.mkdir(parents=True, exist_ok=True)
             self.path = str(p)
         self.con = duckdb.connect(self.path)
+        # Bumped by log_run; read by anything caching a summary of the runs
+        # table. In-process only, and deliberately so: it answers "did a run
+        # land since I looked", which is a question about this writer's life.
+        self.run_revision = 0
         # Both default to TRUE. One stray PRAGMA inside the single-writer
         # process would then download an extension over the network — a silent
         # network fallback (invariant 4) that makes the offline suite pass on a
@@ -493,6 +497,12 @@ class Registry:
             "INSERT INTO runs VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
             [run_id, kind, _j(spec), _now()],
         )
+        # The invalidation seam for anything that caches a summary OF the runs
+        # table. There is one writer, so every run in this process passes here;
+        # a caller that saw revision N and still sees N knows no run landed in
+        # between. A re-logged identical run bumps it too, which costs one
+        # rebuild and never serves a stale answer.
+        self.run_revision += 1
         return run_id
 
     # -- research objects ---------------------------------------------------
@@ -2394,6 +2404,24 @@ class Registry:
         Synthetic rows are stored but excluded by default: a deterministic
         fixture must never be citable as evidence about a real trade.
         """
+        where, params = self._news_where(
+            as_of=as_of, terms=terms, tickers=tickers,
+            knowledge_cutoff=knowledge_cutoff, since=since,
+            include_synthetic=include_synthetic)
+        params.extend([int(limit), int(offset)])
+        return self._rows(
+            "SELECT * FROM news_items WHERE " + where
+            + " ORDER BY published DESC, item_hash LIMIT ? OFFSET ?", params)
+
+    def _news_where(self, *, as_of: str, terms=(), tickers=(),
+                    knowledge_cutoff: str | None = None,
+                    since: str | None = None,
+                    include_synthetic: bool = False) -> tuple[str, list]:
+        """The one point-in-time predicate, shared by the page and the count.
+
+        Duplicated clauses would let a search and its own total drift apart --
+        two answers about the same window, and no way to tell which is wrong.
+        """
         if not as_of:
             raise ValueError(
                 "search_news requires an explicit as_of; defaulting it to now "
@@ -2419,22 +2447,26 @@ class Registry:
                 "item_hash IN (SELECT item_hash FROM news_item_tickers "
                 f"WHERE ticker IN ({marks}))")
             params.extend(list(tickers))
-        params.extend([int(limit), int(offset)])
-        return self._rows(
-            "SELECT * FROM news_items WHERE " + " AND ".join(where)
-            + " ORDER BY published DESC, item_hash LIMIT ? OFFSET ?", params)
+        return " AND ".join(where), params
 
     def count_news_matches(self, *, as_of: str, terms=(), tickers=(),
+                           knowledge_cutoff: str | None = None,
+                           since: str | None = None,
                            include_synthetic: bool = False) -> int:
         """The full match total, which the page length cannot stand in for.
 
         Every ratio the relevance report computes is over the whole match set;
         computing them from one page would make the answer depend on paging.
+        Aggregated in SQL: paging a million rows back to call ``len`` on them
+        put the entire archive through the driver on every search.
         """
-        rows = self.search_news(as_of=as_of, terms=terms, tickers=tickers,
-                                include_synthetic=include_synthetic,
-                                limit=1_000_000, offset=0)
-        return len(rows)
+        where, params = self._news_where(
+            as_of=as_of, terms=terms, tickers=tickers,
+            knowledge_cutoff=knowledge_cutoff, since=since,
+            include_synthetic=include_synthetic)
+        row = self.con.execute(
+            "SELECT count(*) FROM news_items WHERE " + where, params).fetchone()
+        return int(row[0] or 0)
 
     def archive_stats(self) -> dict:
         """Size and span of the archive. Cache this — min/max are unindexed."""

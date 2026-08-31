@@ -24,8 +24,9 @@ def _no_throttle(monkeypatch):
     test in this file wait on the one before it — the cross-test timing state
     the suite is meant to be free of — for no assertion in return.
     """
-    monkeypatch.setattr(gdelt, "_MIN_INTERVAL_S", 0.0)
-    monkeypatch.setattr(gdelt, "_last_request", 0.0)
+    from qlab.news.providers._throttle import Throttle
+
+    monkeypatch.setattr(gdelt, "_THROTTLE", Throttle(0.0))
 
 
 class _Resp:

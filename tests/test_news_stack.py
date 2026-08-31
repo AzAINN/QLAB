@@ -133,12 +133,10 @@ def test_a_stack_of_all_dead_members_raises(monkeypatch):
             datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("dead",))
 
 
-def test_the_merged_window_is_what_provenance_reports(monkeypatch):
-    # fetch_news writes the in-process cache per call, so a stack used to leave
-    # it holding only the LAST member's records: cached_news_provenance then
-    # described a fraction of the window the desk had actually read, and named
-    # the wrong provider for it. The merge is what the desk read, so the merge
-    # is what the cache must hold.
+def test_a_stack_returns_every_members_records_in_one_ordering(monkeypatch):
+    # What the desk reads is the merge, not the last member's slice: each
+    # member's records are kept, stamped with the member that fetched them,
+    # and ordered by the single window ordering rather than by member.
     monkeypatch.setitem(
         feed.PROVIDERS, "one",
         lambda a, u: [_item("one", "A", "h1", "2026-08-27T09:00:00+00:00"),
@@ -149,7 +147,8 @@ def test_the_merged_window_is_what_provenance_reports(monkeypatch):
     window = feed.fetch_news_stacked(
         datetime(2026, 8, 28, tzinfo=timezone.utc), ("SPY",), ("one", "two"))
     assert len(window.items) == 3
-    assert feed.cached_news_provenance(("SPY",)) == ("one", 3)
+    assert [i.headline for i in window.items] == ["h2", "h1b", "h1"]
+    assert sorted(i.provider for i in window.items) == ["one", "one", "two"]
 
 
 def test_an_all_dead_stack_keeps_each_members_own_sentence(monkeypatch):

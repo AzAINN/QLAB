@@ -56,7 +56,6 @@ def test_synthetic_fetch_is_deterministic_filtered_and_provider_tagged(
     assert all(set(item.tickers) <= set(CORE) for item in first)
     cutoff = as_of - timedelta(hours=48)
     assert all(cutoff <= _timestamp(item.published) <= as_of for item in first)
-    assert news.cached_news_provenance(CORE) == ("synthetic", len(narrow))
     expected_order = sorted(
         first,
         key=lambda item: (
@@ -374,6 +373,26 @@ def test_credential_status_reports_the_whole_stack_not_just_the_singular(monkeyp
     monkeypatch.delenv("QLAB_NEWS_PROVIDERS")
     monkeypatch.setenv("QLAB_NEWS_PROVIDER", "rss")
     assert credential_status()["news_provider"] == "rss"
+
+
+def test_an_edgar_only_stack_is_not_ready_without_a_contact(monkeypatch):
+    """Every edgar fetch refuses without QLAB_EDGAR_CONTACT, so counting it as
+    a ready news lane promises a window the desk cannot fetch."""
+    from qlab.env import credential_status
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "edgar")
+    monkeypatch.delenv("QLAB_NEWS_PROVIDER", raising=False)
+    monkeypatch.delenv("QLAB_EDGAR_CONTACT", raising=False)
+    assert credential_status()["news_ready"] is False
+
+    monkeypatch.setenv("QLAB_EDGAR_CONTACT", "A Quant <quant@example.org>")
+    assert credential_status()["news_ready"] is True
+
+    # A stack that also holds a keyless real provider is ready either way:
+    # readiness is "can any member answer", not "can all of them".
+    monkeypatch.delenv("QLAB_EDGAR_CONTACT")
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "edgar,macro")
+    assert credential_status()["news_ready"] is True
 
 
 def _rss_payload(headline: str) -> bytes:

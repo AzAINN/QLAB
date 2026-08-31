@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import json
 import os
-import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from qlab.news.feed import NewsItem, load_news_sources
+from qlab.news.providers._throttle import Throttle
 from qlab.paths import state_path
 
 SOURCE = "SEC EDGAR"
@@ -41,7 +41,7 @@ _CACHE_TTL = timedelta(days=7)
 _MAX_LOOKBACK = timedelta(days=120)
 _MIN_INTERVAL_S = 0.12               # under the SEC's 10 requests/second
 _TIMEOUT_S = 10
-_last_request = 0.0
+_THROTTLE = Throttle(_MIN_INTERVAL_S)
 
 
 def _contact() -> str:
@@ -55,10 +55,7 @@ def _contact() -> str:
 
 
 def _get_json(url: str) -> dict:
-    global _last_request
-    wait = _MIN_INTERVAL_S - (time.monotonic() - _last_request)
-    if wait > 0:
-        time.sleep(wait)
+    _THROTTLE.wait()
     # User-Agent only, as feed._fetch_rss sends. urlopen does not decode
     # content encodings, so negotiating gzip would hand compressed bytes
     # straight to json.loads on the first live call.
@@ -69,7 +66,6 @@ def _get_json(url: str) -> dict:
         payload = response.read()
     finally:
         response.close()
-    _last_request = time.monotonic()
     return json.loads(payload)
 
 

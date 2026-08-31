@@ -18,11 +18,9 @@ import hashlib
 import os
 import sys
 import random
-import threading
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ElementTree
-from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -73,8 +71,6 @@ class NewsItem:
 
 ProviderFetch = Callable[[datetime, tuple[str, ...]], list[NewsItem]]
 PROVIDERS: dict[str, ProviderFetch] = {}
-_NEWS_CACHE: dict[tuple[str, ...], tuple[NewsItem, ...]] = {}
-_CACHE_LOCK = threading.RLock()
 
 PLUGIN_GROUP = "qlab.news.providers"
 _FIRST_PARTY = frozenset({"synthetic", "rss", "alpaca", "edgar", "macro", "gdelt"})
@@ -176,8 +172,6 @@ def fetch_news(
         )
 
     ordered = sorted(items, key=_ordering_key)
-    with _CACHE_LOCK:
-        _NEWS_CACHE[tickers] = tuple(ordered)
     if partial_failures:
         raise PartialWindow(ordered, partial_failures)
     return ordered
@@ -304,32 +298,8 @@ def fetch_news_stacked(
     if not any(outcome_is_live(v) for v in outcomes.values()):
         raise StackFailed(outcomes)
     items.sort(key=_ordering_key)
-    # Each member's fetch overwrote the cache, so the provenance the desk
-    # reported described only the LAST member — a fraction of the window, under
-    # the wrong provider name. What the desk read is the merge; publish the merge.
-    with _CACHE_LOCK:
-        _NEWS_CACHE[_normalize_universe(universe)] = tuple(items)
     return StackedWindow(items=items, outcomes=outcomes,
                          providers=tuple(providers), partials=partials)
-
-
-def cached_news_provenance(
-    universe: Sequence[str],
-) -> tuple[str, int] | None:
-    """Return provider/count provenance from the last in-process fetch.
-
-    After a stack, this is the MERGED window: the count is every member's
-    records and the name is the window's plurality provider — the one that
-    contributed most, not the only one that contributed.
-    """
-    tickers = _normalize_universe(universe)
-    with _CACHE_LOCK:
-        items = _NEWS_CACHE.get(tickers)
-    if not items:
-        return None
-    counts = Counter(item.provider for item in items)
-    top_provider = min(counts, key=lambda name: (-counts[name], name))
-    return top_provider, len(items)
 
 
 @lru_cache(maxsize=4)

@@ -6335,3 +6335,75 @@ def test_predictor_run_is_dispatched_off_the_dispatch_lock():
     """Fitting a board is seconds of numpy; holding `_LOCK` across it would
     freeze the snapshot poll and every approval behind it."""
     assert "/api/research/predictors/run" in ui_server._LOCK_EXEMPT_POSTS
+
+
+# --- K3b: serving the visuals a build draws ----------------------------------
+
+
+def test_visuals_route_lists_the_circuit(session):
+    status, out = handle_api(session, "GET", "/api/visuals", {}, {})
+    assert status == 200
+    names = [v["name"] for v in out["visuals"]]
+    assert "quantum_circuit" in names
+    assert names == sorted(names)
+    assert all(v["title"] for v in out["visuals"])
+
+
+def test_visual_route_renders_one_wire_per_feature(session):
+    status, out = handle_api(
+        session, "GET", "/api/visuals/quantum_circuit",
+        {"features": ["mom_21d,vol_21d,disp_5d"]}, {})
+    assert status == 200, out
+    assert out["name"] == "quantum_circuit"
+    assert out["title"]
+    assert out["params"]["features"] == ["mom_21d", "vol_21d", "disp_5d"]
+    wires = [line for line in out["text"].splitlines() if "|0>" in line]
+    assert len(wires) == 3
+    assert all("RY(" in line for line in wires)
+
+
+def test_visual_route_parses_angles_and_the_kernel(session):
+    status, out = handle_api(
+        session, "GET", "/api/visuals/quantum_circuit",
+        {"features": ["a,b,c"], "angles": ["0.5,1.0,-1.5"],
+         "kernel": ["zz"]}, {})
+    assert status == 200, out
+    assert out["params"]["angles"] == [0.5, 1.0, -1.5]
+    assert out["params"]["kernel"] == "zz"
+    entangler = [line for line in out["text"].splitlines()
+                 if line.startswith("ZZ")]
+    assert len(entangler) == 1
+    assert "(a,b)" in entangler[0]
+
+
+def test_visual_route_without_zz_draws_no_entangler(session):
+    _, out = handle_api(
+        session, "GET", "/api/visuals/quantum_circuit",
+        {"features": ["a,b,c"], "kernel": ["angle"]}, {})
+    assert not [line for line in out["text"].splitlines()
+                if line.startswith("ZZ")]
+
+
+def test_visual_route_404s_an_unknown_name_naming_the_known(session):
+    status, refused = handle_api(
+        session, "GET", "/api/visuals/nope", {}, {})
+    assert status == 404
+    assert "nope" in refused["error"]
+    assert "quantum_circuit" in refused["error"]
+
+
+def test_visual_route_400s_an_unparseable_angle(session):
+    status, refused = handle_api(
+        session, "GET", "/api/visuals/quantum_circuit",
+        {"features": ["a,b"], "angles": ["0.5,x"]}, {})
+    assert status == 400
+    assert "angles" in refused["error"]
+
+
+def test_visual_route_400s_more_features_than_the_drawer_will_draw(session):
+    features = ",".join(f"f{i}" for i in range(13))
+    status, refused = handle_api(
+        session, "GET", "/api/visuals/quantum_circuit",
+        {"features": [features]}, {})
+    assert status == 400
+    assert "13" in refused["error"] and "12" in refused["error"]

@@ -38,6 +38,8 @@ GET  /api/atlas/context          the rich surface a reasoning Atlas forms a view
 GET  /api/research/predictors    the predictor board: augmented lane vs its control
 POST /api/research/predictors/run  run one lane (plus its baseline — pairing is
                                  the board's promise) and persist the board
+GET  /api/visuals                what this build can draw, as {name, title}
+GET  /api/visuals/<name>         one text visual, parameters off the query string
 GET  /api/workforce              recent runs, how far each got, and where it stopped
 GET  /api/workforce/stream       what the agents said and did, off the audit bus
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
@@ -6328,6 +6330,45 @@ def handle_api(session: UISession, method: str, path: str,
             # back naming MODEL_IDS, which is what an operator needs to retry.
             return 400, {"error": str(exc)}
 
+    if method == "GET" and path == "/api/visuals":
+        # What this build can draw. Rendering is pure text off a params dict —
+        # no registry handle, no network — so it stays under the dispatch lock
+        # with its sibling GETs.
+        from qlab import visuals
+
+        return 200, {"visuals": [
+            {"name": spec.name, "title": spec.title}
+            for spec in visuals.catalog().values()
+        ]}
+
+    if method == "GET" and path.startswith("/api/visuals/"):
+        from qlab import visuals
+
+        name = path.removeprefix("/api/visuals/")
+        try:
+            params = _visual_params(query)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        try:
+            text = visuals.render(name, params)
+        except KeyError as exc:
+            # The registry's own sentence, which lists the known names.
+            # `str(KeyError)` would re-quote it, so take the argument.
+            return 404, {"error": exc.args[0] if exc.args else repr(exc)}
+        except (ValueError, TypeError) as exc:
+            # A bad parameter is the caller's error, not a 500: the drawer
+            # says which one and what the limit was.
+            return 400, {"error": str(exc)}
+        spec = visuals.catalog().get(name)
+        return 200, {
+            "name": name,
+            "title": spec.title if spec is not None else name,
+            "text": text,
+            # Echoed as parsed, so a client can see what its query string
+            # actually became before the drawer read it.
+            "params": params,
+        }
+
     if method == "GET" and path == "/api/research/qualitative":
         # Read-only over the window already fetched: composing the matrix never
         # touches the network, so it is safe under the dispatch lock.
@@ -6733,6 +6774,46 @@ def _qbool(query: dict, key: str, default: bool) -> bool:
     if not v:
         return default
     return _flagbool(v[0], default)
+
+
+def _visual_params(query: dict) -> dict:
+    """Turn a visual's query string into the plain dict a renderer reads.
+
+    Query values are always text, and the drawers take typed parameters: a
+    list of feature names, a list of angles in RADIANS, a kernel name. An
+    unparseable number is refused here, by name, rather than silently dropped
+    — a visual that quietly renders symbolically because `angles` failed to
+    parse would be a drawing of the wrong thing.
+
+    Absent keys stay absent, so each renderer's own default applies.
+    """
+    def _one(key: str) -> str | None:
+        values = query.get(key)
+        return values[0] if isinstance(values, list) and values else None
+
+    params: dict = {}
+    features = _one("features")
+    if features is not None:
+        params["features"] = [
+            part.strip() for part in features.split(",") if part.strip()]
+    angles = _one("angles")
+    if angles is not None:
+        parsed: list[float] = []
+        for part in (p.strip() for p in angles.split(",")):
+            if not part:
+                continue
+            try:
+                parsed.append(float(part))
+            except ValueError:
+                raise ValueError(
+                    f"angles must be comma-separated numbers in radians; "
+                    f"{part!r} is not a number"
+                ) from None
+        params["angles"] = parsed
+    kernel = _one("kernel")
+    if kernel is not None:
+        params["kernel"] = kernel
+    return params
 
 
 # ---------------------------------------------------------------------------

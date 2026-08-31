@@ -379,7 +379,17 @@ qlab workforce watch --id <id>                 # tail a run someone else is driv
 qlab workforce interrupt --id <id>             # freeze an orphan for explicit resume
 qlab workforce run --resume <id>               # continue an interrupted run
 qlab events --kind workflow_phase              # tail the owner's audit bus
+qlab cli                                       # interactive Claude as Atlas, on this desk
+qlab build "add a heatmap visual"              # Claude Code on this checkout
 ```
+
+`qlab cli` opens the real Claude CLI wearing the Atlas persona, granted the
+desk manager's own tools from `agents/atlas.md` through the owner-backed proxy
+plus read-only web — no shell and no filesystem. `qlab build` opens Claude Code
+on this checkout with its own default tools and its own interactive permission
+prompts, so every edit is one you approve; if it touches `qlab/` or
+`clients/atlas-tui/` you are offered `qlab --restart runtime` and never given
+it. The workstation spells both as `/cli` and `/build`.
 
 **Tests**
 

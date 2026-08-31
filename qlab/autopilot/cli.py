@@ -774,7 +774,7 @@ def _cmd_tui(args) -> int:
     # `_publish_owner_port` already put the port in this environment; passing it
     # explicitly is what makes the handover a statement rather than an
     # inheritance nobody can see.
-    env = dict(os.environ, QLAB_UI_PORT=str(args.port))
+    env = _client_env(args.port)
     if os.name == "nt":
         # exec* on Windows is spawn-then-exit-parent: the shell sees the
         # launcher die and prints its prompt INTO the fullscreen client, and
@@ -795,6 +795,46 @@ def _cmd_tui(args) -> int:
 # child owns the tty, and the desk is exactly as governed while it runs as it
 # was before, because `qlab cli`'s session reaches the owner through the same
 # read-bounded proxy the workforce already uses.
+
+
+def _launcher_path() -> str | None:
+    """This `qlab`, as an absolute path the workstation can spawn.
+
+    `sys.argv[0]` first — a console script, a pipx shim, or the checkout's own
+    entry point, whichever actually started this process — then PATH, and then
+    nothing. `None` is a real answer: the client falls back to plain `qlab`,
+    and an environment variable that exists and names a file that does not is
+    worse than absent.
+
+    Run as `python -m qlab.autopilot.cli`, `argv[0]` is the module file rather
+    than a launcher, so the `isfile` check is not a formality: spawning a
+    `.py` would fail at exec on every platform that does not read a shebang.
+    """
+    said = sys.argv[0] if sys.argv else ""
+    if said and os.path.isfile(said) and os.access(said, os.X_OK):
+        return os.path.abspath(said)
+    return shutil.which("qlab")
+
+
+def _client_env(port: int) -> dict:
+    """The environment the Atlas workstation is handed.
+
+    Two statements rather than an inheritance. The port is which owner the
+    client polls; `QLAB_BIN` is which `qlab` its `/build` spawns — and that one
+    matters because a machine with a pipx install *and* a checkout resolves
+    `qlab` off PATH to the installed copy, so `/build` would open Claude Code
+    on a tree the running binary was not built from. The client prefers this
+    and keeps PATH as its last fallback (`handoff::launcher`).
+    """
+    env = dict(os.environ, QLAB_UI_PORT=str(port))
+    launcher = _launcher_path()
+    if launcher:
+        env["QLAB_BIN"] = launcher
+    else:
+        # Never a blank: an empty QLAB_BIN is a claim this launcher cannot
+        # make, and the client's own PATH fallback is the honest answer.
+        env.pop("QLAB_BIN", None)
+    return env
 
 
 def _owner_answers(runtime_url: str) -> bool:
@@ -871,6 +911,12 @@ def _cmd_build(args) -> int:
     # Said, never done. A build that touched the owner's code is invisible to a
     # long-lived runtime (invariant 8), and restarting it out from under an
     # operator who was mid-approval is not this verb's decision to make.
+    #
+    # Printed for the operator who typed `qlab build` in a shell — this is
+    # their only channel. Reached from the workstation's `/build` it lands on a
+    # screen the client is about to paint over, which is why the client asks
+    # git the same question itself and says so in a toast (`handoff::run`).
+    # Two callers, two surfaces, one rule: offer the restart, never perform it.
     if _desk_sources_changed():
         print("\nthis build touched code the desk serves; it keeps running the "
               "old imports until you restart it:\n    qlab --restart runtime",
@@ -1072,7 +1118,12 @@ def build_parser() -> argparse.ArgumentParser:
     # would have made "which one am I in" a flag an operator can forget.
     cli = sub.add_parser(
         "cli", help="open the real Claude CLI as Atlas, against this desk")
-    cli.add_argument("--port", type=int, default=8765)
+    # The published port, not a literal. The workstation spawns `qlab cli` with
+    # no `--port`, and the desk it is looking at is the one the launcher put in
+    # this environment — a hard 8765 here opens Atlas against a different owner
+    # than the operator can see, or against none at all.
+    cli.add_argument("--port", type=int,
+                     default=int(os.environ.get("QLAB_UI_PORT", 8765)))
     add_common(cli)
     cli.set_defaults(func=_cmd_cli)
 

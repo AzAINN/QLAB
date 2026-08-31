@@ -820,6 +820,77 @@ def proxy_mcp_config(runtime_url: str, *, offline: bool) -> dict:
 # constant, which is exactly the shape invariant 3 forbids.
 _WEB_TOOLS = ("WebSearch", "WebFetch")
 
+# Every Claude-visible name the owner-backed proxy can actually serve, across
+# both grants this module builds. Used to *check* a role's declared tool, never
+# to widen one: a name that is not in here names nothing, and is refused.
+_KNOWN_PROXY_TOOLS = frozenset(_PROXY_TOOLS) | frozenset(_CHAT_TOOLS)
+
+
+def role_proxy_tool(tool: str) -> str | None:
+    """One `agents/*.md` tool name as Claude will see it, or None.
+
+    `_proxy_tool` is tried first and keeps its trader mapping, so a role that
+    asks for `risk_report` still gets `portfolio.state`. What this adds is the
+    second lookup that mapper cannot do: `_LAB_TOOL_BASES` is keyed on the
+    *dotted* base, and `agents/atlas.md` spells five of its tools with
+    underscores (`regime_turbulence`), while four more — the K1 additions
+    `workflow.start`, `workflow.resume`, `atlas.task.create`, `approvals.list` —
+    are real proxy tools that were never in that set at all. Nine of atlas's
+    eighteen answered None, and a grant built by dropping them silently would
+    have shipped a desk manager with no regime panel and no way to start work,
+    looking exactly like one that had both.
+
+    So the fallback asks the question that actually matters — does the proxy
+    serve a tool by this name — against the union of what this module grants
+    anywhere. It cannot invent authority: a name outside that union is None.
+    """
+    mapped = _proxy_tool(tool)
+    if mapped:
+        return mapped
+    # `_claude_tool` sanitizes dots to underscores, which is exactly how the
+    # proxy registers its own names, so both spellings land on one string.
+    candidate = _claude_tool(tool.rsplit("__", 1)[-1])
+    return candidate if candidate in _KNOWN_PROXY_TOOLS else None
+
+
+def atlas_cli_tools() -> list[str]:
+    """What an interactive `qlab cli` session may reach, in full.
+
+    **Derived from the atlas role's own `tools:` front matter**, not from
+    `_PROXY_TOOLS`. The first cut granted that union — every workforce role's
+    tools at once, including `workflow.referee` (mint a referee PASS),
+    `registry.log_verdict` (persist one) and `algorithms.solve` — with only the
+    persona in front of it. A persona is prose the model may decline to follow;
+    it is not a gate. The role file is the gate, and it is the same file the
+    persona itself is read from, which is what invariant 5 is for.
+
+    What Atlas is not granted here is not forbidden outright: it falls through
+    to Claude Code's own interactive permission prompt, with the operator
+    answering. Least privilege, and then a human.
+
+    Refuses loudly on a role tool the proxy cannot serve. A silent drop is the
+    exact failure this function exists to have noticed once already.
+    """
+    from qlab.agents.loader import load_agents
+
+    source = next((s for s in load_agents() if s.name == "atlas"), None)
+    if source is None:
+        raise RuntimeError(
+            "agents/atlas.md defines no `atlas` role; `qlab cli` has no tool "
+            "grant to build — run `python -m qlab.agents.loader list`")
+    granted: list[str] = []
+    for tool in source.tools:
+        resolved = role_proxy_tool(tool)
+        if resolved is None:
+            raise RuntimeError(
+                f"agents/atlas.md grants {tool!r}, which the qlab-operator "
+                "proxy does not serve; fix the name in the role file or add "
+                "the tool to qlab/mcp/tui_proxy.py — a grant that quietly "
+                "dropped it would look identical to one that worked")
+        if resolved not in granted:
+            granted.append(resolved)
+    return [*granted, *_WEB_TOOLS]
+
 
 def atlas_persona() -> str:
     """The desk manager's own brief, out of the one source of truth.
@@ -847,7 +918,8 @@ def build_atlas_cli_argv(*, runtime_url: str, offline: bool) -> list[str]:
     operator is the one at the keyboard. What is bounded instead is authority —
     the tool *universe* is the two read-only web tools, so anything else is not
     merely un-allowlisted but absent, and the qlab tools arrive through the
-    proxy that only ever calls the owner's HTTP API.
+    proxy that only ever calls the owner's HTTP API. The allowlist is the atlas
+    role's own grant (`atlas_cli_tools`), never the workforce union.
     """
     return [
         "claude",
@@ -855,7 +927,7 @@ def build_atlas_cli_argv(*, runtime_url: str, offline: bool) -> list[str]:
         "--mcp-config", json.dumps(proxy_mcp_config(runtime_url,
                                                     offline=offline)),
         "--tools", ",".join(_WEB_TOOLS),
-        "--allowedTools", ",".join([*_PROXY_TOOLS, *_WEB_TOOLS]),
+        "--allowedTools", ",".join(atlas_cli_tools()),
         "--append-system-prompt", atlas_persona(),
     ]
 

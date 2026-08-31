@@ -2,8 +2,8 @@
 
 Two argv builders and two refusals, all pure: what reaches `execvp` is exactly
 what these functions return, so the authority each hand-off carries is a value
-a test can read rather than a claim in a docstring. `cli` grants the owner-backed
-proxy tools plus read-only web and nothing else; `build` grants Claude Code's own
+a test can read rather than a claim in a docstring. `cli` grants the atlas role's own
+tools plus read-only web and nothing else; `build` grants Claude Code's own
 defaults and leans on its own interactive permission prompts, because the
 operator is sitting in front of it.
 """
@@ -11,6 +11,7 @@ operator is sitting in front of it.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -28,16 +29,16 @@ def test_the_atlas_cli_argv_is_exactly_this():
         "--mcp-config", json.dumps(cc.proxy_mcp_config(
             "http://127.0.0.1:8765", offline=True)),
         "--tools", "WebSearch,WebFetch",
-        "--allowedTools", ",".join([*cc._PROXY_TOOLS, "WebSearch", "WebFetch"]),
+        "--allowedTools", ",".join(cc.atlas_cli_tools()),
         "--append-system-prompt", cc.atlas_persona(),
     ]
 
 
-def test_the_cli_grants_the_proxy_tools_and_read_only_web_and_nothing_else():
+def test_the_cli_grants_the_atlas_grant_and_read_only_web_and_nothing_else():
     argv = cc.build_atlas_cli_argv(
         runtime_url="http://127.0.0.1:8765", offline=False)
     granted = argv[argv.index("--allowedTools") + 1].split(",")
-    assert set(granted) == {*cc._PROXY_TOOLS, "WebSearch", "WebFetch"}
+    assert set(granted) == set(cc.atlas_cli_tools())
     # The tool *universe*, not just the allowlist: an allowlist narrows what is
     # pre-approved, while `--tools` is what exists to be prompted for at all.
     universe = argv[argv.index("--tools") + 1].split(",")
@@ -187,3 +188,150 @@ def test_both_verbs_are_registered_on_the_desk_parser():
     built = parser.parse_args(["build", "add a heatmap"])
     assert built.func is verbs._cmd_build
     assert built.request == "add a heatmap"
+
+
+# -- what `qlab cli` may actually reach -------------------------------------
+#
+# The first cut allowlisted `_PROXY_TOOLS` — the union of every workforce
+# role's grant — with only the persona in front of it. A persona is not a gate:
+# it is text the model may decline to follow, and that list carries
+# `workflow.referee` (mint a PASS), `registry.log_verdict` (write one down) and
+# `algorithms.solve`. Atlas's authority is now derived from the same file the
+# persona comes from, which is the whole point of invariant 5.
+
+def _atlas_role_tools():
+    from qlab.agents.loader import load_agents
+
+    return next(s for s in load_agents() if s.name == "atlas").tools
+
+
+def test_the_cli_grants_the_atlas_roles_own_tools_and_not_the_workforces():
+    argv = cc.build_atlas_cli_argv(
+        runtime_url="http://127.0.0.1:8765", offline=True)
+    granted = set(argv[argv.index("--allowedTools") + 1].split(","))
+
+    # The referee's two tools are the sharp end: one mints a PASS and the other
+    # persists it, and a PASS is what a fill is bound to.
+    for forbidden in ("workflow_referee", "registry_log_verdict",
+                      "algorithms_solve", "backtest_run",
+                      "research_apply_views"):
+        assert f"mcp__qlab-operator__{forbidden}" not in granted, forbidden
+
+    # And what the role does name is all there.
+    for tool in _atlas_role_tools():
+        resolved = cc.role_proxy_tool(tool)
+        assert resolved in granted, f"{tool} -> {resolved}"
+
+    assert {"WebSearch", "WebFetch"} <= granted
+    # Nothing else at all: the set is exactly the role plus the web.
+    assert granted == {
+        *(cc.role_proxy_tool(t) for t in _atlas_role_tools()),
+        "WebSearch", "WebFetch",
+    }
+
+
+def test_every_tool_the_atlas_role_names_is_one_the_proxy_actually_serves():
+    # `_proxy_tool` alone answers None for nine of the role's eighteen — the
+    # five regime tools (spelled with underscores in agents/atlas.md, keyed
+    # with dots in _LAB_TOOL_BASES) and the four K1 additions. Silently
+    # dropping them would ship an Atlas with no regime panel and no way to
+    # start work, looking exactly like one that had them.
+    for tool in _atlas_role_tools():
+        assert cc.role_proxy_tool(tool) is not None, tool
+
+
+def test_a_role_tool_the_proxy_cannot_serve_refuses_rather_than_vanishes():
+    assert cc.role_proxy_tool("mcp__qlab__not.a.tool") is None
+    from qlab.agents.loader import AgentDef
+
+    bogus = AgentDef(name="atlas", description="", body="x",
+                     tools=["mcp__qlab__not.a.tool"])
+    monkey = lambda: [bogus]  # noqa: E731
+    import qlab.agents.loader as loader
+
+    original = loader.load_agents
+    loader.load_agents = monkey
+    try:
+        with pytest.raises(RuntimeError, match="not.a.tool"):
+            cc.build_atlas_cli_argv(
+                runtime_url="http://127.0.0.1:8765", offline=True)
+    finally:
+        loader.load_agents = original
+
+
+# -- the port the desk is actually on ---------------------------------------
+
+def test_the_cli_verb_defaults_to_the_port_the_launcher_published(monkeypatch):
+    from qlab.autopilot import cli as verbs
+
+    monkeypatch.setenv("QLAB_UI_PORT", "9000")
+    assert verbs.build_parser().parse_args(["cli"]).port == 9000
+    # And an explicit flag still wins over the environment.
+    assert verbs.build_parser().parse_args(["cli", "--port", "8123"]).port == 8123
+
+
+def test_without_a_published_port_the_cli_verb_falls_back_to_the_default(monkeypatch):
+    from qlab.autopilot import cli as verbs
+
+    monkeypatch.delenv("QLAB_UI_PORT", raising=False)
+    assert verbs.build_parser().parse_args(["cli"]).port == 8765
+
+
+# -- which checkout `/build` opens ------------------------------------------
+
+def test_the_workstations_env_names_the_launcher_that_started_it():
+    # Without this the Rust client spawns whatever `qlab` PATH resolves, which
+    # on a machine with a pipx install and a checkout is reliably the wrong
+    # one — `/build` would open Claude Code on a different tree than the
+    # binary was built from.
+    from qlab.autopilot import cli as verbs
+
+    env = verbs._client_env(8765)
+    assert env["QLAB_UI_PORT"] == "8765"
+    assert os.path.isfile(env["QLAB_BIN"]), env["QLAB_BIN"]
+    assert os.path.isabs(env["QLAB_BIN"]), env["QLAB_BIN"]
+
+
+def test_a_launcher_that_cannot_name_itself_leaves_the_path_fallback_alone(monkeypatch):
+    from qlab.autopilot import cli as verbs
+
+    monkeypatch.setattr(verbs.sys, "argv", ["", "tui"])
+    monkeypatch.setattr(verbs.shutil, "which", lambda name: None)
+    env = verbs._client_env(8765)
+    # Absent, not empty: the Rust side treats a blank QLAB_BIN as "not set"
+    # too, but an env var that exists and names nothing is a claim this
+    # launcher cannot make.
+    assert "QLAB_BIN" not in env
+
+
+# -- the restart offer's one moving part ------------------------------------
+
+def test_a_rename_into_the_desks_trees_counts_and_a_quoted_path_is_unquoted(
+        monkeypatch):
+    from qlab.autopilot import cli as verbs
+
+    def porcelain(out: str):
+        class Done:
+            stdout = out
+        return lambda *a, **k: Done()
+
+    # A rename: the destination is what was written, so `R  old -> new` counts
+    # when `new` is under a desk tree even though `old` is not.
+    monkeypatch.setattr(verbs.subprocess, "run",
+                        porcelain("R  docs/old.py -> qlab/visuals/new.py\n"))
+    assert verbs._desk_sources_changed() is True
+
+    # ...and does not count when only the source was.
+    monkeypatch.setattr(verbs.subprocess, "run",
+                        porcelain("R  qlab/old.py -> docs/new.py\n"))
+    assert verbs._desk_sources_changed() is False
+
+    # A path with a space is quoted by porcelain v1; the quotes are not part
+    # of it.
+    monkeypatch.setattr(verbs.subprocess, "run",
+                        porcelain('?? "qlab/visuals/my chart.py"\n'))
+    assert verbs._desk_sources_changed() is True
+
+    monkeypatch.setattr(verbs.subprocess, "run",
+                        porcelain(' M planning-docs/notes.md\n'))
+    assert verbs._desk_sources_changed() is False

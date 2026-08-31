@@ -149,6 +149,50 @@ def test_an_approved_request_is_still_the_proposal(session):
     assert proposal["superseded"] == []
 
 
+def test_an_older_approved_but_unbooked_request_is_superseded_too(session):
+    """A plan approved and never booked is exactly the stale allocation the
+    operator must not be shown beside a newer one."""
+    older = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    approval = [row for row in session.registry.list_approval_requests(50)
+                if row["plan_id"] == older][0]["approval_id"]
+    handle_api(session, "POST", f"/api/approvals/{approval}/approve", {}, {})
+    assert _states(session)[older] == "approved"
+
+    newer = _checked_plan(session, tilt=0.02)
+    out = session.announce_desk_work(True, [])
+
+    assert out["superseded"] == [older]
+    assert _states(session)[older] == "invalidated"
+    row = [r for r in session.registry.list_approval_requests(50)
+           if r["plan_id"] == older][0]
+    assert row["invalidated_reason"] == f"superseded by {newer}"
+
+    proposal = current_proposal(session.registry)
+    assert proposal["plan_id"] == newer
+    assert proposal["superseded"] == [older]
+    # The chat names the state it withdrew: an approved request going away is
+    # a bigger fact than a pending one going away, and must not read the same.
+    assert f"{older[:8]} (approved, unbooked)" in _said(session)
+
+
+def test_a_consumed_request_is_never_superseded(session):
+    """Terminal rows are untouched: a booked plan is history, not a question."""
+    plan_id = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    approval = [row for row in session.registry.list_approval_requests(50)
+                if row["plan_id"] == plan_id][0]["approval_id"]
+    handle_api(session, "POST", f"/api/approvals/{approval}/approve", {}, {})
+    session.registry.transition_approval(
+        approval, "consumed", consumed_at="2026-08-31T00:00:00+00:00")
+
+    newer = _checked_plan(session, tilt=0.02)
+    out = session.announce_desk_work(True, [])
+    assert out["superseded"] == []
+    assert _states(session)[plan_id] == "consumed"
+    assert current_proposal(session.registry)["plan_id"] == newer
+
+
 def test_the_referee_verdict_for_the_plans_hash_is_included(session):
     plan_id = _checked_plan(session)
     session.announce_desk_work(True, [])

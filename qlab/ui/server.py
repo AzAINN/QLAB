@@ -4184,15 +4184,20 @@ class UISession:
           request (pending, approved, consumed, expired) means the desk has
           already asked; it asks once.
         * The desk holds ONE open question. Once the newest checked plan has
-          its request, every older pending one is invalidated with a reason
-          naming its successor, and the chat says so — once per superseded
+          its request, every older live one — pending, and approved but never
+          booked — is invalidated with a reason naming its successor, and the
+          chat says so, naming the state it withdrew. Once per superseded
           plan, because a second pass finds those rows already terminal and
           has nothing left to name.
         * A trigger task minted this tick is named with its reason and the
           template the lookup maps it to. `created_tasks` is per-tick and
           deduped upstream, so a strong indicator is announced once.
         """
-        from qlab.governance.proposal import current_proposal, supersede
+        from qlab.governance.proposal import (
+            current_proposal,
+            live_requests,
+            supersede,
+        )
         from qlab.operator.templates import TRIGGER_TEMPLATE
 
         announced: dict = {"approvals_opened": [], "superseded": [],
@@ -4221,11 +4226,17 @@ class UISession:
                 f"`/execute {pid[:8]}` to book it; each opens the confirm box.")
             announced["approvals_opened"].append(aid)
         # One proposal. Run every tick, not only when a request was opened
-        # here: a desk that came up holding two pending requests has two open
+        # here: a desk that came up holding two live requests has two open
         # questions and nothing else would ever close the older one.
         proposal = current_proposal(self.registry)
         if proposal is not None:
             keep = str(proposal["plan_id"])
+            # The state each is in BEFORE the withdrawal, because that is what
+            # the chat line has to name: an approved-but-unbooked allocation
+            # going away is a bigger fact than a pending one going away, and
+            # after the transition every row reads `invalidated`.
+            was = {plan_id: str(row.get("status") or "")
+                   for plan_id, row in live_requests(self.registry).items()}
             try:
                 gone = supersede(self.registry, keep)
             except (KeyError, ValueError, PermissionError) as exc:
@@ -4234,10 +4245,12 @@ class UISession:
                     f"ones could not be withdrawn: {exc}")
                 gone = []
             for old in gone:
+                state = ("approved, unbooked" if was.get(old) == "approved"
+                         else was.get(old) or "live")
                 self._record_atlas_reply(
-                    f"⚑ Plan {keep[:8]} supersedes {old[:8]}: one proposal "
-                    f"at a time. The older approval is invalidated as "
-                    f"superseded — it can no longer book anything.")
+                    f"⚑ Plan {keep[:8]} supersedes {old[:8]} ({state}): one "
+                    f"proposal at a time. The older approval is invalidated "
+                    f"as superseded — it can no longer book anything.")
             announced["superseded"].extend(gone)
         for task in created_tasks or []:
             kind = str(task.get("trigger") or "trigger")

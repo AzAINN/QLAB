@@ -119,7 +119,8 @@ from qlab.core.desk_mode import (
     DEFAULT_DESK_MODE, DeskMode, load_desk_mode, save_desk_mode)
 from qlab.core.posture import (
     DEFAULT_POSTURE, Posture, load_posture, save_posture)
-from qlab.core.llm_config import SurfaceModel, save_llm_config, startup_llm_config
+from qlab.core.llm_config import (
+    SurfaceModel, llm_config_chosen, save_llm_config, startup_llm_config)
 from qlab.core.types import _jsonable
 from qlab.paths import workspace_root
 
@@ -460,6 +461,13 @@ class UISession:
         # Which model answers for which surface. The persisted choice wins over
         # the environment, which only seeds a desk that has never chosen.
         self.llm_config = startup_llm_config()
+        # Whether anybody NAMED that pair, computed here because here is where
+        # the answer stops being visible: past the line above a chosen
+        # `claude · inherit` and a desk nobody has asked are the same object.
+        # The desk mode's flag exists for this reason; unlike it, only a file
+        # counts — there is no launcher flag for a model, and the environment
+        # by this module's own rule seeds a desk that has never chosen.
+        self.llm_config_chosen = llm_config_chosen()
         # (monotonic stamp, payload) for the backend availability probe. The
         # owner is threaded and the heartbeat is a second writer of shared
         # state, so this cache takes a lock like every other mutable field here
@@ -1670,6 +1678,13 @@ class UISession:
         # announce one either.
         save_llm_config(updated)
         self.llm_config = updated
+        # Somebody answered. Set here rather than re-derived from disk, for the
+        # desk mode's reason: the constructor's read runs once and no POST goes
+        # near it, so without this line a desk that was asked and answered would
+        # go on reporting that nobody had, and the door would open again on
+        # every launch. After the save, never before — a choice the desk could
+        # not persist is not one it may claim anybody made.
+        self.llm_config_chosen = True
         self.registry.record_event(
             "llm.config_changed",
             # Names only: a backend's URL may carry a credential, and the
@@ -1679,6 +1694,9 @@ class UISession:
         return {
             "surface": surface,
             **self.llm_config.to_dict(),
+            # Same key the snapshot serves, so a door that saves and a door
+            # that re-polls read the same fact rather than two spellings of it.
+            "chosen": self.llm_config_chosen,
             "effect": (
                 # Not "off, so nothing happens": the chat surface reads the
                 # pair regardless of the switch, and a sentence saying
@@ -1704,7 +1722,16 @@ class UISession:
         """
         with self._llm_catalog_lock:
             cached = self._llm_catalog
-        payload = self.llm_config.to_dict()
+        payload = {
+            **self.llm_config.to_dict(),
+            # The one thing the pair cannot say about itself: a desk nobody
+            # has asked serves byte-identical values to one whose operator
+            # picked exactly them, so a client that must ASK which mind runs
+            # Atlas has to be told the difference by name. Always a boolean —
+            # an absent key means an owner too old to serve one, which is a
+            # different fact and must not read as "nobody chose".
+            "chosen": self.llm_config_chosen,
+        }
         if cached is None:
             return {**payload, "availability": None, "probed_at": None}
         _, catalog = cached

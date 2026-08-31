@@ -4851,6 +4851,70 @@ def test_a_posture_that_is_not_a_boolean_is_refused(session, value):
     assert session.posture_payload() == {"armed": False, "chosen": False}
 
 
+# -- the chosen mind --------------------------------------------------------
+def test_a_mind_nobody_chose_is_not_served_as_a_chosen_one(monkeypatch):
+    """The pair alone cannot tell a chosen ``claude · inherit`` from the default.
+
+    ``startup_llm_config`` collapses an absent file into ``DEFAULT_LLM_CONFIG``
+    and ``llm_payload`` served both identically, so a desk nobody has asked and
+    one whose operator picked exactly that were the same three fields on the
+    wire — and a startup door that must ask *which mind runs Atlas* had nothing
+    to key on. ``chosen`` is that fact and nothing more: the values stay the
+    default's, so a client that ignores the flag reads today's payload.
+    """
+    monkeypatch.delenv("QLAB_LLM_REASONER", raising=False)
+    monkeypatch.delenv("QLAB_LLM_WORKFORCE", raising=False)
+    fresh = UISession(offline_default=True, registry=Registry(":memory:"))
+    payload = fresh.llm_payload()
+    assert payload["chosen"] is False
+    # The fallback is still served in full: an unchosen mind is a working desk,
+    # not an error state.
+    assert payload["reasoner"] == {"backend": "claude", "model": "inherit"}
+    assert payload["workforce"] == {"backend": "claude", "model": "inherit"}
+    assert payload["reasoner_enabled"] is False
+    # And it reaches the client where the client actually looks: the llm block
+    # rides on the snapshot, which is what `desk_unchosen` reads for the mode.
+    snap = handle_api(fresh, "GET", "/api/tui", {"offline": ["1"]}, {})[1]
+    assert snap["llm"]["chosen"] is False
+
+
+def test_a_persisted_mind_is_served_as_a_chosen_one(monkeypatch):
+    """A file is somebody speaking, and it outlives the owner that wrote it."""
+    from qlab.core.llm_config import LlmConfig, SurfaceModel, save_llm_config
+
+    monkeypatch.delenv("QLAB_LLM_REASONER", raising=False)
+    monkeypatch.delenv("QLAB_LLM_WORKFORCE", raising=False)
+    save_llm_config(LlmConfig(reasoner=SurfaceModel("ollama", "granite3.3:8b"),
+                              workforce=SurfaceModel("claude", "sonnet")))
+    revived = UISession(offline_default=True, registry=Registry(":memory:"))
+    payload = revived.llm_payload()
+    assert payload["chosen"] is True
+    assert payload["reasoner"] == {"backend": "ollama", "model": "granite3.3:8b"}
+
+
+def test_a_config_written_before_the_flag_reads_as_chosen(monkeypatch):
+    """The migration, and the reason the flag is derived rather than stored.
+
+    These are the exact bytes every owner before this change wrote, carrying
+    the default pair: no ``chosen`` key, and values indistinguishable from a
+    desk that was never asked. Reading the key out of the file would make every
+    upgraded desk unchosen and open a door on every launch, so the answer comes
+    from the file's existence — which is the whole claim: somebody wrote it.
+    """
+    from qlab.paths import state_path
+
+    monkeypatch.delenv("QLAB_LLM_REASONER", raising=False)
+    monkeypatch.delenv("QLAB_LLM_WORKFORCE", raising=False)
+    path = state_path("llm_config.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "reasoner": {"backend": "claude", "model": "inherit"},
+        "workforce": {"backend": "claude", "model": "inherit"},
+        "reasoner_enabled": False}), encoding="utf-8")
+    revived = UISession(offline_default=True, registry=Registry(":memory:"))
+    assert revived.llm_payload()["chosen"] is True
+
+
 def test_a_checked_plan_gets_its_approval_opened_and_announced_once(session):
     """The reporter's checked preview is the desk asking; nothing opened the
     request, so BOOK's `x` returned in silence for want of a covering

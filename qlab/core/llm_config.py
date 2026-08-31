@@ -137,6 +137,25 @@ def load_llm_config() -> LlmConfig | None:
         return None
 
 
+def llm_config_chosen() -> bool:
+    """Whether anybody has answered *which mind runs this desk*.
+
+    A file is the only thing that counts. The environment "only seeds a desk
+    that has never chosen" (module docstring) and the default is what a desk
+    runs on while nobody has been asked, so neither is an answer — and past
+    ``startup_llm_config`` all three are the same object.
+
+    Derived from the file's existence rather than stored in it, which is what
+    makes the migration free: every config written before this flag existed was
+    written by somebody, so it reads as chosen without carrying a key. An
+    unreadable file is deliberately NOT an answer — ``load_llm_config`` turns
+    it back into "not chosen yet" so the operator is offered the picker, which
+    is the re-asking that docstring has always promised and which nothing could
+    perform until this flag existed.
+    """
+    return load_llm_config() is not None
+
+
 def save_llm_config(config: LlmConfig) -> None:
     path = state_path(_STATE_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,10 +227,14 @@ def env_llm_config() -> LlmConfig | None:
 def startup_llm_config() -> LlmConfig:
     """The config to start with: the persisted choice, then the env, then default.
 
-    Mirrors ``startup_desk_mode``'s precedence with one difference — there is no
-    "ask the operator" state here, because unlike a book, an unchosen model
-    routing has a correct answer (today's behaviour) that no one needs to
-    confirm.
+    Mirrors ``startup_desk_mode``'s precedence. The three sources still
+    collapse into one config on purpose: unlike a book, an unchosen routing has
+    a correct answer (today's behaviour), so no desk has to wait on an operator
+    before it can run. What the collapse must not do is hide *which* source
+    answered — a surface that asks which mind runs Atlas needs the default and
+    a deliberately chosen ``claude · inherit`` told apart, and this return value
+    cannot tell them apart. ``llm_config_chosen`` is that second fact, and the
+    owner serves it beside these values.
 
     The environment is parsed FIRST and unconditionally, even though the file
     beats it. Short-circuiting on the file would make a malformed

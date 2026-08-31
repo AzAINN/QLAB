@@ -15,6 +15,7 @@ from qlab.core.llm_config import (
     LlmConfig,
     SurfaceModel,
     env_llm_config,
+    llm_config_chosen,
     load_llm_config,
     save_llm_config,
     startup_llm_config,
@@ -206,6 +207,50 @@ def test_precedence_is_the_file_then_the_env_then_the_default(tmp_path, monkeypa
         reasoner=SurfaceModel("claude", "opus"),
         workforce=SurfaceModel("claude", "haiku")))
     assert startup_llm_config().workforce == SurfaceModel("claude", "haiku")
+
+
+def test_a_file_is_the_only_thing_that_counts_as_a_choice(tmp_path, monkeypatch):
+    """``startup_llm_config`` cannot answer this: it collapses all three sources.
+
+    The values a desk runs on and whether anybody named them are two facts, and
+    the second one stops being visible at the ``or`` chain.
+    """
+    monkeypatch.setenv("QLAB_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("QLAB_LLM_REASONER", raising=False)
+    monkeypatch.delenv("QLAB_LLM_WORKFORCE", raising=False)
+    assert llm_config_chosen() is False
+    # Saving the default is still an answer: what changed is that somebody said
+    # it. This is the pair the flag exists to tell apart from the fallback.
+    save_llm_config(DEFAULT_LLM_CONFIG)
+    assert llm_config_chosen() is True
+
+
+def test_the_env_seed_is_not_an_answer_to_the_question(tmp_path, monkeypatch):
+    """This module's own rule, read literally: the environment "only seeds a
+    desk that has never chosen". A shell variable routes the desk without
+    retiring the question; the picker's answer writes the file that does, and
+    that file beats the variable from then on.
+
+    Deliberately unlike ``desk_mode``, where a launcher flag counts as an
+    answer — there is no launcher flag for a model, and a shell is not
+    somebody choosing.
+    """
+    monkeypatch.setenv("QLAB_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("QLAB_LLM_WORKFORCE", "ollama:granite3.3:8b")
+    assert startup_llm_config().workforce == SurfaceModel("ollama", "granite3.3:8b")
+    assert llm_config_chosen() is False
+
+
+def test_a_file_nothing_can_read_reopens_the_question(tmp_path, monkeypatch):
+    """``load_llm_config``'s promise, finally keepable.
+
+    Its docstring has always said an unreadable file means "not chosen yet" and
+    that the operator "is about to be offered the picker anyway" — but with no
+    way to say so, a scratch file silently became a permanent default instead.
+    """
+    monkeypatch.setenv("QLAB_STATE_DIR", str(tmp_path))
+    (tmp_path / "llm_config.json").write_text("{ not json", encoding="utf-8")
+    assert llm_config_chosen() is False
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +448,7 @@ def test_the_snapshot_carries_the_config_and_never_probes(owner, monkeypatch):
     assert up.probes == []                       # nothing was asked
     assert block["workforce"] == {"backend": "claude", "model": "inherit"}
     assert block["reasoner_enabled"] is False
+    assert block["chosen"] is False               # nothing has named a mind
     assert block["availability"] is None          # never probed, and says so
     assert block["probed_at"] is None
 
@@ -453,6 +499,43 @@ def test_the_choice_route_refuses_with_the_reason_and_accepts_with_the_payload(
                                    "model": "granite3.3:8b"})
     assert status == 200
     assert accepted["workforce"] == {"backend": "up", "model": "granite3.3:8b"}
+
+
+def test_a_posted_choice_is_a_choice_from_then_on(owner, monkeypatch):
+    """Without this the flag would be permanently false on a running owner.
+
+    The constructor reads the file once and no POST goes near that read, so a
+    desk that was asked and answered would keep reporting that nobody had —
+    and the door would open again on every launch.
+    """
+    from qlab.ui.server import UISession, handle_api
+
+    _install(monkeypatch, up=_fake("up", served=("m-1",)))
+    assert owner.llm_payload()["chosen"] is False
+
+    status, payload = handle_api(owner, "POST", "/api/llm", {},
+                                 {"surface": "workforce", "backend": "up",
+                                  "model": "m-1"})
+    assert status == 200
+    assert payload["chosen"] is True
+    assert owner.llm_payload()["chosen"] is True
+    # Durable, which is the fact the flag is about: a fresh owner over the same
+    # state directory reads the answer rather than re-asking.
+    revived = UISession(offline_default=True, registry=Registry(":memory:"))
+    try:
+        assert revived.llm_payload()["chosen"] is True
+    finally:
+        revived.registry.close()
+
+
+def test_the_switch_alone_is_also_an_answer(owner, monkeypatch):
+    """`{surface, enabled}` writes a file too, so it names a mind as much as a
+    pair change does — the flag follows the file, never the shape of the POST.
+    """
+    _install(monkeypatch, up=_fake("up", served=("m-1",)))
+    owner.set_llm_config("reasoner", enabled=False)
+    assert owner.llm_payload()["chosen"] is True
+    assert load_llm_config() is not None
 
 
 def test_the_catalog_route_answers_while_the_dispatch_lock_is_held(owner, monkeypatch):
@@ -626,6 +709,10 @@ def test_a_failed_write_never_leaves_memory_ahead_of_disk(owner, monkeypatch):
     with pytest.raises(OSError):
         owner.set_llm_config("workforce", "up", "m-1")
     assert owner.llm_config == DEFAULT_LLM_CONFIG
+    # Nor may it claim somebody chose: the flag is the file's, and no file was
+    # written. A desk that reported a choice it could not persist would retire
+    # the door's question and restart into the default it never announced.
+    assert owner.llm_payload()["chosen"] is False
     # Nothing was announced that did not happen.
     assert not [event for event in owner.registry.read_events(20, None)
                 if event["kind"] == "llm.config_changed"]

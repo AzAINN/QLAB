@@ -807,3 +807,63 @@ def test_the_null_trial_count_is_reachable_from_the_tool_that_runs_the_board():
         source = inspect.getsource(module)
         assert "null_trials" in source, (
             f"{module_name} runs the board but cannot set null_trials")
+
+
+# --- F3 on the beat: one at a time, and oldest first --------------------------
+
+
+def _queued_trigger(session, task_id: str, day: str) -> str:
+    """A queued regime_review trigger dated ``day``."""
+    session.registry.create_atlas_task(
+        task_id, f"regime_flip|{day}|ACWI|{task_id}", "regime_flip", {},
+        "regime_review")
+    return task_id
+
+
+def _research_session():
+    from qlab.state.registry import Registry as _Registry
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=_Registry(":memory:"))
+    session.atlas.set_mode("research")
+    return session
+
+
+def test_the_beat_queues_a_trigger_instead_of_spawning_a_second_coordinator():
+    """One research workflow at a time is a queue, not a lost trigger."""
+    session = _research_session()
+    started: list[str] = []
+    session.atlas_workflow_runner = lambda task, template_id: (
+        started.append(template_id) or {"template_id": template_id,
+                                        "action_taken": True})
+    session.coordinator_status = lambda: {
+        "driving": True, "workflow_id": "wf-busy", "can_drive": True,
+        "reason": ""}
+    from qlab.operator.atlas import _utc_today
+
+    _queued_trigger(session, "task-a", _utc_today()[:10])
+
+    out = session.atlas_run_startable(True)
+
+    assert started == []
+    assert out and out[0]["task_id"] == "task-a"
+    assert out[0]["state"] == "queued"
+    assert session.registry.get_atlas_task("task-a")["status"] == "queued"
+
+
+def test_an_idle_slot_starts_the_oldest_queued_task_first():
+    from datetime import date, timedelta
+
+    session = _research_session()
+    started: list[str] = []
+    session.atlas_workflow_runner = lambda task, template_id: (
+        started.append(str(task["task_id"]))
+        or {"template_id": template_id, "action_taken": True})
+    session.coordinator_status = lambda: {"driving": False, "workflow_id": ""}
+    today = date.today()
+    _queued_trigger(session, "task-old", (today - timedelta(days=2)).isoformat())
+    _queued_trigger(session, "task-new", today.isoformat())
+
+    session.atlas_run_startable(True)
+
+    assert started == ["task-old"]

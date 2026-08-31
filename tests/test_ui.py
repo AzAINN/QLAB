@@ -5779,3 +5779,39 @@ def test_an_execution_that_raises_does_not_leave_a_live_approval(session,
     assert approval["status"] == "invalidated"
     assert "incomplete persisted legs" in approval["invalidated_reason"]
     assert _booked_events(session) == []
+
+
+# --- F3: one research workflow at a time -------------------------------------
+
+
+def _driving(session, workflow_id, template="regime_review"):
+    """Pin the owner's one coordinator slot to a named running workflow."""
+    session.coordinator_status = lambda: {
+        "driving": True, "workflow_id": workflow_id,
+        "can_drive": True, "reason": ""}
+
+
+def test_a_second_start_is_refused_by_the_name_of_the_one_already_running(session):
+    status, first = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"goal": "[regime_review] re-read the panel", "offline": True})
+    assert status == 200
+    workflow_id = first["workflow_id"]
+    _driving(session, workflow_id)
+
+    status, refused = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"goal": "another one", "offline": True})
+    assert status == 409
+    assert refused["error"] == (
+        f"a research workflow is already running: regime_review ({workflow_id})")
+    assert refused["running"]["workflow_id"] == workflow_id
+    assert refused["running"]["template"] == "regime_review"
+
+
+def test_an_idle_coordinator_starts_as_before(session):
+    session.coordinator_status = lambda: {"driving": False, "workflow_id": ""}
+    status, started = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"goal": "review the paper portfolio", "offline": True})
+    assert status == 200 and started["current_phase"] == "analyst"

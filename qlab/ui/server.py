@@ -405,6 +405,12 @@ class UISession:
         # caller — each with its own lock and its own session slot, which is
         # exactly the "one coordinator at a time" guarantee gone.
         self._driver_lock = threading.Lock()
+        # Which queued tasks have already had their "waiting on the slot" line
+        # said, per running workflow. Process-local chatter control, never a
+        # record — see `_announce_queued_task` (invariant 9: it is written from
+        # the heartbeat thread and read from handler threads).
+        self._queued_notice: set[tuple[str, str]] = set()
+        self._queued_notice_lock = threading.Lock()
         # Threaded owner: the TTL cache is read from handler threads and
         # invalidated from the heartbeat thread (invariant 9).
         self._archive_lock = threading.Lock()
@@ -3638,6 +3644,35 @@ class UISession:
         """Spawn a coordinator for a workflow this owner just registered."""
         return self.coordinator_driver.drive(workflow_id, goal, roles=roles)
 
+    def running_research_workflow(self) -> dict | None:
+        """The workflow this owner's one coordinator is walking, named.
+
+        ``coordinator_status()`` answers "is something driving"; a refusal has
+        to answer "driving *what*", or the operator is told no with nothing to
+        look at and no way to decide whether to wait or interrupt.
+
+        The template comes from the goal's own ``[template_id]`` stamp — the
+        one ``atlas_workflow_runner`` writes — and falls back to the workflow
+        kind, because a run a human started from the workforce view carries no
+        template at all and "a workflow (id)" is still a name.
+        """
+        status = self.coordinator_status()
+        if not status.get("driving"):
+            return None
+        workflow_id = str(status.get("workflow_id") or "")
+        workflow = (self.registry.get_workflow(workflow_id)
+                    if workflow_id else None) or {}
+        goal = str((workflow.get("request") or {}).get("goal") or "")
+        template = ""
+        if goal.startswith("[") and "]" in goal:
+            template = goal[1:goal.index("]")].strip()
+        return {
+            "workflow_id": workflow_id,
+            "template": template or str(workflow.get("kind") or "") or "a workflow",
+            "current_phase": str(workflow.get("current_phase") or ""),
+            "goal": goal,
+        }
+
     def coordinator_status(self) -> dict:
         """What the desk should say about unattended coordination."""
         driver = self.coordinator_driver
@@ -3783,10 +3818,22 @@ class UISession:
 
         Unattended work only: a proposal is a queued task the operator has yet
         to approve, so the beat passes over it.
+
+        One research workflow at a time. While the owner's coordinator is
+        walking a graph, a trigger is left exactly where it is — ``queued`` —
+        and named in the chat, rather than spawning a second coordinator or
+        registering a workflow row nothing will walk. Nothing is lost: the
+        task keeps its place and a later beat starts it.
+
+        Oldest first, which is why the candidate list is reversed:
+        ``startable_tasks`` reads the registry's newest-first order, and
+        starting the newest of a queue every beat is how the oldest waiting
+        trigger never runs at all.
         """
         facts = self.atlas_facts(offline)
+        running = self.running_research_workflow()
         started: list[dict] = []
-        for candidate in self.atlas.startable_tasks(facts):
+        for candidate in reversed(self.atlas.startable_tasks(facts)):
             if len(started) >= limit:
                 break
             if not candidate.get("startable"):
@@ -3795,6 +3842,18 @@ class UISession:
                 # A proposal is started by the operator approving it, never by
                 # the beat. This line IS the envelope.
                 continue
+            if running is not None:
+                started.append({
+                    "task_id": candidate["task_id"],
+                    "template_id": candidate.get("template_id"),
+                    "started": False, "state": "queued",
+                    "blocked_by": "coordinator",
+                    "reason": (f"a research workflow is already running: "
+                               f"{running['template']} "
+                               f"({running['workflow_id']})"),
+                })
+                self._announce_queued_task(started[-1], running)
+                continue
             result = self.atlas.start_task(
                 candidate["task_id"], facts, runner=self.atlas_workflow_runner)
             started.append({"task_id": candidate["task_id"],
@@ -3802,6 +3861,30 @@ class UISession:
                             **{k: v for k, v in result.items()
                                if k in ("started", "completed", "blocked_by")}})
         return started
+
+    def _announce_queued_task(self, entry: dict, running: dict) -> None:
+        """Say once, in the chat, that a trigger is waiting on the slot.
+
+        Once per (task, running workflow) pair, because the beat re-reaches
+        the same queued task every thirty seconds and a line per beat is not
+        an announcement, it is the noise this whole task exists to remove.
+        The memo is process-local and deliberately so: it bounds chatter, it
+        is not a record — the record is the task row, which never moved.
+
+        The owner is threaded (invariant 9): the beat and an HTTP handler can
+        both be in here, so the memo takes its own lock.
+        """
+        key = (str(entry.get("task_id") or ""), str(running.get("workflow_id") or ""))
+        with self._queued_notice_lock:
+            if key in self._queued_notice:
+                return
+            # Bounded: one entry per queued task per running workflow, and the
+            # set is dropped when this process ends.
+            self._queued_notice.add(key)
+        self._record_atlas_reply(
+            f"\u2691 {entry.get('template_id') or 'work'} stays queued "
+            f"({key[0][:8]}): {entry.get('reason')}. It starts when the slot "
+            f"frees; nothing was lost.")
 
     def atlas_start_task(self, task_id: str, offline: bool) -> dict:
         """Start one queued Atlas task through the governed workflow runner.
@@ -5621,6 +5704,18 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, {"result": session.call_lab_tool(name, body, off)}
 
     if method == "POST" and path == "/api/workflows/start":
+        # One research workflow at a time, refused BY NAME. The owner drives one
+        # coordinator; a second start would register a graph nothing walks, and
+        # a bare 409 leaves the operator no way to decide between waiting and
+        # interrupting. Only this route is guarded: the unattended beat reaches
+        # `atlas_run_startable`, which queues instead of refusing.
+        running = session.running_research_workflow()
+        if running is not None:
+            return 409, {
+                "error": (f"a research workflow is already running: "
+                          f"{running['template']} ({running['workflow_id']})"),
+                "running": running,
+            }
         try:
             return 200, session.start_workflow(body)
         except ValueError as exc:

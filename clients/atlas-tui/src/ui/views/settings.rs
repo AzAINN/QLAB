@@ -4190,20 +4190,27 @@ fn draw_models(
     // section is told what it is missing, in the count this card already uses
     // for everything it could not draw whole.
     let mut budget = (area.height - MODELS_MIN_H) as usize;
-    let (rights, spent) = rights_rows(store, cursor, note, inner_w, budget);
-    let drawn = spent <= budget;
-    match drawn {
+    let (rights, spent) = rights_rows(store, cursor, note, inner_w);
+    // **The deferral owns a row before anything else is cut.** It was note zero
+    // in the queue once, which meant the marker swallowed it: the card said
+    // `▾ 2 more` and named neither the rights nor the reason, so a short column
+    // hid the whole section behind a number that described nothing. What is
+    // reserved here is the *fact that the rights are not on screen*, which is
+    // the one thing this card cannot leave to a count.
+    let deferred = match spent <= budget {
         true => {
             rows.extend(rights);
             budget -= spent;
+            None
         }
-        false => notes.insert(0, format!("▾ {RIGHTS_ROWS} rights need {spent} rows")),
-    }
+        false => Some(deferral(store, spent)),
+    };
     // Whole sentences or a count, never half of one: the remedy is the last
     // third of the owner's longest reason, so a clipped one is a fix an
     // operator cannot run. The marker costs a row, and it is reserved before
     // anything is dropped rather than after — `views::desk::fit` makes the same
     // reservation, for the same reason.
+    let mut left = budget.saturating_sub(usize::from(deferred.is_some()));
     // The hand-off note joins the queue last, and only when the sentences the
     // *owner* wrote have room to spare. It is this client's own copy about a
     // distinction that does not move, and a card with one row of slack and a
@@ -4211,21 +4218,26 @@ fn draw_models(
     // remedy an operator can act on for a line that says the same thing on
     // every desk.
     if let Some(said) = handoff {
-        let spent: usize = notes.iter().map(cost).sum();
-        if spent + cost(&said) <= budget {
+        let wanted: usize = notes.iter().map(cost).sum();
+        if wanted + cost(&said) <= left {
             notes.push(said);
         }
     }
-    let room_for_marker = budget > 0;
-    if notes.iter().map(cost).sum::<usize>() > budget {
-        budget = budget.saturating_sub(1);
+    let all_fit = notes.iter().map(cost).sum::<usize>() <= left;
+    // A row of its own for the count, and only when there is one to spare: a
+    // marker pushed into a row the card does not have is clipped by the
+    // `Paragraph` without a word.
+    let marker_row = !all_fit && left > 0;
+    if !all_fit {
+        left = left.saturating_sub(1);
     }
     let mut hidden = 0usize;
+    let mut drawn: Vec<Line<'static>> = Vec::new();
     for reason in &notes {
-        match cost(reason) <= budget {
+        match cost(reason) <= left {
             true => {
-                budget -= cost(reason);
-                rows.push(Line::from(Span::styled(
+                left -= cost(reason);
+                drawn.push(Line::from(Span::styled(
                     format!(" {reason}"),
                     // Dim: the reason explains the tone on the row above, and a
                     // second warning-coloured line would compete with it.
@@ -4235,11 +4247,21 @@ fn draw_models(
             false => hidden += 1,
         }
     }
-    // The guard is not decoration: the rights spend the slack ahead of the
-    // sentences, so unlike before there is a state with notes and no row left
-    // for the count — and a marker pushed into a row the card does not have is
-    // clipped by the `Paragraph` without a word.
-    if hidden > 0 && room_for_marker {
+    // Where the rows would have been, above the sentences rather than under
+    // them. With no row left for a separate count it carries that count too:
+    // the alternative is a card that names the rights and then hides a reason
+    // silently, which is the failure the marker exists to prevent.
+    if let Some(said) = deferred.as_ref().filter(|_| budget > 0) {
+        rows.push(Line::from(Span::styled(
+            match hidden > 0 && !marker_row {
+                true => format!(" ▾ {} more, incl. the rights", hidden + 1),
+                false => format!(" {said}"),
+            },
+            Style::default().fg(t.text_dim),
+        )));
+    }
+    rows.extend(drawn);
+    if hidden > 0 && marker_row {
         rows.push(Line::from(Span::styled(
             format!(" ▾ {hidden} more"),
             Style::default().fg(t.text_dim),
@@ -4250,7 +4272,21 @@ fn draw_models(
     // draw rather than derived from the constants by the caller, for the reason
     // `record` states: a rectangle list built from what the layout *asked for*
     // would answer about a frame the column's height refused.
-    drawn && !broken_rights(store)
+    deferred.is_none() && !broken_rights(store)
+}
+
+/// What the card says in place of the rights when the column cannot hold them.
+///
+/// Two sentences, because the two states are not the same fact and one of them
+/// misdescribes the other. A card short of rows has three switches it could not
+/// draw; a desk whose rights file the owner refused to read has none to draw at
+/// all, and telling that operator the section "needs four rows" would send them
+/// to resize a terminal over a file they have to fix.
+fn deferral(store: &Store, wanted: usize) -> String {
+    match broken_rights(store) {
+        true => "▾ the rights file could not be read".to_string(),
+        false => format!("▾ {RIGHTS_ROWS} rights need {wanted} rows"),
+    }
 }
 
 /// Whether the owner could not read the rights file at all.
@@ -4280,7 +4316,6 @@ fn rights_rows(
     cursor: Option<usize>,
     note: Option<&str>,
     inner_w: usize,
-    slack: usize,
 ) -> (Vec<Line<'static>>, usize) {
     let t = theme();
     let Some(rights) = store.rights() else {
@@ -4295,13 +4330,20 @@ fn rights_rows(
         // card, in the four rows the rights would have taken. Warning-toned:
         // the desk is running on a rights file nobody can read, and what Atlas
         // is actually being offered is unknown until it is fixed.
-        // Bounded to the rows this card actually has rather than to
-        // [`SAID_MAX`], and the METHOD card's warning states the reason: the
-        // guard is against foreign text running away, and what decides how much
-        // is *drawn* is the card's own budget. The reader's sentence carries
-        // the remedy in its last third, and 112 cells cuts it off mid-word on a
-        // card with five rows of slack to give it.
-        let said = to_room(said, slack.max(1) * inner_w - 1);
+        // Bounded to [`WARNING_MAX`] rather than to [`SAID_MAX`], and the
+        // METHOD card's warning states the reason: the guard is against foreign
+        // text running away, and what decides how much is *drawn* is the card's
+        // own budget. 112 cells cuts this sentence off mid-path, and the remedy
+        // — which file to delete, and that this panel can set the rights
+        // instead — is its last third.
+        //
+        // **Whole, or not at all.** Fitting it to whatever slack there happened
+        // to be is what produced `the owner answered 500: /state/atlas…` on a
+        // short column: the status kept and the remedy gone, which is the
+        // clipped-sentence failure this card spends rows to avoid. The cost
+        // returned here is the whole sentence's, so a column that cannot hold
+        // it defers the section and says so in one row instead.
+        let said = format::bounded(said, WARNING_MAX);
         return (
             vec![Line::from(Span::styled(
                 format!(" {said}"),
@@ -4420,16 +4462,25 @@ fn right_row(field: &str, held: Option<bool>, on_cursor: bool) -> Line<'static> 
 
 /// What one right actually reaches, in the owner's own division of it.
 ///
-/// `workforce` is not among them and cannot be: the gate binds the desk chat
-/// and `qlab cli`, never a human-started `qlab workforce run`, which the owner
-/// tags with an origin of its own.
+/// **`workflows` says "for chat" and may not say more.** The owner's gate
+/// (`_refuse_without_workflows_right`) returns early on anything that is not
+/// the desk chat: a human-started `qlab workforce run`, the owner's own
+/// `Coordinator.drive`, the heartbeat's autonomous dispatch and this
+/// workstation's own buttons carry another origin or none, and none of them is
+/// gated. A granite or ollama reasoner is ungated by construction as well — it
+/// reaches the owner with its own client and stamps no origin header at all —
+/// which is a live reading of this very card, drawn one row above the note that
+/// says the reasoner is not claude.
+///
+/// So "owner-enforced" was an overclaim: it invited an operator to read a
+/// withdrawn right as a gate the desk holds shut against every caller, and it
+/// is shut against exactly one.
 fn shapes(field: &str) -> &'static str {
     match field {
         "web" => " · chat, /cli tools",
-        // The one the owner refuses by name — `workflow.start`, `resume` and
-        // `atlas.task.create` from the chat — which is why this row's word is
-        // about the owner and the other two are about what is handed over.
-        "workflows" => " · owner-enforced",
+        // Refused by name — `workflow.start`, `resume` and `atlas.task.create`
+        // — and only when the chat is what asked.
+        "workflows" => " · refused for chat",
         "build" => " · the /build key",
         _ => "",
     }
@@ -4437,16 +4488,21 @@ fn shapes(field: &str) -> &'static str {
 
 /// The line the three rows may not be drawn without.
 ///
-/// **It states the asymmetry, and the asymmetry is the whole caveat.** Only
-/// `workflows` is refused by the owner when it is off; `web` and `build` shape
-/// the tool grant a chat or a hand-off is launched with and nothing else, so a
-/// desk with those two withdrawn is a desk that was not *handed* them — not one
-/// the owner will stop. Rights are an operator's stated intent, exactly like
-/// the posture, and this card may never read as more than that.
+/// **It states the half of the asymmetry no row can carry.** Each row says what
+/// its own right reaches — `web` and `build` shape the tool grant a chat or a
+/// hand-off is launched with and nothing else; `workflows` is refused, and
+/// refused for chat. What is left over is the scope those three share, and it
+/// is the thing an operator would otherwise assume the opposite of: a
+/// `qlab workforce run`, the owner's own coordinator, the heartbeat's dispatch
+/// and a granite reasoner making its own owner call are none of them bound by
+/// anything on this card.
+///
+/// Rights are an operator's stated intent, exactly like the posture, and this
+/// line is what keeps the card from reading as more than that.
 ///
 /// Written to one row at the card's own width: the block draws 38 cells here,
 /// and a second row is one this column does not have (see [`MODELS_H`]).
-const ASYMMETRY: &str = "only workflows off is owner-refused";
+const ASYMMETRY: &str = "nothing here binds a non-chat caller";
 
 /// What one surface's reasoner means for the two keys that hand off.
 ///
@@ -4576,9 +4632,11 @@ fn to_room(said: &str, room: usize) -> String {
 ///
 /// Both forms are short because the value column is 24 cells at the baseline
 /// (`LABEL_W` inside the card's half width). `claude · inherit (tiers decide)`
-/// is 31 and wraps onto an unindented second row, spending one of the slack
-/// rows [`MODELS_H`] reserves for the availability reasons — the one thing on
-/// this card that must not be clipped.
+/// is 31 and wraps onto an unindented second row, spending the card's *one*
+/// remaining slack row — the rights took the other four (see [`MODELS_H`]), so
+/// what a wrapped value costs here is the whole of what is left for the
+/// availability reasons, and a reason that does not fit whole is counted rather
+/// than drawn.
 ///
 /// **The composed value is fitted to `room`, not just its tokens.** A per-token
 /// bound is no bound at all here: a real Claude id makes

@@ -322,6 +322,16 @@ fn a_backend_that_cannot_serve_is_toned_and_carries_the_owners_own_reason() {
     // `a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half`
     // pins; what this test is about is the tone the reason carries when it is
     // drawn, and a wider card is where that happens.
+    // The tone is a fact about the *row*, and it is owed at the baseline
+    // whether or not the sentence under it fitted: an operator reading a
+    // counted reason still has to see that the mind is unreachable, and the
+    // 200-column assertion below would not have caught a tone that only
+    // survived on a wide card.
+    assert_eq!(
+        body_style_of(&client.buffer(120, 36), "ollama · granite3.3:8b").fg,
+        Some(Theme::truecolor().warning),
+        "the row lost its tone at the baseline, where the reason is counted"
+    );
     let frame = client.frame(200, 36);
     assert_eq!(
         body_style_of(&client.buffer(200, 36), "ollama · granite3.3:8b").fg,
@@ -460,6 +470,49 @@ fn a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half() {
     // And whole wherever it does fit, which is the other half of the property:
     // a card that had quietly stopped drawing reasons altogether would pass the
     // count assertion above on its own.
+    // The cliff itself, from both sides. `wrapped_rows` reserves a row for a
+    // word break, so a sentence costs one row at or under the card's width and
+    // *three* past it — there is no two-row reason to test, and the card's one
+    // slack row means only the first is ever drawn. Pinning both sides is what
+    // stops "drawn whole" from being a claim about short strings: 37 cells is
+    // the widest sentence this card can show, and 38 is counted.
+    let cliff = |reason: &str| {
+        let client = models_from(&format!(
+            r#"{{"reasoner": {{"backend": "claude", "model": "inherit"}},
+                 "workforce": {{"backend": "claude", "model": "inherit"}},
+                 "reasoner_enabled": true,
+                 "availability": [{{"name": "claude", "available": false,
+                                    "reason": "{reason}"}}],
+                 "probed_at": "{PROBED}"}}"#
+        ));
+        content(&client.frame(120, 36))
+    };
+    let widest = "x".repeat(37);
+    assert!(
+        cliff(&widest).contains(&widest),
+        "the widest one-row reason was not drawn"
+    );
+    let over = "y".repeat(38);
+    let counted = cliff(&over);
+    assert!(counted.contains("▾ 1 more"), "{counted}");
+    assert!(!counted.contains("yyyy"), "{counted}");
+
+    // And a sentence nobody would call short, drawn whole where the card is
+    // wide enough to hold it in one row: the property is about the *row*, not
+    // about the sentence being small.
+    let long = "the claude CLI exited 1: Invalid API key · Please run /login";
+    let wide = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "claude", "model": "inherit"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "availability": [{{"name": "claude", "available": false,
+                                "reason": "{long}"}}],
+             "probed_at": "{PROBED}"}}"#
+    ));
+    let body = content(&wide.frame(200, 36));
+    assert!(body.contains(long), "{body}");
+    assert!(!body.contains("▾"), "{body}");
+
     // A claude reasoner, so the hand-off note is silent and the one row of
     // slack is the reason's alone.
     let brief = models_from(&format!(
@@ -484,7 +537,11 @@ fn a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half() {
     // this client's own copy and yields to the owner's sentences. The number is
     // exact on purpose (see above).
     let short = content(&client.frame(120, 30));
-    assert!(short.contains("▾ 2 more"), "{short}");
+    // Named, not merely counted: the deferral owns a row ahead of the cut, so
+    // the operator is told the rights are the section that is off screen. It
+    // was `▾ 2 more` — a number describing nothing — until the reservation was
+    // moved in front of the marker.
+    assert!(short.contains("▾ 2 more, incl. the rights"), "{short}");
     // And no half of it survives beside the count.
     assert!(!short.contains("ollama is running at"), "{short}");
     // The four rows it qualifies are untouched — the reason is the section that
@@ -2734,7 +2791,7 @@ mod rights {
             Some(Theme::truecolor().accent)
         );
         assert_eq!(
-            body_style_of(&buffer, "off · owner-enforced").fg,
+            body_style_of(&buffer, "off · refused for chat").fg,
             Some(Theme::truecolor().text_secondary)
         );
         assert_eq!(
@@ -2746,7 +2803,16 @@ mod rights {
         // three are not gates at all.
         let body = content(&client.frame(120, 36));
         assert!(
-            body.contains("only workflows off is owner-refused"),
+            body.contains("nothing here binds a non-chat caller"),
+            "{body}"
+        );
+        // And the row is scoped to the caller the owner actually gates. Its
+        // gate returns early on anything that is not the desk chat, and this
+        // very card is drawn one row above a note saying the reasoner is not
+        // claude — a reasoner that reaches the owner with no origin header at
+        // all. "owner-enforced" invited exactly the wrong reading.
+        assert!(
+            line_with(&client.frame(120, 36), "workflows").contains("refused for chat"),
             "{body}"
         );
     }
@@ -2784,13 +2850,56 @@ mod rights {
         let body = content(&client.frame(120, 36));
         assert!(body.contains("atlas_rights.json"), "{body}");
         assert!(body.contains("delete it"), "{body}");
-        assert!(!body.contains("only workflows off"), "{body}");
+        assert!(!body.contains("nothing here binds"), "{body}");
 
         // And the key refuses rather than writing on top of a file the owner
         // could not read.
         let mut client = client;
         on_models(&mut client);
         assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
+    }
+
+    #[test]
+    fn a_rights_sentence_that_will_not_fit_is_replaced_and_never_cut_mid_path() {
+        // The card's own rule, applied to its own longest sentence: a clipped
+        // remedy is a fix an operator cannot run. Fitting the reader's refusal
+        // to whatever slack there happened to be produced
+        // `the owner answered 500: /state/atlas…` on a short column — the
+        // status kept and the path, the reason and the remedy all gone.
+        let said = "the owner answered 500: /state/qlab/atlas_rights.json is not readable \
+                    as JSON (Expecting value: line 1 column 1 (char 0)); delete it to restore \
+                    the defaults ([build, web, workflows] all true), or set it from the \
+                    desk's rights panel";
+        let broken = |width: u16, height: u16| {
+            let mut store = harness::fixture_store();
+            store.posture = Posture::Operator;
+            let mut rights = rights_payload(true, true, true);
+            rights.rights = Default::default();
+            rights.error = Some(said.to_string());
+            with_rights(&mut store, rights);
+            let mut client = Client::new(store);
+            client.press(KeyCode::Char('9'));
+            content(&client.frame(width, height))
+        };
+
+        // Where it fits, whole — the file, the reason and the remedy.
+        let roomy = broken(200, 36);
+        assert!(roomy.contains("atlas_rights.json"), "{roomy}");
+        assert!(roomy.contains("rights panel"), "{roomy}");
+
+        // Where it does not, the fixed sentence in its place. Never the
+        // section's other deferral — "3 rights need 4 rows" would send this
+        // operator to resize a terminal over a file they have to fix.
+        let tight = broken(120, 30);
+        assert!(
+            tight.contains("the rights file could not be read"),
+            "{tight}"
+        );
+        assert!(!tight.contains("rights need"), "{tight}");
+        // And no half of the owner's sentence survives beside it: a path cut
+        // mid-way is a file an operator cannot go and look at.
+        assert!(!tight.contains("atlas_rights"), "{tight}");
+        assert!(!tight.contains("answered 500"), "{tight}");
     }
 
     #[test]

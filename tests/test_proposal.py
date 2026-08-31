@@ -132,7 +132,10 @@ def test_a_plan_whose_request_is_gone_is_not_the_proposal(session):
     # newest one gone too the desk is asking nothing — not falling back to a
     # question it already withdrew.
     assert current_proposal(session.registry) is None
-    assert older  # named, so the supersession is not silent
+    # The older one is not merely gone: the record says what took its place.
+    withdrawn = [row for row in session.registry.list_approval_requests(50)
+                 if row["plan_id"] == older][0]
+    assert withdrawn["invalidated_reason"] == f"superseded by {newer}"
 
 
 def test_an_approved_request_is_still_the_proposal(session):
@@ -193,6 +196,113 @@ def test_a_consumed_request_is_never_superseded(session):
     assert current_proposal(session.registry)["plan_id"] == newer
 
 
+def test_a_partial_supersede_still_announces_what_it_withdrew(session,
+                                                              monkeypatch):
+    """A row that refuses to move must not swallow the ones that already did.
+
+    The first version built its whole announcement from a single return value,
+    so a raise on the second row discarded the first row's *completed*
+    invalidation: an approval was dead in the registry and the chat never said
+    so — the exact silent withdrawal this task exists to prevent.
+    """
+    for tilt in (0.0, 0.01, 0.02):
+        _checked_plan(session, tilt=tilt)
+
+    real = session.registry.transition_approval
+    calls = {"n": 0}
+
+    def flaky(approval_id, status, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("duckdb write failed")
+        return real(approval_id, status, **kwargs)
+
+    monkeypatch.setattr(session.registry, "transition_approval", flaky)
+    out = session.announce_desk_work(True, [])
+
+    assert len(out["approvals_opened"]) == 3
+    keeper = current_proposal(session.registry)["plan_id"]
+    assert len(out["superseded"]) == 1
+    assert len(out["supersede_failures"]) == 1
+    withdrawn = out["superseded"][0]
+    stuck = out["supersede_failures"][0]["plan_id"]
+    assert {withdrawn, stuck} == {
+        plan for plan in _states(session) if plan != keeper}
+
+    states = _states(session)
+    assert states[withdrawn] == "invalidated"
+    assert states[stuck] == "pending"
+
+    said = _said(session)
+    assert f"supersedes {withdrawn[:8]}" in said
+    # And the one it could not withdraw is named as such — never silently.
+    assert f"could not be withdrawn" in said and stuck[:8] in said
+
+
+def test_a_proposal_outside_the_plan_window_is_still_served_and_superseded(
+        session):
+    """Liveness drives the search, not a plan-table window.
+
+    Scanning the newest N plans meant a busy research desk pushed a live
+    approved request out of view: the route said "no proposal" while the
+    approval stayed bookable, and the tick — which only superseded when it
+    found a proposal — never withdrew it either.
+    """
+    older = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    approval = [row for row in session.registry.list_approval_requests(50)
+                if row["plan_id"] == older][0]["approval_id"]
+    handle_api(session, "POST", f"/api/approvals/{approval}/approve", {}, {})
+
+    # Sixty plans that were never checked — noise the desk is not asking about.
+    for i in range(60):
+        session.registry.create_plan(
+            f"refused-{i:03d}", "dec-noise", {"ACWI": 1.0}, {"n_legs": 1})
+        session.registry.set_plan_state(f"refused-{i:03d}", "refused")
+
+    _, payload = handle_api(session, "GET", "/api/desk/proposal", {}, {})
+    assert payload["proposal"]["plan_id"] == older
+    assert payload["proposal"]["approval_state"] == "approved"
+
+    newer = _checked_plan(session, tilt=0.02)
+    out = session.announce_desk_work(True, [])
+    assert out["superseded"] == [older]
+    assert _states(session)[older] == "invalidated"
+    assert current_proposal(session.registry)["plan_id"] == newer
+
+
+def test_a_superseded_approval_cannot_book(session):
+    """The governance consequence, stated as a test: withdrawn means unbookable."""
+    older = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    approval = [row for row in session.registry.list_approval_requests(50)
+                if row["plan_id"] == older][0]["approval_id"]
+    handle_api(session, "POST", f"/api/approvals/{approval}/approve", {}, {})
+    _checked_plan(session, tilt=0.02)
+    session.announce_desk_work(True, [])
+
+    status, result = handle_api(
+        session, "POST", f"/api/plans/{older}/execute", {},
+        {"offline": True, "approval_id": approval, "human_confirmed": True})
+    assert status == 200
+    assert result["executed"] is False
+    assert result["blocked_by"] == "approval"
+
+
+def test_an_expired_request_is_not_the_proposal(session):
+    """Read-only expiry: a lapsed request is not an open question, and the
+    route must not have to write to notice that."""
+    plan_id = _checked_plan(session)
+    session.announce_desk_work(True, [])
+    session.registry.con.execute(
+        "UPDATE approval_requests SET expires_at = ? WHERE plan_id = ?",
+        ["2000-01-01T00:00:00+00:00", plan_id])
+
+    assert current_proposal(session.registry) is None
+    # The row itself is untouched — sweeping is the owner's job, not the read's.
+    assert _states(session)[plan_id] == "pending"
+
+
 def test_the_referee_verdict_for_the_plans_hash_is_included(session):
     plan_id = _checked_plan(session)
     session.announce_desk_work(True, [])
@@ -211,12 +321,12 @@ def test_supersede_names_the_keeper_and_leaves_the_keeper_alone(session):
     session.announce_desk_work(True, [])
 
     # Idempotent: the invalidation already happened, so a second call has
-    # nothing to name and reports nothing.
-    assert supersede(session.registry, newer) == []
+    # nothing to name and reports nothing — and nothing failed.
+    assert supersede(session.registry, newer) == ([], [])
     assert _states(session)[newer] == "pending"
 
     # And it never invalidates the plan it was told to keep.
-    assert supersede(session.registry, older) == [newer]
+    assert supersede(session.registry, older) == ([newer], [])
     assert _states(session)[newer] == "invalidated"
 
 

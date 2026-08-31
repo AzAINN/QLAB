@@ -4202,7 +4202,7 @@ class UISession:
         from qlab.operator.templates import TRIGGER_TEMPLATE
 
         announced: dict = {"approvals_opened": [], "superseded": [],
-                           "triggers": []}
+                           "supersede_failures": [], "triggers": []}
         asked = {str(a.get("plan_id") or "")
                  for a in self.registry.list_approval_requests(200)}
         for plan in self.registry.list_plans(20):
@@ -4238,13 +4238,7 @@ class UISession:
             # after the transition every row reads `invalidated`.
             was = {plan_id: str(row.get("status") or "")
                    for plan_id, row in live_requests(self.registry).items()}
-            try:
-                gone = supersede(self.registry, keep)
-            except (KeyError, ValueError, PermissionError) as exc:
-                self._record_atlas_reply(
-                    f"⚑ Plan {keep[:8]} is the current proposal but the older "
-                    f"ones could not be withdrawn: {exc}")
-                gone = []
+            gone, failures = supersede(self.registry, keep)
             for old in gone:
                 state = ("approved, unbooked" if was.get(old) == "approved"
                          else was.get(old) or "live")
@@ -4252,7 +4246,18 @@ class UISession:
                     f"⚑ Plan {keep[:8]} supersedes {old[:8]} ({state}): one "
                     f"proposal at a time. The older approval is invalidated "
                     f"as superseded — it can no longer book anything.")
+            # Separately, and never merged into the line above: a request the
+            # desk failed to withdraw is still bookable, which is the opposite
+            # fact and the operator has to be able to act on it.
+            for failed in failures:
+                self._record_atlas_reply(
+                    f"⚑ Plan {keep[:8]} is the current proposal but approval "
+                    f"{str(failed['approval_id'])[:8]} for plan "
+                    f"{str(failed['plan_id'])[:8]} could not be withdrawn: "
+                    f"{failed['error']}. It is still "
+                    f"{failed['status'] or 'live'} — reject it by hand.")
             announced["superseded"].extend(gone)
+            announced["supersede_failures"].extend(failures)
         for task in created_tasks or []:
             kind = str(task.get("trigger") or "trigger")
             action = str(task.get("action") or "")

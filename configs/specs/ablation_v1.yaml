@@ -80,6 +80,22 @@ arms:
     objective: min_variance
     solver: classical
     params: { views_source: qualitative_matrix }
+  - id: A6                  # cardinality-constrained min-variance
+    # RESEARCH-STAGE (`cardinal_min_variance` is not operational, so nothing
+    # here can reach a governed solve). Held constant against A1 in every
+    # respect — same objective, same solver, same moments config — except the
+    # cardinality: each rebalance first picks exactly `cardinality` names by
+    # exact relevance/redundancy enumeration over the point-in-time covariance,
+    # then runs A1's minimum-variance solve on just those, with every other
+    # weight exactly 0.0. A6-vs-A1 therefore measures concentration alone.
+    #
+    # k=4 of the 7 pinned names, NOT a larger k: the panel above holds seven
+    # tickers, so any k >= 7 is not a constraint at all (and k > 7 refuses at
+    # every rebalance and measures nothing). Four is the smallest count that
+    # still leaves a diversification choice to make across the four sleeves.
+    objective: min_variance
+    solver: classical
+    params: { cardinality: 4 }
   - id: A2                  # THE FALSIFIABLE RIVAL — uses the distribution directly
     objective: scenario_cvar
     solver: cvar_lp

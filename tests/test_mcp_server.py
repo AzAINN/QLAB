@@ -408,13 +408,14 @@ def test_backtest_run_accepts_every_operational_pair_in_ablation_spec(reg):
         )
 
     arms = [arm for arm in spec["arms"] if is_operational_pair(arm)]
-    # A5 shares A1's operational (objective, solver) pair; what makes it a
-    # research arm is `params.views_source`, which `backtest.run` has no
-    # parameter for. Running it here therefore runs an unconditioned
-    # min-variance — the conditioning is unreachable from this tool by
-    # construction, which is exactly the claim.
+    # A5 and A6 share A1's operational (objective, solver) pair; what makes
+    # each a research arm is a params key — `views_source` for A5,
+    # `cardinality` for A6 — and `backtest.run` has no parameter for either.
+    # Running them here therefore runs a plain unconditioned, full-universe
+    # min-variance: the conditioning and the k-of-N selection are unreachable
+    # from this tool by construction, which is exactly the claim.
     assert [arm["id"] for arm in arms] == [
-        "B0", "B1", "B2", "B3", "A1", "B4", "A5", "A2",
+        "B0", "B1", "B2", "B3", "A1", "B4", "A5", "A6", "A2",
     ]
 
     app = StubApp()

@@ -135,6 +135,14 @@ _ALGORITHMS = (
         "(mean pinned). Research until the ablation shows it earns its place.",
     ),
     AlgorithmSpec(
+        "cardinal_min_variance", "Cardinal minimum variance", "allocation",
+        "research", ("min_variance",), "classical", None,
+        "Exact k-of-N relevance/redundancy selection followed by minimum "
+        "variance on the chosen names, with every unselected weight exactly "
+        "zero. The count is enumerated, not penalized, so no solver can trade "
+        "it away. Research until the ablation shows arm A6 earns its place.",
+    ),
+    AlgorithmSpec(
         "mvsk_vol_target", "Vol-targeted MVSK", "overlay", "research",
         ("mvsk",), "classical_multistart", None,
         "Research-only de-risking overlay; it does not satisfy the live mandate.",

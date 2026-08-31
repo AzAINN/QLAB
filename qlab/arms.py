@@ -144,6 +144,30 @@ def solve_arm(
     higher = arm.objective in _NEEDS_HIGHER_MOMENTS
     ms = estimate(snapshot, moments, higher=higher)
 
+    # -- cardinality arm: exact k-of-N, then the same min-variance solve -----
+    # It varies one thing against A1 and nothing else, so it routes around the
+    # objective/solver dispatch rather than adding a knob to it. The selection
+    # reads only `ms`, which the snapshot already truncated to as_of, so the
+    # basket cannot be chosen with hindsight.
+    if "cardinality" in arm.params:
+        from qlab.algorithms.cardinal import solve_cardinal_min_variance
+
+        if arm.objective != "min_variance":
+            raise ValueError(
+                f"cardinality is defined against the min-variance allocation; "
+                f"arm {arm.id!r} asks for objective {arm.objective!r}")
+        k = int(arm.params["cardinality"])
+        targets = solve_cardinal_min_variance(ms, k, None, constraints=constraints)
+        w = Weights(tickers=ms.tickers,
+                    values=[targets[t] for t in ms.tickers])
+        diag = {"arm": arm.id, "objective": arm.objective,
+                "solver": f"{arm.solver}+select_k_of_n",
+                "cardinality": k,
+                "selected": sorted(t for t, v in targets.items() if v > 0.0),
+                "moments": ms.summary(),
+                "portfolio_moments": portfolio_moments(w.as_array(), ms)}
+        return w, diag
+
     obj = build_objective(
         _objective_form(arm.objective),
         ms,

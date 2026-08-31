@@ -64,7 +64,10 @@ def _discover(package: ModuleType) -> dict[str, VisualSpec]:
         found[info.name] = VisualSpec(
             name=info.name, title=title, render=renderer
         )
-    return found
+    # Explicit order: pkgutil happens to sort file names today, but that is
+    # an implementation detail, and a catalog an operator reads must not
+    # reshuffle between Python versions.
+    return dict(sorted(found.items()))
 
 
 def catalog() -> dict[str, VisualSpec]:

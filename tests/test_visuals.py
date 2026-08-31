@@ -16,6 +16,16 @@ import pytest
 from qlab import visuals
 
 
+@pytest.fixture(autouse=True)
+def _forget_fake_packages():
+    """A fake package imported by a test must not outlive it in sys.modules —
+    the next test's discovery would otherwise see a module it never wrote."""
+    before = set(sys.modules)
+    yield
+    for name in [n for n in sys.modules if n not in before and n.startswith("fake_visuals")]:
+        sys.modules.pop(name, None)
+
+
 def _write_package(tmp_path, name: str, modules: dict[str, str]):
     root = tmp_path / name
     root.mkdir()

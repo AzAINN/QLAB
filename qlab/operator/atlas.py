@@ -57,6 +57,21 @@ _WORKFLOW_TRIGGERS = frozenset({
     "drawdown_warning", "drawdown_control", "drift_breach", "regime_flip",
 })
 
+# Trigger kinds whose mint has no bound per window, and which therefore must not
+# start unattended. Everything else the beat may start fires once per condition
+# — one startup, one recovery, one kill-switch trip, one research run — so the
+# count is bounded even where `_WORKFLOW_TRIGGERS` does not charge for it.
+# `held_record_change` mints one task per held name whose qualitative record
+# moved, per window, and `portfolio_watch` runs a Claude coordinator with
+# WebSearch/WebFetch, so a wide news day is one uncounted coordinator per
+# ticker. These stay `queued` and announced until the mint site itself is
+# bounded (coalesce per window, then join `_WORKFLOW_TRIGGERS`).
+#
+# NOT the complement of `_WORKFLOW_TRIGGERS`: membership there is about the
+# daily budget, and briefs and alerts are deliberately outside it while still
+# being work the beat has always started.
+_UNBOUNDED_TRIGGERS = frozenset({"held_record_change"})
+
 # How many of the newest task rows a bounded scan reads. One number, because
 # two would disagree the first time either moved.
 #

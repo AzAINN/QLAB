@@ -3162,9 +3162,10 @@ def test_the_heartbeat_never_starts_a_proposal(session):
 def test_the_heartbeat_still_starts_a_trigger_task(session):
     """The other side of the same guard: this project did not turn autonomy off.
 
-    ``regime_flip`` rather than any trigger kind at all: the beat starts only
-    the kinds the daily budget counts, so this regression needs a kind that is
-    in ``_WORKFLOW_TRIGGERS`` or it would pass for the wrong reason."""
+    ``regime_flip`` rather than the invented ``regime_shift`` this fixture used
+    to carry: the beat now reads the kind as well as the origin, so a kind no
+    part of the desk maps or classifies is a fixture that could pass or fail
+    for reasons unrelated to what this test measures."""
     today = date.today().isoformat()
     session.registry.create_atlas_task(
         "task-trigger", f"regime_flip|{today}|SPY|abc", "regime_flip",

@@ -157,21 +157,31 @@ Recorded plainly, because none of it is covered by the offline suite.
   test.
 - **The live 756-day predictor board is untimed.** The client's 120 s deadline
   was measured on the synthetic panel only.
-- **`held_record_change` is NOT in `_WORKFLOW_TRIGGERS`, and the beat now
-  honours that.** As shipped on this branch the sentence above was written as
-  if membership in `_WORKFLOW_TRIGGERS` decided what the beat starts. It did
-  not: `_WORKFLOW_TRIGGERS` was read only by `_within_daily_budget`, which the
-  mint never calls, while `atlas_run_startable` gated on `origin` alone and
+- **`held_record_change` is minted but never started unattended.** As shipped
+  on this branch the sentence above was written as if membership in
+  `_WORKFLOW_TRIGGERS` decided what the beat starts. It did not:
+  `_WORKFLOW_TRIGGERS` is read only by `_within_daily_budget`, which the mint
+  never calls, while `atlas_run_startable` gated on `origin` alone and
   `portfolio_watch` is admissible in `research` — so the owner *did* start one
   Claude coordinator (with WebSearch/WebFetch) per moved held name per window,
   uncounted against `max_autonomous_workflows_per_day`. The branch fix round
-  makes the two sets one: `atlas_run_startable` starts only the trigger kinds
-  the budget counts. A `held_record_change` task is now minted, announced by
-  `announce_desk_work`, and stays `queued` until a human starts it — from
-  WORKFORCE, or from chat via `workflow.start` under rights. The same gate
-  applies to every other kind outside the set (`owner_startup`,
-  `data_recovered`, `kill_switch`, `new_research_run`): they are queued and
-  announced rather than started unattended.
+  adds a second, named set beside it — `_UNBOUNDED_TRIGGERS`, currently
+  `{"held_record_change"}` — and the beat passes over exactly those kinds. A
+  watch task is minted, announced by `announce_desk_work`, and stays `queued`
+  until a human starts it: from WORKFORCE, or from chat via `workflow.start`
+  under rights.
+
+  The two sets are disjoint and neither is the other's complement. What
+  separates them is what each measures. `_WORKFLOW_TRIGGERS` is *cost*: which
+  kinds spend `max_autonomous_workflows_per_day`, and briefs and alerts sit
+  outside it on purpose because they are not workflow launches.
+  `_UNBOUNDED_TRIGGERS` is *count*: whether one occurrence of the condition can
+  mint an unbounded number of tasks for a single window. `owner_startup`,
+  `data_recovered`, `kill_switch` and `new_research_run` fire once per startup,
+  recovery, trip and run, so the beat starts them unattended exactly as it
+  always has — gating on the budget set instead would have silenced all four,
+  which is a regression of existing autonomy rather than a consequence of the
+  rule.
 - **The live-on-Alpaca-book path** is still unexercised end to end, unchanged by
   this branch.
 
@@ -186,11 +196,12 @@ The first entry is the branch fix round's own, and it is the top one.
   the mint is one task per moved held name, so a wide news day mints one
   workflow's worth of work per ticker; one task per window carrying the moved
   names is the shape that can be started once. (2) *Count against the budget*:
-  once coalesced, the kind joins `_WORKFLOW_TRIGGERS` so every start it earns
-  is charged to `max_autonomous_workflows_per_day` — the fix round made
-  membership in that set the single gate for unattended starts, so joining it
-  is now the whole of the promotion. Until both hold, the task is queued and
-  announced and a human starts it. (An outage window becoming the next baseline
+  once coalesced, the kind leaves `_UNBOUNDED_TRIGGERS` and joins
+  `_WORKFLOW_TRIGGERS`, so every start it earns is charged to
+  `max_autonomous_workflows_per_day`. Both edits together are the promotion;
+  either alone is wrong — leaving it unbounded while charging for it, or
+  starting it unattended while it can still mint per ticker. Until both hold,
+  the task is queued and announced and a human starts it. (An outage window becoming the next baseline
   is the third, older half of this: a `degraded` flag at the matrix write site.)
 - F1: `current_proposal` ordering has no SQL tiebreak for equal `created_at` —
   add one in the registry query.

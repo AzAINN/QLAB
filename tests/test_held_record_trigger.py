@@ -271,28 +271,67 @@ def test_the_trigger_maps_to_portfolio_watch_and_starts_in_research():
 
 
 def test_the_trigger_is_not_one_the_unattended_beat_may_start():
-    """By name, because the property is a set membership and nothing else.
+    """Two sets, two facts, and they are deliberately not each other's
+    complement.
 
-    ``portfolio_watch`` runs a Claude coordinator with WebSearch/WebFetch and
-    the mint is per held name per window. ``_WORKFLOW_TRIGGERS`` is the set the
-    daily budget counts AND the set ``atlas_run_startable`` will start, so a
-    kind outside it is minted, announced, and waits for a human."""
-    from qlab.operator.atlas import _WORKFLOW_TRIGGERS
+    (a) Outside `_WORKFLOW_TRIGGERS`: an unapproved watch never spends the
+    daily autonomous budget. (e) Inside `_UNBOUNDED_TRIGGERS`: the mint has no
+    bound per window — one task per held name whose record moved — and
+    `portfolio_watch` runs a Claude coordinator with WebSearch/WebFetch, so the
+    beat must not start it at all until the mint site is bounded."""
+    from qlab.operator.atlas import _UNBOUNDED_TRIGGERS, _WORKFLOW_TRIGGERS
 
     assert "held_record_change" not in _WORKFLOW_TRIGGERS
+    assert "held_record_change" in _UNBOUNDED_TRIGGERS
+    # The two sets are disjoint by construction: a kind the budget charges for
+    # is a kind the beat starts, and a kind in both would be charged and never
+    # spent.
+    assert _UNBOUNDED_TRIGGERS.isdisjoint(_WORKFLOW_TRIGGERS)
+
+
+def _research_session():
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    session.atlas.set_mode("research")
+    return session
+
+
+def test_a_bounded_brief_or_alert_still_starts_unattended():
+    """The regression pin. `owner_startup`/`data_recovered` (-> desk_brief),
+    `kill_switch` (-> risk_event) and `new_research_run` (-> research_review)
+    fire once per condition, and the beat has always started them — they sit
+    outside `_WORKFLOW_TRIGGERS` because briefs and alerts are not workflow
+    launches and do not spend the daily budget, NOT because they are
+    unattended work. Gating the beat on the budget set would silence all four.
+    """
+    from datetime import date
+
+    today = date.today().isoformat()
+    for kind, template in (("owner_startup", "desk_brief"),
+                           ("kill_switch", "risk_event")):
+        session = _research_session()
+        session.atlas_workflow_runner = lambda task, template_id: {
+            "template_id": template_id, "action_taken": True}
+        session.coordinator_status = lambda: {"driving": False,
+                                              "workflow_id": ""}
+        session.registry.create_atlas_task(
+            f"task-{kind}", f"{kind}|{today}|ACWI|s", kind, {}, template)
+
+        started = session.atlas_run_startable(True, limit=5)
+
+        assert [e["task_id"] for e in started] == [f"task-{kind}"], kind
+        assert started[0].get("started") is True, kind
 
 
 def test_a_minted_task_survives_a_beat_still_queued():
     """The beat sees it, passes over it, and registers no workflow.
 
-    Revert the kind gate in ``atlas_run_startable`` and this task starts: one
-    uncounted coordinator per moved held name per window."""
+    Remove ``held_record_change`` from ``_UNBOUNDED_TRIGGERS`` and this task
+    starts: one uncounted coordinator per moved held name per window."""
     from datetime import date
 
-    from qlab.ui.server import UISession
-
-    session = UISession(offline_default=True, registry=Registry(":memory:"))
-    session.atlas.set_mode("research")
+    session = _research_session()
     today = date.today().isoformat()
     session.registry.create_atlas_task(
         "task-held", f"held_record_change|{today}|ACWI|w1->w2",

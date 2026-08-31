@@ -2424,22 +2424,20 @@ class UISession:
             "caveats": spec.get("caveats") or [],
         }
 
-    def run_predictor_lane(self, body: dict) -> dict:
-        """Run one or more board lanes against the baseline, and persist it.
+    def run_predictor_lane(self, request: dict) -> dict:
+        """Run the lanes in an ALREADY VALIDATED request, and persist the board.
 
-        This is the same computation ``research.predictor_board`` performs —
-        one snapshot, one panel, one board, one run row with
-        ``dsr_trial_counted: False``. It is written here rather than imported
-        because the MCP tool's version lives inline in its registration
-        closure and that module is not this branch's to reshape; the shared
-        seam is :func:`qlab.research.board.run_predictor_board`, which both
-        call, so the *numbers* cannot diverge even though the plumbing is
-        written twice.
+        ``request`` is what :func:`_validated_lane_request` returns, never a
+        raw body. The split is the point: everything a caller can get wrong is
+        decided before this method is entered, so a ``ValueError`` raised from
+        here is a data or estimator failure and must surface as a 500. Told
+        instead that their request was bad, an operator edits a request that
+        was already correct.
 
         The requested lane is never run alone. The board's structural promise
         is pairing — a lane's edge is only a claim when the control saw the
-        same folds — so the baseline is appended by the desk rather than
-        asked for, and a caller who omits it gets a comparison anyway.
+        same folds — so the validator appends the baseline, and a caller who
+        omits it gets a comparison anyway.
 
         Fitting is seconds of numpy plus a possible network fetch, so this is
         reached from OUTSIDE the dispatch lock: the method takes ``_LOCK``
@@ -2447,73 +2445,28 @@ class UISession:
         reentrant — the ``atlas_message`` precedent).
         """
         from qlab.core import data as market
-        from qlab.core.universe import load_universe
-        from qlab.research.board import BASELINE_MODEL_ID, run_predictor_board
+        from qlab.research.board import (
+            PREDICTOR_BOARD_CAVEATS,
+            predictor_run_spec,
+            run_predictor_board,
+        )
 
-        requested = body.get("model")
-        if isinstance(requested, str):
-            lanes = [requested]
-        elif isinstance(requested, list) and all(
-                isinstance(lane, str) for lane in requested):
-            lanes = list(requested)
-        else:
-            raise ValueError("model must be a lane id or a list of lane ids")
-        if not lanes:
-            raise ValueError("model must name at least one lane")
-        # The operator's order, deduplicated, with the control last: the
-        # ranking is the board's own, but `models` echoes what was asked for
-        # plus what pairing required.
-        models = [lane for i, lane in enumerate(lanes) if lane not in lanes[:i]]
-        if BASELINE_MODEL_ID not in models:
-            models.append(BASELINE_MODEL_ID)
-
-        universe = str(body.get("universe") or "core")
-        lookback_days = body.get("lookback_days", 756)
-        if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
-            raise TypeError("lookback_days must be an integer")
-        if lookback_days < 300:
-            raise ValueError(
-                "a predictor board needs at least 300 return observations "
-                "for lagged features and purged walk-forward folds")
-        offline = _flagbool(body.get("offline"), self.offline_default)
-        as_of = str(body.get("as_of") or date.today().isoformat())
-
-        # The search knobs the MCP tool exposes, for the same reason it does:
-        # a tuned board must be reproducible from its own row. Absent means
-        # the board's own default, and every value is validated by the board
-        # itself — including the lane ids, whose refusal names MODEL_IDS.
-        search: dict = {"models": tuple(models)}
-        for key in ("alphas", "map_weights", "n_splits", "null_trials"):
-            value = body.get(key)
-            if value is not None:
-                search[key] = tuple(value) if isinstance(value, list) else value
-
-        tickers = load_universe().tickers(universe)
         snapshot = market.snapshot(
-            tickers, as_of, lookback_days=lookback_days + 1,
-            offline=offline, seed=self.seed)
+            request["tickers"], request["as_of"],
+            lookback_days=request["lookback_days"] + 1,
+            offline=request["offline"], seed=self.seed)
         panel = snapshot.log_returns().dropna(how="any")
-        board = run_predictor_board(panel, **search)
+        board = run_predictor_board(panel, **request["search"])
 
-        caveats = [
-            "risk prediction only",
-            "research stage",
-            "ranking is (-mean_ic, ic_std, model_id); the champion is the "
-            "first admitted model, not a promoted one",
-        ]
-        run_spec = {
-            "algorithm_id": "predictor_board",
-            "as_of": as_of,
-            "universe": universe,
-            "tickers": tickers,
-            "lookback_days": lookback_days,
-            "source": snapshot.source,
-            "snapshot_id": snapshot.content_hash(),
-            "board": board,
-            # Research evidence: no backtest row, no solution, no DSR trial.
-            "dsr_trial_counted": False,
-            "caveats": caveats,
-        }
+        run_spec = predictor_run_spec(
+            as_of=request["as_of"],
+            universe=request["universe"],
+            tickers=request["tickers"],
+            lookback_days=request["lookback_days"],
+            source=snapshot.source,
+            snapshot_id=snapshot.content_hash(),
+            board=board,
+        )
         with _LOCK:
             run_id = self.registry.log_run("predictor_board", run_spec)
         # Nothing to invalidate by hand: every summary of the runs table is
@@ -2521,11 +2474,11 @@ class UISession:
         # the next read rebuilds instead of serving the board this replaced.
         return {
             "run_id": run_id,
-            "models": models,
+            "models": list(request["models"]),
             "champion": board.get("champion"),
             "ranking": board.get("ranking"),
             "board": board,
-            "caveats": caveats,
+            "caveats": list(PREDICTOR_BOARD_CAVEATS),
         }
 
     def workforce_summary(self, limit: int = 10) -> dict:
@@ -6459,11 +6412,17 @@ def handle_api(session: UISession, method: str, path: str,
         # This is research, not authority: it writes one run row, no backtest,
         # no solution, and nothing downstream of it can reach the paper book.
         try:
-            return 200, session.run_predictor_lane(body)
+            request = _validated_lane_request(
+                body, offline_default=session.offline_default)
         except (ValueError, TypeError) as exc:
             # The board's own refusals travel verbatim: an unknown lane comes
             # back naming MODEL_IDS, which is what an operator needs to retry.
             return 400, {"error": str(exc)}
+        # Deliberately OUTSIDE that try. Everything the caller could get wrong
+        # was decided above; a failure from here is the data layer or the fit,
+        # and it must reach the handler's 500 rather than be reported to an
+        # operator as a request they should go and edit.
+        return 200, session.run_predictor_lane(request)
 
     if method == "GET" and path == "/api/visuals":
         # What this build can draw. Rendering is pure text off a params dict —
@@ -6484,20 +6443,25 @@ def handle_api(session: UISession, method: str, path: str,
             params = _visual_params(query)
         except ValueError as exc:
             return 400, {"error": str(exc)}
+        # One walk: the same catalog answers "does it exist", "what is it
+        # called" and "draw it". `visuals.render` would walk it again.
+        specs = visuals.catalog()
+        spec = specs.get(name)
+        if spec is None:
+            # Worded exactly as `visuals.render` refuses an unknown name — a
+            # test pins the two together, because this is the one sentence
+            # this route says on its own rather than relaying.
+            known = ", ".join(sorted(specs)) or "none"
+            return 404, {"error": f"unknown visual {name!r}; available: {known}"}
         try:
-            text = visuals.render(name, params)
-        except KeyError as exc:
-            # The registry's own sentence, which lists the known names.
-            # `str(KeyError)` would re-quote it, so take the argument.
-            return 404, {"error": exc.args[0] if exc.args else repr(exc)}
+            text = spec.render(params)
         except (ValueError, TypeError) as exc:
             # A bad parameter is the caller's error, not a 500: the drawer
             # says which one and what the limit was.
             return 400, {"error": str(exc)}
-        spec = visuals.catalog().get(name)
         return 200, {
             "name": name,
-            "title": spec.title if spec is not None else name,
+            "title": spec.title,
             "text": text,
             # Echoed as parsed, so a client can see what its query string
             # actually became before the drawer read it.
@@ -6911,6 +6875,77 @@ def _qbool(query: dict, key: str, default: bool) -> bool:
     return _flagbool(v[0], default)
 
 
+def _validated_lane_request(body: dict, *, offline_default: bool) -> dict:
+    """Decide everything a predictor-run caller can get wrong, and nothing else.
+
+    This is the whole 400 surface of ``/api/research/predictors/run``: the
+    lane ids, the search grids, the universe selector, the lookback, and the
+    look-ahead tripwire. Past this function every refusal belongs to the data
+    layer or the estimator, and those are 500s — a fit that fails is not the
+    operator's mistake, and saying it was sends them editing a correct request.
+
+    The baseline is appended here rather than asked for: a challenger with no
+    control saw no shared folds, and the board's whole promise is pairing.
+    """
+    from qlab.core.universe import load_universe
+    from qlab.mcp.guardrails import check_as_of
+    from qlab.research.board import BASELINE_MODEL_ID, validate_search
+
+    requested = body.get("model")
+    if isinstance(requested, str):
+        lanes = [requested]
+    elif isinstance(requested, list) and all(
+            isinstance(lane, str) for lane in requested):
+        lanes = list(requested)
+    else:
+        raise ValueError("model must be a lane id or a list of lane ids")
+    if not lanes:
+        raise ValueError("model must name at least one lane")
+    # The operator's order, deduplicated, with the control last: the ranking
+    # is the board's own, but `models` echoes what was asked for plus what
+    # pairing required.
+    models = [lane for i, lane in enumerate(lanes) if lane not in lanes[:i]]
+    if BASELINE_MODEL_ID not in models:
+        models.append(BASELINE_MODEL_ID)
+
+    lookback_days = body.get("lookback_days", 756)
+    if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
+        raise TypeError("lookback_days must be an integer")
+    if lookback_days < 300:
+        raise ValueError(
+            "a predictor board needs at least 300 return observations "
+            "for lagged features and purged walk-forward folds")
+
+    universe = str(body.get("universe") or "core")
+    # Resolved here, not in the run: an unknown selector is a bad request, and
+    # `tickers` refuses it by name.
+    tickers = load_universe().tickers(universe)
+
+    # The look-ahead tripwire, the same one every MCP research tool takes. A
+    # board fitted on a snapshot dated tomorrow is evidence about nothing.
+    as_of = (str(check_as_of(str(body["as_of"]))) if body.get("as_of")
+             else date.today().isoformat())
+
+    return {
+        "models": models,
+        "universe": universe,
+        "tickers": tickers,
+        "lookback_days": lookback_days,
+        "offline": _flagbool(body.get("offline"), offline_default),
+        "as_of": as_of,
+        # The search knobs the MCP tool exposes, for the same reason it does:
+        # a tuned board must be reproducible from its own row. Validated by
+        # the board itself, so an unknown lane comes back naming MODEL_IDS.
+        "search": validate_search(
+            models,
+            alphas=body.get("alphas"),
+            map_weights=body.get("map_weights"),
+            n_splits=body.get("n_splits"),
+            null_trials=body.get("null_trials"),
+        ),
+    }
+
+
 def _visual_params(query: dict) -> dict:
     """Turn a visual's query string into the plain dict a renderer reads.
 
@@ -6923,8 +6958,14 @@ def _visual_params(query: dict) -> dict:
     Absent keys stay absent, so each renderer's own default applies.
     """
     def _one(key: str) -> str | None:
+        # `?kernel=` names no kernel. Passing "" through would be refused by
+        # the drawer as an unknown one, and quietly substituting the default
+        # would draw something nobody asked for; absent is the honest read,
+        # and the renderer's own default then applies.
         values = query.get(key)
-        return values[0] if isinstance(values, list) and values else None
+        if not isinstance(values, list) or not values:
+            return None
+        return values[0].strip() or None
 
     params: dict = {}
     features = _one("features")

@@ -6331,10 +6331,188 @@ def test_predictor_run_shows_up_in_the_board_read(session):
     assert summary["ranking"] == out["ranking"]
 
 
-def test_predictor_run_is_dispatched_off_the_dispatch_lock():
+def _owner_post(session, path, body, timeout=15):
+    """POST through a real owner over loopback, so `do_POST`'s dispatch —
+    which is where the lock exemption and the 500 handler live — is what runs.
+
+    `handle_api` cannot answer either question: the exemption is a branch above
+    it, and an unhandled exception becomes a status only in the handler.
+    """
+    import json as _json
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    handler = type("H", (ui_server._Handler,), {"session": session})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            data=_json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.status, _json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, _json.loads(exc.read())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_predictor_run_is_dispatched_off_the_dispatch_lock(session):
     """Fitting a board is seconds of numpy; holding `_LOCK` across it would
-    freeze the snapshot poll and every approval behind it."""
+    freeze the snapshot poll and every approval behind it.
+
+    Membership in the tuple is the intent; the request is the proof. The stub
+    runs where the real fit would, on the handler thread, and takes the lock
+    non-blockingly — which can only succeed if dispatch did not already hold
+    it. `run_predictor_lane` takes `_LOCK` itself, so this also proves the
+    method is reachable without deadlocking on a non-reentrant lock.
+    """
     assert "/api/research/predictors/run" in ui_server._LOCK_EXEMPT_POSTS
+
+    free = {}
+
+    def stub(request):
+        free["acquired"] = ui_server._LOCK.acquire(blocking=False)
+        if free["acquired"]:
+            ui_server._LOCK.release()
+        return {"run_id": "stub", "models": list(request["models"]),
+                "champion": None, "ranking": [], "board": {}, "caveats": []}
+
+    session.run_predictor_lane = stub
+    status, out = _owner_post(session, "/api/research/predictors/run",
+                              dict(_LANE_RUN, model="kernel:zz"))
+    assert status == 200, out
+    assert free["acquired"] is True
+
+
+def test_predictor_run_refuses_a_future_as_of(session):
+    """The look-ahead tripwire the MCP twin has. A board fitted on a snapshot
+    dated tomorrow is not evidence about anything."""
+    from datetime import timedelta as _timedelta
+
+    ahead = (date.today() + _timedelta(days=1)).isoformat()
+    status, refused = handle_api(
+        session, "POST", "/api/research/predictors/run", {},
+        dict(_LANE_RUN, model="kernel:zz", as_of=ahead))
+    assert status == 400
+    assert "look-ahead" in refused["error"]
+    assert ahead in refused["error"]
+    assert session.registry.list_runs(limit=5) == []
+
+
+def test_predictor_run_lets_a_fit_failure_be_a_500_not_a_bad_request(
+        session, monkeypatch):
+    """A ValueError out of the estimator is not the operator's mistake.
+
+    The route validates the body up front and catches nothing else, so a
+    failure in the data layer or the fit reaches the handler's 500 — telling
+    an operator their request was wrong when it was not sends them editing a
+    correct request forever.
+    """
+    import qlab.research.board as board_module
+
+    def explode(*args, **kwargs):
+        raise ValueError("the folds did not converge")
+
+    monkeypatch.setattr(board_module, "run_predictor_board", explode)
+    status, out = _owner_post(session, "/api/research/predictors/run",
+                              dict(_LANE_RUN, model="kernel:zz"))
+    assert status == 500
+    assert "the folds did not converge" in out["error"]
+    assert session.registry.list_runs(limit=5) == []
+
+
+def test_predictor_run_offline_inherits_the_desks_own_default(
+        session, monkeypatch):
+    """An absent `offline` key is not a choice of False."""
+    import qlab.core.data as market_module
+
+    real = market_module.snapshot
+    seen = []
+
+    def spy(tickers, as_of, **kwargs):
+        seen.append(kwargs.get("offline"))
+        # Never actually reach the network from a test: what is under test is
+        # which flag the route computed, not what a live fetch would return.
+        return real(tickers, as_of, **{**kwargs, "offline": True})
+
+    monkeypatch.setattr(market_module, "snapshot", spy)
+    body = {k: v for k, v in _LANE_RUN.items() if k != "offline"}
+    for default in (True, False):
+        session.offline_default = default
+        status, out = handle_api(
+            session, "POST", "/api/research/predictors/run", {},
+            dict(body, model="kernel:zz"))
+        assert status == 200, out
+    assert seen == [True, False]
+
+
+def test_both_predictor_board_writers_build_one_run_spec(session):
+    """The route and the MCP tool persist the same row shape, or a reader of
+    the runs table has to know which surface wrote it."""
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.quant_lab import register_lab_tools
+
+    shared = {"universe": "core", "lookback_days": 420, "as_of": "2022-06-30",
+              "models": ["kernel:zz", "ridge:none"], "alphas": [1.0],
+              "map_weights": [1.0], "n_splits": 3, "null_trials": 2}
+
+    _, out = handle_api(
+        session, "POST", "/api/research/predictors/run", {},
+        dict(_LANE_RUN, model=shared["models"]))
+    route_spec = session.registry.list_runs(limit=1)[0]["spec"]
+
+    class _App:
+        """The minimal registrar the tool module expects."""
+
+        def __init__(self):
+            self.tools = {}
+
+        def tool(self, name):
+            def register(fn):
+                self.tools[name] = fn
+                return fn
+            return register
+
+    tool_registry = Registry(":memory:")
+    app = _App()
+    register_lab_tools(
+        app, LabState(offline=True, registry=tool_registry), owner_only=True)
+    app.tools["research.predictor_board"](**shared)
+    tool_spec = tool_registry.list_runs(limit=1)[0]["spec"]
+    tool_registry.close()
+
+    assert sorted(route_spec) == sorted(tool_spec)
+    # Same inputs, same row: only the board object may differ, and here it
+    # does not either — the same panel through the same estimator.
+    for key in sorted(route_spec):
+        assert route_spec[key] == tool_spec[key], key
+    assert route_spec["as_of"] == "2022-06-30"
+    assert out["run_id"] == session.registry.list_runs(limit=1)[0]["run_id"]
+
+    # Agreeing today is not the same as being unable to diverge. Both writers
+    # must go through one builder, or the next field added to one is added to
+    # only one — which is how `as_of` drifted in the first place.
+    from qlab.research.board import predictor_run_spec
+
+    assert route_spec == predictor_run_spec(
+        as_of=route_spec["as_of"],
+        universe=route_spec["universe"],
+        tickers=route_spec["tickers"],
+        lookback_days=route_spec["lookback_days"],
+        source=route_spec["source"],
+        snapshot_id=route_spec["snapshot_id"],
+        board=route_spec["board"],
+    )
 
 
 # --- K3b: serving the visuals a build draws ----------------------------------
@@ -6609,3 +6787,28 @@ def test_a_review_reporter_files_nothing(session):
                       "regime_summary": "steady"}})
     assert _pending_universe_changes(session) == []
     assert session.registry.read_events_of_kind("universe_questions_filed") == []
+
+
+def test_visual_route_404_speaks_the_registrys_own_sentence(session):
+    """The route formats its own 404 so the catalog is walked once, which
+    means the sentence can drift from the registry's. It must not."""
+    import qlab.visuals as visuals
+
+    status, refused = handle_api(
+        session, "GET", "/api/visuals/nope", {}, {})
+    assert status == 404
+    with pytest.raises(KeyError) as raised:
+        visuals.render("nope", {})
+    assert refused["error"] == raised.value.args[0]
+
+
+def test_visual_route_treats_an_empty_parameter_as_absent(session):
+    """`?kernel=` is not a choice of a kernel. Passing "" through would be
+    refused by the drawer as an unknown kernel; dropping it silently to the
+    default would be a drawing nobody asked for. Absent is the honest read."""
+    status, out = handle_api(
+        session, "GET", "/api/visuals/quantum_circuit",
+        {"features": ["a,b,c"], "kernel": [""], "angles": [""]}, {})
+    assert status == 200, out
+    assert "kernel" not in out["params"]
+    assert "angles" not in out["params"]

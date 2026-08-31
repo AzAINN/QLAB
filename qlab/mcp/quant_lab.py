@@ -1001,7 +1001,11 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
         and every run records exactly what was searched in ``board.search``,
         so a tuned run stays reproducible from its own registry row.
         """
-        from qlab.research.board import run_predictor_board
+        from qlab.research.board import (
+            PREDICTOR_BOARD_CAVEATS,
+            predictor_run_spec,
+            run_predictor_board,
+        )
 
         st.budget.charge("research.predictor_board")
         if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
@@ -1040,24 +1044,20 @@ def register_lab_tools(app, st: LabState, *, owner_only: bool = False) -> None:
             if value is not None
         }
         board = run_predictor_board(panel, **search)
-        caveats = [
-            "risk prediction only",
-            "research stage",
-            "ranking is (-mean_ic, ic_std, model_id); the champion is the "
-            "first admitted model, not a promoted one",
-        ]
-        run_spec = {
-            "algorithm_id": "predictor_board",
-            "as_of": str(d),
-            "universe": universe,
-            "tickers": tickers,
-            "lookback_days": lookback_days,
-            "source": snapshot.source,
-            "snapshot_id": snapshot.content_hash(),
-            "board": board,
-            "dsr_trial_counted": False,
-            "caveats": caveats,
-        }
+        caveats = list(PREDICTOR_BOARD_CAVEATS)
+        # One builder, shared with the owner's /api/research/predictors/run.
+        # Both persist this row and both are read back by the same
+        # summarisers; built twice, they drifted at `as_of` inside one branch.
+        run_spec = predictor_run_spec(
+            as_of=str(d),
+            universe=universe,
+            tickers=tickers,
+            lookback_days=lookback_days,
+            source=snapshot.source,
+            snapshot_id=snapshot.content_hash(),
+            board=board,
+            caveats=caveats,
+        )
         run_id = st.registry.log_run("predictor_board", run_spec)
         # Board validation writes neither a solution nor a backtest row, so
         # the DSR trial universe is unchanged.

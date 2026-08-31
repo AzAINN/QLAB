@@ -106,6 +106,96 @@ def _validated_map_weights(map_weights) -> tuple[float, ...]:
     return values
 
 
+# What a predictor board is and is not, carried by every run row it writes.
+# One tuple, because two writers persist these rows and a caveat that reaches
+# only one surface is a caveat the reader of the other never sees.
+PREDICTOR_BOARD_CAVEATS = (
+    "risk prediction only",
+    "research stage",
+    "ranking is (-mean_ic, ic_std, model_id); the champion is the "
+    "first admitted model, not a promoted one",
+)
+
+
+def validate_search(
+    models,
+    *,
+    alphas=None,
+    map_weights=None,
+    n_splits=None,
+    null_trials=None,
+) -> dict:
+    """Validate a board request's search knobs without running anything.
+
+    Every check here is one :func:`run_predictor_board` performs on the way
+    in. Running them up front is what lets a caller separate "the request was
+    wrong" from "the fit failed" -- a single ``try`` around the whole run
+    cannot, and would report an estimator failure as the operator's mistake.
+
+    Returns the keyword arguments to pass on. An absent knob stays absent, so
+    the board's own defaults still apply.
+    """
+    search: dict = {"models": _validated_models(models)}
+    if alphas is not None:
+        search["alphas"] = _validated_alphas(alphas)
+    if map_weights is not None:
+        search["map_weights"] = _validated_map_weights(map_weights)
+    if n_splits is not None:
+        if isinstance(n_splits, bool) or not isinstance(n_splits, int):
+            raise TypeError("n_splits must be an integer")
+        if n_splits < 2:
+            raise ValueError("n_splits must be at least 2; one fold is not a "
+                             "walk-forward evaluation")
+        search["n_splits"] = n_splits
+    if null_trials is not None:
+        if isinstance(null_trials, bool) or not isinstance(null_trials, int):
+            raise TypeError("null_trials must be an integer")
+        # Zero is a real choice -- it means "do not null this selection" and
+        # the board says so in the row rather than pretending it was tested.
+        if null_trials < 0:
+            raise ValueError("null_trials must not be negative")
+        search["null_trials"] = null_trials
+    return search
+
+
+def predictor_run_spec(
+    *,
+    as_of: str,
+    universe: str,
+    tickers,
+    lookback_days: int,
+    source: str,
+    snapshot_id: str,
+    board: dict,
+    caveats=None,
+) -> dict:
+    """The registry row a predictor board writes, built in exactly one place.
+
+    Two surfaces persist this row -- the owner's ``/api/research/predictors/
+    run`` and the ``research.predictor_board`` tool -- and both are read back
+    by the same summarisers. Built twice, the two drifted at ``as_of`` within
+    a single branch. A reader of the runs table must never have to know which
+    surface wrote a row.
+
+    ``algorithm_id`` and ``dsr_trial_counted`` are fixed here, not arguments:
+    a board is research evidence, it writes no backtest row and no solution,
+    and no caller gets to say otherwise.
+    """
+    return {
+        "algorithm_id": "predictor_board",
+        "as_of": str(as_of),
+        "universe": universe,
+        "tickers": list(tickers),
+        "lookback_days": int(lookback_days),
+        "source": source,
+        "snapshot_id": snapshot_id,
+        "board": board,
+        "dsr_trial_counted": False,
+        "caveats": list(caveats if caveats is not None
+                        else PREDICTOR_BOARD_CAVEATS),
+    }
+
+
 def _kernel_fold_predict(
     train_raw: np.ndarray,
     train_y: np.ndarray,

@@ -612,9 +612,13 @@ pub fn encode(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::F(n) => function_key(n)?,
         _ => return None,
     };
-    // Alt is a prefixed escape in every terminal this client runs in — and
-    // never over a control character, which carries its modifier in the byte.
-    match key.modifiers.contains(KeyModifiers::ALT) && !ctrl {
+    // Alt is a prefixed escape in every terminal this client runs in, over a
+    // control byte exactly as over a letter: xterm's `metaSendsEscape` puts the
+    // ESC in front of whatever the key produced, and `readline`'s default
+    // keymap is built on that — `\e\C-h`, `\e\C-e`, `\e\C-y`. Treating a
+    // control byte as though it already carried the modifier drops the ALT
+    // silently and makes the whole Ctrl-Alt family a dead key in the pane.
+    match key.modifiers.contains(KeyModifiers::ALT) {
         true => Some([&[0x1b][..], &bytes].concat()),
         false => Some(bytes),
     }
@@ -625,12 +629,26 @@ pub fn encode(key: KeyEvent) -> Option<Vec<u8>> {
 /// The C0 range is the top three bits cleared: `?` through `_` map onto 0x1f
 /// down to 0x00, and a lowercase letter is the same physical key as its
 /// capital. Ctrl-? is DEL, which is outside that arithmetic and is the one
-/// special case. Anything else — a digit, a comma — has no control form, and
-/// nothing is sent rather than a byte the operator did not type.
+/// special case.
+///
+/// **`4` through `7` are not digits here.** crossterm reports the top of the C0
+/// range by its own legacy names — 0x1C..0x1F arrive spelled `4`, `5`, `6`, `7`
+/// with control held (`event/sys/unix/parse.rs`), which is the same table that
+/// makes Ctrl-] arrive as `5`. So these four arms are Ctrl-\, Ctrl-], Ctrl-^
+/// and Ctrl-_, and the arithmetic above cannot reach them because the character
+/// the arithmetic would see is a digit. Dropping them costs a child that
+/// ignores SIGINT its quit signal and readline its undo, which is the
+/// difference between a terminal and a keyboard that mostly works. (`5` never
+/// arrives here: the router intercepts it as the key that returns the
+/// keyboard, which is that byte's other name.)
+///
+/// Anything else — a real digit, a comma — has no control form, and nothing is
+/// sent rather than a byte the operator did not type.
 fn control_byte(c: char) -> Option<Vec<u8>> {
     match c {
         '?' => Some(vec![0x7f]),
         ' ' => Some(vec![0x00]),
+        '4'..='7' => Some(vec![0x1c + (c as u8 - b'4')]),
         c if c.is_ascii() => {
             let upper = c.to_ascii_uppercase() as u8;
             (0x40..=0x5f).contains(&upper).then(|| vec![upper & 0x1f])
@@ -982,9 +1000,23 @@ mod tests {
         assert_eq!(with(KeyCode::Char('_'), KeyModifiers::CONTROL), [0x1f]);
         assert_eq!(with(KeyCode::Char(' '), KeyModifiers::CONTROL), [0x00]);
         assert_eq!(with(KeyCode::Char('?'), KeyModifiers::CONTROL), [0x7f]);
+        // The four digits crossterm's legacy table actually delivers, which are
+        // not digits an operator typed at all: 0x1C..0x1F arrive spelled `4`
+        // through `7`, so these are Ctrl-\\, Ctrl-], Ctrl-^ and Ctrl-_. The
+        // first is the quit signal a child ignoring SIGINT is stopped with, and
+        // the last is readline's undo — dropping them is the difference between
+        // a terminal and a keyboard that mostly works.
+        assert_eq!(with(KeyCode::Char('4'), KeyModifiers::CONTROL), [0x1c]);
+        assert_eq!(with(KeyCode::Char('5'), KeyModifiers::CONTROL), [0x1d]);
+        assert_eq!(with(KeyCode::Char('6'), KeyModifiers::CONTROL), [0x1e]);
+        assert_eq!(with(KeyCode::Char('7'), KeyModifiers::CONTROL), [0x1f]);
         // And a key with no control form sends nothing rather than a byte the
-        // operator did not type: Ctrl-3 is not `3` and is not 0x33.
-        assert!(encode(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL)).is_none());
+        // operator did not type. A digit OUTSIDE that window, deliberately:
+        // the first version of this test asserted on `3`, the one digit near
+        // the window that no terminal spells this way, so it passed while the
+        // four that do arrive were being dropped.
+        assert!(encode(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::CONTROL)).is_none());
+        assert!(encode(KeyEvent::new(KeyCode::Char(','), KeyModifiers::CONTROL)).is_none());
     }
 
     #[test]
@@ -1028,17 +1060,27 @@ mod tests {
     }
 
     #[test]
-    fn alt_is_a_prefixed_escape_and_never_over_a_control_byte() {
+    fn alt_is_a_prefixed_escape_over_every_key_a_control_byte_included() {
         assert_eq!(with(KeyCode::Char('b'), KeyModifiers::ALT), b"\x1bb");
         assert_eq!(with(KeyCode::Enter, KeyModifiers::ALT), b"\x1b\r");
         // Ctrl-Alt-C is the interrupt byte with an escape in front of it, not
-        // an escape in front of a `c`.
+        // an escape in front of a `c` — and not the bare byte either, which is
+        // what an encoder that treated a control byte as "already modified"
+        // would send. `readline`'s own keymap is full of these (`\e\C-h`,
+        // `\e\C-e`, `\e\C-y`), so the whole family is a dead key without it.
         assert_eq!(
             with(
                 KeyCode::Char('c'),
                 KeyModifiers::ALT | KeyModifiers::CONTROL
             ),
-            [0x03]
+            b"\x1b\x03"
+        );
+        assert_eq!(
+            with(
+                KeyCode::Char('h'),
+                KeyModifiers::ALT | KeyModifiers::CONTROL
+            ),
+            b"\x1b\x08"
         );
     }
 

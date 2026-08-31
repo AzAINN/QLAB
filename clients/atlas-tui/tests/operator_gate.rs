@@ -192,6 +192,42 @@ fn no_write_call_site_exists_outside_the_gated_module() {
 }
 
 #[test]
+fn only_the_two_gated_modules_can_start_a_child() {
+    // The same shape as the write census, for the other authority this client
+    // has: a process. A `net::write` is a request the owner re-validates; a
+    // spawn is a program on the operator's machine, and it answers to nothing
+    // downstream. Two modules may hold one — `handoff.rs`, which gives the
+    // whole terminal away, and `pty.rs`, which gives a pane — and both are
+    // gated, which is what makes "the monitoring build contains no spawn" a
+    // property of the artifact rather than a promise.
+    //
+    // Every spelling, not only the two this crate uses today: a `Command` from
+    // `std::process` and a `CommandBuilder` from `portable_pty` are different
+    // words for the same authority, and pinning one would watch the wrong door.
+    for verb in [
+        "process::Command",
+        "portable_pty",
+        "CommandBuilder",
+        "spawn_command",
+        "openpty",
+    ] {
+        let found = files_mentioning(verb);
+        assert!(
+            found
+                .iter()
+                .all(|file| file == "handoff.rs" || file == "pty.rs"),
+            "`{verb}` may only appear in the two gated modules that start children, found: \
+             {found:?}"
+        );
+    }
+    // And each searched word is really in the tree, or the loop above asserts
+    // nothing: a walker that cannot read the crate returns no matches, which
+    // reads exactly like a crate that starts no children at all.
+    assert!(files_mentioning("process::Command").contains(&"handoff.rs".to_string()));
+    assert!(files_mentioning("spawn_command").contains(&"pty.rs".to_string()));
+}
+
+#[test]
 fn the_one_click_book_is_gated_in_every_place_it_is_spelled() {
     // The card itself is ungated — a monitoring window shows the desk's open
     // question, which is what a monitoring window is *for* — so the gate is on
@@ -460,6 +496,32 @@ mod glass {
                 Resolved::Refused(said) => assert!(said.contains("not armed"), "{line}: {said}"),
                 other => panic!("{line}: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn the_pane_that_runs_a_child_is_not_in_a_monitoring_build() {
+        // `atlas::pty` cannot be named in this leg — the module is not in the
+        // crate — so what is left to check is that the gate is spelled the way
+        // the compiler reads it, and that the file it removes is really the one
+        // that opens a pseudoterminal and puts a process on it. A `cfg` naming
+        // the wrong feature compiles cleanly in both legs, and nothing else
+        // here would see it.
+        assert!(
+            super::source("lib.rs").contains("#[cfg(feature = \"operator\")]\npub mod pty;"),
+            "lib.rs must gate `pty` on the operator feature, verbatim"
+        );
+        let pty = super::source("pty.rs");
+        for held in [
+            "openpty(",
+            "spawn_command(",
+            "pub fn write(",
+            "pub fn kill(",
+        ] {
+            assert!(
+                pty.contains(held),
+                "the gated module is the one that owns the child: {held:?}"
+            );
         }
     }
 

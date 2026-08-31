@@ -23,6 +23,13 @@ pub mod handoff;
 pub mod input;
 pub mod model;
 pub mod net;
+/// A child of this process on a pseudoterminal, so the ATLAS tab can hold a
+/// real `qlab cli` beside the desk rather than instead of it. Gated with the
+/// commands that can reach one: the monitoring build has no key that opens a
+/// pane, and the design's claim is that the artifact *contains* no spawn — a
+/// property only absence can hold.
+#[cfg(feature = "operator")]
+pub mod pty;
 /// A credential an operator typed, carried without being printable. Gated with
 /// the only path that can produce or spend one: the login form and the POST it
 /// feeds both exist under `operator`, so the default build has no such value to

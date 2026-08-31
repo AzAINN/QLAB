@@ -61,6 +61,17 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "
 # owner — a resume point silently off by the whole offset.
 reqwest = { version = "0.13.4", features = ["json", "stream", "query"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# The pseudoterminal the ATLAS pane runs its child on, the parser that turns the
+# child's bytes back into a screen, and the widget that draws that screen.
+#
+# Declared unconditionally because Cargo has no `cfg` a dependency can be keyed
+# on: what keeps a pty out of the *monitoring artifact* is that the only module
+# naming these is `pty`, and `pty` is gated — nothing in the glass build
+# references the crates, so nothing of them is linked. The manifest is where
+# they may be listed; the source is where the gate has to hold.
+portable-pty = "0.9"
+vt100 = "0.16"
+tui-term = "0.3"
 
 [profile.release]
 lto = true

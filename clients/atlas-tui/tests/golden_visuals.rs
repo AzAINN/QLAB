@@ -208,6 +208,134 @@ fn a_drawing_renders_line_for_line_with_its_gates_still_over_their_wires() {
 }
 
 #[test]
+fn the_off_pane_count_counts_down_and_reaches_zero_at_the_right_edge() {
+    // A count that never moved read as a control that does nothing, and said
+    // "+20 cols" with the operator already looking at the end of the line.
+    let mut client = with_list();
+    with_drawing(&mut client, CIRCUIT);
+
+    // At the left edge: the whole overhang.
+    let at_rest = hint(&client.frame(120, 36));
+    let total = off_pane(&at_rest).expect("no overhang on a caption wider than the pane");
+    assert!(total > 0, "{at_rest}");
+
+    // Ten columns in: ten fewer.
+    for _ in 0..10 {
+        client.press(KeyCode::Char('l'));
+        client.frame(120, 36);
+    }
+    let mid = hint(&client.frame(120, 36));
+    assert_eq!(off_pane(&mid), Some(total - 10), "{mid}");
+
+    // At the right edge: nothing off-pane, and the count is gone rather than
+    // stuck at a number the operator can no longer act on.
+    client.press(KeyCode::End);
+    client.frame(120, 36);
+    let edge = hint(&client.frame(120, 36));
+    assert_eq!(off_pane(&edge), None, "{edge}");
+
+    // And Home puts the whole overhang back.
+    client.press(KeyCode::Home);
+    client.frame(120, 36);
+    assert_eq!(off_pane(&hint(&client.frame(120, 36))), Some(total));
+}
+
+/// The render pane's key hint, which is where the off-pane count is stated.
+fn hint(frame: &str) -> String {
+    line_with(frame, "Enter render").to_string()
+}
+
+/// The `+N cols` the hint carries, or `None` when there is nothing off-pane.
+fn off_pane(hint: &str) -> Option<usize> {
+    let at = hint.find('+')?;
+    hint[at + 1..]
+        .split_whitespace()
+        .next()?
+        .parse::<usize>()
+        .ok()
+}
+
+#[test]
+fn a_visual_with_no_drawing_in_it_says_so_rather_than_rendering_nothing() {
+    // A 200 whose `text` is empty is a broken drawer, not an empty circuit.
+    // An empty pane would read as "this visual draws nothing", which is a
+    // claim the owner never made.
+    let mut client = with_list();
+    with_drawing(&mut client, "");
+    let frame = client.frame(120, 36);
+    assert!(
+        content(&frame).contains("no drawing in it"),
+        "an empty text rendered as an empty pane:\n{frame}"
+    );
+}
+
+#[test]
+fn a_broken_owner_is_never_drawn_as_a_desk_that_said_no() {
+    // A 5xx is a traceback in somebody else's process. Drawing it as a
+    // refusal would send the operator to edit the one thing that was not
+    // wrong — the request.
+    let mut client = with_list();
+    client.store.apply(
+        AppEvent::Visual(Box::new(VisualAnswer {
+            asked: "quantum_circuit".into(),
+            result: VisualResult::Failed {
+                status: 500,
+                said: "the owner failed at 500 while drawing this — Enter asks again".into(),
+            },
+        })),
+        Instant::now(),
+    );
+    let frame = client.frame(120, 36);
+    let body = content(&frame);
+    assert!(body.contains("OWNER FAILED 500"), "{frame}");
+    assert!(
+        !body.to_lowercase().contains("refus"),
+        "a 5xx was drawn as a refusal:\n{frame}"
+    );
+    // And the remedy is named: this pane has no automatic retry. Read as a
+    // fragment because the sentence wraps — it is a remedy, not art.
+    assert!(body.contains("asks again"), "{frame}");
+    assert_eq!(client.store.visual_asking(), None);
+}
+
+#[test]
+fn a_render_that_never_came_back_leaves_a_sentence_and_a_way_to_ask_again() {
+    // The bug this variant exists for: a transport failure and an undecodable
+    // 200 both used to produce a log line and no event at all, so the pane
+    // drew "asking the owner…" until the client was restarted.
+    for said in [
+        "the owner did not answer (connection refused) — Enter asks again",
+        "the owner answered with something this client cannot read — Enter asks again",
+    ] {
+        let mut client = with_list();
+        client.press(KeyCode::Enter);
+        assert_eq!(client.store.visual_asking(), Some("quantum_circuit"));
+
+        client.store.apply(
+            AppEvent::Visual(Box::new(VisualAnswer {
+                asked: "quantum_circuit".into(),
+                result: VisualResult::Unanswered { said: said.into() },
+            })),
+            Instant::now(),
+        );
+        let frame = client.frame(120, 36);
+        let body = content(&frame);
+        // The sentence wraps — it is a remedy, not art — so it is read in
+        // fragments the way the refusal sentences are.
+        assert!(body.contains("asks again"), "{said}:\n{frame}");
+        assert!(body.contains("NO ANSWER"), "{said}:\n{frame}");
+        assert!(
+            !body.contains("asking the owner to draw it"),
+            "the pane is still waiting on a reply that never came:\n{frame}"
+        );
+
+        // And Enter can ask again, which is what the sentence promised.
+        client.press(KeyCode::Enter);
+        assert_eq!(client.store.visual_asking(), Some("quantum_circuit"));
+    }
+}
+
+#[test]
 fn a_refused_render_draws_the_owners_sentence_and_never_a_dead_owner() {
     // Both refusals the route makes, because they have different fixes: a 404
     // names the visuals that exist, a 400 names the parameter it would not
@@ -298,7 +426,9 @@ fn the_keys_this_pane_binds_are_offered_to_a_glass_window_too() {
         .filter(|b| b.source == atlas::input::Source::View(atlas::store::ViewId::Visuals))
         .map(|b| b.key)
         .collect();
-    for key in ["↑", "↓", "Enter", "PgUp", "PgDn", "j", "k"] {
+    for key in [
+        "↑", "↓", "Enter", "PgUp", "PgDn", "j", "k", "h", "l", "Home", "End",
+    ] {
         assert!(offered.contains(&key), "{key} is not offered: {offered:?}");
     }
 }

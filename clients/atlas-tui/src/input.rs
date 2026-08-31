@@ -656,6 +656,18 @@ pub const KEYMAP: &[Binding] = &[
         Source::View(ViewId::Visuals),
         "one column right",
     ),
+    b(
+        "Home",
+        "Home",
+        Source::View(ViewId::Visuals),
+        "back to the left edge of the drawing",
+    ),
+    b(
+        "End",
+        "End",
+        Source::View(ViewId::Visuals),
+        "out to the right edge — where a caption wider than the pane ends",
+    ),
     // -- SETT -------------------------------------------------------------
     //
     // The three keys below are the *cards'*, not the pane's: each is refused

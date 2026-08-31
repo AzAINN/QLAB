@@ -1588,20 +1588,49 @@ pub struct VisualAnswer {
     pub result: VisualResult,
 }
 
-/// What came back: a drawing, or the owner's sentence about why not.
+/// What came back: a drawing, or one of the three ways there is not one.
 ///
-/// Two variants and not an `Option<Visual>` beside an error string, because a
-/// pane holding both could draw a stale circuit under a fresh refusal — which
-/// is the "the owner declined and here is the picture anyway" reading that
-/// makes a refusal invisible.
+/// A sum and not an `Option<Visual>` beside an error string, because a pane
+/// holding both could draw a stale circuit under a fresh refusal — the "the
+/// owner declined and here is the picture anyway" reading that makes a refusal
+/// invisible.
+///
+/// **Four variants, and the last three are not one fact.** A 4xx is the owner
+/// having *considered* the request and said no; a 5xx is the owner breaking
+/// while drawing; nothing at all is the request never having landed. They have
+/// three different remedies — fix the name or the params, tell whoever runs the
+/// owner, try again — and a pane that folded them together would name the wrong
+/// one every time. Every variant reaches the pane as an **answer**, which is
+/// what retires the "asking the owner…" line: a render that produced no event
+/// left the pane waiting for a reply that was never coming.
 #[derive(Debug, Clone)]
 pub enum VisualResult {
     Drawn(Box<Visual>),
-    /// The owner answered, considered it, and said no. `status` is kept beside
-    /// the sentence because 404 and 400 are different fixes — an unknown name
-    /// against params a known drawer would not take — and the pane says which.
+    /// A 4xx: the owner answered, considered it, and said no. `status` is kept
+    /// beside the sentence because 404 and 400 are different fixes — an unknown
+    /// name against params a known drawer would not take — and the pane says
+    /// which.
     Refused {
         status: u16,
+        said: String,
+    },
+    /// A 5xx: the owner broke while drawing this.
+    ///
+    /// **Never `Refused`.** A refusal is a decision an operator can act on by
+    /// changing what they asked for; a 500 is a traceback in somebody else's
+    /// process, and drawing it as "the desk said no" would send the operator to
+    /// edit a request that was never the problem.
+    Failed {
+        status: u16,
+        said: String,
+    },
+    /// No answer at all — nothing came back, or what came back could not be
+    /// read as a visual.
+    ///
+    /// Its own variant rather than a silent log line, which is what it was:
+    /// the render that produced no event left `visual_asking` set and the pane
+    /// drawing "asking the owner…" until the client was restarted.
+    Unanswered {
         said: String,
     },
 }

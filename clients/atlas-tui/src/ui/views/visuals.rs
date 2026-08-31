@@ -188,6 +188,17 @@ impl View for VisualsView {
                 self.hscroll(1);
                 None
             }
+            // The two edges, in one press each. A caption twenty columns off
+            // the right of the pane is twenty presses of `l` away, and a
+            // reader who wanted the end of a line should not have to count.
+            KeyCode::Home => {
+                self.hoffset = 0;
+                None
+            }
+            KeyCode::End => {
+                self.hoffset = self.max_hscroll.get();
+                None
+            }
             _ => None,
         }
     }
@@ -311,6 +322,32 @@ impl VisualsView {
                     ))],
                     true,
                 ),
+                // **Not "refused", in the header or the tone.** The owner
+                // broke while drawing this, which is nothing the operator can
+                // fix by asking for something else — and a word that implied
+                // they could would send them to edit the one thing that was
+                // not wrong. Negative rather than warning: a desk whose owner
+                // is throwing 500s is not a desk to read numbers off.
+                VisualResult::Failed { status, said } => (
+                    format!("{} · owner failed {status}", answer.asked),
+                    vec![Line::from(Span::styled(
+                        said.clone(),
+                        Style::default().fg(t.negative),
+                    ))],
+                    true,
+                ),
+                // Nothing came back, or nothing readable did. Still an answer
+                // and still drawn: the version of this pane that logged these
+                // and emitted nothing left "asking the owner…" on screen until
+                // the client was restarted.
+                VisualResult::Unanswered { said } => (
+                    format!("{} · no answer", answer.asked),
+                    vec![Line::from(Span::styled(
+                        said.clone(),
+                        Style::default().fg(t.negative),
+                    ))],
+                    true,
+                ),
             },
         };
 
@@ -327,11 +364,16 @@ impl VisualsView {
         self.max_hscroll
             .set(widest.saturating_sub(rows[1].width as usize));
 
+        // What is still off the right-hand edge *from here*, not what the
+        // widest line always was: a count that never moved read as a control
+        // that does nothing, and said "+20 cols" with the operator already at
+        // the right edge looking at the end of the line.
+        let hoffset = self.hoffset.min(self.max_hscroll.get());
         f.render_widget(
             Paragraph::new(vec![
                 panel_header(&title),
                 Line::from(Span::styled(
-                    keys_note(self.max_hscroll.get()),
+                    keys_note(self.max_hscroll.get() - hoffset),
                     Style::default().fg(t.text_dim),
                 )),
             ]),
@@ -349,7 +391,7 @@ impl VisualsView {
                 true => paragraph.wrap(Wrap { trim: true }),
                 // `scroll` on the horizontal axis only, where the widget's own
                 // unit *is* a column and cannot disagree with the wall above.
-                false => paragraph.scroll((0, self.hoffset.min(self.max_hscroll.get()) as u16)),
+                false => paragraph.scroll((0, hoffset as u16)),
             },
             rows[1],
         );
@@ -519,30 +561,50 @@ mod tests {
 
     #[test]
     fn an_answer_retires_the_question_whichever_shape_it_came_in() {
-        // A refusal that left `asking` set would draw "asking the owner…"
-        // over the sentence saying no drawing is coming.
+        // All four, because all four are answers. The version of this pane
+        // that emitted nothing for the last two left `asking` set and drew
+        // "asking the owner…" until the client was restarted.
         let mut store = with_list();
-        store.ask_visual("quantum_circuit");
-        store.apply(
-            AppEvent::Visual(Box::new(VisualAnswer {
-                asked: "quantum_circuit".into(),
-                result: VisualResult::Refused {
-                    status: 400,
-                    said: "angles must be one per feature".into(),
-                },
-            })),
-            Instant::now(),
-        );
-        assert_eq!(store.visual_asking(), None);
+        for result in [
+            VisualResult::Drawn(Box::default()),
+            VisualResult::Refused {
+                status: 400,
+                said: "angles must be one per feature".into(),
+            },
+            VisualResult::Failed {
+                status: 500,
+                said: "the owner failed at 500 while drawing this — Enter asks again".into(),
+            },
+            VisualResult::Unanswered {
+                said: "the owner did not answer — Enter asks again".into(),
+            },
+        ] {
+            store.ask_visual("quantum_circuit");
+            assert_eq!(store.visual_asking(), Some("quantum_circuit"));
+            store.apply(
+                AppEvent::Visual(Box::new(VisualAnswer {
+                    asked: "quantum_circuit".into(),
+                    result,
+                })),
+                Instant::now(),
+            );
+            assert_eq!(store.visual_asking(), None);
+        }
+    }
 
-        store.ask_visual("quantum_circuit");
-        store.apply(
-            AppEvent::Visual(Box::new(VisualAnswer {
-                asked: "quantum_circuit".into(),
-                result: VisualResult::Drawn(Box::default()),
-            })),
-            Instant::now(),
-        );
-        assert_eq!(store.visual_asking(), None);
+    #[test]
+    fn home_and_end_reach_both_edges_in_one_press_each() {
+        let mut store = with_list();
+        let mut view = VisualsView::default();
+        view.max_hscroll.set(20);
+        view.on_key(key(KeyCode::End), &mut store);
+        assert_eq!(view.hoffset, 20, "End did not reach the right edge");
+        view.on_key(key(KeyCode::Home), &mut store);
+        assert_eq!(view.hoffset, 0, "Home did not reach the left edge");
+        // A drawing that fits has no edges to jump between, and End must not
+        // invent one: `max_hscroll` is zero and the pane does not move.
+        view.max_hscroll.set(0);
+        view.on_key(key(KeyCode::End), &mut store);
+        assert_eq!(view.hoffset, 0);
     }
 }

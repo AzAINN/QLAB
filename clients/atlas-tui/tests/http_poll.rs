@@ -22,10 +22,35 @@ enum Seen {
     Regime,
     Backends,
     Visuals(usize),
-    Visual(String),
+    /// The name that was asked for **and what came back**.
+    ///
+    /// Both halves, because the name alone made the refusal test pass on any
+    /// answer at all: a 404 drawn as a rendered circuit would have satisfied
+    /// `Seen::Visual("circut")` exactly as the refusal does.
+    Visual(String, Drew),
     Proposal(bool),
     Malformed(String),
     Other,
+}
+
+/// Which of the four shapes an answer came back in — the distinction the pane
+/// draws four different sentences from, reduced to the word each one is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drew {
+    Drawn,
+    Refused(u16),
+    Failed(u16),
+    Unanswered,
+}
+
+fn drew(result: &atlas::model::VisualResult) -> Drew {
+    use atlas::model::VisualResult;
+    match result {
+        VisualResult::Drawn(_) => Drew::Drawn,
+        VisualResult::Refused { status, .. } => Drew::Refused(*status),
+        VisualResult::Failed { status, .. } => Drew::Failed(*status),
+        VisualResult::Unanswered { .. } => Drew::Unanswered,
+    }
 }
 
 fn seen(ev: &AppEvent) -> Seen {
@@ -39,7 +64,9 @@ fn seen(ev: &AppEvent) -> Seen {
         // The name that was *asked for*, not one read off the payload: a
         // refusal carries no payload, and which drawing was declined is the
         // whole fact the pane needs.
-        AppEvent::Visual(answer) => Seen::Visual(answer.asked.clone()),
+        // The shape rides with the name so an assertion about a refusal
+        // cannot be satisfied by a rendered drawing.
+        AppEvent::Visual(answer) => Seen::Visual(answer.asked.clone(), drew(&answer.result)),
         // Both answers, kept apart: `{"proposal": null}` is the owner saying
         // the desk has no open question, which is what retires a card, and a
         // test that could not tell it from a payload that never arrived could
@@ -664,12 +691,12 @@ async fn the_visuals_registry_and_one_drawing_are_asked_for_and_never_on_the_bea
     poller.visual("quantum_circuit");
     let seen = drain_until(
         &mut rx,
-        |ev| matches!(ev, Seen::Visual(_)),
+        |ev| matches!(ev, Seen::Visual(..)),
         Duration::from_secs(5),
     )
     .await;
     assert!(
-        seen.contains(&Seen::Visual("quantum_circuit".to_string())),
+        seen.contains(&Seen::Visual("quantum_circuit".to_string(), Drew::Drawn)),
         "{seen:?}"
     );
     // The path is the owner's own route with the name as one segment — no
@@ -698,12 +725,15 @@ async fn an_unknown_visual_comes_back_as_a_refusal_and_never_as_a_dead_owner() {
     poller.visual("circut");
     let seen = drain_until(
         &mut rx,
-        |ev| matches!(ev, Seen::Visual(_)),
+        |ev| matches!(ev, Seen::Visual(..)),
         Duration::from_secs(5),
     )
     .await;
+    // The status too, and not merely "an answer about circut arrived": the 404
+    // has to reach the bus as a *refusal*, or the pane would draw the owner's
+    // "no such visual" as a circuit it never rendered.
     assert!(
-        seen.contains(&Seen::Visual("circut".to_string())),
+        seen.contains(&Seen::Visual("circut".to_string(), Drew::Refused(404))),
         "{seen:?}"
     );
     // And the owner is still up: a refusal is not a dropped feed.

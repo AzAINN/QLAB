@@ -620,22 +620,23 @@ async fn poll_loop(
                         }
                         if let Some(name) = visual {
                             let url = visual_url(&base, &name);
-                            match render_visual(&client, &url).await {
-                                Ok(result) => emit(
-                                    &tx,
-                                    AppEvent::Visual(Box::new(VisualAnswer {
-                                        asked: name,
-                                        result,
-                                    })),
-                                )?,
-                                Err(VisualFailed::Malformed(error)) => emit(
-                                    &tx,
-                                    AppEvent::Http(HttpResult::Malformed { url, error }),
-                                )?,
-                                Err(VisualFailed::Unanswered(error)) => {
-                                    tracing::warn!(%error, "visual render fetch failed")
-                                }
+                            let rendered = render_visual(&client, &url).await;
+                            // The chip first, because it is about the owner and
+                            // the answer below is about one drawing.
+                            if let Some(error) = rendered.malformed {
+                                emit(&tx, AppEvent::Http(HttpResult::Malformed { url, error }))?;
                             }
+                            // And always an answer. This emit is unconditional
+                            // on purpose: the two arms that used to return
+                            // without one left the pane waiting on a reply that
+                            // was never coming, with only a log line to say so.
+                            emit(
+                                &tx,
+                                AppEvent::Visual(Box::new(VisualAnswer {
+                                    asked: name,
+                                    result: rendered.result,
+                                })),
+                            )?;
                         }
                         if jump {
                             break;
@@ -687,64 +688,140 @@ fn encode_segment(name: &str) -> String {
     out
 }
 
-/// A body this client could not read, and one nobody answered — the two
-/// failures a render has that are *not* the owner refusing.
+/// The retry this pane owns, named in every sentence that says there is no
+/// drawing.
 ///
-/// The owner's own refusal is not here: a 404 for an unknown name and a 400 for
-/// bad params are answers, and they come back as [`VisualResult::Refused`].
-/// Folding them in here is exactly the mistake that would draw a governance-
-/// shaped "no" as a dead owner.
-enum VisualFailed {
-    Malformed(String),
-    Unanswered(String),
+/// A refusal, a broken owner and a dropped request all end the same way for
+/// the operator: press the key again. Saying so is not decoration — the pane
+/// has no automatic retry and no beat behind it, so a sentence that stopped at
+/// what went wrong would leave a window that looks permanently stuck.
+const RETRY: &str = "Enter asks again";
+
+/// One render attempt, and what the frame owes for it.
+///
+/// Two fields because the two are different audiences. `result` is what the
+/// pane draws and is **never absent** — every way a render can end reaches the
+/// operator as an answer, which is what retires the "asking the owner…" line.
+/// `malformed` is the status line's own MALFORMED chip, set only when the
+/// owner answered 2xx with a body this client could not decode: that is a
+/// broken contract with the owner and invariant 4 says it fails loud, beside
+/// the pane's own quieter sentence rather than instead of it.
+struct Rendered {
+    result: VisualResult,
+    malformed: Option<String>,
 }
 
-/// One render, with the refusal bodies read rather than thrown away.
+/// One render, with every non-2xx body read rather than thrown away.
 ///
 /// Its own fetch rather than `fetch::<Visual>`, and this is the whole reason:
 /// the shared one turns every non-2xx into `Failed` **without reading the
 /// body**, and the body is precisely where the owner puts the sentence that
 /// says what to fix. A pane built on the shared path could only ever say
 /// "owner answered 400", which names no remedy at all.
-async fn render_visual(client: &reqwest::Client, url: &str) -> Result<VisualResult, VisualFailed> {
+///
+/// The 4xx/5xx split is the second reason. `is_client_error` is the whole test:
+/// a 4xx is the owner having considered the request, a 5xx is the owner
+/// breaking while drawing, and only the first is something the operator can fix
+/// by asking for something else.
+async fn render_visual(client: &reqwest::Client, url: &str) -> Rendered {
     let resp = match client.get(url).send().await {
         Ok(resp) => resp,
-        Err(err) => return Err(VisualFailed::Unanswered(because(&err))),
+        Err(err) => return unanswered(format!("the owner did not answer ({})", because(&err))),
     };
     let status = resp.status();
     let body = match resp.text().await {
         Ok(body) => body,
-        Err(err) => return Err(VisualFailed::Unanswered(because(&err))),
+        // The headers arrived and the body did not. Still nothing to draw, and
+        // still not a refusal: the owner never got as far as deciding.
+        Err(err) => {
+            return unanswered(format!(
+                "the owner's answer stopped mid-body ({})",
+                because(&err)
+            ))
+        }
     };
     if status.is_success() {
         return match serde_json::from_str::<Visual>(&body) {
-            Ok(visual) => Ok(VisualResult::Drawn(Box::new(visual))),
-            Err(err) => Err(VisualFailed::Malformed(err.to_string())),
+            Ok(visual) => Rendered {
+                result: VisualResult::Drawn(Box::new(visual)),
+                malformed: None,
+            },
+            // Both halves: the chip says the contract broke, and the pane says
+            // there is no drawing and how to ask again. Either alone leaves one
+            // of the two surfaces lying — a chip over a pane that still claims
+            // to be waiting, or a pane that quietly gave up on a broken owner.
+            Err(err) => Rendered {
+                result: VisualResult::Unanswered {
+                    said: format!(
+                        "the owner answered with something this client cannot read — {RETRY}"
+                    ),
+                },
+                malformed: Some(err.to_string()),
+            },
         };
     }
-    Ok(VisualResult::Refused {
-        status: status.as_u16(),
-        said: refusal_sentence(status.as_u16(), &body),
-    })
+    Rendered {
+        result: not_drawn(status, &body),
+        malformed: None,
+    }
 }
 
-/// The owner's sentence about a refusal, or an honest stand-in when it sent
-/// none.
+/// What a non-2xx answer means, split on the one test that decides it.
 ///
-/// Verbatim when there is one: the 404 body names the visuals that *do* exist
-/// and the 400 body names the param that was wrong, and neither is a sentence
-/// this client could compose. The stand-in says the status and nothing more,
-/// because inventing a remedy for a body nobody sent is how a client starts
-/// teaching an operator something the owner never said.
-fn refusal_sentence(status: u16, body: &str) -> String {
-    match serde_json::from_str::<VisualError>(body)
+/// Its own function so the split has a caller a test can reach without a
+/// socket: the canned owner in `tests/http_poll.rs` answers 200 or 404 and has
+/// no way to produce a 500, and a test that restated this branch instead of
+/// calling it would be pinning its own copy.
+fn not_drawn(status: reqwest::StatusCode, body: &str) -> VisualResult {
+    let code = status.as_u16();
+    let said = owner_said(body);
+    match status.is_client_error() {
+        // The owner considered it and said no. Its sentence, verbatim — the
+        // 404 body names the visuals that do exist and the 400 body names the
+        // parameter that was wrong.
+        true => VisualResult::Refused {
+            status: code,
+            said: match said {
+                Some(said) => said,
+                None => format!("the owner answered {code} and said nothing about why"),
+            },
+        },
+        // The owner broke. Never the word "refused": a 500 is a traceback in
+        // somebody else's process, and an operator sent to edit their request
+        // would be fixing the one thing that was not wrong.
+        false => VisualResult::Failed {
+            status: code,
+            said: match said {
+                Some(said) => {
+                    format!("the owner failed at {code} while drawing this: {said} — {RETRY}")
+                }
+                None => format!("the owner failed at {code} while drawing this — {RETRY}"),
+            },
+        },
+    }
+}
+
+/// A render that produced nothing to draw and no verdict either.
+fn unanswered(what: String) -> Rendered {
+    Rendered {
+        result: VisualResult::Unanswered {
+            said: format!("{what} — {RETRY}"),
+        },
+        malformed: None,
+    }
+}
+
+/// The owner's own sentence out of an error body, if it sent one.
+///
+/// `None` covers a body nobody sent, an empty sentence, and a body this client
+/// cannot read — three shapes of "it said nothing", and the caller composes the
+/// stand-in. Inventing a remedy for any of them is how a client starts teaching
+/// an operator something the owner never said.
+fn owner_said(body: &str) -> Option<String> {
+    serde_json::from_str::<VisualError>(body)
         .ok()
         .and_then(|payload| payload.error)
         .filter(|said| !said.trim().is_empty())
-    {
-        Some(said) => said,
-        None => format!("the owner answered {status} and said nothing about why"),
-    }
 }
 
 /// One client builder for both halves of the boundary.
@@ -804,36 +881,90 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_refusal_is_the_owners_own_sentence_when_it_sent_one() {
+    fn an_owners_error_body_is_read_and_an_empty_one_is_not_invented() {
         // The 404 body names the visuals that *do* exist and the 400 body
         // names the parameter that was wrong. Neither is a sentence this
         // client could compose, and both are the whole remedy.
         assert_eq!(
-            refusal_sentence(
-                404,
-                r#"{"error": "no visual named circut; known: quantum_circuit"}"#
-            ),
-            "no visual named circut; known: quantum_circuit"
+            owner_said(r#"{"error": "no visual named circut; known: quantum_circuit"}"#).as_deref(),
+            Some("no visual named circut; known: quantum_circuit")
         );
-        assert_eq!(
-            refusal_sentence(400, r#"{"error": "angles must be one per feature"}"#),
-            "angles must be one per feature"
-        );
+        // A body nobody sent, an empty sentence, one this client cannot read,
+        // and one with no sentence in it are all "it said nothing" — the
+        // caller composes the stand-in rather than this inventing one.
+        for body in ["", r#"{"error": ""}"#, "<html>502</html>", "{}"] {
+            assert_eq!(owner_said(body), None, "{body:?}");
+        }
     }
 
     #[test]
-    fn a_refusal_with_no_sentence_says_the_status_and_invents_no_remedy() {
-        // A body nobody sent, an empty one, and one this client cannot read.
-        // Inventing a fix for any of them is how a client starts teaching an
-        // operator something the owner never said.
-        for body in ["", r#"{"error": ""}"#, "<html>502</html>", "{}"] {
-            let said = refusal_sentence(502, body);
-            assert!(said.contains("502"), "{body:?} -> {said}");
-            assert!(
-                said.contains("said nothing about why"),
-                "{body:?} -> {said}"
-            );
+    fn every_sentence_this_module_composes_names_the_key_that_asks_again() {
+        // The pane has no automatic retry and no beat behind it, so a sentence
+        // that stopped at what went wrong would leave a window that looks
+        // permanently stuck.
+        //
+        // A refusal is deliberately not here: its sentence is the *owner's*,
+        // verbatim, and appending a remedy to somebody else's words is how a
+        // client starts editing what the desk said. The two shapes this module
+        // writes itself are the two that carry the key.
+        let said = |result: &VisualResult| match result {
+            VisualResult::Refused { said, .. }
+            | VisualResult::Failed { said, .. }
+            | VisualResult::Unanswered { said } => said.clone(),
+            VisualResult::Drawn(_) => panic!("a drawing has no sentence"),
+        };
+        assert!(said(&unanswered("the owner did not answer".into()).result).contains(RETRY));
+        let broken = render_failure(500, r#"{"error": "KeyError: angles"}"#);
+        assert!(said(&broken).contains(RETRY), "{}", said(&broken));
+    }
+
+    #[test]
+    fn a_4xx_is_the_owner_refusing_and_a_5xx_is_the_owner_breaking() {
+        // The split the whole variant exists for. A refusal is a decision an
+        // operator acts on by asking for something else; a 500 is a traceback
+        // in somebody else's process, and "the desk said no" would send them
+        // to edit the one thing that was not wrong.
+        let refused = render_failure(404, r#"{"error": "no visual named circut"}"#);
+        match &refused {
+            VisualResult::Refused { status, said } => {
+                assert_eq!(*status, 404);
+                // Verbatim, and with nothing of this client's prepended.
+                assert_eq!(said, "no visual named circut");
+            }
+            other => panic!("a 404 was not a refusal: {other:?}"),
         }
+
+        let broke = render_failure(500, r#"{"error": "KeyError: angles"}"#);
+        match &broke {
+            VisualResult::Failed { status, said } => {
+                assert_eq!(*status, 500);
+                assert!(said.contains("500"), "{said}");
+                assert!(said.contains("the owner failed"), "{said}");
+                // The word an operator would act on wrongly.
+                assert!(
+                    !said.to_lowercase().contains("refus"),
+                    "a 5xx was drawn as a refusal: {said}"
+                );
+                // The owner's own detail is kept beside it rather than lost.
+                assert!(said.contains("KeyError: angles"), "{said}");
+            }
+            other => panic!("a 500 was not a failure: {other:?}"),
+        }
+
+        // A 5xx with nothing in the body still says the status and the remedy.
+        let quiet = render_failure(503, "");
+        match &quiet {
+            VisualResult::Failed { said, .. } => {
+                assert!(said.contains("503") && said.contains(RETRY), "{said}");
+                assert!(!said.to_lowercase().contains("refus"), "{said}");
+            }
+            other => panic!("a 503 was not a failure: {other:?}"),
+        }
+    }
+
+    /// The production split, called rather than restated.
+    fn render_failure(status: u16, body: &str) -> VisualResult {
+        not_drawn(reqwest::StatusCode::from_u16(status).unwrap(), body)
     }
 
     #[test]

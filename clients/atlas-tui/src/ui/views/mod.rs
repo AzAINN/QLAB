@@ -179,7 +179,7 @@ impl Views {
             markets: markets::MarketsView::default(),
             book: book::BookView::default(),
             research: research::ResearchView,
-            predictors: predictors::PredictorsView,
+            predictors: predictors::PredictorsView::default(),
             workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
             settings: settings::SettingsView::default(),
@@ -196,14 +196,18 @@ impl Views {
     /// Not routed by `ViewId`, deliberately: the answer arrives on the bus
     /// while the operator may be looking anywhere, and a form that only heard
     /// about its own request when SETTINGS happened to be on screen would sit
-    /// in "asking the owner…" forever. SETTINGS is the only view that awaits an
-    /// answer at all — every other outcome is a toast and a refetch — so this
-    /// names it rather than asking seven views a question six of them have no
-    /// state for.
+    /// in "asking the owner…" forever. The three that await an answer are named
+    /// here — every other outcome is a toast and a refetch — rather than asking
+    /// ten views a question seven of them have no state for.
     #[cfg(feature = "operator")]
     pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
         self.settings.wrote(outcome);
         self.atlas.wrote(outcome);
+        // PREDICTORS is the third, and the one that waits longest: a board is
+        // fitted synchronously on the owner and its answer is the only thing
+        // that retires the pane's in-flight line. A pane told only when it
+        // happened to be on screen would sit at "running…" forever.
+        self.predictors.wrote(outcome);
     }
 
     /// Open the one box in this client a credential is typed into.

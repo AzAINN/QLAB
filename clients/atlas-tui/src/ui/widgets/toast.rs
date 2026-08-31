@@ -585,6 +585,34 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
         Wrote::MethodRefused { said } => {
             Toast::new(Level::Warn, "desk method refused", said.clone())
         }
+        // What the owner *ran* and what it *admitted*, which are two facts and
+        // are reported as two. A board that fitted three lanes and admitted
+        // none is a result — the augmentation did not earn its place — and a
+        // receipt that said only "ran" would read as the opposite.
+        Wrote::PredictorRan {
+            models, champion, ..
+        } => {
+            let ran = match models.len() {
+                0 => "the owner did not say which lanes it ran".to_string(),
+                _ => models.join(", "),
+            };
+            Toast::new(
+                Level::Info,
+                "predictor board",
+                match champion {
+                    Some(champion) => format!("{ran} — champion {champion}"),
+                    // Never "no champion" as an absence: nothing cleared the
+                    // admission bar, and that is what the board found.
+                    None => format!("{ran} — nothing cleared admission"),
+                },
+            )
+        }
+        // `Warn`, not `Alarm`: the desk considered the lane and declined it,
+        // and nothing was fitted. The sentence names the lanes it does serve,
+        // which is the whole remedy.
+        Wrote::PredictorRefused { said } => {
+            Toast::new(Level::Warn, "predictor run refused", said.clone())
+        }
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

@@ -1444,10 +1444,14 @@ pub struct MethodEntry {
 
 /// One method that exists and may not be chosen, with the stage that says why.
 ///
-/// `choosable` is read rather than assumed. The owner always sends `false`
-/// here, and a client that hard-coded the refusal would keep refusing an entry
-/// the catalog had since promoted — the one thing a stage change is supposed to
-/// move.
+/// `choosable` is decoded and **nothing reads it**. The owner always sends
+/// `false`, and the METHOD picker hard-codes the refusal: a research entry is
+/// drawn under the operational ones and the cursor cannot reach it, whatever
+/// this field says. It is modelled so the first surface that wants it need not
+/// widen the payload — and until one does, a stage promotion moves this flag
+/// and moves nothing on screen. The comment here once claimed the opposite,
+/// which is the shape invariant 10 names: a field that reads as load-bearing
+/// and is not.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ResearchEntry {
     pub id: Option<String>,

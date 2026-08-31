@@ -267,6 +267,28 @@ pub enum Command {
     /// nobody can tell apart afterwards.
     #[cfg(feature = "operator")]
     SetMethod(MethodChange),
+    /// Fit one predictor lane, against the board's own baseline.
+    ///
+    /// **A research run, and the only write on this workstation whose cost is
+    /// the owner's CPU rather than a row in the book.** It writes one
+    /// `predictor_board` run and nothing else: no plan, no approval, no
+    /// posture, and every gate between a plan and a fill is unmoved by it.
+    ///
+    /// Gated with the writes even so. It is a POST, it spends real seconds of
+    /// an owner shared with whoever else is at the desk, and a window the desk
+    /// declined authority to is not where one gets started from — the same
+    /// rule the two hand-offs are held to.
+    ///
+    /// `model` is a lane id the *owner* served, read off the board this client
+    /// is already drawing. Nothing here composes one, so there is no name this
+    /// command can carry that the owner did not name first.
+    #[cfg(feature = "operator")]
+    RunPredictor {
+        model: String,
+        /// The lane this window is pointed at, so the fit reads the panel the
+        /// operator is looking at rather than the route's own default.
+        offline: bool,
+    },
     /// Open the real Claude CLI as Atlas, on this terminal.
     ///
     /// Not a request and not a write: the runtime hands the screen to a child
@@ -483,6 +505,17 @@ impl PartialEq for Command {
             ) => a == b && x == y && p == q && o == n,
             #[cfg(feature = "operator")]
             (Command::SetMethod(a), Command::SetMethod(b)) => a == b,
+            #[cfg(feature = "operator")]
+            (
+                Command::RunPredictor {
+                    model: a,
+                    offline: x,
+                },
+                Command::RunPredictor {
+                    model: b,
+                    offline: y,
+                },
+            ) => a == b && x == y,
             #[cfg(feature = "operator")]
             (Command::Posture { armed: a }, Command::Posture { armed: b }) => a == b,
             #[cfg(feature = "operator")]

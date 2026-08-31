@@ -586,6 +586,16 @@ fn ingest(
     if matches!(&ev, AppEvent::Wrote(atlas::bus::Wrote::MethodSet { .. })) {
         poller.method();
     }
+    // And the board the run above just replaced. The nudge is the snapshot's,
+    // and a snapshot carries only the one-row `predictors` summary — the full
+    // board rides its own endpoint and no beat at all, so without this the
+    // pane would go on drawing the board from before the run it watched
+    // finish. Fired whatever pane is on screen, for the reason `views.wrote`
+    // is: the answer arrives while the operator may be looking anywhere.
+    #[cfg(feature = "operator")]
+    if matches!(&ev, AppEvent::Wrote(atlas::bus::Wrote::PredictorRan { .. })) {
+        poller.predictors();
+    }
     // And the one surface that is *waiting* for an answer rather than being
     // told about one. The login form sends and then has to hear what the owner
     // said — a consent question to put to the operator, a refusal to show under

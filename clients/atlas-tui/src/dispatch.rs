@@ -23,7 +23,8 @@ mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
     use crate::net::write::{
-        Booked, Choice, Execution, Login, Mandate, News, Proposed, Start, WriteClient, WriteError,
+        Board, Booked, Choice, Execution, Login, Mandate, News, Proposed, Start, WriteClient,
+        WriteError,
     };
     use crate::store::Posture;
     use std::sync::Arc;
@@ -210,6 +211,11 @@ mod armed {
                     "clear the holdings cap this desk was given".to_string()
                 }
             },
+            // The lane, and only the lane. The baseline the route runs beside
+            // it is the owner's own decision, not something that was asked
+            // for — a failed write naming both would report a request this
+            // client never made.
+            Command::RunPredictor { model, .. } => format!("run {model}"),
             // The task, because that is what was approved. The template id is
             // the word an operator typed; the task is the row the owner
             // refuses or starts, and a refusal naming the other one cannot be
@@ -571,6 +577,35 @@ mod armed {
                     said: err.to_string(),
                 },
             },
+            // A research run, and the only write here that spends the owner's
+            // CPU rather than touching the book. Governance is not involved
+            // and cannot be: the route fits a risk model and writes one
+            // `predictor_board` row, and there is no plan, approval or posture
+            // anywhere on its path. The lane travels whole and the owner's own
+            // answer comes back either way — including the 400 that names
+            // every lane it does serve, which is the one an operator will hit.
+            Command::RunPredictor { model, offline } => {
+                match client.run_predictor(&model, offline).await {
+                    Ok(Board::Ran {
+                        run_id,
+                        models,
+                        champion,
+                    }) => Wrote::PredictorRan {
+                        run_id,
+                        models,
+                        champion,
+                    },
+                    // A considered no, not a broken request: the owner listed
+                    // the lanes it serves, and rendering that as a transport
+                    // failure would bury the remedy under an error nobody can
+                    // act on.
+                    Ok(Board::Rejected(said)) => Wrote::PredictorRefused { said },
+                    Err(err) => Wrote::Failed {
+                        what: names(&Command::RunPredictor { model, offline }),
+                        said: err.to_string(),
+                    },
+                }
+            }
             Command::TestAlpaca => match client.test_alpaca().await {
                 Ok(verdict) => Wrote::Tested {
                     ok: verdict.ok,

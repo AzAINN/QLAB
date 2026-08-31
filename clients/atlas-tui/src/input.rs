@@ -115,6 +115,13 @@ pub enum Source {
     /// SETTINGS' holdings-cap box, while it is open. The sixth router in that
     /// file, and the same rule again.
     SettingsCap,
+    /// PREDICTORS' lane picker, while it is open.
+    ///
+    /// Its own section for the reason every box on this workstation has one:
+    /// `on_key` hands the open box to `picker_key`, and a section that followed
+    /// it would describe the pane with rows about a list that is usually not on
+    /// screen. Armed windows only — a monitoring one never opens it.
+    PredictorsRun,
     /// The confirmation box, which outranks everything but Ctrl-C.
     Confirm,
     /// The startup door, which outranks even that — it is up before there is
@@ -126,7 +133,7 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 23] = [
+    pub const ALL: [Source; 25] = [
         Source::Shell,
         Source::Command,
         Source::Help,
@@ -136,6 +143,12 @@ impl Source {
         Source::View(ViewId::Markets),
         Source::View(ViewId::Book),
         Source::View(ViewId::Research),
+        // PRED and its picker. The pane was absent from this list entirely
+        // while it bound nothing — `region()` named it and the equivalence
+        // check never asked — and a section missing from here is a router
+        // nothing compares, which is how a key with no help row would ship.
+        Source::View(ViewId::Predictors),
+        Source::PredictorsRun,
         Source::View(ViewId::Workforce),
         Source::WorkforceAsk,
         Source::WorkforcePicker,
@@ -168,6 +181,7 @@ impl Source {
             Source::SettingsContact => "SETT · the edgar contact box",
             Source::SettingsMethod => "SETT · the method picker",
             Source::SettingsCap => "SETT · the holdings cap box",
+            Source::PredictorsRun => "PRED · the lane picker",
             Source::Confirm => "a confirmation box",
             Source::Door => "the startup door",
         }
@@ -217,9 +231,10 @@ impl Source {
             // placeholder, which is what would catch a cursor added to it
             // without a help row.
             Source::View(ViewId::Research) => ("ui/views/research.rs", "", "on_key"),
-            // PRED binds nothing either, for RSCH's reason: read-only, nothing
-            // scrolls, and the board refetch rides the shell's own `r`.
+            // PRED's `View::on_key` routes `r` itself and hands an open box to
+            // `picker_key`, which is the section below.
             Source::View(ViewId::Predictors) => ("ui/views/predictors.rs", "", "on_key"),
+            Source::PredictorsRun => ("ui/views/predictors.rs", "", "picker_key"),
             // SETT's `View::on_key` only forwards; `keys` is the router, and
             // the form under it is the section below.
             Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "keys"),
@@ -485,6 +500,31 @@ pub const KEYMAP: &[Binding] = &[
         "b",
         Source::View(ViewId::Book),
         "book the desk's current proposal — opens the confirmation box",
+    ),
+    // -- PRED ---------------------------------------------------------------
+    // The shell keeps `r` — it is still the desk refresh, and on this pane it
+    // is also what re-asks the board. An armed window is *shown* the key on top
+    // of that, which is why this row says both things.
+    w(
+        "Char('r')",
+        "r",
+        Source::View(ViewId::Predictors),
+        "refresh the board, and offer to run one of its lanes",
+    ),
+    // -- PRED, the lane picker ----------------------------------------------
+    w("Up", "↑", Source::PredictorsRun, "the lane above"),
+    w("Down", "↓", Source::PredictorsRun, "the lane below"),
+    w(
+        "Enter",
+        "Enter",
+        Source::PredictorsRun,
+        "fits that lane against the baseline — it books nothing",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::PredictorsRun,
+        "closes it — the board is left as the owner served it",
     ),
     // -- WORK -------------------------------------------------------------
     w(

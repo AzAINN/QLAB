@@ -1048,7 +1048,13 @@ impl Store {
                     // brings a fresh one forward — a client copy would be a
                     // second account of a mandate the owner merged, and a
                     // wrong one wherever it clamped what was asked for.
+                    // And so is a predictor board. The full board rides its own
+                    // endpoint and the pane that asked keeps its own in-flight
+                    // line (`ui::views::predictors`), so a copy of either here
+                    // would be a second account of a fit only the owner did.
                     Wrote::MethodSet { .. }
+                    | Wrote::PredictorRan { .. }
+                    | Wrote::PredictorRefused { .. }
                     | Wrote::MethodRefused { .. }
                     | Wrote::NewsSaved { .. }
                     | Wrote::NewsRefused { .. }

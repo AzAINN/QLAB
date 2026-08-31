@@ -544,6 +544,38 @@ pub enum Mandate {
     Rejected(String),
 }
 
+/// What the owner did with a predictor lane. Two outcomes, and the second is
+/// not an error — the same split [`News`], [`Mandate`] and [`Choice`] make,
+/// for the same reason.
+///
+/// The route refuses with **400 and a sentence**, and the one an operator will
+/// actually hit names the lanes: `unknown model 'forest:deep'; available:
+/// ('ridge:none', 'groupwise:angle', …)`. That is a considered answer about a
+/// well-formed request and it carries the whole remedy, so it is rendered
+/// rather than folded into a broken socket.
+///
+/// `Ran` carries the owner's own **answer**, never the request: `models` is
+/// what it actually fitted — the operator's lane plus `ridge:none`, which the
+/// route always appends, because a challenger without its control is not
+/// evidence — and `champion` is `null` when nothing cleared admission. That
+/// `None` is a result, not a missing value, and this client may not render it
+/// as one.
+#[derive(Debug)]
+pub enum Board {
+    Ran {
+        run_id: Option<String>,
+        /// The lanes the owner ran, in its own order. Not read as "what was
+        /// asked for": the baseline is in here whether or not it was sent.
+        models: Vec<String>,
+        /// The admitted champion, or `None` — which is the board saying
+        /// nothing cleared the bar, and is an answer.
+        champion: Option<String>,
+    },
+    /// The owner would not run that lane. Its own sentence, which names the
+    /// lanes it does serve.
+    Rejected(String),
+}
+
 /// What the venue said about the stored login.
 ///
 /// `/api/alpaca/test` answers **200 whatever happened** — a missing profile, a
@@ -596,6 +628,23 @@ const ASK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
 /// minutes of silence for that one would hide a dead owner behind a card that
 /// looks busy.
 const NEWS_VERIFY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How long a predictor board may take to fit.
+///
+/// The owner's route is **synchronous**: `POST /api/research/predictors/run`
+/// returns when every fold of every lane has been fitted, and H1 measured that
+/// in seconds for the offline synthetic panel — but a live 756-day lookback
+/// opens a market fetch first and then fits the operator's lane *and* the
+/// baseline, which is where "seconds" becomes "a minute". The poller's eight
+/// seconds would give up on all of it, report a write that failed, and leave
+/// the owner still fitting: the same mistake the news check made before
+/// [`NEWS_VERIFY_DEADLINE`] existed.
+///
+/// Shorter than the news check, deliberately. That one is bounded by five live
+/// feeds it does not control; this one is bounded by the owner's own CPU, and
+/// past two minutes a board is not slow, it is wedged — at which point an
+/// operator needs to be told rather than kept in front of a busy line.
+const PREDICTOR_RUN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
 pub struct WriteClient {
     base: String,
@@ -1170,6 +1219,64 @@ impl WriteClient {
                 },
             }),
             Err(WriteError::Refused { status: 400, said }) => Ok(News::Rejected(sentence(&said))),
+            Err(err) => Err(err),
+        }
+    }
+
+    // -- the research board ------------------------------------------------
+
+    /// Fit one predictor lane against the board's own baseline.
+    ///
+    /// **A research run, and it can reach nothing else.** The route fits a risk
+    /// model over a panel and writes one `predictor_board` run row; it opens no
+    /// plan, touches no approval, moves no posture and books nothing, and every
+    /// gate between a plan and a fill is unmoved by it. What it costs is the
+    /// owner's CPU — see [`PREDICTOR_RUN_DEADLINE`].
+    ///
+    /// One lane per call, though the owner accepts a list. The picker sends
+    /// what the operator chose, and a client that could send several would put
+    /// one keystroke behind a board an operator did not read the shape of. The
+    /// baseline rides along regardless: the owner appends `ridge:none` itself,
+    /// which is why the answer's `models` is read back rather than echoed.
+    ///
+    /// `universe` and `lookback_days` are left to the route's own defaults
+    /// (`core`, 756). Sending them from here would be this client asserting a
+    /// research design it has no surface to choose one with — the day a pane
+    /// offers the choice is the day they belong in the body.
+    ///
+    /// `offline` travels explicitly, for `set_news`' reason: the route defaults
+    /// it to the desk mode, and a window pointed at the other lane would be
+    /// told about a board it is not reading.
+    pub async fn run_predictor(&self, model: &str, offline: bool) -> Result<Board, WriteError> {
+        let body = json!({ "model": model, "offline": offline });
+        // The one knob this route varies: an answer is allowed to take minutes,
+        // because the fit is what it is waiting on. Everything else — the
+        // refusal handling, the verbatim body — is the one implementation.
+        match self
+            .post_within("/api/research/predictors/run", body, PREDICTOR_RUN_DEADLINE)
+            .await
+        {
+            Ok(said) => Ok(Board::Ran {
+                run_id: field(&said, "run_id"),
+                models: said
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                // Absent and `null` collapse here, and they mean the same
+                // thing on this route: nothing cleared admission. `field`
+                // already treats an empty string as absent, which is the third
+                // spelling of the same answer.
+                champion: field(&said, "champion"),
+            }),
+            Err(WriteError::Refused { status: 400, said }) => Ok(Board::Rejected(sentence(&said))),
             Err(err) => Err(err),
         }
     }

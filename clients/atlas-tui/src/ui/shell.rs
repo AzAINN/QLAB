@@ -289,7 +289,26 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
             return None;
         }
         KeyCode::Char('q') | KeyCode::Esc => return Some(Command::Quit),
-        KeyCode::Char('r') => return Some(Command::Refresh),
+        // `r` stays the workstation's refresh on every pane, including this
+        // one — the shell claims it so no view can take a binding the whole
+        // client depends on, and PREDICTORS is the pane whose board *only*
+        // moves because this key asks for it (`main::ingest`).
+        //
+        // So the pane is shown the key rather than given it: an armed
+        // PREDICTORS opens its run picker here and the refresh below is still
+        // what `r` sends. The view returns nothing — it has state to move and
+        // no request to make — and the assert is what keeps that true, because
+        // a `Command` returned here would be silently dropped.
+        KeyCode::Char('r') => {
+            if store.nav.view == ViewId::Predictors {
+                let offered = views.on_key(store.nav.view, key, store);
+                debug_assert!(
+                    offered.is_none(),
+                    "PREDICTORS' `r` produced a command the shell would drop"
+                );
+            }
+            return Some(Command::Refresh);
+        }
         KeyCode::Char(c) if c.is_ascii_digit() => {
             if let Some(view) = ViewId::from_digit(c) {
                 store.nav.view = view;

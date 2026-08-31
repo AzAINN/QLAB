@@ -307,6 +307,26 @@ pub enum Wrote {
     /// is still research stage, a cap outside the universe. Its own sentence,
     /// which carries the remedy.
     MethodRefused { said: String },
+    /// The owner fitted a predictor board.
+    ///
+    /// **The owner's own answer, never the request's echo.** `models` is what
+    /// it actually ran — the chosen lane *plus* `ridge:none`, which the route
+    /// appends whether or not it was asked for, because a challenger without
+    /// its control is not evidence — so a receipt composed here would report
+    /// one lane where two were fitted.
+    ///
+    /// `champion` is an `Option` because the owner's is: `null` means nothing
+    /// cleared admission, which is a **result** and not a missing value. A
+    /// client that rendered it as the chosen lane, or as absent, would report
+    /// a refuted board as a successful one.
+    PredictorRan {
+        run_id: Option<String>,
+        models: Vec<String>,
+        champion: Option<String>,
+    },
+    /// The owner would not run that lane. Its own sentence — which, for the
+    /// refusal an operator will actually hit, names every lane it does serve.
+    PredictorRefused { said: String },
     /// The request itself failed: no owner, a timeout, a non-2xx. `said` is the
     /// owner's words verbatim when there were any.
     Failed { what: String, said: String },

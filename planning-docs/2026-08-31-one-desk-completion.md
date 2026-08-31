@@ -157,10 +157,21 @@ Recorded plainly, because none of it is covered by the offline suite.
   test.
 - **The live 756-day predictor board is untimed.** The client's 120 s deadline
   was measured on the synthetic panel only.
-- **`held_record_change` is NOT in `_WORKFLOW_TRIGGERS`.** The trigger exists
-  and maps to `portfolio_watch`, but it is outside the set that spends the
-  daily autonomous budget, so the owner will not start the watch unattended
-  until a mint-site bound exists (see I2 below).
+- **`held_record_change` is NOT in `_WORKFLOW_TRIGGERS`, and the beat now
+  honours that.** As shipped on this branch the sentence above was written as
+  if membership in `_WORKFLOW_TRIGGERS` decided what the beat starts. It did
+  not: `_WORKFLOW_TRIGGERS` was read only by `_within_daily_budget`, which the
+  mint never calls, while `atlas_run_startable` gated on `origin` alone and
+  `portfolio_watch` is admissible in `research` — so the owner *did* start one
+  Claude coordinator (with WebSearch/WebFetch) per moved held name per window,
+  uncounted against `max_autonomous_workflows_per_day`. The branch fix round
+  makes the two sets one: `atlas_run_startable` starts only the trigger kinds
+  the budget counts. A `held_record_change` task is now minted, announced by
+  `announce_desk_work`, and stays `queued` until a human starts it — from
+  WORKFORCE, or from chat via `workflow.start` under rights. The same gate
+  applies to every other kind outside the set (`owner_startup`,
+  `data_recovered`, `kill_switch`, `new_research_run`): they are queued and
+  announced rather than started unattended.
 - **The live-on-Alpaca-book path** is still unexercised end to end, unchanged by
   this branch.
 
@@ -168,7 +179,19 @@ Recorded plainly, because none of it is covered by the offline suite.
 
 Carried whole from `.superpowers/sdd/2026-08-31-one-desk-plan/j1-followups.md`.
 Each is deliberately NOT in this branch; each names the task that surfaced it.
+The first entry is the branch fix round's own, and it is the top one.
 
+- **I2 (top follow-up): bound the `held_record_change` mint before the watch
+  may run unattended.** Two bounds, both required. (1) *Coalesce per window*:
+  the mint is one task per moved held name, so a wide news day mints one
+  workflow's worth of work per ticker; one task per window carrying the moved
+  names is the shape that can be started once. (2) *Count against the budget*:
+  once coalesced, the kind joins `_WORKFLOW_TRIGGERS` so every start it earns
+  is charged to `max_autonomous_workflows_per_day` — the fix round made
+  membership in that set the single gate for unattended starts, so joining it
+  is now the whole of the promotion. Until both hold, the task is queued and
+  announced and a human starts it. (An outage window becoming the next baseline
+  is the third, older half of this: a `degraded` flag at the matrix write site.)
 - F1: `current_proposal` ordering has no SQL tiebreak for equal `created_at` —
   add one in the registry query.
 - G2: cardinality was evaluated on the 7-name ablation spec with
@@ -183,9 +206,6 @@ Each is deliberately NOT in this branch; each names the task that surfaced it.
 - I3/K4-routes: `Registry.answered_universe_change` replaces the 500-row scan in
   `_check_not_already_answered` (done in K4-routes if its report says so;
   otherwise still open).
-- I2: a mint-site bound must exist BEFORE `held_record_change` joins
-  `_WORKFLOW_TRIGGERS` (the daily autonomous budget); an outage window becomes
-  the next baseline — a `degraded` flag at the matrix write site is the fix.
 - H1: `POST /api/research/predictors/run` has no rate limit or concurrency cap
   (same posture as `/api/alpaca/test`); a data-dependent fold failure
   (`n_splits` too large for the panel) is a 500 by construction.

@@ -383,6 +383,52 @@ def test_withdrawing_orphans_is_announced_once(session):
     assert (once, _said(session).count("no longer checked")) == (1, 1)
 
 
+def test_a_mid_execution_plan_keeps_its_approval(session):
+    """`submitted` is what `execute_plan` writes before it iterates legs, and
+    it accepts a `submitted` plan again so a crash mid-execution replays by
+    `client_order_id` without double-booking. Withdrawing the approval here
+    would strand a half-filled book with no authority to finish it."""
+    from qlab.governance.proposal import (MID_EXECUTION_EVENT,
+                                          withdraw_orphans)
+
+    plan_id = _checked_plan(session)
+    _, opened = handle_api(session, "POST", "/api/approvals", {},
+                           {"plan_id": plan_id})
+    approval_id = opened["approval_id"]
+    session.registry.set_plan_state(plan_id, "submitted")
+
+    withdrawn, failures = withdraw_orphans(session.registry)
+
+    assert (withdrawn, failures) == ([], [])
+    assert session.registry.get_approval_request(
+        approval_id)["status"] == "pending"
+    # Said once, however many sweeps pass: the sweep re-reaches a stuck
+    # `submitted` plan every tick.
+    withdraw_orphans(session.registry)
+    withdraw_orphans(session.registry)
+    noted = session.registry.read_events_of_kind(MID_EXECUTION_EVENT, limit=20)
+    assert [e["payload"]["approval_id"] for e in noted] == [approval_id]
+
+
+def test_a_checked_plan_that_moves_to_any_other_state_still_withdraws(session):
+    """The other side: only `submitted` is exempt. `refused` is still an
+    orphan, and its approval is still a live authority to trade something the
+    desk refused."""
+    from qlab.governance.proposal import withdraw_orphans
+
+    plan_id = _checked_plan(session)
+    _, opened = handle_api(session, "POST", "/api/approvals", {},
+                           {"plan_id": plan_id})
+    session.registry.set_plan_state(plan_id, "refused")
+
+    withdrawn, failures = withdraw_orphans(session.registry)
+
+    assert failures == []
+    assert [row["plan_id"] for row in withdrawn] == [plan_id]
+    assert session.registry.get_approval_request(
+        opened["approval_id"])["status"] == "invalidated"
+
+
 def test_an_orphan_does_not_withdraw_the_live_proposal_beside_it(session):
     # The withdrawal is scoped to orphans; the desk's real question survives.
     orphan = _checked_plan(session)

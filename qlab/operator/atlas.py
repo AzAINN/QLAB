@@ -350,7 +350,12 @@ class AtlasSupervisor:
             # exactly "trigger" is refused downstream rather than normalised
             # into a permit.
             origin = task.get("origin")
+            # The kind travels with the entry because the unattended caller
+            # gates on it: which trigger fired decides whether the beat may
+            # start this without a human, and re-reading the row to find out
+            # would be a second copy of the queue's own answer.
             entry = {"task_id": task["task_id"], "template_id": template_id,
+                     "kind": str(task.get("trigger_kind") or ""),
                      "origin": "trigger" if origin is None else str(origin)}
             entry.update(self.task_age(task, today))
             if entry["stale"] is not False:

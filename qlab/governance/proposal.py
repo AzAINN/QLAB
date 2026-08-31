@@ -13,7 +13,8 @@ drifted book takes; there is no second state machine and no new terminal
 status. Naming the reason is what keeps it a fail-loud act — a
 superseded proposal is withdrawn on the record, never dropped.
 
-Read-only apart from that one transition, and it takes no lock: both callers
+Read-only apart from that one transition (and the event that records a plan
+mid-execution keeping its authority), and it takes no lock: both callers
 (the owner's tick and ``GET /api/desk/proposal``) already run under the owner
 dispatch lock, which is not reentrant.
 """
@@ -219,6 +220,25 @@ def current_proposal(registry, now_iso: str | None = None) -> dict | None:
 # does not exist.
 ORPHAN_REASON = "plan no longer checked"
 
+# The sweep re-reaches a stuck `submitted` plan every tick, so the record is
+# keyed on the approval rather than the sweep: a line per tick is not a record
+# of a pause, it is thirty of them an hour saying one thing.
+MID_EXECUTION_EVENT = "approval_kept_mid_execution"
+
+
+def _note_mid_execution(registry, plan_id: str, approval_id: str,
+                        row: dict) -> None:
+    """Record, once per approval, that a mid-execution plan kept its authority."""
+    seen = registry.read_events_of_kind(MID_EXECUTION_EVENT, limit=200)
+    if any(str((e.get("payload") or {}).get("approval_id") or "") == approval_id
+           for e in seen):
+        return
+    registry.record_event(MID_EXECUTION_EVENT, {
+        "plan_id": plan_id, "approval_id": approval_id,
+        "status": str(row.get("status") or ""),
+        "reason": ("plan is submitted: execution is in flight or resumable, so "
+                   "the approval keeps its authority")})
+
 
 def withdraw_orphans(registry) -> tuple[list[dict], list[dict]]:
     """Invalidate live requests whose plan is missing or no longer ``checked``.
@@ -235,6 +255,14 @@ def withdraw_orphans(registry) -> tuple[list[dict], list[dict]]:
     because a request the desk failed to withdraw is still bookable and the
     operator has to be told. Each withdrawn entry carries the plan state and
     the status it held, which is what the announcement has to name.
+
+    ``submitted`` is NOT an orphan. ``execute_plan`` sets that state before it
+    iterates legs, and it accepts a ``submitted`` plan again precisely so a
+    process that died mid-execution resumes: each leg replays through its
+    stable ``client_order_id`` without double-booking. Invalidating the
+    approval here would strand a half-filled book — the remaining legs would
+    have no live authority to fill and the filled ones no request to reconcile
+    against. Its authority is kept and the pause is recorded once per approval.
     """
     withdrawn: list[dict] = []
     failures: list[dict] = []
@@ -243,6 +271,9 @@ def withdraw_orphans(registry) -> tuple[list[dict], list[dict]]:
         if plan is not None and plan.get("state") == "checked":
             continue
         approval_id = str(row.get("approval_id") or "")
+        if plan is not None and plan.get("state") == "submitted":
+            _note_mid_execution(registry, plan_id, approval_id, row)
+            continue
         entry = {"plan_id": plan_id, "approval_id": approval_id,
                  "status": str(row.get("status") or ""),
                  "plan_state": ("missing" if plan is None

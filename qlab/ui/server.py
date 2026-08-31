@@ -4515,6 +4515,15 @@ class UISession:
         Unattended work only: a proposal is a queued task the operator has yet
         to approve, so the beat passes over it.
 
+        And only the trigger kinds the daily budget counts. What this method
+        starts unattended and what ``_within_daily_budget`` scans must be one
+        set, or a kind outside it launches an uncounted Claude coordinator per
+        occurrence per window — which is exactly what ``held_record_change``
+        did, once per moved held name. Anything else stays ``queued`` and
+        announced (``announce_desk_work`` says what the desk wants); the
+        operator starts it from WORKFORCE, or Atlas does from chat via
+        ``workflow.start``, which is bound by rights and the one-workflow rule.
+
         One research workflow at a time. While the owner's coordinator is
         walking a graph, a trigger is left exactly where it is — ``queued`` —
         and named in the chat, rather than spawning a second coordinator or
@@ -4526,6 +4535,8 @@ class UISession:
         starting the newest of a queue every beat is how the oldest waiting
         trigger never runs at all.
         """
+        from qlab.operator.atlas import _WORKFLOW_TRIGGERS
+
         facts = self.atlas_facts(offline)
         running = self.running_research_workflow()
         started: list[dict] = []
@@ -4537,6 +4548,10 @@ class UISession:
             if candidate.get("origin") != "trigger":
                 # A proposal is started by the operator approving it, never by
                 # the beat. This line IS the envelope.
+                continue
+            if candidate.get("kind") not in _WORKFLOW_TRIGGERS:
+                # Startable is not the same as startable *unattended*. A kind
+                # the budget does not count may not spend the budget's slot.
                 continue
             if running is not None:
                 started.append({

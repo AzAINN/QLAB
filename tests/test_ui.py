@@ -3160,10 +3160,14 @@ def test_the_heartbeat_never_starts_a_proposal(session):
 
 
 def test_the_heartbeat_still_starts_a_trigger_task(session):
-    """The other side of the same guard: this project did not turn autonomy off."""
+    """The other side of the same guard: this project did not turn autonomy off.
+
+    ``regime_flip`` rather than any trigger kind at all: the beat starts only
+    the kinds the daily budget counts, so this regression needs a kind that is
+    in ``_WORKFLOW_TRIGGERS`` or it would pass for the wrong reason."""
     today = date.today().isoformat()
     session.registry.create_atlas_task(
-        "task-trigger", f"regime_shift|{today}|SPY|abc", "regime_shift",
+        "task-trigger", f"regime_flip|{today}|SPY|abc", "regime_flip",
         {"why": "regime"}, "regime_review")
     session.atlas.set_mode("research")
 
@@ -3180,7 +3184,7 @@ def test_a_task_written_before_this_column_reads_as_a_trigger(session):
         "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
         "trigger_payload, template_id, status, attempt_count, created_at, "
         "updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        ["task-old", f"regime_shift|{today}|SPY|old", "regime_shift", "{}",
+        ["task-old", f"regime_flip|{today}|SPY|old", "regime_flip", "{}",
          "regime_review", "queued", 0, "2026-08-06T00:00:00Z",
          "2026-08-06T00:00:00Z"])
     session.atlas.set_mode("research")
@@ -3200,7 +3204,7 @@ def test_an_empty_origin_is_not_read_as_a_trigger(session):
         "INSERT INTO atlas_tasks (task_id, dedupe_key, trigger_kind, "
         "trigger_payload, template_id, status, attempt_count, origin, "
         "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ["task-empty", f"regime_shift|{today}|SPY|e", "regime_shift", "{}",
+        ["task-empty", f"regime_flip|{today}|SPY|e", "regime_flip", "{}",
          "regime_review", "queued", 0, "", "2026-08-06T00:00:00Z",
          "2026-08-06T00:00:00Z"])
     session.atlas.set_mode("research")

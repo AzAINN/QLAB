@@ -270,6 +270,50 @@ def test_the_trigger_maps_to_portfolio_watch_and_starts_in_research():
     assert template.creates_plan is False
 
 
+def test_the_trigger_is_not_one_the_unattended_beat_may_start():
+    """By name, because the property is a set membership and nothing else.
+
+    ``portfolio_watch`` runs a Claude coordinator with WebSearch/WebFetch and
+    the mint is per held name per window. ``_WORKFLOW_TRIGGERS`` is the set the
+    daily budget counts AND the set ``atlas_run_startable`` will start, so a
+    kind outside it is minted, announced, and waits for a human."""
+    from qlab.operator.atlas import _WORKFLOW_TRIGGERS
+
+    assert "held_record_change" not in _WORKFLOW_TRIGGERS
+
+
+def test_a_minted_task_survives_a_beat_still_queued():
+    """The beat sees it, passes over it, and registers no workflow.
+
+    Revert the kind gate in ``atlas_run_startable`` and this task starts: one
+    uncounted coordinator per moved held name per window."""
+    from datetime import date
+
+    from qlab.ui.server import UISession
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    session.atlas.set_mode("research")
+    today = date.today().isoformat()
+    session.registry.create_atlas_task(
+        "task-held", f"held_record_change|{today}|ACWI|w1->w2",
+        "held_record_change", {"ticker": "ACWI", "reason": "primary +1"},
+        "portfolio_watch")
+    # The premise: this task is startable on every axis except its kind, so
+    # `started == []` below cannot pass for some unrelated refusal.
+    entry = next(e for e in session.atlas.startable_tasks(session.atlas_facts(True))
+                 if e["task_id"] == "task-held")
+    assert entry["startable"] is True, entry.get("reason")
+    assert entry["origin"] == "trigger"
+
+    started = session.atlas_run_startable(True, limit=5)
+
+    assert started == []
+    task = session.registry.get_atlas_task("task-held")
+    assert task["status"] == "queued"
+    assert not task.get("workflow_id")
+    assert session.registry.list_workflows(limit=10) == []
+
+
 def test_the_minted_task_is_gated_at_start_time_like_every_trigger(reg):
     """Minted queued, never spawned — the mode decides at START, not here."""
     session, results = _run(reg, [

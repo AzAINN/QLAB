@@ -6239,3 +6239,99 @@ def test_the_method_route_still_refuses_the_universe_key(session):
                                  {"universe_add": ["XLK"]})
     assert status == 400
     assert "universe_add" in refused["error"]
+
+
+# --- H1: running a predictor lane from the desk ------------------------------
+#
+# The board is a *paired* comparison, so a lane alone is not evidence: the
+# route always runs the requested lane(s) plus the baseline. The panel is the
+# offline synthetic one, and the search is deliberately tiny — this exercises
+# the route, not the estimator (tests/test_board.py owns the estimator).
+
+_LANE_RUN = {"universe": "core", "lookback_days": 420, "offline": True,
+             "as_of": "2022-06-30", "null_trials": 2, "n_splits": 3,
+             "alphas": [1.0], "map_weights": [1.0]}
+
+
+def test_predictor_run_runs_the_lane_with_its_baseline(session):
+    from qlab.research.board import BASELINE_MODEL_ID
+
+    status, out = handle_api(
+        session, "POST", "/api/research/predictors/run", {},
+        dict(_LANE_RUN, model="kernel:zz"))
+    assert status == 200, out
+    # A challenger without its control is not a comparison, so the baseline is
+    # added by the route rather than asked for.
+    assert out["models"] == ["kernel:zz", BASELINE_MODEL_ID]
+    assert set(out["ranking"]) == {"kernel:zz", BASELINE_MODEL_ID}
+    assert out["champion"] is None or out["champion"] in out["ranking"]
+    assert out["board"]["baseline"] == BASELINE_MODEL_ID
+    assert out["board"]["search"]["models"] == out["models"]
+
+    runs = session.registry.list_runs(limit=5)
+    assert [r["kind"] for r in runs] == ["predictor_board"]
+    assert runs[0]["run_id"] == out["run_id"]
+    spec = runs[0]["spec"]
+    assert spec["dsr_trial_counted"] is False
+    assert spec["board"]["ranking"] == out["ranking"]
+    # Research evidence writes no backtest row and no solution.
+    report = session.registry.report(out["run_id"])
+    assert report["backtests"] == [] and report["solutions"] == []
+
+
+def test_predictor_run_accepts_a_list_of_lanes(session):
+    status, out = handle_api(
+        session, "POST", "/api/research/predictors/run", {},
+        dict(_LANE_RUN, model=["kernel:angle", "groupwise:zz"]))
+    assert status == 200, out
+    assert out["models"] == ["kernel:angle", "groupwise:zz", "ridge:none"]
+    assert set(out["ranking"]) == set(out["models"])
+
+
+def test_predictor_run_refuses_an_unknown_lane_naming_the_lanes(session):
+    status, refused = handle_api(
+        session, "POST", "/api/research/predictors/run", {},
+        dict(_LANE_RUN, model="forest:deep"))
+    assert status == 400
+    assert "forest:deep" in refused["error"]
+    # The refusal names the board's own lane set, so an operator can retry.
+    assert "kernel:zz" in refused["error"]
+    assert "groupwise:angle_zz" in refused["error"]
+    assert session.registry.list_runs(limit=5) == []
+
+
+def test_predictor_run_refuses_a_lookback_too_short_to_fold(session):
+    status, refused = handle_api(
+        session, "POST", "/api/research/predictors/run", {},
+        dict(_LANE_RUN, model="kernel:zz", lookback_days=120))
+    assert status == 400
+    assert "300" in refused["error"]
+    assert session.registry.list_runs(limit=5) == []
+
+
+def test_predictor_run_shows_up_in_the_board_read(session):
+    status, before = handle_api(
+        session, "GET", "/api/research/predictors", {}, {})
+    assert status == 200 and before["status"] == "never_ran"
+    assert session.predictor_board_summary()["status"] == "never_ran"
+
+    _, out = handle_api(session, "POST", "/api/research/predictors/run", {},
+                        dict(_LANE_RUN, model="kernel:zz"))
+
+    status, after = handle_api(
+        session, "GET", "/api/research/predictors", {}, {})
+    assert status == 200
+    assert after["status"] == "ok"
+    assert after["run_id"] == out["run_id"]
+    # The summary is TTL-cached against the run revision; a new run must move
+    # it in the same request, not one TTL later.
+    summary = session.predictor_board_summary()
+    assert summary["status"] == "ok"
+    assert summary["run_id"] == out["run_id"]
+    assert summary["ranking"] == out["ranking"]
+
+
+def test_predictor_run_is_dispatched_off_the_dispatch_lock():
+    """Fitting a board is seconds of numpy; holding `_LOCK` across it would
+    freeze the snapshot poll and every approval behind it."""
+    assert "/api/research/predictors/run" in ui_server._LOCK_EXEMPT_POSTS

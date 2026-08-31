@@ -36,6 +36,8 @@ GET  /api/atlas/status           Atlas mode, lifecycle state, heartbeat
 GET  /api/news                   the news window, its coverage, and provenance
 GET  /api/atlas/context          the rich surface a reasoning Atlas forms a view from
 GET  /api/research/predictors    the predictor board: augmented lane vs its control
+POST /api/research/predictors/run  run one lane (plus its baseline — pairing is
+                                 the board's promise) and persist the board
 GET  /api/workforce              recent runs, how far each got, and where it stopped
 GET  /api/workforce/stream       what the agents said and did, off the audit bus
 GET  /api/atlas/read             Atlas's composed read: signals + news + research
@@ -130,6 +132,17 @@ _AWAITING_OPERATOR = frozenset({"blocked", "failed", "interrupted"})
 # anything reachable from one must be treated as replace-never-mutate: editing
 # a dict in place is a write racing that serialization, with no lock over it.
 _LOCK = threading.Lock()
+# POST routes `do_POST` dispatches WITHOUT holding `_LOCK`. A route belongs
+# here only when it is long — a model call, a socket to a venue, a fit — and
+# when it takes `_LOCK` itself around whatever registry work it does, because
+# `_LOCK` is not reentrant. Holding the dispatch lock across any of these would
+# freeze the snapshot poll, the SSE poll and every approval behind them.
+_LOCK_EXEMPT_POSTS = (
+    "/api/atlas/message",
+    "/api/alpaca/test",
+    "/api/news/settings",
+    "/api/research/predictors/run",
+)
 # Operational policies that fund every whitelisted name by construction, so any
 # cap below the size of the universe refuses every plan they produce. The desk
 # still accepts the cap — an operator may be setting it before the method — but
@@ -2317,6 +2330,110 @@ class UISession:
             "ranking": board.get("ranking"),
             "models": rows,
             "caveats": spec.get("caveats") or [],
+        }
+
+    def run_predictor_lane(self, body: dict) -> dict:
+        """Run one or more board lanes against the baseline, and persist it.
+
+        This is the same computation ``research.predictor_board`` performs —
+        one snapshot, one panel, one board, one run row with
+        ``dsr_trial_counted: False``. It is written here rather than imported
+        because the MCP tool's version lives inline in its registration
+        closure and that module is not this branch's to reshape; the shared
+        seam is :func:`qlab.research.board.run_predictor_board`, which both
+        call, so the *numbers* cannot diverge even though the plumbing is
+        written twice.
+
+        The requested lane is never run alone. The board's structural promise
+        is pairing — a lane's edge is only a claim when the control saw the
+        same folds — so the baseline is appended by the desk rather than
+        asked for, and a caller who omits it gets a comparison anyway.
+
+        Fitting is seconds of numpy plus a possible network fetch, so this is
+        reached from OUTSIDE the dispatch lock: the method takes ``_LOCK``
+        itself, briefly, for the registry write at the end (``_LOCK`` is not
+        reentrant — the ``atlas_message`` precedent).
+        """
+        from qlab.core import data as market
+        from qlab.core.universe import load_universe
+        from qlab.research.board import BASELINE_MODEL_ID, run_predictor_board
+
+        requested = body.get("model")
+        if isinstance(requested, str):
+            lanes = [requested]
+        elif isinstance(requested, list) and all(
+                isinstance(lane, str) for lane in requested):
+            lanes = list(requested)
+        else:
+            raise ValueError("model must be a lane id or a list of lane ids")
+        if not lanes:
+            raise ValueError("model must name at least one lane")
+        # The operator's order, deduplicated, with the control last: the
+        # ranking is the board's own, but `models` echoes what was asked for
+        # plus what pairing required.
+        models = [lane for i, lane in enumerate(lanes) if lane not in lanes[:i]]
+        if BASELINE_MODEL_ID not in models:
+            models.append(BASELINE_MODEL_ID)
+
+        universe = str(body.get("universe") or "core")
+        lookback_days = body.get("lookback_days", 756)
+        if isinstance(lookback_days, bool) or not isinstance(lookback_days, int):
+            raise TypeError("lookback_days must be an integer")
+        if lookback_days < 300:
+            raise ValueError(
+                "a predictor board needs at least 300 return observations "
+                "for lagged features and purged walk-forward folds")
+        offline = _flagbool(body.get("offline"), self.offline_default)
+        as_of = str(body.get("as_of") or date.today().isoformat())
+
+        # The search knobs the MCP tool exposes, for the same reason it does:
+        # a tuned board must be reproducible from its own row. Absent means
+        # the board's own default, and every value is validated by the board
+        # itself — including the lane ids, whose refusal names MODEL_IDS.
+        search: dict = {"models": tuple(models)}
+        for key in ("alphas", "map_weights", "n_splits", "null_trials"):
+            value = body.get(key)
+            if value is not None:
+                search[key] = tuple(value) if isinstance(value, list) else value
+
+        tickers = load_universe().tickers(universe)
+        snapshot = market.snapshot(
+            tickers, as_of, lookback_days=lookback_days + 1,
+            offline=offline, seed=self.seed)
+        panel = snapshot.log_returns().dropna(how="any")
+        board = run_predictor_board(panel, **search)
+
+        caveats = [
+            "risk prediction only",
+            "research stage",
+            "ranking is (-mean_ic, ic_std, model_id); the champion is the "
+            "first admitted model, not a promoted one",
+        ]
+        run_spec = {
+            "algorithm_id": "predictor_board",
+            "as_of": as_of,
+            "universe": universe,
+            "tickers": tickers,
+            "lookback_days": lookback_days,
+            "source": snapshot.source,
+            "snapshot_id": snapshot.content_hash(),
+            "board": board,
+            # Research evidence: no backtest row, no solution, no DSR trial.
+            "dsr_trial_counted": False,
+            "caveats": caveats,
+        }
+        with _LOCK:
+            run_id = self.registry.log_run("predictor_board", run_spec)
+        # Nothing to invalidate by hand: every summary of the runs table is
+        # keyed on `registry.run_revision`, which log_run has just moved, so
+        # the next read rebuilds instead of serving the board this replaced.
+        return {
+            "run_id": run_id,
+            "models": models,
+            "champion": board.get("champion"),
+            "ranking": board.get("ranking"),
+            "board": board,
+            "caveats": caveats,
         }
 
     def workforce_summary(self, limit: int = 10) -> dict:
@@ -6192,10 +6309,24 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, session.atlas_context(offline)
 
     if method == "GET" and path == "/api/research/predictors":
-        # Read-only over the newest persisted board. Running one is a POST to
-        # /api/lab/research.predictor_board, which is owner-gated: reading the
-        # evidence and producing it are different authorities.
+        # Read-only over the newest persisted board. Running one is the POST
+        # below (or /api/lab/research.predictor_board, owner-gated): reading
+        # the evidence and producing it are different authorities.
         return 200, session.predictor_board_detail()
+
+    if method == "POST" and path == "/api/research/predictors/run":
+        # Producing the evidence. do_POST runs this one outside the dispatch
+        # lock — the fit is seconds of numpy and, live, a market fetch —
+        # and `run_predictor_lane` takes `_LOCK` itself for the run row.
+        #
+        # This is research, not authority: it writes one run row, no backtest,
+        # no solution, and nothing downstream of it can reach the paper book.
+        try:
+            return 200, session.run_predictor_lane(body)
+        except (ValueError, TypeError) as exc:
+            # The board's own refusals travel verbatim: an unknown lane comes
+            # back naming MODEL_IDS, which is what an operator needs to retry.
+            return 400, {"error": str(exc)}
 
     if method == "GET" and path == "/api/research/qualitative":
         # Read-only over the window already fetched: composing the matrix never
@@ -6922,8 +7053,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # different answer, and the accepted trade for the same reason
                 # the GET route accepts serving a cached catalog at all.
                 self.session.llm_backends_catalog()
-            if parsed.path in ("/api/atlas/message", "/api/alpaca/test",
-                               "/api/news/settings"):
+            if parsed.path in _LOCK_EXEMPT_POSTS:
                 # The whole route runs outside the lock, not just a warm-up: an
                 # answer is a model call, up to _ATLAS_REPLY_TIMEOUT_S of it,
                 # and one operator question must not freeze the snapshot poll,
@@ -6944,6 +7074,11 @@ class _Handler(BaseHTTPRequestHandler):
                 # chosen source, which is minutes when gdelt is among them, and
                 # it writes .env and the process environment rather than the
                 # registry.
+                #
+                # A predictor-lane run is the same shape again: a market
+                # snapshot and seconds of numpy fitting every fold of every
+                # requested lane plus its baseline, then one run row written
+                # under `_LOCK` by `run_predictor_lane` itself.
                 status, obj = handle_api(self.session, "POST", parsed.path,
                                          parse_qs(parsed.query), body)
             else:

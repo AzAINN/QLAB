@@ -6944,6 +6944,22 @@ def handle_api(session: UISession, method: str, path: str,
                 "running": running,
             }
         template_id = str(body.get("template_id") or "").strip()
+        if not template_id and _from_chat(headers):
+            # The chat tool defaults `template_id=""`, which fell through to
+            # the ungated `start_workflow` branch below and registered a
+            # five-phase `portfolio_review` no template gate had seen and no
+            # coordinator was dispatched to walk. Atlas starts REGISTERED work
+            # or none: the mode gate is attached to the template, so a start
+            # with no template is a start with no gate.
+            from qlab.operator.templates import startable_templates
+
+            mode = session.atlas.mode
+            names = sorted(startable_templates(mode, session.atlas_facts(off)))
+            return 400, {"error": (
+                "a workflow start needs a registered template_id: the mode "
+                "gate is attached to the template, so a start without one is a "
+                f"start without a gate. Startable in {mode} mode: "
+                f"{', '.join(names) or 'none'}")}
         if template_id:
             # A registered template, resolved in-process to its own declared
             # graph. `start_workflow` still takes no phases from a body.

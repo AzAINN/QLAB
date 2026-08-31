@@ -105,33 +105,38 @@ If no `claude` is on PATH, a dispatch still registers its workflow and says so �
 you can resume it by hand with `: workforce`. Absence is reported, never
 absorbed.
 
-    qlab tui --claude offer   # default: show readiness, never prompt
-    qlab tui --claude auto    # start the workforce after the first snapshot
-    qlab tui --claude off     # start only when : workforce GOAL requests it
+On the Atlas workstation the WORKFORCE view (key `7`) is where a governed run
+is read: the pipeline, the phase each role is in, and what it settled. The
+console stays quiet — full tool traffic remains on the AUDIT view — and the
+run's durable phases live in the registry, so nothing here is the run's state,
+only its picture. A run that stalls is stopped by a watchdog rather than
+hanging the desk. Stop terminates the entire Claude/coordinator/Agent/MCP
+child-process tree, marks the active durable phase `interrupted`, and fences
+late child writes until an explicit resume. A successful Claude exit that
+leaves a phase open is treated the same way rather than leaving the desk
+painted `working`. Owner startup recovers orphaned `running` rows, and the
+owner also expires rows older than the coordinator lease. Headless, the same
+machinery is driven by `qlab workforce run "GOAL"` and the owner's own
+coordinator.
 
-Inside the desk, the workforce view (key `4`) is a chat: type to the
-coordinator and it deploys the five governed roles. Progress is a flowchart —
-hover a node for that phase's live summary, elapsed time, and artifacts — and
-the console stays quiet, printing one short note per agent (what it settled,
-what runs next) and the run's results at the end. Full tool traffic remains on
-the timeline (`~`). Follow-up messages continue the same session, the `■ stop`
-button interrupts without losing durable phase state, and a run that stalls is
-stopped by a watchdog rather than hanging the desk. Stop terminates the entire
-Claude/coordinator/Agent/MCP child-process tree, marks the active durable phase
-`interrupted`, and fences late child writes until an explicit resume. A
-successful Claude exit that leaves a phase open is treated the same way rather
-than leaving the desk painted `working`. Owner startup recovers orphaned
-`running` rows, and the owner also expires rows older than the coordinator
-lease. `: workforce GOAL`, `: workforce status`, `: workforce resume ID`,
-`: workforce stop`, and `: workforce abandon [ID]` drive the same machinery
-from the command row. Abandon permanently closes unfinished phases but retains
-completed evidence, events, and the audit record; it does not delete registry
-state.
+Three ways a run starts, and all three end at the same gate:
 
-`: chat MESSAGE` switches the same chat box to a read-only desk assistant —
-ask about the portfolio, market, runs, or audit trail conversationally; it
-holds observation tools only (no agents, no writes, no execution) and keeps
-its own session, separate from the workforce coordinator.
+- the operator, from WORKFORCE or by approving a queued task;
+- Atlas, from the chat, with `workflow.start` — which requires the `workflows`
+  right *and* a registered `template_id`. The mode gate is attached to the
+  template, so a start without one is refused by name;
+- the beat, unattended, for the trigger kinds the daily budget counts
+  (`_WORKFLOW_TRIGGERS`). Every other kind is minted, announced, and left
+  `queued` for a human.
+
+The ATLAS view's chat box is the desk assistant and the command row at once.
+`/ask` asks the desk what it would do, `/do` takes a proposal it is offering,
+`/approve` and `/execute` open the hash-bound boxes, `/clear` empties this
+window's chat pane. `/cli` opens the real Claude CLI wearing the Atlas persona
+through the owner-backed proxy — owner tools plus read-only web, no shell and
+no filesystem — and `/build` opens Claude Code on this checkout. Both spawn a
+child that owns the terminal until it exits; a window the desk declined
+operator authority to is offered neither.
 
 For a core-only install:
 
@@ -162,13 +167,15 @@ There are two valid Claude modes:
 
 1. Headless: Claude Code launches the combined qlab server from .mcp.json when
    no owner UI process is running.
-2. Workforce desk: qlab tui owns the book and optionally launches a session-local
-   `qlab-coordinator` against the qlab-operator proxy. The coordinator deploys
-   only the five qlab roles, following the dependency graph the registry
-   enforces: analyst, bounded challenger debate, optimizer on the final
-   persisted decision, referee gate, then reporter. They can inspect, research,
-   persist judgments, and request a dry rebalance preview; only the human-facing
-   TUI can confirm paper execution.
+2. Owner desk: the `qlab` owner runtime holds the only registry handle and
+   drives its own `qlab-coordinator` against the `qlab-operator` proxy. The
+   coordinator deploys only the qlab roles a template declares, following the
+   dependency graph the registry enforces: analyst, bounded challenger debate,
+   optimizer on the final persisted decision, referee gate, then reporter. They
+   can inspect, research, persist judgments, and request a dry rebalance
+   preview. No role can book a fill: the BOOK box on the Atlas workstation is
+   the one confirmation, bound to the plan's own `targets_hash`, and the owner
+   re-validates the approval and the referee PASS before any leg is sent.
 
 Starting a retired standalone quant-lab or quant-trader module now delegates to
 the guarded combined server, so those module paths cannot recreate the old

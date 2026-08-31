@@ -833,3 +833,46 @@ def test_the_owner_serves_every_route_the_chat_action_tools_call():
     status, resumed = handle_api(
         session, "POST", f"/api/workflows/{workflow_id}/resume", {}, {})
     assert status == 200 and resumed["status"] == "running"
+
+
+def test_the_one_click_book_is_on_no_agent_surface():
+    """A census, not a spot check. `POST /api/desk/proposal/book` approves and
+    executes in one call, so it is exactly the raw-order tool invariant 3
+    forbids — the comment on the route says it is client-only, and this is what
+    makes that a fact. Every name a book could plausibly wear is checked
+    against all three agent-facing surfaces at once."""
+    from qlab.mcp.quant_lab import register_lab_tools
+    from qlab.mcp.quant_trader import register_trader_tools, TraderState
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.tui_proxy import register_proxy_tools
+    from qlab.state.registry import Registry
+    from qlab.tui.claude import _LAB_TOOL_BASES, _PROXY_TOOLS
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    reg = Registry(":memory:")
+    combined = StubApp()
+    register_lab_tools(combined, LabState(offline=True, registry=reg))
+    register_trader_tools(combined, TraderState(registry=reg, offline=True))
+    owner_side = StubApp()
+    register_lab_tools(owner_side, LabState(offline=True, registry=reg),
+                       owner_only=True)
+    proxy = StubApp()
+    register_proxy_tools(proxy, object())
+
+    surfaces = {
+        "OWNER_LAB_TOOLS": set(OWNER_LAB_TOOLS),
+        "the chat's lab bases": set(_LAB_TOOL_BASES),
+        "the chat's proxy tools": set(_PROXY_TOOLS),
+        "the qlab-operator proxy": set(proxy.names),
+        "the combined server": set(combined.names),
+        "the combined server, owner-only": set(owner_side.names),
+    }
+    for where, names in surfaces.items():
+        booking = sorted(n for n in names if "book" in n.lower()
+                         or "proposal" in n.lower())
+        assert booking == [], f"{where} exposes {booking}"
+        # And by every spelling the route itself could be registered under.
+        for spelling in ("desk.proposal.book", "desk_proposal_book",
+                         "proposal_book", "book_proposal",
+                         "/api/desk/proposal/book"):
+            assert spelling not in names, f"{where} exposes {spelling}"

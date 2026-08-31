@@ -158,11 +158,15 @@ the TUI workforce view.
 - Workforce runs persist analyst → challenger → optimizer → referee → reporter
   phase state in the owner registry, so a stopped CLI session is inspectable and
   resumable from a new one.
-- Five least-privilege roles are generated from one neutral source for Claude
-  Code and IBM Bob: moments analyst, challenger, optimization runner, referee,
-  and reporter. The `portfolio_watch` template adds a sixth, quarantined role:
-  `contender-scout`, whose whole grant is `WebSearch`, `WebFetch` and two
-  registry decision tools.
+- Eleven least-privilege roles are generated from one neutral source
+  (`agents/*.md`) for Claude Code and IBM Bob. Five of them are the rebalance
+  pipeline — moments analyst, challenger, optimization runner, referee,
+  reporter — and five is the pipeline's length, not the roster's. The other six
+  are `atlas` (the desk manager: it reads persisted facts, picks one registered
+  template and writes the brief; it never trades and never approves),
+  `contender-scout` (the `portfolio_watch` template's quarantined web role,
+  whose whole grant is `WebSearch`, `WebFetch` and two registry decision
+  tools), `news-analyst`, `news-extractor`, `data-qa` and `signal-qa`.
 - Operator choices that are not the governance document live in state, merged
   by `load_mandate`: the operational method and `max_holdings` in
   `state_path("mandate_overrides.json")` (`GET`/`POST /api/desk/method`), and

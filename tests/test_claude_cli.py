@@ -280,17 +280,35 @@ def test_without_a_published_port_the_cli_verb_falls_back_to_the_default(monkeyp
 
 # -- which checkout `/build` opens ------------------------------------------
 
-def test_the_workstations_env_names_the_launcher_that_started_it():
+def test_the_workstations_env_names_the_launcher_that_started_it(
+        monkeypatch, tmp_path):
     # Without this the Rust client spawns whatever `qlab` PATH resolves, which
     # on a machine with a pipx install and a checkout is reliably the wrong
     # one — `/build` would open Claude Code on a different tree than the
     # binary was built from.
+    #
+    # Both lookups are stubbed. Read against the real ones this passed because
+    # a `qlab` happened to be installed on the developer's machine — a test
+    # whose subject is which of two launchers is chosen must not be answered by
+    # the machine it runs on, and it went green on CI for a reason that would
+    # not survive a container with no install.
     from qlab.autopilot import cli as verbs
+
+    started_by = tmp_path / "qlab"
+    started_by.write_text("#!/bin/sh\n", encoding="utf-8")
+    started_by.chmod(0o755)
+    monkeypatch.setattr(verbs.sys, "argv", [str(started_by), "tui"])
+    monkeypatch.setattr(
+        verbs.shutil, "which",
+        lambda name: "/somewhere/else/on/PATH/qlab")
 
     env = verbs._client_env(8765)
     assert env["QLAB_UI_PORT"] == "8765"
     assert os.path.isfile(env["QLAB_BIN"]), env["QLAB_BIN"]
     assert os.path.isabs(env["QLAB_BIN"]), env["QLAB_BIN"]
+    # argv[0] wins over PATH: that preference IS the fix, and a PATH copy is
+    # exactly the wrong tree it exists to avoid.
+    assert env["QLAB_BIN"] == str(started_by.resolve())
 
 
 def test_a_launcher_that_cannot_name_itself_leaves_the_path_fallback_alone(monkeypatch):
@@ -461,6 +479,37 @@ def test_with_the_workflows_right_the_three_action_tools_are_offered():
     chat = cc.chat_tools()
     for base in ("workflow.start", "workflow.resume", "atlas.task.create"):
         assert cc._claude_tool(base) in chat, base
+
+
+def test_without_the_workflows_right_qlab_cli_cannot_start_or_write_work():
+    """`qlab cli` is the same Atlas at a different keyboard. The chat side of
+    this was covered and the CLI side was not, so a rights narrowing that held
+    in the desk chat and leaked through `/cli` would have gone unnoticed —
+    and the CLI grant is built from a different source (the atlas role file,
+    not `_CHAT_TOOLS`), so the two are genuinely separate code paths."""
+    _write_rights({"web": True, "workflows": False, "build": True})
+    granted = cc.atlas_cli_tools()
+    for base in ("workflow.start", "workflow.resume", "atlas.task.create"):
+        assert cc._claude_tool(base) not in granted, base
+    # Reading what is waiting is not doing anything, on either surface.
+    assert cc._claude_tool("approvals.list") in granted
+    # And the argv the child is actually spawned with carries that same grant —
+    # a list narrowed in the builder and not in the argv would grant it anyway.
+    argv = cc.build_atlas_cli_argv(
+        runtime_url="http://127.0.0.1:8765", offline=True)
+    allowed = argv[argv.index("--allowedTools") + 1]
+    assert allowed == ",".join(granted)
+    for name in ("workflow_start", "workflow_resume", "atlas_task_create"):
+        assert name not in allowed, name
+
+
+def test_with_the_workflows_right_qlab_cli_carries_the_action_tools():
+    """The regression half: the withdrawal above is a narrowing, not the
+    permanent absence of tools the atlas role file grants."""
+    _write_rights({"web": True, "workflows": True, "build": True})
+    granted = cc.atlas_cli_tools()
+    for base in ("workflow.start", "workflow.resume", "atlas.task.create"):
+        assert cc._claude_tool(base) in granted, base
 
 
 def test_the_chat_argv_carries_exactly_the_rights_shaped_grant():

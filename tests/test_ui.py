@@ -5642,6 +5642,36 @@ def test_a_truthy_human_confirmed_cannot_book(session):
     assert _booked_events(session) == []
 
 
+@pytest.mark.parametrize("confirmation", [
+    # Absent entirely — the shape a client that forgot the field sends, and the
+    # one an agent composing a body from the route name would send.
+    "__absent__",
+    # The truthy integer. `if body.get("human_confirmed")` would pass all of
+    # these; `is not True` is why none of them do.
+    1, 1.0, "true", "True", [True], {"human_confirmed": True},
+])
+def test_only_the_boolean_true_books(session, confirmation):
+    """Invariant 3's `human_confirmed=True` is an identity check, not a truth
+    test. Weaken it to truthiness and every value below books a paper trade."""
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    body = _book_body(session, plan_id)
+    if confirmation == "__absent__":
+        del body["human_confirmed"]
+    else:
+        body["human_confirmed"] = confirmation
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {}, body)
+
+    assert status == 400, confirmation
+    assert out["error"] == "human_confirmed=true is required"
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert session.registry.list_orders(50) == []
+    assert _booked_events(session) == []
+
+
 def test_an_already_approved_proposal_books_without_a_second_approval(session):
     # An approved, unspent request is still the desk's live question. Booking
     # it must not try to approve it twice — decide_approval only binds pending.
@@ -6374,28 +6404,41 @@ def test_predictor_run_is_dispatched_off_the_dispatch_lock(session):
     """Fitting a board is seconds of numpy; holding `_LOCK` across it would
     freeze the snapshot poll and every approval behind it.
 
-    Membership in the tuple is the intent; the request is the proof. The stub
+    Membership in the tuple is the intent; the request is the proof. The probe
     runs where the real fit would, on the handler thread, and takes the lock
     non-blockingly — which can only succeed if dispatch did not already hold
-    it. `run_predictor_lane` takes `_LOCK` itself, so this also proves the
-    method is reachable without deadlocking on a non-reentrant lock.
+    it.
+
+    The probe then CALLS the real `run_predictor_lane` rather than standing in
+    for it. `run_predictor_lane` takes `_LOCK` itself, so the second half of
+    this claim — that the method is reachable without deadlocking on a
+    non-reentrant lock — is only proved by running it; a stub that returned a
+    dict in its place proved the exemption and nothing about the deadlock.
     """
     assert "/api/research/predictors/run" in ui_server._LOCK_EXEMPT_POSTS
 
     free = {}
+    real = session.run_predictor_lane
 
-    def stub(request):
+    def probe(request):
         free["acquired"] = ui_server._LOCK.acquire(blocking=False)
         if free["acquired"]:
             ui_server._LOCK.release()
-        return {"run_id": "stub", "models": list(request["models"]),
-                "champion": None, "ranking": [], "board": {}, "caveats": []}
+        # If the route held `_LOCK`, this call hangs rather than failing — the
+        # deadlock IS the failure, and the suite's own timeout is what reports
+        # it. There is no way to assert a non-reentrant re-acquire "would have"
+        # deadlocked without deadlocking.
+        return real(request)
 
-    session.run_predictor_lane = stub
+    session.run_predictor_lane = probe
     status, out = _owner_post(session, "/api/research/predictors/run",
                               dict(_LANE_RUN, model="kernel:zz"))
     assert status == 200, out
     assert free["acquired"] is True
+    # The real fit ran: a probe that returned a dict of its own would satisfy
+    # every assertion above without the lane ever taking `_LOCK`.
+    assert out["run_id"]
+    assert session.registry.list_runs(limit=5) != []
 
 
 def test_predictor_run_refuses_a_future_as_of(session):
@@ -6622,9 +6665,16 @@ def test_a_losing_approve_cannot_roll_back_the_winners_ticker(session, monkeypat
 
     The failure this reproduces: a second approval widens (a no-op append,
     the ticker is already recorded), its transition fails, and its rollback
-    removes a ticker the FIRST approval had already recorded as approved. The
-    second call's transition is made to fail on purpose, because that is the
-    branch that used to reach the unbounded rollback.
+    removes a ticker the FIRST approval had already recorded as approved.
+
+    The `flaky` patch below is UNREACHABLE BY DESIGN, and that is the finding,
+    not an oversight: the route now refuses the second approve as `not pending`
+    *before* it reaches the widening, so `transition_approval` is called once
+    and the raising branch never runs. That the route never gets that far is
+    the stronger statement, and it is asserted (`calls == 1`). The patch is
+    kept so this test still fails loudly if the ordering is ever inverted — a
+    second call would then raise, the rollback would run, and the widening
+    assertions at the end would catch what it removed.
     """
     from qlab.trader.mandate import load_mandate_overrides
 
@@ -6652,6 +6702,9 @@ def test_a_losing_approve_cannot_roll_back_the_winners_ticker(session, monkeypat
         session, "POST", f"/api/approvals/{approval_id}/approve", {}, {})
     assert status == 400
     assert "not pending" in refused["error"]
+    # Once, not twice: the refusal lands before the widening, so the loser
+    # never reaches a transition it could fail at.
+    assert len(calls) == 1, calls
 
     # The winner's widening survived the loser.
     assert load_mandate_overrides()["universe_add"] == [contender]
@@ -7097,6 +7150,39 @@ def test_with_the_workflows_right_the_chat_reaches_the_routes_own_gates(
                              {"kind": "held_record_change", "reason": "r"},
                              headers=_CHAT)
     assert status == 200 and out.get("task_id")
+
+
+def test_the_chat_cannot_start_a_workflow_without_naming_a_template(session):
+    """`workflow.start` defaults `template_id=""`, which fell through to the
+    ungated branch and registered a five-phase `portfolio_review` no template
+    gate had seen and no coordinator was dispatched to walk. The mode gate is
+    attached to the template, so a start without one is a start without one."""
+    session.atlas.set_mode("research")
+
+    status, out = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"goal": "look at the book", "kind": "portfolio_review"},
+        headers=_CHAT)
+
+    assert status == 400, out
+    assert "template_id" in out["error"]
+    # The refusal names what IS startable, so the reasoner's next turn is a
+    # correction rather than a guess.
+    assert "portfolio_watch" in out["error"]
+    assert session.registry.list_workflows(limit=10) == []
+
+
+def test_the_chat_still_starts_a_named_template(session):
+    """The other side: naming a registered template goes through the gate."""
+    session.atlas.set_mode("research")
+
+    status, out = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"goal": "read the record on the held names",
+         "template_id": "portfolio_watch"}, headers=_CHAT)
+
+    assert status == 200, out
+    assert out.get("workflow_id")
 
 
 def test_the_trigger_line_carries_the_reason_the_task_was_minted_for(session):

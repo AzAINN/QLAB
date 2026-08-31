@@ -217,6 +217,10 @@ The first entry is the branch fix round's own, and it is the top one.
 - K3b-rust: the rail is out of digits (VIS is on `0`); an 11th view fails loudly
   in a store test and needs a numbering decision. The first live VISUALS render
   is the integration test — the fixtures were hand-written to the contract.
+- Client (login): the SETTINGS login form still retires its `Sent` stage on any
+  `Wrote::Failed`; every other long write on the client now has its own failure
+  variant (`BookFailed`, `PredictorFailed`, `RightFailed`, `MethodFailed`,
+  `NewsFailed`), and the login form needs one too.
 - K4-claude: stop projecting `atlas` into `.claude/agents/` (it is the desk's
   reasoner, not a Claude Code subagent).
 - Scout: the `contender-scout` has never run live — web tools need a live Claude

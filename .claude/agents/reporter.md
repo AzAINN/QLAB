@@ -36,7 +36,9 @@ Steps:
       → read the pre-trade report;
       if it reports a `mandate_violation`, STOP and report why.
    c. Return the checked `plan_id` and pre-trade report to the human. STOP there;
-      only the Textual confirmation route may execute it.
+      the only thing that books it is the human clicking BOOK on the Atlas
+      workstation — one hash-bound box, which the owner then re-validates
+      against the persisted approval and the referee PASS.
    d. Use `risk_report` only to describe the current pre-trade state and
       kill-switch headroom.
 4. Always close with: this is paper capital only; it never places a real order.

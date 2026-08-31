@@ -11,8 +11,14 @@ quantitative panel. This is how to make that window real rather than synthetic.
 | `alpaca` | Alpaca's news API, symbol-tagged, real date ranges | secondary | a live desk with a resolvable Alpaca credential |
 | `rss` | public feeds, keyword-matched to the universe | secondary | when named explicitly |
 | `edgar` | SEC filings, dated by acceptance time | primary | when named; needs `QLAB_EDGAR_CONTACT` |
-| `macro` | official releases — BLS, BEA, EIA, Treasury | primary | when named; no credential |
+| `macro` | official releases — the feeds in `news_sources.yaml` `macro.feeds`, BEA only as shipped | primary | when named; no credential |
 | `gdelt` | many publishers, one article per domain | secondary | when named; no credential |
+
+The `macro` row names the shipped default, not a fixed roster: BLS and the US
+Treasury were removed on 2026-08-28 (403 and 404 to every request) and no
+replacement was verified. `qlab news-setup` derives the publishers it offers
+from the config's own `macro.feeds`, so the wizard cannot go stale the way this
+table did.
 
 `edgar` and `macro` are the primary sources: a primary claim stands on its own,
 where a secondary one needs a second publisher before the desk calls it

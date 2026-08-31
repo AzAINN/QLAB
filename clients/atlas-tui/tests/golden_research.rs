@@ -696,3 +696,44 @@ fn a_universe_longer_than_the_pane_counts_what_it_could_not_draw() {
     assert!(body.contains("RUNS"), "{body}");
     assert!(body.contains("CATALOG"), "{body}");
 }
+
+#[test]
+fn a_flat_live_book_holds_nothing_whatever_the_registry_row_says() {
+    // BOOK reads `live_portfolio.positions` and nothing else, so a matrix that
+    // fell back to the reconciled book would mark a name HELD off a stale
+    // registry row while the pane next door drew a flat desk — two panes of one
+    // workstation disagreeing about what the desk owns. A flat live book is an
+    // answer: nothing is held.
+    let mut client = research_from(
+        r#"{"live_portfolio": {"positions": []},
+            "portfolio": {"positions": {"SPY": {"qty": 10.0}, "XLF": {"qty": 4.0}}}}"#,
+    );
+    with_matrix(
+        &mut client,
+        include_str!("fixtures/qualitative_matrix.json"),
+    );
+    let body = content(&client.frame(120, 36));
+    assert!(
+        !body.contains("HELD"),
+        "a flat live book marked a holding:\n{body}"
+    );
+    // And the rows are all there — a desk that holds nothing still reads the
+    // record for its whole universe.
+    assert!(matrix_row_of(&body, "SPY").contains("14"), "{body}");
+}
+
+#[test]
+fn a_terminal_too_short_for_the_matrix_refuses_rather_than_dropping_it() {
+    // The pane reserves its rows out of the view's height, which raised the
+    // floor when it landed. One row under it the view refuses as a whole; at
+    // it, all four panes draw. A height that quietly dropped the matrix would
+    // be the record disappearing from the desk without saying so.
+    let client = with_window();
+    let short = content(&client.frame(120, 19));
+    assert!(short.contains("RESEARCH needs"), "{short}");
+    let exact = content(&client.frame(120, 20));
+    assert!(exact.contains("QUALITATIVE MATRIX"), "{exact}");
+    assert!(exact.contains("LEADERBOARD"), "{exact}");
+    assert!(exact.contains("RUNS"), "{exact}");
+    assert!(exact.contains("CATALOG"), "{exact}");
+}

@@ -137,6 +137,13 @@ const BOTTOM_MIN: u16 = 8;
 /// saying so.
 const MATRIX_MIN: u16 = 4;
 
+/// What RESEARCH needs in rows before any of its panes may draw: both bands'
+/// floors, plus the two readout lines and the leaderboard's own head. Named
+/// rather than spelled in the guard, for `FLOOR`'s reason — the matrix reserves
+/// its rows out of this height, and a pane whose floor was added to one
+/// expression and not the other would be dropped rather than refused.
+const HEIGHT_FLOOR: u16 = BOTTOM_MIN + MATRIX_MIN + 6;
+
 /// Nothing to retain: no cursor, no page, no field. Every pane is a rendering
 /// of what the owner said.
 #[derive(Default)]
@@ -148,7 +155,7 @@ impl View for ResearchView {
         // every cell was held to, and a right-aligned cell loses its *leading*
         // characters — the sign first. A return of `-11.3%` drawn as `11.3%` is
         // a loss rendered as a gain, so the pane refuses instead.
-        if area.width < FLOOR || area.height < BOTTOM_MIN + MATRIX_MIN + 6 {
+        if area.width < FLOOR || area.height < HEIGHT_FLOOR {
             refuse(
                 f,
                 area,
@@ -761,8 +768,9 @@ fn matrix_notes(matrix: &QualitativeMatrix) -> Vec<String> {
 /// record say about what the desk is already carrying. A held name with one
 /// publisher behind it is a position with nothing under it, and alphabetical
 /// order would bury it under the names the desk does not own. Within each group
-/// the owner's own key order stands — this client re-sorts nothing it did not
-/// have to.
+/// the rows keep the order the payload decodes into — `rows` is a `BTreeMap`,
+/// so that is alphabetical by ticker, and it is deterministic without this
+/// client choosing a second ranking of its own.
 fn ordered<'a>(
     matrix: &'a QualitativeMatrix,
     held: &BTreeSet<String>,
@@ -772,49 +780,38 @@ fn ordered<'a>(
         .iter()
         .map(|(ticker, row)| (ticker.as_str(), row, held.contains(ticker)))
         .collect();
-    // `sort_by_key` is stable, which is the whole of the second rule: the map's
-    // own order survives inside each group.
+    // `sort_by_key` is stable, which is the whole of the second rule: the
+    // alphabetical order the map decoded into survives inside each group.
     rows.sort_by_key(|(_, _, held)| !held);
     rows
 }
 
 /// What the book is carrying, by ticker.
 ///
-/// The live book first and the reconciled book behind it, the precedence BOOK
-/// reads: a desk whose live marks have not arrived still holds what the
-/// registry says it holds. Held means a *positive* quantity — a flat or closed
-/// row is a name the desk is not carrying, and marking those would put most of
-/// the universe in the held group and retire the ordering.
+/// `live_portfolio.positions` and nothing else, which is exactly what BOOK's
+/// ribbon and blotter read. A fallback to the reconciled book was here and was
+/// wrong: an empty live book is not a missing answer, it is a flat desk, and
+/// falling through to the registry row marked a name HELD on this pane while
+/// the pane next door drew no positions at all — two panes of one workstation
+/// disagreeing about what the desk owns.
+///
+/// Held means a *positive* quantity. A flat or closed row is a name the desk is
+/// not carrying, and marking those would put most of the universe in the held
+/// group and retire the ordering.
 fn held(store: &Store) -> BTreeSet<String> {
-    let Some(snapshot) = store.snapshot.as_ref() else {
+    let Some(book) = store
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.live_portfolio.as_ref())
+    else {
         return BTreeSet::new();
     };
-    let live: BTreeSet<String> = snapshot
-        .live_portfolio
-        .as_ref()
-        .map(|book| {
-            book.positions
-                .iter()
-                .filter(|position| position.qty.is_some_and(|qty| qty > 0.0))
-                .filter_map(|position| format::text(position.ticker.as_ref()))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    if !live.is_empty() {
-        return live;
-    }
-    snapshot
-        .portfolio
-        .as_ref()
-        .map(|book| {
-            book.positions
-                .iter()
-                .filter(|(_, position)| position.qty.is_some_and(|qty| qty > 0.0))
-                .map(|(ticker, _)| ticker.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+    book.positions
+        .iter()
+        .filter(|position| position.qty.is_some_and(|qty| qty > 0.0))
+        .filter_map(|position| format::text(position.ticker.as_ref()))
+        .map(str::to_string)
+        .collect()
 }
 
 /// One name: what the book holds, and what the record says about it.
@@ -1035,6 +1032,21 @@ mod tests {
         // to: the alternative is one pane drawing while the other is starved
         // below the width its cells were held to.
         assert_eq!(FLOOR, BOARD_W.max(MATRIX_W));
+    }
+
+    #[test]
+    fn the_height_floor_is_the_two_bands_own_arithmetic() {
+        // Same rule as the width, and the same failure if it drifts: the matrix
+        // reserves `MATRIX_MIN` out of the view's height, so a floor that did
+        // not count it would leave the pane with nowhere to draw and no
+        // refusal to say so. `tests/golden_research.rs` pins the boundary this
+        // number produces on a real frame.
+        assert_eq!(HEIGHT_FLOOR, BOTTOM_MIN + MATRIX_MIN + 6);
+        assert_eq!(HEIGHT_FLOOR, 18);
+        // The six on top of the two bands are the layout's own rows: the two
+        // admission readouts, and the leaderboard's head with a row of ranking
+        // under it. Stated here because the guard cannot show it.
+        assert_eq!(HEIGHT_FLOOR - BOTTOM_MIN - MATRIX_MIN, 6);
     }
 
     /// A matrix carrying `rows` under one window, with no failures.

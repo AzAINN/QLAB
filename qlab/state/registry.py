@@ -2109,6 +2109,63 @@ class Registry:
                 [day_iso[:10]])
         return int(rows[0]["n"]) if rows else 0
 
+    def count_atlas_tasks(self, status: str) -> int:
+        """How many task rows are in ``status``, over the whole table.
+
+        A COUNT, not the length of a bounded page: a number that saturates at
+        the scan window is a wrong answer with a plausible shape, and this one
+        is shown on the system card as what the desk has retired.
+        """
+        rows = self._rows(
+            "SELECT COUNT(*) AS n FROM atlas_tasks WHERE status = ?", [status])
+        return int(rows[0]["n"]) if rows else 0
+
+    def count_workflows(self, status: str) -> int:
+        """How many workflow rows are in ``status``, over the whole table."""
+        rows = self._rows(
+            "SELECT COUNT(*) AS n FROM workflows WHERE status = ?", [status])
+        return int(rows[0]["n"]) if rows else 0
+
+    def mark_idle_workflows_stale(
+        self,
+        reason: str,
+        *,
+        updated_before: str,
+        statuses: tuple[str, ...] = ("running", "interrupted"),
+    ) -> list[dict]:
+        """Mark every live-looking workflow with no progress since a cutoff.
+
+        Marked, never deleted: the run and its phases stay readable, which is
+        the whole point of a durable workforce record. ``stale`` is a resolved
+        state, so an Atlas task bound to one of these is freed by
+        ``reconcile_tasks`` instead of waiting on it forever.
+
+        Idempotent: a marked row leaves ``statuses`` and its ``updated_at``
+        moves to now, so a second pass over the same cutoff finds nothing.
+        """
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("marking a workflow stale requires a reason")
+        placeholders = ",".join("?" for _ in statuses)
+        rows = self._rows(
+            f"SELECT workflow_id FROM workflows WHERE status IN ({placeholders}) "
+            "AND updated_at < ? ORDER BY created_at",
+            [*statuses, updated_before],
+        )
+        changed: list[dict] = []
+        for row in rows:
+            workflow_id = str(row["workflow_id"])
+            self.con.execute(
+                "UPDATE workflows SET status='stale', updated_at=? "
+                "WHERE workflow_id=?", [_now(), workflow_id])
+            self.record_event("workflow_marked_stale", {
+                "workflow_id": workflow_id, "reason": reason,
+                "updated_before": updated_before,
+            })
+            changed.append(self.get_workflow(workflow_id) or
+                           {"workflow_id": workflow_id})
+        return changed
+
     # -- standing authority grants (inert unless a human creates one) -------
     def create_authority_grant(self, grant: dict) -> str:
         gid = str(grant["grant_id"])

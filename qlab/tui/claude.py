@@ -169,22 +169,34 @@ _COORDINATOR_TOOLS = [
 # The conversational desk assistant: observation and reading only. No Agent
 # dispatch, no workflow phases, no research writes, and (as everywhere) no
 # execution surface exists to grant.
+# What the chat Atlas may DO, as against read. Each is one existing owner route
+# behind the gates a human hits on it: `check_startable` on a start, the
+# one-at-a-time refusal on a second, and no execution surface anywhere — there
+# is no tool here that creates, approves, or consumes an approval, because
+# booking is the operator's click and nothing else.
+_CHAT_ACTION_TOOLS = [_claude_tool(base) for base in (
+    "workflow.start", "workflow.resume", "atlas.task.create", "approvals.list",
+)]
+
 _CHAT_TOOLS = [_claude_tool(base) for base in (
     "portfolio.state", "market.snapshot", "policy.current", "audit.events",
     "research.runs", "research.decisions", "algorithms.list",
     "algorithms.describe", "registry.list_runs", "registry.report",
     "registry.recent_decisions", "data.fetch_universe",
     "data.snapshot_summary",
-)]
+)] + _CHAT_ACTION_TOOLS
 
 _CHAT_SYSTEM_PROMPT = (
     "You are the qlab desk assistant, chatting inside a quant operator "
     "terminal. Answer conversationally and compactly — this renders in a "
     "terminal pane. Use your qlab tools for every live number (portfolio, "
     "market, runs, decisions, catalog); never invent data or results. You "
-    "are read-only: you cannot trade, modify research, or deploy agents. "
-    "For the governed five-role pipeline, point the operator at workforce "
-    "mode.\n\n"
+    "create and run research workflows yourself and say what you started — "
+    "`workflow.start` takes a registered template id and the owner's mode "
+    "gate decides whether it may run; one research workflow runs at a time, "
+    "and a refusal names the one already running. You never book: you cannot "
+    "trade, create or approve a plan, or deploy agents — booking is the one "
+    "click the operator makes.\n\n"
     "You know the system you sit inside. qlab is a governed agentic quant "
     "research desk: AI agents own judgment, algorithms own numbers, "
     "deterministic code owns rigor. One owner HTTP process is the only "

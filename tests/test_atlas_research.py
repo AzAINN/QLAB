@@ -809,7 +809,7 @@ def test_the_null_trial_count_is_reachable_from_the_tool_that_runs_the_board():
             f"{module_name} runs the board but cannot set null_trials")
 
 
-# --- F3 on the beat: one at a time, and oldest first --------------------------
+# --- F3/K1 on the beat: one at a time, oldest first, stale work expires -------
 
 
 def _queued_trigger(session, task_id: str, day: str) -> str:
@@ -867,3 +867,23 @@ def test_an_idle_slot_starts_the_oldest_queued_task_first():
     session.atlas_run_startable(True)
 
     assert started == ["task-old"]
+
+
+def test_one_tick_expires_the_backlog_and_leaves_today_alone():
+    import threading as _threading
+    from datetime import date, timedelta
+
+    from qlab.operator.heartbeat import build_owner_tick
+
+    session = _research_session()
+    session.coordinator_status = lambda: {"driving": False, "workflow_id": ""}
+    old = (date.today() - timedelta(days=40)).isoformat()
+    for i in range(50):
+        session.registry.create_atlas_task(
+            f"old-{i}", f"drift_breach|{old}|ACWI|{i}", "drift_breach", {},
+            "desk_rebalance_review")
+
+    result = build_owner_tick(session, _threading.Lock(), offline=True)()
+
+    assert len(result["expired"]["expired_tasks"]) == 50
+    assert session.registry.count_atlas_tasks("expired") == 50

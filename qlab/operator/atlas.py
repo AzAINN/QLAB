@@ -109,7 +109,11 @@ class Dispatched:
 # the workflow is still in flight and the task must keep waiting.
 _WORKFLOW_SUCCESS = "complete"
 _WORKFLOW_UNSUCCESSFUL = frozenset({
-    "failed", "blocked", "interrupted", "abandoned",
+    # `stale` is the owner's week-without-progress mark. It belongs here rather
+    # than outside: a task bound to a workflow nobody has walked in seven days
+    # would otherwise stay `running` forever, and the drive sweep would keep
+    # re-spawning a coordinator for a graph that is not going anywhere.
+    "failed", "blocked", "interrupted", "abandoned", "stale",
 })
 # The union, for readers that only need "would reconcile_tasks resolve this?".
 # Derived rather than re-listed so a state added to either half above cannot

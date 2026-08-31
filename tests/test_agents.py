@@ -280,3 +280,47 @@ def test_the_moments_analyst_reads_the_matrix_and_reaches_no_trader_tool():
     assert "research.qualitative_matrix" in scopes["lab"]
     assert "moments.condition" not in scopes["lab"]
     assert scopes["trader"] == set()
+
+
+def test_atlas_holds_exactly_the_four_new_desk_manager_tools():
+    """The desk manager starts its own research — and still cannot book.
+
+    The list is asserted whole rather than by membership: a tool quietly added
+    to the persona is authority nobody reviewed, and the point of this task was
+    that Atlas gained four named abilities and no others.
+    """
+    atlas = _by_name()["atlas"]
+    assert set(atlas.tools) == {
+        "mcp__qlab__policy.current",
+        "mcp__qlab__registry.report",
+        "mcp__qlab__registry.list_runs",
+        "mcp__qlab__registry.recent_decisions",
+        "mcp__qlab__registry.log_decision",
+        "mcp__qlab__get_portfolio_state",
+        "mcp__qlab__risk_report",
+        "mcp__qlab__regime_turbulence",
+        "mcp__qlab__regime_absorption",
+        "mcp__qlab__regime_volatility_term_structure",
+        "mcp__qlab__regime_drawdown",
+        "mcp__qlab__regime_tail_risk",
+        "mcp__qlab__research.predictor_board",
+        "mcp__qlab__research.qualitative_matrix",
+        "mcp__qlab__workflow.start",
+        "mcp__qlab__workflow.resume",
+        "mcp__qlab__atlas.task.create",
+        "mcp__qlab__approvals.list",
+    }
+    scopes = role_scopes(atlas.tools)
+    # Starting research is not touching the book: the trader scope is unchanged.
+    assert scopes["trader"] == {"get_portfolio_state", "risk_report"}
+    assert "execute_plan" not in scopes["lab"]
+    assert "propose_rebalance" not in scopes["lab"]
+
+
+def test_the_atlas_persona_says_it_starts_work_and_never_books():
+    # Whitespace-normalized: the sentence is wrapped in the source, and a test
+    # that pinned the wrapping would fail on a reflow that changed nothing.
+    body = " ".join(_by_name()["atlas"].body.split())
+    assert ("You create and run research workflows yourself and say what you "
+            "started; you never book — booking is the one click the operator "
+            "makes.") in body

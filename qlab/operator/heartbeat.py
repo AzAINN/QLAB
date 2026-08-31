@@ -177,9 +177,25 @@ def build_owner_tick(session, lock, *, offline: bool,
                     # Its own key, never the value's: a field that changes JSON
                     # type mid-run poisons the tick for a typed client.
                     reap_error = str(exc)[:200]
+            # Before the observe, for the reap's own reason: expiry marks a
+            # week-idle workflow `stale`, which is a resolved state, so the
+            # reconciliation inside `atlas_observe` frees the task bound to it
+            # on this same tick rather than the next one. Guarded the same way
+            # — a desk that cannot retire old work must still observe.
+            expired, expire_error = None, ""
+            expire = getattr(session, "expire_stale_atlas_work", None)
+            if callable(expire):
+                try:
+                    expired = expire()
+                except Exception as exc:
+                    expire_error = str(exc)[:200]
             # `handed` is empty unless the reasoner ran, so a desk with the
             # flag off calls exactly what it called before.
             result = session.atlas_observe(offline, **handed)
+            if expired is not None:
+                result["expired"] = expired
+            if expire_error:
+                result["expire_error"] = expire_error
             if reaped is not None:
                 result["reaped"] = reaped
             if reap_error:

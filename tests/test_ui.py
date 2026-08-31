@@ -5815,3 +5815,148 @@ def test_an_idle_coordinator_starts_as_before(session):
         session, "POST", "/api/workflows/start", {},
         {"goal": "review the paper portfolio", "offline": True})
     assert status == 200 and started["current_phase"] == "analyst"
+
+
+# --- K1: the chat starts its own research ------------------------------------
+
+
+def _no_drive(session):
+    """Register the workflow without spawning a coordinator for it."""
+    session.drive_workflow = lambda wid, goal, roles=(): {
+        "driving": False, "reason": "pinned off in tests"}
+    session.coordinator_status = lambda: {"driving": False, "workflow_id": ""}
+
+
+def test_the_chat_starts_a_research_template_and_gets_its_id(session):
+    _no_drive(session)
+    session.atlas.set_mode("research")
+    status, started = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"template_id": "regime_review", "goal": "the panel moved",
+         "offline": True})
+    assert status == 200
+    assert started["template_id"] == "regime_review"
+    assert started["workflow_id"]
+    assert [step["phase"] for step in started["steps"]] == [
+        "analyst", "challenger", "optimizer", "referee", "reporter"]
+
+
+def test_a_plan_creating_template_is_refused_by_name_in_research_mode(session):
+    _no_drive(session)
+    session.atlas.set_mode("research")
+    status, refused = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"template_id": "desk_rebalance_review", "offline": True})
+    assert status == 400
+    assert "desk_rebalance_review" in refused["error"]
+    assert "Propose mode" in refused["error"]
+
+
+def test_the_same_template_starts_in_propose_mode(session):
+    _no_drive(session)
+    # The data half of the gate, pinned: offline synthetic prices are never
+    # paper-proposal-eligible, and this test is about the MODE half.
+    facts = session.atlas_facts(True)
+    facts["data"]["eligible_for_paper_proposal"] = True
+    session.atlas_facts = lambda offline: facts
+    session.atlas.set_mode("propose")
+    status, started = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"template_id": "desk_rebalance_review", "offline": True})
+    assert status == 200 and started["template_id"] == "desk_rebalance_review"
+
+
+def test_the_chat_writes_a_task_down_and_never_twice_in_a_day(session):
+    status, created = handle_api(
+        session, "POST", "/api/atlas/tasks", {},
+        {"kind": "regime_review", "reason": "the operator asked for one"})
+    assert status == 200
+    assert created["created"] is True and created["status"] == "queued"
+    assert created["template_id"] == "regime_review"
+
+    status, again = handle_api(
+        session, "POST", "/api/atlas/tasks", {},
+        {"kind": "regime_review", "reason": "asked twice"})
+    assert status == 200
+    assert again["created"] is False
+    assert again["task_id"] == created["task_id"]
+
+    status, refused = handle_api(
+        session, "POST", "/api/atlas/tasks", {},
+        {"kind": "do_whatever", "reason": "why not"})
+    assert status == 400
+    assert "do_whatever" in refused["error"]
+
+
+# --- K1: stale work expires ---------------------------------------------------
+
+
+def _stale_trigger(session, day: str, name: str) -> str:
+    session.registry.create_atlas_task(
+        name, f"drift_breach|{day}|ACWI|{name}", "drift_breach", {},
+        "desk_rebalance_review")
+    return name
+
+
+def test_fifty_stale_triggers_expire_in_one_pass_and_a_fresh_one_stays(session):
+    from datetime import date, timedelta
+
+    today = date.today()
+    old = (today - timedelta(days=40)).isoformat()
+    for i in range(50):
+        _stale_trigger(session, old, f"old-{i}")
+    fresh = _stale_trigger(session, today.isoformat(), "fresh")
+
+    first = session.expire_stale_atlas_work()
+    assert len(first["expired_tasks"]) == 50
+    assert fresh not in first["expired_tasks"]
+    assert session.registry.get_atlas_task("old-0")["status"] == "expired"
+    assert "older than the 5-day cutoff" in (
+        session.registry.get_atlas_task("old-0")["error"])
+    assert session.registry.get_atlas_task(fresh)["status"] == "queued"
+
+    # Idempotent: nothing is expired twice.
+    assert session.expire_stale_atlas_work()["expired_tasks"] == []
+
+
+def test_an_idle_workflow_is_marked_stale_once_and_never_deleted(session):
+    from datetime import datetime, timedelta, timezone
+
+    workflow_id = session.registry.start_workflow(
+        "portfolio_review", {"goal": "[regime_review] stalled"},
+        phases=("analyst", "challenger", "optimizer", "referee", "reporter"),
+    )["workflow_id"]
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    session.registry.con.execute(
+        "UPDATE workflows SET updated_at=? WHERE workflow_id=?",
+        [long_ago, workflow_id])
+
+    first = session.expire_stale_atlas_work()
+    assert first["stale_workflows"] == [workflow_id]
+    assert session.registry.get_workflow(workflow_id)["status"] == "stale"
+    assert session.expire_stale_atlas_work()["stale_workflows"] == []
+
+
+def test_system_status_counts_what_expired_and_what_went_stale(session):
+    from datetime import date, timedelta
+
+    old = (date.today() - timedelta(days=40)).isoformat()
+    _stale_trigger(session, old, "old-1")
+    session.expire_stale_atlas_work()
+
+    status, payload = handle_api(session, "GET", "/api/system", {}, {})
+    assert status == 200
+    assert payload["expired_tasks"] == 1
+    assert payload["stale_workflows"] == 0
+
+
+def test_the_desk_task_list_does_not_show_an_expired_trigger_as_pending(session):
+    from datetime import date, timedelta
+
+    old = (date.today() - timedelta(days=40)).isoformat()
+    _stale_trigger(session, old, "old-1")
+    _stale_trigger(session, date.today().isoformat(), "fresh")
+    session.expire_stale_atlas_work()
+
+    shown = {row["task_id"] for row in session.atlas_task_rows(10)}
+    assert shown == {"fresh"}

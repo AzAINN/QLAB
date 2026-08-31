@@ -212,6 +212,11 @@ _ACTIVE_MARKET_THREAD: threading.Thread | None = None
 # update beyond this grace cannot belong to a healthy qlab coordinator.
 _WORKFLOW_STALE_AFTER_SECONDS = 35 * 60
 _WORKFLOW_REAP_INTERVAL_SECONDS = 60.0
+# How long a workflow may go without phase progress before the desk stops
+# calling it live. Far longer than the reap above, and a different claim: the
+# reap says "this coordinator is gone, the run is resumable", this says "a week
+# passed and nobody resumed it". The row is marked, never deleted.
+_WORKFLOW_IDLE_STALE_DAYS = 7
 # How many parked workflows one sweep may ASK to drive. A refusal is per-graph
 # (a daemon-backed one-role read can be refused while a claude review would
 # start), so the sweep must look past one — but a desk-wide refusal, like no
@@ -1625,6 +1630,12 @@ class UISession:
             "data_source": provenance[0] if provenance else "none",
             "data_age_days": provenance[1] if provenance else None,
             "autopilot": autopilot,
+            # What the desk has retired. Two COUNT(*)s, cheap enough for the
+            # snapshot path, and the only place an operator can see that the
+            # queue is short because work expired rather than because nothing
+            # ever fired.
+            "expired_tasks": self.registry.count_atlas_tasks("expired"),
+            "stale_workflows": self.registry.count_workflows("stale"),
         }
 
     def data_health(self, offline: bool, purpose: str = "paper_proposal") -> dict:
@@ -3584,6 +3595,112 @@ class UISession:
                     "drive_reason": driven.get("reason", "")},
         )
 
+    def start_template_workflow(self, template_id: str, goal: str,
+                                offline: bool) -> dict:
+        """Start one registered template's own graph, through the mode gate.
+
+        This is what the desk manager reaches when it starts its own research,
+        and it is the *same* gate the unattended beat passes: ``check_startable``
+        answers first, so a research template starts at once and a
+        plan-creating one starts only in Propose mode — and even then it ends
+        at a checked plan that still needs a human approval to book.
+
+        The network names a template, never a phase graph. ``start_workflow``
+        still refuses ``phases`` from a body; the graph that runs here is the
+        one the template itself declares, resolved in-process.
+
+        The workflow is driven, because registering one is not running it: a
+        row nobody walks is the parked-at-phase-one state this desk already
+        learned to avoid. A refusal to drive is reported, not raised — the
+        workflow exists and a later beat picks it up.
+        """
+        from qlab.operator.templates import check_startable
+        from qlab.state.registry import agent_for_phase
+
+        template_id = str(template_id or "").strip()
+        # Raises TemplateNotAllowed (a PermissionError) naming the template and
+        # the reason. The caller turns that into the refusal the operator reads.
+        template = check_startable(template_id, self.atlas.mode,
+                                   self.atlas_facts(offline))
+        if not template.needs_coordinator or not template.phases:
+            raise ValueError(
+                f"{template_id!r} is deterministic and starts no workflow; it "
+                "is assembled from owner facts — read the desk brief instead")
+        text = f"[{template_id}] {goal.strip() or template.purpose}"
+        started = self.start_workflow(
+            {"kind": "portfolio_review", "goal": text, "started_by": "atlas"},
+            phases=template.phases)
+        workflow_id = str((started or {}).get("workflow_id") or "")
+        if not workflow_id:
+            raise RuntimeError(
+                f"no workflow could be started for template {template_id!r}")
+        driven = self.drive_workflow(
+            workflow_id, text,
+            roles=tuple(agent_for_phase(phase) for phase in template.phases))
+        return {**started, "template_id": template_id,
+                "driving": bool(driven.get("driving")),
+                "drive_reason": str(driven.get("reason") or "")}
+
+    def atlas_create_task(self, kind: str, reason: str) -> dict:
+        """Write one Atlas task down, from a trigger kind or a template name.
+
+        Creating is not starting. The row lands ``queued`` and ``start_task``
+        remains the only thing that starts it, so this grants nothing the mode
+        gate does not still answer for. One per template per trading day — the
+        same dedupe shape every other proposal carries, so ``task_age`` can
+        read the day out of it.
+
+        A reason is required. A task nobody explained is one nobody can judge
+        later, and the desk's whole record is built on being able to.
+        """
+        from qlab.operator.templates import TEMPLATES, TRIGGER_TEMPLATE
+
+        kind = str(kind or "").strip()
+        reason = str(reason or "").strip()
+        if not kind:
+            raise ValueError(
+                "a task needs a kind: a trigger kind "
+                f"({sorted(TRIGGER_TEMPLATE)}) or a registered template "
+                f"({sorted(TEMPLATES)})")
+        if not reason:
+            raise ValueError(
+                f"a task for {kind!r} needs a reason; an unexplained task "
+                "cannot be judged later")
+        template_id = TRIGGER_TEMPLATE.get(kind) or (
+            kind if kind in TEMPLATES else "")
+        if not template_id:
+            raise ValueError(
+                f"unknown task kind {kind!r}; name a trigger kind "
+                f"({sorted(TRIGGER_TEMPLATE)}) or a registered template "
+                f"({sorted(TEMPLATES)})")
+        trading_date = date.today().isoformat()
+        universe = ",".join(sorted(self.mandate.universe_whitelist))
+        task_kind = f"proposal:{template_id}"
+        dedupe = f"{task_kind}|{trading_date}|{universe}|{template_id}"
+        existing = self.registry.get_atlas_task_by_dedupe(dedupe)
+        if existing is not None:
+            return {"task_id": str(existing["task_id"]),
+                    "template_id": template_id,
+                    "status": str(existing.get("status") or ""),
+                    "created": False,
+                    "reason": (f"today's task for {template_id} already "
+                               "exists; one per template per day")}
+        task_id = uuid.uuid4().hex[:16]
+        if not self.registry.create_atlas_task(
+                task_id, dedupe, task_kind,
+                {"template_id": template_id, "reason": reason,
+                 "asked_by": "atlas"},
+                template_id, origin="proposal"):
+            raise RuntimeError(
+                f"task {dedupe!r} was created between its lookup and its "
+                "insert; the id minted here was never stored")
+        self.registry.record_event(
+            "atlas_task_created",
+            {"task_id": task_id, "template_id": template_id,
+             "reason": self._bounded(reason, 500), "origin": "proposal"})
+        return {"task_id": task_id, "template_id": template_id,
+                "status": "queued", "created": True, "reason": reason}
+
     # -- owner-driven coordination -------------------------------------------
     @property
     def coordinator_driver(self):
@@ -3882,7 +3999,7 @@ class UISession:
             # set is dropped when this process ends.
             self._queued_notice.add(key)
         self._record_atlas_reply(
-            f"\u2691 {entry.get('template_id') or 'work'} stays queued "
+            f"⚑ {entry.get('template_id') or 'work'} stays queued "
             f"({key[0][:8]}): {entry.get('reason')}. It starts when the slot "
             f"frees; nothing was lost.")
 
@@ -4082,6 +4199,73 @@ class UISession:
                 "atlas_proposals_expired",
                 {"task_ids": expired, "trading_date": today})
         return expired
+
+    def expire_stale_atlas_work(self, today: str | None = None) -> dict:
+        """Retire work that has outlived the question it answered.
+
+        Two kinds, both marked and neither deleted — the record of what the
+        desk once wanted is worth keeping; offering it as live work is not.
+
+        * A queued *trigger* is a claim about one trading day. Past
+          ``max_task_age_days`` it describes a portfolio that has moved, and
+          ``startable_tasks`` already refuses it for exactly that reason — but
+          it refused it again every beat, forever, and fifty of them buried
+          whatever else was queued. Marking them ``expired`` is the refusal
+          made once. If the condition still holds the observe tick fires it
+          again under today's date.
+        * A workflow with no phase progress in a week is not in flight. It is
+          marked ``stale`` (a resolved state, so reconciliation frees the task
+          bound to it and the drive sweep stops re-walking it) and kept.
+
+        Idempotent by construction: both passes read only rows in a live state,
+        and both write a state that is not live.
+        """
+        from qlab.operator.atlas import TASK_SCAN_WINDOW, _utc_today
+
+        day = (today or _utc_today())[:10]
+        cutoff_days = self.atlas.config.max_task_age_days
+        expired: list[str] = []
+        for task in self.registry.list_atlas_tasks(
+                TASK_SCAN_WINDOW, status="queued", origin="trigger"):
+            age = self.atlas.task_age(task, day)
+            # Strictly True. An unreadable trading date is age-*unknown*, which
+            # `startable_tasks` already refuses; expiring it would retire a row
+            # on a guess about how old it is.
+            if age.get("stale") is not True:
+                continue
+            task_id = str(task["task_id"])
+            self.registry.update_atlas_task(
+                task_id, status="expired",
+                error=(f"older than the {cutoff_days}-day cutoff: this trigger "
+                       f"fired on {age['trading_date']}, {age['age_days']} days "
+                       f"before {day}, and no longer describes this book"))
+            expired.append(task_id)
+        if expired:
+            self.registry.record_event(
+                "atlas_tasks_expired",
+                {"task_ids": expired, "cutoff_days": cutoff_days, "as_of": day})
+        stale = self.registry.mark_idle_workflows_stale(
+            f"no phase progress in {_WORKFLOW_IDLE_STALE_DAYS} days",
+            updated_before=(datetime.now(timezone.utc)
+                            - timedelta(days=_WORKFLOW_IDLE_STALE_DAYS)
+                            ).isoformat())
+        return {"expired_tasks": expired,
+                "stale_workflows": [str(row["workflow_id"]) for row in stale]}
+
+    def atlas_task_rows(self, limit: int = 10) -> list[dict]:
+        """Trigger tasks the desk should still show, newest first.
+
+        Expired rows are dropped rather than drawn. This window is what the
+        classic TUI renders as OPEN TASKS and RECENT TASKS, so a retired
+        trigger appearing in it reads as work still waiting — and fifty of them
+        would take every row of a ten-row list. They stay in the registry and
+        the system card counts them; they just do not stand in for live work.
+        """
+        from qlab.operator.atlas import TASK_SCAN_WINDOW
+
+        rows = self.registry.list_atlas_tasks(TASK_SCAN_WINDOW, origin="trigger")
+        return [row for row in rows
+                if str(row.get("status") or "") != "expired"][:limit]
 
     def _asked_refusals(self) -> tuple[str, list[dict]]:
         """The newest ask's own refusals, and the trading day it was asked on.
@@ -4962,7 +5146,7 @@ class UISession:
             # reads as open autonomous work that nobody authorised, and one ask
             # in Research fills the ten-row window and pushes real trigger work
             # off it. Proposals have their own block below.
-            "atlas_tasks": self.registry.list_atlas_tasks(10, origin="trigger"),
+            "atlas_tasks": self.atlas_task_rows(10),
             # The newest proposal set, read from the task table so the client
             # renders it without a second fetch — and so a poll never mints
             # one. Asking is what proposes; drawing is what reports. `startable`
@@ -5605,6 +5789,13 @@ def handle_api(session: UISession, method: str, path: str,
         except PermissionError as exc:
             return 400, {"error": str(exc)}
 
+    if method == "POST" and path == "/api/atlas/tasks":
+        try:
+            return 200, session.atlas_create_task(
+                str(body.get("kind") or ""), str(body.get("reason") or ""))
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+
     if method == "POST" and path == "/api/atlas/autonomy":
         enabled = body.get("enabled")
         if not isinstance(enabled, bool):
@@ -5716,6 +5907,19 @@ def handle_api(session: UISession, method: str, path: str,
                           f"{running['template']} ({running['workflow_id']})"),
                 "running": running,
             }
+        template_id = str(body.get("template_id") or "").strip()
+        if template_id:
+            # A registered template, resolved in-process to its own declared
+            # graph. `start_workflow` still takes no phases from a body.
+            try:
+                return 200, session.start_template_workflow(
+                    template_id, str(body.get("goal") or ""), off)
+            except PermissionError as exc:
+                # TemplateNotAllowed: the mode gate, naming the template and
+                # what would have to change.
+                return 400, {"error": str(exc)}
+            except ValueError as exc:
+                return 400, {"error": str(exc)}
         try:
             return 200, session.start_workflow(body)
         except ValueError as exc:

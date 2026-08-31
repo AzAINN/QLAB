@@ -775,3 +775,61 @@ def test_qualitative_matrix_serves_the_desks_own_record_not_an_arms(reg):
     assert out["source"] == "desk"
     assert out["window_hash"] == "desk"
     assert out["rows"]["ACWI"]["coverage"] == 3
+
+
+def test_the_chat_atlas_action_tools_are_wired_all_four_ways():
+    """A grant nothing forwards is a grant that silently disappears.
+
+    Four things have to agree for the chat Atlas to reach one of these: the
+    owner has to serve the route, the proxy has to register the tool, the chat
+    allowlist has to name it, and the persona has to grant it. Asserted
+    together, because each one alone is silent when it is the one that is
+    missing.
+    """
+    from qlab.agents.loader import load_agents
+    from qlab.mcp.tui_proxy import register_proxy_tools
+    from qlab.tui.claude import _CHAT_TOOLS, _claude_tool
+
+    proxy = StubApp()
+    register_proxy_tools(proxy, object())
+    atlas = {a.name: a for a in load_agents()}["atlas"]
+
+    for base, proxy_name, route in (
+        ("workflow.start", "workflow_start", "/api/workflows/start"),
+        ("workflow.resume", "workflow_resume", "/api/workflows/<id>/resume"),
+        ("atlas.task.create", "atlas_task_create", "/api/atlas/tasks"),
+        ("approvals.list", "approvals_list", "/api/approvals"),
+    ):
+        assert proxy_name in proxy.names, (base, route)
+        assert _claude_tool(base) in _CHAT_TOOLS, base
+        assert f"mcp__qlab__{base}" in atlas.tools, base
+
+
+def test_the_owner_serves_every_route_the_chat_action_tools_call():
+    from qlab.state.registry import Registry
+    from qlab.ui.server import UISession, handle_api
+
+    session = UISession(offline_default=True, registry=Registry(":memory:"))
+    session.coordinator_status = lambda: {"driving": False, "workflow_id": ""}
+    session.drive_workflow = lambda wid, goal, roles=(): {
+        "driving": False, "reason": "pinned off in tests"}
+    session.atlas.set_mode("research")
+
+    status, started = handle_api(
+        session, "POST", "/api/workflows/start", {},
+        {"template_id": "regime_review", "offline": True})
+    assert status == 200
+    workflow_id = started["workflow_id"]
+
+    status, _ = handle_api(session, "GET", "/api/approvals", {}, {})
+    assert status == 200
+
+    status, task = handle_api(
+        session, "POST", "/api/atlas/tasks", {},
+        {"kind": "regime_flip", "reason": "the panel flipped"})
+    assert status == 200 and task["template_id"] == "regime_review"
+
+    session.registry.interrupt_workflow(workflow_id, "stopped for the test")
+    status, resumed = handle_api(
+        session, "POST", f"/api/workflows/{workflow_id}/resume", {}, {})
+    assert status == 200 and resumed["status"] == "running"

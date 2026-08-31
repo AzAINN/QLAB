@@ -461,20 +461,52 @@ def register_proxy_tools(app, client: RuntimeClient) -> None:
     # -- durable workforce control ----------------------------------------
     @app.tool(name="workflow_start")
     def workflow_start(
-        goal: str,
+        goal: str = "",
         as_of: str = "",
         universe: str = "core",
         kind: str = "portfolio_review",
         variants: list[dict] | None = None,
+        template_id: str = "",
     ) -> dict:
-        """Create a durable standard or panel workforce run and return its id."""
+        """Start a workforce run — a registered template, or a standard graph.
+
+        With ``template_id`` the owner resolves the template's own declared
+        phases and applies the mode gate: a research template starts at once, a
+        plan-creating one only in Propose mode, and nothing executes either
+        way. The owner refuses a second start while one is running, naming the
+        run that holds the slot.
+        """
         payload = {
             "goal": goal, "as_of": as_of, "universe": universe,
             "kind": kind, "offline": client.offline,
         }
         if variants is not None:
             payload["variants"] = variants
+        if template_id:
+            payload["template_id"] = template_id
         return client.post("/api/workflows/start", payload)
+
+    @app.tool(name="workflow_resume")
+    def workflow_resume(workflow_id: str) -> dict:
+        """Resume an interrupted workforce run at its first incomplete phase."""
+        if not workflow_id.replace("-", "").isalnum():
+            raise ValueError("invalid workflow_id")
+        return client.post(f"/api/workflows/{workflow_id}/resume", {})
+
+    @app.tool(name="atlas_task_create")
+    def atlas_task_create(kind: str, reason: str) -> dict:
+        """Queue an Atlas task for a trigger kind or a registered template.
+
+        Writing work down, not starting it: the row lands queued and the mode
+        gate still answers when something starts it.
+        """
+        return client.post("/api/atlas/tasks", {"kind": kind, "reason": reason})
+
+    @app.tool(name="approvals_list")
+    def approvals_list(status: str = "") -> dict:
+        """Approval requests: what the desk is waiting on a human to decide."""
+        return (client.get("/api/approvals", status=status) if status
+                else client.get("/api/approvals"))
 
     @app.tool(name="workflow_status")
     def workflow_status(workflow_id: str = "", limit: int = 10) -> dict:

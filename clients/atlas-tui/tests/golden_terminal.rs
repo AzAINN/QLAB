@@ -105,14 +105,16 @@ fn the_cursor_is_drawn_only_where_the_typing_goes() {
     );
 }
 
-// -- the column the desk actually has ----------------------------------------
+// -- the narrow terminal ----------------------------------------------------
 
 #[test]
-fn the_baseline_column_gets_a_whole_sentence_rather_than_a_clipped_one() {
-    // 45 columns is what ATLAS's main column is at the 120×36 baseline with the
-    // desk sidebar up, and the long sentence does not fit on a 45-wide border.
-    // A clipped `…give it to Cl` is the one rendering worse than a short one:
-    // it teaches half a key list and reads as a working desk.
+fn a_narrow_terminal_gets_a_whole_sentence_rather_than_a_clipped_one() {
+    // Not the baseline: at 120×36 the pane is 77 cells and both long sentences
+    // fit. This is a small terminal, where A5 has already dropped the board and
+    // the pane has the whole content width and still has only 45 — under the 64
+    // the long desk form needs. A clipped `…give it to Cl` is the one rendering
+    // worse than a short one: it teaches half a key list and reads as a working
+    // desk.
     let frame = pane(45, 8, false, None);
     let footer = footer(&frame);
     assert!(
@@ -127,7 +129,7 @@ fn the_baseline_column_gets_a_whole_sentence_rather_than_a_clipped_one() {
 }
 
 #[test]
-fn a_focused_baseline_column_still_names_the_key_that_returns_the_keyboard() {
+fn a_focused_narrow_terminal_still_names_the_key_that_returns_the_keyboard() {
     let frame = pane(45, 8, true, None);
     assert!(footer(&frame).contains("ctrl-] returns it"), "{frame}");
 }

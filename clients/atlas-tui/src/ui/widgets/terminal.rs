@@ -19,12 +19,14 @@
 //! While the pane holds it, every key belongs to the child — digits, `/`, `q`
 //! and Ctrl-C included — so a pane that stopped naming the way out would read
 //! exactly like a hung client. That is why the sentence has two whole forms
-//! rather than one that clips: ATLAS's main column is about 45 cells wide at the
-//! 120×36 baseline with the desk sidebar up, the long sentence does not fit
-//! there, and `…give it to Cl` teaches half a key list while looking like a
-//! working desk. Below the narrower form's own width the pane refuses outright
-//! — a terminal an operator cannot leave is worse than a column that says why
-//! it is empty.
+//! rather than one that clips. The settled pane is 77 cells at a 120×36
+//! terminal, which both long sentences fit — but a narrow terminal is not a
+//! narrow pane it can refuse its way out of. The desk form needs a width of 64
+//! and the child form 48, so anything under those is an ordinary 80- or
+//! 60-column window with the board beside it, and `…give it to Cl` there would
+//! teach half a key list while looking like a working desk. Below the narrower
+//! form's own width the pane refuses outright — a terminal an operator cannot
+//! leave is worse than a column that says why it is empty.
 //!
 //! **The copy here is the stream's.** Task A4 implements the keys this border
 //! names and may not reword them; a border and a keymap that disagreed about
@@ -69,11 +71,14 @@ const JOIN_W: usize = 4;
 
 /// The narrowest pane that can still state the way out, and the shortest.
 ///
-/// `MIN_W` is [`CHILDS_SHORT`]'s own width plus [`CHROME_W`] — one below it,
-/// there is no remaining phrasing that names the key, and the pane refuses
-/// rather than drawing a terminal whose exit is unsaid. `MIN_H` is the two
-/// border rows and three of the child's: a session showing fewer than three
-/// rows shows a prompt and none of what it answered.
+/// `MIN_W` is the **longer** short form — [`DESKS_SHORT`], 39 cells — plus
+/// [`CHROME_W`]. The longer of the two on purpose: the floor has to hold for
+/// whichever sentence the pane is showing, and deriving it from
+/// [`CHILDS_SHORT`] would read as two cells of headroom that do not exist.
+/// One below it there is no remaining phrasing that names the key, and the pane
+/// refuses rather than drawing a terminal whose exit is unsaid. `MIN_H` is the
+/// two border rows and three of the child's: a session showing fewer than
+/// three rows shows a prompt and none of what it answered.
 const MIN_W: u16 = 43;
 const MIN_H: u16 = 5;
 
@@ -86,6 +91,12 @@ const MIN_H: u16 = 5;
 const CHILD: &str = " qlab cli ";
 
 /// Draw the child's screen, and the border that says who is typing into it.
+///
+/// **`area` is the whole pane, border included, and the pty must be sized to
+/// what is inside it** — `(area.width - 2, area.height - 2)`. `tui-term` renders
+/// into the block's inner rect, so a child told the outer size wraps its output
+/// two columns wider than the pane it is drawn in, and the fold lands two rows
+/// below the last one on screen.
 ///
 /// `said` is the sentence a child that is no longer running left behind — the
 /// store's `PtyState::Ended`, which already names what happened *and* how to
@@ -207,9 +218,11 @@ fn footer(room: usize, focused: bool, said: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// The width ATLAS's main column has at the 120×36 baseline with the desk
-    /// sidebar beside it — the size this pane is actually asked to draw at.
-    const BASELINE: usize = 41;
+    /// The border room a 45-cell pane has. Not the baseline — at 120×36 the
+    /// settled pane is 77 and both long sentences fit — but the narrow-TERMINAL
+    /// case the short forms exist for, small enough that A5 has already dropped
+    /// the board and given the pane the whole content width.
+    const NARROW: usize = 41;
 
     #[test]
     fn the_long_sentence_is_drawn_whole_or_not_at_all() {
@@ -222,14 +235,31 @@ mod tests {
     }
 
     #[test]
-    fn the_column_the_desk_actually_has_gets_a_whole_sentence() {
+    fn the_settled_pane_shows_the_long_forms_and_the_crossovers_are_where_stated() {
+        // The module doc names 77, 64 and 48. A number stated in prose and
+        // checked nowhere is exactly how a stale "the column is 45 cells"
+        // survived a whole task.
+        assert_eq!(footer(room(77), false, None), DESKS);
+        assert_eq!(footer(room(77), true, None), CHILDS);
+        for (width, focused, long, short) in [
+            (64u16, false, DESKS, DESKS_SHORT),
+            (48u16, true, CHILDS, CHILDS_SHORT),
+        ] {
+            assert_eq!(footer(room(width), focused, None), long, "at {width}");
+            let under = width - 1;
+            assert_eq!(footer(room(under), focused, None), short, "at {under}");
+        }
+    }
+
+    #[test]
+    fn a_narrow_terminal_gets_a_whole_sentence() {
         // The regression this pair exists for: both long forms are wider than
-        // the baseline column, so a renderer with one form would have clipped
-        // every frame an operator ever saw.
-        assert!(DESKS.chars().count() > BASELINE);
-        assert!(CHILDS.chars().count() > BASELINE);
-        assert_eq!(footer(BASELINE, false, None), DESKS_SHORT);
-        assert_eq!(footer(BASELINE, true, None), CHILDS_SHORT);
+        // an 80-column window's pane, so a renderer with one form would have
+        // clipped every frame drawn on one.
+        assert!(DESKS.chars().count() > NARROW);
+        assert!(CHILDS.chars().count() > NARROW);
+        assert_eq!(footer(NARROW, false, None), DESKS_SHORT);
+        assert_eq!(footer(NARROW, true, None), CHILDS_SHORT);
     }
 
     #[test]
@@ -257,9 +287,9 @@ mod tests {
     #[test]
     fn an_ending_wider_than_the_border_is_marked_rather_than_cut_in_silence() {
         let said = "`qlab cli` exited 3 and the desk kept every fact it had already written down";
-        let line = footer(BASELINE, false, Some(said));
+        let line = footer(NARROW, false, Some(said));
         assert!(line.ends_with('…'), "{line:?}");
-        assert!(line.chars().count() <= BASELINE, "{line:?}");
+        assert!(line.chars().count() <= NARROW, "{line:?}");
     }
 
     #[test]

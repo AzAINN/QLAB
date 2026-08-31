@@ -13,7 +13,7 @@
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
 use crate::model::{
     LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, ProposalPayload, QualitativeMatrix,
-    RegimePanel, Snapshot, Templates,
+    RegimePanel, Snapshot, Templates, Visual, VisualAnswer, VisualError, VisualResult, VisualsList,
 };
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
@@ -132,7 +132,12 @@ pub async fn readiness(base: &str) -> Readiness {
 /// cadence — which is precisely the cost the owner refuses to pay on
 /// `/api/tui`. It is asked for when the palette enters the model scope and at
 /// no other time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Clone` and not `Copy`: [`Refetch::Visual`] names *which* drawing was asked
+/// for, which is the one request on this boundary whose target the operator
+/// chooses. It is still a closed set of routes — the name goes into a path
+/// segment this module builds and percent-encodes, never into a url a caller
+/// hands over.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refetch {
     Now,
     Backends,
@@ -155,6 +160,16 @@ pub enum Refetch {
     /// merges the override, so the answer to the write is the only thing that
     /// can say what the desk is now holding to.
     Method,
+    /// What the owner can draw. No beat behind it, and the strongest version
+    /// of the board's reason: the registry is a walk over the owner's own
+    /// `qlab/visuals/` package, so it changes when the owner is *deployed*.
+    /// Asked for when the VISUALS view opens and when `r` is pressed there.
+    Visuals,
+    /// One visual, rendered. The only request here whose target the operator
+    /// picks, and it rides a keystroke rather than any beat: the owner does
+    /// the drawing per request, and nothing about it changes until somebody
+    /// asks for a different one.
+    Visual(String),
 }
 
 /// The runtime's end of the poller.
@@ -197,6 +212,18 @@ impl PollerHandle {
     /// Ask which method the desk solves with, once. Same shape again.
     pub fn method(&self) {
         let _ = self.refetch.send(Refetch::Method);
+    }
+
+    /// Ask what the owner can draw, once. Same shape again.
+    pub fn visuals(&self) {
+        let _ = self.refetch.send(Refetch::Visuals);
+    }
+
+    /// Ask the owner to render one visual. The only request on this handle
+    /// that carries a value, and it is a *name* out of the list the owner
+    /// itself served — never a path and never a url.
+    pub fn visual(&self, name: &str) {
+        let _ = self.refetch.send(Refetch::Visual(name.to_string()));
     }
 }
 
@@ -258,6 +285,9 @@ async fn poll_loop(
     // No lane: the proposal is a plan, an approval request and a verdict, all
     // registry rows, identical whichever data the desk reads.
     let proposal_url = format!("{base}/api/desk/proposal");
+    // No lane: what the owner can draw is a walk over its own package, and the
+    // drawing itself is a pure function of the params — neither reads the feed.
+    let visuals_url = format!("{base}/api/visuals");
 
     // Two facts, not one. `up` is what the chips read — a payload this client
     // could actually use — and `reachable` is what the socket said.
@@ -452,17 +482,32 @@ async fn poll_loop(
                         // are one fetch — but coalesced *by kind*: draining the
                         // queue wholesale would swallow a catalog request that
                         // happened to arrive behind a nudge.
+                        //
+                        // The render is coalesced to the *last* name asked
+                        // for rather than to a flag: an operator walking the
+                        // list with Enter means the drawing they stopped on,
+                        // and rendering every name they passed through would
+                        // finish on whichever answer happened to land last.
                         let mut jump = first == Refetch::Now;
                         let mut catalog = first == Refetch::Backends;
                         let mut predictors = first == Refetch::Predictors;
                         let mut news = first == Refetch::News;
                         let mut method = first == Refetch::Method;
+                        let mut visuals = first == Refetch::Visuals;
+                        let mut visual = match &first {
+                            Refetch::Visual(name) => Some(name.clone()),
+                            _ => None,
+                        };
                         while let Ok(next) = refetch.try_recv() {
                             jump |= next == Refetch::Now;
                             catalog |= next == Refetch::Backends;
                             predictors |= next == Refetch::Predictors;
                             news |= next == Refetch::News;
                             method |= next == Refetch::Method;
+                            visuals |= next == Refetch::Visuals;
+                            if let Refetch::Visual(name) = next {
+                                visual = Some(name);
+                            }
                         }
                         if catalog {
                             match fetch::<LlmCatalog>(&client, &backends_url).await {
@@ -553,6 +598,45 @@ async fn poll_loop(
                                 }
                             }
                         }
+                        if visuals {
+                            match fetch::<VisualsList>(&client, &visuals_url).await {
+                                Fetched::Decoded(payload) => {
+                                    emit(&tx, AppEvent::Visuals(payload.visuals))?
+                                }
+                                Fetched::Malformed(error) => emit(
+                                    &tx,
+                                    AppEvent::Http(HttpResult::Malformed {
+                                        url: visuals_url.clone(),
+                                        error,
+                                    }),
+                                )?,
+                                // What the owner can draw is not whether the
+                                // desk is there. Same reasoning as the panel,
+                                // the templates and the board.
+                                Fetched::Failed(error) => {
+                                    tracing::warn!(%error, "visuals list fetch failed")
+                                }
+                            }
+                        }
+                        if let Some(name) = visual {
+                            let url = visual_url(&base, &name);
+                            match render_visual(&client, &url).await {
+                                Ok(result) => emit(
+                                    &tx,
+                                    AppEvent::Visual(Box::new(VisualAnswer {
+                                        asked: name,
+                                        result,
+                                    })),
+                                )?,
+                                Err(VisualFailed::Malformed(error)) => emit(
+                                    &tx,
+                                    AppEvent::Http(HttpResult::Malformed { url, error }),
+                                )?,
+                                Err(VisualFailed::Unanswered(error)) => {
+                                    tracing::warn!(%error, "visual render fetch failed")
+                                }
+                            }
+                        }
                         if jump {
                             break;
                         }
@@ -566,6 +650,100 @@ async fn poll_loop(
                 }
             }
         }
+    }
+}
+
+/// The path one render is asked for on.
+///
+/// Built here rather than by the caller for the reason the module header
+/// gives: nothing outside this file may aim a request. The name is
+/// percent-encoded because it goes into a *path segment* — every visual the
+/// owner registers today is a Python module name and therefore already safe,
+/// and the encoding is what keeps that from being load-bearing the first time
+/// one is not.
+pub fn visual_url(base: &str, name: &str) -> String {
+    format!(
+        "{}/api/visuals/{}",
+        base.trim_end_matches('/'),
+        encode_segment(name)
+    )
+}
+
+/// Percent-encode everything that is not unreserved, per RFC 3986.
+///
+/// Hand-rolled rather than pulled in: `reqwest`'s `query` feature encodes query
+/// *values*, and this is a path segment — a `/` in one is a different route,
+/// not an escaped character.
+fn encode_segment(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for byte in name.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// A body this client could not read, and one nobody answered — the two
+/// failures a render has that are *not* the owner refusing.
+///
+/// The owner's own refusal is not here: a 404 for an unknown name and a 400 for
+/// bad params are answers, and they come back as [`VisualResult::Refused`].
+/// Folding them in here is exactly the mistake that would draw a governance-
+/// shaped "no" as a dead owner.
+enum VisualFailed {
+    Malformed(String),
+    Unanswered(String),
+}
+
+/// One render, with the refusal bodies read rather than thrown away.
+///
+/// Its own fetch rather than `fetch::<Visual>`, and this is the whole reason:
+/// the shared one turns every non-2xx into `Failed` **without reading the
+/// body**, and the body is precisely where the owner puts the sentence that
+/// says what to fix. A pane built on the shared path could only ever say
+/// "owner answered 400", which names no remedy at all.
+async fn render_visual(client: &reqwest::Client, url: &str) -> Result<VisualResult, VisualFailed> {
+    let resp = match client.get(url).send().await {
+        Ok(resp) => resp,
+        Err(err) => return Err(VisualFailed::Unanswered(because(&err))),
+    };
+    let status = resp.status();
+    let body = match resp.text().await {
+        Ok(body) => body,
+        Err(err) => return Err(VisualFailed::Unanswered(because(&err))),
+    };
+    if status.is_success() {
+        return match serde_json::from_str::<Visual>(&body) {
+            Ok(visual) => Ok(VisualResult::Drawn(Box::new(visual))),
+            Err(err) => Err(VisualFailed::Malformed(err.to_string())),
+        };
+    }
+    Ok(VisualResult::Refused {
+        status: status.as_u16(),
+        said: refusal_sentence(status.as_u16(), &body),
+    })
+}
+
+/// The owner's sentence about a refusal, or an honest stand-in when it sent
+/// none.
+///
+/// Verbatim when there is one: the 404 body names the visuals that *do* exist
+/// and the 400 body names the param that was wrong, and neither is a sentence
+/// this client could compose. The stand-in says the status and nothing more,
+/// because inventing a remedy for a body nobody sent is how a client starts
+/// teaching an operator something the owner never said.
+fn refusal_sentence(status: u16, body: &str) -> String {
+    match serde_json::from_str::<VisualError>(body)
+        .ok()
+        .and_then(|payload| payload.error)
+        .filter(|said| !said.trim().is_empty())
+    {
+        Some(said) => said,
+        None => format!("the owner answered {status} and said nothing about why"),
     }
 }
 
@@ -624,6 +802,51 @@ async fn fetch<T: DeserializeOwned>(client: &reqwest::Client, url: &str) -> Fetc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_is_the_owners_own_sentence_when_it_sent_one() {
+        // The 404 body names the visuals that *do* exist and the 400 body
+        // names the parameter that was wrong. Neither is a sentence this
+        // client could compose, and both are the whole remedy.
+        assert_eq!(
+            refusal_sentence(
+                404,
+                r#"{"error": "no visual named circut; known: quantum_circuit"}"#
+            ),
+            "no visual named circut; known: quantum_circuit"
+        );
+        assert_eq!(
+            refusal_sentence(400, r#"{"error": "angles must be one per feature"}"#),
+            "angles must be one per feature"
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_no_sentence_says_the_status_and_invents_no_remedy() {
+        // A body nobody sent, an empty one, and one this client cannot read.
+        // Inventing a fix for any of them is how a client starts teaching an
+        // operator something the owner never said.
+        for body in ["", r#"{"error": ""}"#, "<html>502</html>", "{}"] {
+            let said = refusal_sentence(502, body);
+            assert!(said.contains("502"), "{body:?} -> {said}");
+            assert!(
+                said.contains("said nothing about why"),
+                "{body:?} -> {said}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_visual_name_is_one_path_segment_and_never_a_route_of_its_own() {
+        assert_eq!(
+            visual_url("http://127.0.0.1:8765", "quantum_circuit"),
+            "http://127.0.0.1:8765/api/visuals/quantum_circuit"
+        );
+        // The escapes that matter: a separator, a traversal, and a space.
+        assert_eq!(encode_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_segment(".."), "..");
+        assert_eq!(encode_segment("a b?x=1"), "a%20b%3Fx%3D1");
+    }
 
     #[test]
     fn readiness_carries_the_reason() {

@@ -25,6 +25,7 @@ pub mod markets;
 pub mod predictors;
 pub mod research;
 pub mod settings;
+pub mod visuals;
 pub mod workforce;
 
 use crate::cmd::Command;
@@ -140,7 +141,7 @@ pub struct Selected {
     pub blotter: bool,
 }
 
-/// The nine views, alive for the life of the process.
+/// The ten views, alive for the life of the process.
 pub struct Views {
     atlas: atlas::AtlasView,
     desk: desk::DeskView,
@@ -151,6 +152,7 @@ pub struct Views {
     workforce: workforce::WorkforceView,
     audit: audit::AuditView,
     settings: settings::SettingsView,
+    visuals: visuals::VisualsView,
     /// The pane the last frame drew, so a view can be told it has been
     /// re-entered.
     ///
@@ -181,6 +183,7 @@ impl Views {
             workforce: workforce::WorkforceView::default(),
             audit: audit::AuditView::default(),
             settings: settings::SettingsView::default(),
+            visuals: visuals::VisualsView::default(),
             // `None`, not the first view: the frame that draws the pane a
             // client opens on is an entry too, and a pane that assumed it was
             // already showing would skip its own reset exactly once.
@@ -328,6 +331,7 @@ impl Views {
             ViewId::Workforce => &self.workforce,
             ViewId::Audit => &self.audit,
             ViewId::Settings => &self.settings,
+            ViewId::Visuals => &self.visuals,
         }
     }
 
@@ -342,6 +346,7 @@ impl Views {
             ViewId::Workforce => &mut self.workforce,
             ViewId::Audit => &mut self.audit,
             ViewId::Settings => &mut self.settings,
+            ViewId::Visuals => &mut self.visuals,
         }
     }
 }

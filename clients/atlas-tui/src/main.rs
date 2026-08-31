@@ -467,6 +467,14 @@ fn ingest(
                         poller.news();
                         poller.method();
                     }
+                    // And on VISUALS: the registry is a walk over the owner's
+                    // own package, so nothing but a deploy changes it and no
+                    // beat would ever re-read it. The *drawing* is not
+                    // re-asked — the operator chose which one they wanted, and
+                    // `r` must not silently render something else.
+                    if store.nav.view == ViewId::Visuals {
+                        poller.visuals();
+                    }
                 }
                 // A read, and the only one a keystroke asks for. The store
                 // decides whether asking again could learn anything — the
@@ -478,6 +486,11 @@ fn ingest(
                 // arm below dispatches to the *writer*, and a read that reached
                 // it would be a request this command never meant.
                 Some(Command::Backends) => {}
+                // The other read a keystroke asks for, and its own arm for the
+                // same reason: the arm below dispatches to the *writer*, and a
+                // read that reached it would be a request this command never
+                // meant. The pane has already recorded what it is waiting on.
+                Some(Command::RenderVisual(name)) => poller.visual(&name),
                 // The two hand-offs. Recorded, not performed: this function has
                 // no terminal, and the loop above is what owns the screen the
                 // child is about to want. Above the dispatch arm for the same
@@ -513,6 +526,9 @@ fn ingest(
                     poller.news();
                     poller.method();
                 }
+                if store.nav.view == ViewId::Visuals {
+                    poller.visuals();
+                }
             }
         }
     }
@@ -540,6 +556,9 @@ fn ingest(
             if store.nav.view == ViewId::Settings {
                 poller.news();
                 poller.method();
+            }
+            if store.nav.view == ViewId::Visuals {
+                poller.visuals();
             }
         }
     }

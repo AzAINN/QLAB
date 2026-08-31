@@ -12,7 +12,7 @@ expression: "settings_from(r#\"{\"llm\": {}, \"policy\": {\"constraints\": {}}, 
 " 7 WORK │                                                                             │▌ BREADTH                        "
 " 8 AUDIT│                                                                             │ --                              "
 "▌9 SETT │                                                                             │ adv -- / dec --                 "
-"        │ read-only — cannot switch the desk   read-only — cannot change what is read │                                 "
+" 0 VIS  │ read-only — cannot switch the desk   read-only — cannot change what is read │                                 "
 "        │▌ METHOD                               ▌ SYSTEM                              │▌ MOVERS                         "
 "        │ nothing has said how this desk solves  desk         --                      │ --                              "
 "        │                                        provenance   --                      │                                 "

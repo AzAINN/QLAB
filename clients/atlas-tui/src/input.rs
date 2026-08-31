@@ -126,7 +126,7 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 22] = [
+    pub const ALL: [Source; 23] = [
         Source::Shell,
         Source::Command,
         Source::Help,
@@ -141,6 +141,7 @@ impl Source {
         Source::WorkforcePicker,
         Source::View(ViewId::Audit),
         Source::View(ViewId::Settings),
+        Source::View(ViewId::Visuals),
         Source::SettingsLogin,
         Source::SettingsModels,
         Source::SettingsLane,
@@ -222,6 +223,9 @@ impl Source {
             // SETT's `View::on_key` only forwards; `keys` is the router, and
             // the form under it is the section below.
             Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "keys"),
+            // VIS routes everything from `on_key` itself: two panes, one
+            // router, and every key on it a read.
+            Source::View(ViewId::Visuals) => ("ui/views/visuals.rs", "", "on_key"),
             Source::SettingsLogin => ("ui/views/settings.rs", "", "form_key"),
             Source::SettingsModels => ("ui/views/settings.rs", "", "switch_key"),
             Source::SettingsLane => ("ui/views/settings.rs", "", "lane_key"),
@@ -301,7 +305,7 @@ pub const KEYMAP: &[Binding] = &[
         Source::Shell,
         "refresh now, without waiting for the poll",
     ),
-    b("Char(c)", "1–9", Source::Shell, "show that view"),
+    b("Char(c)", "1–9, 0", Source::Shell, "show that view"),
     b("Tab", "Tab", Source::Shell, "the next view"),
     b("BackTab", "Shift-Tab", Source::Shell, "the previous view"),
     b(
@@ -556,6 +560,61 @@ pub const KEYMAP: &[Binding] = &[
         "R",
         Source::View(ViewId::Audit),
         "reject it — R, because the shell owns lowercase r",
+    ),
+    // -- VIS --------------------------------------------------------------
+    //
+    // Every row here is `b` and not `w`. Reading a drawing the owner already
+    // made changes nothing, so a glass window is offered all six — the posture
+    // filter removes what a window would *refuse*, and this pane refuses none
+    // of it.
+    b("Up", "↑", Source::View(ViewId::Visuals), "the visual above"),
+    b(
+        "Down",
+        "↓",
+        Source::View(ViewId::Visuals),
+        "the visual below",
+    ),
+    b(
+        "Enter",
+        "Enter",
+        Source::View(ViewId::Visuals),
+        "render the one under the cursor — the owner draws it, nothing is run",
+    ),
+    b(
+        "PageUp",
+        "PgUp",
+        Source::View(ViewId::Visuals),
+        "a page of the drawing up",
+    ),
+    b(
+        "PageDown",
+        "PgDn",
+        Source::View(ViewId::Visuals),
+        "a page down",
+    ),
+    b(
+        "Char('k')",
+        "k",
+        Source::View(ViewId::Visuals),
+        "the drawing, one line up",
+    ),
+    b(
+        "Char('j')",
+        "j",
+        Source::View(ViewId::Visuals),
+        "one line down",
+    ),
+    b(
+        "Char('h')",
+        "h",
+        Source::View(ViewId::Visuals),
+        "the drawing, one column left — art is never re-wrapped to fit",
+    ),
+    b(
+        "Char('l')",
+        "l",
+        Source::View(ViewId::Visuals),
+        "one column right",
     ),
     // -- SETT -------------------------------------------------------------
     //

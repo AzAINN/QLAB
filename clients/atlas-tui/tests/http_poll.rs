@@ -21,6 +21,8 @@ enum Seen {
     Snapshot,
     Regime,
     Backends,
+    Visuals(usize),
+    Visual(String),
     Proposal(bool),
     Malformed(String),
     Other,
@@ -33,6 +35,11 @@ fn seen(ev: &AppEvent) -> Seen {
         AppEvent::Snapshot(_) => Seen::Snapshot,
         AppEvent::RegimePanel(_) => Seen::Regime,
         AppEvent::Backends(_) => Seen::Backends,
+        AppEvent::Visuals(list) => Seen::Visuals(list.len()),
+        // The name that was *asked for*, not one read off the payload: a
+        // refusal carries no payload, and which drawing was declined is the
+        // whole fact the pane needs.
+        AppEvent::Visual(answer) => Seen::Visual(answer.asked.clone()),
         // Both answers, kept apart: `{"proposal": null}` is the owner saying
         // the desk has no open question, which is what retires a card, and a
         // test that could not tell it from a payload that never arrived could
@@ -511,8 +518,8 @@ async fn a_nudge_and_a_catalog_request_that_arrive_together_are_both_served() {
 
         drain_until(&mut rx, |ev| *ev == Seen::Snapshot, Duration::from_secs(5)).await;
         let polls = owner.asked_for("/api/tui").len();
-        poller.refetch.send(first).expect("poller alive");
-        poller.refetch.send(second).expect("poller alive");
+        poller.refetch.send(first.clone()).expect("poller alive");
+        poller.refetch.send(second.clone()).expect("poller alive");
 
         // Inside the cadence, deliberately: waited out to the beat the desk
         // poll arrives on its own, and the nudge assertion would pass on a
@@ -610,4 +617,95 @@ async fn a_desk_with_no_open_question_says_so_on_the_bus() {
         seen.contains(&Seen::Proposal(false)),
         "an empty proposal never reached the bus: {seen:?}"
     );
+}
+
+#[tokio::test]
+async fn the_visuals_registry_and_one_drawing_are_asked_for_and_never_on_the_beat() {
+    // Both routes, together, because they are one seam: the list names what
+    // may be rendered and the render is a path built from a name in it. And
+    // neither may ride the cadence — the registry is a walk over the owner's
+    // own package, and a drawing is work it does per request.
+    let owner = spawn_owner(vec![
+        ready(),
+        snapshot_fixture(),
+        (
+            "/api/visuals",
+            r#"{"visuals": [{"name": "quantum_circuit", "title": "angle/ZZ feature map"}]}"#
+                .to_string(),
+        ),
+        (
+            "/api/visuals/quantum_circuit",
+            r#"{"name": "quantum_circuit", "title": "angle/ZZ feature map",
+                "text": "x0 |0> --[ RY(θ0) ]------", "params": {"kernel": "angle"}}"#
+                .to_string(),
+        ),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let poller = spawn_poller(owner.base.clone(), true, tx);
+
+    // Settle the first cycle so the assertions below are about the requests
+    // this test made rather than about startup.
+    drain_until(&mut rx, |ev| *ev == Seen::Snapshot, Duration::from_secs(5)).await;
+    assert!(
+        owner.asked_for("/api/visuals").is_empty(),
+        "the registry was fetched on the beat: {:?}",
+        owner.targets()
+    );
+
+    poller.visuals();
+    let seen = drain_until(
+        &mut rx,
+        |ev| matches!(ev, Seen::Visuals(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(seen.contains(&Seen::Visuals(1)), "{seen:?}");
+
+    poller.visual("quantum_circuit");
+    let seen = drain_until(
+        &mut rx,
+        |ev| matches!(ev, Seen::Visual(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        seen.contains(&Seen::Visual("quantum_circuit".to_string())),
+        "{seen:?}"
+    );
+    // The path is the owner's own route with the name as one segment — no
+    // query, because this half sends no params.
+    assert!(
+        owner
+            .targets()
+            .contains(&"/api/visuals/quantum_circuit".to_string()),
+        "{:?}",
+        owner.targets()
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_visual_comes_back_as_a_refusal_and_never_as_a_dead_owner() {
+    // The canned owner 404s any path it was not given, which is exactly the
+    // shape the real route answers an unknown name with. The distinction under
+    // test is that this reaches the bus as an *answer*: a client that folded it
+    // into "the owner did not respond" would send the operator to restart a
+    // process that is working exactly as designed.
+    let owner = spawn_owner(vec![ready(), snapshot_fixture()]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let poller = spawn_poller(owner.base.clone(), true, tx);
+    drain_until(&mut rx, |ev| *ev == Seen::Snapshot, Duration::from_secs(5)).await;
+
+    poller.visual("circut");
+    let seen = drain_until(
+        &mut rx,
+        |ev| matches!(ev, Seen::Visual(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        seen.contains(&Seen::Visual("circut".to_string())),
+        "{seen:?}"
+    );
+    // And the owner is still up: a refusal is not a dropped feed.
+    assert!(!seen.contains(&Seen::ConnDown), "{seen:?}");
 }

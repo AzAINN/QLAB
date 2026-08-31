@@ -1,7 +1,7 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
 use crate::model::{
     LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, Proposal, QualitativeMatrix,
-    RegimePanel, Snapshot, Template,
+    RegimePanel, Snapshot, Template, VisualAnswer, VisualEntry,
 };
 
 pub enum AppEvent {
@@ -77,6 +77,23 @@ pub enum AppEvent {
     /// entry would go on offering to book a question the desk had already
     /// withdrawn. Boxed because the payload carries the whole target vector.
     Proposal(Option<Box<Proposal>>),
+    /// What the owner can draw, from `/api/visuals`.
+    ///
+    /// Fetched when the VISUALS view is entered and on `r` there, on
+    /// `PredictorDetail`'s terms and for a stronger version of its reason: the
+    /// registry is a walk over the owner's own package, so it changes when the
+    /// owner is deployed and a cadence would re-read one answer forever.
+    Visuals(Vec<VisualEntry>),
+    /// One rendered visual, from `/api/visuals/<name>`.
+    ///
+    /// Asked for by a keystroke and never by a beat: rendering is work the
+    /// owner does per request, and the operator chose which drawing they
+    /// wanted. It carries a refusal as an answer rather than as a failure —
+    /// a 404 for an unknown name and a 400 for params the drawer would not
+    /// take are both the owner having *considered* the request, and folding
+    /// either into "the owner did not answer" would send the operator to
+    /// restart a process that is working exactly as designed.
+    Visual(Box<VisualAnswer>),
     Sse(SseEvent),
     Http(HttpResult),
     ConnUp(Channel),

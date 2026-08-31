@@ -13,7 +13,7 @@ use crate::glyph::Mood;
 use crate::model::{
     Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig,
     MethodSettings, NewsSettings, Plan, Policy, PredictorDetail, QualitativeMatrix, RegimePanel,
-    Run, Snapshot, System, Template, Workflow,
+    Run, Snapshot, System, Template, VisualAnswer, VisualEntry, Workflow,
 };
 use crate::net::http;
 use crate::ui::door::Door;
@@ -80,7 +80,7 @@ pub enum Trigger {
     AuditEvent(String),
 }
 
-/// The eight views, in nav-rail order.
+/// The ten views, in nav-rail order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewId {
     /// The desk manager's own pane: the conversation with Atlas, beside the
@@ -103,12 +103,19 @@ pub enum ViewId {
     Workforce,
     Audit,
     Settings,
+    /// What a build produced, drawn: the owner's registered text visuals, and
+    /// whichever one the operator asked it to render. Last on the rail because
+    /// it is the newest surface and the rail's order is the numbering an
+    /// operator has learned — inserting it beside PRED, where it belongs by
+    /// subject, would silently renumber four panes underneath a hand that
+    /// already knows where they are.
+    Visuals,
 }
 
 impl ViewId {
     /// Nav order. The digit keys index this, so it is also the numbering an
     /// operator sees — the two cannot drift apart.
-    pub const ALL: [ViewId; 9] = [
+    pub const ALL: [ViewId; 10] = [
         ViewId::Atlas,
         ViewId::Desk,
         ViewId::Markets,
@@ -118,6 +125,7 @@ impl ViewId {
         ViewId::Workforce,
         ViewId::Audit,
         ViewId::Settings,
+        ViewId::Visuals,
     ];
 
     /// At most five cells: the nav rail is eight wide and spends three of them
@@ -133,6 +141,22 @@ impl ViewId {
             ViewId::Workforce => "WORK",
             ViewId::Audit => "AUDIT",
             ViewId::Settings => "SETT",
+            ViewId::Visuals => "VIS",
+        }
+    }
+
+    /// The key that shows this view, and the character the rail prints beside
+    /// its label.
+    ///
+    /// A method rather than `index() + 1` spelled at each site, because the
+    /// tenth view has no tenth digit: it is `0`, which is both the last free
+    /// key on the row and the only one that still fits the rail's single
+    /// column. The rail and [`from_digit`] read this same function, so what is
+    /// printed and what is accepted cannot drift.
+    pub fn digit(self) -> char {
+        match self.index() {
+            9 => '0',
+            n => char::from_digit(n as u32 + 1, 10).unwrap_or('?'),
         }
     }
 
@@ -142,11 +166,7 @@ impl ViewId {
     }
 
     pub fn from_digit(digit: char) -> Option<ViewId> {
-        let n = digit.to_digit(10)? as usize;
-        if n == 0 {
-            return None;
-        }
-        ViewId::ALL.get(n - 1).copied()
+        ViewId::ALL.iter().copied().find(|id| id.digit() == digit)
     }
 
     /// Cycling wraps in both directions: an operator holding Tab must never
@@ -460,6 +480,23 @@ pub struct Store {
     /// No arrival stamp either, for `news`' reason: the fetch is edge-triggered
     /// on entering the pane, on `r` there, and on the card's own POST.
     method: Option<MethodSettings>,
+    /// What the owner can draw, fetched when VISUALS opens.
+    ///
+    /// `None` is "not asked yet or not answered yet"; `Some([])` is the owner
+    /// having answered that it registers no visuals. The pane keeps the two
+    /// apart, because only the second is a fact about the desk — the first is
+    /// a fact about this client, with a different remedy.
+    visuals: Option<Vec<VisualEntry>>,
+    /// The one drawing this window has asked for and not yet heard about.
+    ///
+    /// Separate from the answer below rather than folded into an `Option`,
+    /// because "asking for the circuit" and "holding last week's circuit" are
+    /// both states with a drawing on screen, and a pane that could not tell
+    /// them apart would render a stale picture as the answer to a fresh
+    /// question.
+    visual_asking: Option<String>,
+    /// The last answer to a render request, refusals included.
+    visual: Option<VisualAnswer>,
     /// The qualitative matrix, fetched on its own slow beat.
     ///
     /// `None` is "not asked yet or not answered yet". RESEARCH keeps that
@@ -661,6 +698,9 @@ impl Store {
             backends: None,
             backends_at: None,
             predictor_detail: None,
+            visuals: None,
+            visual_asking: None,
+            visual: None,
             news: None,
             method: None,
             qualitative: None,
@@ -830,6 +870,22 @@ impl Store {
             // different runs as one evaluation nobody performed.
             AppEvent::PredictorDetail(detail) => {
                 self.predictor_detail = Some(*detail);
+                self.dirty = true;
+            }
+            // Replaced wholesale like the board: the route serves the whole
+            // registry, and a visual the owner stopped registering is one this
+            // client must stop offering to render.
+            AppEvent::Visuals(list) => {
+                self.visuals = Some(list);
+                self.dirty = true;
+            }
+            // The answer clears the question whatever shape it came in.
+            // Clearing only on a drawing would leave a refused render showing
+            // "asking the owner" forever, over the sentence that explains why
+            // no drawing is coming.
+            AppEvent::Visual(answer) => {
+                self.visual_asking = None;
+                self.visual = Some(*answer);
                 self.dirty = true;
             }
             // Replaced wholesale for the same reason: the route serves the
@@ -1120,6 +1176,36 @@ impl Store {
     /// the two apart.
     pub fn predictor_detail(&self) -> Option<&PredictorDetail> {
         self.predictor_detail.as_ref()
+    }
+
+    /// What the owner can draw, if VISUALS has fetched the list.
+    ///
+    /// `None` is "not asked yet or not answered yet"; an empty slice is the
+    /// owner's own answer that it registers nothing. Two sentences on the
+    /// pane, because they have two different remedies.
+    pub fn visuals(&self) -> Option<&[VisualEntry]> {
+        self.visuals.as_deref()
+    }
+
+    /// The drawing this window is waiting on, if it is waiting on one.
+    pub fn visual_asking(&self) -> Option<&str> {
+        self.visual_asking.as_deref()
+    }
+
+    /// The last answer to a render request — a drawing or the owner's refusal.
+    pub fn visual(&self) -> Option<&VisualAnswer> {
+        self.visual.as_ref()
+    }
+
+    /// Record that this window has asked the owner to draw `name`.
+    ///
+    /// Set by the pane that asks rather than by the runtime that sends, so the
+    /// "asking…" line and the request are one act: a flag set beside the
+    /// dispatch in `main.rs` would live in the one module no test binary
+    /// compiles, and invariant 10 has already been paid for three times here.
+    pub fn ask_visual(&mut self, name: &str) {
+        self.visual_asking = Some(name.to_string());
+        self.dirty = true;
     }
 
     /// What the desk reads the news from, if SETTINGS has fetched it.
@@ -2942,20 +3028,25 @@ mod tests {
         // the deliberate renumbering of everything after it, pinned here.
         assert_eq!(ViewId::from_digit('6'), Some(ViewId::Predictors));
         assert_eq!(ViewId::from_digit('9'), Some(ViewId::Settings));
-        assert_eq!(ViewId::from_digit('0'), None, "there is no view zero");
+        // The tenth view takes the last free key on the row, and it is the
+        // only one that still fits the rail's single digit column. There is no
+        // view eleven, and a two-character key is not a key.
+        assert_eq!(ViewId::from_digit('0'), Some(ViewId::Visuals));
         for (i, id) in ViewId::ALL.iter().enumerate() {
-            assert_eq!(
-                ViewId::from_digit(char::from_digit(i as u32 + 1, 10).unwrap()),
-                Some(*id)
-            );
+            // Round-tripped through `digit` rather than through `i + 1`, which
+            // is the arithmetic that stops being the numbering at the tenth
+            // pane — the rail prints this same function.
+            assert_eq!(ViewId::from_digit(id.digit()), Some(*id));
+            assert!(id.digit().is_ascii_digit(), "{id:?} has no key");
+            assert!(i < 10, "the rail has run out of digits");
             assert!(
                 id.label().chars().count() <= 5,
                 "{id:?} does not fit the rail"
             );
         }
         // Wrapping in both directions: a wall would read as a hung client.
-        assert_eq!(ViewId::Settings.next(), ViewId::Atlas);
-        assert_eq!(ViewId::Atlas.prev(), ViewId::Settings);
+        assert_eq!(ViewId::Visuals.next(), ViewId::Atlas);
+        assert_eq!(ViewId::Atlas.prev(), ViewId::Visuals);
     }
 
     /// One durable bus frame, as `net::sse` hands it over.

@@ -302,6 +302,15 @@ pub enum Command {
     /// same way `Scope::Mode`'s value list is compiled into a glass build and
     /// never reached there.
     Backends,
+    /// Ask the owner to draw one of its registered visuals.
+    ///
+    /// A read, and ungated for that reason: the route renders text from
+    /// parameters and touches no registry row, no plan and no approval, so a
+    /// glass window may ask for it exactly as it may ask what the backends
+    /// serve. It carries a *name* the owner itself served in
+    /// `/api/visuals` — never a path — and the poller is what turns one into a
+    /// request, so nothing here can aim this client anywhere.
+    RenderVisual(String),
 }
 
 /// The one field of the mandate a METHOD change carries.
@@ -485,6 +494,7 @@ impl PartialEq for Command {
             #[cfg(feature = "operator")]
             (Command::OpenBuild(a), Command::OpenBuild(b)) => a == b,
             (Command::Backends, Command::Backends) => true,
+            (Command::RenderVisual(a), Command::RenderVisual(b)) => a == b,
             _ => false,
         }
     }

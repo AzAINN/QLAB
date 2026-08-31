@@ -169,6 +169,7 @@ fn tab_cycles_the_views_and_wraps_in_both_directions() {
         ViewId::Workforce,
         ViewId::Audit,
         ViewId::Settings,
+        ViewId::Visuals,
         ViewId::Atlas,
         ViewId::Desk,
     ] {

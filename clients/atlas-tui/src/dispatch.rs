@@ -179,6 +179,7 @@ mod armed {
             Command::Quit => "quit".to_string(),
             Command::Refresh => "refresh".to_string(),
             Command::Backends => "read the backends".to_string(),
+            Command::RenderVisual(name) => format!("draw {name}"),
             Command::RunLine(_) => "run a palette line".to_string(),
             Command::Approve(id) => format!("approve {id}"),
             Command::RequestApproval(plan) => format!("open an approval for {plan}"),
@@ -642,6 +643,7 @@ mod armed {
             Command::Quit
             | Command::Refresh
             | Command::Backends
+            | Command::RenderVisual(_)
             | Command::RunLine(_)
             | Command::OpenCli
             | Command::OpenBuild(_) => return None,

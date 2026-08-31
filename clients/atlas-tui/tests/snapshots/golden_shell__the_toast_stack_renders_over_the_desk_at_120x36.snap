@@ -12,7 +12,7 @@ expression: "frame_with_toasts(&store, &toast_queue(now), 120, 36, now +\nDurati
 " 7 WORK │  below its threshold for five ▌ REGIME                ▌ ALERTS        │pl-42 is waiting on a human           │"
 " 8 AUDIT│  sessions.                    STATE    UNCERTAIN      TIER     NONE   └──────────────────────────────────────┘"
 " 9 SETT │                               DETECTOR CALM           HEADROOM 0.0%   ┌──────────────────────────────────────┐"
-"        │OBSERVATIONS                   SIG/THR  9.2% / 11.1%   VOL/LIM  10.1% /│● DESK HALTED                       1s│"
+" 0 VIS  │OBSERVATIONS                   SIG/THR  9.2% / 11.1%   VOL/LIM  10.1% /│● DESK HALTED                       1s│"
 "        │▌ Indicator panel reads stress CONF     66.7%          GATE     1 REFUS│the live book is halted: tool         │"
 "        │  with 3 of 5 detectors                                  est_cost 41bp └──────────────────────────────────────┘"
 "        │  agreeing.                                              exceeds the 25bp    │ ▼ worst XLK    -2.08%           "

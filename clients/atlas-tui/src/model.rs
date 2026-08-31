@@ -1507,3 +1507,97 @@ pub struct MatrixRow {
     #[serde(default, deserialize_with = "null_or_default")]
     pub claim_keys: Vec<String>,
 }
+
+// -- /api/visuals ----------------------------------------------------------
+
+/// What the owner can draw, from `GET /api/visuals`.
+///
+/// Its own payload rather than a section of the snapshot, for [`NewsSettings`]'
+/// reason: the registry is a walk over `qlab/visuals/`, it changes when the
+/// owner is *deployed* rather than when the desk moves, and `/api/tui` carries
+/// none of it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VisualsList {
+    /// The owner's own order, which is by name. Not re-sorted here: a second
+    /// ordering rule would be this client's opinion about a registry the owner
+    /// owns, and the operator's cursor is an index into what was served.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub visuals: Vec<VisualEntry>,
+    /// Anything the owner grew that this client does not model yet, kept whole
+    /// for the reason `Snapshot::extra` is.
+    #[serde(flatten)]
+    pub extra: Value,
+}
+
+/// One registered visual: the id the route takes, and the title it carries.
+///
+/// Both optional for this module's own rule. A name this client cannot read is
+/// a row it must not offer to render — there is nothing to put in the path —
+/// and the list pane says so rather than sending an empty id.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VisualEntry {
+    pub name: Option<String>,
+    pub title: Option<String>,
+}
+
+/// One rendered visual, from `GET /api/visuals/<name>`.
+///
+/// `text` is the drawing, already laid out by the owner's own renderer, and it
+/// is rendered here **verbatim**: the drawer aligns its gate columns across
+/// wires of uneven name length, so a client that re-wrapped or trimmed the
+/// lines would draw a circuit whose gates no longer line up over the qubits
+/// they act on.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Visual {
+    pub name: Option<String>,
+    pub title: Option<String>,
+    pub text: Option<String>,
+    /// What the owner actually rendered with, its own answer rather than the
+    /// query this client sent. Carried whole and untyped because the params a
+    /// visual takes are the *visual's* vocabulary — the circuit's three keys
+    /// are not the next one's — and a client that modeled one drawer's shape
+    /// would reject the second visual the desk registers.
+    #[serde(default)]
+    pub params: Value,
+    /// Anything the owner grew that this client does not model yet, kept whole
+    /// for the reason `Snapshot::extra` is.
+    #[serde(flatten)]
+    pub extra: Value,
+}
+
+/// The owner's refusal body: an unknown visual (404) or params it would not
+/// take (400).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VisualError {
+    pub error: Option<String>,
+}
+
+/// The answer to one render request, tied to the name that asked for it.
+///
+/// The asked-for name rides along rather than being read off the payload,
+/// because a refusal has no payload to read it off: the pane has to be able to
+/// say *which* visual the owner declined, and a 404 body names the known ones
+/// rather than the unknown one.
+#[derive(Debug, Clone)]
+pub struct VisualAnswer {
+    pub asked: String,
+    pub result: VisualResult,
+}
+
+/// What came back: a drawing, or the owner's sentence about why not.
+///
+/// Two variants and not an `Option<Visual>` beside an error string, because a
+/// pane holding both could draw a stale circuit under a fresh refusal — which
+/// is the "the owner declined and here is the picture anyway" reading that
+/// makes a refusal invisible.
+#[derive(Debug, Clone)]
+pub enum VisualResult {
+    Drawn(Box<Visual>),
+    /// The owner answered, considered it, and said no. `status` is kept beside
+    /// the sentence because 404 and 400 are different fixes — an unknown name
+    /// against params a known drawer would not take — and the pane says which.
+    Refused {
+        status: u16,
+        said: String,
+    },
+}

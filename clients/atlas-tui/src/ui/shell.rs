@@ -39,7 +39,7 @@ use ratatui::{
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
-/// Exactly wide enough for `▌6 AUDIT` — the active marker, the digit, a space,
+/// Exactly wide enough for `▌8 AUDIT` — the active marker, the digit, a space,
 /// and the longest label. Widening it would take cells from the content.
 ///
 /// Public because the golden harness crops a frame down to the columns a view
@@ -704,8 +704,7 @@ fn draw_nav(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
     fill(f, area, t.bg_surface);
     let lines: Vec<Line> = ViewId::ALL
         .iter()
-        .enumerate()
-        .map(|(i, id)| {
+        .map(|id| {
             let active = *id == store.nav.view;
             // The marker is a glyph, not only a colour: on a 256-colour
             // terminal the highlight is a shade, and a shade is not an answer
@@ -728,7 +727,10 @@ fn draw_nav(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {
                         t.bg_surface
                     }),
                 ),
-                Span::styled(format!("{} {:<5}", i + 1, id.label()), style),
+                // `id.digit()`, not `i + 1`: the tenth pane's key is `0`, and
+                // a rail that counted would print a two-character number into
+                // a one-character column and offer a key nothing accepts.
+                Span::styled(format!("{} {:<5}", id.digit(), id.label()), style),
             ])
         })
         .collect();

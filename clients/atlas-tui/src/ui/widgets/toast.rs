@@ -549,6 +549,42 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
         Wrote::NewsRefused { said } => {
             Toast::new(Level::Warn, "news sources refused", said.clone())
         }
+        // The owner's own merged pair, never the request's: a cap the mandate
+        // clamped and a method the overrides resolved differently would both
+        // read as applied-as-typed in a receipt composed here.
+        //
+        // `Warn` when the owner warned. A cap the effective method will refuse
+        // *applied* — the owner's ruling is warn rather than refuse — so the
+        // sentence that says the next plan will be refused is the whole of the
+        // message, and an `Info` beside it would tone a broken mandate as a
+        // successful change.
+        Wrote::MethodSet {
+            policy,
+            cap,
+            warning,
+        } => {
+            let held = match cap {
+                Some(cap) => format!("at most {cap} names"),
+                None => "no holdings cap".to_string(),
+            };
+            Toast::new(
+                match warning {
+                    Some(_) => Level::Warn,
+                    None => Level::Info,
+                },
+                "desk method",
+                match warning {
+                    Some(warning) => format!("{policy} · {held} — {warning}"),
+                    None => format!("this desk solves with {policy} · {held}"),
+                },
+            )
+        }
+        // `Warn`, not `Alarm`: the desk considered the change and declined it,
+        // and nothing was written. The sentence carries the remedy — including
+        // the one that says a research-stage method is not promoted from here.
+        Wrote::MethodRefused { said } => {
+            Toast::new(Level::Warn, "desk method refused", said.clone())
+        }
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

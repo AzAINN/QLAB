@@ -461,10 +461,11 @@ fn ingest(
                         poller.predictors();
                     }
                     // Same rule on SETTINGS: `r` refreshes what the operator is
-                    // looking at, and the news answer rides no beat that would
-                    // ever refresh it otherwise.
+                    // looking at, and neither the news answer nor the method
+                    // rides a beat that would ever refresh them otherwise.
                     if store.nav.view == ViewId::Settings {
                         poller.news();
+                        poller.method();
                     }
                 }
                 // A read, and the only one a keystroke asks for. The store
@@ -510,6 +511,7 @@ fn ingest(
                 }
                 if store.nav.view == ViewId::Settings {
                     poller.news();
+                    poller.method();
                 }
             }
         }
@@ -537,6 +539,7 @@ fn ingest(
             }
             if store.nav.view == ViewId::Settings {
                 poller.news();
+                poller.method();
             }
         }
     }
@@ -555,6 +558,14 @@ fn ingest(
     #[cfg(feature = "operator")]
     if matches!(&ev, AppEvent::Wrote(atlas::bus::Wrote::NewsSaved { .. })) {
         poller.news();
+    }
+    // And the method, for the same reason and one more: the owner *merges* an
+    // override into the mandate and recomputes its cap warning on the way out,
+    // so what is now in force is a fact only its own answer holds. A card left
+    // drawing what it asked for would show a cap the mandate had clamped.
+    #[cfg(feature = "operator")]
+    if matches!(&ev, AppEvent::Wrote(atlas::bus::Wrote::MethodSet { .. })) {
+        poller.method();
     }
     // And the one surface that is *waiting* for an answer rather than being
     // told about one. The login form sends and then has to hear what the owner

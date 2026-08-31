@@ -23,7 +23,7 @@ mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
     use crate::net::write::{
-        Booked, Choice, Execution, Login, News, Proposed, Start, WriteClient, WriteError,
+        Booked, Choice, Execution, Login, Mandate, News, Proposed, Start, WriteClient, WriteError,
     };
     use crate::store::Posture;
     use std::sync::Arc;
@@ -198,6 +198,17 @@ mod armed {
                 false => "save the news sources".to_string(),
             },
             Command::SetLlm { surface, .. } => format!("point {surface} at a model"),
+            // What was asked for, in the operator's own terms. Two sentences
+            // rather than one, because the two are different decisions with
+            // different consequences and a failed write has to say which one
+            // did not land.
+            Command::SetMethod(change) => match change {
+                crate::cmd::MethodChange::Policy(id) => format!("solve with {id}"),
+                crate::cmd::MethodChange::Cap(Some(cap)) => format!("hold at most {cap} names"),
+                crate::cmd::MethodChange::Cap(None) => {
+                    "clear the holdings cap this desk was given".to_string()
+                }
+            },
             // The task, because that is what was approved. The template id is
             // the word an operator typed; the task is the row the owner
             // refuses or starts, and a refusal naming the other one cannot be
@@ -535,6 +546,30 @@ mod armed {
                     },
                 }
             }
+            // Not a governance decision either, and it books nothing: it
+            // chooses how the desk *solves*. The owner owns the catalog and the
+            // mandate — it refuses a method it does not know, one that is still
+            // research stage, and a cap outside the universe — so the change is
+            // sent whole and the owner's own sentence comes back either way.
+            Command::SetMethod(change) => match client.set_method(&change).await {
+                Ok(Mandate::Applied {
+                    policy,
+                    cap,
+                    warning,
+                }) => Wrote::MethodSet {
+                    policy,
+                    cap,
+                    warning,
+                },
+                // A considered no, not a broken request: the owner's 400
+                // carries the remedy — including the one sentence that says a
+                // research-stage method is not promoted by a desk setting.
+                Ok(Mandate::Rejected(said)) => Wrote::MethodRefused { said },
+                Err(err) => Wrote::Failed {
+                    what: names(&Command::SetMethod(change)),
+                    said: err.to_string(),
+                },
+            },
             Command::TestAlpaca => match client.test_alpaca().await {
                 Ok(verdict) => Wrote::Tested {
                     ok: verdict.ok,

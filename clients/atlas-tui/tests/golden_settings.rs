@@ -203,7 +203,7 @@ fn every_card_answers_for_itself_and_no_card_is_marked_as_listening() {
     // failure the MODELS stamp was moved to the top over.
     let frame = settings().frame(120, 36);
     let body = content(&frame);
-    // Seven cards, seven statements, and the two that carry keys in an armed
+    // Eight cards, eight statements, and the ones that carry keys in an armed
     // window get the specific ones: a glass window points the desk nowhere and
     // changes nothing about what it reads.
     assert!(
@@ -216,8 +216,8 @@ fn every_card_answers_for_itself_and_no_card_is_marked_as_listening() {
     );
     assert_eq!(
         body.matches("read-only").count(),
-        7,
-        "one footer per card, and this pane draws seven:\n{body}"
+        8,
+        "one footer per card, and this pane draws eight:\n{body}"
     );
     // And nothing is tinted. Focus is where a key would land, so a window with
     // no keys marks no card — a highlight that never moves under the arrows
@@ -931,12 +931,15 @@ mod cards {
         );
         assert_eq!(body.matches("a login · t test").count(), 1, "{body}");
 
-        // One card down is NEWS, which has keys of its own — and two down is
-        // POLICY, which has none at all and says so rather than going quiet:
-        // silence and "there is nothing here" are the two readings this pane
-        // spends rows to keep apart.
+        // One card down is NEWS, which has keys of its own; two down is METHOD,
+        // which has two of its own; and three down is POLICY, which has none at
+        // all and says so rather than going quiet: silence and "there is
+        // nothing here" are the two readings this pane spends rows to keep
+        // apart.
         press(&mut client, KeyCode::Down);
         assert!(content(&client.frame(120, 36)).contains("s save"));
+        press(&mut client, KeyCode::Down);
+        assert!(content(&client.frame(120, 36)).contains("m method · k cap"));
         press(&mut client, KeyCode::Down);
         let body = content(&client.frame(120, 36));
         assert!(!body.contains("a login · t test"), "{body}");
@@ -2072,6 +2075,468 @@ mod news {
         let mut client = armed();
         on_news(&mut client);
         press(&mut client, KeyCode::Char('c'));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+}
+
+// -- how this desk solves, and how many names it may hold --------------------
+
+/// The method payload as the owner serves it, with no cap and nothing wrong.
+fn method_payload() -> atlas::model::MethodSettings {
+    serde_json::from_str(include_str!("fixtures/desk_method.json")).unwrap()
+}
+
+fn with_method(store: &mut Store, method: atlas::model::MethodSettings) {
+    store.apply(AppEvent::Method(Box::new(method)), Instant::now());
+}
+
+/// A glass window reads the whole card, and still cannot touch it.
+#[test]
+fn the_method_card_is_read_only_in_a_glass_window() {
+    let mut store = harness::fixture_store();
+    with_method(&mut store, method_payload());
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    let frame = client.frame(120, 36);
+    let body = content(&frame);
+    // What is in force: the id, the arm the predictor board calls it by, and
+    // the cap — which is `none` rather than a zero this pane invented.
+    let now = line_with(&frame, "solving");
+    assert!(now.contains("hrp"), "{now}");
+    assert!(now.contains("B2"), "{now}");
+    assert!(now.contains("cap none"), "{now}");
+    // What may be chosen, with the owner's own mark on the one in force.
+    assert!(body.contains("risk_parity"), "{body}");
+    assert!(body.contains("min_variance"), "{body}");
+    // And why the rest may not be. The stage is the owner's word, not this
+    // client's: the catalog has `offline` entries too.
+    assert!(
+        body.contains("not choosable — research stage"),
+        "the desk never said why a research method cannot be picked:\n{body}"
+    );
+    // The rule names no key, because this window would refuse every one.
+    assert!(
+        body.contains("read-only — cannot change the method"),
+        "{body}"
+    );
+    assert!(!body.contains("m method"), "{body}");
+}
+
+/// A cap of nothing is not the absence of a cap, and neither is a missing key.
+#[test]
+fn a_cap_the_owner_did_not_set_is_none_and_never_a_zero() {
+    let mut store = harness::fixture_store();
+    let mut method = method_payload();
+    method.current.max_holdings = Some(8);
+    with_method(&mut store, method);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    let frame = client.frame(120, 36);
+    assert!(line_with(&frame, "solving").contains("cap 8"), "{frame}");
+
+    // And with none, the word rather than a number.
+    let mut store = harness::fixture_store();
+    with_method(&mut store, method_payload());
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    let frame = client.frame(120, 36);
+    assert!(line_with(&frame, "solving").contains("cap none"), "{frame}");
+    assert!(!line_with(&frame, "solving").contains("cap 0"), "{frame}");
+}
+
+/// The owner's warning is the one thing on this card that is nowhere else, so
+/// it is what the lists yield to rather than the other way round.
+#[test]
+fn the_owners_cap_warning_is_drawn_whole_and_outranks_the_lists() {
+    let mut store = harness::fixture_store();
+    let mut method = method_payload();
+    method.current.max_holdings = Some(5);
+    method.warning = Some(
+        "Hierarchical risk parity holds every name; a cap of 5 will refuse its plans · a cap \
+         of 5 cannot reach 100% at a 40% per-asset cap; every plan will refuse"
+            .to_string(),
+    );
+    with_method(&mut store, method);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    let buf = client.buffer(120, 36);
+    let body = content(&client.frame(120, 36));
+    // Both clauses. The owner joins them with ` · ` and this client does not
+    // parse the sentence — half of it is a desk an operator believes is fine.
+    assert!(body.contains("holds every"), "{body}");
+    assert!(
+        body.contains("per-asset cap"),
+        "the second clause was cut:\n{body}"
+    );
+    // And it is toned as a warning rather than sitting in the run of the card.
+    assert_eq!(
+        body_style_of(&buf, "holds every").fg,
+        Some(Theme::truecolor().warning),
+        "the sentence that says the next plan will be refused is not a quiet fact"
+    );
+    // The entries gave way for it, and said in one line that they are there
+    // and that some of them are research stage — the picker carries every one
+    // of them whole, with the owner's rationale beside it.
+    assert!(
+        body.contains("3 to choose · 3 research stage"),
+        "the lists went silent instead of collapsing:\n{body}"
+    );
+}
+
+/// Nothing has answered yet is not a desk with no method.
+#[test]
+fn a_card_with_no_answer_yet_says_so_rather_than_inventing_a_method() {
+    let frame = settings().frame(120, 36);
+    assert!(
+        content(&frame).contains("nothing has said how this desk solves"),
+        "{frame}"
+    );
+}
+
+#[test]
+fn the_method_card_renders_read_only_at_120x36() {
+    let mut store = harness::fixture_store();
+    with_method(&mut store, method_payload());
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    insta::assert_snapshot!(client.frame(120, 36));
+}
+
+#[cfg(feature = "operator")]
+mod method {
+    use super::*;
+    use atlas::bus::Wrote;
+    use atlas::cmd::{Command, MethodChange};
+    use atlas::store::Posture;
+    use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+
+    fn armed_with(method: atlas::model::MethodSettings) -> Client {
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        with_method(&mut store, method);
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
+        client.frame(120, 36);
+        client
+    }
+
+    fn armed() -> Client {
+        armed_with(method_payload())
+    }
+
+    fn press(client: &mut Client, code: KeyCode) -> Option<Command> {
+        let acted = atlas::ui::shell::on_key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        );
+        client.frame(120, 36);
+        acted
+    }
+
+    fn click(client: &mut Client, column: u16, row: u16) -> Option<Command> {
+        let acted = atlas::ui::shell::on_mouse(
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut client.store,
+            &mut client.views,
+        );
+        client.frame(120, 36);
+        acted
+    }
+
+    /// The screen row a line is drawn on, so a click is aimed at what the
+    /// operator is looking at rather than at a coordinate worked out here.
+    fn row_of(client: &Client, needle: &str) -> u16 {
+        client
+            .frame(120, 36)
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row contains {needle}")) as u16
+    }
+
+    /// METHOD is the card after NEWS, which is the card after DESK.
+    fn on_method(client: &mut Client) {
+        press(client, KeyCode::Down);
+        press(client, KeyCode::Down);
+    }
+
+    #[test]
+    fn the_card_states_its_own_two_keys_and_the_pane_walks_onto_it() {
+        let mut client = armed();
+        on_method(&mut client);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("m method · k cap"), "{body}");
+    }
+
+    #[test]
+    fn the_picker_sends_the_id_the_operator_chose_and_nothing_else() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('m'));
+        let body = content(&client.frame(120, 36));
+        // It opens on what the desk already solves with, so Enter here changes
+        // nothing — the owner's own `current` mark, never an id match made in
+        // this client.
+        assert!(body.contains("HOW THIS DESK SOLVES"), "{body}");
+        press(&mut client, KeyCode::Down);
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::SetMethod(MethodChange::Policy(
+                "risk_parity".to_string()
+            ))),
+        );
+    }
+
+    /// The cursor cannot land on a research entry at all, which is a stronger
+    /// claim than a refusal made after Enter.
+    #[test]
+    fn a_research_entry_is_listed_and_can_never_be_chosen() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('m'));
+        let body = content(&client.frame(120, 36));
+        // Named, with the owner's own stage beside it — an operator who read
+        // the id in the catalog has to find it here rather than nowhere.
+        assert!(body.contains("cardinal_min_variance"), "{body}");
+        assert!(body.contains("not choosable — research stage"), "{body}");
+        // And the walk stops at the last operational entry, however far it is
+        // held down.
+        for _ in 0..12 {
+            press(&mut client, KeyCode::Down);
+        }
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::SetMethod(MethodChange::Policy(
+                "min_variance".to_string()
+            ))),
+            "the cursor reached a method the owner will not run"
+        );
+    }
+
+    #[test]
+    fn the_cap_box_sends_a_number_and_clears_on_an_empty_one() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        press(&mut client, KeyCode::Char('5'));
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::SetMethod(MethodChange::Cap(Some(5)))),
+        );
+
+        // An empty box clears the override rather than sending nothing: the
+        // owner reads `null` as "put the mandate's own cap back".
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::SetMethod(MethodChange::Cap(None))),
+        );
+
+        // And so does a typed zero, which is the other spelling an operator
+        // reaches for — and is never a cap of nothing.
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        press(&mut client, KeyCode::Char('0'));
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::SetMethod(MethodChange::Cap(None))),
+        );
+    }
+
+    #[test]
+    fn a_cap_above_the_universe_is_refused_here_with_the_number_still_in_the_box() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        // The fixture desk watches seven names.
+        press(&mut client, KeyCode::Char('9'));
+        press(&mut client, KeyCode::Char('9'));
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            None,
+            "a cap above the universe reached the owner"
+        );
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("watches 7 names"), "{body}");
+        // The box is still open with what was typed in it: the remedy is to
+        // type a different number, not to reopen and retype.
+        assert!(body.contains("99"), "the box lost what was typed:\n{body}");
+        // A number inside the bound goes — both sides of the guard, in the
+        // same box, because a refusal that also swallowed the good case would
+        // pass a test that only pressed the bad one.
+        press(&mut client, KeyCode::Backspace);
+        press(&mut client, KeyCode::Backspace);
+        press(&mut client, KeyCode::Char('5'));
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::SetMethod(MethodChange::Cap(Some(5)))),
+            "the refusal swallowed a cap the desk can hold"
+        );
+    }
+
+    #[test]
+    fn one_request_at_a_time_and_the_card_says_it_is_waiting() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        press(&mut client, KeyCode::Char('4'));
+        assert!(press(&mut client, KeyCode::Enter).is_some());
+        // A second Enter is refused out loud rather than queueing a second
+        // `mandate_override` row for one decision — and the box says so, which
+        // is where the operator is looking.
+        assert_eq!(press(&mut client, KeyCode::Enter), None);
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("asking the owner"),
+            "a second press said nothing:\n{body}"
+        );
+        // The card behind it is waiting too, so closing the box does not lose
+        // the fact that a request is out.
+        press(&mut client, KeyCode::Esc);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("asking the owner"), "{body}");
+        // And the key that would open a second decision is refused for the
+        // same reason, on the card rather than in a box.
+        assert_eq!(press(&mut client, KeyCode::Char('m')), None);
+        assert!(content(&client.frame(120, 36)).contains("asking the owner"));
+    }
+
+    #[test]
+    fn the_owners_refusal_stays_on_the_card_and_keeps_what_was_typed() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        press(&mut client, KeyCode::Char('3'));
+        assert!(press(&mut client, KeyCode::Enter).is_some());
+        client.views.wrote(&Wrote::MethodRefused {
+            said: "max_holdings must be between 1 and 20 (the size of the mandated universe)"
+                .to_string(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("between 1 and 20"), "{body}");
+        assert!(body.contains("3"), "the box lost what was typed:\n{body}");
+
+        // And an answer that says the desk moved closes it — what the card then
+        // draws is the owner's own refetched answer, not a copy of the request.
+        client.views.wrote(&Wrote::MethodSet {
+            policy: "hrp".to_string(),
+            cap: Some(3),
+            warning: None,
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(!body.contains("between 1 and 20"), "{body}");
+        assert!(!body.contains("asking the owner"), "{body}");
+    }
+
+    #[test]
+    fn a_click_on_a_stated_key_word_does_exactly_what_the_key_does() {
+        let mut client = armed();
+        on_method(&mut client);
+        let rule = row_of(&client, "m method · k cap");
+        let line = line_with(&client.frame(120, 36), "m method · k cap").to_string();
+        // Cells, not bytes: the frame is full of box-drawing characters and a
+        // byte offset would aim the click several columns short of the word.
+        let column = |word: &str| {
+            let byte = line
+                .find(word)
+                .unwrap_or_else(|| panic!("no {word} on {line}"));
+            line[..byte].chars().count() as u16
+        };
+
+        // The word `method` opens the picker, exactly as `m` does — the same
+        // `KeyCode` through the same router, so a click can never mean
+        // something the card does not say.
+        click(&mut client, column("method"), rule);
+        assert!(
+            content(&client.frame(120, 36)).contains("HOW THIS DESK SOLVES"),
+            "clicking `method` did not open the picker"
+        );
+        press(&mut client, KeyCode::Esc);
+
+        // And `cap` opens the box the key opens.
+        click(&mut client, column("cap"), rule);
+        assert!(
+            content(&client.frame(120, 36)).contains("HOW MANY NAMES"),
+            "clicking `cap` did not open the box:\n{}",
+            client.frame(120, 36)
+        );
+    }
+
+    /// Both keys exist only in a window the desk armed, and the overlay says so.
+    #[test]
+    fn the_two_keys_are_offered_only_where_they_would_be_answered() {
+        for code in ["Char('m')", "Char('k')"] {
+            assert!(
+                atlas::input::KEYMAP
+                    .iter()
+                    .filter(
+                        |binding| binding.code == code && binding.action.starts_with("on METHOD")
+                    )
+                    .all(|binding| binding.writes),
+                "{code} on METHOD is offered to a window that would refuse it"
+            );
+        }
+        // And `m` is claimed three times on this pane — the lane, the models
+        // and the method — which is legal because a key means whatever the
+        // focused card says it means, and is pinned here because it is the one
+        // collision on the workstation.
+        assert_eq!(
+            atlas::input::KEYMAP
+                .iter()
+                .filter(|binding| binding.code == "Char('m')"
+                    && binding.source == atlas::input::Source::View(atlas::store::ViewId::Settings))
+                .count(),
+            3,
+        );
+        // An unarmed window claims neither.
+        let mut client = armed();
+        client.store.posture = Posture::Glass;
+        assert_eq!(press(&mut client, KeyCode::Char('m')), None);
+        assert_eq!(press(&mut client, KeyCode::Char('k')), None);
+    }
+
+    #[test]
+    fn the_focused_method_card_renders_at_120x36() {
+        let mut client = armed();
+        on_method(&mut client);
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn the_method_picker_renders_at_120x36() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('m'));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn the_cap_box_renders_at_120x36() {
+        let mut client = armed();
+        on_method(&mut client);
+        press(&mut client, KeyCode::Char('k'));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn the_warned_method_card_renders_at_120x36() {
+        let mut method = method_payload();
+        method.current.max_holdings = Some(5);
+        method.warning = Some(
+            "Hierarchical risk parity holds every name; a cap of 5 will refuse its plans · a \
+             cap of 5 cannot reach 100% at a 40% per-asset cap; every plan will refuse"
+                .to_string(),
+        );
+        let mut client = armed_with(method);
+        on_method(&mut client);
         insta::assert_snapshot!(client.frame(120, 36));
     }
 }

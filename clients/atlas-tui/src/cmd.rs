@@ -250,6 +250,23 @@ pub enum Command {
         /// desk being read rather than about its own default.
         offline: bool,
     },
+    /// Choose the operational method this desk solves with, or the number of
+    /// names it may hold.
+    ///
+    /// **It changes what the desk *proposes*, never what it may book.** The
+    /// owner's route merges one of two keys into the mandate and answers with
+    /// the merged pair; it opens no plan, touches no approval and moves no
+    /// posture, and every gate between a plan and a fill is unmoved by it. What
+    /// it *can* do is make the next solve refuse — a cap below what the chosen
+    /// method holds is a warning here and a refused plan later — which is why
+    /// the owner's warning is carried back rather than dropped.
+    ///
+    /// One key per command, because the card sends one decision at a time and
+    /// the owner reports one `mandate_override` audit row per changed field: a
+    /// command that could carry both would let one keystroke produce two rows
+    /// nobody can tell apart afterwards.
+    #[cfg(feature = "operator")]
+    SetMethod(MethodChange),
     /// Open the real Claude CLI as Atlas, on this terminal.
     ///
     /// Not a request and not a write: the runtime hands the screen to a child
@@ -285,6 +302,25 @@ pub enum Command {
     /// same way `Scope::Mode`'s value list is compiled into a glass build and
     /// never reached there.
     Backends,
+}
+
+/// The one field of the mandate a METHOD change carries.
+///
+/// A sum rather than a struct of two `Option`s, because the owner accepts a
+/// *subset* and the two absent-shapes are not the same fact: "leave the method
+/// alone" and "clear the cap override" are both `None` in a struct, and the
+/// second is a request that changes the desk. The enum makes the pair
+/// unrepresentable, so nothing downstream can send an empty body the owner
+/// answers 400 to.
+///
+/// [`MethodChange::Cap`]'s own `None` is the clearing one: it sends
+/// `max_holdings: null`, which drops the override and puts the shipped
+/// mandate's value back in force.
+#[cfg(feature = "operator")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MethodChange {
+    Policy(String),
+    Cap(Option<i64>),
 }
 
 /// An EDGAR contact on its way to the owner.
@@ -437,6 +473,8 @@ impl PartialEq for Command {
                 },
             ) => a == b && x == y && p == q && o == n,
             #[cfg(feature = "operator")]
+            (Command::SetMethod(a), Command::SetMethod(b)) => a == b,
+            #[cfg(feature = "operator")]
             (Command::Posture { armed: a }, Command::Posture { armed: b }) => a == b,
             #[cfg(feature = "operator")]
             (Command::ApproveAction(a), Command::ApproveAction(b)) => a == b,
@@ -586,7 +624,9 @@ impl Scope {
             Scope::Approve => "a pending approval id, or a checked plan id — opens the approve box",
             Scope::Execute => "a checked plan id with its approval on record — opens the hash box",
             Scope::Cli => "nothing — Enter opens the Claude CLI as Atlas, on this terminal",
-            Scope::Build => "what to build, in a sentence — opens Claude Code on this checkout",
+            Scope::Build => {
+                "opens Claude Code on this checkout — it can edit files, with your approval"
+            }
             Scope::Clear => "nothing — Enter empties this window's chat pane",
         }
     }

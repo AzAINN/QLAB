@@ -12,8 +12,8 @@ use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
     Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig,
-    NewsSettings, Plan, Policy, PredictorDetail, QualitativeMatrix, RegimePanel, Run, Snapshot,
-    System, Template, Workflow,
+    MethodSettings, NewsSettings, Plan, Policy, PredictorDetail, QualitativeMatrix, RegimePanel,
+    Run, Snapshot, System, Template, Workflow,
 };
 use crate::net::http;
 use crate::ui::door::Door;
@@ -454,6 +454,12 @@ pub struct Store {
     /// the fetch is edge-triggered on entering the pane and on `r` there, so
     /// there is no TTL for this client to invent.
     news: Option<NewsSettings>,
+    /// Which method this desk solves with and how many names it may hold,
+    /// fetched when SETTINGS opens.
+    ///
+    /// No arrival stamp either, for `news`' reason: the fetch is edge-triggered
+    /// on entering the pane, on `r` there, and on the card's own POST.
+    method: Option<MethodSettings>,
     /// The qualitative matrix, fetched on its own slow beat.
     ///
     /// `None` is "not asked yet or not answered yet". RESEARCH keeps that
@@ -656,6 +662,7 @@ impl Store {
             backends_at: None,
             predictor_detail: None,
             news: None,
+            method: None,
             qualitative: None,
             proposal: None,
             #[cfg(feature = "operator")]
@@ -832,6 +839,15 @@ impl Store {
                 self.news = Some(*settings);
                 self.dirty = true;
             }
+            // Replaced wholesale for the same reason: the route serves the
+            // merged mandate, the two catalogs and the warning it recomputed
+            // together, and merging two answers would draw a cap from one
+            // reading beside the warning from another — which is precisely the
+            // pair that has to agree.
+            AppEvent::Method(method) => {
+                self.method = Some(*method);
+                self.dirty = true;
+            }
             // Replaced wholesale for the same reason again: the route serves
             // one window's whole matrix, and merging two of them would draw a
             // name counted in one window beside a name counted in another,
@@ -971,7 +987,14 @@ impl Store {
                     // copy would be a second account of what the desk reads,
                     // and a wrong one on an offline desk, which resolves
                     // `synthetic` whatever was chosen.
-                    Wrote::NewsSaved { .. }
+                    // And so is the method. The owner's answer to
+                    // `/api/desk/method` is what the card draws, and the write
+                    // brings a fresh one forward — a client copy would be a
+                    // second account of a mandate the owner merged, and a
+                    // wrong one wherever it clamped what was asked for.
+                    Wrote::MethodSet { .. }
+                    | Wrote::MethodRefused { .. }
+                    | Wrote::NewsSaved { .. }
                     | Wrote::NewsRefused { .. }
                     | Wrote::Armed { .. }
                     | Wrote::Proposed { .. }
@@ -1106,6 +1129,15 @@ impl Store {
     /// the two apart.
     pub fn news(&self) -> Option<&NewsSettings> {
         self.news.as_ref()
+    }
+
+    /// Which method this desk solves with, if SETTINGS has fetched it.
+    ///
+    /// `None` is "not asked yet or not answered yet", never "this desk has no
+    /// method" — every desk has one, and the card says which of the two states
+    /// it is in rather than drawing a blank where a policy belongs.
+    pub fn method(&self) -> Option<&MethodSettings> {
+        self.method.as_ref()
     }
 
     /// The qualitative matrix, if the beat has brought one back.

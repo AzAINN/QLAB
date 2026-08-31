@@ -104,6 +104,17 @@ pub enum Source {
     /// SETTINGS' EDGAR contact box, while it is open. The fourth router in
     /// that file, and the same rule again.
     SettingsContact,
+    /// SETTINGS' method picker, while it is open.
+    ///
+    /// The same *box* as the model switcher and the lane picker — one widget,
+    /// three lists — and still its own section, for the lane picker's exact
+    /// mechanical reason: `switch_key` hands this list to `method_key`, and a
+    /// section that followed it would count these four keys twice and describe
+    /// the models list with rows about the mandate.
+    SettingsMethod,
+    /// SETTINGS' holdings-cap box, while it is open. The sixth router in that
+    /// file, and the same rule again.
+    SettingsCap,
     /// The confirmation box, which outranks everything but Ctrl-C.
     Confirm,
     /// The startup door, which outranks even that — it is up before there is
@@ -115,7 +126,7 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 20] = [
+    pub const ALL: [Source; 22] = [
         Source::Shell,
         Source::Command,
         Source::Help,
@@ -134,6 +145,8 @@ impl Source {
         Source::SettingsModels,
         Source::SettingsLane,
         Source::SettingsContact,
+        Source::SettingsMethod,
+        Source::SettingsCap,
         Source::Confirm,
         Source::Door,
     ];
@@ -152,6 +165,8 @@ impl Source {
             Source::SettingsModels => "SETT · the model switcher",
             Source::SettingsLane => "SETT · the data lane picker",
             Source::SettingsContact => "SETT · the edgar contact box",
+            Source::SettingsMethod => "SETT · the method picker",
+            Source::SettingsCap => "SETT · the holdings cap box",
             Source::Confirm => "a confirmation box",
             Source::Door => "the startup door",
         }
@@ -211,6 +226,8 @@ impl Source {
             Source::SettingsModels => ("ui/views/settings.rs", "", "switch_key"),
             Source::SettingsLane => ("ui/views/settings.rs", "", "lane_key"),
             Source::SettingsContact => ("ui/views/settings.rs", "", "contact_key"),
+            Source::SettingsMethod => ("ui/views/settings.rs", "", "method_key"),
+            Source::SettingsCap => ("ui/views/settings.rs", "", "cap_key"),
             Source::Confirm => ("ui/widgets/confirm.rs", "", "on_key"),
             Source::Door => ("ui/door.rs", "", "on_key"),
         }
@@ -582,6 +599,18 @@ pub const KEYMAP: &[Binding] = &[
         "on DESK: choose the data lane — live · alpaca asks for a login first",
     ),
     w(
+        "Char('m')",
+        "m",
+        Source::View(ViewId::Settings),
+        "on METHOD: choose the method this desk solves with",
+    ),
+    w(
+        "Char('k')",
+        "k",
+        Source::View(ViewId::Settings),
+        "on METHOD: how many names this desk may hold — 0 clears the cap",
+    ),
+    w(
         "Char(' ')",
         "Space",
         Source::View(ViewId::Settings),
@@ -685,6 +714,46 @@ pub const KEYMAP: &[Binding] = &[
         "Esc",
         Source::SettingsContact,
         "closes the box and leaves the stored contact alone",
+    ),
+    // -- SETT, the method picker ------------------------------------------
+    w("Up", "↑", Source::SettingsMethod, "the method above"),
+    w("Down", "↓", Source::SettingsMethod, "the method below"),
+    w(
+        "Enter",
+        "Enter",
+        Source::SettingsMethod,
+        "solves with that method from the next run — it books nothing",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::SettingsMethod,
+        "closes it — the desk solves as it did",
+    ),
+    // -- SETT, the holdings cap box ---------------------------------------
+    w(
+        "Char(c)",
+        "any key",
+        Source::SettingsCap,
+        "types the cap — digits only, and 0 clears it",
+    ),
+    w(
+        "Backspace",
+        "Backspace",
+        Source::SettingsCap,
+        "deletes a character",
+    ),
+    w(
+        "Enter",
+        "Enter",
+        Source::SettingsCap,
+        "sends it — an empty box or 0 puts the mandate's own cap back",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::SettingsCap,
+        "closes the box and leaves the cap alone",
     ),
     // -- the confirmation box ---------------------------------------------
     w(

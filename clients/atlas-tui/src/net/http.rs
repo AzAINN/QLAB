@@ -12,8 +12,8 @@
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
 use crate::model::{
-    LlmCatalog, NewsSettings, PredictorDetail, ProposalPayload, QualitativeMatrix, RegimePanel,
-    Snapshot, Templates,
+    LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, ProposalPayload, QualitativeMatrix,
+    RegimePanel, Snapshot, Templates,
 };
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
@@ -148,6 +148,13 @@ pub enum Refetch {
     /// already holds. Asked for when SETTINGS opens, when `r` is pressed
     /// there, and after the pane's own POST.
     News,
+    /// Which method the desk solves with, and its holdings cap. No beat behind
+    /// it for the news answer's reason — it changes when an operator changes
+    /// it — and asked for at the same three moments, the last of which is the
+    /// METHOD card's own POST: the owner recomputes the cap warning as it
+    /// merges the override, so the answer to the write is the only thing that
+    /// can say what the desk is now holding to.
+    Method,
 }
 
 /// The runtime's end of the poller.
@@ -185,6 +192,11 @@ impl PollerHandle {
     /// Ask what the desk reads the news from, once. Same shape again.
     pub fn news(&self) {
         let _ = self.refetch.send(Refetch::News);
+    }
+
+    /// Ask which method the desk solves with, once. Same shape again.
+    pub fn method(&self) {
+        let _ = self.refetch.send(Refetch::Method);
     }
 }
 
@@ -235,6 +247,10 @@ async fn poll_loop(
     // Asking without it would let the owner answer about a desk mode this
     // window is not pointed at.
     let news_url = format!("{base}/api/news/settings?offline={lane}");
+    // No lane: the mandate and the algorithm catalog are the same in both, and
+    // a query parameter the route does not read would be this client claiming a
+    // distinction the owner does not make.
+    let method_url = format!("{base}/api/desk/method");
     // The lane, because the route reads it and the answer differs: an offline
     // desk reads the synthetic feed, and a matrix fetched without the flag
     // would be a reading of a window this client is not pointed at.
@@ -440,11 +456,13 @@ async fn poll_loop(
                         let mut catalog = first == Refetch::Backends;
                         let mut predictors = first == Refetch::Predictors;
                         let mut news = first == Refetch::News;
+                        let mut method = first == Refetch::Method;
                         while let Ok(next) = refetch.try_recv() {
                             jump |= next == Refetch::Now;
                             catalog |= next == Refetch::Backends;
                             predictors |= next == Refetch::Predictors;
                             news |= next == Refetch::News;
+                            method |= next == Refetch::Method;
                         }
                         if catalog {
                             match fetch::<LlmCatalog>(&client, &backends_url).await {
@@ -510,6 +528,28 @@ async fn poll_loop(
                                 // templates and the board.
                                 Fetched::Failed(error) => {
                                     tracing::warn!(%error, "news settings fetch failed")
+                                }
+                            }
+                        }
+                        if method {
+                            match fetch::<MethodSettings>(&client, &method_url).await {
+                                Fetched::Decoded(payload) => {
+                                    emit(&tx, AppEvent::Method(Box::new(payload)))?
+                                }
+                                Fetched::Malformed(error) => emit(
+                                    &tx,
+                                    AppEvent::Http(HttpResult::Malformed {
+                                        url: method_url.clone(),
+                                        error,
+                                    }),
+                                )?,
+                                // How the desk solves is not whether the desk
+                                // is there, and the same reasoning again: a
+                                // failure here must not tell the operator the
+                                // owner went away when the snapshot that
+                                // decides that is still arriving.
+                                Fetched::Failed(error) => {
+                                    tracing::warn!(%error, "desk method fetch failed")
                                 }
                             }
                         }

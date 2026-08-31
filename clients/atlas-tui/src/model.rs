@@ -1370,6 +1370,92 @@ pub struct NewsSource {
     pub chosen: Option<bool>,
 }
 
+// -- /api/desk/method ------------------------------------------------------
+
+/// Which operational method this desk solves with, and how many names it may
+/// hold.
+///
+/// Its own payload rather than a section of the snapshot, for [`NewsSettings`]'
+/// reason: the owner composes it from the algorithm catalog and the mandate
+/// overrides file, and `/api/tui` carries none of it. Fetched when SETTINGS is
+/// entered and after the pane's own POST — see `bus::AppEvent::Method`.
+///
+/// **Three lists, and none of them is derivable from another.** `operational`
+/// is what may be chosen; `research` is what exists and may not, each with the
+/// stage that says why; `current` is what is in force after the overrides were
+/// merged. A client that marked "current" by matching a name against the
+/// operational list would be a second opinion about a mandate the owner owns —
+/// and would have nothing at all to say about a research entry, which is
+/// exactly the question the card exists to answer.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MethodSettings {
+    /// What the desk solves with right now, overrides merged.
+    #[serde(default)]
+    pub current: MethodCurrent,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub operational: Vec<MethodEntry>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub research: Vec<ResearchEntry>,
+    /// The overrides file verbatim, `{}` when there is none. Carried so the
+    /// card can say a value is the operator's rather than the mandate's.
+    #[serde(default)]
+    pub overrides: MethodOverrides,
+    /// The owner's own sentence about a cap the effective method will refuse —
+    /// "hrp holds every name; a cap of 8 will refuse its plans". Not an error:
+    /// the change applied, and the refusal arrives later from
+    /// `Mandate.check_targets`. Absent when there is nothing to say.
+    pub warning: Option<String>,
+    /// Anything the owner grew that this client does not model yet, kept whole
+    /// for the reason `Snapshot::extra` is.
+    #[serde(flatten)]
+    pub extra: Value,
+}
+
+/// The pair in force. Both optional, and `max_holdings` is nullable in the
+/// owner too: no cap is not a cap of zero.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MethodCurrent {
+    pub operational_policy: Option<String>,
+    pub max_holdings: Option<i64>,
+}
+
+/// What the operator has overridden, as the owner persisted it. Absent keys
+/// mean the shipped mandate's own values are in force.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MethodOverrides {
+    pub operational_policy: Option<String>,
+    pub max_holdings: Option<i64>,
+}
+
+/// One method the desk may be pointed at.
+///
+/// `current` is the owner's own mark rather than an id comparison made here,
+/// for [`MethodSettings`]' reason.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MethodEntry {
+    pub id: Option<String>,
+    pub label: Option<String>,
+    /// The research arm this method is registered as, so a choice on this card
+    /// and a row on the predictor board are the same thing named once.
+    pub arm_id: Option<String>,
+    pub rationale: Option<String>,
+    pub current: Option<bool>,
+}
+
+/// One method that exists and may not be chosen, with the stage that says why.
+///
+/// `choosable` is read rather than assumed. The owner always sends `false`
+/// here, and a client that hard-coded the refusal would keep refusing an entry
+/// the catalog had since promoted — the one thing a stage change is supposed to
+/// move.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ResearchEntry {
+    pub id: Option<String>,
+    pub label: Option<String>,
+    pub stage: Option<String>,
+    pub choosable: Option<bool>,
+}
+
 // -- /api/research/qualitative ---------------------------------------------
 
 /// The qualitative matrix: what the grounded news window says about each name,

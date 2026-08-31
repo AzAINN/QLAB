@@ -1,7 +1,7 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
 use crate::model::{
-    LlmCatalog, NewsSettings, PredictorDetail, Proposal, QualitativeMatrix, RegimePanel, Snapshot,
-    Template,
+    LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, Proposal, QualitativeMatrix,
+    RegimePanel, Snapshot, Template,
 };
 
 pub enum AppEvent {
@@ -42,6 +42,17 @@ pub enum AppEvent {
     /// `PredictorDetail`'s reason: it changes when an operator changes it, and
     /// a cadence would be re-fetching an answer this client already holds.
     News(Box<NewsSettings>),
+    /// Which method this desk solves with and how many names it may hold, from
+    /// `/api/desk/method`.
+    ///
+    /// Fetched on the same terms as `News` and for the same reason: it changes
+    /// when an operator changes it, so a cadence would spend a request per poll
+    /// re-reading an answer this client already holds. Asked for when SETTINGS
+    /// is entered, when `r` is pressed there, and after the card's own POST —
+    /// the last one because the owner recomputes its cap warning on the way
+    /// out, and a card left drawing the pre-change answer would be showing a
+    /// mandate nobody is running.
+    Method(Box<MethodSettings>),
     /// The qualitative matrix, from `/api/research/qualitative`.
     ///
     /// The one of these four that rides a beat, and deliberately: the window
@@ -258,6 +269,27 @@ pub enum Wrote {
     /// it cannot reach, a missing or malformed contact. Its own sentence,
     /// which carries the remedy and never the contact.
     NewsRefused { said: String },
+    /// The owner changed which method this desk solves with, or its cap.
+    ///
+    /// **The owner's own account of what is now in force**, read off the answer
+    /// and never echoed from the request: the route merges the override into
+    /// the shipped mandate and answers with the merged pair, so a receipt
+    /// composed here would report a cap the mandate had clamped as the one the
+    /// desk is holding to.
+    ///
+    /// `warning` rides with it because it is recomputed by the same answer and
+    /// is the whole reason this change is a warn rather than a refusal: a cap
+    /// below what the effective method holds applies, and the plan it will
+    /// refuse is minutes away.
+    MethodSet {
+        policy: String,
+        cap: Option<i64>,
+        warning: Option<String>,
+    },
+    /// The owner would not solve that way — a method it does not know, one that
+    /// is still research stage, a cap outside the universe. Its own sentence,
+    /// which carries the remedy.
+    MethodRefused { said: String },
     /// The request itself failed: no owner, a timeout, a non-2xx. `said` is the
     /// owner's words verbatim when there were any.
     Failed { what: String, said: String },

@@ -510,6 +510,40 @@ pub enum News {
     Rejected(String),
 }
 
+/// What the owner did with a method or a cap. Two outcomes, and the second is
+/// not an error — the same split [`News`] and [`Choice`] make, for the same
+/// reason.
+///
+/// **Named for the mandate rather than for the method**, and not by taste:
+/// `tests/operator_gate.rs` censuses `Method::` across `src` as an HTTP write
+/// marker (`reqwest`'s own `Method::POST`), and every arm of an enum called
+/// `Method` would read as a POST call site in whatever file matched on it.
+/// Widening the census to tell the two apart would make it stop watching the
+/// door it exists to watch.
+///
+/// The route refuses with **400 and a sentence**: a method it does not know, a
+/// method that is still research stage ("promotion out of research takes
+/// evidence and a catalog change, not a desk setting"), a cap outside the
+/// mandated universe. Every one of those is a considered answer about a
+/// well-formed request, written for a human, and the remedy is inside it.
+///
+/// `Applied` carries the **merged** pair the owner answers with rather than
+/// what was sent, for the reason `News::Applied` carries the resolved stack: a
+/// receipt composed from the request would report a value the mandate had
+/// clamped as the one in force. `warning` rides with it because a cap the
+/// effective method will refuse *applies* — the ruling is warn, not refuse —
+/// and the plan it breaks is minutes away.
+#[derive(Debug)]
+pub enum Mandate {
+    Applied {
+        policy: String,
+        cap: Option<i64>,
+        warning: Option<String>,
+    },
+    /// The owner would not solve that way. Its own sentence.
+    Rejected(String),
+}
+
 /// What the venue said about the stored login.
 ///
 /// `/api/alpaca/test` answers **200 whatever happened** — a missing profile, a
@@ -1136,6 +1170,52 @@ impl WriteClient {
                 },
             }),
             Err(WriteError::Refused { status: 400, said }) => Ok(News::Rejected(sentence(&said))),
+            Err(err) => Err(err),
+        }
+    }
+
+    // -- the method and the cap --------------------------------------------
+
+    /// Choose the operational method this desk solves with, or its cap.
+    ///
+    /// One key per call, because [`crate::cmd::MethodChange`] can hold no more
+    /// than one: the owner takes any subset of the two and writes one audit row
+    /// per changed field, and a call that could send both would put two
+    /// decisions behind one keystroke.
+    ///
+    /// `null` is a request, not an omission. Clearing the cap drops the
+    /// override and puts the shipped mandate's own value back in force, which
+    /// is a change the owner records — so the body carries an explicit
+    /// `max_holdings: null` rather than leaving the key out.
+    pub async fn set_method(
+        &self,
+        change: &crate::cmd::MethodChange,
+    ) -> Result<Mandate, WriteError> {
+        use crate::cmd::MethodChange;
+        let body = match change {
+            MethodChange::Policy(id) => json!({"operational_policy": id}),
+            MethodChange::Cap(cap) => json!({"max_holdings": cap}),
+        };
+        match self.post("/api/desk/method", body).await {
+            Ok(said) => Ok(Mandate::Applied {
+                // The owner's own merge, read off `current`. A 200 that does
+                // not say what is in force is not a contract failure worth
+                // refusing the change over — the change *happened* — so it
+                // reports the absence and the refetch behind it says what the
+                // desk now solves with.
+                policy: said
+                    .get("current")
+                    .and_then(|current| field(current, "operational_policy"))
+                    .unwrap_or_else(|| "the owner did not say which method".to_string()),
+                cap: said
+                    .get("current")
+                    .and_then(|current| current.get("max_holdings"))
+                    .and_then(Value::as_i64),
+                warning: field(&said, "warning"),
+            }),
+            Err(WriteError::Refused { status: 400, said }) => {
+                Ok(Mandate::Rejected(sentence(&said)))
+            }
             Err(err) => Err(err),
         }
     }

@@ -1,14 +1,14 @@
 //! SETTINGS — what this desk is configured by, and where an operator changes it.
 //!
-//! Seven cards of facts an operator would otherwise have to assemble from
+//! Eight cards of facts an operator would otherwise have to assemble from
 //! `mandate.yaml`, `.mcp.json`, a shell prompt and whatever the last `/mode`
 //! did. Everything drawn is the owner's own answer; nothing here is composed,
 //! defaulted, or inferred — with one deliberate exception, the NEWS draft,
 //! which is marked as an edit precisely so it cannot be mistaken for one.
 //!
-//! **The cards are the routing.** Seven of them, and the three that carry keys
+//! **The cards are the routing.** Eight of them, and the four that carry keys
 //! carry different ones, so a pane-level key list was either wrong about four
-//! cards or silent about all seven. The arrows move a focus between cards, the
+//! cards or silent about all eight. The arrows move a focus between cards, the
 //! focused card's header is tinted, and a key means whatever *that* card says
 //! it means — which is why each card states its own keys on the rule its block
 //! already reserves rather than in a row it would have to win from its content.
@@ -16,22 +16,33 @@
 //! what it would drop here is the sentence that says whether there is a key at
 //! all.
 //!
-//! **What an operator may change here, and what they may not.** Three things:
-//! which login the owner stores, which mind each surface runs, and — since
-//! this branch — the data lane and the news stack. All four are the owner's
-//! own routes and none of them widens what this desk can *do*. A stored login
-//! makes `LIVE·ALPACA` choosable; the lane picker sends exactly what `/mode`
-//! sends and is refused by exactly the same owner; and the news routes write
-//! `.env` and the process environment, take no registry lock, and touch no
-//! plan, approval or posture. Every gate between a plan and a fill is unmoved
-//! by all of it.
+//! **What an operator may change here, and what they may not.** Five things:
+//! which login the owner stores, which mind each surface runs, the data lane,
+//! the news stack, and — since this branch — the operational method this desk
+//! solves with and how many names it may hold. Every one is the owner's own
+//! route and none of them widens what this desk can *do*. A stored login makes
+//! `LIVE·ALPACA` choosable; the lane picker sends exactly what `/mode` sends
+//! and is refused by exactly the same owner; the news routes write `.env` and
+//! the process environment; and the method route merges two keys into the
+//! mandate. None takes a registry lock, none touches a plan, an approval or a
+//! posture, and every gate between a plan and a fill is unmoved by all of it.
 //!
-//! Two refusals are made *here* rather than left to the owner, and both for the
-//! same reason: the remedy is a key on this pane and the owner's sentence
-//! cannot name a key it does not know this pane has. Ticking a source the desk
-//! cannot read is refused on the keystroke, and saving a stack with `edgar` in
-//! it and no contact points at `c`. Everything else travels and comes back in
-//! the owner's own words.
+//! The method is the one that can make the desk *refuse*, and deliberately: a
+//! cap below what the chosen method holds applies, and the plan it breaks
+//! arrives minutes later out of the owner's own mandate check. That ruling is
+//! the owner's; what this pane owes it is that the sentence saying so is drawn
+//! where it cannot be missed, which is why the METHOD card's body is a budget
+//! and the warning is what the lists yield to.
+//!
+//! Three refusals are made *here* rather than left to the owner, and all for
+//! the same reason: the remedy is a key or a box on this pane and the owner's
+//! sentence cannot name one it does not know this pane has. Ticking a source
+//! the desk cannot read is refused on the keystroke; saving a stack with
+//! `edgar` in it and no contact points at `c`; and a cap above the universe
+//! this desk watches is refused with the box still open and the number still in
+//! it. Everything else travels and comes back in the owner's own words —
+//! including every refusal about the method itself, which is the owner's
+//! catalog and not this client's.
 //!
 //! Focus is a fact about an armed window. A glass one marks no card — a
 //! highlight that never moves under the arrows reads as a hung client, which is
@@ -72,7 +83,8 @@ use crate::cmd::{self, ModelChoice};
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
 use crate::model::{
-    Constraints, DeskMode, LlmConfig, LlmSurface, NewsSettings, NewsSource, System,
+    Constraints, DeskMode, LlmConfig, LlmSurface, MethodEntry, MethodSettings, NewsSettings,
+    NewsSource, System,
 };
 use crate::store::Store;
 use crate::theme::{palette, theme};
@@ -167,6 +179,29 @@ const CONTACT_MIN_H: u16 = 11;
 #[cfg(feature = "operator")]
 const CONTACT_W: u16 = 58;
 
+/// The holdings-cap box's own floor, in rows of the view's area.
+///
+/// The same shape as the contact box and one row shorter: it holds one field,
+/// the bound the owner will hold it to, what clearing it means, and a key line.
+/// Below this it would be a box with room for a header and nothing else while
+/// still taking every keystroke, which is the state every box here refuses at.
+#[cfg(feature = "operator")]
+const CAP_MIN_H: u16 = 10;
+
+/// Its width. Wide enough for the bound sentence beside the label column.
+#[cfg(feature = "operator")]
+const CAP_W: u16 = 58;
+
+/// The longest cap an operator may type before the box stops taking keys.
+///
+/// Three digits, not a parse bound: the owner's own limit is the size of the
+/// mandated universe and this client does not own that number. What this stops
+/// is a held key filling a `String` with digits that can no longer be read as
+/// an `i64` at all — a refusal about arithmetic where the operator asked about
+/// a mandate.
+#[cfg(feature = "operator")]
+const CAP_DIGITS: usize = 3;
+
 /// The one source whose name this client has to know.
 ///
 /// Not a second copy of the owner's catalog — every other rule about every
@@ -201,6 +236,14 @@ const NEWS_TOP: u16 = 3;
 #[cfg(feature = "operator")]
 const CONFIRM: &str = "CONFIRM";
 
+/// What a card says while it is waiting, and what it says to the second press.
+///
+/// One string for both, because they are one statement: the card is busy, and
+/// the key that was just pressed did nothing. Two wordings would let the wait
+/// line and the refusal drift into disagreeing about whether anything was sent.
+#[cfg(feature = "operator")]
+const ASKING: &str = "asking the owner…";
+
 /// One card of this pane, as a thing a key can be aimed at.
 ///
 /// The order is the order they are drawn — the full-width card, then the left
@@ -214,6 +257,10 @@ pub enum Card {
     #[default]
     Desk,
     News,
+    /// How this desk solves, and how many names it may hold. The one card that
+    /// changes what the desk *proposes* rather than what it reads or displays —
+    /// and still not what it may book.
+    Method,
     Policy,
     Theme,
     System,
@@ -225,9 +272,10 @@ impl Card {
     /// The walk order, and only the walk has one: the glass build has no focus
     /// to move, so nothing there reads this.
     #[cfg(feature = "operator")]
-    const ALL: [Card; 7] = [
+    const ALL: [Card; 8] = [
         Card::Desk,
         Card::News,
+        Card::Method,
         Card::Policy,
         Card::Theme,
         Card::System,
@@ -251,6 +299,12 @@ impl Card {
             (true, Card::Desk) => "a login · t test · m switch lane",
             (true, Card::News) => "space · c contact · s save · v verify",
             (true, Card::Models) => "m switches a model",
+            // Two keys and two words, at the card's own width. `k` rather than
+            // `c`, which the NEWS card already claims one card up, and rather
+            // than `h` — the pane has no vim walk to collide with, but a key
+            // that reads as "help" on a workstation with a help overlay is one
+            // an operator presses expecting something else.
+            (true, Card::Method) => "m method · k cap",
             (true, _) => "no keys on this card",
             // The pane-level line the cards inherited, kept whole on the two
             // cards it was always about.
@@ -260,6 +314,10 @@ impl Card {
             // is why the sentence is this one rather than the longer one that
             // says "what this desk reads".
             (false, Card::News) => "read-only — cannot change what is read",
+            // What this card changes is how the desk *solves*, which is still
+            // not what it may book — and the rule has 38 cells here, which is
+            // what picks this sentence over the longer one.
+            (false, Card::Method) => "read-only — cannot change the method",
             (false, _) => "read-only",
         }
     }
@@ -281,6 +339,7 @@ impl Card {
             Card::Desk => &[("switch", 'm')],
             Card::News => &[("contact", 'c'), ("save", 's'), ("verify", 'v')],
             Card::Models => &[("switches", 'm')],
+            Card::Method => &[("method", 'm'), ("cap", 'k')],
             _ => &[],
         }
     }
@@ -330,6 +389,10 @@ pub struct SettingsView {
     /// What the operator has picked on the NEWS card and not yet sent.
     #[cfg(feature = "operator")]
     news: Draft,
+    /// What the METHOD card is holding: the cap box while it is open, the one
+    /// request in flight, and whatever was last said back.
+    #[cfg(feature = "operator")]
+    method: MethodDraft,
     /// How many source rows the last frame drew, published the way `area` is:
     /// the cursor is clamped against the catalog that is on screen, and the
     /// catalog moves under it every time the owner answers.
@@ -442,6 +505,31 @@ struct Draft {
     note: Option<String>,
 }
 
+/// What the METHOD card is holding, before and while the owner is asked.
+///
+/// **No draft of the choice itself.** Unlike NEWS, nothing here is staged: a
+/// method is sent the moment Enter is pressed on it and a cap the moment Enter
+/// leaves the box, so there is nothing for `Esc` to discard and nothing that
+/// can disagree with what the desk reports. The card draws the owner's own
+/// answer and only the owner's — which is what lets the cap row say what is in
+/// force rather than what somebody typed.
+#[cfg(feature = "operator")]
+#[derive(Default)]
+struct MethodDraft {
+    /// The cap box, while it is open, holding what has been typed into it.
+    cap_box: Option<String>,
+    /// Whether a request is in flight.
+    ///
+    /// One at a time, so a held key cannot put two `mandate_override` rows on
+    /// the owner's audit bus for one decision — and refused *out loud*, because
+    /// a key that silently did nothing reads as a dead card rather than a busy
+    /// one.
+    sending: bool,
+    /// What this card, or the owner, last said about a change. Retired by the
+    /// next keystroke, like the switcher's note.
+    note: Option<String>,
+}
+
 impl View for SettingsView {
     fn draw(&self, f: &mut Frame, area: Rect, store: &Store, _fx: &FlashTracker, _now: Instant) {
         // Published first, and on every frame including the ones that draw no
@@ -502,15 +590,31 @@ impl View for SettingsView {
         // owner's reason for an unreachable backend is not clipped. Anchored to
         // the bottom rather than stacked under the rationale, which has no
         // height of its own to end at.
+        //
+        // METHOD leads the column, because the walk order is the draw order and
+        // it is walked after NEWS — and because it is the actionable half of
+        // the card under it: METHOD says which method is in force and what else
+        // could be, POLICY says what every solve is then held to.
+        //
+        // **The rationale is what yields for it**, and it is the only slot on
+        // this pane that could: the left column has twenty-two rows at the
+        // baseline height, POLICY and THEME are fixed at nine and three, and
+        // the `Min(0)` under them was nine rows carrying a three-line sentence.
+        // At 120x36 the rationale is now drawn in no rows at all and returns as
+        // the terminal grows — which is the trade this pane can make, because
+        // the owner writes a rationale *per method* and the picker `m` opens
+        // renders every one of them.
         let left = Layout::vertical([
+            Constraint::Length(METHOD_H),
             Constraint::Length(POLICY_H),
             Constraint::Min(0),
             Constraint::Length(THEME_H),
         ])
         .split(cols[0]);
-        draw_policy(f, left[0], store, at);
-        draw_rationale(f, left[1], store);
-        draw_theme(f, left[2], at);
+        self.draw_method(f, left[0], store, at);
+        draw_policy(f, left[1], store, at);
+        draw_rationale(f, left[2], store);
+        draw_theme(f, left[3], at);
 
         // MODELS sits directly under SYSTEM rather than growing SYSTEM a row.
         // The two answer the same question — what this desk is made of — and
@@ -542,8 +646,9 @@ impl View for SettingsView {
             &[
                 (Card::Desk, top[0]),
                 (Card::News, top[1]),
-                (Card::Policy, left[0]),
-                (Card::Theme, left[2]),
+                (Card::Method, left[0]),
+                (Card::Policy, left[1]),
+                (Card::Theme, left[3]),
                 (Card::System, right[0]),
                 (Card::Models, right[1]),
                 (Card::Universe, right[2]),
@@ -557,6 +662,7 @@ impl View for SettingsView {
         self.draw_form(f, area, store);
         self.draw_switch(f, area, store);
         self.draw_contact(f, area, store);
+        self.draw_cap(f, area, store);
     }
 
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
@@ -607,6 +713,7 @@ impl View for SettingsView {
             (self.form.is_some() && self.form_fits())
                 || (self.switch.is_some() && self.box_fits())
                 || (self.news.contact_box.is_some() && self.contact_fits())
+                || (self.method.cap_box.is_some() && self.cap_fits())
         }
         #[cfg(not(feature = "operator"))]
         false
@@ -777,6 +884,12 @@ impl SettingsView {
         area.height >= CONTACT_MIN_H && area.width >= TWO_COL
     }
 
+    /// And again for the cap box, which needs one row fewer than the contact.
+    fn cap_fits(&self) -> bool {
+        let area = self.area.get();
+        area.height >= CAP_MIN_H && area.width >= TWO_COL
+    }
+
     fn publish(&self, area: Rect) {
         self.area.set(area);
     }
@@ -852,6 +965,7 @@ impl SettingsView {
             Hit::Header(card) => {
                 self.focus.set(card);
                 self.news.note = None;
+                self.method.note = None;
                 None
             }
             Hit::Row(at) => {
@@ -919,6 +1033,13 @@ impl SettingsView {
             self.news.contact_box = None;
             return None;
         }
+        // And the cap goes with its box, for the same reason: a number typed
+        // into something the operator has not been able to see since the
+        // terminal shrank is not one this client may still be holding.
+        if self.method.cap_box.is_some() && !self.cap_fits() {
+            self.method.cap_box = None;
+            return None;
+        }
         if self.form.is_some() {
             return self.form_key(k);
         }
@@ -927,6 +1048,9 @@ impl SettingsView {
         }
         if self.news.contact_box.is_some() {
             return self.contact_key(k);
+        }
+        if self.method.cap_box.is_some() {
+            return self.cap_key(k, store);
         }
         match k.code {
             KeyCode::Up => self.step(-1),
@@ -962,6 +1086,34 @@ impl SettingsView {
                 self.switch = Some(Switch::opened_on(store));
                 return Some(Command::Backends);
             }
+            // The method, on the card that names it. The same box again with a
+            // third list behind it — and no catalog request rides this one
+            // either: what may be chosen is the owner's own `/api/desk/method`
+            // answer, which this pane fetched on the way in.
+            //
+            // Both keys refuse out loud while a request is in flight. The route
+            // writes the mandate override file and logs an audit row per
+            // changed field, so a held key would put two decisions on the
+            // record for one press.
+            KeyCode::Char('m') if self.focus.get() == Card::Method => match self.method.sending {
+                true => self.method.note = Some(ASKING.to_string()),
+                false => {
+                    self.method.note = None;
+                    self.switch = Some(Switch::method(store));
+                }
+            },
+            KeyCode::Char('k') if self.focus.get() == Card::Method => match self.method.sending {
+                true => self.method.note = Some(ASKING.to_string()),
+                false => {
+                    self.method.note = None;
+                    // Opened empty rather than on what is in force. The box's
+                    // own sentence says what clearing means, and a field
+                    // pre-filled with the current cap would make Enter on an
+                    // untouched box a request that changes nothing — which is
+                    // an audit row for a decision nobody made.
+                    self.method.cap_box = Some(String::new());
+                }
+            },
             // Nothing is sent by a tick. The draft is this window's alone
             // until `s` or `v` carries it, which is what lets an operator
             // build a stack out of four keystrokes instead of four writes of
@@ -990,6 +1142,7 @@ impl SettingsView {
     /// wherever the cursor was last left.
     fn step(&mut self, by: isize) {
         self.news.note = None;
+        self.method.note = None;
         let last = self.news_rows.get().saturating_sub(1);
         if self.focus.get() == Card::News && self.news_rows.get() > 0 {
             let at = self.news.at.min(last);
@@ -1292,11 +1445,12 @@ impl SettingsView {
     /// into it now.
     pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
         use crate::bus::Wrote;
-        // Any answer at all retires the wait. A failure is carried by the
-        // toast rather than by this card — it is a broken request rather than
+        // Any answer at all retires both waits. A failure is carried by the
+        // toast rather than by these cards — it is a broken request rather than
         // a decision about the stack — but a card still saying "asking the
         // owner…" over one would read as a client that had hung.
         self.news.sending = None;
+        self.method.sending = false;
         match outcome {
             // The owner's answer replaces the draft wholesale, and the refetch
             // behind it is what the card then draws. A draft left standing
@@ -1321,6 +1475,22 @@ impl SettingsView {
             // and the toast that carries it too is gone in four seconds.
             Wrote::NewsRefused { said } => {
                 self.news.note = Some(format::bounded(said, SAID_MAX));
+                return;
+            }
+            // The desk moved. The box has done its work and the refetch behind
+            // this outcome is what the card then draws — including the warning
+            // the owner recomputed, which is why nothing here copies the pair
+            // out of the answer onto the card.
+            Wrote::MethodSet { .. } => {
+                self.method.cap_box = None;
+                self.method.note = None;
+                return;
+            }
+            // Not confirmable and not a broken request: the owner considered
+            // the change and declined it, so the box stays up with the number
+            // still in it and the owner's sentence under the field.
+            Wrote::MethodRefused { said } => {
+                self.method.note = Some(format::bounded(said, SAID_MAX));
                 return;
             }
             _ => {}
@@ -1391,6 +1561,9 @@ impl SettingsView {
     fn switch_key(&mut self, k: KeyEvent, store: &Store) -> Option<Command> {
         if self.switch.as_ref().map(|switch| switch.kind) == Some(Picker::Lane) {
             return self.lane_key(k, store);
+        }
+        if self.switch.as_ref().map(|switch| switch.kind) == Some(Picker::Method) {
+            return self.method_key(k, store);
         }
         let rows = choices(store);
         let switch = self.switch.as_mut()?;
@@ -1500,6 +1673,211 @@ impl SettingsView {
         None
     }
 
+    /// One keystroke into the method picker.
+    ///
+    /// The same four keys as the lane picker and the same meanings, because it
+    /// is the same box again: what differs is the list behind it and what Enter
+    /// does with a row.
+    ///
+    /// **The cursor walks the operational entries and nothing else.** The
+    /// research entries are drawn under them, dimmed, with the stage that says
+    /// why — and there is no index at which the cursor can land on one, so
+    /// "not choosable" is a property of this list rather than a refusal it
+    /// makes after the fact. The owner refuses one too, in a sentence about
+    /// evidence and a catalog change; this box simply never asks it to.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
+    fn method_key(&mut self, k: KeyEvent, store: &Store) -> Option<Command> {
+        let rows = operational(store);
+        let switch = self.switch.as_mut()?;
+        switch.note = None;
+        // Rebuilt from the store every keystroke, and the store moves under it:
+        // the pane's own refetch lands on the bus while this box is open, so
+        // the cursor is clamped against the list that is about to be drawn
+        // rather than the one that was there when it opened.
+        switch.at = switch.at.min(rows.len().saturating_sub(1));
+        match k.code {
+            KeyCode::Up => switch.at = switch.at.saturating_sub(1),
+            KeyCode::Down => switch.at = (switch.at + 1).min(rows.len().saturating_sub(1)),
+            // Leaves the desk solving as it does. Nothing is staged here
+            // either: a choice is sent the moment it is made, which is what the
+            // `now` marker on the rows is about.
+            KeyCode::Esc => self.switch = None,
+            KeyCode::Enter => {
+                let Some(row) = rows.get(switch.at) else {
+                    // An empty list. Stated rather than silent, exactly as the
+                    // model switcher states it: a box that swallowed Enter
+                    // would read as a desk refusing a choice it never offered.
+                    switch.note = Some("the desk has not said what it can solve with".to_string());
+                    return None;
+                };
+                let Some(id) = format::text(row.id.as_ref()).map(str::to_string) else {
+                    switch.note = Some("the desk offered a method it cannot name".to_string());
+                    return None;
+                };
+                self.switch = None;
+                self.method.note = None;
+                self.method.sending = true;
+                return Some(Command::SetMethod(cmd::MethodChange::Policy(id)));
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// One keystroke into the holdings-cap box.
+    ///
+    /// Its own router for the contact box's reason: the keys that *open* a box
+    /// and the keys *inside* it are two sets.
+    ///
+    /// **One refusal is made here rather than left to the owner**, and it is
+    /// the pane's third and last: a cap outside `1..N` is refused on Enter,
+    /// with the box left open and the number still in it. The owner answers the
+    /// same 400 — and its sentence names the universe rather than the key on
+    /// this card — but the remedy is to type a different number into the box
+    /// that is already open, and a round trip that closed nothing and changed
+    /// nothing is a round trip the operator watches for no reason. `N` is the
+    /// universe the *snapshot* carries; with none, nothing is asserted here and
+    /// the owner's own bound is the only one.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
+    fn cap_key(&mut self, k: KeyEvent, store: &Store) -> Option<Command> {
+        let universe = store.universe().len();
+        // Read once, mutated through `as_mut` below. One binding held across
+        // the whole match would borrow the draft the refusals also write to,
+        // and splitting the arms to satisfy that is what put two `Enter`s in
+        // this router — which the keymap equivalence reads as two bindings.
+        let said = self.method.cap_box.as_ref()?.trim().to_string();
+        match k.code {
+            // Digits only, and bounded. A letter in a numeric field is a
+            // refusal the operator would only hear about on Enter, and a held
+            // key would push the digits they typed out of an `i64` entirely.
+            KeyCode::Char(c) => {
+                let typed = self.method.cap_box.as_mut()?;
+                if c.is_ascii_digit() && typed.chars().count() < CAP_DIGITS {
+                    typed.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                self.method.cap_box.as_mut()?.pop();
+            }
+            KeyCode::Enter => {
+                // One request at a time, and refused out loud: the route writes
+                // the override file and logs an audit row per changed field, so
+                // a held Enter would put two decisions on the record for one
+                // press. Typing still works — the operator may be correcting
+                // the number they are waiting on.
+                if self.method.sending {
+                    self.method.note = Some(ASKING.to_string());
+                    return None;
+                }
+                // Empty or zero is the clearing request, not an absent one: it
+                // sends `max_holdings: null`, which drops the override and puts
+                // the mandate's own cap back. Two spellings for one intent
+                // because both are what an operator reaches for, and neither is
+                // a cap of nothing.
+                let cap = match said.is_empty() {
+                    true => None,
+                    false => match said.parse::<i64>() {
+                        Ok(0) => None,
+                        Ok(cap) => Some(cap),
+                        // Unreachable while the field takes three digits and
+                        // nothing else, and cheaper to say than to leave as a
+                        // branch that silently does nothing.
+                        Err(_) => {
+                            self.method.note = Some("that is not a number of names".to_string());
+                            return None;
+                        }
+                    },
+                };
+                // The one refusal made here rather than left to the owner, and
+                // the pane's third: a cap above the universe this desk watches
+                // is refused with the box still open and the number still in
+                // it. The owner answers the same 400 — naming the universe
+                // rather than the box that holds the number — and a round trip
+                // that changed nothing is one the operator watches for no
+                // reason. `N` is the *snapshot's* universe; with none, nothing
+                // is asserted here and the owner's bound is the only one.
+                if let Some(cap) = cap {
+                    if universe > 0 && cap > universe as i64 {
+                        self.method.note = Some(format!(
+                            "this desk watches {universe} names — a cap above that holds \
+                             nothing back"
+                        ));
+                        return None;
+                    }
+                }
+                // The box stays open over the request, exactly as the login
+                // form stays open over its own: a 400 has to land somewhere the
+                // number that caused it is still visible, or the operator is
+                // being asked to retype a value to answer a question about the
+                // value they just typed. `wrote` is what closes it, and only on
+                // an answer that says the desk moved.
+                self.method.note = None;
+                self.method.sending = true;
+                return Some(Command::SetMethod(cmd::MethodChange::Cap(cap)));
+            }
+            KeyCode::Esc => self.method.cap_box = None,
+            _ => {}
+        }
+        None
+    }
+
+    /// The cap box, drawn over the pane that opened it.
+    ///
+    /// The same discipline as the three boxes above — refuse rather than open
+    /// invisible, and the next keystroke retires it.
+    fn draw_cap(&self, f: &mut Frame, area: Rect, store: &Store) {
+        use ratatui::widgets::{Block, Borders, Clear};
+        let Some(typed) = &self.method.cap_box else {
+            return;
+        };
+        if !self.cap_fits() {
+            let row = Rect {
+                x: area.x,
+                y: area.y + area.height / 2,
+                width: area.width,
+                height: 1,
+            };
+            f.render_widget(Clear, row);
+            refuse(
+                f,
+                row,
+                format!(
+                    "the holdings cap box needs {CAP_MIN_H} rows; this pane has {}.",
+                    area.height
+                ),
+            );
+            return;
+        }
+        let t = theme();
+        let w = CAP_W.min(area.width.saturating_sub(4)).max(3);
+        let lines = cap_lines(typed, store, self.method.note.as_deref());
+        let rect = centred(area, w, wanted(&lines, w - 2));
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.accent))
+            .style(Style::default().bg(t.bg_raised));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+
+    /// The METHOD card, and the state only an armed window can hold.
+    fn draw_method(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+        method_card(
+            f,
+            area,
+            store,
+            at,
+            self.method.note.as_deref(),
+            self.method.sending,
+        );
+    }
+
     /// The switcher, drawn over the pane that opened it.
     fn draw_switch(&self, f: &mut Frame, area: Rect, store: &Store) {
         use ratatui::widgets::{Block, Borders, Clear};
@@ -1532,6 +1910,7 @@ impl SettingsView {
         let lines = match switch.kind {
             Picker::Models => switch.lines(store, cap(area)),
             Picker::Lane => switch.lane_lines(store),
+            Picker::Method => switch.method_lines(store),
         };
         let rect = centred(area, w, wanted(&lines, w - 2));
         f.render_widget(Clear, rect);
@@ -1717,6 +2096,10 @@ enum Picker {
     /// refuses the combinations `DeskMode` cannot make — and the two this
     /// offers are the two the startup door offers.
     Lane,
+    /// The operational method: how this desk solves, out of the entries the
+    /// owner's catalog marks operational. The research entries are drawn under
+    /// them and the cursor cannot reach one — see `method_key`.
+    Method,
 }
 
 /// Where the live row sits in the lane list, so the box can be reopened on it
@@ -1801,6 +2184,20 @@ fn choices(store: &Store) -> Vec<Choice> {
     rows
 }
 
+/// The methods this desk may be pointed at, in the owner's own order.
+///
+/// Read off the payload rather than filtered here: `operational` is the owner's
+/// list of what may be chosen, and a client that derived it — by stage, by
+/// name, by anything — would be a second opinion about a catalog whose whole
+/// point is that the desk owns it.
+#[cfg(feature = "operator")]
+fn operational(store: &Store) -> Vec<MethodEntry> {
+    store
+        .method()
+        .map(|method| method.operational.clone())
+        .unwrap_or_default()
+}
+
 /// How many rows of the list the box shows at once.
 ///
 /// Bounded by a constant as well as by the pane: a desk holding thirty models
@@ -1856,6 +2253,133 @@ impl Switch {
             top: 0,
             note: None,
         }
+    }
+
+    /// The method box, opened on the method the desk already solves with.
+    ///
+    /// Same rule as `opened_on` and `lane`: an operator who opens it and
+    /// presses Enter changes nothing, and one who does not recognise their own
+    /// desk on the list is being told something true about it. On the owner's
+    /// `current` mark rather than an id comparison made here — the mandate is
+    /// merged from two places and the owner is the one that merged it.
+    fn method(store: &Store) -> Self {
+        let at = operational(store)
+            .iter()
+            .position(|row| row.current == Some(true))
+            .unwrap_or(0);
+        Self {
+            kind: Picker::Method,
+            at,
+            top: 0,
+            note: None,
+        }
+    }
+
+    /// The method box's lines: what may be chosen, then what may not and why.
+    ///
+    /// No window and no `▾ n more`: the owner serves three operational entries
+    /// and a handful of research ones, and the box is sized for the whole of
+    /// both. If a catalog ever outgrows that, the box grows with it — `wanted`
+    /// measures the lines rather than assuming a count — and `centred` clamps
+    /// it to the pane, which is the one place a row could be lost silently.
+    fn method_lines(&self, store: &Store) -> Vec<Line<'static>> {
+        let t = theme();
+        let rows = operational(store);
+        let at = self.at.min(rows.len().saturating_sub(1));
+        let mut lines = vec![panel_header("how this desk solves"), Line::from("")];
+        if rows.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " the desk has not said what it can solve with",
+                Style::default().fg(t.text_dim),
+            )));
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let on = i == at;
+            let mut spans = vec![
+                Span::styled(
+                    if on { " ▸ " } else { "   " },
+                    Style::default().fg(t.accent),
+                ),
+                Span::styled(
+                    format!(
+                        "{:<18}{:<4}",
+                        to_room(&or_missing(row.id.as_ref()), 17),
+                        to_room(&or_missing(row.arm_id.as_ref()), 3)
+                    ),
+                    match on {
+                        true => Style::default()
+                            .fg(t.accent)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                        false => Style::default().fg(t.text_primary),
+                    },
+                ),
+                Span::styled(
+                    to_room(&or_missing(row.label.as_ref()), 26),
+                    Style::default().fg(t.text_dim),
+                ),
+            ];
+            if row.current == Some(true) {
+                spans.push(Span::styled(
+                    "  now",
+                    Style::default()
+                        .fg(t.positive)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        // The owner's own reason for the row the cursor is on. One line rather
+        // than one per row: the rationales are sentences, and six of them would
+        // be a box an operator scrolls instead of a list they choose from.
+        if let Some(said) = rows
+            .get(at)
+            .and_then(|row| format::text(row.rationale.as_ref()))
+        {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", format::bounded(said, SAID_MAX)),
+                Style::default().fg(t.text_tertiary),
+            )));
+        }
+        let research = store
+            .method()
+            .map(|method| method.research.as_slice())
+            .unwrap_or_default();
+        if !research.is_empty() {
+            lines.push(Line::from(""));
+            // Listed rather than hidden, and the cursor cannot reach any of
+            // them. A method the desk *has* and will not run is a fact an
+            // operator looking for it needs — the alternative is a name they
+            // read in the catalog and cannot find here at all.
+            for row in research {
+                lines.push(Line::from(vec![
+                    Span::styled("   ", Style::default().fg(t.text_dim)),
+                    Span::styled(
+                        format!("{:<22}", to_room(&or_missing(row.id.as_ref()), 21)),
+                        Style::default().fg(t.text_dim),
+                    ),
+                    Span::styled(
+                        match format::text(row.stage.as_ref()) {
+                            Some(stage) => format!("not choosable — {stage} stage"),
+                            None => "not choosable".to_string(),
+                        },
+                        Style::default().fg(t.text_tertiary),
+                    ),
+                ]));
+            }
+        }
+        lines.push(match &self.note {
+            Some(note) => Line::from(Span::styled(
+                format!(" {}", format::bounded(note, SAID_MAX)),
+                Style::default()
+                    .fg(t.warning)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )),
+            None => Line::from(Span::styled(
+                " Enter solves with it from the next run · ↑↓ moves · Esc leaves it",
+                Style::default().fg(t.text_dim),
+            )),
+        });
+        lines
     }
 
     /// The lane box's lines. No window and no `▾ n more`: there are two rows
@@ -2190,6 +2714,71 @@ fn contact_lines(typed: &str, stored: bool, width: u16) -> Vec<Line<'static>> {
 
 /// The owner's question, and the word that answers it.
 #[cfg(feature = "operator")]
+/// The holdings-cap box's lines: what is typed, what it will be held to, and
+/// what an empty box means.
+///
+/// Plain text and no mask, like the contact box: a number of names is neither a
+/// secret nor an identity, and it is the one value on this pane an operator has
+/// to be able to *read back* before pressing Enter.
+///
+/// The bound is stated rather than only enforced. The owner's own limit is the
+/// size of the mandated universe, and this box says the number it will refuse
+/// above — read off the snapshot's universe, or left unsaid when there is none,
+/// because a bound this client invented would be a second mandate.
+#[cfg(feature = "operator")]
+fn cap_lines(typed: &str, store: &Store, note: Option<&str>) -> Vec<Line<'static>> {
+    let t = theme();
+    let universe = store.universe().len();
+    let held = store
+        .method()
+        .and_then(|method| method.current.max_holdings);
+    let mut lines = vec![panel_header("how many names"), Line::from("")];
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {:<LABEL_W$}", "names"),
+            Style::default().fg(t.text_secondary),
+        ),
+        // Plain, like the contact beside it and unlike the login form's two
+        // fields: a number of names is neither a secret nor an identity, and it
+        // is the one value on this pane an operator has to read back before
+        // pressing Enter. `field_row` masks, and reusing it here would hide the
+        // digits behind bullets in the box whose whole job is to show them.
+        Span::styled(typed.to_string(), Style::default().fg(t.text_primary)),
+        Span::styled("▏", Style::default().fg(t.accent)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        match universe {
+            0 => " the owner holds this to the size of the mandated universe".to_string(),
+            n => format!(" between 1 and {n} — the names this desk watches"),
+        },
+        Style::default().fg(t.text_dim),
+    )));
+    lines.push(Line::from(Span::styled(
+        match held {
+            Some(cap) => format!(" this desk holds at most {cap} today"),
+            None => " this desk has no cap today — the method holds what it holds".to_string(),
+        },
+        Style::default().fg(t.text_tertiary),
+    )));
+    // The note outranks the key line, as every other box on this pane has it:
+    // an operator who has just been refused needs the reason rather than a
+    // reminder of which key sends.
+    lines.push(match note {
+        Some(said) => Line::from(Span::styled(
+            format!(" {}", format::bounded(said, SAID_MAX)),
+            Style::default()
+                .fg(t.warning)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )),
+        None => Line::from(Span::styled(
+            " Enter sends it · an empty box or 0 clears the cap · Esc leaves it",
+            Style::default().fg(t.text_dim),
+        )),
+    });
+    lines
+}
+
 fn consent_lines(said: &str, typed: &str) -> Vec<Line<'static>> {
     let t = theme();
     vec![
@@ -2236,7 +2825,15 @@ impl SettingsView {
     fn draw_form(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
     fn draw_switch(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
     fn draw_contact(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
+    fn draw_cap(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
     fn forget_hits(&self) {}
+
+    /// The METHOD card with nothing over it. Every fact on it is the owner's,
+    /// and in this build there is no note and no request that could hold a
+    /// different answer.
+    fn draw_method(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+        method_card(f, area, store, at, None, false);
+    }
     fn record(&self, _cards: &[(Card, Rect)], _at: Option<Card>) {}
 
     /// The card without a draft over it. Every rule on it is the owner's, and
@@ -2260,6 +2857,21 @@ impl SettingsView {
 const DESK_H: u16 = 10;
 /// Header, eight rows, and the rule.
 const POLICY_H: u16 = 10;
+
+/// Header, seven rows, and the rule.
+///
+/// **Seven is what the left column had to give**, not what the card would like:
+/// twenty-two rows at the baseline height, ten to POLICY, three to THEME, and
+/// the `Min(0)` that used to carry the rationale is what yielded the rest.
+///
+/// So the body below is a budget rather than a fixed list of rows, and the
+/// order of the budget is the order of what an operator cannot get any other
+/// way. The pair in force is one row. The owner's warning takes as many as it
+/// needs — it is nowhere else on this workstation, and half of it is a desk
+/// somebody believes is fine. The entries take what is left and say how many
+/// they did not draw, because every one of them is in the picker `m` opens,
+/// whole, with the owner's rationale beside it.
+const METHOD_H: u16 = 9;
 /// Header, seven rows, and the rule.
 const SYSTEM_H: u16 = 9;
 /// Header, four rows, four of slack, and the rule.
@@ -2307,6 +2919,21 @@ const THEME_H: u16 = 3;
 /// granite3.3:8b`" — is 105 cells and survives uncut. Nothing on the wire is
 /// guaranteed to be the owner's, which is the C2 rule now made uniform.
 const SAID_MAX: usize = 112;
+
+/// The bound the METHOD card's warning passes, and it is wider than
+/// [`SAID_MAX`] on purpose.
+///
+/// A foreign-text guard rather than a layout device: the owner may join two
+/// clauses with ` · ` — a method that holds every name, and a cap that cannot
+/// reach the budget at the per-asset ceiling — and the second is the half an
+/// operator acts on. This client does not parse the sentence, so it cannot cut
+/// it at a clause; what decides how much is *drawn* is the card's own budget,
+/// which marks the cut where it lands. Sized to the bound the module that reads
+/// the owner's replies already holds foreign text to — which this file may not
+/// name, by the rule `operator_gate`'s census states: the pin is a plain text
+/// search, so even a comment here may not spell what is on the far side of the
+/// seam.
+const WARNING_MAX: usize = 240;
 
 /// The bound a backend or model name passes. A name is a token, not a sentence:
 /// `granite3.3:8b` is thirteen characters and anything past this is not one.
@@ -2512,6 +3139,349 @@ fn news_card(
     );
     card(f, area, Card::News, title, at, rows);
     shown
+}
+
+/// How this desk solves, what it may hold, and what else it could be pointed
+/// at.
+///
+/// Drawn from the owner's `/api/desk/method` answer and nothing else. The three
+/// lists it carries are three different claims — what is in force, what may be
+/// chosen, what exists and may not — and none of them is derived here: a client
+/// that worked out "current" by matching a name, or "not choosable" by knowing
+/// which ids are research, would be a second opinion about a mandate and a
+/// catalog the owner merged.
+///
+/// **The warning outranks the lists, and that is the whole shape of this
+/// function.** The owner's ruling is that a cap the effective method will
+/// refuse *applies* — nothing is refused at set time and the failure arrives
+/// later, out of `Mandate.check_targets`, as a plan that will not build. So the
+/// sentence that says so is the one thing on this card an operator cannot get
+/// any other way: the entries are all in the picker `m` opens, whole, with
+/// their rationales, and the warning is nowhere else at all. It is drawn
+/// directly under the pair it is about, before anything that could push it off
+/// the bottom, and it takes as many rows as it needs — the owner may join two
+/// clauses with ` · `, and half of that sentence is a desk an operator believes
+/// is fine.
+///
+/// The draft state is passed in rather than reached for, so the glass build
+/// draws the same card from the same code with nothing to pass.
+fn method_card(
+    f: &mut Frame,
+    area: Rect,
+    store: &Store,
+    at: Option<Card>,
+    note: Option<&str>,
+    sending: bool,
+) {
+    let t = theme();
+    let Some(method) = store.method() else {
+        card(
+            f,
+            area,
+            Card::Method,
+            "method",
+            at,
+            vec![absent("nothing has said how this desk solves")],
+        );
+        return;
+    };
+    let wide = (area.width as usize).saturating_sub(1);
+    // The card's own body, in rows: its height less the rule the block reserves
+    // and the header the first line is.
+    let mut budget = (area.height as usize).saturating_sub(2);
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let take = |rows: &mut Vec<Line<'static>>, budget: &mut usize, line: Line<'static>| {
+        if *budget > 0 {
+            *budget -= 1;
+            rows.push(line);
+        }
+    };
+
+    // The pair in force, in one row. Two rows read better and the column has
+    // one: the id is what an operator types, the arm is what the predictor
+    // board calls the same thing, and the cap is the number that decides
+    // whether a plan builds at all.
+    take(
+        &mut rows,
+        &mut budget,
+        kv(
+            // `solving` rather than `policy`, which the card below owns: two
+            // rows spelling the same label is two rows an operator has to tell
+            // apart, and this one carries the arm and the cap that POLICY does
+            // not.
+            "solving",
+            to_room(
+                &format!(
+                    "{} · {} · {}",
+                    or_missing(method.current.operational_policy.as_ref()),
+                    arm_of(method),
+                    match method.current.max_holdings {
+                        // A cap of nothing is not no cap, and neither is a
+                        // missing key: the owner sends `null` for "hold what
+                        // the method holds", and `none` is this pane's word for
+                        // that rather than a zero it would have invented.
+                        Some(cap) => format!("cap {cap}"),
+                        None => "cap none".to_string(),
+                    }
+                ),
+                wide.saturating_sub(LABEL_W + 1),
+            ),
+            t.accent,
+        ),
+    );
+
+    // Three things can claim the rows under it, in the operator's own order and
+    // for the NEWS card's reasons. A refusal or a local message is the answer
+    // to the key that was just pressed; a request in flight says why the card
+    // has not moved; and with neither, the owner's warning stands — which is
+    // the state it is in for as long as the mismatch lasts.
+    let said = match (note, sending) {
+        (Some(said), _) => Some(said.to_string()),
+        (None, true) => Some(ASKING.to_string()),
+        (None, false) => format::text(method.warning.as_ref()).map(str::to_string),
+    };
+    if let Some(said) = said {
+        // Bounded as foreign text and not as a layout device — nothing on this
+        // path is guaranteed to be the owner's — and bounded *wide*, because
+        // the owner joins two clauses with ` · ` and the second one ("every
+        // plan will refuse") is the half an operator acts on. What decides how
+        // much is drawn is the budget below, and a sentence the rows cannot
+        // hold is marked rather than trailing off.
+        let said = format::bounded(&said, WARNING_MAX);
+        let lines = wrap_to(&said, wide.max(1));
+        let cut = lines.len() > budget;
+        let shown = lines.len().min(budget);
+        for (i, line) in lines.into_iter().take(shown).enumerate() {
+            take(
+                &mut rows,
+                &mut budget,
+                Line::from(Span::styled(
+                    match cut && i + 1 == shown {
+                        true => format!(" {}…", to_room(&line, wide.saturating_sub(1))),
+                        false => format!(" {line}"),
+                    },
+                    Style::default()
+                        .fg(match (note.is_some(), sending) {
+                            // The owner's warning and this card's own refusal
+                            // are both warnings; a request in flight is not.
+                            (false, true) => t.accent,
+                            _ => t.warning,
+                        })
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                )),
+            );
+        }
+    }
+
+    // Then the two lists, in three tiers of how much room is left. **The
+    // warning took what it needed first**, deliberately: every entry below is
+    // in the picker `m` opens — whole, with the owner's rationale beside it —
+    // and the warning is on this card and nowhere else on the workstation.
+    //
+    // Tier three is one line for both lists rather than none for the second:
+    // "there are methods here" and "some of them are research stage" are the
+    // two facts an operator needs to know a key is worth pressing, and they fit
+    // in one row together.
+    let entries = &method.operational;
+    let research = &method.research;
+    let stages = stages_of(research);
+    if entries.is_empty() && research.is_empty() {
+        take(
+            &mut rows,
+            &mut budget,
+            absent("the owner named no method this desk can solve with"),
+        );
+    } else if budget == 1 && !entries.is_empty() && !research.is_empty() {
+        take(
+            &mut rows,
+            &mut budget,
+            Line::from(Span::styled(
+                to_room(
+                    &format!(
+                        " ▾ {} to choose · {} {stages} stage",
+                        entries.len(),
+                        research.len()
+                    ),
+                    wide,
+                ),
+                Style::default().fg(t.text_dim),
+            )),
+        );
+    } else {
+        // What may be chosen. One row each while there is room, and one line
+        // naming the count when there is not — never a silent short list.
+        if budget >= entries.len() && !entries.is_empty() {
+            for entry in entries {
+                let current = entry.current == Some(true);
+                take(
+                    &mut rows,
+                    &mut budget,
+                    Line::from(vec![
+                        Span::styled(
+                            if current { " ▸ " } else { "   " },
+                            Style::default().fg(t.accent),
+                        ),
+                        Span::styled(
+                            format!(
+                                "{:<20}{}",
+                                to_room(&or_missing(entry.id.as_ref()), 19),
+                                to_room(&or_missing(entry.arm_id.as_ref()), 4)
+                            ),
+                            match current {
+                                true => Style::default().fg(t.text_primary),
+                                false => Style::default().fg(t.text_secondary),
+                            },
+                        ),
+                        Span::styled(
+                            match current {
+                                true => "  now",
+                                false => "",
+                            },
+                            Style::default()
+                                .fg(t.positive)
+                                .add_modifier(ratatui::style::Modifier::BOLD),
+                        ),
+                    ]),
+                );
+            }
+        } else if !entries.is_empty() {
+            take(
+                &mut rows,
+                &mut budget,
+                Line::from(Span::styled(
+                    to_room(
+                        &format!(" ▾ {} methods this desk can solve with", entries.len()),
+                        wide,
+                    ),
+                    Style::default().fg(t.text_dim),
+                )),
+            );
+        }
+
+        // And what may not, with the stage that says why. **This is how the desk
+        // says why a research-stage method cannot be picked** — the owner
+        // refuses one with a sentence about evidence and a catalog change, and
+        // an operator who never sees the name here would go looking for the key
+        // that chooses it. So the *reason* survives down to the last row: at one
+        // row it is a count and a stage, and only the names go.
+        if !research.is_empty() && budget > 1 {
+            take(
+                &mut rows,
+                &mut budget,
+                Line::from(Span::styled(
+                    to_room(&format!(" not choosable — {stages} stage"), wide),
+                    Style::default().fg(t.text_tertiary),
+                )),
+            );
+            // The marker costs a row and is reserved *before* anything is
+            // dropped, which is the reservation the NEWS card and MODELS both
+            // make for the same reason.
+            let shown = match research.len() <= budget {
+                true => research.len(),
+                false => budget.saturating_sub(1),
+            };
+            for entry in research.iter().take(shown) {
+                take(
+                    &mut rows,
+                    &mut budget,
+                    Line::from(Span::styled(
+                        format!("   {}", to_room(&or_missing(entry.id.as_ref()), wide)),
+                        Style::default().fg(t.text_dim),
+                    )),
+                );
+            }
+            let hidden = research.len() - shown;
+            if hidden > 0 {
+                take(
+                    &mut rows,
+                    &mut budget,
+                    Line::from(Span::styled(
+                        format!("   ▾ {hidden} more"),
+                        Style::default().fg(t.text_dim),
+                    )),
+                );
+            }
+        } else if !research.is_empty() {
+            take(
+                &mut rows,
+                &mut budget,
+                Line::from(Span::styled(
+                    to_room(
+                        &format!(
+                            " ▾ {} more are {stages} stage — not choosable",
+                            research.len()
+                        ),
+                        wide,
+                    ),
+                    Style::default().fg(t.text_dim),
+                )),
+            );
+        }
+    }
+    card(f, area, Card::Method, "method", at, rows);
+}
+
+/// The stage the unchoosable entries share, or `research` when they do not.
+///
+/// The owner's own word, never this client's: the catalog has `offline` as well
+/// as `research`, and a card that hard-coded one would tell an operator the
+/// wrong thing about why a method is not on offer. Falls back to `research`
+/// only when the owner named no stage at all, and the picker lists each entry's
+/// own word beside it either way.
+fn stages_of(research: &[crate::model::ResearchEntry]) -> String {
+    let mut named: Vec<&str> = research
+        .iter()
+        .filter_map(|entry| format::text(entry.stage.as_ref()))
+        .collect();
+    named.sort_unstable();
+    named.dedup();
+    match named.len() {
+        1 => named[0].to_string(),
+        _ => "research".to_string(),
+    }
+}
+
+/// The research arm the desk's current method is registered as, or `--`.
+///
+/// Read off the entry the owner *marked* current rather than matched by id: the
+/// mark is the owner's own merge of the mandate and its overrides, and a
+/// comparison made here would disagree with it the first time one of them
+/// spelled a name differently.
+fn arm_of(method: &MethodSettings) -> String {
+    method
+        .operational
+        .iter()
+        .find(|entry| entry.current == Some(true))
+        .and_then(|entry| format::text(entry.arm_id.as_ref()))
+        .unwrap_or(MISSING)
+        .to_string()
+}
+
+/// `said`, broken into lines of at most `room` cells, on word boundaries where
+/// there is one.
+///
+/// The card needs the *lines*, not the count: it draws each as its own `Line`
+/// so a row can be dropped at the budget rather than clipped by `Paragraph`
+/// halfway through a sentence nobody can then finish reading.
+fn wrap_to(said: &str, room: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in said.split_whitespace() {
+        let width = line.chars().count();
+        if width > 0 && width + 1 + word.chars().count() > room {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        // A single word longer than the room is cut rather than dropped: it is
+        // one of the owner's own ids, and a blank row says less than a cut one.
+        line.push_str(&to_room(word, room));
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// What one source has to say for itself, and whether it is a problem.

@@ -1,0 +1,24 @@
+{
+  "current": {"operational_policy": "hrp", "max_holdings": null},
+  "operational": [
+    {"id": "hrp", "label": "Hierarchical risk parity", "arm_id": "B2",
+     "rationale": "Current evidence favors the robust HRP benchmark out of sample.",
+     "current": true},
+    {"id": "risk_parity", "label": "Equal risk contribution", "arm_id": "B3",
+     "rationale": "Equalises each name's risk contribution; no return view.",
+     "current": false},
+    {"id": "min_variance", "label": "Minimum variance", "arm_id": "A1",
+     "rationale": "The classical long-only floor; holds fewer names than hrp.",
+     "current": false}
+  ],
+  "research": [
+    {"id": "regime_min_variance", "label": "Regime-conditioned minimum variance",
+     "stage": "research", "choosable": false},
+    {"id": "views_conditioned_min_variance", "label": "Views-conditioned minimum variance",
+     "stage": "research", "choosable": false},
+    {"id": "cardinal_min_variance", "label": "Cardinal minimum variance",
+     "stage": "research", "choosable": false}
+  ],
+  "overrides": {},
+  "warning": null
+}

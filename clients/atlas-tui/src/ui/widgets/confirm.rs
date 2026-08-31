@@ -33,6 +33,7 @@
 //! and it mints a `ConfirmToken`. The BOOK and AUDIT views own one `Host` each.
 
 use crate::cmd::Command;
+use crate::format::MISSING;
 use crate::model::{Approval, Plan};
 use crate::theme::theme;
 use crate::ui::widgets::panel_header;
@@ -205,6 +206,11 @@ pub struct Modal {
     challenge: String,
     typed: String,
     binding: Binding,
+    /// One sentence under the facts, for a decision whose *consequence* is not
+    /// readable off its own columns. A plan box needs none — its facts are the
+    /// trade — but a universe change's facts are two ids and a ticker, and what
+    /// approving does to the desk is nowhere in them.
+    note: Option<String>,
     /// Where the last frame drew the words that arm this box, so a click on
     /// them can do exactly what Enter does and nothing else.
     ///
@@ -301,6 +307,7 @@ impl Modal {
                 approval_id: approval_id.to_string(),
                 targets_hash: hash.to_string(),
             },
+            note: None,
             arm_row: std::cell::Cell::new(Rect::default()),
         })
     }
@@ -364,6 +371,7 @@ impl Modal {
                 plan_id: plan_id.to_string(),
                 targets_hash: targets_hash.to_string(),
             },
+            note: None,
             arm_row: std::cell::Cell::new(Rect::default()),
         })
     }
@@ -377,8 +385,62 @@ impl Modal {
             challenge: STATIC_CHALLENGE.into(),
             typed: String::new(),
             binding: Binding::Action,
+            note: None,
             arm_row: std::cell::Cell::new(Rect::default()),
         }
+    }
+
+    /// Add the sentence that says what answering this box does.
+    pub fn with_note(mut self, note: &str) -> Modal {
+        self.note = Some(note.to_string());
+        self
+    }
+
+    /// The confirm box for deciding one approval request, whichever kind it is.
+    ///
+    /// One function for both callers — the AUDIT key and the chat's `/approve`
+    /// — because two spellings of "what does this box say" is how a universe
+    /// change came to be drawn as a plan with everything missing.
+    ///
+    /// `approval` is optional: the chat resolves an id the snapshot may no
+    /// longer be serving, and a box that named the id and nothing else is still
+    /// the truth about what is being decided.
+    ///
+    /// A `universe_change` states its own columns rather than a plan's. It binds
+    /// no plan and never expires, so `plan` and `expires` are not absent facts
+    /// to be dashed — they do not apply, and the row that would carry them says
+    /// what the request *is* instead.
+    pub fn for_approval(approval_id: &str, approval: Option<&Approval>, verb: &str) -> Modal {
+        let mut facts = vec![("approval".to_string(), approval_id.to_string())];
+        let universe = approval.is_some_and(|a| a.is_universe_change());
+        if universe {
+            let approval = approval.expect("universe is only true for a row we hold");
+            facts.push(("kind".to_string(), "universe change".to_string()));
+            facts.push((
+                "ticker".to_string(),
+                approval
+                    .summary_str("ticker")
+                    .unwrap_or(MISSING)
+                    .to_string(),
+            ));
+            if let Some(memo) = approval.summary_str("memo_decision_id") {
+                facts.push(("memo".to_string(), memo.to_string()));
+            }
+            let ticker = approval.summary_str("ticker").unwrap_or("this ticker");
+            return Modal::action(&format!("{} UNIVERSE CHANGE", verb.to_uppercase()), facts)
+                .with_note(&format!(
+                    "Approving admits {ticker} into the desk's research universe. It books nothing."
+                ));
+        }
+        if let Some(approval) = approval {
+            if let Some(plan) = crate::format::text(approval.plan_id.as_ref()) {
+                facts.push(("plan".to_string(), plan.to_string()));
+            }
+            if let Some(expires) = crate::format::clock(approval.expires_at.as_ref()) {
+                facts.push(("expires".to_string(), expires));
+            }
+        }
+        Modal::action(&format!("{} APPROVAL", verb.to_uppercase()), facts)
     }
 
     /// Whether this box is answered by reading rather than by typing.
@@ -566,6 +628,12 @@ impl Modal {
                 Span::styled(value.clone(), Style::default().fg(t.text_primary)),
             ])
         }));
+        for row in self.note_rows() {
+            lines.push(Line::from(Span::styled(
+                row,
+                Style::default().fg(t.text_secondary),
+            )));
+        }
         lines.push(Line::default());
         if self.displayed_only() {
             // No field, and therefore one row rather than two. The words that
@@ -631,7 +699,32 @@ impl Modal {
     /// not this module's.
     fn height(&self) -> u16 {
         let prompt = if self.displayed_only() { 1 } else { 2 };
-        H.max(CHROME_H + self.facts.len() as u16 + prompt)
+        H.max(CHROME_H + self.facts.len() as u16 + self.note_rows().len() as u16 + prompt)
+    }
+
+    /// The note, wrapped to the box's own inner width.
+    ///
+    /// Wrapped against [`W`] rather than the area, because `height` is asked
+    /// before the rect exists — and a note counted at one width and drawn at
+    /// another is a box whose last row falls outside its own border.
+    fn note_rows(&self) -> Vec<String> {
+        let Some(note) = self.note.as_deref() else {
+            return Vec::new();
+        };
+        let width = (W - 2) as usize;
+        let mut rows = vec![String::new()];
+        for word in note.split_whitespace() {
+            let row = rows.last_mut().expect("seeded with one row");
+            if row.is_empty() {
+                row.push_str(word);
+            } else if row.chars().count() + 1 + word.chars().count() <= width {
+                row.push(' ');
+                row.push_str(word);
+            } else {
+                rows.push(word.to_string());
+            }
+        }
+        rows
     }
 
     /// Whether the last frame drew this box's arming words under that cell.

@@ -1123,6 +1123,10 @@ impl AtlasView {
                 }
             }
             lines.extend(card.lines);
+            // Beside the proposal, not below the board: a universe change binds
+            // no plan, so it is a second question the same header covers, and
+            // the list further down never renders while a proposal is up.
+            self.universe_calls(store, inner, &mut lines);
         }
 
         if !lines.is_empty() {
@@ -1176,24 +1180,34 @@ impl AtlasView {
         // that answers it. This is the "it says awaiting approval but where"
         // question, answered on the page the operator actually asks from —
         // the affordance only; both keys still land in the confirm ritual.
+        // Plan approvals only. A universe change is answered above when a
+        // proposal is up and below when one is not, and counting it here would
+        // open this list for an item it does not draw.
         let approvals_waiting = store
             .approvals()
             .iter()
-            .filter(|a| a.status.as_deref() == Some("pending"))
+            .filter(|a| a.status.as_deref() == Some("pending") && !a.is_universe_change())
             .count();
         let plans_checked = store
             .plans()
             .iter()
             .filter(|p| p.state.as_deref() == Some("checked"))
             .count();
-        if store.proposal().is_none() && approvals_waiting + plans_checked > 0 {
+        let universe_waiting = store
+            .approvals()
+            .iter()
+            .any(|a| a.status.as_deref() == Some("pending") && a.is_universe_change());
+        if store.proposal().is_none()
+            && approvals_waiting + plans_checked + usize::from(universe_waiting) > 0
+        {
             lines.push(Line::from(""));
             lines.push(panel_header("your call"));
+            self.universe_calls(store, inner, &mut lines);
             // The chat's own words, one per item: what to type, right here.
             for approval in store
                 .approvals()
                 .iter()
-                .filter(|a| a.status.as_deref() == Some("pending"))
+                .filter(|a| a.status.as_deref() == Some("pending") && !a.is_universe_change())
                 .take(3)
             {
                 if let Some(id) = approval.approval_id.as_deref() {
@@ -1322,6 +1336,54 @@ impl AtlasView {
     #[cfg(feature = "operator")]
     pub fn ask_about(&mut self, template: &str) {
         self.asked = Some(template.to_string());
+    }
+
+    /// The pending universe widenings, each as the words that answer it.
+    ///
+    /// Its own line rather than a place in the approvals list, because the two
+    /// are not the same question: an approval there authorises a fill, and this
+    /// one only admits a ticker into what the desk may research. The ticker is
+    /// on the line for that reason — the id alone would ask an operator to
+    /// approve a widening without naming what is being widened to.
+    ///
+    /// Drawn whether or not a proposal is up: a universe change binds no plan,
+    /// so the proposal card does not answer it and cannot stand in for it.
+    fn universe_calls(&self, store: &Store, inner: Rect, lines: &mut Vec<Line<'static>>) {
+        for approval in store
+            .approvals()
+            .iter()
+            .filter(|a| a.status.as_deref() == Some("pending") && a.is_universe_change())
+            .take(3)
+        {
+            let Some(id) = approval.approval_id.as_deref() else {
+                continue;
+            };
+            let short = &id[..8.min(id.len())];
+            let word = format!("/approve {short}");
+            let ticker = approval.summary_str("ticker").unwrap_or(format::MISSING);
+            // Wrapped rather than one line: the sidebar is about thirty cells
+            // and the sentence names both the ticker and the two ways to answer
+            // it, so unwrapped the desk would draw a word an operator cannot
+            // read and a click target ending mid-id.
+            for row in wrap(
+                &format!("universe change: +{ticker} — {word} or a on AUDIT"),
+                inner.width as usize,
+            ) {
+                // The click lands on the row the word is actually on, for the
+                // rule the acts panel states: a word the frame did not draw
+                // whole is not something a click may run.
+                if row.contains(&word) {
+                    self.affordances.borrow_mut().push((
+                        Rect::new(inner.x, inner.y + lines.len() as u16, inner.width, 1),
+                        word.clone(),
+                    ));
+                }
+                lines.push(Line::from(Span::styled(
+                    row,
+                    Style::default().fg(theme().accent),
+                )));
+            }
+        }
     }
 }
 

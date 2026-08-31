@@ -905,11 +905,21 @@ pub struct StreamHealth {
 
 // -- the execution gate ----------------------------------------------------
 
-/// A plan-bound, expiring approval request. The client renders these; only the
-/// operator posture may act on one, and only through the owner.
+/// An approval request. The client renders these; only the operator posture may
+/// act on one, and only through the owner.
+///
+/// Two kinds share the table. A `plan` row binds a plan and expires; a
+/// `universe_change` row — filed by the contender scout when it names a ticker
+/// outside the mandate — binds no plan and never expires, so every column a
+/// plan row is read through (`plan_id`, `targets_hash`, `expires_at`, …) is
+/// null on it by design rather than by loss.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Approval {
     pub approval_id: Option<String>,
+    /// `plan` or `universe_change`. Absent on pre-migration rows, which the
+    /// owner's `_kinded` stamps `plan` — so `None` is a plan approval here too,
+    /// and nothing may read the absence as a third kind.
+    pub kind: Option<String>,
     pub task_id: Option<String>,
     pub plan_id: Option<String>,
     pub plan_digest: Option<String>,
@@ -927,6 +937,20 @@ pub struct Approval {
     pub consumed_at: Option<String>,
     pub invalidated_reason: Option<String>,
     pub created_at: Option<String>,
+}
+
+impl Approval {
+    /// Whether this row asks to widen the mandate's universe rather than to
+    /// authorise a fill.
+    pub fn is_universe_change(&self) -> bool {
+        self.kind.as_deref() == Some("universe_change")
+    }
+
+    /// One string out of the owner's `summary` object. A universe change carries
+    /// `ticker` and `memo_decision_id` there and nothing else.
+    pub fn summary_str(&self, key: &str) -> Option<&str> {
+        self.summary.as_ref()?.get(key)?.as_str()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -114,6 +114,47 @@ fn the_queue_shows_both_statuses_a_client_can_act_on() {
     assert!(approved.contains("approved"), "{approved}");
 }
 
+/// A queue holding both kinds: the widening the contender scout asked for, and
+/// an ordinary plan approval beside it.
+const BOTH_KINDS: &str = r#"{"approvals": [
+     {"approval_id": "uc11223344556677", "kind": "universe_change", "status": "pending",
+      "plan_id": null, "expires_at": null,
+      "summary": {"ticker": "NVDA", "memo_decision_id": "memo1234abcd"}},
+     {"approval_id": "aaaa111122223333", "plan_id": "pppp1111", "status": "pending",
+      "expires_at": "2026-07-30T19:12:18+00:00"}]}"#;
+
+#[test]
+fn a_universe_change_row_says_what_it_widens_instead_of_dashing_a_plan() {
+    // The row binds no plan and never expires, so both columns a plan row is
+    // read through are null on it by design. Drawn as a plan it said `--` twice
+    // — the desk claiming it had lost two facts the owner never sends — where
+    // what the request actually has is a ticker and the memo that argued for it.
+    let client = audit_from(BOTH_KINDS);
+    let frame = client.frame(120, 36);
+    let row = line_with(&frame, "uc112233445");
+    assert!(row.contains("+NVDA"), "the widening it asks for: {row}");
+    // The memo's id where the expiry would be. Eight characters and no label:
+    // the column is exactly the width of a clock, and `memo <id>` clipped to
+    // `memo mem` is the truncation this pane refuses everywhere else.
+    assert!(row.contains("memo1234"), "the memo it came from: {row}");
+    assert!(row.contains("pending"), "{row}");
+    assert!(
+        !row.contains("--"),
+        "a row with nothing missing drew the MISSING dash: {row}"
+    );
+    // And the plan row beside it is untouched.
+    let plan = line_with(&frame, "aaaa1111222");
+    assert!(
+        plan.contains("pppp1111") && plan.contains("19:12:18"),
+        "{plan}"
+    );
+}
+
+#[test]
+fn the_queue_renders_a_universe_change_beside_a_plan_approval_at_120x36() {
+    insta::assert_snapshot!(audit_from(BOTH_KINDS).frame(120, 36));
+}
+
 #[test]
 fn an_empty_queue_says_so_rather_than_drawing_a_blank_pane() {
     // "Nothing waiting" and "this pane is broken" must not look the same.
@@ -340,6 +381,73 @@ mod armed {
             press(&mut client, KeyCode::Enter),
             Some(Command::Reject("aaaa111122223333".into()))
         );
+    }
+
+    #[test]
+    fn a_universe_change_opens_a_box_about_the_universe_and_not_about_a_plan() {
+        // The same one confirm every decision takes — the box just states the
+        // request it is actually about. `plan` and `expires` are not absent
+        // facts here; they do not apply, and a box that showed them empty would
+        // ask a human to vouch for a trade that does not exist.
+        let mut client = armed(super::BOTH_KINDS);
+        assert_eq!(
+            press(&mut client, KeyCode::Char('a')),
+            None,
+            "no command yet"
+        );
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("APPROVE UNIVERSE CHANGE"), "{frame}");
+        assert!(frame.contains("uc11223344556677"), "{frame}");
+        assert!(frame.contains("NVDA"), "{frame}");
+        assert!(frame.contains("memo1234abcd"), "{frame}");
+        // What approving does, said once, because it is nowhere in the facts.
+        // Asserted in two halves because the sentence wraps to the box's width.
+        assert!(frame.contains("Approving admits NVDA"), "{frame}");
+        assert!(frame.contains("books nothing"), "{frame}");
+        assert!(
+            !frame.contains("expires"),
+            "a request that never expires drew an expiry row: {frame}"
+        );
+        assert!(
+            !frame.contains("APPROVE APPROVAL"),
+            "the plan box's title on a universe change: {frame}"
+        );
+
+        // One confirmation, the existing write, and the id the box named.
+        for c in "CONFIRM".chars() {
+            press(&mut client, KeyCode::Char(c));
+        }
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::Approve("uc11223344556677".into()))
+        );
+    }
+
+    #[test]
+    fn rejecting_a_universe_change_is_the_same_one_box_and_the_same_write() {
+        let mut client = armed(super::BOTH_KINDS);
+        press(&mut client, KeyCode::Char('R'));
+        assert!(client.frame(120, 36).contains("REJECT UNIVERSE CHANGE"));
+        for c in "CONFIRM".chars() {
+            press(&mut client, KeyCode::Char(c));
+        }
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::Reject("uc11223344556677".into()))
+        );
+    }
+
+    #[test]
+    fn a_plan_approval_still_opens_the_plan_box() {
+        // `kind` absent means `plan` — the owner stamps pre-migration rows that
+        // way — so the row below the widening must be unchanged by all of this.
+        let mut client = armed(super::BOTH_KINDS);
+        press(&mut client, KeyCode::Down);
+        press(&mut client, KeyCode::Char('a'));
+        let frame = client.frame(120, 36);
+        assert!(frame.contains("APPROVE APPROVAL"), "{frame}");
+        assert!(frame.contains("pppp1111"), "{frame}");
+        assert!(frame.contains("19:12:18"), "{frame}");
     }
 
     #[test]

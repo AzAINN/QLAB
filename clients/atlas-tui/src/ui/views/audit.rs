@@ -189,15 +189,8 @@ impl AuditView {
         let Some(id) = format::text(approval.approval_id.as_ref()) else {
             return;
         };
-        let mut facts = vec![("approval".to_string(), id.to_string())];
-        if let Some(plan) = format::text(approval.plan_id.as_ref()) {
-            facts.push(("plan".to_string(), plan.to_string()));
-        }
-        if let Some(expires) = clock(approval.expires_at.as_ref()) {
-            facts.push(("expires".to_string(), expires));
-        }
         self.confirm.open(
-            Modal::action(&format!("{} APPROVAL", verb.to_uppercase()), facts),
+            Modal::for_approval(id, Some(approval), verb),
             pending(id.to_string()),
         );
     }
@@ -241,7 +234,14 @@ impl AuditView {
     }
 }
 
-/// One approval: the marker, its id, the plan it binds, its status, its expiry.
+/// One approval: the marker, its id, what it binds, its status, and its deadline.
+///
+/// The last two columns are read off the *kind*. A universe change binds no plan
+/// and never expires, so drawing it through a plan row's columns would put the
+/// MISSING dash under both — the desk saying it lost two facts, where the owner
+/// never had them to send. It states the widening it asks for and the memo it
+/// came from instead: the same two columns, answering the same two questions
+/// this kind of request actually has answers to.
 ///
 /// The expiry goes whole or not at all. Between the pane's refusal floor and its
 /// design width the row would otherwise be clipped by the `Paragraph`, and the
@@ -251,6 +251,26 @@ impl AuditView {
 fn approval_row(approval: &Approval, selected: bool, width: u16) -> Line<'static> {
     let t = theme();
     let status = format::text(approval.status.as_ref()).unwrap_or(MISSING);
+    let universe = approval.is_universe_change();
+    let binds = if universe {
+        let ticker = approval.summary_str("ticker").unwrap_or(MISSING);
+        format!("+{ticker}").chars().take(10).collect::<String>()
+    } else {
+        short(approval.plan_id.as_ref(), 10)
+    };
+    let tail = if universe {
+        // The memo's id, eight characters, and no `memo` label in front of it:
+        // this column is [`APPROVALS_W`] minus the four fixed ones, which is the
+        // eight an expiry clock takes exactly. `memo <id>` is thirteen, and the
+        // pane's own rule is that a chip goes whole or not at all — a label
+        // clipped to `memo mem` is the truncation this row exists to avoid.
+        approval
+            .summary_str("memo_decision_id")
+            .map(|id| id.chars().take(8).collect::<String>())
+            .unwrap_or_else(|| MISSING.to_string())
+    } else {
+        clock(approval.expires_at.as_ref()).unwrap_or_else(|| MISSING.to_string())
+    };
     let mut spans = vec![
         Span::styled(
             if selected { "▌" } else { " " },
@@ -261,7 +281,7 @@ fn approval_row(approval: &Approval, selected: bool, width: u16) -> Line<'static
             Style::default().fg(t.text_primary),
         ),
         Span::styled(
-            format!("{:<11}", short(approval.plan_id.as_ref(), 10)),
+            format!("{binds:<11}"),
             Style::default().fg(t.text_secondary),
         ),
         Span::styled(
@@ -272,10 +292,7 @@ fn approval_row(approval: &Approval, selected: bool, width: u16) -> Line<'static
         ),
     ];
     if width >= APPROVALS_W {
-        spans.push(Span::styled(
-            clock(approval.expires_at.as_ref()).unwrap_or_else(|| MISSING.to_string()),
-            Style::default().fg(t.text_tertiary),
-        ));
+        spans.push(Span::styled(tail, Style::default().fg(t.text_tertiary)));
     }
     Line::from(spans)
 }

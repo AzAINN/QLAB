@@ -645,3 +645,96 @@ mod booking {
         );
     }
 }
+
+// -- the universe changes the scout asks for --------------------------------
+
+/// The contender scout's widening, waiting on a human. It binds no plan, so it
+/// is not answered by the proposal card and cannot be gated behind one.
+const UNIVERSE: &str = r#"{"approvals": [
+     {"approval_id": "uc11223344556677", "kind": "universe_change", "status": "pending",
+      "plan_id": null, "expires_at": null,
+      "summary": {"ticker": "NVDA", "memo_decision_id": "memo1234abcd"}}]}"#;
+
+/// A desk with both a live proposal and a pending widening.
+fn proposal_and_universe() -> Client {
+    let mut store = store_from(UNIVERSE);
+    harness::with_proposal(&mut store, harness::PROPOSAL);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('1'));
+    client
+}
+
+#[test]
+fn a_universe_change_is_pointed_at_even_while_a_proposal_is_up() {
+    // The your-call list is gated on there being no proposal, because the card
+    // *is* the your-call item for a plan. A universe change is a second
+    // question the card does not answer — gated the same way it would sit in
+    // the queue with nothing on any pane saying so.
+    let client = proposal_and_universe();
+    let body = content(&client.frame(120, 36));
+    assert!(
+        body.contains("universe change: +NVDA"),
+        "the widening is invisible beside a proposal:\n{body}"
+    );
+    assert!(body.contains("/approve uc112233"), "{body}");
+    assert!(body.contains("a on AUDIT"), "{body}");
+    // Under the header the card is already under: two your-call slots would be
+    // two accounts of what the desk is waiting for.
+    assert_eq!(body.matches("YOUR CALL").count(), 1, "{body}");
+}
+
+#[test]
+fn a_universe_change_is_a_your_call_line_with_no_proposal_too() {
+    let mut client = Client::new(store_from(UNIVERSE));
+    client.press(KeyCode::Char('1'));
+    let body = content(&client.frame(120, 36));
+    assert!(body.contains("universe change: +NVDA"), "{body}");
+    assert_eq!(body.matches("YOUR CALL").count(), 1, "{body}");
+}
+
+/// One golden per leg for the reason the proposal card's is: the card's last
+/// row states this window's posture in an armed build and is absent in a
+/// monitoring one.
+#[cfg(feature = "operator")]
+#[test]
+fn the_sidebar_points_at_a_universe_change_beside_the_proposal_at_120x36() {
+    insta::assert_snapshot!(proposal_and_universe().frame(120, 36));
+}
+
+#[cfg(not(feature = "operator"))]
+mod glass_universe {
+    use super::*;
+
+    #[test]
+    fn the_sidebar_points_at_a_universe_change_with_no_booking_row_at_120x36() {
+        insta::assert_snapshot!(proposal_and_universe().frame(120, 36));
+    }
+}
+
+/// The chat's own path to the same box.
+///
+/// `/approve <id>` and AUDIT's `a` are two ways to decide one request, and the
+/// pointer above tells an operator to use either. They call one builder, so a
+/// box that said different things about the same row is not something this
+/// client can be asked to draw.
+#[cfg(feature = "operator")]
+#[test]
+fn the_chat_approve_word_opens_the_universe_box_the_audit_key_opens() {
+    let mut store = store_from(UNIVERSE);
+    store.posture = atlas::store::Posture::Operator;
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('1'));
+    client.press(KeyCode::Char('/'));
+    for c in "approve uc11223344556677".chars() {
+        client.press(KeyCode::Char(c));
+    }
+    client.press(KeyCode::Enter);
+    let frame = client.frame(120, 36);
+    assert!(frame.contains("APPROVE UNIVERSE CHANGE"), "{frame}");
+    assert!(frame.contains("NVDA"), "{frame}");
+    assert!(frame.contains("Approving admits NVDA"), "{frame}");
+    assert!(
+        !frame.contains("APPROVE APPROVAL"),
+        "the chat drew the plan box for a universe change: {frame}"
+    );
+}

@@ -508,13 +508,10 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
         }
         #[cfg(feature = "operator")]
         Resolved::OpenApprove(id) => {
-            let facts = approval_facts(store, &id);
+            let modal = approval_modal(store, &id);
             store.nav.view = ViewId::Atlas;
             if let Some(host) = views.confirm_mut(ViewId::Atlas) {
-                host.open(
-                    crate::ui::widgets::confirm::Modal::action("APPROVE APPROVAL", facts),
-                    crate::ui::widgets::confirm::Pending::Approve(id),
-                );
+                host.open(modal, crate::ui::widgets::confirm::Pending::Approve(id));
             }
             done(store);
             None
@@ -667,24 +664,18 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
 /// Staying put matters more than it sounds. An operator working through the
 /// blotter who types a symbol is naming a position, and being thrown to MARKETS
 /// for it would lose the column they had sorted by.
-/// What the approve box shows: the request, its plan, its expiry — the same
-/// three facts AUDIT's own `a` puts up, from the same rows.
+/// The approve box the chat's `/approve` puts up — built by the same function
+/// AUDIT's own `a` calls, so the two paths cannot come to say different things
+/// about one request. An id the snapshot is no longer serving still gets a box
+/// naming it: the owner decides what is decidable, and a client that silently
+/// dropped the word would look like the key had missed.
 #[cfg(feature = "operator")]
-fn approval_facts(store: &Store, approval_id: &str) -> Vec<(String, String)> {
-    let mut facts = vec![("approval".to_string(), approval_id.to_string())];
-    if let Some(approval) = store
+fn approval_modal(store: &Store, approval_id: &str) -> crate::ui::widgets::confirm::Modal {
+    let approval = store
         .approvals()
         .iter()
-        .find(|a| a.approval_id.as_deref() == Some(approval_id))
-    {
-        if let Some(plan) = approval.plan_id.as_deref() {
-            facts.push(("plan".to_string(), plan.to_string()));
-        }
-        if let Some(expires) = crate::format::clock(approval.expires_at.as_ref()) {
-            facts.push(("expires".to_string(), expires));
-        }
-    }
-    facts
+        .find(|a| a.approval_id.as_deref() == Some(approval_id));
+    crate::ui::widgets::confirm::Modal::for_approval(approval_id, approval, "approve")
 }
 
 fn landing(current: ViewId, hit: Selected) -> Option<ViewId> {

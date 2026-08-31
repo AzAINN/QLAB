@@ -370,3 +370,35 @@ fn regime_panel_fixture_deserializes_with_partial_readings() {
     assert_eq!(hmm.indicator_id, "hmm");
     assert!(hmm.state.is_none() && hmm.signal.is_none() && hmm.reasoning.is_none());
 }
+
+#[test]
+fn a_universe_change_approval_carries_its_kind_and_no_plan_columns() {
+    // The row `build_universe_change_request` files: every plan column null,
+    // because it binds no plan and never expires, and the ticker it asks for
+    // lives in `summary` beside the memo decision that argued for it.
+    let approval: atlas::model::Approval = serde_json::from_str(
+        r#"{"approval_id": "uc11223344556677", "kind": "universe_change",
+             "plan_id": null, "plan_digest": null, "decision_id": null,
+             "targets_hash": null, "data_permit_id": null, "broker": null,
+             "book_revision": null, "expected_cost": null, "expires_at": null,
+             "status": "pending",
+             "summary": {"ticker": "NVDA", "memo_decision_id": "memo1234abcd"}}"#,
+    )
+    .unwrap();
+    assert!(approval.is_universe_change());
+    assert_eq!(approval.plan_id, None);
+    assert_eq!(approval.expires_at, None);
+    assert_eq!(approval.summary_str("ticker"), Some("NVDA"));
+    assert_eq!(
+        approval.summary_str("memo_decision_id"),
+        Some("memo1234abcd")
+    );
+
+    // A row from before the migration carries no `kind` at all, and the owner
+    // stamps those `plan`. Read as a third kind they would lose their plan
+    // column to a widening the desk was never asked for.
+    let legacy: atlas::model::Approval =
+        serde_json::from_str(r#"{"approval_id": "aaaa1111", "plan_id": "pppp1111"}"#).unwrap();
+    assert!(!legacy.is_universe_change());
+    assert_eq!(legacy.summary_str("ticker"), None);
+}

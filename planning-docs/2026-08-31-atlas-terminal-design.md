@@ -36,12 +36,18 @@ Verified against `main` at `222c293`:
 
 ## Rulings
 
-- **The mind decides the tab's shape.** ATLAS keeps one identity and two
-  bodies: with a local reasoner the main column is today's chat; with Claude
-  the main column is a live terminal running the desk's own `qlab cli`. The
-  desk sidebar — proposal card, tensions, your-call pointers — stays in both.
-  That sidebar is what makes an agent session *on the desk* rather than
-  beside it, and it is why the pane is not simply a bigger hand-off.
+- **The column follows the child, not the config.** ATLAS keeps one identity
+  and two bodies: the terminal pane while a child is running, today's chat
+  otherwise. The desk sidebar — proposal card, tensions, your-call pointers —
+  stays in both. That sidebar is what makes an agent session *on the desk*
+  rather than beside it, and it is why the pane is not simply a bigger
+  hand-off.
+  What the chosen mind decides is whether a child can be started at all:
+  Claude offers `/cli`, a local reasoner refuses it by name with the reason
+  (`qlab cli` is a Claude verb). Keying the column on the child rather than on
+  the config keeps one less piece of state, leaves a Claude desk with no
+  session behaving exactly as it does today, and means no frame can claim a
+  terminal that is not there.
 - **The child is always the desk's own verb.** The pane spawns `qlab cli`,
   never `claude` directly. Which tools, which MCP config, which persona a
   session gets is decided in `qlab/tui/claude.py` and tested there; a client
@@ -77,8 +83,9 @@ Verified against `main` at `222c293`:
 
 | Surface | Today | After |
 |---|---|---|
-| ATLAS, local reasoner | chat log + input + sidebar | unchanged |
-| ATLAS, Claude | the same chat, fed by a headless `--print` turn | a live `qlab cli` terminal in the main column, desk sidebar beside it |
+| ATLAS, no child running | chat log + input + sidebar | unchanged |
+| ATLAS, child running | not possible | a live `qlab cli` terminal in the main column, desk sidebar beside it |
+| `/cli` on a local-reasoner desk | opens Claude regardless of the configured mind | refused by name: `qlab cli` is a Claude verb |
 | `/cli` | leaves the workstation, returns on exit | opens the pane in ATLAS |
 | `/build` | leaves the workstation, returns on exit | unchanged |
 | First open | whatever `llm_config` already said | a door: which mind runs Atlas, persisted by the owner |

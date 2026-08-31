@@ -108,7 +108,7 @@
 
 **Files:** `clients/atlas-tui/src/ui/views/atlas.rs`, `clients/atlas-tui/src/cmd.rs` (`Scope::Cli` resolves to opening the pane), `clients/atlas-tui/src/dispatch.rs` or `main.rs` (the open/kill call sites); goldens.
 
-- [ ] **Step 1: Failing tests** — with the reasoner set to Claude and a session open, the ATLAS main column is the pane and the sidebar still draws the proposal card and the your-call pointers; with a local reasoner the column is the chat, unchanged (golden identical to today's); `/cli` on an unarmed desk is refused exactly as today; the glass build offers neither the word nor the pane.
+- [ ] **Step 1: Failing tests** — while a child is running the ATLAS main column is the pane and the sidebar still draws the proposal card and the your-call pointers; with no child the column is the chat and its golden is byte-identical to today's; `/cli` on a local-reasoner desk is refused by name (`qlab cli` is a Claude verb) and on an unarmed desk exactly as today; the glass build offers neither the word nor the pane.
 - [ ] **Step 2–4: red → green, goldens read and accepted, both legs.**
 - [ ] **Step 5: Commit** `feat(atlas-tui): Claude runs in the tab, beside the desk`.
 

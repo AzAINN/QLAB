@@ -1089,7 +1089,10 @@ impl SettingsView {
     fn save(&mut self, store: &Store, verify: bool) -> Option<Command> {
         self.news.note = None;
         let Some(news) = store.news() else {
-            self.news.note = Some("the owner has not said what this desk reads".to_string());
+            // Short enough for the card's own note row: at 38 cells the
+            // longer sentence was cut mid-word, and this is a refusal an
+            // operator has to read to know nothing was sent.
+            self.news.note = Some("nothing to save — no answer yet".to_string());
             return None;
         };
         // One request at a time. The route writes the operator's `.env`, and a
@@ -2372,22 +2375,31 @@ fn news_card(
     edited: bool,
 ) -> usize {
     let t = theme();
+    let wide = (area.width as usize).saturating_sub(2);
     let Some(news) = store.news() else {
-        card(
-            f,
-            area,
-            Card::News,
-            "news",
-            at,
-            // Not "this desk reads nothing": the payload's own `configured`
-            // says that, and it has not arrived. The two are a desk nobody set
-            // up and a route nobody has answered yet.
-            // One line at the card's own width. Wrapped, the continuation
-            // landed unindented beside DESK's value column and read as part
-            // of *that* card's rows — and this is the state every desk is in
-            // until the first fetch answers.
-            vec![absent("nothing has said what this desk reads")],
-        );
+        // The keys still route in this state and `save` still refuses out
+        // loud, so this branch owes the same note row the drawn card does.
+        // Without it the refusal was written and never painted, which is the
+        // silent-key shape the wait line was added to close.
+        //
+        // Not "this desk reads nothing": the payload's own `configured` says
+        // that, and it has not arrived. The two are a desk nobody set up and a
+        // route nobody has answered yet.
+        //
+        // One line at the card's own width. Wrapped, the continuation landed
+        // unindented beside DESK's value column and read as part of *that*
+        // card's rows — and this is the state every desk is in until the first
+        // fetch answers.
+        let mut rows = vec![absent("nothing has said what this desk reads")];
+        if let Some(said) = note {
+            rows.push(Line::from(Span::styled(
+                format!(" {}", to_room(&format::bounded(said, SAID_MAX), wide)),
+                Style::default()
+                    .fg(t.warning)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )));
+        }
+        card(f, area, Card::News, "news", at, rows);
         return 0;
     };
     // The mark goes in the title, where the focus tint already is: an edit this
@@ -2465,7 +2477,6 @@ fn news_card(
     // row is fifteen cells at this width, which is exactly where
     // `needs QLAB_EDGAR_CONTACT` and a verify detail get cut, and those are
     // the two strings an operator acts on.
-    let wide = (area.width as usize).saturating_sub(2);
     rows.push(
         match (note, sending, cursor.and_then(|at| news.catalog.get(at))) {
             (Some(said), _, _) => Line::from(Span::styled(
@@ -2519,25 +2530,40 @@ fn news_card(
 /// The `bool` is *a problem*, not *unavailable*: a `partial:` flag on a source
 /// that answered is a fact about a feed rather than a warning about the desk,
 /// and toning it as one would train an operator to read past the rows that are.
+/// Whether this source is waiting for something before the desk can read it at
+/// all.
+///
+/// **Not the same question as "is anything wrong with it".** A feed that
+/// answered a check with one of its own sources missing has something wrong
+/// with it and is perfectly readable; a source with no credential is neither
+/// readable nor wrong. The row draws them in two different places — one dims
+/// the tick and the name, the other tints the note — and merging them was the
+/// bug this split fixes: a verify that came back 503 dimmed the row as if the
+/// desk could not reach the source at all, which is a claim about the
+/// configuration rather than about today's fetch.
+///
+/// One definition, read by the row and by the note it carries.
+///
+/// `available` is `Some(false)` only: a source nothing has answered about is
+/// not one the desk has refused. The second half is the one thing this client
+/// can tell the owner has not been given — edgar's contact. The owner reports
+/// the *want* (`needs`) and separately whether one is stored, and a row that
+/// printed a cost over an unmet requirement would leave the operator ticking a
+/// source that cannot be saved.
+fn wanting(source: &NewsSource, news: &NewsSettings) -> bool {
+    source.available == Some(false)
+        || (or_missing(source.name.as_ref()) == EDGAR
+            && news.edgar_contact_set != Some(true)
+            && format::text(source.needs.as_ref()).is_some())
+}
+
 fn source_note(
     source: &NewsSource,
     news: &NewsSettings,
     verified: &[NewsMember],
 ) -> (String, bool) {
     let name = or_missing(source.name.as_ref());
-    // `Some(false)` only. A source nothing has answered about is not one the
-    // desk has refused.
-    //
-    // The second half is the one thing this client can tell the owner has not
-    // been given: edgar's contact. The owner reports the *want* (`needs`) and
-    // separately whether one is stored, and a row that printed a cost over an
-    // unmet requirement would leave the operator ticking a source that cannot
-    // be saved.
-    let wanting = source.available == Some(false)
-        || (name == EDGAR
-            && news.edgar_contact_set != Some(true)
-            && format::text(source.needs.as_ref()).is_some());
-    if wanting {
+    if wanting(source, news) {
         return (
             format::text(source.needs.as_ref())
                 .map(|needs| format!("needs {needs}"))
@@ -2573,8 +2599,14 @@ fn source_row(
     let t = theme();
     let name = or_missing(source.name.as_ref());
     let held = ticked.contains(&name);
-    let (said, out) = source_note(source, news, verified);
-    let bad = out;
+    // Two different facts, drawn in two different places. `out` is whether the
+    // desk can read this source at all, which dims the tick and the name;
+    // `bad` is whether something is wrong with it right now, which tints the
+    // note. One `bool` for both said that a feed which answered a check with a
+    // 503 was a source this desk cannot reach — a claim about the
+    // configuration rather than about today's fetch.
+    let out = wanting(source, news);
+    let (said, bad) = source_note(source, news, verified);
     Line::from(vec![
         // A glyph and not only a colour, for the switcher's reason: on a
         // 256-colour terminal a highlight is a shade, and a shade is not an

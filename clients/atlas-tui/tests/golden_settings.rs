@@ -1628,10 +1628,17 @@ mod news {
             body.contains("nothing has said what this desk reads"),
             "{body}"
         );
-        // And every key on the card declines rather than pretending.
+        // And every key on the card declines rather than pretending — out
+        // loud. The refusal used to be written into a note this branch never
+        // drew, which is the same silent-key shape the wait line closed.
         assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
         assert_eq!(press(&mut client, KeyCode::Char('s')), None);
-        assert!(content(&client.frame(120, 36)).contains("nothing has said"));
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("nothing has said"), "{body}");
+        assert!(
+            body.contains("nothing to save — no answer yet"),
+            "a refusal was written and never painted:\n{body}"
+        );
     }
 
     #[test]
@@ -1829,6 +1836,26 @@ mod news {
             body_style_of(&buffer, "rss feed").fg,
             Some(Theme::truecolor().warning)
         );
+        // And the *row* is a different claim from its note. A feed that
+        // answered a check with a 503 is a source this desk can read and did
+        // not get an answer from today; one with no credential is a source it
+        // cannot read at all. Merging the two dimmed the first as if it were
+        // the second, which is a statement about the configuration rather than
+        // about this fetch.
+        assert_eq!(
+            body_style_of(&buffer, "[x] rss").fg,
+            Some(Theme::truecolor().positive),
+            "a source that merely did not answer was dimmed as unreadable"
+        );
+        assert_eq!(
+            body_style_of(&buffer, "[x] macro").fg,
+            Some(Theme::truecolor().positive)
+        );
+        assert_eq!(
+            body_style_of(&buffer, "[ ] alpaca").fg,
+            Some(Theme::truecolor().text_dim),
+            "a source the desk cannot read at all is not drawn as available"
+        );
 
         // A check that came back saying nothing is not a clean one.
         assert!(press(&mut client, KeyCode::Char('v')).is_some());
@@ -1910,15 +1937,40 @@ mod news {
             client.frame(120, 36)
         );
 
-        // And the cursor stops at the last row the card actually drew: a
-        // Space against a row nobody can see is a change nobody chose.
-        for _ in 0..8 {
+        // The cursor walks the rows the card drew, and stops on the last of
+        // them. Four are drawn here, so three arrows from the top lands on
+        // `rss` — asserted by the name the frame shows rather than by an
+        // index, because the index is exactly what was wrong.
+        for _ in 0..3 {
             press(&mut client, KeyCode::Down);
         }
+        let frame = client.frame(120, 36);
+        // The catalog row, not the stack row above it, which names rss too.
+        assert!(
+            line_with(&frame, "] rss").contains('▸'),
+            "the cursor is not on the fourth drawn row:\n{frame}"
+        );
+
+        // And the mouse addresses the same rows the keyboard does. `rss` is
+        // the last one drawn; a click on it unticks the name the frame shows
+        // there, which is the half that used to disagree — the cursor could
+        // run past the click rectangles, so the two pointed at different
+        // sources.
+        let last = row_of(&client, "[x] rss");
+        assert_eq!(click(&mut client, 70, last), None);
+        let frame = client.frame(120, 36);
+        assert!(line_with(&frame, "] rss").contains("[ ]"), "{frame}");
+        assert!(content(&frame).contains("EDITED"), "{frame}");
+
+        // One more arrow leaves the card rather than stepping onto a row
+        // nobody can see. This is the half the two used to disagree about:
+        // with the cursor bounded by the catalog instead of by the frame, a
+        // fifth Down landed on a hidden source and Space would have ticked it.
+        press(&mut client, KeyCode::Down);
         let body = content(&client.frame(120, 36));
         assert!(
             !body.contains("s save"),
-            "the walk never left a card it could not fill:\n{body}"
+            "the cursor stepped onto a row the card never drew:\n{body}"
         );
     }
 

@@ -110,6 +110,8 @@
 
 **Files:** `clients/atlas-tui/src/ui/views/atlas.rs`, `clients/atlas-tui/src/cmd.rs` (`Scope::Cli` resolves to opening the pane), `clients/atlas-tui/src/dispatch.rs` or `main.rs` (the open/kill call sites); goldens.
 
+**From A4 (binding, and A4 calls it the likeliest real bug left):** `AtlasView::typing()` is unchanged, so a half-typed ask row survives `/cli` — the row is still "typing" while the pane is drawn over it, and printable keys are swallowed into a row nobody can see. Opening the pane must settle the ask row (clear it, or take it out of `typing()` while a pane is up), and a test must pin that a partly-typed ask row does not eat the pane's keys. Also note `Ctrl-]` arrives as `KeyCode::Char('5')` + CONTROL on this client (crossterm's legacy C0 mapping); A4 accepts both spellings — do not "simplify" that to one.
+
 **From A3's review (binding):** `open_pty` uses `tokio::spawn` and therefore PANICS rather than refusing if called outside the runtime (`store.rs:1006`). Every call site you add must be on the runtime's own loop; if you ever need one that might not be, it owes a sentence instead of a panic (invariant 4).
 
 **Resize (ruled, binding).** `pty_resize` deliberately cannot be called from `draw`, and the pane's size is only known there. Use this client's own idiom: the pane records its INNER rect into a `Cell<Rect>` during draw exactly as `atlas.rs` already does for `input_row` (`:92`) and `book_word` (`:137`); after the frame the runtime compares it with what the pty was last told and calls `store.pty_resize(cols, rows)` only when it differs. One source of truth for the geometry — the layout code — and no mutation of the store inside a draw. A terminal resize needs no special case: the next frame reports the new rect.

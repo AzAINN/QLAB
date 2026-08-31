@@ -5264,3 +5264,126 @@ def test_news_settings_verify_names_a_dead_member_and_still_applies(
     assert "503" in out["verify"]["members"]["macro"]["detail"]
     assert out["stack"] == ["macro"]
     assert os.environ["QLAB_NEWS_PROVIDERS"] == "macro"
+
+
+def test_the_upcoming_route_names_an_exhausted_calendar_instead_of_500ing(
+        session, monkeypatch):
+    """The look-ahead refuses loudly when the hand-maintained file runs out.
+    Letting that escape the handler turned a known, expected state into a 500
+    with a repr in it — the one shape a client cannot distinguish from the
+    owner being broken."""
+    from qlab.news.providers import macro
+
+    def exhausted(*a, **k):
+        raise RuntimeError("the release calendar is exhausted: ...")
+
+    monkeypatch.setattr(macro, "upcoming", exhausted)
+    status, payload = handle_api(session, "GET", "/api/news/upcoming", {}, {})
+    assert status == 200
+    assert payload["upcoming"] == []
+    assert "exhausted" in payload["error"]
+
+
+def test_system_status_shows_the_calendar_running_out_before_it_does(
+        session, monkeypatch):
+    from qlab.news.providers import macro
+
+    monkeypatch.setattr(macro, "calendar_days_left", lambda now: 9)
+    status = session.system_status(True)
+    assert status["calendar_days_left"] == 9
+
+    monkeypatch.setattr(macro, "calendar_days_left", lambda now: None)
+    assert session.system_status(True)["calendar_days_left"] is None
+
+    # A calendar this process cannot read is not a status-poll failure.
+    def broken(now):
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(macro, "calendar_days_left", broken)
+    assert session.system_status(True)["calendar_days_left"] is None
+
+
+def test_one_news_window_is_grounded_once_for_the_read_and_the_matrix(
+        session, monkeypatch):
+    """Grounding hashes, windows and clusters every record. The read and the
+    matrix are two views of ONE window, and re-deriving the identical
+    GroundedNews per call put that work on the dispatch lock twice a poll."""
+    from qlab.news import grounding
+
+    real = grounding.ground
+    calls = []
+
+    def counting(items, **kwargs):
+        calls.append(kwargs.get("provider"))
+        return real(items, **kwargs)
+
+    monkeypatch.setattr(grounding, "ground", counting)
+    window = session.fetch_desk_news(True)
+    assert window["items"]
+    session.compose_desk_read(True, prefetched_news=window)
+    session.compose_desk_read(True, prefetched_news=window)
+    session.qualitative_matrix(True)
+    assert len(calls) == 1
+
+    # A different window is a different grounding, not a stale reuse.
+    other = dict(window)
+    other["items"] = list(window["items"])[:1]
+    session.compose_desk_read(True, prefetched_news=other)
+    assert len(calls) == 2
+
+
+def test_the_heavy_snapshot_summaries_are_ttl_cached_and_a_run_invalidates_them(
+        session):
+    """Every /api/tui poll recomposed these under the dispatch lock: two
+    `list_runs(200)` scans for the ablation, 1000 rows for the equilibrium and
+    100 for the board — with every other request queued behind them."""
+    calls = []
+    real = session.registry.list_runs
+
+    def counting(limit=50, *a, **k):
+        calls.append(limit)
+        return real(limit, *a, **k)
+
+    session.registry.list_runs = counting
+
+    assert session.latest_equilibrium_returns() is None
+    assert session.latest_ablation_metrics() == {}
+    assert session.predictor_board_summary() == {"status": "never_ran"}
+    first = len(calls)
+    assert first >= 3
+
+    # Within the TTL and with no new run, the second call scans nothing.
+    session.latest_equilibrium_returns()
+    session.latest_ablation_metrics()
+    session.predictor_board_summary()
+    assert len(calls) == first
+
+    # A logged run is exactly what these summarise, so it invalidates all three.
+    run_id = session.registry.log_run("ablation", {"note": "fresh"})
+    session.registry.log_backtest(run_id, "B2", {"sharpe": 0.9})
+    session.latest_equilibrium_returns()
+    assert session.latest_ablation_metrics() == {"B2": {"sharpe": 0.9}}
+    session.predictor_board_summary()
+    assert len(calls) > first
+
+
+def test_the_heartbeat_tick_logs_one_qualitative_matrix_per_window(session):
+    """The matrix had only conditional producers — a route no shipped client
+    calls, and a reasoner-enabled chat — so a stock desk logged none at all and
+    the per-window history the registry is supposed to carry never accrued."""
+    import threading
+
+    from qlab.news.matrix import DESK_MATRIX_SOURCE
+    from qlab.operator.heartbeat import build_owner_tick
+
+    tick = build_owner_tick(session, threading.Lock(), offline=True)
+    tick()
+
+    rows = session.registry.matrix_runs(source=DESK_MATRIX_SOURCE, limit=5)
+    assert len(rows) == 1
+    assert rows[0]["spec"]["source"] == DESK_MATRIX_SOURCE
+
+    # One row per WINDOW, not per tick: the same window logs nothing new.
+    tick()
+    assert len(session.registry.matrix_runs(
+        source=DESK_MATRIX_SOURCE, limit=5)) == 1

@@ -243,6 +243,22 @@ def build_owner_tick(session, lock, *, offline: bool,
                         except Exception as exc:
                             session.registry.record_event(
                                 "news_archive_failed", {"error": str(exc)[:400]})
+                    # The matrix is the per-window qualitative record, and its
+                    # only other producers are conditional — a route no shipped
+                    # client calls, and a chat that needs a reasoner — so a
+                    # stock desk logged none at all. Here it is deterministic:
+                    # one row per window, which is the guard the method already
+                    # enforces on its own. Guarded separately for the same
+                    # reason the archive is: it must not make a healthy window
+                    # look stale.
+                    matrix = getattr(session, "qualitative_matrix", None)
+                    if callable(matrix):
+                        try:
+                            matrix(offline)
+                        except Exception as exc:
+                            session.registry.record_event(
+                                "qualitative_matrix_failed",
+                                {"error": str(exc)[:400]})
             except Exception as exc:
                 # A read failure must not stop the supervisor from observing —
                 # but the cached read must not keep passing as current either,

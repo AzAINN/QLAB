@@ -120,6 +120,9 @@ _AWAITING_OPERATOR = frozenset({"blocked", "failed", "interrupted"})
 # dispatch runs under this lock.
 # Effectively one request computes at a time (fine for a local single user),
 # while the socket layer never stalls.
+# The payload a handler returns is serialized AFTER the lock is released, so
+# anything reachable from one must be treated as replace-never-mutate: editing
+# a dict in place is a write racing that serialization, with no lock over it.
 _LOCK = threading.Lock()
 # How long a stream poll waits for the dispatch lock before proving the socket
 # is alive instead. Must stay comfortably under the client's stream read
@@ -131,6 +134,10 @@ _STREAM_LOCK_WAIT_SECONDS = 2.0
 # changes when this desk trades. Any mutation drops the cache, so a fill shows
 # up at once rather than up to this long later.
 _VALUATION_TTL_SECONDS = 15.0
+# The archive summary and the three run summaries share one staleness budget:
+# a poll is 30s apart, so this is "at most one rebuild per poll" and never a
+# stale answer, because a logged run invalidates them regardless.
+_RESEARCH_TTL_SECONDS = 30.0
 # How long a backend availability probe may be reused. Probing Ollama costs a
 # round trip per backend, and a picker that re-reads on every keystroke (or a
 # client that asked on every /api/tui poll) would turn an idle settings panel
@@ -229,6 +236,10 @@ _GATED_WORKFORCE_ROLES = frozenset({
 # These research operations may be reached through the TUI's stateless MCP
 # proxy. They can write research/audit rows, but none can mutate the paper book
 # or submit an order. The allowlist is enforced again here at the owner boundary.
+# "Audit rows" is not the same as inert: a verdict or decision row a proxy
+# session logs is read later by `rebalance_preview`'s gates. What keeps a role
+# from writing the row that clears its own work is the per-role agent
+# allowlists, not this set — this one only bounds what the proxy can reach.
 OWNER_LAB_TOOLS = frozenset({
     "data.fetch_universe",
     "data.snapshot_summary",
@@ -344,10 +355,16 @@ class UISession:
         # outside the owner dispatch lock. desk_read composes from this and
         # never fetches, so a cold cache cannot stall the lock on RSS timeouts.
         self._desk_news: dict | None = None
-        # Guards publication of the window above. Two fetchers legitimately run
-        # concurrently — a heartbeat tick and an operator refresh — and both
-        # write here from outside the dispatch lock.
+        # Guards publication of the window above, and the grounded form of it
+        # below. Two fetchers legitimately run concurrently — a heartbeat tick
+        # and an operator refresh — and both write here from outside the
+        # dispatch lock.
         self._news_lock = threading.Lock()
+        # (window key, GroundedNews) for the window above. Grounding hashes,
+        # windows and clusters every record; the read and the matrix are two
+        # views of ONE window, and re-deriving the identical result per call
+        # put that work on the dispatch lock twice a poll.
+        self._grounded_news: tuple[tuple, object] | None = None
         # Previous robust regime, for flip detection. In memory only: after a
         # restart there is no prior observation, and claiming a flip without
         # one would launch a workflow off a cold start.
@@ -390,6 +407,13 @@ class UISession:
         # invalidated from the heartbeat thread (invariant 9).
         self._archive_lock = threading.Lock()
         self._archive_stats_cache = None
+        # (monotonic stamp, run revision, payload) per summary. These three are
+        # recomposed on every /api/tui poll under the dispatch lock and each
+        # one scans hundreds of run rows; the registry's run revision is what
+        # makes the cache exact rather than merely timely. Same locking reason
+        # as the archive cache above.
+        self._research_lock = threading.Lock()
+        self._research_cache: dict[str, tuple[float, int, object]] = {}
         # The qualitative matrix is logged once per news window, and "has this
         # window already been logged" is a check followed by a write. The owner
         # is threaded (invariant 9): without this, a handler thread and the
@@ -1556,10 +1580,21 @@ class UISession:
             "last_run_at": last_daily_ops.get("ts") if last_daily_ops else None,
             "triggers_fired": len(triggers) if isinstance(triggers, list) else 0,
         }
+        from qlab.news.providers import macro
         from qlab.tui.claude import resolve_claude_executable
 
         # One resolver for every "is claude here" answer (Windows shims).
         claude_available = bool(resolve_claude_executable())
+        # How much life the hand-maintained look-ahead has left. `upcoming`
+        # only refuses once it is ALREADY exhausted, which is a day too late to
+        # act on; this is the same fact while there is still time to extend the
+        # file. An unreadable config is None here and raises where it is
+        # actionable, not on a status poll.
+        try:
+            calendar_days_left = macro.calendar_days_left(
+                datetime.now(timezone.utc))
+        except Exception:
+            calendar_days_left = None
         return {
             "mode": "paper",
             "offline": offline,
@@ -1576,6 +1611,7 @@ class UISession:
                 "agent authority is intentionally propose-only; paper execution "
                 "requires explicit human confirmation"
             ),
+            "calendar_days_left": calendar_days_left,
             "data_source": provenance[0] if provenance else "none",
             "data_age_days": provenance[1] if provenance else None,
             "autopilot": autopilot,
@@ -1700,7 +1736,13 @@ class UISession:
         newest board row cannot be read, are different facts and render as
         different statuses. Nothing here is a judgment — ``age_days`` is a
         number, and whether it is too old is the reasoner's call.
+
+        TTL-cached against the run revision: a hundred run rows on every poll.
         """
+        return self._run_summary_cached(
+            "predictor_board", self._predictor_board_summary)
+
+    def _predictor_board_summary(self) -> dict:
         row = next(
             (
                 r
@@ -2964,6 +3006,40 @@ class UISession:
             "uncovered": [t for t in universe if per_ticker[t] == 0],
         }
 
+    def grounded_window(self, window: dict, universe) -> object:
+        """The grounded form of one news window, derived once per window.
+
+        Keyed by what grounding actually reads — the provider stamp, the
+        window's own as_of, the records' identities, and the universe they are
+        mapped against — so a genuinely new window is genuinely re-grounded and
+        only an identical one is reused. The cached ``as_of`` is the first
+        caller's instant by design: the point-in-time boundary belongs to the
+        window, not to whoever looked at it second.
+        """
+        from qlab.news.grounding import ground
+
+        items = list(window.get("items") or [])
+        provider_name = str(window.get("provider_name") or "synthetic")
+        key = (
+            provider_name,
+            str(window.get("as_of") or ""),
+            tuple(universe),
+            tuple((getattr(item, "url", ""), getattr(item, "published", ""),
+                   getattr(item, "headline", "")) for item in items),
+        )
+        with self._news_lock:
+            cached = self._grounded_news
+            if cached is not None and cached[0] == key:
+                return cached[1]
+        # Grounding runs outside the lock: it is pure over its arguments, and
+        # holding the news lock across it would serialize a fetcher behind it.
+        grounded = ground(
+            items, as_of=datetime.now(timezone.utc).isoformat(),
+            provider=provider_name, universe=universe)
+        with self._news_lock:
+            self._grounded_news = (key, grounded)
+        return grounded
+
     def compose_desk_read(
         self,
         offline: bool,
@@ -2980,18 +3056,14 @@ class UISession:
         except Exception as exc:
             panel = {"robust_state": "unknown",
                      "uncertainty_reason": f"panel unavailable: {exc}"}
-        items = list(prefetched_news.get("items") or [])
         news_error = prefetched_news.get("error")
         # Ground the window before interpreting it: enforce the point-in-time
         # boundary, hash each record so an edited headline is a new record
         # rather than a silent rewrite, and cluster so corroboration is visible.
-        from qlab.news.grounding import ground
-
+        # Shared with the matrix, which reads the same window.
         provider_name = str(
             prefetched_news.get("provider_name") or "synthetic")
-        grounded = ground(
-            items, as_of=datetime.now(timezone.utc).isoformat(),
-            provider=provider_name, universe=universe)
+        grounded = self.grounded_window(prefetched_news, universe)
         # Deterministic properties of the record, computed before anything
         # interprets it. These describe what the window covers and how well
         # supported it is — never a direction, which is the whole reason they
@@ -3049,7 +3121,6 @@ class UISession:
         registry carries the history of the record rather than a row per page
         refresh.
         """
-        from qlab.news.grounding import ground
         from qlab.news.matrix import DESK_MATRIX_SOURCE, build_matrix
         from qlab.news.providers.macro import upcoming
 
@@ -3057,10 +3128,7 @@ class UISession:
         universe = list(self.mandate.universe_whitelist)
         as_of = date.today().isoformat()
         provider_name = str(window.get("provider_name") or "synthetic")
-        grounded = ground(
-            list(window.get("items") or []),
-            as_of=datetime.now(timezone.utc).isoformat(),
-            provider=provider_name, universe=universe)
+        grounded = self.grounded_window(window, universe)
         # The look-ahead is hand-maintained and refuses loudly once it runs
         # out. That refusal must not take the matrix down with it — coverage is
         # a fact about the window, not about the yaml — but it is carried
@@ -4420,8 +4488,36 @@ class UISession:
         }
         return policy
 
+    def _run_summary_cached(self, key: str, build):
+        """TTL-cache one summary of the runs table, exact against new runs.
+
+        Built under the lock, exactly as ``archive_summary`` is: two handler
+        threads arriving cold should wait for one scan, not run two. The value
+        is deep-copied out, because these payloads reach handlers and the
+        convention there is replace-never-mutate.
+        """
+        import copy
+
+        revision = self.registry.run_revision
+        with self._research_lock:
+            hit = self._research_cache.get(key)
+            if (hit is not None and hit[1] == revision
+                    and (time.monotonic() - hit[0]) < _RESEARCH_TTL_SECONDS):
+                return copy.deepcopy(hit[2])
+            value = build()
+            self._research_cache[key] = (time.monotonic(), revision, value)
+            return copy.deepcopy(value)
+
     def latest_equilibrium_returns(self) -> dict | None:
-        """Compact summary of the newest persisted equilibrium research run."""
+        """Compact summary of the newest persisted equilibrium research run.
+
+        TTL-cached against the registry's run revision: it scans a thousand run
+        rows and every /api/tui poll asks for it under the dispatch lock.
+        """
+        return self._run_summary_cached(
+            "equilibrium_returns", self._latest_equilibrium_returns)
+
+    def _latest_equilibrium_returns(self) -> dict | None:
         for run in self.registry.list_runs(1000):
             if run.get("kind") != "equilibrium":
                 continue
@@ -4447,7 +4543,13 @@ class UISession:
         at a time, and a newer one of those must never displace the ablation.
         ``list_runs`` is already newest-first, and filtering before ``report``
         keeps the TUI poll path off an N+1 scan of unrelated research history.
+        TTL-cached against the run revision: the poll path used to pay for this
+        twice, once here and once through ``leaderboard``.
         """
+        return self._run_summary_cached(
+            "ablation_metrics", self._latest_ablation_metrics)
+
+    def _latest_ablation_metrics(self) -> dict[str, dict]:
         from qlab.experiment import ABLATION_RUN_KIND
 
         for run in self.registry.list_runs(200):
@@ -5057,9 +5159,17 @@ def handle_api(session: UISession, method: str, path: str,
     if method == "GET" and path == "/api/news/upcoming":
         # Scheduled releases, not news: future-dated by definition, so they
         # never travel through the point-in-time window.
-        from qlab.news.providers.macro import upcoming
+        from qlab.news.providers import macro
 
-        return 200, {"upcoming": upcoming(datetime.now(timezone.utc))}
+        # The calendar is hand-maintained and refuses loudly once it runs out.
+        # That is an expected state of the file, not a fault of the owner, so
+        # it is named the way the matrix names it -- never a 500 with a repr,
+        # which a client cannot tell from the desk being broken.
+        try:
+            events = macro.upcoming(datetime.now(timezone.utc))
+        except RuntimeError as exc:
+            return 200, {"upcoming": [], "error": str(exc)}
+        return 200, {"upcoming": events}
 
     if method == "GET" and path == "/api/news/settings":
         # Cache-only and network-free, like /api/news itself.

@@ -4,7 +4,7 @@
 
 **Goal:** The real Claude CLI runs inside the ATLAS tab on a pseudoterminal, with the desk's own sidebar beside it, and the startup door can honestly ask which mind runs Atlas.
 
-**Architecture:** A gated `src/pty.rs` owns the child (spawn `qlab cli` on a `portable-pty`, a blocking reader thread posting bytes onto the existing bus, write/resize/kill, exit as an event). The store holds the `vt100::Parser`, so a frame stays a pure function of `(store, fx, instant)`. `src/ui/widgets/terminal.rs` renders the parsed screen with `tui-term`'s `PseudoTerminal`. ATLAS chooses its main column by the configured reasoner: chat for a local model, the pane for Claude. The owner gains a `chosen` flag on `llm_config` so "nobody picked a mind" is expressible.
+**Architecture:** A gated `src/pty.rs` owns the child (spawn `qlab cli` on a `portable-pty`, a blocking reader thread posting bytes onto the existing bus, write/resize/kill, exit as an event). The store holds the `vt100::Parser`, so a frame stays a pure function of `(store, fx, instant)`. `src/ui/widgets/terminal.rs` renders the parsed screen with `tui-term`'s `PseudoTerminal`. ATLAS's main column follows the *child*: the pane while one runs, today's chat otherwise; the configured mind decides only whether `/cli` may start one. The owner gains a `chosen` flag on `llm_config` so "nobody picked a mind" is expressible.
 
 **Tech Stack:** Rust, ratatui 0.30, crossterm 0.29, tokio (no `process`/`io-util` features — the pty reader is a blocking thread), new deps `portable-pty = "0.9"`, `vt100 = "0.16"`, `tui-term = "0.3"` (resolution verified: one `ratatui 0.30.2` in the lock, no duplicate). Python 3.13 owner.
 

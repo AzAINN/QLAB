@@ -1267,3 +1267,55 @@ pub struct NewsSource {
     /// as `default`.
     pub chosen: Option<bool>,
 }
+
+// -- /api/research/qualitative ---------------------------------------------
+
+/// The qualitative matrix: what the grounded news window says about each name,
+/// as counts.
+///
+/// Its own payload rather than a section of the snapshot, for [`NewsSettings`]'
+/// reason: the owner composes it from the window it already fetched, and
+/// `/api/tui` carries none of it.
+///
+/// Nothing here has a sign, and this client adds none. `qlab/news/matrix.py`
+/// states why and it holds twice as hard on the way out: a signed column drawn
+/// over these counts would be a return forecast wearing a qualitative name.
+///
+/// `calendar_error` and `news_error` are separate because they are separate
+/// claims — one says nobody extended the release calendar, the other says the
+/// feed broke — and only the second means the coverage counts below are not a
+/// reading of the press at all.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct QualitativeMatrix {
+    pub as_of: Option<String>,
+    /// Identifies the *window*, not the reading of it: the same claims read on
+    /// a later day carry the same hash.
+    pub window_hash: Option<String>,
+    pub provider: Option<String>,
+    pub run_id: Option<String>,
+    /// Keyed by ticker, and the owner builds one row per universe name — a
+    /// name with nothing written about it is a row of zeros, not an absent
+    /// row. An empty map is a window with no universe behind it at all.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub rows: BTreeMap<String, MatrixRow>,
+    pub calendar_error: Option<String>,
+    pub news_error: Option<String>,
+}
+
+/// One name's row: counts over the record, and the next scheduled release.
+///
+/// `days_to_next_release` is the one nullable count, and it is nullable in the
+/// owner too: no scheduled release ahead is not zero days to one.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MatrixRow {
+    pub ticker: Option<String>,
+    pub coverage: Option<i64>,
+    pub publishers: Option<i64>,
+    pub corroborated: Option<i64>,
+    pub primary_docs: Option<i64>,
+    pub days_to_next_release: Option<i64>,
+    /// What each cell was counted from. Carried so a count stays traceable to
+    /// archive rows; this client does not draw them.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub claim_keys: Vec<String>,
+}

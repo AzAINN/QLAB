@@ -1,8 +1,12 @@
-//! RESEARCH — the ablation's ranking, the run ledger, and the staged catalog.
+//! RESEARCH — the ablation's ranking, the qualitative record, the run ledger,
+//! and the staged catalog.
 //!
-//! Three panes carrying what the Textual reference view carried, because this
-//! one replaces it: a surface that quietly stopped existing at the cutover
-//! would be a governance record an operator can no longer reach.
+//! Three of the panes carry what the Textual reference view carried, because
+//! this one replaces it: a surface that quietly stopped existing at the cutover
+//! would be a governance record an operator can no longer reach. The fourth —
+//! the qualitative matrix — is the half of the desk's evidence that had no
+//! surface at all: the owner has logged one row per news window since the
+//! grounding landed, and until now nothing on this workstation drew it.
 //!
 //! The leaderboard is the owner's own ranking, in the owner's own order. It
 //! sorts arms it could not score *last* rather than dropping them, and this
@@ -21,7 +25,7 @@
 use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
-use crate::model::{Algorithm, LeaderboardRow, RunSpec};
+use crate::model::{Algorithm, LeaderboardRow, MatrixRow, QualitativeMatrix, RunSpec};
 use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
@@ -35,6 +39,7 @@ use ratatui::{
     widgets::{Paragraph, Row, Table},
     Frame,
 };
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 /// The seven columns: the method, the mark that says what kind of arm it is,
@@ -63,14 +68,48 @@ const COLS: [(&str, u16, bool); 7] = [
     ("DSR", 5, RIGHT),
 ];
 
-/// The leaderboard's floor, derived from the columns so the two cannot drift.
-const BOARD_W: u16 = board_w();
+/// The matrix's six columns: the name, the mark that says the book holds it,
+/// and the five counts the owner's `MatrixRow` carries.
+///
+/// Left for the name and the mark, right for every count, by the leaderboard's
+/// rule. Nothing here is signed and nothing here is toned by direction: these
+/// are counts over the *record*, and a red cell on a low one would be this
+/// client turning coverage into a view — the exact confusion
+/// `qlab/news/matrix.py` refuses to serve.
+///
+/// `RELEASE` is seven because the header is, and because `--` is a real value
+/// in it: no scheduled release ahead is not zero days to one.
+const MATRIX_COLS: [(&str, u16, bool); 7] = [
+    ("NAME", 6, LEFT),
+    ("", 4, LEFT),
+    ("COVER", 5, RIGHT),
+    ("PUBS", 4, RIGHT),
+    ("CORROB", 6, RIGHT),
+    ("PRIMARY", 7, RIGHT),
+    ("RELEASE", 7, RIGHT),
+];
 
-const fn board_w() -> u16 {
+/// The leaderboard's floor, derived from the columns so the two cannot drift.
+const BOARD_W: u16 = width_of(&COLS);
+
+/// The matrix's own floor, derived the same way. Below the view's floor today,
+/// which is why RESEARCH refuses once for both rather than letting one pane
+/// draw while the other is starved — `FLOOR` is what the guard actually reads,
+/// and a widened matrix column raises it without anyone remembering to.
+const MATRIX_W: u16 = width_of(&MATRIX_COLS);
+
+/// What RESEARCH needs before any of its grids may draw.
+const FLOOR: u16 = if MATRIX_W > BOARD_W {
+    MATRIX_W
+} else {
+    BOARD_W
+};
+
+const fn width_of(cols: &[(&str, u16, bool)]) -> u16 {
     let mut w = 0;
     let mut i = 0;
-    while i < COLS.len() {
-        w += COLS[i].1 + 1;
+    while i < cols.len() {
+        w += cols[i].1 + 1;
         i += 1;
     }
     w - 1
@@ -90,6 +129,14 @@ const CATALOG_MIN: u16 = 30 + 1 + 11;
 /// rather than a hint.
 const BOTTOM_MIN: u16 = 8;
 
+/// The matrix's floor: its header, its rule, and one row under them — which is
+/// also exactly what the three states that draw a sentence instead of a table
+/// need. Reserved out of the view's height rather than taken from whatever is
+/// left, because a pane that quietly stopped being drawn is the failure this
+/// module's header names: the record would disappear from the desk without
+/// saying so.
+const MATRIX_MIN: u16 = 4;
+
 /// Nothing to retain: no cursor, no page, no field. Every pane is a rendering
 /// of what the owner said.
 #[derive(Default)]
@@ -101,12 +148,12 @@ impl View for ResearchView {
         // every cell was held to, and a right-aligned cell loses its *leading*
         // characters — the sign first. A return of `-11.3%` drawn as `11.3%` is
         // a loss rendered as a gain, so the pane refuses instead.
-        if area.width < BOARD_W || area.height < BOTTOM_MIN + 6 {
+        if area.width < FLOOR || area.height < BOTTOM_MIN + MATRIX_MIN + 6 {
             refuse(
                 f,
                 area,
                 format!(
-                    "RESEARCH needs {BOARD_W} columns to render the five metrics without \
+                    "RESEARCH needs {FLOOR} columns to render the five metrics without \
                      clipping a sign; this pane has {}.",
                     area.width
                 ),
@@ -118,7 +165,15 @@ impl View for ResearchView {
         // takes the rest: the catalog is the pane that grows with the owner's
         // deployment, so it is the one that should get the spare rows.
         let arms = store.leaderboard().len().max(1) as u16;
-        let board = (arms + 3).min(area.height.saturating_sub(BOTTOM_MIN + 1));
+        let board = (arms + 3).min(area.height.saturating_sub(BOTTOM_MIN + MATRIX_MIN + 2));
+        // The matrix takes what it needs and no more, clamped so the ledger
+        // band below it keeps its floor: the catalog is still the pane that
+        // grows with the owner's deployment, and the matrix's height is a fact
+        // about the universe, which does not.
+        let matrix = matrix_h(store).clamp(
+            MATRIX_MIN,
+            area.height.saturating_sub(board + BOTTOM_MIN + 2),
+        );
         // Two admission readouts lead, one row each: whether the desk may use
         // the vol forecast, and which model — if any — leads the paired
         // predictor board. Everything below them is evidence.
@@ -126,17 +181,19 @@ impl View for ResearchView {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(board),
+            Constraint::Length(matrix),
             Constraint::Min(0),
         ])
         .split(area);
         draw_forecast(f, rows[0], store);
         draw_predictors(f, rows[1], store);
         draw_board(f, rows[2], store);
+        draw_matrix(f, rows[3], store);
 
-        let left = RUNS_W.min(rows[3].width.saturating_sub(CATALOG_MIN + 1));
+        let left = RUNS_W.min(rows[4].width.saturating_sub(CATALOG_MIN + 1));
         let cols = Layout::horizontal([Constraint::Length(left), Constraint::Min(0)])
             .spacing(1)
-            .split(rows[3]);
+            .split(rows[4]);
         draw_runs(f, cols[0], store);
         draw_catalog(f, cols[1], store);
     }
@@ -551,6 +608,262 @@ fn decimals(value: f64, dp: usize) -> String {
     }
 }
 
+// -- the qualitative matrix -------------------------------------------------
+//
+// What the grounded news window says about each name, as counts. Read-only in
+// both postures and in both builds: the matrix is evidence the owner logged
+// per window, this pane claims no key, and nothing drawn here can be acted on
+// from here.
+//
+// Nothing in it is signed and nothing is toned by magnitude. `qlab/news/
+// matrix.py` refuses to serve a signed column because a signed qualitative
+// column is a return forecast wearing a qualitative name, and a client that
+// painted the counts by direction would put the sign back on the way out.
+
+/// The rows the matrix would use if it could have them: its rule, its header,
+/// whatever failures the window carried, and the table or the one sentence
+/// that stands in for it.
+fn matrix_h(store: &Store) -> u16 {
+    let Some(matrix) = store.qualitative() else {
+        return MATRIX_MIN;
+    };
+    let body = match matrix.rows.is_empty() {
+        true => 1,
+        false => 1 + matrix.rows.len() as u16,
+    };
+    2 + matrix_notes(matrix).len() as u16 + body
+}
+
+/// The matrix pane: the window it read, what broke while reading it, and one
+/// row per name with the book's own names first.
+fn draw_matrix(f: &mut Frame, area: Rect, store: &Store) {
+    let t = theme();
+    let block = panel_block();
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let split = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+
+    let Some(matrix) = store.qualitative() else {
+        f.render_widget(
+            Paragraph::new(titled("qualitative matrix", "not fetched yet", inner.width)),
+            split[0],
+        );
+        // Deliberately not the empty-window sentence below. One says this
+        // client has not been told, the other says the desk has nothing to
+        // tell, and they have different remedies — a blank pane would be
+        // indistinguishable from either.
+        refuse(f, split[1], "the matrix has not been fetched".to_string());
+        return;
+    };
+
+    f.render_widget(
+        Paragraph::new(titled(
+            "qualitative matrix",
+            &window_note(matrix),
+            inner.width,
+        )),
+        split[0],
+    );
+
+    let notes = matrix_notes(matrix);
+    let body = if notes.is_empty() {
+        split[1]
+    } else {
+        let taken = (notes.len() as u16).min(split[1].height);
+        let rows =
+            Layout::vertical([Constraint::Length(taken), Constraint::Min(0)]).split(split[1]);
+        f.render_widget(
+            Paragraph::new(
+                notes
+                    .iter()
+                    .map(|note| absent(note))
+                    .collect::<Vec<Line<'static>>>(),
+            ),
+            rows[0],
+        );
+        rows[1]
+    };
+
+    if matrix.rows.is_empty() {
+        // A window the owner answered for, with no universe behind it. Said
+        // rather than drawn as an empty grid: a header over nothing reads as a
+        // pane that failed to render.
+        refuse(f, body, "the record is empty for this window".to_string());
+        return;
+    }
+
+    let header = Row::new(
+        MATRIX_COLS
+            .map(|(name, width, right)| cell(name.to_string(), Style::default(), right, width)),
+    )
+    .style(Style::default().fg(t.text_secondary));
+
+    let held = held(store);
+    let rows = ordered(matrix, &held);
+    // One row for the column header, and a row spent on the count when the
+    // universe outruns the pane — the ledger's rule, for the ledger's reason.
+    let room = body.height.saturating_sub(1) as usize;
+    let shown = fits(rows.len(), room);
+    let table = Table::new(
+        rows.iter()
+            .take(shown)
+            .map(|&(ticker, row, held)| matrix_row(ticker, row, held)),
+        MATRIX_COLS.map(|(_, w, _)| Constraint::Length(w)),
+    )
+    .header(header)
+    .column_spacing(1);
+    f.render_widget(table, body);
+    if shown < rows.len() {
+        let at = body.y + 1 + shown as u16;
+        f.render_widget(
+            Paragraph::new(more(rows.len() - shown)),
+            Rect::new(body.x, at, body.width, 1),
+        );
+    }
+}
+
+/// The window this table is a reading of: the day it was read, and the hash
+/// that identifies the window itself.
+///
+/// Both, because they answer different questions. `as_of` says when it was
+/// read; the hash says *which record* — the owner hashes the claims and not the
+/// day, so two readings of one window are recognisable as one window rather
+/// than as a record that changed overnight.
+fn window_note(matrix: &QualitativeMatrix) -> String {
+    let as_of = format::text(matrix.as_of.as_ref()).unwrap_or(MISSING);
+    let hash = format::text(matrix.window_hash.as_ref())
+        .map(|hash| head(hash.to_string(), 8))
+        .unwrap_or_else(|| MISSING.to_string());
+    format!("{as_of} · window {hash}")
+}
+
+/// The failures the window carried, one line each.
+///
+/// Two lines rather than one sentence, because they are two claims. A calendar
+/// nobody extended empties one column and leaves every count intact; a feed
+/// that broke means the counts are not a reading of the press at all — zero
+/// coverage on a broken feed is not a quiet tape. Folded together, the second
+/// would read as the first, and the loud one is the one that must not.
+fn matrix_notes(matrix: &QualitativeMatrix) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(error) = format::text(matrix.news_error.as_ref()) {
+        notes.push(format!("news feed: {error}"));
+    }
+    if let Some(error) = format::text(matrix.calendar_error.as_ref()) {
+        notes.push(format!("release calendar: {error}"));
+    }
+    notes
+}
+
+/// The universe with the book's own names lifted to the top.
+///
+/// Held first because of the question this table is read for: what does the
+/// record say about what the desk is already carrying. A held name with one
+/// publisher behind it is a position with nothing under it, and alphabetical
+/// order would bury it under the names the desk does not own. Within each group
+/// the owner's own key order stands — this client re-sorts nothing it did not
+/// have to.
+fn ordered<'a>(
+    matrix: &'a QualitativeMatrix,
+    held: &BTreeSet<String>,
+) -> Vec<(&'a str, &'a MatrixRow, bool)> {
+    let mut rows: Vec<(&str, &MatrixRow, bool)> = matrix
+        .rows
+        .iter()
+        .map(|(ticker, row)| (ticker.as_str(), row, held.contains(ticker)))
+        .collect();
+    // `sort_by_key` is stable, which is the whole of the second rule: the map's
+    // own order survives inside each group.
+    rows.sort_by_key(|(_, _, held)| !held);
+    rows
+}
+
+/// What the book is carrying, by ticker.
+///
+/// The live book first and the reconciled book behind it, the precedence BOOK
+/// reads: a desk whose live marks have not arrived still holds what the
+/// registry says it holds. Held means a *positive* quantity — a flat or closed
+/// row is a name the desk is not carrying, and marking those would put most of
+/// the universe in the held group and retire the ordering.
+fn held(store: &Store) -> BTreeSet<String> {
+    let Some(snapshot) = store.snapshot.as_ref() else {
+        return BTreeSet::new();
+    };
+    let live: BTreeSet<String> = snapshot
+        .live_portfolio
+        .as_ref()
+        .map(|book| {
+            book.positions
+                .iter()
+                .filter(|position| position.qty.is_some_and(|qty| qty > 0.0))
+                .filter_map(|position| format::text(position.ticker.as_ref()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !live.is_empty() {
+        return live;
+    }
+    snapshot
+        .portfolio
+        .as_ref()
+        .map(|book| {
+            book.positions
+                .iter()
+                .filter(|(_, position)| position.qty.is_some_and(|qty| qty > 0.0))
+                .map(|(ticker, _)| ticker.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One name: what the book holds, and what the record says about it.
+fn matrix_row(ticker: &str, row: &MatrixRow, held: bool) -> Row<'static> {
+    let t = theme();
+    let cells: [(String, Style); MATRIX_COLS.len()] = [
+        (
+            ticker.to_string(),
+            Style::default().fg(match held {
+                true => t.text_primary,
+                false => t.text_secondary,
+            }),
+        ),
+        (
+            match held {
+                true => "HELD",
+                false => "",
+            }
+            .to_string(),
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        ),
+        count(row.coverage),
+        count(row.publishers),
+        count(row.corroborated),
+        count(row.primary_docs),
+        count(row.days_to_next_release),
+    ];
+    Row::new(
+        cells
+            .into_iter()
+            .zip(MATRIX_COLS)
+            .map(|((text, style), (_, width, right))| cell(text, style, right, width)),
+    )
+}
+
+/// One count, or `--`.
+///
+/// Absent is not zero, and in the release column the difference is the whole
+/// cell: no scheduled release ahead is not a release today. Nothing is toned by
+/// magnitude — a low coverage count is a fact about the record, and colouring
+/// it would be this pane turning the record into a view.
+fn count(value: Option<i64>) -> (String, Style) {
+    let t = theme();
+    match value {
+        Some(value) => (value.to_string(), Style::default().fg(t.text_secondary)),
+        None => (MISSING.to_string(), Style::default().fg(t.text_tertiary)),
+    }
+}
+
 /// The research run ledger, newest first as the owner serves it.
 fn draw_runs(f: &mut Frame, area: Rect, store: &Store) {
     let t = theme();
@@ -715,6 +1028,134 @@ mod tests {
         // clipping the sign off a return.
         let columns: u16 = COLS.iter().map(|(_, w, _)| w).sum();
         assert_eq!(BOARD_W, columns + COLS.len() as u16 - 1);
+        let matrix: u16 = MATRIX_COLS.iter().map(|(_, w, _)| w).sum();
+        assert_eq!(MATRIX_W, matrix + MATRIX_COLS.len() as u16 - 1);
+        // And the view refuses on whichever of its grids needs more, so a
+        // widened matrix column raises the floor without anyone remembering
+        // to: the alternative is one pane drawing while the other is starved
+        // below the width its cells were held to.
+        assert_eq!(FLOOR, BOARD_W.max(MATRIX_W));
+    }
+
+    /// A matrix carrying `rows` under one window, with no failures.
+    fn matrix(rows: &[(&str, i64)]) -> QualitativeMatrix {
+        QualitativeMatrix {
+            as_of: Some("2026-08-31".to_string()),
+            window_hash: Some("0123456789abcdef".to_string()),
+            rows: rows
+                .iter()
+                .map(|(ticker, coverage)| {
+                    (
+                        ticker.to_string(),
+                        MatrixRow {
+                            ticker: Some(ticker.to_string()),
+                            coverage: Some(*coverage),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_names_the_book_holds_are_lifted_above_the_rest_of_the_universe() {
+        // The question this table is read for is what the record says about
+        // what the desk is carrying. Alphabetical order buries a held name with
+        // one publisher behind it under the names the desk does not own.
+        let matrix = matrix(&[("ACWI", 3), ("QQQ", 1), ("SPY", 9), ("XLF", 0)]);
+        let held = ["SPY".to_string(), "XLF".to_string()].into_iter().collect();
+        let rows = ordered(&matrix, &held);
+        let names: Vec<&str> = rows.iter().map(|(ticker, _, _)| *ticker).collect();
+        assert_eq!(names, ["SPY", "XLF", "ACWI", "QQQ"]);
+        // And the mark is the book's answer, not a name-shaped guess.
+        assert_eq!(
+            rows.iter().map(|(_, _, held)| *held).collect::<Vec<bool>>(),
+            [true, true, false, false]
+        );
+        // Inside each group the owner's own key order stands: this client
+        // re-sorts nothing it did not have to.
+        let none = BTreeSet::new();
+        assert_eq!(
+            ordered(&matrix, &none)
+                .iter()
+                .map(|(ticker, _, _)| *ticker)
+                .collect::<Vec<&str>>(),
+            ["ACWI", "QQQ", "SPY", "XLF"]
+        );
+    }
+
+    #[test]
+    fn a_count_the_window_does_not_have_is_absent_rather_than_zero() {
+        // In the release column the difference is the whole cell: no scheduled
+        // release ahead is not a release today.
+        let t = theme();
+        assert_eq!(count(None).0, MISSING);
+        assert_eq!(count(None).1.fg, Some(t.text_tertiary));
+        assert_eq!(count(Some(0)).0, "0");
+        assert_ne!(count(Some(0)).1.fg, count(None).1.fg);
+    }
+
+    #[test]
+    fn a_broken_feed_and_an_unextended_calendar_are_two_lines_and_not_one() {
+        // Zero coverage on a broken feed is not a quiet tape, and a calendar
+        // nobody extended leaves every count intact. Folded into one sentence
+        // the loud one would read as the quiet one.
+        let mut matrix = matrix(&[("SPY", 0)]);
+        assert!(matrix_notes(&matrix).is_empty());
+        matrix.calendar_error = Some("the release calendar ends 2026-08-01".to_string());
+        assert_eq!(matrix_notes(&matrix).len(), 1);
+        matrix.news_error = Some("alpaca refused: 401".to_string());
+        let notes = matrix_notes(&matrix);
+        assert_eq!(notes.len(), 2);
+        // The feed first: it is the one that says the counts below are not a
+        // reading of the press at all.
+        assert!(notes[0].contains("alpaca refused"), "{notes:?}");
+        assert!(notes[1].contains("release calendar ends"), "{notes:?}");
+    }
+
+    #[test]
+    fn the_pane_asks_for_the_rows_it_has_and_never_fewer_than_its_floor() {
+        // Height is what keeps the three states apart on screen: each of them
+        // needs the header and one line under it, and a pane sized to its rows
+        // alone would give the sentences nowhere to go.
+        let mut store = Store::default();
+        assert_eq!(matrix_h(&store), MATRIX_MIN);
+        store.apply(
+            crate::bus::AppEvent::Qualitative(Box::new(matrix(&[]))),
+            Instant::now(),
+        );
+        assert_eq!(matrix_h(&store), 3, "an empty window still says so");
+        store.apply(
+            crate::bus::AppEvent::Qualitative(Box::new(matrix(&[("SPY", 1), ("QQQ", 2)]))),
+            Instant::now(),
+        );
+        assert_eq!(matrix_h(&store), 5, "rule, header, columns, two names");
+        let mut broken = matrix(&[("SPY", 1), ("QQQ", 2)]);
+        broken.news_error = Some("alpaca refused: 401".to_string());
+        store.apply(
+            crate::bus::AppEvent::Qualitative(Box::new(broken)),
+            Instant::now(),
+        );
+        assert_eq!(matrix_h(&store), 6, "the failure gets its own row");
+    }
+
+    #[test]
+    fn the_window_note_names_the_day_and_the_record() {
+        // Two questions, two facts: `as_of` says when it was read and the hash
+        // says which record — the owner hashes the claims and not the day, so
+        // two readings of one window are recognisable as one window.
+        let note = window_note(&matrix(&[]));
+        assert!(note.contains("2026-08-31"), "{note}");
+        assert!(note.contains("01234567"), "{note}");
+        assert!(!note.contains("89abcdef"), "the prefix is a prefix: {note}");
+        // And a window the owner did not stamp says so rather than reading as
+        // a window with an empty name.
+        assert_eq!(
+            window_note(&QualitativeMatrix::default()),
+            format!("{MISSING} · window {MISSING}")
+        );
     }
 
     /// The longest name the owner's `ARM_NAMES` can send, verbatim. A name

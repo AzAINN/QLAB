@@ -12,8 +12,8 @@ use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
     Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig,
-    NewsSettings, Plan, Policy, PredictorDetail, RegimePanel, Run, Snapshot, System, Template,
-    Workflow,
+    NewsSettings, Plan, Policy, PredictorDetail, QualitativeMatrix, RegimePanel, Run, Snapshot,
+    System, Template, Workflow,
 };
 use crate::net::http;
 use crate::ui::door::Door;
@@ -454,6 +454,12 @@ pub struct Store {
     /// the fetch is edge-triggered on entering the pane and on `r` there, so
     /// there is no TTL for this client to invent.
     news: Option<NewsSettings>,
+    /// The qualitative matrix, fetched on its own slow beat.
+    ///
+    /// `None` is "not asked yet or not answered yet". RESEARCH keeps that
+    /// apart from an answered window with no rows in it: one says this client
+    /// has not looked, the other says the desk's record is empty.
+    qualitative: Option<QualitativeMatrix>,
     /// The newest chat timestamp at the moment `/clear` ran. The bus keeps
     /// every row and AUDIT still draws them — this window just stops drawing
     /// rows at or before the mark. A timestamp rather than a count, because
@@ -626,6 +632,7 @@ impl Store {
             backends_at: None,
             predictor_detail: None,
             news: None,
+            qualitative: None,
             chat_cleared_through: None,
             nav: Nav::default(),
             cmd: CmdLine::default(),
@@ -796,6 +803,14 @@ impl Store {
             // one reading beside a stack from another.
             AppEvent::News(settings) => {
                 self.news = Some(*settings);
+                self.dirty = true;
+            }
+            // Replaced wholesale for the same reason again: the route serves
+            // one window's whole matrix, and merging two of them would draw a
+            // name counted in one window beside a name counted in another,
+            // under a single `window_hash` that describes neither.
+            AppEvent::Qualitative(matrix) => {
+                self.qualitative = Some(*matrix);
                 self.dirty = true;
             }
             // A keystroke may move a selection and a resize moves everything;
@@ -1012,6 +1027,15 @@ impl Store {
     /// the two apart.
     pub fn news(&self) -> Option<&NewsSettings> {
         self.news.as_ref()
+    }
+
+    /// The qualitative matrix, if the beat has brought one back.
+    ///
+    /// `None` is "not asked yet or not answered yet", never "the record is
+    /// empty" — the payload's own `rows` says that, and RESEARCH keeps the two
+    /// apart: a blank pane cannot say which one it is.
+    pub fn qualitative(&self) -> Option<&QualitativeMatrix> {
+        self.qualitative.as_ref()
     }
 
     /// Today's proposals, as the owner last served them.

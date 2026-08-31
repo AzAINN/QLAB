@@ -1,0 +1,62 @@
+{
+  "as_of": "2026-08-31",
+  "window_hash": "9f2c41ab77de0135",
+  "provider": "alpaca",
+  "run_id": "c7d1e4b0f2a34851",
+  "rows": {
+    "ACWI": {
+      "ticker": "ACWI",
+      "coverage": 7,
+      "publishers": 4,
+      "corroborated": 3,
+      "primary_docs": 1,
+      "days_to_next_release": 12,
+      "claim_keys": ["acwi:flows", "acwi:rebalance"]
+    },
+    "BNDW": {
+      "ticker": "BNDW",
+      "coverage": 0,
+      "publishers": 0,
+      "corroborated": 0,
+      "primary_docs": 0,
+      "days_to_next_release": null,
+      "claim_keys": []
+    },
+    "GLD": {
+      "ticker": "GLD",
+      "coverage": 3,
+      "publishers": 1,
+      "corroborated": 0,
+      "primary_docs": 0,
+      "days_to_next_release": 4,
+      "claim_keys": ["gld:reserves"]
+    },
+    "QQQ": {
+      "ticker": "QQQ",
+      "coverage": 11,
+      "publishers": 6,
+      "corroborated": 8,
+      "primary_docs": 2,
+      "days_to_next_release": 1,
+      "claim_keys": ["qqq:guidance"]
+    },
+    "SPY": {
+      "ticker": "SPY",
+      "coverage": 14,
+      "publishers": 9,
+      "corroborated": 11,
+      "primary_docs": 4,
+      "days_to_next_release": 21,
+      "claim_keys": ["spy:cpi", "spy:fomc"]
+    },
+    "XLF": {
+      "ticker": "XLF",
+      "coverage": 2,
+      "publishers": 1,
+      "corroborated": 0,
+      "primary_docs": 1,
+      "days_to_next_release": null,
+      "claim_keys": ["xlf:8k"]
+    }
+  }
+}

@@ -13,7 +13,7 @@
 mod harness;
 
 use atlas::bus::{AppEvent, Channel};
-use atlas::model::Snapshot;
+use atlas::model::{QualitativeMatrix, Snapshot};
 use atlas::store::Store;
 use atlas::theme::Theme;
 use crossterm::event::KeyCode;
@@ -46,7 +46,10 @@ fn research_from(json: &str) -> Client {
 }
 
 #[test]
-fn the_research_view_renders_its_three_panes_at_120x36() {
+fn the_research_view_renders_its_panes_at_120x36() {
+    // No window fetched yet, which is the state every RESEARCH opens in: the
+    // matrix rides a beat, and the frame before its first tick has to say that
+    // rather than draw an empty table.
     insta::assert_snapshot!(research().frame(120, 36));
 }
 
@@ -470,4 +473,226 @@ fn a_desk_that_never_ran_the_board_says_so() {
     let frame = client.frame(120, 36);
     let row = line_with(&frame, "predictors");
     assert!(row.contains("no predictor board run yet"), "{row}");
+}
+
+// -- the qualitative matrix --------------------------------------------------
+//
+// What the grounded news window says about each name, as counts. The pane is
+// read-only in both postures and claims no key: it is evidence the owner logged
+// per window, and nothing on it can be acted on from here.
+//
+// Two properties run through these pins. Held names lead, because the question
+// this table is read for is what the record says about what the desk is already
+// carrying — a held name with one publisher behind it is a position with
+// nothing under it. And the three ways it can have nothing to draw are three
+// different sentences: not fetched, an empty window, and a window whose feed
+// broke are three different remedies, and a blank pane is none of them.
+
+/// The captured window, folded in the way the runtime folds it.
+fn with_matrix(client: &mut Client, json: &str) {
+    let matrix = serde_json::from_str::<QualitativeMatrix>(json).unwrap();
+    let now = client.store.last_snapshot_at.unwrap_or_else(Instant::now);
+    client
+        .store
+        .apply(AppEvent::Qualitative(Box::new(matrix)), now);
+}
+
+/// One matrix row, read out of the rows the *view* owns.
+///
+/// Not `line_with`: the ticker tape repeats every symbol in the universe and
+/// the pulse rail draws movers of its own, so `frame.contains("SPY")` matches
+/// two lines this pane did not draw. Every assertion below reads through here.
+fn matrix_row_of<'a>(body: &'a str, name: &str) -> &'a str {
+    body.lines()
+        .find(|line| starts_the_row(line, name))
+        .unwrap_or_else(|| panic!("no matrix row for {name}:\n{body}"))
+}
+
+/// Whether a rendered line is `name`'s row — the rule `matrix_row_of` and the
+/// ordering pin share, so the two cannot disagree about which line is whose.
+///
+/// The leading cell of a content row is the pane rule the shell draws between
+/// the rails; a name is the first thing the *view* put on the line.
+fn starts_the_row(line: &str, name: &str) -> bool {
+    line.trim_start()
+        .trim_start_matches('\u{2502}')
+        .trim_start()
+        .starts_with(name)
+}
+
+/// The fixture desk on RESEARCH, holding the window the poller's beat brings.
+fn with_window() -> Client {
+    let mut client = research();
+    with_matrix(
+        &mut client,
+        include_str!("fixtures/qualitative_matrix.json"),
+    );
+    client
+}
+
+#[test]
+fn the_qualitative_matrix_renders_the_window_at_120x36() {
+    insta::assert_snapshot!(with_window().frame(120, 36));
+}
+
+#[test]
+fn the_matrix_names_the_window_it_is_a_reading_of() {
+    // Two facts, because they answer different questions: `as_of` says when the
+    // record was read, and the hash says *which* record — the owner hashes the
+    // claims and not the day, so two readings of one window are recognisable as
+    // one window rather than as a record that changed overnight.
+    let frame = with_window().frame(120, 36);
+    let head = line_with(&frame, "QUALITATIVE MATRIX");
+    assert!(head.contains("2026-08-31"), "{head}");
+    assert!(head.contains("9f2c41ab"), "{head}");
+}
+
+#[test]
+fn the_matrix_columns_are_the_owners_own_counts_and_nothing_signed() {
+    // `qlab/news/matrix.py` refuses to serve a signed column because a signed
+    // qualitative column is a return forecast wearing a qualitative name. A
+    // client that added one on the way out would put the sign back.
+    let frame = with_window().frame(120, 36);
+    let header = line_with(&frame, "CORROB");
+    for column in ["NAME", "COVER", "PUBS", "CORROB", "PRIMARY", "RELEASE"] {
+        assert!(header.contains(column), "{header}");
+    }
+    let body = content(&frame);
+    let spy = matrix_row_of(&body, "SPY");
+    for count in ["14", "9", "11", "4", "21"] {
+        assert!(spy.contains(count), "{spy}");
+    }
+    assert!(!spy.contains('+') && !spy.contains('%'), "{spy}");
+}
+
+#[test]
+fn the_books_own_names_lead_and_wear_the_mark() {
+    // Held first, and the mark is the book's answer rather than a name-shaped
+    // guess: the owner serves the whole universe here, so nothing in the row
+    // itself says whether the desk is carrying it.
+    let mut client = research_from(
+        r#"{"live_portfolio": {"positions": [
+             {"ticker": "XLF", "qty": 12.0},
+             {"ticker": "SPY", "qty": 3.0},
+             {"ticker": "GLD", "qty": 0.0}]}}"#,
+    );
+    with_matrix(
+        &mut client,
+        include_str!("fixtures/qualitative_matrix.json"),
+    );
+    let body = content(&client.frame(120, 36));
+    let at = |name: &str| {
+        body.lines()
+            .position(|line| starts_the_row(line, name))
+            .unwrap_or_else(|| panic!("no matrix row for {name}:\n{body}"))
+    };
+    let row_of = |name: &str| matrix_row_of(&body, name);
+    assert!(
+        at("SPY") < at("ACWI"),
+        "an unheld name led the table:\n{body}"
+    );
+    assert!(at("XLF") < at("ACWI"), "{body}");
+    // Alphabetical inside each group — the owner's own key order, which this
+    // client re-sorts no further than it had to.
+    assert!(at("SPY") < at("XLF"), "{body}");
+    assert!(at("ACWI") < at("BNDW"), "{body}");
+    assert!(row_of("SPY").contains("HELD"), "{body}");
+    assert!(!row_of("ACWI").contains("HELD"), "{body}");
+    // A closed row is not a held one: marking flat names would put most of the
+    // universe in the held group and retire the ordering.
+    assert!(!row_of("GLD").contains("HELD"), "{body}");
+}
+
+#[test]
+fn a_name_with_no_scheduled_release_is_absent_rather_than_due_today() {
+    // The one nullable count, and it is nullable in the owner too: no release
+    // ahead is not zero days to one. A `0` in that column would put a name the
+    // calendar says nothing about at the top of tomorrow's reading.
+    let body = content(&with_window().frame(120, 36));
+    let bndw = matrix_row_of(&body, "BNDW");
+    assert!(bndw.contains("--"), "{bndw}");
+    // And a real zero elsewhere in the same row still renders as a zero: BNDW
+    // has no coverage, which is a count the window actually made.
+    assert!(bndw.contains(" 0"), "{bndw}");
+}
+
+#[test]
+fn a_matrix_nobody_has_fetched_is_not_an_empty_window() {
+    // Three states, three sentences. "This client has not been told" and "the
+    // desk has nothing to tell" have different remedies, and a blank pane is
+    // neither of them.
+    let unfetched = content(&research().frame(120, 36));
+    assert!(unfetched.contains("has not been fetched"), "{unfetched}");
+    assert!(!unfetched.contains("record is empty"), "{unfetched}");
+
+    let mut client = research();
+    with_matrix(
+        &mut client,
+        r#"{"as_of": "2026-08-31", "window_hash": "9f2c41ab77de0135", "rows": {}}"#,
+    );
+    let empty = content(&client.frame(120, 36));
+    assert!(empty.contains("the record is empty"), "{empty}");
+    assert!(!empty.contains("has not been fetched"), "{empty}");
+    // Still under its own header: an empty window is a window, and the pane
+    // says which one it read.
+    assert!(empty.contains("9f2c41ab"), "{empty}");
+}
+
+#[test]
+fn the_windows_failures_are_named_on_the_pane_one_line_each() {
+    // Zero coverage on a broken feed is not a quiet tape, and a calendar nobody
+    // extended leaves every count intact. Two claims, two lines: folded into
+    // one sentence the loud one would read as the quiet one.
+    let t = Theme::truecolor();
+    let mut client = research();
+    with_matrix(
+        &mut client,
+        r#"{"as_of": "2026-08-31", "window_hash": "9f2c41ab77de0135",
+            "news_error": "alpaca refused: 401",
+            "calendar_error": "the release calendar ends 2026-08-01",
+            "rows": {"SPY": {"ticker": "SPY", "coverage": 0, "publishers": 0,
+                             "corroborated": 0, "primary_docs": 0,
+                             "days_to_next_release": null}}}"#,
+    );
+    let frame = client.frame(120, 36);
+    let body = content(&frame);
+    assert!(body.contains("alpaca refused: 401"), "{body}");
+    assert!(body.contains("the release calendar ends"), "{body}");
+    // Dim, not alarming: the pane still drew every count it has, and the rows
+    // under a broken feed are the evidence that there is nothing behind them.
+    assert_eq!(
+        body_style_of(&client.buffer(120, 36), "alpaca refused").fg,
+        Some(t.text_dim)
+    );
+    // The counts survive the failures rather than the pane refusing wholesale.
+    assert!(matrix_row_of(&body, "SPY").contains('0'), "{body}");
+}
+
+#[test]
+fn a_universe_longer_than_the_pane_counts_what_it_could_not_draw() {
+    // Nothing here scrolls. A matrix that drew the names that fit and stopped
+    // would read as a narrower universe than the desk covers.
+    let rows: Vec<String> = (0..40)
+        .map(|i| {
+            format!(
+                r#""T{i:02}": {{"ticker": "T{i:02}", "coverage": 1, "publishers": 1,
+                     "corroborated": 0, "primary_docs": 0, "days_to_next_release": 3}}"#
+            )
+        })
+        .collect();
+    let mut client = research();
+    with_matrix(
+        &mut client,
+        &format!(
+            r#"{{"as_of": "2026-08-31", "window_hash": "9f2c41ab77de0135",
+                 "rows": {{{}}}}}"#,
+            rows.join(",")
+        ),
+    );
+    let body = content(&client.frame(120, 36));
+    assert!(body.contains("more"), "{body}");
+    // And the ledger below it keeps its floor rather than being squeezed out
+    // by a universe that grew.
+    assert!(body.contains("RUNS"), "{body}");
+    assert!(body.contains("CATALOG"), "{body}");
 }

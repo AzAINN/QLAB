@@ -1,5 +1,7 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
-use crate::model::{LlmCatalog, NewsSettings, PredictorDetail, RegimePanel, Snapshot, Template};
+use crate::model::{
+    LlmCatalog, NewsSettings, PredictorDetail, QualitativeMatrix, RegimePanel, Snapshot, Template,
+};
 
 pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
@@ -39,6 +41,14 @@ pub enum AppEvent {
     /// `PredictorDetail`'s reason: it changes when an operator changes it, and
     /// a cadence would be re-fetching an answer this client already holds.
     News(Box<NewsSettings>),
+    /// The qualitative matrix, from `/api/research/qualitative`.
+    ///
+    /// The one of these four that rides a beat, and deliberately: the window
+    /// underneath it is refreshed by the *owner's* heartbeat rather than by
+    /// anything an operator does here, so a payload fetched once on entering
+    /// RESEARCH would sit unchanged on screen while the record moved. Boxed
+    /// like the board: one row per universe name, each carrying its claim keys.
+    Qualitative(Box<QualitativeMatrix>),
     Sse(SseEvent),
     Http(HttpResult),
     ConnUp(Channel),

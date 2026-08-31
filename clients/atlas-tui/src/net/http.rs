@@ -11,7 +11,9 @@
 //! the frame loop for the length of a request.
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
-use crate::model::{LlmCatalog, NewsSettings, PredictorDetail, RegimePanel, Snapshot, Templates};
+use crate::model::{
+    LlmCatalog, NewsSettings, PredictorDetail, QualitativeMatrix, RegimePanel, Snapshot, Templates,
+};
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -33,6 +35,14 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// The regime panel is a diagnostic over one snapshot, not the desk itself: it
 /// moves when a detector run does, which is far slower than the tape.
 pub const REGIME_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The qualitative matrix is a reading of the owner's news window, which the
+/// owner's own heartbeat refreshes — so it moves without anybody here touching
+/// a key, and it is the one research payload that owes a beat rather than a
+/// pane entry. Slower than the panel because a news window turns over in
+/// minutes, not in seconds, and every fetch costs the owner a build over the
+/// whole universe under its dispatch lock.
+pub const QUALITATIVE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The registered workflow templates change when the owner is *deployed*, not
 /// when the desk moves — `qlab/operator/templates.py` is a module-level table —
@@ -224,6 +234,10 @@ async fn poll_loop(
     // Asking without it would let the owner answer about a desk mode this
     // window is not pointed at.
     let news_url = format!("{base}/api/news/settings?offline={lane}");
+    // The lane, because the route reads it and the answer differs: an offline
+    // desk reads the synthetic feed, and a matrix fetched without the flag
+    // would be a reading of a window this client is not pointed at.
+    let qualitative_url = format!("{base}/api/research/qualitative?offline={lane}");
 
     // Two facts, not one. `up` is what the chips read — a payload this client
     // could actually use — and `reachable` is what the socket said.
@@ -239,6 +253,7 @@ async fn poll_loop(
     // Due immediately, then on their own slow beats.
     let mut regime_due = Instant::now();
     let mut templates_due = Instant::now();
+    let mut qualitative_due = Instant::now();
 
     loop {
         // The readiness gate, only while the owner is not known to be answering.
@@ -326,6 +341,28 @@ async fn poll_loop(
                     // still arriving. Same reasoning as the panel above.
                     Fetched::Failed(error) => {
                         tracing::warn!(%error, "workflow template poll failed")
+                    }
+                }
+            }
+
+            if up == Some(true) && Instant::now() >= qualitative_due {
+                qualitative_due = Instant::now() + QUALITATIVE_INTERVAL;
+                match fetch::<QualitativeMatrix>(&client, &qualitative_url).await {
+                    Fetched::Decoded(matrix) => emit(&tx, AppEvent::Qualitative(Box::new(matrix)))?,
+                    Fetched::Malformed(error) => emit(
+                        &tx,
+                        AppEvent::Http(HttpResult::Malformed {
+                            url: qualitative_url.clone(),
+                            error,
+                        }),
+                    )?,
+                    // The record is evidence, not the desk: a failure here must
+                    // not tell the operator the owner went away when the
+                    // snapshot that decides that is still arriving. Same
+                    // reasoning as the panel and the templates — and the pane
+                    // says for itself that it holds no matrix.
+                    Fetched::Failed(error) => {
+                        tracing::warn!(%error, "qualitative matrix poll failed")
                     }
                 }
             }

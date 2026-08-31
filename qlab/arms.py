@@ -12,6 +12,7 @@ the solver), which is what makes the ablation an honest comparison (§6).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -150,22 +151,37 @@ def solve_arm(
     # reads only `ms`, which the snapshot already truncated to as_of, so the
     # basket cannot be chosen with hindsight.
     if "cardinality" in arm.params:
-        from qlab.algorithms.cardinal import solve_cardinal_min_variance
+        from qlab.algorithms.cardinal import (
+            HOLDING_TOLERANCE, solve_cardinal_min_variance)
 
         if arm.objective != "min_variance":
             raise ValueError(
                 f"cardinality is defined against the min-variance allocation; "
                 f"arm {arm.id!r} asks for objective {arm.objective!r}")
         k = int(arm.params["cardinality"])
+        t0 = time.perf_counter()
         targets = solve_cardinal_min_variance(ms, k, None, constraints=constraints)
+        elapsed = time.perf_counter() - t0
         w = Weights(tickers=ms.tickers,
                     values=[targets[t] for t in ms.tickers])
+        arr = w.as_array()
+        cov = np.asarray(ms.cov, dtype=float)
         diag = {"arm": arm.id, "objective": arm.objective,
                 "solver": f"{arm.solver}+select_k_of_n",
+                # The same keys every other arm reports, so cross-arm
+                # diagnostics line up instead of silently missing a column.
+                # w'Sigma w on the full vector is the min-variance objective
+                # value; unselected weights are exactly zero, so it equals the
+                # value on the selected block.
+                "objective_value": float(arr @ cov @ arr),
+                # Wall clock covers the enumeration as well as the solve: the
+                # selection is part of what this arm costs.
+                "wall_clock_s": elapsed,
                 "cardinality": k,
-                "selected": sorted(t for t, v in targets.items() if v > 0.0),
+                "selected": sorted(t for t, v in targets.items()
+                                   if v > HOLDING_TOLERANCE),
                 "moments": ms.summary(),
-                "portfolio_moments": portfolio_moments(w.as_array(), ms)}
+                "portfolio_moments": portfolio_moments(arr, ms)}
         return w, diag
 
     obj = build_objective(

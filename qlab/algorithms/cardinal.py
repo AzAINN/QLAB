@@ -32,6 +32,11 @@ from qlab.solvers.base import Constraints
 # actually runs — if that entry changes solver, A6 changes with A1.
 _ALLOCATION_ALGORITHM = "min_variance"
 
+# The threshold `Mandate.check_targets` and the trader both count a holding at.
+# The policy measures its own delivered count the same way, so "k names" means
+# the same thing here as it does everywhere downstream.
+HOLDING_TOLERANCE = 1e-4
+
 
 def solve_cardinal_min_variance(
     ms: MomentSet,
@@ -84,7 +89,7 @@ def solve_cardinal_min_variance(
     )
     objective = build_objective("min_variance", sub)
     if constraints is None:
-        constraints = _constraints_for(mandate)
+        constraints = _constraints_for(mandate, k)
     result = solve_prepared_objective(_ALLOCATION_ALGORITHM, objective, constraints)
 
     sub_weights = dict(
@@ -92,23 +97,58 @@ def solve_cardinal_min_variance(
             strict=True)
     )
     targets = {ticker: sub_weights.get(ticker, 0.0) for ticker in tickers}
+
+    # Exactly k is a claim about the DELIVERED plan, not just about the basket.
+    # Long-only min-variance is free to park a selected name on its lower bound,
+    # and a plan that holds k-1 names while the policy reports k is the "count
+    # is a lie" failure this module exists to prevent — `max_holdings` and the
+    # trader would both count something the policy never said. Refuse loudly:
+    # the caller has to choose a different k or a different bound, and only the
+    # caller can decide which.
+    delivered = sum(1 for weight in targets.values()
+                    if weight > HOLDING_TOLERANCE)
+    if delivered != k:
+        raise ValueError(
+            f"cardinality policy selected {k} names but the long-only "
+            f"minimum-variance solve funded {delivered} of them above the "
+            f"{HOLDING_TOLERANCE:g} holding threshold; a plan that delivers "
+            f"a different count than it claims is not a k-of-N plan"
+        )
+
     if mandate is not None:
         mandate.check_targets(targets)
     return targets
 
 
-def _constraints_for(mandate) -> Constraints:
-    """Box constraints that already respect the mandate's per-asset cap.
+def _constraints_for(mandate, k: int) -> Constraints:
+    """Box constraints that already respect the mandate's per-asset bounds.
 
     Concentrating into ``k`` names is precisely the move that pushes a weight
     through ``max_weight_per_asset``. Bounding the solve is not a substitute for
     ``check_targets`` — that still runs — it just means the honest answer under
     the cap is found instead of a violation being reported.
+
+    Feasibility is checked here rather than left to the solver: ``k`` names
+    capped below ``1/k`` cannot sum to one however they are allocated, and the
+    solver would report only "budget violated", which says nothing about which
+    of the two numbers to change.
     """
     if mandate is None:
         return Constraints()
+    max_weight = float(getattr(mandate, "max_weight_per_asset", 1.0))
+    min_weight = float(getattr(mandate, "min_weight_per_asset", 0.0))
+    if k * max_weight < 1.0 - HOLDING_TOLERANCE:
+        raise ValueError(
+            f"k={k} names capped at max_weight_per_asset={max_weight:g} can "
+            f"hold at most {k * max_weight:g} of the budget; raise k or the cap"
+        )
+    if k * min_weight > 1.0 + HOLDING_TOLERANCE:
+        raise ValueError(
+            f"k={k} names floored at min_weight_per_asset={min_weight:g} "
+            f"require {k * min_weight:g} of the budget; lower k or the floor"
+        )
     return Constraints(
         long_only=bool(getattr(mandate, "long_only", True)),
-        min_weight=0.0,
-        max_weight=float(getattr(mandate, "max_weight_per_asset", 1.0)),
+        min_weight=min_weight,
+        max_weight=max_weight,
     )

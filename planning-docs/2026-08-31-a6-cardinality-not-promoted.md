@@ -47,8 +47,28 @@ So the arm does not contain 57 out-of-sample selection decisions. It contains
 of a single fixed sub-universe, and n=1 is not evidence that k-of-N selection
 works — it is evidence that this one basket did well on this one panel.
 
-**The margin collapses across draws.** Re-running A1/B2/A6 on four synthetic
-panels (the generator draws its factor loadings per seed):
+**Read that constancy correctly: it is a property of the generator, not a
+discovery about k-of-N, and the selector is not broken.** In
+`qlab/core/data.py::_synthetic_prices` each asset's annualised vol and drift are
+derived from `md5(ticker)`, so relative volatilities are *stationary for the
+whole history*; the correlation structure comes from fixed factor loadings; and
+consecutive quarterly rebalances share about 92% of a 756-day window. The
+selection objective keys on exactly those two things — inverse vol and
+|correlation| — so a near-constant basket is the *necessary* consequence of a
+stationary panel read through overlapping windows. Nobody should later "fix"
+the selector to make it churn: churn on this data would be the bug. What it does
+mean is that this panel cannot exercise selection, so it cannot be the panel
+that promotes it.
+
+**The margin shrinks across draws — but this sweep is weaker than it looks.**
+Re-running A1/B2/A6 on four synthetic panels. State the limitation plainly: the
+seed does **not** resample the per-asset volatility profile. `ann_vol` and
+`drift` come from `md5(ticker)` and are identical in every seed; only the factor
+loadings, the regime path and the shocks resample. Since the selector keys on
+inverse vol and |correlation|, the seed sweep largely re-runs the *same
+selection problem* against different noise. It is a check on luck-of-the-path,
+not on luck-of-the-basket. A real robustness sweep has to vary the volatility
+profile itself — different and wider ticker sets — and that has not been run.
 
 | seed | A1 sortino | B2 sortino | A6 sortino | A6 − B2 | A6 max_dd | B2 max_dd |
 |-----:|-----------:|-----------:|-----------:|--------:|----------:|----------:|
@@ -59,9 +79,21 @@ panels (the generator draws its factor loadings per seed):
 
 The sweep is not broken — there is real variance, and the *sign* is positive on
 all four draws — but the headline seed-7 margin is the best of four and is two
-orders of magnitude larger than the worst. The block-bootstrap sortino CIs on
-the seed-7 run overlap almost completely: A6 `[0.0195, 0.1079]` against B2
-`[-0.001, 0.0958]`.
+orders of magnitude larger than the worst.
+
+**The confidence intervals overlap almost completely.** One scale trap to avoid:
+`sortino_ci` is a **per-period (daily)** statistic, while the `sortino` column in
+the table above is **annualised**. Both are given here at both scales so the two
+cannot be misread as the same number.
+
+| arm | sortino (annualised) | sortino CI (per-period) | sortino CI (annualised, ×√252) |
+|-----|---------------------:|------------------------:|-------------------------------:|
+| A1  | 0.6984 | [0.0004, 0.0963] | [0.0063, 1.5287] |
+| B2  | 0.6565 | [−0.0010, 0.0958] | [−0.0159, 1.5208] |
+| A6  | 0.9485 | [0.0195, 0.1079] | [0.3096, 1.7129] |
+
+A6's annualised interval `[0.31, 1.71]` contains essentially all of B2's
+`[−0.02, 1.52]`. The point estimate separates the arms; the interval does not.
 
 **The win is a return outcome from a return-blind selector.** A6 earns 0.0560
 annual against A1's 0.0344 while running *more* risk (ann vol 0.0867 vs
@@ -91,7 +123,22 @@ what the design boundary forbids doing casually.
 `_POLICIES`. Arm A6 stays in `ablation_v1.yaml` so the measurement is
 reproducible and the next run can be compared against this one.
 
-What would change the answer: a selection that actually varies across
-rebalances (a wider candidate universe than seven names, where 4-of-N is a live
-choice rather than a foregone one), a positive margin that survives more draws
-than it fails, and an execution path that carries `k` end to end.
+What would change the answer: a panel on which selection is a live choice at all
+— a wider candidate universe than seven names, with a volatility profile that
+actually varies across draws rather than being pinned by `md5(ticker)` — a
+positive margin that survives that sweep, and an execution path that carries `k`
+end to end.
+
+## Postscript: exactly-k is now checked at delivery
+
+Fix round 1 closed a real hole found in review. `select_k_of_n` certifies a
+k-name basket, but long-only min-variance may then park one of those names on
+its lower bound, so the *delivered* plan could hold fewer than `k` names above
+the 1e-4 threshold that `Mandate.check_targets` and the trader both count at —
+the "count is a lie" failure the module exists to prevent. The policy now counts
+its own delivered names at 1e-4 and refuses, naming both counts.
+
+Checked against the numbers above: over every rebalance of all four seeds, A6
+delivered exactly 4 names every time, so the recorded results are unaffected. The
+failure mode is not exotic, though — about 4% of well-conditioned random
+covariances park a selected name, and one such matrix is pinned as a test.

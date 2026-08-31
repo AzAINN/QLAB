@@ -25,6 +25,8 @@ use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
 use crate::model::{ActionItem, Event, PredictorMetrics, Predictors};
+#[cfg(feature = "operator")]
+use crate::store::PtyState;
 use crate::store::Store;
 use crate::theme::theme;
 use crate::ui::views::View;
@@ -135,6 +137,16 @@ pub struct AtlasView {
     /// not yet painted.
     #[cfg(feature = "operator")]
     book_word: std::cell::Cell<Rect>,
+    /// Where the last frame drew the terminal pane, if it drew one.
+    ///
+    /// Published by the branch that draws the pane and retracted by every frame
+    /// that does not, for `book_word`'s exact reason: a rect that outlived its
+    /// frame would let a click hand the keyboard to a child on a screen nobody
+    /// is looking at. The pane's border offers a click as one of the two ways
+    /// in, and a click can only be answered about geometry — which exists here
+    /// and nowhere else, because the layout is decided in `draw`.
+    #[cfg(feature = "operator")]
+    pane: std::cell::Cell<Rect>,
 }
 
 impl View for AtlasView {
@@ -144,6 +156,9 @@ impl View for AtlasView {
         // for the reason `drew` is: a rect that outlived its frame would let a
         // click book off a screen nobody is looking at.
         self.no_book_word();
+        // The same rule for the pane, and it is the whole of what makes a click
+        // on it answerable: only the frame that draws one says where it is.
+        self.no_pane();
         if area.width < CHAT_MIN || area.height < 4 {
             // Nothing is on screen, so nothing may be approved off the back of
             // it. Every path out of this function settles `drew`, because the
@@ -250,6 +265,17 @@ impl View for AtlasView {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // A click inside the pane gives the keyboard to the child — the
+                // mouse's half of the sentence its border draws, and first
+                // because while a pane is up it owns the column the other
+                // branches are about. It reaches a dead child as a no-op: only
+                // a live one can hold a keyboard, and that is the store's rule
+                // rather than a condition restated here.
+                #[cfg(feature = "operator")]
+                if self.pane_at(m.column, m.row) {
+                    store.pty_focus(true);
+                    return None;
+                }
                 // The card's own word, which is not a `/word`: booking is not a
                 // command-line scope, and routing it through the resolver would
                 // be a second path to a fill that does not go through the box.
@@ -319,6 +345,17 @@ impl AtlasView {
             _ => {
                 #[cfg(feature = "operator")]
                 if store.posture.writes() {
+                    // The pane's focus key, claimed before the ask row's own —
+                    // while a child is in this column the row is not on screen,
+                    // and a key that focused it would arm a field the operator
+                    // cannot see. Claimed for a pane whose child has *ended*
+                    // too, where it does nothing: the pane still holds the
+                    // column, so falling through would be the same invisible
+                    // field one state later.
+                    if k.code == KeyCode::Char('i') && store.pty_state() != PtyState::Absent {
+                        store.pty_focus(true);
+                        return None;
+                    }
                     // The booking key, claimed only while the ask row is idle
                     // — the same corner the focus key sits in, and the same
                     // rule: an empty unfocused row yields the letter, a row
@@ -368,6 +405,31 @@ impl AtlasView {
 
     #[cfg(not(feature = "operator"))]
     fn no_book_word(&self) {}
+
+    /// Whether the last frame drew the terminal pane under that cell.
+    ///
+    /// The whole rect, border included: the border is the pane's own row and
+    /// clicking it is clicking the pane. An empty rect answers `false` for
+    /// every cell, which is what a frame with no pane in it publishes.
+    #[cfg(feature = "operator")]
+    fn pane_at(&self, column: u16, row: u16) -> bool {
+        let rect = self.pane.get();
+        rect.width > 0
+            && rect.height > 0
+            && row >= rect.y
+            && row < rect.y.saturating_add(rect.height)
+            && column >= rect.x
+            && column < rect.x.saturating_add(rect.width)
+    }
+
+    /// This frame drew no pane. Two bodies, for `no_book_word`'s reason.
+    #[cfg(feature = "operator")]
+    fn no_pane(&self) {
+        self.pane.set(Rect::default());
+    }
+
+    #[cfg(not(feature = "operator"))]
+    fn no_pane(&self) {}
 
     /// Move the conversation window, walls at both ends like every other
     /// cursor on this workstation. Positive is towards older messages.
@@ -2035,5 +2097,37 @@ mod tests {
             view.on_mouse(mouse(MouseEventKind::ScrollDown), &mut store);
         }
         assert_eq!(view.offset, 0, "the scroll ran past the newest line");
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_click_is_inside_the_pane_only_where_the_last_frame_drew_one() {
+        // The geometry half of the pane's click, on its own because the other
+        // half — handing a live child the keyboard — is the store's and is
+        // pinned there. What has to hold here is that a click is answered about
+        // the frame in front of the operator: every cell of the drawn rect
+        // counts, its border included, and a frame that drew no pane answers no
+        // cell at all.
+        let view = AtlasView::default();
+        assert!(
+            !view.pane_at(10, 10),
+            "a view that has drawn nothing claimed a click"
+        );
+
+        view.pane.set(Rect::new(8, 2, 20, 6));
+        // The corners, which is where an off-by-one lives.
+        assert!(view.pane_at(8, 2), "the top-left cell is in the pane");
+        assert!(view.pane_at(27, 7), "the bottom-right cell is in the pane");
+        assert!(view.pane_at(15, 4));
+        // And every neighbour of them is not.
+        assert!(!view.pane_at(7, 4), "a cell left of the pane");
+        assert!(!view.pane_at(28, 4), "a cell right of the pane");
+        assert!(!view.pane_at(15, 1), "a cell above the pane");
+        assert!(!view.pane_at(15, 8), "a cell below the pane");
+
+        // Retracted by a frame that drew no pane — a rect that outlived its
+        // frame would hand the keyboard away on a screen nobody is looking at.
+        view.no_pane();
+        assert!(!view.pane_at(15, 4), "the pane's rect outlived its frame");
     }
 }

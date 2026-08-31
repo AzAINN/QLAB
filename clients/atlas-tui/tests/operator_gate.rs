@@ -301,6 +301,51 @@ fn the_parser_that_holds_a_childs_screen_is_gated_wherever_it_is_named() {
 }
 
 #[test]
+fn a_keystroke_reaches_a_child_from_one_gated_place() {
+    // The third authority, after the write and the spawn: this client can put
+    // bytes into another program's stdin. The design's claim is that the
+    // monitoring artifact contains *no forwarded keystroke*, and that is the
+    // same kind of claim as "no spawn" — only absence can hold it, so it is
+    // pinned the same way.
+    //
+    // Two files, and each is doing one thing. `pty.rs` turns a keystroke into
+    // bytes and hands them to a session; `ui/shell.rs` is the router that
+    // decides, once, whether this keystroke belongs to the child at all. A
+    // third place naming either would be a second answer to a question that has
+    // exactly one.
+    assert_eq!(
+        production_files_mentioning("pty::encode("),
+        vec!["ui/shell.rs".to_string()],
+        "a key becomes bytes at one call site"
+    );
+    assert_eq!(
+        production_files_mentioning("pty_write("),
+        vec!["store.rs".to_string(), "ui/shell.rs".to_string()],
+        "the store owns the write and the router is the only caller"
+    );
+    // The codec, gated with the module it lives in — and named as code spells
+    // it, for the reason the parser census states about itself: `encode` is a
+    // word four files use in prose.
+    assert_eq!(
+        production_files_mentioning("pub fn encode("),
+        vec!["pty.rs".to_string()],
+        "one codec, beside the child it is a wire format for"
+    );
+    // And the router's own gate, on the attribute's verbatim text: a `cfg`
+    // naming the wrong feature compiles cleanly in both legs, and this one is
+    // what makes the glass build forward nothing.
+    assert!(
+        source("ui/shell.rs")
+            .contains("#[cfg(feature = \"operator\")]\n    if store.pty_focused() {"),
+        "the pane's claim on the keyboard must be gated, verbatim"
+    );
+    assert!(
+        source("ui/shell.rs").contains("#[cfg(feature = \"operator\")]\nfn pty_key("),
+        "the pane's router must be gated, verbatim"
+    );
+}
+
+#[test]
 fn the_one_click_book_is_gated_in_every_place_it_is_spelled() {
     // The card itself is ungated — a monitoring window shows the desk's open
     // question, which is what a monitoring window is *for* — so the gate is on

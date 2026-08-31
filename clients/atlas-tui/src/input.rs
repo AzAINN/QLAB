@@ -73,6 +73,22 @@ pub enum Source {
     /// scroll the conversation and the keys inside the row are two routers,
     /// and one section over both would describe one with rows about the other.
     AtlasAsk,
+    /// ATLAS's terminal pane, while the child in it holds the keyboard.
+    ///
+    /// Its own section because it is the one surface here that outranks the
+    /// shell: while it holds the keyboard the global keys are not merely
+    /// yielded, they are gone, and a section that described the pane with
+    /// ATLAS's rows would be listing keys the operator cannot press. It is also
+    /// the shortest section on the overlay, and deliberately — the desk binds
+    /// exactly one key inside a pane and hands over every other.
+    ///
+    /// What the child does with a forwarded key is not a binding of this
+    /// workstation and owes no row. The bytes are decided by a codec that holds
+    /// no state and returns no command, so there is nothing there that could
+    /// bind anything; that the pane takes *everything* is stated on its own
+    /// border, on every frame, which is where an operator who has just lost the
+    /// keyboard is already looking.
+    AtlasPane,
     /// WORKFORCE's question row, while it has the keyboard.
     ///
     /// Its own section rather than part of `View(Workforce)`, because it is its
@@ -133,12 +149,13 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 25] = [
+    pub const ALL: [Source; 26] = [
         Source::Shell,
         Source::Command,
         Source::Help,
         Source::View(ViewId::Atlas),
         Source::AtlasAsk,
+        Source::AtlasPane,
         Source::View(ViewId::Desk),
         Source::View(ViewId::Markets),
         Source::View(ViewId::Book),
@@ -173,6 +190,7 @@ impl Source {
             Source::Help => "this overlay",
             Source::View(id) => id.label(),
             Source::AtlasAsk => "ATLAS · the ask row",
+            Source::AtlasPane => "ATLAS · the terminal pane",
             Source::WorkforceAsk => "WORK · the question row",
             Source::WorkforcePicker => "WORK · the template picker",
             Source::SettingsLogin => "SETT · the alpaca login form",
@@ -216,6 +234,12 @@ impl Source {
             // the ask row under it is the section below.
             Source::View(ViewId::Atlas) => ("ui/views/atlas.rs", "", "keys"),
             Source::AtlasAsk => ("ui/views/atlas.rs", "", "ask_key"),
+            // The pane's router is the shell's, not the view's, because it has
+            // to claim a key *above* the shell — a section in `atlas.rs` would
+            // describe a surface reached only after every global key had
+            // already been taken. It is a sibling of `on_key` above and so is
+            // read apart from it, exactly as the two WORKFORCE fields are.
+            Source::AtlasPane => ("ui/shell.rs", "", "pty_key"),
             Source::View(ViewId::Desk) => ("ui/views/desk.rs", "", "on_key"),
             Source::View(ViewId::Markets) => ("ui/views/markets.rs", "", "on_key"),
             Source::View(ViewId::Book) => ("ui/views/book.rs", "", "on_key"),
@@ -306,11 +330,15 @@ const fn w(code: &'static str, key: &'static str, source: Source, action: &'stat
 /// What a *window* is offered is [`bindings`], which filters on the posture.
 pub const KEYMAP: &[Binding] = &[
     // -- anywhere ---------------------------------------------------------
+    // The exception is stated on the row it is an exception to, rather than
+    // only in the section that takes the key: an operator asking why Ctrl-C did
+    // nothing reads this row, not the one about a pane they may not have
+    // realised has the keyboard.
     b(
         "Char('c')",
         "Ctrl-C",
         Source::Shell,
-        "quit — works even while a field owns the keyboard",
+        "quit — from any field, but not from a pane holding the keyboard",
     ),
     b("Char('q')", "q", Source::Shell, "quit"),
     b("Esc", "Esc", Source::Shell, "quit"),
@@ -393,6 +421,12 @@ pub const KEYMAP: &[Binding] = &[
         Source::View(ViewId::Atlas),
         "book the desk's current proposal — only while the ask row is empty",
     ),
+    w(
+        "Char('i')",
+        "i",
+        Source::View(ViewId::Atlas),
+        "give the keyboard to the pane — while a child is running there",
+    ),
     // -- ATLAS, the ask row -----------------------------------------------
     w(
         "Char('i')",
@@ -423,6 +457,18 @@ pub const KEYMAP: &[Binding] = &[
         "Esc",
         Source::AtlasAsk,
         "clears the row and gives the keyboard back",
+    ),
+    // -- ATLAS, the terminal pane -----------------------------------------
+    //
+    // One row, and it is the whole surface: the desk keeps this key and hands
+    // over every other, which is why the row says what it takes rather than
+    // only what it does. Guard-differentiated, like the shell's digit arm — the
+    // router matches the character and reads the modifier beside it.
+    w(
+        "Char(c)",
+        "Ctrl-]",
+        Source::AtlasPane,
+        "returns the keyboard — every key but this one is the child's",
     ),
     // -- MKTS -------------------------------------------------------------
     b("Up", "↑", Source::View(ViewId::Markets), "the row above"),
@@ -1413,9 +1459,13 @@ mod tests {
         let glass: Vec<&str> = bindings(Posture::Glass).map(|b| b.key).collect();
         assert!(glass.contains(&"q"));
         assert!(glass.contains(&"/"));
-        // The four keys that can move money or start work are absent, not
-        // disabled: a greyed key says the client could do it if asked.
-        for armed in ["x", "a", "R", "S"] {
+        // The keys that can move money, start work, or type into a process are
+        // absent, not disabled: a greyed key says the client could do it if
+        // asked. The pane's pair is here because a monitoring build compiles no
+        // router that could take a keystroke and nothing that could open a
+        // child to give one to — an overlay offering them would be describing a
+        // surface that cannot exist in the artifact drawing it.
+        for armed in ["x", "a", "R", "S", "Ctrl-]"] {
             assert!(
                 !glass.contains(&armed),
                 "{armed} is offered to a glass window"

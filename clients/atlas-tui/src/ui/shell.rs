@@ -206,11 +206,31 @@ fn stale_for(store: &Store, now: Instant) -> Option<Duration> {
 // this function to check it. That module's header lists what the check
 // cannot see — including why a comment in here may not spell a key variant.
 pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Command> {
+    // **The one surface that outranks Ctrl-C, and the exchange that buys it.**
+    // While the pane holds the keyboard every key is the child's. A terminal
+    // whose child cannot be interrupted is not a terminal, and a desk that kept
+    // Ctrl-C here would leave a runaway session stoppable only by killing the
+    // workstation it is running inside. What the desk keeps instead is one key:
+    // Ctrl-] returns the keyboard, and then Ctrl-C quits exactly as it always
+    // has. Two keystrokes to leave, and the pane's own border names the first
+    // of them on every frame — which is the half that makes this an exchange
+    // rather than a binding quietly taken away.
+    //
+    // Routed on the focus and nothing else. A child that has ended cannot hold
+    // the keyboard — the flag is a field of the *live* child, so an ending
+    // takes it back along with the session — and that is what stops a dead pane
+    // from answering every keystroke with the same sentence about a write that
+    // went nowhere.
+    #[cfg(feature = "operator")]
+    if store.pty_focused() {
+        pty_key(key, store);
+        return None;
+    }
     // Raw mode disables ISIG, so Ctrl-C arrives as a keystroke or not at all —
-    // and the reflex every operator has has to work. First, above every surface
-    // that takes the keyboard, because this is the one key that must reach the
-    // runtime whatever is on screen: a field, a modal, or the door the
-    // workstation opens on. It sat under the confirmation box, where the
+    // and the reflex every operator has has to work. Above every surface that
+    // takes the keyboard *on the desk*, because this is the one key that must
+    // reach the runtime whatever is on screen: a field, a modal, or the door
+    // the workstation opens on. It sat under the confirmation box, where the
     // challenge field read it as a typed `c` — the box's own arm still swallows
     // every other key it is handed, which is what it is for.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -332,6 +352,40 @@ pub fn on_key(key: KeyEvent, store: &mut Store, views: &mut Views) -> Option<Com
         _ => {}
     }
     views.on_key(store.nav.view, key, store)
+}
+
+/// One keystroke while the child in the ATLAS pane holds the keyboard.
+///
+/// **It returns nothing, and the unit is the claim.** No key on this surface
+/// can produce a `Command`, because the whole of what "the pane holds the
+/// keyboard" means is that the desk acts on none of it. The one key the desk
+/// keeps moves the focus, which is store state and never a request.
+///
+/// **Two spellings of one key.** 0x1D is what a terminal sends for Ctrl-], and
+/// crossterm reports the C0 range by its legacy names — this client negotiates
+/// no keyboard enhancement, so what actually arrives is `5` with control held.
+/// The bracket is the spelling a kitty-protocol terminal would send, both are
+/// the same byte, and both are honoured; the border says Ctrl-] because that is
+/// the key an operator presses.
+///
+/// Everything else is the child's, verbatim, including the digits and the
+/// slash. The codec decides what each key is on the wire; a key it has no wire
+/// form for is not sent rather than approximated, and its own doc says why that
+/// is not a swallowed keystroke.
+// Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+// this function to check it. That module's header lists what the check
+// cannot see — including why a comment in here may not spell a key variant.
+#[cfg(feature = "operator")]
+fn pty_key(key: KeyEvent, store: &mut Store) {
+    let held = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char(c) if held && (c == ']' || c == '5') => store.pty_focus(false),
+        _ => {
+            if let Some(bytes) = crate::pty::encode(key) {
+                store.pty_write(&bytes);
+            }
+        }
+    }
 }
 
 /// One mouse event: the nav rail's rows select views, everything else goes to

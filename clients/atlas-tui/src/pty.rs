@@ -28,6 +28,7 @@
 //! channel kind the bus already is, which is what lets a blocking thread hand
 //! work to an async loop without a runtime handle.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{
     ChildKiller, CommandBuilder, ExitStatus, MasterPty, NativePtySystem, PtyPair, PtySize,
     PtySystem,
@@ -550,6 +551,142 @@ fn ending(label: &str, status: &ExitStatus) -> String {
     }
 }
 
+/// What a keystroke is, on the wire the child reads.
+///
+/// **A codec, not a router, and the signature is the argument.** It is handed a
+/// keystroke and can return bytes; it holds no store, returns no `Command` and
+/// reaches no session, so there is no key it could bind to anything the desk
+/// does. That is why it has no section in `input::KEYMAP` while the router that
+/// calls it does: the overlay lists what the *desk* claims, and this claims
+/// nothing — it spells, for a child, what the operator's terminal spelled for
+/// this process. A key added here can only ever become bytes.
+///
+/// It lives beside the child rather than in `ui/` for the reason the spawn
+/// does: the monitoring artifact contains no forwarded keystroke, and absence
+/// is a property only a gate can hold.
+///
+/// **`None` is not a lost keystroke.** It is a key with no wire form at all — a
+/// media key, a bare modifier, a variant a later crossterm invents — and a
+/// child would make no more of an invented sequence than of nothing. The lost
+/// keystroke is the other case, and the session says that one out loud.
+///
+/// The sequences are xterm's, in the *normal* cursor-key mode. A child that
+/// switched its keypad into application mode would want the `SS3` forms for the
+/// arrows; nothing on this desk reads that mode back off the parser, and the
+/// CSI forms are what every library in reach accepts.
+pub fn encode(key: KeyEvent) -> Option<Vec<u8>> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // The cursor and editing keys, which carry their modifiers *inside* the
+    // sequence and are therefore returned whole. Falling through to the escape
+    // prefix below would send Alt twice — once as a parameter and once as a
+    // leading escape — which a child reads as Esc and then an unmodified key.
+    let csi = match key.code {
+        KeyCode::Delete => Some(b"\x1b[3~".as_slice()),
+        KeyCode::Insert => Some(b"\x1b[2~".as_slice()),
+        KeyCode::Up => Some(b"\x1b[A".as_slice()),
+        KeyCode::Down => Some(b"\x1b[B".as_slice()),
+        KeyCode::Right => Some(b"\x1b[C".as_slice()),
+        KeyCode::Left => Some(b"\x1b[D".as_slice()),
+        KeyCode::Home => Some(b"\x1b[H".as_slice()),
+        KeyCode::End => Some(b"\x1b[F".as_slice()),
+        KeyCode::PageUp => Some(b"\x1b[5~".as_slice()),
+        KeyCode::PageDown => Some(b"\x1b[6~".as_slice()),
+        _ => None,
+    };
+    if let Some(plain) = csi {
+        return Some(modified(plain, key));
+    }
+    let bytes = match key.code {
+        KeyCode::Char(c) if ctrl => control_byte(c)?,
+        KeyCode::Char(c) => c.to_string().into_bytes(),
+        // CR, not LF. The terminal sends what the Return key sends, and what
+        // that *means* is the child's line discipline to decide; a client
+        // helpfully sending `\n` would be answering a question the pty owns.
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        KeyCode::Esc => vec![0x1b],
+        // DEL, which is what the key labelled Backspace sends in every terminal
+        // this desk runs in. BS (0x08) is Ctrl-H, and a different key.
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::F(n) => function_key(n)?,
+        _ => return None,
+    };
+    // Alt is a prefixed escape in every terminal this client runs in — and
+    // never over a control character, which carries its modifier in the byte.
+    match key.modifiers.contains(KeyModifiers::ALT) && !ctrl {
+        true => Some([&[0x1b][..], &bytes].concat()),
+        false => Some(bytes),
+    }
+}
+
+/// The control character a key carries when Ctrl is held.
+///
+/// The C0 range is the top three bits cleared: `?` through `_` map onto 0x1f
+/// down to 0x00, and a lowercase letter is the same physical key as its
+/// capital. Ctrl-? is DEL, which is outside that arithmetic and is the one
+/// special case. Anything else — a digit, a comma — has no control form, and
+/// nothing is sent rather than a byte the operator did not type.
+fn control_byte(c: char) -> Option<Vec<u8>> {
+    match c {
+        '?' => Some(vec![0x7f]),
+        ' ' => Some(vec![0x00]),
+        c if c.is_ascii() => {
+            let upper = c.to_ascii_uppercase() as u8;
+            (0x40..=0x5f).contains(&upper).then(|| vec![upper & 0x1f])
+        }
+        _ => None,
+    }
+}
+
+/// A cursor or editing key, with whatever modifiers it was pressed under.
+///
+/// xterm's encoding: a bitfield offset by one — shift 1, alt 2, control 4 —
+/// spliced in as the second parameter. An unmodified key keeps its short form,
+/// because that is what an unmodified key sends and a parameter of 1 is a
+/// different string for a reader that compares them literally.
+fn modified(plain: &[u8], key: KeyEvent) -> Vec<u8> {
+    let mut bits = 0u8;
+    for (held, bit) in [
+        (KeyModifiers::SHIFT, 1),
+        (KeyModifiers::ALT, 2),
+        (KeyModifiers::CONTROL, 4),
+    ] {
+        if key.modifiers.contains(held) {
+            bits |= bit;
+        }
+    }
+    if bits == 0 {
+        return plain.to_vec();
+    }
+    let param = bits + 1;
+    let body = String::from_utf8_lossy(&plain[2..plain.len() - 1]).into_owned();
+    match plain[plain.len() - 1] {
+        // `\x1b[5~` already carries a parameter and gains a second.
+        b'~' => format!("\x1b[{body};{param}~").into_bytes(),
+        // `\x1b[A` carries none, and the first is the implicit 1.
+        tail => format!("\x1b[{body}1;{param}{}", tail as char).into_bytes(),
+    }
+}
+
+/// The function keys, in the two families a terminal spells them with.
+///
+/// F1–F4 are `SS3`; the rest are `CSI … ~`, with the gaps at 16 and 22 that the
+/// historical VT keyboards left behind. Past F12 there is no agreed sequence,
+/// so nothing is sent rather than something invented.
+fn function_key(n: u8) -> Option<Vec<u8>> {
+    let sequence = match n {
+        1..=4 => format!("\x1bO{}", (b'P' + n - 1) as char),
+        5 => "\x1b[15~".to_string(),
+        6..=9 => format!("\x1b[{}~", 11 + u16::from(n)),
+        10 => "\x1b[21~".to_string(),
+        11 => "\x1b[23~".to_string(),
+        12 => "\x1b[24~".to_string(),
+        _ => return None,
+    };
+    Some(sequence.into_bytes())
+}
+
 /// Say it once, to both readers: the caller who needs a value and the desk that
 /// needs a line.
 fn refuse(events: &Events, said: String) -> PtyError {
@@ -805,5 +942,112 @@ mod tests {
         let said = label_of(&command);
         assert!(said.starts_with("sh -c xxx"), "{said:?}");
         assert!(said.chars().count() <= LABEL + 1, "{said:?}");
+    }
+
+    // -- the codec ----------------------------------------------------------
+    //
+    // Exact bytes, because "the child received something" is not the property:
+    // an arrow that arrives as the wrong sequence moves a cursor the operator
+    // did not mean to move, and no assertion about *reaching* the child would
+    // notice. The sequences are xterm's, which is what every terminal library a
+    // `qlab cli` session might use was written against.
+
+    fn bytes(code: KeyCode) -> Vec<u8> {
+        encode(KeyEvent::new(code, KeyModifiers::NONE)).expect("a key with a wire form")
+    }
+
+    fn with(code: KeyCode, mods: KeyModifiers) -> Vec<u8> {
+        encode(KeyEvent::new(code, mods)).expect("a key with a wire form")
+    }
+
+    #[test]
+    fn a_printable_key_is_its_own_utf8_and_nothing_more() {
+        assert_eq!(bytes(KeyCode::Char('q')), b"q");
+        assert_eq!(bytes(KeyCode::Char('/')), b"/");
+        assert_eq!(bytes(KeyCode::Char('3')), b"3");
+        // A question is typed in whatever language it is asked in, and a client
+        // that sent one byte per `char` would corrupt every one of them.
+        assert_eq!(bytes(KeyCode::Char('é')), "é".as_bytes());
+    }
+
+    #[test]
+    fn ctrl_c_is_the_interrupt_byte_and_the_c0_range_is_arithmetic() {
+        // The byte the whole focus ruling is about: with ISIG set on the pty,
+        // this is what makes the child's own line discipline raise SIGINT.
+        assert_eq!(with(KeyCode::Char('c'), KeyModifiers::CONTROL), [0x03]);
+        // The same key by its capital, and the ends of the range.
+        assert_eq!(with(KeyCode::Char('C'), KeyModifiers::CONTROL), [0x03]);
+        assert_eq!(with(KeyCode::Char('d'), KeyModifiers::CONTROL), [0x04]);
+        assert_eq!(with(KeyCode::Char('@'), KeyModifiers::CONTROL), [0x00]);
+        assert_eq!(with(KeyCode::Char('_'), KeyModifiers::CONTROL), [0x1f]);
+        assert_eq!(with(KeyCode::Char(' '), KeyModifiers::CONTROL), [0x00]);
+        assert_eq!(with(KeyCode::Char('?'), KeyModifiers::CONTROL), [0x7f]);
+        // And a key with no control form sends nothing rather than a byte the
+        // operator did not type: Ctrl-3 is not `3` and is not 0x33.
+        assert!(encode(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL)).is_none());
+    }
+
+    #[test]
+    fn the_keys_a_session_is_actually_driven_with_carry_their_own_sequences() {
+        assert_eq!(bytes(KeyCode::Enter), b"\r");
+        assert_eq!(bytes(KeyCode::Tab), b"\t");
+        assert_eq!(bytes(KeyCode::BackTab), b"\x1b[Z");
+        assert_eq!(bytes(KeyCode::Esc), b"\x1b");
+        assert_eq!(bytes(KeyCode::Backspace), [0x7f]);
+        assert_eq!(bytes(KeyCode::Up), b"\x1b[A");
+        assert_eq!(bytes(KeyCode::Down), b"\x1b[B");
+        assert_eq!(bytes(KeyCode::Right), b"\x1b[C");
+        assert_eq!(bytes(KeyCode::Left), b"\x1b[D");
+        assert_eq!(bytes(KeyCode::Home), b"\x1b[H");
+        assert_eq!(bytes(KeyCode::End), b"\x1b[F");
+        assert_eq!(bytes(KeyCode::PageUp), b"\x1b[5~");
+        assert_eq!(bytes(KeyCode::PageDown), b"\x1b[6~");
+        assert_eq!(bytes(KeyCode::Delete), b"\x1b[3~");
+        assert_eq!(bytes(KeyCode::Insert), b"\x1b[2~");
+        assert_eq!(bytes(KeyCode::F(1)), b"\x1bOP");
+        assert_eq!(bytes(KeyCode::F(4)), b"\x1bOS");
+        assert_eq!(bytes(KeyCode::F(5)), b"\x1b[15~");
+        assert_eq!(bytes(KeyCode::F(6)), b"\x1b[17~");
+        assert_eq!(bytes(KeyCode::F(12)), b"\x1b[24~");
+        // Past F12 there is no sequence anyone agrees on.
+        assert!(encode(KeyEvent::new(KeyCode::F(13), KeyModifiers::NONE)).is_none());
+    }
+
+    #[test]
+    fn a_modified_cursor_key_splices_its_modifier_in_rather_than_dropping_it() {
+        // Word-wise movement is Alt or Ctrl and an arrow in every line editor a
+        // session might present; a client that forwarded the plain form would
+        // move by one character and look like a bug in the child.
+        assert_eq!(with(KeyCode::Left, KeyModifiers::CONTROL), b"\x1b[1;5D");
+        assert_eq!(with(KeyCode::Right, KeyModifiers::ALT), b"\x1b[1;3C");
+        assert_eq!(with(KeyCode::Up, KeyModifiers::SHIFT), b"\x1b[1;2A");
+        assert_eq!(with(KeyCode::Home, KeyModifiers::CONTROL), b"\x1b[1;5H");
+        // The `~` family already carries a parameter and gains a second.
+        assert_eq!(with(KeyCode::Delete, KeyModifiers::CONTROL), b"\x1b[3;5~");
+        assert_eq!(with(KeyCode::PageUp, KeyModifiers::SHIFT), b"\x1b[5;2~");
+    }
+
+    #[test]
+    fn alt_is_a_prefixed_escape_and_never_over_a_control_byte() {
+        assert_eq!(with(KeyCode::Char('b'), KeyModifiers::ALT), b"\x1bb");
+        assert_eq!(with(KeyCode::Enter, KeyModifiers::ALT), b"\x1b\r");
+        // Ctrl-Alt-C is the interrupt byte with an escape in front of it, not
+        // an escape in front of a `c`.
+        assert_eq!(
+            with(
+                KeyCode::Char('c'),
+                KeyModifiers::ALT | KeyModifiers::CONTROL
+            ),
+            [0x03]
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_wire_form_is_not_sent() {
+        // Not a lost keystroke — a key a child would make nothing of. The
+        // alternative is inventing a sequence, which puts bytes into someone's
+        // session that no terminal would ever have produced.
+        assert!(encode(KeyEvent::new(KeyCode::Menu, KeyModifiers::NONE)).is_none());
+        assert!(encode(KeyEvent::new(KeyCode::CapsLock, KeyModifiers::NONE)).is_none());
     }
 }

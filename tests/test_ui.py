@@ -5441,18 +5441,31 @@ def test_the_heartbeat_tick_logs_one_qualitative_matrix_per_window(session):
     calls, and a reasoner-enabled chat — so a stock desk logged none at all and
     the per-window history the registry is supposed to carry never accrued."""
     import threading
+    from datetime import datetime as _dt
 
     from qlab.news.matrix import DESK_MATRIX_SOURCE
     from qlab.operator.heartbeat import build_owner_tick
 
-    tick = build_owner_tick(session, threading.Lock(), offline=True)
-    tick()
+    # The synthetic window is seeded by the fetch's second-resolution as_of,
+    # so two ticks astride a second boundary are two *different* windows and
+    # the guard rightly logs both — which is not what this test measures.
+    # Freeze the tick's clock so "the same window" is literally the same.
+    class _FrozenNow(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt(2026, 8, 31, 12, 0, 0, tzinfo=tz)
 
-    rows = session.registry.matrix_runs(source=DESK_MATRIX_SOURCE, limit=5)
-    assert len(rows) == 1
-    assert rows[0]["spec"]["source"] == DESK_MATRIX_SOURCE
+    import qlab.ui.server as ui_server
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ui_server, "datetime", _FrozenNow)
+        tick = build_owner_tick(session, threading.Lock(), offline=True)
+        tick()
 
-    # One row per WINDOW, not per tick: the same window logs nothing new.
-    tick()
-    assert len(session.registry.matrix_runs(
-        source=DESK_MATRIX_SOURCE, limit=5)) == 1
+        rows = session.registry.matrix_runs(source=DESK_MATRIX_SOURCE, limit=5)
+        assert len(rows) == 1
+        assert rows[0]["spec"]["source"] == DESK_MATRIX_SOURCE
+
+        # One row per WINDOW, not per tick: the same window logs nothing new.
+        tick()
+        assert len(session.registry.matrix_runs(
+            source=DESK_MATRIX_SOURCE, limit=5)) == 1

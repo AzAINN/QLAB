@@ -23,13 +23,27 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterable, Mapping
 from datetime import date
 
 # A quiet desk should not spin: the default cadence is slow enough to be cheap
 # and fast enough that a human watching the rail sees it breathing.
 DEFAULT_INTERVAL_S = 30.0
 MIN_INTERVAL_S = 5.0
+
+# The trigger this module mints on its own, and what makes a record "changed".
+# One primary document is a filing that did not exist last window; two more
+# corroborated claims is a story that stopped being one publisher's take. A
+# single new corroborated claim is not, deliberately: the desk should not wake
+# a human for every second report of the same thing.
+HELD_RECORD_TRIGGER = "held_record_change"
+PRIMARY_DOCS_DELTA = 1
+CORROBORATED_DELTA = 2
+# How many logged desk windows back to look for the previous one. The newest
+# run IS this window, so a scan of one would always find nothing to compare
+# against; a few more cover a registry where a window was logged twice in a day.
+MATRIX_SCAN = 6
 
 
 class AtlasHeartbeat:
@@ -127,6 +141,173 @@ class AtlasHeartbeat:
             }
 
 
+def held_names(session, offline: bool) -> tuple[set[str], str]:
+    """What the book is actually carrying, and why the answer may be empty.
+
+    ``live_portfolio.positions`` with a POSITIVE quantity, which is the same
+    definition BOOK draws its ribbon from and the matrix pane marks held names
+    by. The registry's own position rows are deliberately not a fallback: a
+    flat live book is a flat desk, not a missing answer, and reading the stale
+    row would fire a trigger about a name the desk closed last week.
+
+    Returns ``(held, fault)``; a non-empty fault means the book could not be
+    read at all, which is not the same fact as holding nothing.
+    """
+    book = session.live_portfolio(offline)
+    if not isinstance(book, dict):
+        return set(), "the live book did not answer with a position list"
+    if book.get("blocked"):
+        return set(), (f"the live book is blocked: "
+                       f"{str(book.get('reason') or 'no reason given')[:200]}")
+    held: set[str] = set()
+    for position in book.get("positions") or []:
+        if not isinstance(position, Mapping):
+            continue
+        ticker = str(position.get("ticker") or "").strip()
+        try:
+            qty = float(position.get("qty") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if ticker and qty > 0.0:
+            held.add(ticker)
+    return held, ""
+
+
+def held_record_changes(current: Mapping, previous: Mapping,
+                        held: Iterable[str]) -> list[dict]:
+    """Held names whose record moved between two windows, with the delta said.
+
+    Rises only. A record that thins out is not a reason to open research about
+    a name — a story ending is the absence of news, and the fewer claims are
+    already visible on the matrix. Both windows must carry the name: a name
+    that entered the universe between them has no baseline, and treating a
+    missing row as zero would mint a trigger for the whole record at once.
+    """
+    changes: list[dict] = []
+    for ticker in sorted(set(held)):
+        now, before = current.get(ticker), previous.get(ticker)
+        if not isinstance(now, Mapping) or not isinstance(before, Mapping):
+            continue
+        primary = _count(now, "primary_docs") - _count(before, "primary_docs")
+        corroborated = (_count(now, "corroborated")
+                        - _count(before, "corroborated"))
+        if primary < PRIMARY_DOCS_DELTA and corroborated < CORROBORATED_DELTA:
+            continue
+        changes.append({
+            "ticker": ticker,
+            "primary_docs_delta": primary,
+            "corroborated_delta": corroborated,
+            "reason": (f"{ticker}: primary {primary:+d}, "
+                       f"corroborated {corroborated:+d}"),
+        })
+    return changes
+
+
+def mint_held_record_tasks(session, matrix: Mapping, *,
+                           offline: bool) -> list[dict]:
+    """Queue one ``held_record_change`` task per held name whose record moved.
+
+    Runs beside the matrix log, on the window that log just wrote, because that
+    is the only place in the owner where both windows are knowable: the tick
+    logs one row per window, so "the previous window" is the newest earlier
+    desk-stamped run and nothing else in the process holds it.
+
+    Queued, never started. This mints exactly what a trigger mints — a task row
+    with ``origin="trigger"`` and a template from ``TRIGGER_TEMPLATE`` — so the
+    one-coordinator-at-a-time rule and ``check_startable`` apply at START time,
+    through the same gate every other trigger goes through. Nothing here widens
+    authority: ``portfolio_watch`` creates no plan.
+
+    A window that arrived broken is skipped and SAYS so. Comparing a window
+    whose feed failed against a healthy one measures the outage, not the
+    record, and a silent skip would look exactly like a quiet tape.
+    """
+    from qlab.news.matrix import DESK_MATRIX_SOURCE
+    from qlab.operator.templates import TRIGGER_TEMPLATE
+
+    registry = session.registry
+    current_hash = str(matrix.get("window_hash") or "")
+    current_rows = matrix.get("rows")
+    fault = _window_fault(matrix)
+    if not fault and (not current_hash or not isinstance(current_rows, Mapping)):
+        fault = "this window carries no rows to compare"
+    if fault:
+        registry.record_event(
+            HELD_RECORD_TRIGGER + "_skipped",
+            {"reason": fault, "window_hash": current_hash})
+        return []
+
+    # The window's own date, not today's: an unchanged window is not re-logged,
+    # so keying the dedupe on the clock would re-mint the same finding daily.
+    as_of = str(matrix.get("as_of") or "")
+    previous: Mapping = {}
+    for run in registry.matrix_runs(source=DESK_MATRIX_SOURCE,
+                                    limit=MATRIX_SCAN):
+        spec = run.get("spec")
+        logged = spec.get("matrix") if isinstance(spec, Mapping) else None
+        if not isinstance(logged, Mapping):
+            continue
+        if str(logged.get("window_hash") or "") == current_hash:
+            as_of = str(logged.get("as_of") or as_of)
+            continue
+        previous = logged
+        break
+    if not previous:
+        return []          # the first window ever has nothing to have changed
+
+    held, book_fault = held_names(session, offline)
+    if book_fault:
+        registry.record_event(HELD_RECORD_TRIGGER + "_skipped",
+                              {"reason": book_fault,
+                               "window_hash": current_hash})
+        return []
+    previous_hash = str(previous.get("window_hash") or "")
+    previous_rows = previous.get("rows")
+    changes = held_record_changes(
+        current_rows, previous_rows if isinstance(previous_rows, Mapping) else {},
+        held)
+
+    template_id = TRIGGER_TEMPLATE.get(HELD_RECORD_TRIGGER)
+    created: list[dict] = []
+    for change in changes:
+        payload = dict(change, window_hash=current_hash,
+                       previous_window_hash=previous_hash, as_of=as_of)
+        # The existing trigger key shape — kind|trading date|scope|state — so
+        # the age rule and the budget scan read it the way they read every
+        # other one. The scope is the ticker and the state is the window pair,
+        # which is what "one task per ticker per window" means.
+        dedupe = (f"{HELD_RECORD_TRIGGER}|{as_of}|{change['ticker']}|"
+                  f"{previous_hash}->{current_hash}")
+        task_id = uuid.uuid4().hex[:16]
+        if not registry.create_atlas_task(
+                task_id, dedupe, HELD_RECORD_TRIGGER, payload, template_id):
+            continue
+        registry.record_event(
+            "atlas_task", {"task_id": task_id, "trigger": HELD_RECORD_TRIGGER,
+                           "action": "workflow", "template_id": template_id,
+                           "source": "lookup"})
+        created.append({"task_id": task_id, "trigger": HELD_RECORD_TRIGGER,
+                        "action": "workflow", "ticker": change["ticker"],
+                        "reason": change["reason"]})
+    return created
+
+
+def _window_fault(matrix: Mapping) -> str:
+    """The reason this window cannot be compared, or ``""``."""
+    for key in ("news_error", "calendar_error"):
+        value = str(matrix.get(key) or "").strip()
+        if value:
+            return f"{key}: {value[:200]}"
+    return ""
+
+
+def _count(row: Mapping, column: str) -> int:
+    try:
+        return int(row.get(column) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def build_owner_tick(session, lock, *, offline: bool,
                      autonomous: bool = False) -> Callable[[], dict]:
     """The owner's tick: fetch externally, then compose and observe under lock.
@@ -158,6 +339,10 @@ def build_owner_tick(session, lock, *, offline: bool,
         fetch_news = getattr(session, "fetch_desk_news", None)
         prefetched_news = fetch_news(offline) if callable(fetch_news) else None
         live_autonomous = autonomous
+        # This tick's qualitative window, carried from the log below to the
+        # observe: the held-record rule needs the window the log just wrote,
+        # and the two run in different closures of the same lock phase.
+        matrix_payload: dict | None = None
 
         def observe(**handed) -> dict:
             # Before the observe, so one tick closes the whole loop: the reap
@@ -192,6 +377,27 @@ def build_owner_tick(session, lock, *, offline: bool,
             # `handed` is empty unless the reasoner ran, so a desk with the
             # flag off calls exactly what it called before.
             result = session.atlas_observe(offline, **handed)
+            # Beside the observe rather than inside it: the supervisor's
+            # triggers are evaluated from owner FACTS, and the qualitative
+            # window is not one of them — it is a per-window record only this
+            # tick holds. The tasks join `created_tasks` because everything
+            # downstream — the announcement, the autonomous start below — reads
+            # a trigger task from that list and from the registry row, not from
+            # where it was minted.
+            if matrix_payload is not None:
+                try:
+                    result["created_tasks"] = list(
+                        result.get("created_tasks") or []) + \
+                        mint_held_record_tasks(
+                            session, matrix_payload, offline=offline)
+                except Exception as exc:
+                    # Its own key, never the value's, for the reason the reap
+                    # error above carries one: a field that changes JSON type
+                    # mid-run poisons the tick for a typed client.
+                    result["held_record_error"] = str(exc)[:200]
+                    session.registry.record_event(
+                        HELD_RECORD_TRIGGER + "_failed",
+                        {"error": str(exc)[:400]})
             if expired is not None:
                 result["expired"] = expired
             if expire_error:
@@ -270,7 +476,9 @@ def build_owner_tick(session, lock, *, offline: bool,
                     matrix = getattr(session, "qualitative_matrix", None)
                     if callable(matrix):
                         try:
-                            matrix(offline)
+                            logged = matrix(offline)
+                            if isinstance(logged, dict):
+                                matrix_payload = logged
                         except Exception as exc:
                             session.registry.record_event(
                                 "qualitative_matrix_failed",

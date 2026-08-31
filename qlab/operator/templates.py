@@ -116,6 +116,11 @@ TRIGGER_TEMPLATE: dict[str, str] = {
     "drawdown_control": "risk_event",
     "kill_switch": "risk_event",
     "new_research_run": "research_review",
+    # A held name's qualitative record moving is research about the book,
+    # so it goes to the watch template: that one reads the record and may
+    # name a contender, and it creates no plan — which is what lets a
+    # desk in Research mode start it at all.
+    "held_record_change": "portfolio_watch",
 }
 
 

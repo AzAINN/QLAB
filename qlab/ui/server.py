@@ -3257,8 +3257,12 @@ class UISession:
 
         if not isinstance(providers, list):
             raise ValueError("providers must be a list of source names")
-        names = tuple(str(name).strip().lower() for name in providers
-                      if str(name).strip())
+        # A stack is an order, not a bag: `parse_provider_stack` would read a
+        # repeat back as two members and the feed would fetch the source twice.
+        # Deduped in place so the operator's order survives.
+        names = tuple(dict.fromkeys(
+            str(name).strip().lower() for name in providers
+            if str(name).strip()))
         if not names:
             raise ValueError(
                 "no news source was named; an explicit 'no real sources' is "
@@ -3304,16 +3308,36 @@ class UISession:
         """
         from qlab.news import setup
 
-        contact = (setup.validate_contact(str(edgar_contact))
-                   if edgar_contact is not None else None)
+        # An empty box is "leave the contact alone", the wizard's own answer to
+        # "keep the one already on file?" — not a contact to validate. Absent
+        # and empty mean the same thing here; a non-empty one must be usable.
+        typed = "" if edgar_contact is None else str(edgar_contact).strip()
+        contact = setup.validate_contact(typed) if typed else None
+        # A contact already on file makes edgar `available` in the catalog, so
+        # only the typed one has to be passed down.
         names = self._checked_news_stack(providers, contact)
         plan = setup.SetupPlan(
             read_news=names != ("synthetic",), providers=names,
             edgar_contact=contact, verify=bool(verify))
-        report = setup.verify_plan(
-            plan, self.mandate.universe_whitelist,
-            environ=os.environ) if plan.verify else None
-        setup.apply_plan(plan, root=workspace_root(), environ=os.environ)
+        # `verify_plan` exports the contact and `write_env_values` sets each
+        # name before the file lands, so a raise anywhere in between would
+        # leave the process holding a stack that .env does not — and this
+        # route's "nothing was written" refusal would be untrue. The env
+        # mutation survives only a completed apply_plan.
+        guarded = ("QLAB_NEWS_PROVIDERS", "QLAB_EDGAR_CONTACT")
+        before = {name: os.environ.get(name) for name in guarded}
+        try:
+            report = setup.verify_plan(
+                plan, self.mandate.universe_whitelist,
+                environ=os.environ) if plan.verify else None
+            setup.apply_plan(plan, root=workspace_root(), environ=os.environ)
+        except BaseException:
+            for name, value in before.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            raise
         with self._news_lock:
             # The next heartbeat must fetch through the new stack rather than
             # publish a window the old one produced.
@@ -3321,12 +3345,21 @@ class UISession:
         payload = self.news_settings(offline)
         if report is not None:
             payload["verify"] = {
+                # ANY-member semantics, `check_news`'s own: one living member
+                # is still a record. This is not whole-stack health, and a
+                # member can be ok while short a feed — hence quality_flags.
                 "ok": bool(report.get("ok")),
-                # Names and one sentence each: a member report also carries the
-                # credential description, which is not the pane's business.
+                # Names, one sentence and the flags: a member report also
+                # carries the credential description, which is not the pane's
+                # business.
                 "members": {
-                    str(name): {"ok": bool(member.get("ok")),
-                                "detail": str(member.get("error") or "")}
+                    str(name): {
+                        "ok": bool(member.get("ok")),
+                        "detail": str(member.get("error") or ""),
+                        "quality_flags": [
+                            str(flag) for flag
+                            in (member.get("quality_flags") or [])],
+                    }
                     for name, member in (report.get("members") or {}).items()},
             }
         return payload
@@ -5180,6 +5213,8 @@ def handle_api(session: UISession, method: str, path: str,
         # Network I/O when verify is asked for. do_POST runs this one outside
         # the dispatch lock; it writes .env and the process environment, never
         # the registry, so it does not need it.
+        # `verify.ok` is ANY-member, like `qlab news-check`: it is not a claim
+        # that every chosen source answered.
         offline = _flagbool(body.get("offline"), session.offline_default)
         contact = body.get("edgar_contact")
         try:

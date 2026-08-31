@@ -5223,10 +5223,13 @@ def test_news_settings_applies_a_stack_and_clears_the_cached_window(
 
 
 @pytest.mark.parametrize("body,expected", [
-    ({"providers": ["bloomberg"]}, "bloomberg"),
-    ({"providers": []}, "synthetic"),
+    ({"providers": "macro"}, "providers must be a list of source names"),
+    ({"providers": ["bloomberg"]}, "unknown news provider(s) bloomberg"),
+    # The exact sentence, not a word the unknown-name message also carries:
+    # both of these passed for the wrong reason on a substring.
+    ({"providers": []}, "no news source was named"),
     ({"providers": ["alpaca"]}, "alpaca profile login"),
-    ({"providers": ["edgar"]}, "edgar"),
+    ({"providers": ["edgar"]}, "edgar needs a contact"),
     ({"providers": ["macro"], "edgar_contact": "nobody"}, "nobody"),
 ])
 def test_news_settings_refuses_a_stack_it_cannot_honour(
@@ -5238,6 +5241,69 @@ def test_news_settings_refuses_a_stack_it_cannot_honour(
     assert status == 400
     assert expected in out["error"]
     assert not (tmp_path / ".env").exists(), "a refusal wrote configuration"
+
+
+def test_news_settings_takes_an_empty_contact_as_no_change(
+        session, monkeypatch, tmp_path):
+    """An empty box is "leave the contact alone", not a contact to validate."""
+    from qlab.env import parse_env
+
+    _news_settings_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("QLAB_EDGAR_CONTACT", "Jane Doe <jane@x.io>")
+
+    status, out = handle_api(
+        session, "POST", "/api/news/settings", {},
+        {"providers": ["edgar"], "edgar_contact": "  ", "offline": False})
+    assert status == 200
+    assert out["edgar_contact_set"] is True
+    # The stored line is untouched: only the stack was written.
+    assert parse_env((tmp_path / ".env").read_text(encoding="utf-8")) == {
+        "QLAB_NEWS_PROVIDERS": "edgar"}
+    assert os.environ["QLAB_EDGAR_CONTACT"] == "Jane Doe <jane@x.io>"
+
+
+def test_news_settings_writes_a_repeated_source_once(
+        session, monkeypatch, tmp_path):
+    """A stack is an order, not a bag: macro twice is macro once, in place."""
+    from qlab.env import parse_env
+
+    _news_settings_env(monkeypatch, tmp_path)
+    status, out = handle_api(
+        session, "POST", "/api/news/settings", {},
+        {"providers": ["macro", "rss", "macro"], "offline": False})
+    assert status == 200
+    assert out["stack"] == ["macro", "rss"]
+    assert parse_env((tmp_path / ".env").read_text(encoding="utf-8")) == {
+        "QLAB_NEWS_PROVIDERS": "macro,rss"}
+
+
+def test_news_settings_leaves_no_half_applied_environment(
+        session, monkeypatch, tmp_path):
+    """A write that dies mid-way must not leave the env holding what .env does not.
+
+    `verify_plan` exports the contact and `write_env_values` sets each name
+    before the file lands, so without a guard a raise in between would leave
+    the process configured for a stack nobody saved — and the route's
+    "nothing was written" refusal would be a lie.
+    """
+    _news_settings_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "qlab.news.check.check_news",
+        lambda universe, provider=None, lookback_hours=72: {
+            "ok": True, "members": {"edgar": {"ok": True}}})
+
+    def die(plan, *, root, environ):
+        raise RuntimeError("disk went away")
+
+    monkeypatch.setattr("qlab.news.setup.apply_plan", die)
+    before = dict(os.environ)
+    # do_POST turns this into a 500; what matters is what it leaves behind.
+    with pytest.raises(RuntimeError):
+        handle_api(session, "POST", "/api/news/settings", {},
+                   {"providers": ["edgar"], "verify": True, "offline": False,
+                    "edgar_contact": "Jane Doe <jane@x.io>"})
+    assert os.environ == before
+    assert not (tmp_path / ".env").exists()
 
 
 def test_news_settings_verify_names_a_dead_member_and_still_applies(
@@ -5262,6 +5328,9 @@ def test_news_settings_verify_names_a_dead_member_and_still_applies(
     assert out["verify"]["ok"] is False
     assert out["verify"]["members"]["macro"]["ok"] is False
     assert "503" in out["verify"]["members"]["macro"]["detail"]
+    # A member can be ok and still short a feed, so the flags ride along: the
+    # pane must not read `ok` as whole-stack health.
+    assert out["verify"]["members"]["macro"]["quality_flags"] == []
     assert out["stack"] == ["macro"]
     assert os.environ["QLAB_NEWS_PROVIDERS"] == "macro"
 

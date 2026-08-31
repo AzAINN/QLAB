@@ -736,8 +736,7 @@ def test_the_startup_door_offers_news_setup_and_takes_no_for_an_answer(
     assert len(asked) == 1 and "Set up news sources now?" in asked[0]
     assert not (tmp_path / ".env").exists(), "declining wrote configuration"
     # Declining is not a dead end: say where the same choice lives afterwards.
-    printed = capsys.readouterr().out
-    assert "qlab news-setup" in printed and "Settings" in printed
+    assert cli.NEWS_DOOR_AGAIN in capsys.readouterr().out
     assert record["spawned"][1:4] == ["-m", "qlab.autopilot.cli", "owner"]
 
 
@@ -775,7 +774,8 @@ def test_the_startup_door_drops_edgar_for_one_run_without_persisting_it(
     _drive_cmd_tui(monkeypatch, tmp_path, ["tui"], owner_running=False)
 
     assert asked and "drop" in asked[0]
-    assert "qlab news-setup" in capsys.readouterr().out
+    # The same sentence a decline gets: a one-run drop is not a dead end either.
+    assert cli.NEWS_DOOR_AGAIN in capsys.readouterr().out
     assert os.environ["QLAB_NEWS_PROVIDERS"] == "macro"
     assert not (tmp_path / ".env").exists(), "a one-run drop was persisted"
 

@@ -57,6 +57,16 @@ _WORKFORCE_DEPS = {
     "referee": ("challenger", "optimizer"),
     "reporter": ("referee",),
     "news-analyst": (),
+    "scout": ("analyst",),
+}
+# The watch graph's own DAG. Its reporter is gated by the scout, not by a
+# referee: this graph produces no targets, so there is no gate for the reporter
+# to depend on — and dropping the static dependency instead of replacing it is
+# how a graph that can never start gets created without a word.
+_WATCH_DEPS = {
+    "analyst": (),
+    "scout": ("analyst",),
+    "reporter": ("scout",),
 }
 _WORKFORCE_REQUIRED_ARTIFACTS = {
     # regime + regime_summary are required so the run always carries the analyst's
@@ -72,6 +82,10 @@ _WORKFORCE_REQUIRED_ARTIFACTS = {
     # produces a view; it has no dependencies and reaches no gate, because it
     # never produces targets and so can never approach the approval path.
     "news-analyst": ("news_view",),
+    # The contender scout. `contenders` may be empty — "nothing worth adding"
+    # is a result — but the memo it was written into is not optional: a
+    # contender with no auditable memo behind it is a name from nowhere.
+    "scout": ("memo_decision_id", "contenders"),
 }
 _MAX_PANEL_VARIANTS = 5
 
@@ -79,6 +93,15 @@ _MAX_PANEL_VARIANTS = 5
 # it; this keeps the simulator — which is what every offline test and the demo
 # run against — working without threading a book through every call site.
 DEFAULT_BOOK = "simulated_paper"
+
+# What an approval request is *about*. A plan approval is the execution gate;
+# a universe_change is the operator answering "may this contender enter the
+# mandate at all". They share the lifecycle and nothing else: the second binds
+# no plan, no targets and no book, so no amount of approving it can book
+# anything (``check_approval_for_execution`` refuses it by kind).
+APPROVAL_KIND_PLAN = "plan"
+APPROVAL_KIND_UNIVERSE_CHANGE = "universe_change"
+APPROVAL_KINDS = (APPROVAL_KIND_PLAN, APPROVAL_KIND_UNIVERSE_CHANGE)
 
 # Which statuses an approval may hold *before* it is moved to each status. The
 # terminal ones — rejected, expired, consumed, invalidated — appear in no
@@ -139,6 +162,27 @@ def validate_phase_graph(
                     f"phase {phase!r} depends on {dependency!r}, which the "
                     f"declared graph omits; it could never start"
                 )
+
+
+def deps_for_phases(
+    phases: tuple[str, ...],
+) -> dict[str, tuple[str, ...]] | None:
+    """The dependency DAG a declared graph runs under, or None for the static map.
+
+    One authority for "which DAG does this graph use", because two callers ask
+    it: ``start_workflow``, which persists the answer, and the template
+    contract test, which checks every declared graph could actually run. A
+    second copy would disagree the first time a graph brought its own DAG —
+    which is exactly what the watch graph does.
+
+    Panels are not here: their DAG is built from the variant count by
+    ``panel_phases`` and cannot be derived from the phase names alone.
+    """
+    if "scout" in phases:
+        return {phase: tuple(d for d in _WATCH_DEPS.get(phase, ())
+                             if d in phases)
+                for phase in phases}
+    return None
 
 
 def panel_phases(n_variants: int) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
@@ -404,6 +448,12 @@ class Registry:
         # a set logged before conditioning existed, i.e. no lineage to check.
         self.con.execute(
             "ALTER TABLE moment_sets ADD COLUMN IF NOT EXISTS provenance VARCHAR")
+        # What an approval request IS. NULL is a row written before there was
+        # more than one kind, and every one of those bound a plan — so reads
+        # normalise it to "plan" rather than leaving the oldest approvals with
+        # no kind at all.
+        self.con.execute(
+            "ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS kind VARCHAR")
 
     def _partition_account_by_book(self) -> None:
         """Move a pre-book `account` row onto the book key.
@@ -1456,6 +1506,13 @@ class Registry:
                 raise ValueError("panel requires request['variants']: list[dict]")
             phases, deps = panel_phases(len(variants))
             request["_deps"] = {phase: list(d) for phase, d in deps.items()}
+        else:
+            # Persisted for the same reason the panel's is: resumption re-reads
+            # the graph this run was created with, and the static map would
+            # hold the watch graph's reporter behind a referee it does not have.
+            deps = deps_for_phases(phases)
+            if deps is not None:
+                request["_deps"] = {phase: list(d) for phase, d in deps.items()}
         # Dependency closure is checked here, not just phase names: a graph that
         # omits a dependency would be created happily and then deadlock.
         validate_phase_graph(phases, deps)
@@ -2324,31 +2381,55 @@ class Registry:
             "INSERT INTO approval_requests (approval_id, task_id, plan_id, "
             "plan_digest, decision_id, targets_hash, data_permit_id, broker, "
             "book_revision, expected_cost, summary, status, challenge_digest, "
-            "expires_at, decided_at, consumed_at, invalidated_reason, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "expires_at, decided_at, consumed_at, invalidated_reason, kind, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [aid, approval.get("task_id"), approval.get("plan_id"),
              approval.get("plan_digest"), approval.get("decision_id"),
              approval.get("targets_hash"), approval.get("data_permit_id"),
              approval.get("broker"), approval.get("book_revision"),
              _j(approval.get("expected_cost")), _j(approval.get("summary")),
              "pending", None, approval.get("expires_at"), None, None, None,
-             _now()])
+             str(approval.get("kind") or APPROVAL_KIND_PLAN), _now()])
         return aid
 
+    @staticmethod
+    def _kinded(rows: list[dict]) -> list[dict]:
+        """Every approval row carries a kind; a pre-migration row is a plan."""
+        for row in rows:
+            row["kind"] = str(row.get("kind") or APPROVAL_KIND_PLAN)
+        return rows
+
     def get_approval_request(self, approval_id: str) -> dict | None:
-        rows = self._rows(
-            "SELECT * FROM approval_requests WHERE approval_id = ?", [approval_id])
+        rows = self._kinded(self._rows(
+            "SELECT * FROM approval_requests WHERE approval_id = ?",
+            [approval_id]))
         return rows[0] if rows else None
 
     def list_approval_requests(self, limit: int = 50,
                                status: str | None = None) -> list[dict]:
         if status is not None:
-            return self._rows(
+            return self._kinded(self._rows(
                 "SELECT * FROM approval_requests WHERE status = ? "
-                "ORDER BY created_at DESC LIMIT ?", [status, limit])
-        return self._rows(
+                "ORDER BY created_at DESC LIMIT ?", [status, limit]))
+        return self._kinded(self._rows(
             "SELECT * FROM approval_requests ORDER BY created_at DESC LIMIT ?",
-            [limit])
+            [limit]))
+
+    def pending_universe_change(self, ticker: str) -> dict | None:
+        """The open question about ``ticker``, if the desk already asked it.
+
+        One pending request per name: a second scout memo naming the same
+        contender must not put a second identical question on the operator's
+        desk, and answering one of two would leave the other live forever.
+        """
+        wanted = str(ticker or "").strip().upper()
+        for row in self.list_approval_requests(200, "pending"):
+            if row.get("kind") != APPROVAL_KIND_UNIVERSE_CHANGE:
+                continue
+            summary = row.get("summary") or {}
+            if str(summary.get("ticker") or "").upper() == wanted:
+                return row
+        return None
 
     def transition_approval(self, approval_id: str, status: str, *,
                             challenge_digest: str | None = None,
@@ -2657,4 +2738,5 @@ def agent_for_phase(phase: str) -> str:
         "referee": "referee",
         "reporter": "reporter",
         "news-analyst": "news-analyst",
+        "scout": "contender-scout",
     }[_phase_type(phase)]

@@ -6153,3 +6153,89 @@ def test_the_409_names_the_phase_the_goal_and_falls_back_to_the_kind(session):
     assert refused["error"] == (
         "a research workflow is already running: portfolio_review "
         f"({bare['workflow_id']})")
+
+
+# --- universe_change approvals: a contender enters only by the operator ------
+
+
+def _a_contender_outside(session) -> str:
+    from qlab.core.universe import load_universe
+
+    held = set(session.mandate.universe_whitelist)
+    catalog = load_universe()
+    for ticker in catalog.extended_tickers + catalog.stock_tickers:
+        if ticker not in held:
+            return ticker
+    raise AssertionError("the catalog holds nothing outside the mandate")
+
+
+def test_universe_change_approval_opens_once_and_widens_only_when_approved(session):
+    contender = _a_contender_outside(session)
+    body = {"kind": "universe_change", "ticker": contender,
+            "memo_decision_id": "dec-scout"}
+
+    status, opened = handle_api(session, "POST", "/api/approvals", {}, body)
+    assert status == 200, opened
+    approval_id = opened["approval_id"]
+    assert opened["status"] == "pending"
+    assert opened["kind"] == "universe_change"
+
+    # One pending question per ticker: a second scout memo must not re-ask it.
+    status, again = handle_api(session, "POST", "/api/approvals", {}, body)
+    assert status == 200
+    assert again["approval_id"] == approval_id
+    assert again["deduped"] is True
+    assert len([row for row in session.registry.list_approval_requests(50)
+                if row["kind"] == "universe_change"]) == 1
+
+    # The GET shape I4 reads.
+    status, listed = handle_api(session, "GET", "/api/approvals", {}, {})
+    row = next(r for r in listed["approvals"] if r["approval_id"] == approval_id)
+    assert row["kind"] == "universe_change"
+    assert row["plan_id"] is None
+    assert row["targets_hash"] is None
+    assert row["summary"] == {"ticker": contender,
+                              "memo_decision_id": "dec-scout"}
+
+    assert contender not in session.mandate.universe_whitelist
+
+    status, decided = handle_api(
+        session, "POST", f"/api/approvals/{approval_id}/approve", {}, {})
+    assert status == 200, decided
+    assert decided["status"] == "approved"
+    assert decided["ticker"] == contender
+    assert contender in session.mandate.universe_whitelist
+
+    from qlab.trader.mandate import load_mandate, load_mandate_overrides
+    assert load_mandate_overrides()["universe_add"] == [contender]
+    assert contender in load_mandate().universe_whitelist
+
+    events = session.registry.read_events_of_kind("universe_change_approved")
+    assert [e["payload"]["ticker"] for e in events] == [contender]
+
+
+def test_universe_change_refuses_a_ticker_the_catalog_does_not_carry(session):
+    status, refused = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"kind": "universe_change", "ticker": "NOTATICKER",
+         "memo_decision_id": "d"})
+    assert status == 400
+    assert "universe catalog" in refused["error"]
+
+
+def test_universe_change_refuses_a_name_already_in_the_mandate(session):
+    held = session.mandate.universe_whitelist[0]
+    status, refused = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"kind": "universe_change", "ticker": held, "memo_decision_id": "d"})
+    assert status == 400
+    assert held in refused["error"]
+
+
+def test_the_method_route_still_refuses_the_universe_key(session):
+    """`universe_add` is overridable, but not from the method route: only an
+    approved universe_change writes it."""
+    status, refused = handle_api(session, "POST", "/api/desk/method", {},
+                                 {"universe_add": ["XLK"]})
+    assert status == 400
+    assert "universe_add" in refused["error"]

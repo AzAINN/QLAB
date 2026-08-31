@@ -96,6 +96,7 @@ _LAB_TOOL_BASES = {
 
 _WORKFLOW_PHASE = {
     "moments-analyst": "analyst",
+    "contender-scout": "scout",
     "challenger": "challenger",
     "optimization-runner": "optimizer",
     "referee": "referee",
@@ -151,7 +152,17 @@ _PHASE_ARTIFACT_CONTRACT = {
         "targets; on FAIL use blocked instead of done"
     ),
     "reporter": "recommendation, plus plan_id when a dry preview was accepted",
+    "scout": (
+        "memo_decision_id (the scout_memo decision) and contenders — a list of "
+        "{ticker, thesis, urls} with at least two fetched URLs each, or [] "
+        "when nothing outside the universe is worth the operator's time"
+    ),
 }
+
+# The one role with eyes outside this desk, and the only one _WEB_TOOLS is
+# granted to. Named here because two places have to agree about it: the role's
+# own grant, and the single `--allowedTools` list the whole dispatch shares.
+_WEB_ROLE = "contender-scout"
 
 _TRADER_PROXY_MAP = {
     "get_portfolio_state": "portfolio.state",
@@ -307,6 +318,11 @@ def build_workforce_agents(goal: str = "", *, fast: bool = False) -> dict[str, d
         ):
             continue
         tools = [mapped for tool in source.tools if (mapped := _proxy_tool(tool))]
+        if source.name == _WEB_ROLE:
+            # `_proxy_tool` answers None for a built-in, which would drop the
+            # scout's eyes and leave a role that looks identical to one that
+            # had them. Added back by name, and only here.
+            tools = [*_WEB_TOOLS, *tools]
         if source.name in _PREDICTION_RESEARCH_ROLES:
             tools.append(_claude_tool("research.predict_vol"))
         if is_extractor:
@@ -1028,8 +1044,15 @@ def build_claude_argv(
     offline: bool,
     resume_session: str | None = None,
     chat: bool = False,
+    roles: tuple[str, ...] = (),
 ) -> list[str]:
-    """Build an auditable Claude command with no ambient MCP/tool access."""
+    """Build an auditable Claude command with no ambient MCP/tool access.
+
+    ``roles`` are the graph's phases as agent names. One ``--allowedTools``
+    list serves the whole dispatch, so a tool granted for one role is reachable
+    by every role in it: the web is therefore opened per *graph*, only for one
+    that actually carries the scout, and never for a review that does not.
+    """
     if governed or chat:
         config = proxy_mcp_config(runtime_url, offline=offline)
     else:
@@ -1053,7 +1076,10 @@ def build_claude_argv(
         # agent definition (Agent + two workflow tools) is the restriction —
         # verified live: built-ins do not leak into --agent-selected roles.
         argv[argv.index("--tools") + 1] = "default"
-        argv.extend(["--allowedTools", ",".join(["Agent", *_PROXY_TOOLS])])
+        allowed = ["Agent", *_PROXY_TOOLS]
+        if _WEB_ROLE in roles:
+            allowed.extend(_WEB_TOOLS)
+        argv.extend(["--allowedTools", ",".join(allowed)])
         argv.extend(["--agent", _COORDINATOR_NAME])
         argv.extend(["--permission-mode", "dontAsk"])
         argv.extend(["--name", "qlab-workforce"])
@@ -1214,7 +1240,8 @@ class ClaudeSession:
         return self.process is not None and self.process.poll() is None
 
     def start(self, prompt: str, *, governed: bool = False,
-              resume_session: str | None = None, chat: bool = False) -> bool:
+              resume_session: str | None = None, chat: bool = False,
+              roles: tuple[str, ...] = ()) -> bool:
         executable = resolve_claude_executable()
         self.last_error = ""
         if self.running:
@@ -1232,6 +1259,7 @@ class ClaudeSession:
             offline=self.offline,
             resume_session=resume_session,
             chat=chat,
+            roles=tuple(roles),
         )
         env = os.environ.copy()
         process_cwd = self.cwd

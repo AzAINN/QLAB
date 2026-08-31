@@ -76,6 +76,8 @@ review research analyze analysis assess assessment challenge referee news
 narrative coverage sentiment liquidity concentration diversification
 absorption turbulence tension tensions mandate cap caps limit limits
 plan proposal proposals recommendation recommend etf etfs holdings
+held name names ticker tickers contender contenders candidate candidates
+watch watching monitor monitoring scout
 """.split())
 
 

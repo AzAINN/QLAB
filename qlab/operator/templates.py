@@ -87,6 +87,15 @@ TEMPLATES: dict[str, WorkflowTemplate] = {
         purpose="Turn operator-pasted excerpts into dry, corroborated risk views.",
         phases=("analyst", "challenger", "optimizer", "referee", "reporter"),
         requires=("data_eligible_for_research", "operator_supplied_excerpts")),
+    "portfolio_watch": WorkflowTemplate(
+        template_id="portfolio_watch",
+        purpose="Read what changed for the names the desk holds, and scout "
+                "contenders outside the universe for the operator to rule on.",
+        phases=("analyst", "scout", "reporter"),
+        requires=("data_eligible_for_research",),
+        notes="Creates no plan and touches no weight. The scout's contenders "
+              "become universe_change approvals the operator answers one at a "
+              "time; a name enters the mandate only by that answer."),
     "desk_rebalance_review": WorkflowTemplate(
         template_id="desk_rebalance_review",
         purpose="Full review ending in a checked plan proposed for approval.",

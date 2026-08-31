@@ -1002,3 +1002,22 @@ def test_sdk_liveness_chatter_does_not_bury_the_agents_reasoning():
         assert "atlas_coordinator_started" in kinds
     finally:
         reg.close()
+
+
+def test_a_lone_scout_is_pinned_to_claude_because_the_harness_has_no_web():
+    """The harness serves one-role graphs, but not this one: a scout without
+    web tools would return recalled knowledge and no URL, which its own
+    sourcing rules exist to forbid. Refused by name, not by a tool error."""
+    reg, daemon = Registry(":memory:"), StubDaemon()
+    try:
+        driver = _ollama_driver(reg, daemon)
+        assert driver.drive("wf-scout", "scout contenders",
+                            roles=("contender-scout",))["driving"] is True
+        assert FakeSession.instances, "the claude coordinator was not spawned"
+        rows = reg.list_model_invocations(10)
+        scout = next(r for r in rows if r["role"] == "contender-scout")
+        assert scout["backend"] == "claude_cli"
+        assert "web tools" in (scout["fallback_reason"] or "")
+        assert daemon.asked == []
+    finally:
+        reg.close()

@@ -394,3 +394,30 @@ def test_an_orphan_does_not_withdraw_the_live_proposal_beside_it(session):
 
     assert (current_proposal(session.registry) or {}).get("plan_id") == keeper
     assert list(live_requests(session.registry)) == [keeper]
+
+
+def test_a_universe_change_request_is_not_one_of_the_desks_proposals(session):
+    """F1 reads plan approvals. A universe question has no plan, so it must
+    neither become the current proposal nor be withdrawn by one."""
+    from qlab.governance.approval import build_universe_change_request
+
+    universe_change = build_universe_change_request(
+        "XLK", memo_decision_id="dec-scout")
+    session.registry.create_approval_request(universe_change)
+    approval_id = universe_change["approval_id"]
+
+    assert approval_id not in {row["approval_id"]
+                               for row in live_requests(session.registry).values()}
+
+    plan_id = _checked_plan(session)
+    _, opened = handle_api(session, "POST", "/api/approvals", {},
+                           {"plan_id": plan_id})
+    assert opened["approval_id"] != approval_id
+    proposal = current_proposal(session.registry)
+    assert proposal["plan_id"] == plan_id
+
+    withdrawn, failures = supersede(session.registry, plan_id)
+    assert failures == []
+    assert withdrawn == []
+    assert session.registry.get_approval_request(
+        approval_id)["status"] == "pending"

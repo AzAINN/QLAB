@@ -55,3 +55,18 @@ def test_the_start_route_refuses_with_the_gate_sentence(monkeypatch):
     assert status == 400
     assert "not a research goal" in out["error"]
     assert session.registry.list_workflows(10) == []
+
+
+@pytest.mark.parametrize("goal", [
+    "watch my holdings and find a contender outside the universe",
+    "scout what changed for the names we hold",
+])
+def test_the_watch_goal_anchors(goal):
+    """I3's own template has to pass the gate its own operator will type."""
+    assert check_goal(goal, UNIVERSE) == goal
+
+
+def test_the_watch_words_do_not_open_the_door_to_composition():
+    """Adding anchors must not weaken the off-domain half."""
+    with pytest.raises(GoalRefused, match="correspondence"):
+        check_goal("write me an email about my holdings", UNIVERSE)

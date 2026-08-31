@@ -117,11 +117,15 @@ def _write_claude(agent: AgentDef, out_dir: Path) -> Path:
         # Claude Code sanitizes MCP tool names — a dotted registration like
         # ``data.fetch_universe`` is exposed as ``data_fetch_universe`` — so
         # grants must be emitted in the underscored form or they match nothing.
-        claude_names = [
-            f"{prefix}__{base.replace('.', '_')}"
-            for tool in agent.tools
-            for prefix, _, base in [tool.rpartition("__")]
-        ]
+        # A built-in tool (`WebSearch`) carries no `__` prefix and is not an
+        # MCP registration: emitting it through the sanitizer produced
+        # `__WebSearch`, a name that matches nothing, which is exactly the
+        # silent-drop shape `atlas_cli_tools` refuses loudly.
+        claude_names = []
+        for tool in agent.tools:
+            prefix, sep, base = tool.rpartition("__")
+            claude_names.append(
+                f"{prefix}__{base.replace('.', '_')}" if sep else tool)
         fm["tools"] = ", ".join(claude_names)  # Claude accepts a comma list
     front = yaml.safe_dump(fm, sort_keys=False, default_flow_style=False).strip()
     path = out_dir / f"{agent.name}.md"

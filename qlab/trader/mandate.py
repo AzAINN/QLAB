@@ -34,7 +34,12 @@ _OVERRIDE_FILE = "mandate_overrides.json"
 # carries": a desk-writable ``paper_capital`` or ``universe_whitelist`` would
 # let the desk widen its own mandate, which is the one thing the mandate exists
 # to prevent.
-OVERRIDABLE_FIELDS = ("operational_policy", "max_holdings")
+# ``universe_add`` is the third and it is not the desk's to set: it is written
+# only by an APPROVED ``universe_change`` request, one ticker per human answer,
+# and every name in it is checked against the universe catalog. A contender the
+# scout found is therefore a question the operator answers, never a universe
+# the desk widened for itself.
+OVERRIDABLE_FIELDS = ("operational_policy", "max_holdings", "universe_add")
 _DRAWDOWN_EPSILON = 1e-9
 DrawdownTier = Literal["none", "warning", "control", "breaker"]
 
@@ -361,6 +366,37 @@ def _load_max_holdings(raw: object, source: str = "constraints") -> int | None:
     return raw
 
 
+def _load_universe_add(raw: object, source: str = "override") -> list[str]:
+    """Validate an approved universe extension against the catalog.
+
+    Every added name must be one the data layer already knows how to price and
+    describe, so a widened universe cannot be a ticker nobody can fetch. A name
+    outside the catalog is refused loudly rather than dropped: an override the
+    operator believes is in force and that nothing merges is the failure this
+    whole record is written to avoid.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"mandate {source}.universe_add must be a list")
+    catalog = load_universe()
+    known = set(catalog.core_tickers) | set(catalog.candidates) \
+        | set(catalog.extended_tickers) | set(catalog.stock_tickers)
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"mandate {source}.universe_add entries must be tickers")
+        ticker = entry.strip().upper()
+        if ticker not in known:
+            raise ValueError(
+                f"{ticker!r} is not in the universe catalog; add it to "
+                "universe.yaml before it can enter the mandate")
+        if ticker not in out:
+            out.append(ticker)
+    return out
+
+
 def overrides_path() -> Path:
     """Where the desk's two choices are recorded, outside the mandate."""
     return state_path(_OVERRIDE_FILE)
@@ -421,8 +457,11 @@ def save_mandate_overrides(overrides: dict) -> dict:
     if unknown:
         named = ", ".join(repr(key) for key in unknown)
         raise ValueError(f"unsupported mandate override key(s) {named}")
+    # An empty list is "no addition", which is the absence of a record rather
+    # than a record of nothing — the same rule ``None`` already followed.
     stored = {key: overrides[key] for key in OVERRIDABLE_FIELDS
-              if key in overrides and overrides[key] is not None}
+              if key in overrides and overrides[key] is not None
+              and overrides[key] != []}
     path = overrides_path()
     if not stored:
         path.unlink(missing_ok=True)
@@ -523,6 +562,12 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
     operational_policy = str(allocation.get("operational_policy", "hrp"))
     if overrides.get("operational_policy") is not None:
         operational_policy = str(overrides["operational_policy"])
+    # Widening only, and only by names an approved universe_change wrote. The
+    # merge happens before validation for the same reason the cap's does: a
+    # whitelist the mandate would refuse must be refused here, not persisted.
+    for ticker in _load_universe_add(overrides.get("universe_add")):
+        if ticker not in universe_whitelist:
+            universe_whitelist = [*universe_whitelist, ticker]
     mandate = Mandate(
         paper_capital=float(acct.get("paper_capital", 10000.0)),
         base_currency=acct.get("base_currency", "USD"),

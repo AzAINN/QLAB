@@ -19,7 +19,11 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from qlab.state.registry import targets_hash
+from qlab.state.registry import (
+    APPROVAL_KIND_PLAN,
+    APPROVAL_KIND_UNIVERSE_CHANGE,
+    targets_hash,
+)
 
 
 def _sha(material) -> str:
@@ -75,6 +79,7 @@ def build_approval_request(
     expires_at = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
     return {
         "approval_id": approval_id or uuid.uuid4().hex[:16],
+        "kind": APPROVAL_KIND_PLAN,
         "task_id": task_id,
         "plan_id": plan["plan_id"],
         "plan_digest": plan_digest(plan),
@@ -86,6 +91,53 @@ def build_approval_request(
         "expected_cost": (plan.get("pre_trade") or {}).get("expected_cost"),
         "summary": summary,
         "expires_at": expires_at,
+    }
+
+
+def build_universe_change_request(
+    ticker: str,
+    *,
+    memo_decision_id: str,
+    task_id: str | None = None,
+    approval_id: str | None = None,
+) -> dict:
+    """A pending request to admit one contender into the mandate's universe.
+
+    It binds no plan, no targets, no book and no data permit, because it
+    authorises none of those: approving it widens what the desk may research
+    and later propose, and every proposal that follows still needs its own
+    plan-bound approval. The two facts it carries are the ticker and the scout
+    memo the operator can read before answering, and they ride in ``summary``
+    rather than in new columns — the plan-shaped columns stay NULL, which is
+    what makes an execution check's refusal unambiguous.
+
+    No expiry. A plan approval expires because the book moves under it; a
+    question about the universe stays true until it is answered, and an
+    operator who comes back tomorrow should find it waiting rather than
+    silently expired.
+    """
+    name = str(ticker or "").strip().upper()
+    if not name:
+        raise ValueError("a universe_change request needs a ticker")
+    memo = str(memo_decision_id or "").strip()
+    if not memo:
+        raise ValueError(
+            "a universe_change request needs the scout memo's decision_id; a "
+            "contender with no memo behind it is a name from nowhere")
+    return {
+        "approval_id": approval_id or uuid.uuid4().hex[:16],
+        "kind": APPROVAL_KIND_UNIVERSE_CHANGE,
+        "task_id": task_id,
+        "plan_id": None,
+        "plan_digest": None,
+        "decision_id": None,
+        "targets_hash": None,
+        "data_permit_id": None,
+        "broker": None,
+        "book_revision": None,
+        "expected_cost": None,
+        "summary": {"ticker": name, "memo_decision_id": memo},
+        "expires_at": None,
     }
 
 
@@ -105,6 +157,14 @@ def check_approval_for_execution(
     reasons: list[str] = []
     if not approval:
         return ["no approval record"]
+    # By kind, first and unconditionally. A universe_change carries none of the
+    # bindings below, so every one of them would be a mismatch anyway — but a
+    # refusal assembled out of six "changed since approval" lines reads as a
+    # drifted plan rather than as an approval that can never book anything.
+    kind = str(approval.get("kind") or APPROVAL_KIND_PLAN)
+    if kind != APPROVAL_KIND_PLAN:
+        return [f"approval is a {kind!r} request, which binds no plan and can "
+                f"never authorise execution"]
     if approval.get("status") != "approved":
         reasons.append(
             f"approval status is {approval.get('status')!r}, not 'approved'")

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from qlab.state.registry import targets_hash
+from qlab.state.registry import APPROVAL_KIND_PLAN, targets_hash
 
 # How many approval requests are read to find the desk's open questions. The
 # search is driven from THIS side, never from a window over the plans table: a
@@ -114,6 +114,15 @@ def live_requests(registry, now_iso: str | None = None) -> dict[str, dict]:
         reverse=True)
     live: dict[str, dict] = {}
     for row in rows:
+        # A proposal is a question about a PLAN. A universe_change asks about
+        # the mandate's universe and binds no plan, so it is not one of these
+        # and must never be superseded by one: withdrawing the operator's
+        # open universe question because a newer plan was checked would drop a
+        # question nothing replaced. It has no plan_id either, which would
+        # already skip it — stated by kind so the reason survives a schema
+        # that later gives some other kind a plan.
+        if str(row.get("kind") or APPROVAL_KIND_PLAN) != APPROVAL_KIND_PLAN:
+            continue
         plan_id = str(row.get("plan_id") or "")
         if not plan_id or plan_id in live:
             continue

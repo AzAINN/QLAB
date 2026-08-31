@@ -9,6 +9,7 @@ import pytest
 from qlab.governance.approval import (
     book_revision,
     build_approval_request,
+    build_universe_change_request,
     check_approval_for_execution,
     plan_digest,
 )
@@ -144,3 +145,57 @@ def test_expiry_sweep_marks_pending_expired(session):
     _, listed = handle_api(session, "GET", "/api/approvals", {}, {})
     statuses = {a["approval_id"]: a["status"] for a in listed["approvals"]}
     assert statuses[aid] == "expired"
+
+
+# --- the universe_change kind: an approval that can never book ---------------
+
+
+def test_universe_change_request_carries_its_kind_and_no_plan():
+    request = build_universe_change_request("XLK", memo_decision_id="dec-scout")
+    assert request["kind"] == "universe_change"
+    assert request["plan_id"] is None
+    assert request["plan_digest"] is None
+    assert request["targets_hash"] is None
+    assert request["summary"] == {"ticker": "XLK",
+                                  "memo_decision_id": "dec-scout"}
+
+
+def test_plan_approvals_still_carry_kind_plan():
+    plan = {"plan_id": "P", "decision_id": "d", "state": "checked",
+            "targets": {"ACWI": 1.0}, "legs": []}
+    request = build_approval_request(
+        plan, broker="simulated_paper", data_permit_id=None,
+        current_book_revision=book_revision({}), summary={})
+    assert request["kind"] == "plan"
+
+
+def test_execution_refuses_a_universe_change_approval_outright():
+    """It binds no plan, so nothing it says could ever cover one."""
+    request = build_universe_change_request("XLK", memo_decision_id="d")
+    request["status"] = "approved"
+    plan = {"plan_id": "P", "decision_id": "d", "state": "checked",
+            "targets": {"ACWI": 1.0}, "legs": []}
+    reasons = check_approval_for_execution(
+        request, plan, current_book_revision=book_revision({}),
+        now_iso="2026-01-01T00:00:00+00:00")
+    assert any("universe_change" in reason for reason in reasons)
+
+
+def test_kind_migration_is_idempotent_and_old_rows_read_plan(tmp_path):
+    """A pre-`kind` row is a plan approval; re-opening the file re-migrates."""
+    path = tmp_path / "registry.duckdb"
+    reg = Registry(str(path))
+    reg.con.execute(
+        "INSERT INTO approval_requests (approval_id, plan_id, status) "
+        "VALUES ('old', 'plan-1', 'pending')")
+    reg.close()
+
+    reopened = Registry(str(path))          # the migration runs a second time
+    try:
+        row = reopened.get_approval_request("old")
+        assert row["kind"] == "plan"
+        listed = {r["approval_id"]: r
+                  for r in reopened.list_approval_requests(10)}
+        assert listed["old"]["kind"] == "plan"
+    finally:
+        reopened.close()

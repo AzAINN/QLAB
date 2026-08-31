@@ -74,7 +74,9 @@ POST /api/workflows/<id>/resume     reopen an interrupted/failed/blocked run
 POST /api/workflows/<id>/abandon    permanently close an incomplete run
 POST /api/rebalance_preview    build an exact, referee-bound checked plan
 POST /api/plans/execute        human-confirm one existing checked paper plan
-POST /api/approvals            create a plan-bound, expiring approval request
+POST /api/approvals            create an approval request: a plan-bound,
+                               expiring one, or a `universe_change` asking the
+                               operator to admit one contender
 GET  /api/approvals            list approval requests (optionally by status)
 GET  /api/approvals/<id>       one approval request
 POST /api/approvals/<id>/approve|reject|challenge   the human decision
@@ -204,6 +206,11 @@ reading the context back. Cite the numbers you actually used — a level, a \
 percentile, a headline — and name the ones that disagree with you. If the \
 context does not support an answer, say what is missing; an invented reading \
 is worse than none. Keep it to what fits on a desk card."""
+
+# The two limits `POST /api/desk/method` may set. A strict subset of the
+# override file's `OVERRIDABLE_FIELDS`: `universe_add` lives in the same record
+# but is written only by an approved universe_change, never from this route.
+_METHOD_FIELDS = ("operational_policy", "max_holdings")
 
 _MARKET_EVENT_LIMIT = 500
 # How many approvals of *each* actionable status ride in one /api/tui payload.
@@ -1051,18 +1058,23 @@ class UISession:
         it was already in force.
         """
         from qlab.trader.mandate import (
-            OVERRIDABLE_FIELDS, load_mandate_overrides, save_mandate_overrides)
+            load_mandate_overrides, save_mandate_overrides)
 
         if not isinstance(body, dict) or not body:
             raise ValueError(
                 "send operational_policy, max_holdings, or both (null clears)")
-        unknown = sorted(set(body) - set(OVERRIDABLE_FIELDS))
+        # NOT `OVERRIDABLE_FIELDS`: that tuple says what the override FILE may
+        # carry, and it carries a third key this route must never write.
+        # `universe_add` is written only by an approved universe_change, so a
+        # method POST naming it is refused here rather than silently ignored.
+        unknown = sorted(set(body) - set(_METHOD_FIELDS))
         if unknown:
             named = ", ".join(repr(key) for key in unknown)
             raise ValueError(
                 f"only operational_policy and max_holdings may be set from the "
                 f"desk; refusing {named} — every other limit lives in "
-                "mandate.yaml")
+                "mandate.yaml, and universe_add is written only by an approved "
+                "universe_change request")
         with self._mandate_lock:
             # Snapshot before anything is mutated: this is what goes back if
             # the merged mandate turns out not to load.
@@ -4998,8 +5010,27 @@ class UISession:
         return datetime.now(timezone.utc).isoformat()
 
     def create_approval(self, body: dict, offline: bool) -> dict:
-        """Create a pending approval bound to an exact checked plan."""
+        """Create a pending approval request: a plan, or a universe change.
+
+        The kind decides everything downstream. A ``plan`` request is the
+        execution gate and binds the exact plan, targets, book and permit. A
+        ``universe_change`` binds none of those because it authorises none of
+        them: it asks the operator whether one contender may enter the
+        mandate's universe at all, and the answer widens what may be
+        *researched*, never what may be booked.
+        """
         from qlab.governance.approval import book_revision, build_approval_request
+        from qlab.state.registry import (
+            APPROVAL_KIND_PLAN, APPROVAL_KIND_UNIVERSE_CHANGE)
+
+        kind = str(body.get("kind") or APPROVAL_KIND_PLAN)
+        if kind == APPROVAL_KIND_UNIVERSE_CHANGE:
+            return self.create_universe_change_approval(body)
+        if kind != APPROVAL_KIND_PLAN:
+            raise ValueError(
+                f"unknown approval kind {kind!r}; the desk opens "
+                f"{APPROVAL_KIND_PLAN!r} and "
+                f"{APPROVAL_KIND_UNIVERSE_CHANGE!r} requests")
 
         plan_id = str(body.get("plan_id") or "")
         plan = self.registry.get_plan(plan_id)
@@ -5019,7 +5050,66 @@ class UISession:
                                    {"approval_id": approval["approval_id"],
                                     "plan_id": plan_id})
         return {"approval_id": approval["approval_id"], "status": "pending",
+                "kind": approval["kind"],
                 "expires_at": approval["expires_at"]}
+
+    def create_universe_change_approval(self, body: dict) -> dict:
+        """Ask the operator whether one contender may enter the universe.
+
+        Deduped on the ticker, because the scout runs again: a second memo
+        naming the same contender must not put a second identical question on
+        the desk, and answering one of two would leave the other live forever.
+        The dedupe is reported (``deduped``) rather than silent — a caller that
+        believes it opened a request and did not would file the same contender
+        every week and never know.
+
+        The ticker is checked against the universe catalog here, at the door,
+        rather than at approval time: a question the desk could not honour if
+        answered yes is not a question worth asking a human.
+        """
+        from qlab.governance.approval import build_universe_change_request
+
+        ticker = str(body.get("ticker") or "").strip().upper()
+        if not ticker:
+            raise ValueError("a universe_change request needs a ticker")
+        if ticker in {str(t).upper() for t in self.mandate.universe_whitelist}:
+            raise ValueError(
+                f"{ticker} is already in the mandate's universe; there is "
+                "nothing for the operator to answer")
+        self._check_catalog_ticker(ticker)
+        existing = self.registry.pending_universe_change(ticker)
+        if existing is not None:
+            return {"approval_id": str(existing["approval_id"]),
+                    "status": str(existing["status"]),
+                    "kind": str(existing["kind"]), "ticker": ticker,
+                    "expires_at": existing.get("expires_at"),
+                    "deduped": True}
+        approval = build_universe_change_request(
+            ticker,
+            memo_decision_id=str(body.get("memo_decision_id") or ""),
+            task_id=body.get("task_id"))
+        self.registry.create_approval_request(approval)
+        self.registry.record_event(
+            "approval_created",
+            {"approval_id": approval["approval_id"], "plan_id": None,
+             "kind": approval["kind"], "ticker": ticker})
+        return {"approval_id": approval["approval_id"], "status": "pending",
+                "kind": approval["kind"], "ticker": ticker,
+                "expires_at": approval["expires_at"], "deduped": False}
+
+    @staticmethod
+    def _check_catalog_ticker(ticker: str) -> None:
+        """Refuse a name the data layer cannot price or describe."""
+        from qlab.core.universe import load_universe
+
+        catalog = load_universe()
+        known = (set(catalog.core_tickers) | set(catalog.candidates)
+                 | set(catalog.extended_tickers) | set(catalog.stock_tickers))
+        if ticker not in known:
+            raise ValueError(
+                f"{ticker} is not in the universe catalog, so the desk could "
+                "not price or describe it if the answer were yes; add it to "
+                "universe.yaml first")
 
     def list_approvals(self, status: str | None = None) -> dict:
         self.registry.expire_due_approvals(self._now_iso())
@@ -5081,12 +5171,87 @@ class UISession:
         if approval.get("status") != "pending":
             raise PermissionError(
                 f"approval is {approval.get('status')!r}, not pending")
+        from qlab.state.registry import (
+            APPROVAL_KIND_PLAN, APPROVAL_KIND_UNIVERSE_CHANGE)
+
         status = {"approve": "approved", "reject": "rejected"}[decision]
-        self.registry.transition_approval(
-            approval_id, status, decided_at=self._now_iso())
+        kind = str(approval.get("kind") or APPROVAL_KIND_PLAN)
+        ticker = ""
+        if kind == APPROVAL_KIND_UNIVERSE_CHANGE and status == "approved":
+            # Applied BEFORE the transition, and rolled back if the transition
+            # will not take: an approval marked approved whose widening never
+            # landed would tell the operator a name is in the mandate when it
+            # is not, and every later read would disagree with the record.
+            ticker = self._widen_universe(approval)
+            try:
+                self.registry.transition_approval(
+                    approval_id, status, decided_at=self._now_iso())
+            except Exception:
+                self._narrow_universe(ticker)
+                raise
+        else:
+            self.registry.transition_approval(
+                approval_id, status, decided_at=self._now_iso())
         self.registry.record_event("approval_" + status,
-                                   {"approval_id": approval_id})
-        return {"approval_id": approval_id, "status": status}
+                                   {"approval_id": approval_id, "kind": kind})
+        out = {"approval_id": approval_id, "status": status, "kind": kind}
+        if kind == APPROVAL_KIND_UNIVERSE_CHANGE:
+            out["ticker"] = str(
+                (approval.get("summary") or {}).get("ticker") or "")
+        return out
+
+    def _widen_universe(self, approval: dict) -> str:
+        """Record an approved contender in the override file and reload.
+
+        Under the mandate lock, like every other write to that record: the
+        owner is threaded, and `self.mandate` is what every plan check reads.
+        Persisting without reloading would leave the desk saying a name is in
+        force while nothing that reads the mandate had heard of it.
+
+        Rolls the file back if the merged mandate will not load — a persisted
+        override the mandate refuses is a desk that cannot start, which is a
+        worse failure than a refused approval.
+        """
+        from qlab.trader.mandate import (
+            load_mandate_overrides, save_mandate_overrides)
+
+        summary = approval.get("summary") or {}
+        ticker = str(summary.get("ticker") or "").strip().upper()
+        if not ticker:
+            raise ValueError(
+                "this universe_change approval names no ticker; it cannot be "
+                "applied")
+        with self._mandate_lock:
+            stored_before = load_mandate_overrides()
+            added = list(stored_before.get("universe_add") or [])
+            if ticker not in added:
+                added.append(ticker)
+            save_mandate_overrides({**stored_before, "universe_add": added})
+            try:
+                self.mandate = self._reload_mandate()
+            except Exception as exc:
+                save_mandate_overrides(stored_before)
+                raise ValueError(
+                    f"refusing to add {ticker} to the universe: {exc}") from exc
+            self.registry.record_event("universe_change_approved", {
+                "ticker": ticker,
+                "approval_id": str(approval.get("approval_id") or ""),
+                "memo_decision_id": str(summary.get("memo_decision_id") or ""),
+                "universe_size": len(self.mandate.universe_whitelist),
+            })
+        return ticker
+
+    def _narrow_universe(self, ticker: str) -> None:
+        """Undo one widening. Only the rollback path calls this."""
+        from qlab.trader.mandate import (
+            load_mandate_overrides, save_mandate_overrides)
+
+        with self._mandate_lock:
+            stored = load_mandate_overrides()
+            added = [t for t in (stored.get("universe_add") or [])
+                     if t != ticker]
+            save_mandate_overrides({**stored, "universe_add": added})
+            self.mandate = self._reload_mandate()
 
     def execute_plan_with_approval(self, plan_id: str, body: dict,
                                    offline: bool) -> dict:

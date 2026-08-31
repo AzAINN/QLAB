@@ -34,6 +34,11 @@ TIERS = (DEEP, QUICK, NONE)
 # mechanical roles execute a cataloged step or format an existing result.
 ROLE_TIER: dict[str, str] = {
     "moments-analyst": DEEP,
+    # Judgment: deciding that a name is a contender, and that a source
+    # supports the claim being made about it, is exactly the work the deep
+    # tier exists for. It reaches no gate, so fast mode may cheapen it — and
+    # the route says so when it does.
+    "contender-scout": DEEP,
     "challenger": DEEP,
     "referee": DEEP,
     "optimization-runner": QUICK,

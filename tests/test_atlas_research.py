@@ -688,14 +688,19 @@ def test_every_template_declares_an_executable_phase_graph():
     # A template whose graph omits a dependency would create a workflow that
     # deadlocks and an Atlas task that waits on it forever. Declarations are
     # contracts, so they are checked here rather than discovered in production.
-    from qlab.state.registry import validate_phase_graph
+    from qlab.state.registry import deps_for_phases, validate_phase_graph
 
     for template_id, template in TEMPLATES.items():
         if not template.phases:
             assert not template.needs_coordinator, (
                 f"{template_id} needs a coordinator but declares no phases")
             continue
-        validate_phase_graph(template.phases)
+        # Under the DAG the graph will actually run with — `start_workflow`
+        # asks the same question of the same function, so a graph that brings
+        # its own dependencies (the watch graph's referee-less reporter) is
+        # checked as it runs rather than against a map it never uses.
+        validate_phase_graph(template.phases,
+                             deps_for_phases(template.phases))
 
 
 def test_the_news_read_template_is_executable():

@@ -36,7 +36,7 @@ def test_all_roles_present():
     assert set(agents) == {
         "news-extractor", "data-qa", "signal-qa", "moments-analyst", "challenger",
         "optimization-runner", "referee", "reporter", "atlas",
-        "news-analyst",
+        "news-analyst", "contender-scout",
     }
 
 
@@ -209,8 +209,8 @@ def test_sync_writes_both_adapters(tmp_path: Path):
     claude_out = tmp_path / "claude"
     bob_out = tmp_path / "bob"
     written = sync(claude_out=claude_out, bob_out=bob_out)
-    assert len(written["claude"]) == 10
-    assert len(written["bob"]) == 10
+    assert len(written["claude"]) == 11
+    assert len(written["bob"]) == 11
     assert (claude_out / "news-extractor.md").exists()
     assert (bob_out / "news-extractor.yaml").exists()
     assert (claude_out / "data-qa.md").exists()
@@ -347,3 +347,68 @@ def test_the_atlas_persona_says_it_starts_work_and_never_books():
     assert ("You create and run research workflows yourself and say what you "
             "started; you never book — booking is the one click the operator "
             "makes.") in body
+
+
+def test_contender_scout_holds_exactly_web_and_two_registry_tools():
+    """The scout is the one role with eyes outside this desk. Its grant is the
+    whole quarantine: it reads the web and writes one memo, and it holds no
+    data, solver, news or trader tool — so a contender it likes cannot become
+    a weight, a size, or an order by any path it can reach."""
+    scout = _by_name()["contender-scout"]
+    assert scout.tools == [
+        "WebSearch",
+        "WebFetch",
+        "mcp__qlab__registry.recent_decisions",
+        "mcp__qlab__registry.log_decision",
+    ]
+    scopes = role_scopes(scout.tools)
+    assert scopes["trader"] == set()
+    assert scopes["lab"] == {"WebSearch", "WebFetch",
+                             "registry.recent_decisions", "registry.log_decision"}
+    body = scout.body
+    assert "scout_memo" in body
+    assert "no weight" in body.lower()
+
+
+def test_the_scout_memo_contract_is_in_the_prompt():
+    body = _by_name()["contender-scout"].body
+    assert "up to 3" in body.lower()
+    assert "two sentences" in body.lower()
+    assert "URL" in body
+
+
+def test_web_tools_are_granted_only_to_the_scout_role():
+    from qlab.tui.claude import build_workforce_agents
+
+    agents = build_workforce_agents("watch the holdings and scout contenders")
+    scout = agents["contender-scout"]["tools"]
+    assert "WebSearch" in scout and "WebFetch" in scout
+    assert "mcp__qlab-operator__workflow_scout" in scout
+    for name, spec in agents.items():
+        if name == "contender-scout":
+            continue
+        assert "WebSearch" not in spec["tools"]
+        assert "WebFetch" not in spec["tools"]
+
+
+def test_the_coordinator_argv_opens_the_web_only_for_a_scout_graph():
+    """One `--allowedTools` list serves the whole dispatch, so the web is the
+    template's own property: a regime review never gets it."""
+    from qlab.state.registry import agent_for_phase
+    from qlab.operator.templates import get_template
+    from qlab.tui.claude import build_claude_argv
+
+    def allowed(template_id: str) -> list[str]:
+        roles = tuple(agent_for_phase(phase)
+                      for phase in get_template(template_id).phases)
+        argv = build_claude_argv("go", governed=True,
+                                 runtime_url="http://127.0.0.1:1", offline=True,
+                                 roles=roles)
+        return argv[argv.index("--allowedTools") + 1].split(",")
+
+    watch = allowed("portfolio_watch")
+    assert "WebSearch" in watch and "WebFetch" in watch
+    review = allowed("regime_review")
+    assert "WebSearch" not in review and "WebFetch" not in review
+    # Nothing else was widened: the web is the only difference.
+    assert set(watch) - set(review) == {"WebSearch", "WebFetch"}

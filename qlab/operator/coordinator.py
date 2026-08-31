@@ -135,6 +135,20 @@ def no_role_harness_reason(backend: str) -> str:
             "workforce runs on claude")
 
 
+# The one role whose work is impossible without web tools, and the backends
+# that have them. The harness has none, so a scout dispatched to it would come
+# back with recalled knowledge and no URL — which is precisely the failure the
+# role's own sourcing rules exist to prevent.
+_WEB_ROLE = "contender-scout"
+
+
+def no_web_tools_reason(backend: str) -> str:
+    """Why the scout phase does not run on a backend without web tools."""
+    return (f"the scout phase reads the open web, and the {backend} role "
+            "harness serves no web tools; it is walked by the claude "
+            "coordinator instead")
+
+
 def coordinator_walks_reason(backend: str, roles: tuple[str, ...]) -> str:
     """Why a multi-role graph ran on claude although the workforce named another.
 
@@ -306,6 +320,11 @@ class CoordinatorDriver:
             return SessionPlan(CLAUDE_BACKEND,
                                pinned_reason=no_role_harness_reason(backend))
         if len(roles) == 1:
+            if roles[0] == _WEB_ROLE:
+                # Refused by name rather than by a missing-tool error forty
+                # seconds in, with no URL in the memo to show for it.
+                return SessionPlan(CLAUDE_BACKEND,
+                                   pinned_reason=no_web_tools_reason(backend))
             if resolve_route(roles[0],
                              workforce=workforce).backend == backend:
                 return SessionPlan(backend, role=roles[0])
@@ -378,8 +397,12 @@ class CoordinatorDriver:
             try:
                 session = self._build_session(workflow_id, plan,
                                               workforce=workforce)
+                # The graph's roles reach the session too: one
+                # `--allowedTools` list serves the whole dispatch, so whether
+                # the web is open is a property of the graph being walked and
+                # cannot be decided without it.
                 started = session.start(resume_prompt(workflow_id, goal),
-                                        governed=True)
+                                        governed=True, roles=roles)
             except Exception as exc:
                 self.last_reason = f"coordinator failed to start: {exc}"
                 self._emit("atlas_coordinator_failed",

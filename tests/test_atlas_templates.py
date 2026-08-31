@@ -66,3 +66,45 @@ def test_startable_templates_is_the_menus_permitted_half():
             entry["template_id"]: entry["purpose"]
             for entry in menu if entry["startable"]
         }
+
+
+def test_portfolio_watch_is_research_work_that_creates_no_plan():
+    """The scout may run in Research mode precisely because it books nothing."""
+    from qlab.operator.templates import check_startable, get_template
+
+    template = get_template("portfolio_watch")
+    assert template.phases == ("analyst", "scout", "reporter")
+    assert template.creates_plan is False
+    assert check_startable("portfolio_watch", "research",
+                           {"data": {"blocked": False}}) is template
+
+
+def test_the_watch_graph_is_a_runnable_dependency_closure():
+    """A reporter with no referee to depend on needs its own DAG, not a dropped
+    dependency: the standard map would leave this graph parked forever."""
+    from qlab.state.registry import Registry, agent_for_phase
+    from qlab.operator.templates import get_template
+
+    template = get_template("portfolio_watch")
+    assert agent_for_phase("scout") == "contender-scout"
+    reg = Registry(":memory:")
+    try:
+        started = reg.start_workflow(
+            "portfolio_review", {"goal": "watch the holdings"},
+            phases=template.phases)
+        workflow_id = started["workflow_id"]
+        reg.update_workflow_phase(
+            workflow_id, "analyst", "done", "read the book",
+            {"moment_set_id": "m", "objective_id": "o", "decision_id": "d",
+             "regime": "neutral", "regime_summary": "steady"})
+        reg.update_workflow_phase(
+            workflow_id, "scout", "done", "two contenders",
+            {"memo_decision_id": "d2",
+             "contenders": [{"ticker": "XLK", "thesis": "a. b.",
+                             "urls": ["u1", "u2"]}]})
+        reg.update_workflow_phase(
+            workflow_id, "reporter", "done", "memo",
+            {"recommendation": "one contender for the operator"})
+        assert reg.get_workflow(workflow_id)["status"] == "complete"
+    finally:
+        reg.close()

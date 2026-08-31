@@ -157,6 +157,10 @@ class Mandate:
     min_weight_per_asset: float = 0.0
     max_turnover_per_rebalance: float = 0.50
     max_orders_per_day: int = 20
+    # Cardinality cap on a plan; None means uncapped. The limit lives on the
+    # mandate rather than in a solver so it binds every policy, including ones
+    # that hold the whole universe by construction.
+    max_holdings: int | None = None
     order_type: str = "marketable_limit"
     max_gross_exposure: float = 1.0
     stress_vol_limit: float = 0.30
@@ -191,6 +195,29 @@ class Mandate:
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"mandate {name} must be finite and positive")
+        if self.max_holdings is not None:
+            if isinstance(self.max_holdings, bool) or not isinstance(
+                self.max_holdings, int
+            ):
+                raise ValueError(
+                    "mandate max_holdings must be an integer or null, "
+                    f"got {self.max_holdings!r}"
+                )
+            if self.max_holdings < 1:
+                raise ValueError(
+                    f"mandate max_holdings must be >= 1, got {self.max_holdings}"
+                )
+            # An unenforceable cap is a configuration error, not a no-op: a cap
+            # above the investable universe can never bind and would read as
+            # governance that is not there.
+            if (
+                self.universe_whitelist
+                and self.max_holdings > len(self.universe_whitelist)
+            ):
+                raise ValueError(
+                    f"mandate max_holdings {self.max_holdings} exceeds the "
+                    f"{len(self.universe_whitelist)}-name universe whitelist"
+                )
 
     # -- checks -------------------------------------------------------------
     def check_targets(self, targets: dict[str, float], tol: float = 1e-4,
@@ -223,6 +250,14 @@ class Mandate:
             if v > self.max_weight_per_asset + tol:
                 raise MandateViolation(
                     f"{t} weight {v:.3f} exceeds cap {self.max_weight_per_asset}")
+        if self.max_holdings is not None:
+            # A weight at or below the same tolerance the other checks use is
+            # not a holding; only funded names count against the cap.
+            held = sum(1 for v in vals if v > tol)
+            if held > self.max_holdings:
+                raise MandateViolation(
+                    f"plan holds {held} names, exceeding the max_holdings cap "
+                    f"of {self.max_holdings}")
 
     def check_turnover(self, turnover: float) -> None:
         if turnover > self.max_turnover_per_rebalance + 1e-6:
@@ -299,6 +334,15 @@ def _load_costs(raw: object) -> CostConfig:
             raw.get("max_cost_bps_of_equity", 25.0), "max_cost_bps_of_equity",
             positive=True),
     )
+
+
+def _load_max_holdings(raw: object) -> int | None:
+    """Parse the cardinality cap; ``None``/absent means uncapped."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError("mandate constraints.max_holdings must be an integer or null")
+    return raw
 
 
 def _load_defensive_targets(raw: object) -> dict[str, float]:
@@ -381,6 +425,7 @@ def load_mandate(path: str | Path | None = None) -> Mandate:
         min_weight_per_asset=float(con.get("min_weight_per_asset", 0.0)),
         max_turnover_per_rebalance=float(con.get("max_turnover_per_rebalance", 0.50)),
         max_orders_per_day=int(con.get("max_orders_per_day", 20)),
+        max_holdings=_load_max_holdings(con.get("max_holdings")),
         order_type=con.get("order_type", "marketable_limit"),
         max_gross_exposure=float(con.get("max_gross_exposure", 1.0)),
         stress_vol_limit=float(con.get("stress_vol_limit", 0.30)),

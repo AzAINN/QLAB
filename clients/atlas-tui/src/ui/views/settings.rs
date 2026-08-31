@@ -1,19 +1,37 @@
-//! SETTINGS — what this desk is configured by, and the one thing an operator may type into it.
+//! SETTINGS — what this desk is configured by, and where an operator changes it.
 //!
-//! Six cards of read-only facts an operator would otherwise have to assemble
-//! from `mandate.yaml`, `.mcp.json`, a shell prompt and whatever the last
-//! `/mode` did. Everything on the pane is the owner's own answer; nothing here
-//! is composed, defaulted, or inferred.
+//! Seven cards of facts an operator would otherwise have to assemble from
+//! `mandate.yaml`, `.mcp.json`, a shell prompt and whatever the last `/mode`
+//! did. Everything drawn is the owner's own answer; nothing here is composed,
+//! defaulted, or inferred — with one deliberate exception, the NEWS draft,
+//! which is marked as an edit precisely so it cannot be mistaken for one.
 //!
-//! **The cards are the routing.** Six of them, and the two that carry keys
+//! **The cards are the routing.** Seven of them, and the three that carry keys
 //! carry different ones, so a pane-level key list was either wrong about four
-//! cards or silent about all six. The arrows move a focus between cards, the
+//! cards or silent about all seven. The arrows move a focus between cards, the
 //! focused card's header is tinted, and a key means whatever *that* card says
 //! it means — which is why each card states its own keys on the rule its block
 //! already reserves rather than in a row it would have to win from its content.
 //! A footer competing for rows is the first thing a short column drops, and
 //! what it would drop here is the sentence that says whether there is a key at
 //! all.
+//!
+//! **What an operator may change here, and what they may not.** Three things:
+//! which login the owner stores, which mind each surface runs, and — since
+//! this branch — the data lane and the news stack. All four are the owner's
+//! own routes and none of them widens what this desk can *do*. A stored login
+//! makes `LIVE·ALPACA` choosable; the lane picker sends exactly what `/mode`
+//! sends and is refused by exactly the same owner; and the news routes write
+//! `.env` and the process environment, take no registry lock, and touch no
+//! plan, approval or posture. Every gate between a plan and a fill is unmoved
+//! by all of it.
+//!
+//! Two refusals are made *here* rather than left to the owner, and both for the
+//! same reason: the remedy is a key on this pane and the owner's sentence
+//! cannot name a key it does not know this pane has. Ticking a source the desk
+//! cannot read is refused on the keystroke, and saving a stack with `edgar` in
+//! it and no contact points at `c`. Everything else travels and comes back in
+//! the owner's own words.
 //!
 //! Focus is a fact about an armed window. A glass one marks no card — a
 //! highlight that never moves under the arrows reads as a hung client, which is
@@ -47,19 +65,22 @@
 //! and no writer to carry it, so the form does not exist at all and the alpaca
 //! row is the status display it has always been.
 
+use crate::bus::NewsMember;
 use crate::cmd::Command;
 #[cfg(feature = "operator")]
 use crate::cmd::{self, ModelChoice};
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
-use crate::model::{Constraints, DeskMode, LlmConfig, LlmSurface, System};
+use crate::model::{
+    Constraints, DeskMode, LlmConfig, LlmSurface, NewsSettings, NewsSource, System,
+};
 use crate::store::Store;
 use crate::theme::{palette, theme};
 use crate::ui::views::View;
 use crate::ui::widgets::{panel_block, panel_header, refuse};
 #[cfg(feature = "operator")]
-use crossterm::event::KeyCode;
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
@@ -81,6 +102,22 @@ const CARD_MIN: u16 = 34;
 
 /// Two cards side by side, with a column of space between them.
 const TWO_COL: u16 = CARD_MIN * 2 + 1;
+
+/// The desk card's width in the top band, and the reason it is a length rather
+/// than a ratio.
+///
+/// Every fixed row on DESK is a label and a short word; the one long value is
+/// the credential description, which is a sentence that wraps into the slack
+/// [`DESK_H`] already reserves for it. Width past this buys that card almost
+/// nothing. NEWS beside it spends every cell it is given — a source's cost and
+/// its last outcome are both sentences in a column — so the band gives DESK
+/// what it needs and NEWS the rest.
+///
+/// It is also what keeps both cards' rules legible: a card states its own keys
+/// on the block's bottom line, and a `Paragraph` clips that from the right, so
+/// a card one cell too narrow loses the last key it names rather than wrapping
+/// it.
+const DESK_W: u16 = 36;
 
 /// The login form's own floor, in rows of the *view's* area.
 ///
@@ -117,6 +154,41 @@ const SWITCH_W: u16 = 58;
 #[cfg(feature = "operator")]
 const SWITCH_ROWS: usize = 8;
 
+/// The contact box's own floor, in rows of the view's area.
+///
+/// Lower than [`FORM_MIN_H`] and higher than [`SWITCH_MIN_H`]: it holds one
+/// field, the shape the SEC asks for, what is already stored, and a key line.
+/// Below this it would be a box with room for a header and nothing else while
+/// still taking every keystroke, which is the state every box here refuses at.
+#[cfg(feature = "operator")]
+const CONTACT_MIN_H: u16 = 11;
+
+/// Its width. Wide enough for the example contact beside the label column.
+#[cfg(feature = "operator")]
+const CONTACT_W: u16 = 58;
+
+/// The one source whose name this client has to know.
+///
+/// Not a second copy of the owner's catalog — every other rule about every
+/// other source is read off the payload. This name is here because the *remedy*
+/// for one refusal is a key on this card, and the owner's sentence cannot name
+/// a key it does not know this pane has.
+const EDGAR: &str = "edgar";
+
+/// Where a source row's note starts: the cursor, the tick, the name and the
+/// tier, which are fixed-width so a column of them reads as a column.
+const NOTE_X: usize = 3 + 4 + 8 + 10;
+
+/// The first catalog row's offset inside the NEWS card: the header, the lane
+/// and the resolved stack above it.
+///
+/// Arithmetic rather than published per row, because the card's shape is fixed
+/// and a click has to be answered about the frame that is on screen. It is the
+/// one thing here that would drift silently if a row were inserted above the
+/// catalog, which is why it is a constant with the rows named in its doc.
+#[cfg(feature = "operator")]
+const NEWS_TOP: u16 = 3;
+
 /// The word a login that would destroy another one asks for.
 ///
 /// Static, unlike the execution modal's six characters of a `targets_hash`.
@@ -141,6 +213,7 @@ const CONFIRM: &str = "CONFIRM";
 pub enum Card {
     #[default]
     Desk,
+    News,
     Policy,
     Theme,
     System,
@@ -152,8 +225,9 @@ impl Card {
     /// The walk order, and only the walk has one: the glass build has no focus
     /// to move, so nothing there reads this.
     #[cfg(feature = "operator")]
-    const ALL: [Card; 6] = [
+    const ALL: [Card; 7] = [
         Card::Desk,
+        Card::News,
         Card::Policy,
         Card::Theme,
         Card::System,
@@ -170,16 +244,40 @@ impl Card {
     /// of chrome to keep apart.
     fn footer(self, writes: bool) -> &'static str {
         match (writes, self) {
-            // Named beside the command that is *not* one of this card's keys:
-            // a login does not switch the desk, and the line reads as one
-            // sentence about which is which.
-            (true, Card::Desk) => "a types a login · t tests it · /mode switches the desk",
+            // Terse since the card went half-width: the rule is drawn on the
+            // block's own bottom line and a `Paragraph` clips it from the
+            // right, so a sentence one cell too long loses the last key it
+            // names rather than wrapping.
+            (true, Card::Desk) => "a login · t test · m switch lane",
+            (true, Card::News) => "space · c contact · s save · v verify",
             (true, Card::Models) => "m switches a model",
             (true, _) => "no keys on this card",
-            // The pane-level line the cards inherited, kept whole on the card
-            // it was always about.
-            (false, Card::Desk) => "read-only — this window cannot switch the desk",
+            // The pane-level line the cards inherited, kept whole on the two
+            // cards it was always about.
+            (false, Card::Desk) => "read-only — cannot switch the desk",
+            (false, Card::News) => "read-only — cannot change this desk",
             (false, _) => "read-only",
+        }
+    }
+
+    /// The words on this card's own rule a click may press, and the key each
+    /// one stands for.
+    ///
+    /// Read out of [`footer`](Card::footer) at draw time rather than given
+    /// coordinates here: the rule is one string and the words are found in it,
+    /// so a reworded footer moves its own affordances instead of leaving a
+    /// rectangle over whatever the new sentence put there.
+    ///
+    /// A click sends the key. There is no second path — `on_mouse` hands the
+    /// same `KeyCode` to the same router — so a word cannot come to mean
+    /// something the card does not say.
+    #[cfg(feature = "operator")]
+    fn words(self) -> &'static [(&'static str, char)] {
+        match self {
+            Card::Desk => &[("switch", 'm')],
+            Card::News => &[("contact", 'c'), ("save", 's'), ("verify", 'v')],
+            Card::Models => &[("switches", 'm')],
+            _ => &[],
         }
     }
 }
@@ -225,6 +323,111 @@ pub struct SettingsView {
     /// opened over that would be a box on a pane that is not drawn.
     #[cfg(feature = "operator")]
     area: std::cell::Cell<Rect>,
+    /// What the operator has picked on the NEWS card and not yet sent.
+    #[cfg(feature = "operator")]
+    news: Draft,
+    /// How many source rows the last frame drew, published the way `area` is:
+    /// the cursor is clamped against the catalog that is on screen, and the
+    /// catalog moves under it every time the owner answers.
+    #[cfg(feature = "operator")]
+    news_rows: std::cell::Cell<usize>,
+    /// Whether the login box was opened *by* the lane picker, so the picker
+    /// can come back once the desk can read a credential.
+    ///
+    /// A one-shot rather than a mode: it is taken on the first answer, so a
+    /// login stored from the `a` key later cannot reopen a picker nobody
+    /// asked for.
+    #[cfg(feature = "operator")]
+    relane: bool,
+    /// Where the last frame drew the things a pointer may press.
+    ///
+    /// Published by `draw` for the reason ATLAS publishes its clickable words:
+    /// a click is answered about the frame in front of the operator, never
+    /// about one not yet painted. Cleared at the top of every frame, including
+    /// the ones that draw no cards — rectangles left over from a wider frame
+    /// are the same lie one resize later.
+    #[cfg(feature = "operator")]
+    hits: std::cell::RefCell<Hits>,
+}
+
+/// The rectangles one frame of this pane left behind, by what a click on each
+/// one means.
+///
+/// Three lists rather than one tagged one, because the three are recorded at
+/// different points of the draw and read in a fixed order — a word outranks a
+/// row and a row outranks a header, which is the order they are drawn in.
+#[cfg(feature = "operator")]
+#[derive(Default)]
+struct Hits {
+    headers: Vec<(Rect, Card)>,
+    rows: Vec<(Rect, usize)>,
+    words: Vec<(Rect, Card, char)>,
+}
+
+/// What the pointer is over.
+#[cfg(feature = "operator")]
+enum Hit {
+    Header(Card),
+    Row(usize),
+    Word(Card, char),
+}
+
+#[cfg(feature = "operator")]
+impl Hits {
+    fn clear(&mut self) {
+        self.headers.clear();
+        self.rows.clear();
+        self.words.clear();
+    }
+
+    fn at(&self, column: u16, row: u16) -> Option<Hit> {
+        let over = |r: &Rect| row == r.y && column >= r.x && column < r.x.saturating_add(r.width);
+        if let Some((_, card, key)) = self.words.iter().find(|(r, _, _)| over(r)) {
+            return Some(Hit::Word(*card, *key));
+        }
+        if let Some((_, at)) = self.rows.iter().find(|(r, _)| over(r)) {
+            return Some(Hit::Row(*at));
+        }
+        self.headers
+            .iter()
+            .find(|(r, _)| over(r))
+            .map(|(_, card)| Hit::Header(*card))
+    }
+}
+
+/// What the operator has picked on the NEWS card, before any of it is sent.
+///
+/// Nothing here is a fact about the desk. `picked` stays `None` until a key or
+/// a click touches a row, so the card draws the *owner's* answer rather than a
+/// copy made when the pane opened — a copy would go stale the first time the
+/// stack moved under it, and would then be an edit mark over a change nobody
+/// made.
+#[cfg(feature = "operator")]
+#[derive(Default)]
+struct Draft {
+    picked: Option<Vec<String>>,
+    /// The EDGAR contact typed into the box, kept for the one POST that
+    /// carries it. It is an identity a public archive is told rather than a
+    /// secret, so it is a `String` and not a `Secret` — and it is still drawn
+    /// nowhere but the box it is typed into, and named in no note or toast.
+    contact: Option<String>,
+    /// The contact box, while it is open.
+    contact_box: Option<String>,
+    at: usize,
+    /// What the last verify said, per member.
+    ///
+    /// Held here rather than read back off the GET, because the two are
+    /// different questions: `outcomes` is what the desk's own news window last
+    /// did, and this is what the owner found when the operator *asked it to
+    /// look*. Discarded by the next save, which is a request about a stack this
+    /// answer may no longer describe.
+    verified: Vec<NewsMember>,
+    /// Whether a save is in flight. One request at a time, so a held key
+    /// cannot put two writes of the operator's `.env` on the wire.
+    sending: bool,
+    /// What this card, or the owner, last said about a change. Retired by the
+    /// next keystroke, like the switcher's note.
+    note: Option<String>,
 }
 
 impl View for SettingsView {
@@ -234,6 +437,7 @@ impl View for SettingsView {
         // form may open, and an area only recorded when the pane already fitted
         // could never report that it stopped fitting.
         self.publish(area);
+        self.forget_hits();
         // Label/value rows do not compress: a provenance clipped to `synthe` is
         // a source an operator has to guess at, and an authority clipped to
         // `propose_` is a governance claim that has lost its qualifier. So the
@@ -250,15 +454,27 @@ impl View for SettingsView {
             );
             return;
         }
-        // DESK spans both columns. It is the headline fact — which desk this
-        // is, and whether it can reach the book it is pointed at — and the
-        // credential description under it is a sentence the owner wrote, which
-        // a half-width card would clip mid-word.
-        // Which card is listening, if any. Read once and handed down, so six
+        // DESK and NEWS share the top band. They are one fact between them —
+        // which prices this desk reads and which words it reads about them —
+        // and the lane row on the left is the thing the card on the right is
+        // about, so the adjacency is the pointer.
+        //
+        // **DESK gave up the full width for it, and that was the choice.** Its
+        // credential description is a sentence the owner wrote, and at half
+        // the columns it wraps onto a second row rather than being clipped
+        // (`Wrap`, `trim: false`) — which is what [`DESK_H`]'s three rows of
+        // slack were always reserved for. The alternative was a band of its
+        // own under this one, and the pane has no rows to give: the right
+        // column already wants twenty-three of the twenty-two it has.
+        // Which card is listening, if any. Read once and handed down, so seven
         // cards cannot disagree about it.
         let at = self.focused(store);
         let bands = Layout::vertical([Constraint::Length(DESK_H), Constraint::Min(0)]).split(area);
-        draw_desk(f, bands[0], store, at);
+        let top = Layout::horizontal([Constraint::Length(DESK_W), Constraint::Min(0)])
+            .spacing(1)
+            .split(bands[0]);
+        draw_desk(f, top[0], store, at);
+        self.draw_news(f, top[1], store, at);
 
         let cols = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
             .spacing(1)
@@ -306,15 +522,48 @@ impl View for SettingsView {
         draw_models(f, right[1], store, at);
         draw_universe(f, right[2], store, at);
 
+        // Last, and over every rect the cards were actually given: what a
+        // click may press is a fact about the frame that was just drawn, and a
+        // list built from the constants instead would answer about a layout
+        // the terminal's width may have refused.
+        self.record(
+            &[
+                (Card::Desk, top[0]),
+                (Card::News, top[1]),
+                (Card::Policy, left[0]),
+                (Card::Theme, left[2]),
+                (Card::System, right[0]),
+                (Card::Models, right[1]),
+                (Card::Universe, right[2]),
+            ],
+            at,
+        );
+
         // Over the view rather than over the frame: the questions they ask are
         // about this pane's own controls, unlike the confirm box, which asks
         // about an order and belongs to the whole workstation.
         self.draw_form(f, area, store);
         self.draw_switch(f, area, store);
+        self.draw_contact(f, area, store);
     }
 
     fn on_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
         self.keys(k, store)
+    }
+
+    /// A click on what the last frame drew.
+    ///
+    /// Left button only, and no wheel: nothing on this pane scrolls, and a
+    /// wheel that silently did nothing would read the same as one over a list
+    /// that had stopped responding.
+    fn on_mouse(&mut self, m: MouseEvent, store: &mut Store) -> Option<Command> {
+        #[cfg(not(feature = "operator"))]
+        {
+            let _ = (m, store);
+            None
+        }
+        #[cfg(feature = "operator")]
+        self.clicks(m, store)
     }
 
     /// Back on this pane: the keys aim at the desk card again.
@@ -343,7 +592,9 @@ impl View for SettingsView {
     fn typing(&self) -> bool {
         #[cfg(feature = "operator")]
         {
-            (self.form.is_some() && self.form_fits()) || (self.switch.is_some() && self.box_fits())
+            (self.form.is_some() && self.form_fits())
+                || (self.switch.is_some() && self.box_fits())
+                || (self.news.contact_box.is_some() && self.contact_fits())
         }
         #[cfg(not(feature = "operator"))]
         false
@@ -507,8 +758,101 @@ impl SettingsView {
         area.height >= SWITCH_MIN_H && area.width >= TWO_COL
     }
 
+    /// The same question again for the contact box, which needs more rows than
+    /// the switcher and fewer than the login form.
+    fn contact_fits(&self) -> bool {
+        let area = self.area.get();
+        area.height >= CONTACT_MIN_H && area.width >= TWO_COL
+    }
+
     fn publish(&self, area: Rect) {
         self.area.set(area);
+    }
+
+    fn forget_hits(&self) {
+        self.hits.borrow_mut().clear();
+    }
+
+    /// Where this frame put the things a pointer may press.
+    ///
+    /// Only in a window that can act. A glass one marks no card and its rules
+    /// name no keys, so a rectangle recorded there would be an affordance over
+    /// a sentence that says there is none — the greyed-key claim this client
+    /// refuses everywhere.
+    ///
+    /// Words are recorded for the **focused** card only, because that is the
+    /// only card whose rule is drawn: an unfocused card's footer is not on
+    /// screen, and a hit rectangle over a line nobody can read is a button
+    /// nobody can find.
+    fn record(&self, cards: &[(Card, Rect)], at: Option<Card>) {
+        if at.is_none() {
+            return;
+        }
+        let mut hits = self.hits.borrow_mut();
+        for (card, area) in cards {
+            if area.height == 0 || area.width == 0 {
+                continue;
+            }
+            hits.headers
+                .push((Rect::new(area.x, area.y, area.width, 1), *card));
+            if at != Some(*card) {
+                continue;
+            }
+            // The block draws its rule on the card's last row and the footer
+            // on it as ` {footer} `, left-aligned — so a word starts one cell
+            // in from the card's own left edge plus its offset in the
+            // sentence. Character offsets, because the sentences around the
+            // words are not ASCII.
+            let rule = area.y + area.height - 1;
+            let footer = card.footer(true);
+            for (word, key) in card.words() {
+                let Some(byte) = footer.find(word) else {
+                    continue;
+                };
+                let x = area.x + 1 + footer[..byte].chars().count() as u16;
+                let w = word.chars().count() as u16;
+                if x.saturating_add(w) <= area.x + area.width {
+                    hits.words.push((Rect::new(x, rule, w, 1), *card, *key));
+                }
+            }
+        }
+    }
+
+    /// One click on the frame the operator is looking at.
+    ///
+    /// A word does exactly what its key does — the same `KeyCode` through the
+    /// same router — so a click can never mean something the card does not
+    /// say. A row does two things at once on purpose: it takes the focus *and*
+    /// picks, because a click that only moved a cursor would leave the
+    /// operator reaching for the keyboard to finish what they started.
+    fn clicks(&mut self, m: MouseEvent, store: &mut Store) -> Option<Command> {
+        if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return None;
+        }
+        // A box owns the pointer exactly as it owns the keyboard: a click that
+        // moved the focus under an open form would leave the operator typing
+        // into a box aimed at a card they can no longer see.
+        if self.typing() {
+            return None;
+        }
+        let hit = self.hits.borrow().at(m.column, m.row)?;
+        match hit {
+            Hit::Header(card) => {
+                self.focus.set(card);
+                self.news.note = None;
+                None
+            }
+            Hit::Row(at) => {
+                self.focus.set(Card::News);
+                self.news.at = at;
+                self.pick(store);
+                None
+            }
+            Hit::Word(card, key) => {
+                self.focus.set(card);
+                self.keys(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE), store)
+            }
+        }
     }
 
     /// Which card the keys are aimed at, or `None` in a window that has none.
@@ -555,15 +899,26 @@ impl SettingsView {
             self.switch = None;
             return None;
         }
+        // The contact goes with the box, for the reason the credential does:
+        // a value typed into something the operator has not been able to see
+        // since the terminal shrank is not one this client may still be
+        // holding.
+        if self.news.contact_box.is_some() && !self.contact_fits() {
+            self.news.contact_box = None;
+            return None;
+        }
         if self.form.is_some() {
             return self.form_key(k);
         }
         if self.switch.is_some() {
             return self.switch_key(k, store);
         }
+        if self.news.contact_box.is_some() {
+            return self.contact_key(k);
+        }
         match k.code {
-            KeyCode::Up => self.walk(-1),
-            KeyCode::Down => self.walk(1),
+            KeyCode::Up => self.step(-1),
+            KeyCode::Down => self.step(1),
             KeyCode::Char('a') if self.focus.get() == Card::Desk => {
                 self.form = Some(Form::default())
             }
@@ -575,6 +930,18 @@ impl SettingsView {
             KeyCode::Char('t') if self.focus.get() == Card::Desk => {
                 return Some(Command::TestAlpaca)
             }
+            // The lane, on the card whose `lane` row names it. The same box
+            // the models card opens with a different list behind it — a second
+            // widget family for two rows would be two answers to every
+            // question the first one already settled (what it refuses at, what
+            // owns the keyboard, what Esc leaves behind).
+            //
+            // No catalog request rides this one: what the pair may be is the
+            // owner's own `desk_mode` block, which the snapshot already
+            // carries on the desk's cadence.
+            KeyCode::Char('m') if self.focus.get() == Card::Desk => {
+                self.switch = Some(Switch::lane(store))
+            }
             // The catalog on the store is a *reading* and may be an hour old —
             // `/api/tui` refuses to probe under the dispatch lock — so the key
             // that opens the box asks for a fresh one on the way in, exactly as
@@ -583,6 +950,199 @@ impl SettingsView {
                 self.switch = Some(Switch::opened_on(store));
                 return Some(Command::Backends);
             }
+            // Nothing is sent by a tick. The draft is this window's alone
+            // until `s` or `v` carries it, which is what lets an operator
+            // build a stack out of four keystrokes instead of four writes of
+            // their `.env`.
+            KeyCode::Char(' ') if self.focus.get() == Card::News => self.pick(store),
+            KeyCode::Char('c') if self.focus.get() == Card::News => {
+                self.news.note = None;
+                self.news.contact_box = Some(self.news.contact.clone().unwrap_or_default());
+            }
+            KeyCode::Char('s') if self.focus.get() == Card::News => return self.save(store, false),
+            KeyCode::Char('v') if self.focus.get() == Card::News => return self.save(store, true),
+            _ => {}
+        }
+        None
+    }
+
+    /// One arrow: a source row inside NEWS, a card everywhere else.
+    ///
+    /// The cursor walks *out* of the card at either end rather than stopping
+    /// in it. A row cursor an operator cannot leave is the same fault as a
+    /// card highlight that never moves — and NEWS sits second in the walk, so
+    /// trapping it would put five cards beyond reach of the arrows.
+    ///
+    /// Entering the card puts the cursor on the edge it was entered from, so a
+    /// held arrow reads as one continuous walk rather than as a jump to
+    /// wherever the cursor was last left.
+    fn step(&mut self, by: isize) {
+        self.news.note = None;
+        let last = self.news_rows.get().saturating_sub(1);
+        if self.focus.get() == Card::News && self.news_rows.get() > 0 {
+            let at = self.news.at.min(last);
+            self.news.at = at;
+            if by > 0 && at < last {
+                self.news.at = at + 1;
+                return;
+            }
+            if by < 0 && at > 0 {
+                self.news.at = at - 1;
+                return;
+            }
+        }
+        self.walk(by);
+        if self.focus.get() == Card::News {
+            self.news.at = match by > 0 {
+                true => 0,
+                false => self.news_rows.get().saturating_sub(1),
+            };
+        }
+    }
+
+    /// Tick or untick the row the cursor is on, in the draft and nowhere else.
+    ///
+    /// The one refusal made here rather than left to the owner: a source the
+    /// desk cannot read is refused on the keystroke, because the owner answers
+    /// the same 400 and the row already carries what it is waiting for. A tick
+    /// that appeared and then vanished on the save would be this pane showing
+    /// a state the desk can never be in.
+    fn pick(&mut self, store: &Store) {
+        self.news.note = None;
+        let Some(news) = store.news() else {
+            return;
+        };
+        let at = self.news.at.min(news.catalog.len().saturating_sub(1));
+        self.news.at = at;
+        let Some(source) = news.catalog.get(at) else {
+            return;
+        };
+        let Some(name) = format::text(source.name.as_ref()).map(str::to_string) else {
+            return;
+        };
+        let mut picked = self.picked(news);
+        match picked.iter().position(|held| *held == name) {
+            Some(held) => {
+                picked.remove(held);
+            }
+            // Availability only. An unmet contact is not an unreadable
+            // source: the box on this card provides one, so ticking edgar is
+            // the first half of a change the operator is allowed to make.
+            None if source.available == Some(false) => {
+                self.news.note = Some(match format::text(source.needs.as_ref()) {
+                    Some(needs) => format!("{name} needs {needs}"),
+                    None => format!("the desk cannot read {name}"),
+                });
+                return;
+            }
+            None => picked.push(name),
+        }
+        // Sorted, so "the same set" and "the same list" are the same
+        // comparison — which is what the edited mark is read off.
+        picked.sort();
+        self.news.picked = Some(picked);
+    }
+
+    /// The set the draft would send: what the operator picked, or what the
+    /// owner says is chosen while they have picked nothing.
+    fn picked(&self, news: &NewsSettings) -> Vec<String> {
+        self.news.picked.clone().unwrap_or_else(|| chosen(news))
+    }
+
+    /// Whether the draft differs from the owner's own answer.
+    fn edited(&self, store: &Store) -> bool {
+        if self.news.contact.is_some() {
+            return true;
+        }
+        let Some(news) = store.news() else {
+            return false;
+        };
+        self.news
+            .picked
+            .as_ref()
+            .is_some_and(|picked| *picked != chosen(news))
+    }
+
+    /// Send the draft, with or without asking the owner to check it first.
+    ///
+    /// The second local refusal, and it is here for `pick`'s reason: the owner
+    /// answers the same 400 about edgar with no contact, and its sentence
+    /// names the shape rather than the key on this card that provides one.
+    /// Everything else — an unknown name, an empty list, a malformed
+    /// contact — travels and comes back in the owner's own words, because this
+    /// client owns none of those rules.
+    fn save(&mut self, store: &Store, verify: bool) -> Option<Command> {
+        self.news.note = None;
+        let Some(news) = store.news() else {
+            self.news.note = Some("the owner has not said what this desk reads".to_string());
+            return None;
+        };
+        // One request at a time. The route writes the operator's `.env`, and a
+        // held key would put two of those on the wire for one decision.
+        if self.news.sending {
+            return None;
+        }
+        let providers = self.picked(news);
+        if providers.iter().any(|name| name == EDGAR)
+            && news.edgar_contact_set != Some(true)
+            && self.news.contact.is_none()
+        {
+            self.news.note = Some("edgar needs a contact — press c".to_string());
+            return None;
+        }
+        self.news.sending = true;
+        // The last check described the last request. Kept on screen through
+        // one it no longer describes, it would be a verdict about a stack
+        // nobody sent.
+        self.news.verified.clear();
+        Some(Command::NewsSettings {
+            providers,
+            contact: self.news.contact.clone(),
+            verify,
+            // The lane this card is drawing, which is the lane the answer in
+            // front of the operator is about. The route defaults it to the
+            // desk mode, and a window pointed at the other one would then be
+            // told about a stack it is not reading.
+            offline: match news.lane.as_deref() {
+                Some("live") => false,
+                Some("synthetic") => true,
+                // Neither word, so this client has nothing to assert. The
+                // owner's own default is the desk mode, which is a better
+                // answer than a guess made here.
+                _ => store
+                    .desk_mode()
+                    .and_then(|mode| mode.offline)
+                    .unwrap_or(true),
+            },
+        })
+    }
+
+    /// One keystroke into the contact box.
+    ///
+    /// Its own router for the reason the login form has one: the keys that
+    /// *open* a box and the keys *inside* it are two sets, and one help
+    /// section over both would describe the box with a row about the card.
+    // Every key claimed here owes a row in `input::KEYMAP`, and a test reads
+    // this function to check it. That module's header lists what the check
+    // cannot see — including why a comment in here may not spell a key variant.
+    fn contact_key(&mut self, k: KeyEvent) -> Option<Command> {
+        let typed = self.news.contact_box.as_mut()?;
+        match k.code {
+            KeyCode::Char(c) => typed.push(c),
+            KeyCode::Backspace => {
+                typed.pop();
+            }
+            // Kept, not sent. The contact travels on the save that needs it,
+            // so an operator who types one and walks away has sent nothing —
+            // and a trailing space from a paste goes here rather than at the
+            // owner's shape check, which would refuse a contact that looks
+            // right on screen.
+            KeyCode::Enter => {
+                let said = typed.trim().to_string();
+                self.news.contact = (!said.is_empty()).then_some(said);
+                self.news.contact_box = None;
+            }
+            KeyCode::Esc => self.news.contact_box = None,
             _ => {}
         }
         None
@@ -709,6 +1269,39 @@ impl SettingsView {
     /// into it now.
     pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
         use crate::bus::Wrote;
+        // Any answer at all retires the wait. A failure is carried by the
+        // toast rather than by this card — it is a broken request rather than
+        // a decision about the stack — but a card still saying "asking the
+        // owner…" over one would read as a client that had hung.
+        self.news.sending = false;
+        match outcome {
+            // The owner's answer replaces the draft wholesale, and the refetch
+            // behind it is what the card then draws. A draft left standing
+            // would mark as edited a change that has already landed.
+            Wrote::NewsSaved {
+                checked, verified, ..
+            } => {
+                self.news.picked = None;
+                self.news.contact = None;
+                self.news.note = None;
+                self.news.verified = verified.clone();
+                // Asked to look and told nothing. Said rather than drawn as a
+                // clean check: the rows would otherwise fall back to the
+                // desk's own last outcomes, which is a different question than
+                // the one the operator asked.
+                if *checked && verified.is_empty() {
+                    self.news.note = Some("the owner did not say what it checked".to_string());
+                }
+                return;
+            }
+            // Its own sentence, on the card that asked. It carries the remedy,
+            // and the toast that carries it too is gone in four seconds.
+            Wrote::NewsRefused { said } => {
+                self.news.note = Some(format::bounded(said, SAID_MAX));
+                return;
+            }
+            _ => {}
+        }
         if !matches!(
             self.form.as_ref().map(|form| &form.stage),
             Some(Stage::Sent)
@@ -720,6 +1313,17 @@ impl SettingsView {
         // holds a credential it has already sent.
         if matches!(outcome, Wrote::LoggedIn { .. }) {
             self.close();
+            // The picker steps aside for the login and comes back after it —
+            // but only when the desk can now read one. Reopening on a
+            // credential the owner still refuses would put the operator back
+            // on the row that sent them here, which reads as a loop rather
+            // than as a refusal.
+            if std::mem::take(&mut self.relane)
+                && matches!(outcome, Wrote::LoggedIn { usable: true, .. })
+            {
+                self.focus.set(Card::Desk);
+                self.switch = Some(Switch::lane_at(LANE_LIVE));
+            }
             return;
         }
         let Some(form) = self.form.as_mut() else {
@@ -762,6 +1366,9 @@ impl SettingsView {
     // this function to check it. That module's header lists what the check
     // cannot see — including why a comment in here may not spell a key variant.
     fn switch_key(&mut self, k: KeyEvent, store: &Store) -> Option<Command> {
+        if self.switch.as_ref().map(|switch| switch.kind) == Some(Picker::Lane) {
+            return self.lane_key(k, store);
+        }
         let rows = choices(store);
         let switch = self.switch.as_mut()?;
         switch.note = None;
@@ -822,6 +1429,54 @@ impl SettingsView {
         None
     }
 
+    /// One keystroke into the lane picker.
+    ///
+    /// The same four keys as the model switcher and the same meanings, because
+    /// it is the same box: what differs is the list behind it and what Enter
+    /// does with a row. Routed from `switch_key` rather than from `keys`, so
+    /// the help section that describes the box describes both of them.
+    fn lane_key(&mut self, k: KeyEvent, store: &Store) -> Option<Command> {
+        let rows = lanes(store);
+        let switch = self.switch.as_mut()?;
+        switch.note = None;
+        switch.at = switch.at.min(rows.len().saturating_sub(1));
+        match k.code {
+            KeyCode::Up => switch.at = switch.at.saturating_sub(1),
+            KeyCode::Down => switch.at = (switch.at + 1).min(rows.len().saturating_sub(1)),
+            // Leaves the desk where it is. Nothing is staged here either: a
+            // choice is sent the moment it is made.
+            KeyCode::Esc => self.switch = None,
+            KeyCode::Enter => {
+                let at = switch.at;
+                let Some(row) = rows.get(at) else {
+                    switch.note = Some("the owner did not say which desk this is".to_string());
+                    return None;
+                };
+                // The live lane needs a login the desk can read. Not sent and
+                // not refused: the picker steps aside for the box that fixes
+                // it, and `wrote` brings the picker back once the owner says
+                // the credential works. Pre-empting the owner here is the one
+                // place this pane does it, and it is because the remedy is a
+                // box on this pane rather than a sentence.
+                if row.book == ALPACA
+                    && store.desk_mode().and_then(|mode| mode.credentials_ok) != Some(true)
+                {
+                    self.switch = None;
+                    self.relane = true;
+                    self.open_login();
+                    return None;
+                }
+                let (data, book) = (row.data.to_string(), row.book.to_string());
+                self.switch = None;
+                // Exactly what `/mode` sends, so the owner's own refusals and
+                // the veto path in front of them are one path rather than two.
+                return Some(Command::DeskMode { data, book });
+            }
+            _ => {}
+        }
+        None
+    }
+
     /// The switcher, drawn over the pane that opened it.
     fn draw_switch(&self, f: &mut Frame, area: Rect, store: &Store) {
         use ratatui::widgets::{Block, Borders, Clear};
@@ -851,7 +1506,10 @@ impl SettingsView {
         }
         let t = theme();
         let w = SWITCH_W.min(area.width.saturating_sub(4)).max(3);
-        let lines = switch.lines(store, cap(area));
+        let lines = match switch.kind {
+            Picker::Models => switch.lines(store, cap(area)),
+            Picker::Lane => switch.lane_lines(store),
+        };
         let rect = centred(area, w, wanted(&lines, w - 2));
         f.render_widget(Clear, rect);
         let block = Block::default()
@@ -861,6 +1519,86 @@ impl SettingsView {
         let inner = block.inner(rect);
         f.render_widget(block, rect);
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+
+    /// The contact box, drawn over the pane that opened it.
+    ///
+    /// The same discipline as the two boxes above — refuse rather than open
+    /// invisible, and the next keystroke retires it — and one deliberate
+    /// difference: the field is plain text. The contact is an identity the SEC
+    /// asks callers to send, and masking it would teach the wrong rule about
+    /// the box beside it, which is the one that holds a credential.
+    fn draw_contact(&self, f: &mut Frame, area: Rect, store: &Store) {
+        use ratatui::widgets::{Block, Borders, Clear};
+        let Some(typed) = &self.news.contact_box else {
+            return;
+        };
+        if !self.contact_fits() {
+            let row = Rect {
+                x: area.x,
+                y: area.y + area.height / 2,
+                width: area.width,
+                height: 1,
+            };
+            f.render_widget(Clear, row);
+            refuse(
+                f,
+                row,
+                format!(
+                    "the contact box needs {CONTACT_MIN_H} rows; this pane has {}.",
+                    area.height
+                ),
+            );
+            return;
+        }
+        let t = theme();
+        let w = CONTACT_W.min(area.width.saturating_sub(4)).max(3);
+        let stored = store
+            .news()
+            .and_then(|news| news.edgar_contact_set)
+            .unwrap_or(false);
+        let lines = contact_lines(typed, stored, w - 2);
+        let rect = centred(area, w, wanted(&lines, w - 2));
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.accent))
+            .style(Style::default().bg(t.bg_raised));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+
+    /// The card, and the two things the last frame owes a click: how many
+    /// rows the catalog drew, and where each of them landed.
+    fn draw_news(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+        let drawn = news_card(
+            f,
+            area,
+            store,
+            at,
+            self.news.picked.as_deref(),
+            &self.news.verified,
+            (at == Some(Card::News)).then_some(self.news.at),
+            self.news.note.as_deref(),
+            self.edited(store),
+        );
+        self.news_rows.set(drawn);
+        if at.is_none() {
+            return;
+        }
+        let mut hits = self.hits.borrow_mut();
+        for row in 0..drawn as u16 {
+            let y = area.y + NEWS_TOP + row;
+            // Never past the rule the block reserves: a rectangle over a row
+            // the card had no room to draw is a click on something that is
+            // not there.
+            if y + 1 >= area.y + area.height {
+                break;
+            }
+            hits.rows
+                .push((Rect::new(area.x, y, area.width, 1), row as usize));
+        }
     }
 
     /// The form, drawn over the pane that opened it.
@@ -932,11 +1670,76 @@ impl SettingsView {
 #[cfg(feature = "operator")]
 #[derive(Default)]
 struct Switch {
+    /// Which list is behind it. One box, two lists: a second widget family
+    /// for two rows would be a second answer to every question this one has
+    /// already settled — what it refuses at, what owns the keyboard, and what
+    /// `Esc` leaves behind.
+    kind: Picker,
     at: usize,
     top: usize,
     /// The owner's sentence about a row that cannot be chosen. Retired by the
     /// next keystroke, like the command line's own note.
     note: Option<String>,
+}
+
+/// Which list the box is showing.
+#[cfg(feature = "operator")]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Picker {
+    #[default]
+    Models,
+    /// The data lane: which prices this desk reads, and which book it values
+    /// them against. Two rows, because the pair is not free — the owner
+    /// refuses the combinations `DeskMode` cannot make — and the two this
+    /// offers are the two the startup door offers.
+    Lane,
+}
+
+/// Where the live row sits in the lane list, so the box can be reopened on it
+/// after a login without re-deriving what the operator was reaching for.
+#[cfg(feature = "operator")]
+const LANE_LIVE: usize = 1;
+
+/// One row of the lane picker: a desk mode, in the owner's own spelling.
+#[cfg(feature = "operator")]
+struct LaneRow {
+    data: &'static str,
+    book: &'static str,
+    label: &'static str,
+    /// What taking this row means, in the words the startup door uses for the
+    /// same two choices — one sentence about the desk, not two.
+    said: &'static str,
+}
+
+/// The two halves of a desk mode, spelled as `qlab/core/desk_mode.py` spells
+/// them. The same four words the door uses; a third spelling would be a
+/// client inventing a desk the owner cannot make.
+#[cfg(feature = "operator")]
+const SYNTHETIC: &str = "synthetic";
+#[cfg(feature = "operator")]
+const LIVE: &str = "live";
+#[cfg(feature = "operator")]
+const SIMULATED: &str = "simulated";
+#[cfg(feature = "operator")]
+const ALPACA: &str = "alpaca";
+
+/// The lanes this pane offers, in the order the door offers them.
+#[cfg(feature = "operator")]
+fn lanes(_store: &Store) -> Vec<LaneRow> {
+    vec![
+        LaneRow {
+            data: SYNTHETIC,
+            book: SIMULATED,
+            label: "synthetic (demo)",
+            said: "prices this desk makes",
+        },
+        LaneRow {
+            data: LIVE,
+            book: ALPACA,
+            label: "live · alpaca",
+            said: "a fill here still needs you",
+        },
+    ]
 }
 
 /// One row of the switcher: an offer, and what choosing it would send.
@@ -1002,10 +1805,103 @@ impl Switch {
             .position(|row| row.running)
             .unwrap_or(0);
         Self {
+            kind: Picker::Models,
             at,
             top: 0,
             note: None,
         }
+    }
+
+    /// The lane box, opened on the lane the desk is already running.
+    ///
+    /// Same rule as `opened_on`: an operator who opens it and presses Enter
+    /// changes nothing, and one who does not recognise their own desk on the
+    /// list is being told something true about it.
+    fn lane(store: &Store) -> Self {
+        let at = lanes(store)
+            .iter()
+            .position(|row| running_lane(row, store))
+            .unwrap_or(0);
+        Self::lane_at(at)
+    }
+
+    fn lane_at(at: usize) -> Self {
+        Self {
+            kind: Picker::Lane,
+            at,
+            top: 0,
+            note: None,
+        }
+    }
+
+    /// The lane box's lines. No window and no `▾ n more`: there are two rows
+    /// and there is no catalog behind them to grow.
+    fn lane_lines(&self, store: &Store) -> Vec<Line<'static>> {
+        let t = theme();
+        let rows = lanes(store);
+        let at = self.at.min(rows.len().saturating_sub(1));
+        let mut lines = vec![panel_header("which data"), Line::from("")];
+        for (i, row) in rows.iter().enumerate() {
+            let on = i == at;
+            let mut spans = vec![
+                Span::styled(
+                    if on { " ▸ " } else { "   " },
+                    Style::default().fg(t.accent),
+                ),
+                Span::styled(
+                    format!("{:<20}", row.label),
+                    match on {
+                        true => Style::default()
+                            .fg(t.accent)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                        false => Style::default().fg(t.text_primary),
+                    },
+                ),
+                Span::styled(row.said, Style::default().fg(t.text_dim)),
+            ];
+            if running_lane(row, store) {
+                spans.push(Span::styled(
+                    "  now",
+                    Style::default()
+                        .fg(t.positive)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        // The owner's own description of the credential, whatever the verdict.
+        // Stated rather than offered: a stored login makes the live row
+        // *choosable* and books nothing, and an operator taking that row on a
+        // login the desk cannot read is sent to the form rather than refused.
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {}",
+                store
+                    .desk_mode()
+                    .and_then(|mode| format::text(mode.credentials.as_ref()))
+                    .map(|said| format::bounded(said, SAID_MAX))
+                    .unwrap_or_else(|| MISSING.to_string())
+            ),
+            Style::default().fg(
+                match store.desk_mode().and_then(|mode| mode.credentials_ok) == Some(true) {
+                    true => t.text_tertiary,
+                    false => t.warning,
+                },
+            ),
+        )));
+        lines.push(match &self.note {
+            Some(note) => Line::from(Span::styled(
+                format!(" {}", format::bounded(note, SAID_MAX)),
+                Style::default()
+                    .fg(t.warning)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )),
+            None => Line::from(Span::styled(
+                " Enter points the desk · ↑↓ moves · Esc leaves it",
+                Style::default().fg(t.text_dim),
+            )),
+        });
+        lines
     }
 
     /// The box's lines: the header, a window onto the offers, and the footer.
@@ -1224,6 +2120,50 @@ fn field_row(label: &str, value: &str, focused: bool, room: usize) -> Line<'stat
     ])
 }
 
+/// The one field, and the two things an operator needs beside it: the shape
+/// the SEC asks for, and whether this replaces something.
+#[cfg(feature = "operator")]
+fn contact_lines(typed: &str, stored: bool, width: u16) -> Vec<Line<'static>> {
+    let t = theme();
+    let room = (width as usize).saturating_sub(LABEL_W + 3);
+    vec![
+        panel_header("edgar contact"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!(" {:<LABEL_W$}", "contact"),
+                Style::default().fg(t.text_secondary),
+            ),
+            // Plain, and clipped at the box rather than run past it. It is an
+            // identity a public archive is told, not a secret — masking it
+            // would teach the wrong rule about the box beside it, which is the
+            // one that holds a credential.
+            Span::styled(to_room(typed, room), Style::default().fg(t.text_primary)),
+            Span::styled("▏", Style::default().fg(t.accent)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            " as Your Name <you@example.org>",
+            Style::default().fg(t.text_dim),
+        )),
+        Line::from(Span::styled(
+            " the SEC will not answer an anonymous caller",
+            Style::default().fg(t.text_dim),
+        )),
+        Line::from(Span::styled(
+            match stored {
+                true => " a contact is already stored; this replaces it on the next save",
+                false => " no contact is stored yet",
+            },
+            Style::default().fg(t.text_tertiary),
+        )),
+        Line::from(Span::styled(
+            " Enter keeps it for the next save · Esc leaves it alone",
+            Style::default().fg(t.text_dim),
+        )),
+    ]
+}
+
 /// The owner's question, and the word that answers it.
 #[cfg(feature = "operator")]
 fn consent_lines(said: &str, typed: &str) -> Vec<Line<'static>> {
@@ -1271,6 +2211,15 @@ impl SettingsView {
     fn publish(&self, _area: Rect) {}
     fn draw_form(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
     fn draw_switch(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
+    fn draw_contact(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
+    fn forget_hits(&self) {}
+    fn record(&self, _cards: &[(Card, Rect)], _at: Option<Card>) {}
+
+    /// The card without a draft over it. Every rule on it is the owner's, and
+    /// in this build there is nothing that could hold a different answer.
+    fn draw_news(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+        news_card(f, area, store, at, None, &[], None, None, false);
+    }
 
     fn focused(&self, _store: &Store) -> Option<Card> {
         None
@@ -1376,6 +2325,225 @@ fn draw_desk(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     // of them, and once each card had different keys it was either wrong about
     // five or silent about all six.
     card(f, area, Card::Desk, "desk", at, rows);
+}
+
+/// What this desk reads its news from, and what it could read it from.
+///
+/// Returns how many source rows it drew, which is the number the cursor is
+/// clamped against and the number of click rectangles the caller records. A
+/// count returned rather than recomputed by the caller, because "how many rows
+/// are on screen" is a fact about this function's own layout.
+///
+/// The draft is passed in rather than reached for, so the glass build draws the
+/// same card from the same code with nothing to pass — the read-only half is an
+/// absence of arguments rather than a second renderer.
+#[allow(clippy::too_many_arguments)]
+fn news_card(
+    f: &mut Frame,
+    area: Rect,
+    store: &Store,
+    at: Option<Card>,
+    picked: Option<&[String]>,
+    verified: &[NewsMember],
+    cursor: Option<usize>,
+    note: Option<&str>,
+    edited: bool,
+) -> usize {
+    let t = theme();
+    let Some(news) = store.news() else {
+        card(
+            f,
+            area,
+            Card::News,
+            "news",
+            at,
+            // Not "this desk reads nothing": the payload's own `configured`
+            // says that, and it has not arrived. The two are a desk nobody set
+            // up and a route nobody has answered yet.
+            vec![absent("the owner has not said what this desk reads")],
+        );
+        return 0;
+    };
+    // The mark goes in the title, where the focus tint already is: an edit this
+    // window is holding and has not sent is the first thing an operator needs
+    // to know about the card, and a row for it would be a row the catalog
+    // needs.
+    let title = match edited {
+        true => "news ·edited",
+        false => "news",
+    };
+    let ticked: Vec<String> = match picked {
+        Some(picked) => picked.to_vec(),
+        None => chosen(news),
+    };
+    let mut rows = vec![
+        // The lane first, because it decides the row under it: an offline desk
+        // resolves `synthetic` whatever the catalog holds, and a stack read
+        // without its lane is a claim about a desk this one is not.
+        kv("lane", or_missing(news.lane.as_ref()), t.text_secondary),
+        kv(
+            "stack",
+            match news.stack.is_empty() {
+                true => MISSING.to_string(),
+                false => news.stack.join(" "),
+            },
+            t.text_primary,
+        ),
+    ];
+    let room = (area.width as usize).saturating_sub(NOTE_X);
+    for (i, source) in news.catalog.iter().enumerate() {
+        rows.push(source_row(
+            source,
+            &ticked,
+            news,
+            verified,
+            cursor == Some(i),
+            room,
+        ));
+    }
+    // The last row is the note's, whether or not there is one: a card that grew
+    // a row when it had something to say would move every row above it, and the
+    // cursor with them.
+    rows.push(match note {
+        Some(said) => Line::from(Span::styled(
+            format!(" {}", format::bounded(said, SAID_MAX)),
+            Style::default()
+                .fg(t.warning)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )),
+        None => Line::from(""),
+    });
+    card(f, area, Card::News, title, at, rows);
+    news.catalog.len()
+}
+
+/// One source, as the owner describes it and as the draft has it.
+///
+/// The note is three different facts in one column, in the operator's own
+/// order: what the source is *waiting for* outranks what it last *did*, which
+/// outranks what it *costs* — a source the desk cannot read at all is not the
+/// place to print its price.
+#[allow(clippy::too_many_arguments)]
+fn source_row(
+    source: &NewsSource,
+    ticked: &[String],
+    news: &NewsSettings,
+    verified: &[NewsMember],
+    on: bool,
+    room: usize,
+) -> Line<'static> {
+    let t = theme();
+    let name = or_missing(source.name.as_ref());
+    let held = ticked.contains(&name);
+    // `Some(false)` only. A source nothing has answered about is not one the
+    // desk has refused, and toning it as a problem would train an operator to
+    // read past the row that is one.
+    //
+    // The second half is the one thing this client can tell the owner has not
+    // been given: edgar's contact. The owner reports the *want* (`needs`) and
+    // separately whether one is stored, and a row that printed a cost over an
+    // unmet requirement would leave the operator ticking a source that cannot
+    // be saved.
+    let wanting = source.available == Some(false)
+        || (name == EDGAR
+            && news.edgar_contact_set != Some(true)
+            && format::text(source.needs.as_ref()).is_some());
+    // What the owner found when the operator *asked it to look* outranks what
+    // the desk's own window last did: it is the newer answer and the one the
+    // key was pressed for. It carries its own verdict — a member can answer and
+    // still be degraded — so the tone comes from the member rather than from
+    // any flag beside it.
+    let checked = verified.iter().find(|member| member.name == name);
+    let (said, bad) = if wanting {
+        (
+            format::text(source.needs.as_ref())
+                .map(|needs| format!("needs {needs}"))
+                .unwrap_or_else(|| "the desk cannot read it".to_string()),
+            true,
+        )
+    } else if let Some(member) = checked {
+        member.said()
+    } else if let Some(outcome) = news.outcomes.get(&name) {
+        (outcome.clone(), false)
+    } else if name == EDGAR && news.edgar_contact_set == Some(true) {
+        ("contact set".to_string(), false)
+    } else {
+        (
+            format::text(source.cost.as_ref()).unwrap_or("").to_string(),
+            false,
+        )
+    };
+    let out = wanting;
+    Line::from(vec![
+        // A glyph and not only a colour, for the switcher's reason: on a
+        // 256-colour terminal a highlight is a shade, and a shade is not an
+        // answer to "which row is the space bar about".
+        Span::styled(
+            if on { " ▸ " } else { "   " },
+            Style::default().fg(t.accent),
+        ),
+        Span::styled(
+            match held {
+                true => "[x] ",
+                false => "[ ] ",
+            },
+            Style::default().fg(match (held, out) {
+                (_, true) => t.text_dim,
+                (true, _) => t.positive,
+                (false, _) => t.text_dim,
+            }),
+        ),
+        Span::styled(
+            format!("{name:<8}"),
+            Style::default().fg(match out {
+                true => t.text_dim,
+                false => t.text_primary,
+            }),
+        ),
+        Span::styled(
+            format!("{:<10}", or_missing(source.tier.as_ref())),
+            Style::default().fg(t.text_secondary),
+        ),
+        // Dim unless it is a problem: a `partial:` flag on a source that
+        // answered is a fact about a feed, not a warning about the desk, and
+        // toning it as one would train an operator to read past the rows that
+        // are.
+        Span::styled(
+            to_room(&said, room),
+            Style::default().fg(match bad {
+                true => t.warning,
+                false => t.text_dim,
+            }),
+        ),
+    ])
+}
+
+/// The sources the owner says are chosen right now, sorted.
+///
+/// Read off `chosen` and never off `stack`: they are different claims. A desk
+/// on the synthetic lane *resolves* `["synthetic"]` whatever is configured, and
+/// a draft seeded from that would un-tick every source the operator has set up
+/// the moment they touched a row.
+fn chosen(news: &NewsSettings) -> Vec<String> {
+    let mut names: Vec<String> = news
+        .catalog
+        .iter()
+        .filter(|source| source.chosen == Some(true))
+        .filter_map(|source| format::text(source.name.as_ref()))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names
+}
+
+/// Whether the desk is on this lane now, by the owner's own two words.
+#[cfg(feature = "operator")]
+fn running_lane(row: &LaneRow, store: &Store) -> bool {
+    let Some(mode) = store.desk_mode() else {
+        return false;
+    };
+    format::text(mode.data.as_ref()) == Some(row.data)
+        && format::text(mode.book.as_ref()) == Some(row.book)
 }
 
 /// Which lane the data comes down. Absent stays absent: a desk whose owner did
@@ -2195,6 +3363,30 @@ mod tests {
             probed_row(&block(Some("yesterday".into())), Some(1_785_696_869)),
             MISSING
         );
+    }
+
+    #[test]
+    fn what_is_chosen_is_read_off_the_catalog_and_never_off_the_resolved_stack() {
+        // Two different claims, and the owner makes both. A desk on the
+        // synthetic lane *resolves* `["synthetic"]` whatever is configured, so
+        // a draft seeded from `stack` would un-tick every source the operator
+        // has set up the moment they touched a row.
+        let news: NewsSettings = serde_json::from_value(serde_json::json!({
+            "lane": "synthetic",
+            "stack": ["synthetic"],
+            "catalog": [
+                {"name": "macro", "chosen": true},
+                {"name": "rss", "chosen": true},
+                {"name": "gdelt", "chosen": false},
+                // A name the owner sent empty is absent, as everywhere here.
+                {"name": "", "chosen": true}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(chosen(&news), vec!["macro".to_string(), "rss".to_string()]);
+        // And an owner that sent no catalog has chosen nothing, rather than
+        // this client inferring a stack from the lane it resolved.
+        assert!(chosen(&NewsSettings::default()).is_empty());
     }
 
     #[test]

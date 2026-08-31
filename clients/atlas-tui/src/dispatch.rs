@@ -22,7 +22,9 @@
 mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
-    use crate::net::write::{Choice, Execution, Login, Proposed, Start, WriteClient, WriteError};
+    use crate::net::write::{
+        Choice, Execution, Login, News, Proposed, Start, WriteClient, WriteError,
+    };
     use crate::store::Posture;
     use std::sync::Arc;
 
@@ -187,6 +189,13 @@ mod armed {
             Command::DeskMode { data, book } => format!("point the desk at {data} · {book}"),
             Command::AlpacaLogin { .. } => "store the alpaca login".to_string(),
             Command::TestAlpaca => "test the alpaca login".to_string(),
+            // What was asked for, never what was typed into it: the contact is
+            // in this value and `names` is rendered into a log line and a
+            // toast, which is the one place a `Debug` derive would have put it.
+            Command::NewsSettings { verify, .. } => match verify {
+                true => "check and save the news sources".to_string(),
+                false => "save the news sources".to_string(),
+            },
             Command::SetLlm { surface, .. } => format!("point {surface} at a model"),
             // The task, because that is what was approved. The template id is
             // the word an operator typed; the task is the row the owner
@@ -426,6 +435,43 @@ mod armed {
                     said: err.to_string(),
                 },
             },
+            // Not a governance decision either, and it books nothing: it
+            // chooses what the desk *reads*. The owner owns the catalog — it
+            // refuses a name it does not know, a source it cannot reach and a
+            // contact it cannot parse — so what the operator ticked is sent
+            // whole and the owner's own sentence comes back either way.
+            Command::NewsSettings {
+                providers,
+                contact,
+                verify,
+                offline,
+            } => {
+                let what = names(&Command::NewsSettings {
+                    providers: providers.clone(),
+                    contact: None,
+                    verify,
+                    offline,
+                });
+                match client
+                    .set_news(&providers, contact.as_deref(), verify, offline)
+                    .await
+                {
+                    Ok(News::Applied { stack, verified }) => Wrote::NewsSaved {
+                        stack,
+                        checked: verify,
+                        verified,
+                    },
+                    // A considered no, not a broken request: the owner's 400
+                    // carries the remedy, and rendering it as a failure would
+                    // bury "edgar needs a contact" under a transport error
+                    // nobody can act on.
+                    Ok(News::Rejected(said)) => Wrote::NewsRefused { said },
+                    Err(err) => Wrote::Failed {
+                        what,
+                        said: err.to_string(),
+                    },
+                }
+            }
             Command::TestAlpaca => match client.test_alpaca().await {
                 Ok(verdict) => Wrote::Tested {
                     ok: verdict.ok,

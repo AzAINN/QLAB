@@ -92,6 +92,18 @@ pub enum Source {
     /// SETTINGS' model switcher, while it is open. The third router in that
     /// file, and the same rule again.
     SettingsModels,
+    /// SETTINGS' lane picker, while it is open.
+    ///
+    /// The same *box* as the switcher above — one widget, two lists — and
+    /// still its own section, because it is its own router: `switch_key`
+    /// hands the lane list to `lane_key`, and a section that followed it would
+    /// count every one of these four keys twice and describe the models list
+    /// with rows about the desk. The same split the two WORKFORCE fields have,
+    /// for the same mechanical reason.
+    SettingsLane,
+    /// SETTINGS' EDGAR contact box, while it is open. The fourth router in
+    /// that file, and the same rule again.
+    SettingsContact,
     /// The confirmation box, which outranks everything but Ctrl-C.
     Confirm,
     /// The startup door, which outranks even that — it is up before there is
@@ -103,7 +115,7 @@ impl Source {
     /// Every section, in the order the overlay lists them: the global keys
     /// first, then the two surfaces that take the keyboard, then the views in
     /// nav-rail order, then the box that outranks them all.
-    pub const ALL: [Source; 18] = [
+    pub const ALL: [Source; 20] = [
         Source::Shell,
         Source::Command,
         Source::Help,
@@ -120,6 +132,8 @@ impl Source {
         Source::View(ViewId::Settings),
         Source::SettingsLogin,
         Source::SettingsModels,
+        Source::SettingsLane,
+        Source::SettingsContact,
         Source::Confirm,
         Source::Door,
     ];
@@ -136,6 +150,8 @@ impl Source {
             Source::WorkforcePicker => "WORK · the template picker",
             Source::SettingsLogin => "SETT · the alpaca login form",
             Source::SettingsModels => "SETT · the model switcher",
+            Source::SettingsLane => "SETT · the data lane picker",
+            Source::SettingsContact => "SETT · the edgar contact box",
             Source::Confirm => "a confirmation box",
             Source::Door => "the startup door",
         }
@@ -193,6 +209,8 @@ impl Source {
             Source::View(ViewId::Settings) => ("ui/views/settings.rs", "", "keys"),
             Source::SettingsLogin => ("ui/views/settings.rs", "", "form_key"),
             Source::SettingsModels => ("ui/views/settings.rs", "", "switch_key"),
+            Source::SettingsLane => ("ui/views/settings.rs", "", "lane_key"),
+            Source::SettingsContact => ("ui/views/settings.rs", "", "contact_key"),
             Source::Confirm => ("ui/widgets/confirm.rs", "", "on_key"),
             Source::Door => ("ui/door.rs", "", "on_key"),
         }
@@ -519,13 +537,13 @@ pub const KEYMAP: &[Binding] = &[
         "Up",
         "↑",
         Source::View(ViewId::Settings),
-        "the card above — the focused card's header is tinted",
+        "the card above, or the source above inside NEWS",
     ),
     w(
         "Down",
         "↓",
         Source::View(ViewId::Settings),
-        "the card below",
+        "the card below, or the source below inside NEWS",
     ),
     w(
         "Char('a')",
@@ -544,6 +562,36 @@ pub const KEYMAP: &[Binding] = &[
         "m",
         Source::View(ViewId::Settings),
         "on MODELS: choose which mind each surface runs",
+    ),
+    w(
+        "Char('m')",
+        "m",
+        Source::View(ViewId::Settings),
+        "on DESK: choose the data lane — live · alpaca asks for a login first",
+    ),
+    w(
+        "Char(' ')",
+        "Space",
+        Source::View(ViewId::Settings),
+        "on NEWS: tick the source under the cursor — nothing is sent",
+    ),
+    w(
+        "Char('c')",
+        "c",
+        Source::View(ViewId::Settings),
+        "on NEWS: type the EDGAR contact the SEC asks callers to send",
+    ),
+    w(
+        "Char('s')",
+        "s",
+        Source::View(ViewId::Settings),
+        "on NEWS: save what is ticked — changes what this desk reads, nothing else",
+    ),
+    w(
+        "Char('v')",
+        "v",
+        Source::View(ViewId::Settings),
+        "on NEWS: save it and ask the owner to read one window per source first",
     ),
     // -- SETT, the alpaca login form --------------------------------------
     w(
@@ -585,6 +633,46 @@ pub const KEYMAP: &[Binding] = &[
         "Esc",
         Source::SettingsModels,
         "closes it — every surface is left as the desk has it",
+    ),
+    // -- SETT, the data lane picker ---------------------------------------
+    w("Up", "↑", Source::SettingsLane, "the lane above"),
+    w("Down", "↓", Source::SettingsLane, "the lane below"),
+    w(
+        "Enter",
+        "Enter",
+        Source::SettingsLane,
+        "points the desk at that lane — live · alpaca asks for a login first",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::SettingsLane,
+        "closes it — the desk is left where it is",
+    ),
+    // -- SETT, the edgar contact box --------------------------------------
+    w(
+        "Char(c)",
+        "any key",
+        Source::SettingsContact,
+        "types the contact — plain text, because it is an identity and not a secret",
+    ),
+    w(
+        "Backspace",
+        "Backspace",
+        Source::SettingsContact,
+        "deletes a character",
+    ),
+    w(
+        "Enter",
+        "Enter",
+        Source::SettingsContact,
+        "keeps it for the next save — nothing is sent by this key",
+    ),
+    w(
+        "Esc",
+        "Esc",
+        Source::SettingsContact,
+        "closes the box and leaves the stored contact alone",
     ),
     // -- the confirmation box ---------------------------------------------
     w(

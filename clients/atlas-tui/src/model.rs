@@ -1206,3 +1206,64 @@ pub struct Reading {
     #[serde(default, deserialize_with = "null_or_default")]
     pub quality_flags: Vec<String>,
 }
+
+// -- /api/news/settings ----------------------------------------------------
+
+/// What the desk reads the news from, and what it could read it from.
+///
+/// Its own payload rather than a section of the snapshot, for the reason
+/// [`LlmCatalog`] is: the owner composes it from the environment and its own
+/// setup catalog, and `/api/tui` carries none of it. Fetched when SETTINGS is
+/// entered, like the predictor board.
+///
+/// Every field is optional or defaulted, including the two the owner always
+/// sends. `configured: false` and "the owner did not say" are different facts
+/// about a desk, and a client that folded them would claim a news stack nobody
+/// configured — the same rule every other struct here is written by.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NewsSettings {
+    /// `synthetic` or `live`, following the request's own lane flag.
+    pub lane: Option<String>,
+    /// The stack the desk resolves *right now*. On an offline desk this is
+    /// `["synthetic"]` whatever the catalog says, which is the owner's truth
+    /// and not a state this client may talk it out of.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub stack: Vec<String>,
+    pub configured: Option<bool>,
+    /// Whether a contact is stored. Never the contact itself — the owner does
+    /// not serve it, and this client has nowhere to put one.
+    pub edgar_contact_set: Option<bool>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub catalog: Vec<NewsSource>,
+    /// What each member of the stack last did, in the owner's own words
+    /// (`ok`, or a sentence). Empty before any fetch.
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub outcomes: BTreeMap<String, String>,
+    /// Anything the owner grew that this client does not model yet, kept whole
+    /// for the reason `Snapshot::extra` is.
+    #[serde(flatten)]
+    pub extra: Value,
+}
+
+/// One source the desk could read, as the owner's setup catalog describes it.
+///
+/// `available` and `chosen` are two different claims and the owner makes both:
+/// a source can be installable-and-unchosen, chosen-and-unavailable is what the
+/// route refuses, and `default` is what the wizard would have picked. A client
+/// that derived any of them from the others would be a second opinion about a
+/// stack the owner owns.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NewsSource {
+    pub name: Option<String>,
+    pub tier: Option<String>,
+    /// What this source wants before it can be chosen — `""`,
+    /// `QLAB_EDGAR_CONTACT`, or `an Alpaca credential`.
+    pub needs: Option<String>,
+    /// The one-line cost of reading it, in the catalog's own words.
+    pub cost: Option<String>,
+    pub available: Option<bool>,
+    pub default: Option<bool>,
+    /// Whether the name is in the resolved stack right now. Not the same claim
+    /// as `default`.
+    pub chosen: Option<bool>,
+}

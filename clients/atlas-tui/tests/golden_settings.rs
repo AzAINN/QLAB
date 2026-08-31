@@ -203,16 +203,21 @@ fn every_card_answers_for_itself_and_no_card_is_marked_as_listening() {
     // failure the MODELS stamp was moved to the top over.
     let frame = settings().frame(120, 36);
     let body = content(&frame);
-    // Six cards, six statements, and the desk's is the specific one: a glass
-    // window's whole answer is that it points the desk nowhere.
+    // Seven cards, seven statements, and the two that carry keys in an armed
+    // window get the specific ones: a glass window points the desk nowhere and
+    // changes nothing about what it reads.
     assert!(
-        body.contains("read-only — this window cannot switch the desk"),
+        body.contains("read-only — cannot switch the desk"),
+        "{body}"
+    );
+    assert!(
+        body.contains("read-only — cannot change this desk"),
         "{body}"
     );
     assert_eq!(
         body.matches("read-only").count(),
-        6,
-        "one footer per card, and this pane draws six:\n{body}"
+        7,
+        "one footer per card, and this pane draws seven:\n{body}"
     );
     // And nothing is tinted. Focus is where a key would land, so a window with
     // no keys marks no card — a highlight that never moves under the arrows
@@ -542,7 +547,7 @@ fn an_unarmed_window_claims_no_key_and_offers_no_login_form() {
     // the rule the whole client is built on.
     let mut client = settings();
     let frame = client.frame(120, 36);
-    assert!(!content(&frame).contains("types a login"), "{frame}");
+    assert!(!content(&frame).contains("a login · t test"), "{frame}");
     for code in [
         KeyCode::Down,
         KeyCode::Up,
@@ -921,18 +926,20 @@ mod cards {
         let mut client = armed();
         let body = content(&client.frame(120, 36));
         assert!(
-            body.contains("a types a login"),
+            body.contains("a login · t test"),
             "the desk card opens listening:\n{body}"
         );
-        assert_eq!(body.matches("types a login").count(), 1, "{body}");
+        assert_eq!(body.matches("a login · t test").count(), 1, "{body}");
 
-        // One card down, and the footer moves with the focus. POLICY has no
-        // keys at all, and says so rather than going quiet — silence and "there
-        // is nothing here" are the two readings this pane spends rows to keep
-        // apart.
+        // One card down is NEWS, which has keys of its own — and two down is
+        // POLICY, which has none at all and says so rather than going quiet:
+        // silence and "there is nothing here" are the two readings this pane
+        // spends rows to keep apart.
+        press(&mut client, KeyCode::Down);
+        assert!(content(&client.frame(120, 36)).contains("s save"));
         press(&mut client, KeyCode::Down);
         let body = content(&client.frame(120, 36));
-        assert!(!body.contains("types a login"), "{body}");
+        assert!(!body.contains("a login · t test"), "{body}");
         assert!(body.contains("no keys on this card"), "{body}");
         assert_eq!(
             body_style_of(&client.buffer(120, 36), "POLICY").fg,
@@ -955,7 +962,7 @@ mod cards {
         }
         let body = content(&client.frame(120, 36));
         assert!(
-            !body.contains("a types a login"),
+            !body.contains("a login · t test"),
             "holding ↓ wrapped round to the first card:\n{body}"
         );
         assert_eq!(
@@ -967,7 +974,7 @@ mod cards {
         for _ in 0..12 {
             press(&mut client, KeyCode::Up);
         }
-        assert!(content(&client.frame(120, 36)).contains("a types a login"));
+        assert!(content(&client.frame(120, 36)).contains("a login · t test"));
 
         // Leaving the pane and coming back aims the keys at the desk card
         // again. The focus is the only thing on this client that decides what a
@@ -982,7 +989,7 @@ mod cards {
         client.press(KeyCode::Char('9'));
         let body = content(&client.frame(120, 36));
         assert!(
-            body.contains("a types a login"),
+            body.contains("a login · t test"),
             "the focus survived a trip away from the pane:\n{body}"
         );
         // Not just the footer: the key it names works.
@@ -1000,12 +1007,23 @@ mod cards {
         // work — and the footers would be describing a rule the router does not
         // have.
         let mut client = armed();
-        assert_eq!(
-            press(&mut client, KeyCode::Char('m')),
-            None,
-            "m is not the desk card's"
-        );
-        assert!(!content(&client.frame(120, 36)).contains("WHICH MINDS"));
+        // `m` belongs to two cards now and means a different box on each, so
+        // the keys that are *not* the desk card's are the news card's.
+        for key in ['s', 'v', ' '] {
+            assert_eq!(
+                press(&mut client, KeyCode::Char(key)),
+                None,
+                "{key} is not the desk card's"
+            );
+        }
+        // And the box `m` opens here is the lane picker rather than the model
+        // one — same widget, different list, and the card that owns each says
+        // which.
+        press(&mut client, KeyCode::Char('m'));
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("WHICH DATA"), "{body}");
+        assert!(!body.contains("WHICH MINDS"), "{body}");
+        press(&mut client, KeyCode::Esc);
 
         focus_on(&mut client, "MODELS");
         assert_eq!(
@@ -1307,6 +1325,554 @@ mod cards {
         let mut client = armed();
         focus_on(&mut client, "MODELS");
         press(&mut client, KeyCode::Char('m'));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+}
+
+// -- what the desk reads, and the lane it reads it on ------------------------
+
+/// A glass window still reads the card, and still cannot touch it.
+#[test]
+fn the_news_card_is_read_only_in_a_glass_window() {
+    let mut store = harness::fixture_store();
+    store.apply(
+        AppEvent::News(Box::new(
+            serde_json::from_str(include_str!("fixtures/news_settings.json")).unwrap(),
+        )),
+        Instant::now(),
+    );
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    let frame = client.frame(120, 36);
+    let body = content(&frame);
+    // The owner's own resolution and its catalog, both.
+    assert!(line_with(&frame, "stack").contains("macro rss"), "{frame}");
+    assert!(body.contains("gdelt"), "{body}");
+    // And the rule says there is nothing to press, rather than naming keys
+    // this window would refuse.
+    assert!(
+        body.contains("read-only — cannot change this desk"),
+        "{body}"
+    );
+    assert!(!body.contains("s save"), "{body}");
+}
+
+#[test]
+fn the_news_card_renders_read_only_at_120x36() {
+    let mut store = harness::fixture_store();
+    store.apply(
+        AppEvent::News(Box::new(
+            serde_json::from_str(include_str!("fixtures/news_settings.json")).unwrap(),
+        )),
+        Instant::now(),
+    );
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    insta::assert_snapshot!(client.frame(120, 36));
+}
+
+#[cfg(feature = "operator")]
+mod news {
+    use super::*;
+    use atlas::bus::Wrote;
+    use atlas::cmd::Command;
+    use atlas::model::NewsSettings;
+    use atlas::store::Posture;
+    use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+
+    fn payload() -> NewsSettings {
+        serde_json::from_str(include_str!("fixtures/news_settings.json")).unwrap()
+    }
+
+    /// SETTINGS on the captured desk, armed, with the news answer folded in and
+    /// one frame drawn — every floor and every click rectangle on this pane is
+    /// read off the area the last frame published.
+    fn armed_with(news: NewsSettings) -> Client {
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        store.apply(AppEvent::News(Box::new(news)), Instant::now());
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
+        client.frame(120, 36);
+        client
+    }
+
+    fn armed() -> Client {
+        armed_with(payload())
+    }
+
+    fn press(client: &mut Client, code: KeyCode) -> Option<Command> {
+        let acted = atlas::ui::shell::on_key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        );
+        client.frame(120, 36);
+        acted
+    }
+
+    fn click(client: &mut Client, column: u16, row: u16) -> Option<Command> {
+        let acted = atlas::ui::shell::on_mouse(
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut client.store,
+            &mut client.views,
+        );
+        client.frame(120, 36);
+        acted
+    }
+
+    /// The screen row a line is drawn on, so a click can be aimed at what the
+    /// operator is actually looking at rather than at a coordinate this test
+    /// worked out for itself.
+    fn row_of(client: &Client, needle: &str) -> u16 {
+        client
+            .frame(120, 36)
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row contains {needle}")) as u16
+    }
+
+    /// Put the focus on NEWS, which is the card after DESK.
+    fn on_news(client: &mut Client) {
+        press(client, KeyCode::Down);
+    }
+
+    /// Type a pair into the open login form and send it, so the form is
+    /// *waiting* — which is the only state an owner's answer reaches it in.
+    fn fill(client: &mut Client) {
+        for c in "PKTEST0123456789".chars() {
+            press(client, KeyCode::Char(c));
+        }
+        press(client, KeyCode::Tab);
+        for c in "s3cretABCDEFGHIJKLMNOPQRSTUV".chars() {
+            press(client, KeyCode::Char(c));
+        }
+        press(client, KeyCode::Enter);
+    }
+
+    #[test]
+    fn a_tick_is_a_draft_and_the_card_says_so_until_it_is_sent() {
+        let mut client = armed();
+        on_news(&mut client);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("s save"), "the card names its keys:\n{body}");
+        assert!(
+            !body.contains("EDITED"),
+            "a fresh card is not an edit:\n{body}"
+        );
+
+        // The cursor opens on the first source and Space ticks the one under
+        // it. Nothing is sent: the draft is this window's until `s` carries it.
+        press(&mut client, KeyCode::Down); // alpaca -> edgar
+        press(&mut client, KeyCode::Down); // edgar -> macro
+        press(&mut client, KeyCode::Down); // macro -> rss
+        press(&mut client, KeyCode::Down); // rss -> gdelt
+        assert_eq!(press(&mut client, KeyCode::Char(' ')), None, "a tick sent");
+        let frame = client.frame(120, 36);
+        assert!(content(&frame).contains("EDITED"), "{frame}");
+        assert!(line_with(&frame, "gdelt").contains("[x]"), "{frame}");
+        // And the owner's own answer under it is untouched — the draft is not
+        // a copy of the stack.
+        assert!(line_with(&frame, "stack").contains("macro rss"), "{frame}");
+
+        // Ticked off again, and the mark goes with it: back to the owner's set
+        // is not an edit.
+        press(&mut client, KeyCode::Char(' '));
+        assert!(!content(&client.frame(120, 36)).contains("EDITED"));
+    }
+
+    #[test]
+    fn a_source_this_desk_cannot_read_is_refused_on_the_keystroke() {
+        // The owner answers the same 400, and the row already carries what it
+        // is waiting for. A tick that appeared and then vanished on the save
+        // would be this pane showing a state the desk can never be in.
+        let mut client = armed();
+        on_news(&mut client);
+        assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
+        let frame = client.frame(120, 36);
+        assert!(
+            content(&frame).contains("alpaca needs an Alpaca credential"),
+            "{frame}"
+        );
+        assert!(
+            !line_with(&frame, " alpaca").contains("[x]"),
+            "a source the desk cannot read was ticked:\n{frame}"
+        );
+        // Nothing is claimed as edited by a refusal.
+        assert!(!content(&frame).contains("EDITED"), "{frame}");
+    }
+
+    #[test]
+    fn edgar_without_a_contact_is_not_sent_and_the_card_points_at_the_key() {
+        // The second refusal made here rather than by the owner, and for the
+        // same reason: the remedy is a key on this card, and the owner's
+        // sentence names the shape of a contact rather than the box that takes
+        // one.
+        let mut client = armed();
+        on_news(&mut client);
+        press(&mut client, KeyCode::Down); // edgar
+        press(&mut client, KeyCode::Char(' '));
+        assert_eq!(
+            press(&mut client, KeyCode::Char('s')),
+            None,
+            "a stack the desk cannot honour was sent"
+        );
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("edgar needs a contact — press c"), "{body}");
+        // The same for the checked save: `v` is `s` with one more question.
+        assert_eq!(press(&mut client, KeyCode::Char('v')), None);
+
+        // The contact box takes one, keeps it in the draft, and sends nothing
+        // by itself.
+        press(&mut client, KeyCode::Char('c'));
+        for c in "Jane Quant <jane@x.io>".chars() {
+            assert_eq!(press(&mut client, KeyCode::Char(c)), None);
+        }
+        let box_frame = client.frame(120, 36);
+        assert!(content(&box_frame).contains("EDGAR CONTACT"), "{box_frame}");
+        assert!(content(&box_frame).contains("jane@x.io"), "{box_frame}");
+        assert_eq!(press(&mut client, KeyCode::Enter), None, "the box sent");
+        // Closed, and the contact is nowhere on the pane: it lives in the draft
+        // and in the one POST that carries it.
+        let closed = client.frame(120, 36);
+        assert!(!content(&closed).contains("jane@x.io"), "{closed}");
+
+        // And now the save carries both halves.
+        assert_eq!(
+            press(&mut client, KeyCode::Char('s')),
+            Some(Command::NewsSettings {
+                providers: vec!["edgar".into(), "macro".into(), "rss".into()],
+                contact: Some("Jane Quant <jane@x.io>".into()),
+                verify: false,
+                // The lane the card is drawing, which is the lane the answer in
+                // front of the operator is about.
+                offline: false,
+            })
+        );
+        // One request at a time: the route writes the operator's `.env`.
+        assert_eq!(press(&mut client, KeyCode::Char('s')), None);
+    }
+
+    #[test]
+    fn the_checked_save_is_the_same_request_with_one_more_question() {
+        let mut client = armed();
+        on_news(&mut client);
+        assert_eq!(
+            press(&mut client, KeyCode::Char('v')),
+            Some(Command::NewsSettings {
+                // Untouched, so the draft is the owner's own chosen set.
+                providers: vec!["macro".into(), "rss".into()],
+                contact: None,
+                verify: true,
+                offline: false,
+            })
+        );
+    }
+
+    #[test]
+    fn the_owners_answer_replaces_the_draft_and_its_refusal_stays_on_the_card() {
+        let mut client = armed();
+        on_news(&mut client);
+        press(&mut client, KeyCode::Down);
+        press(&mut client, KeyCode::Char(' ')); // edgar, with no contact
+        press(&mut client, KeyCode::Char('c'));
+        for c in "Jane <jane@x.io>".chars() {
+            press(&mut client, KeyCode::Char(c));
+        }
+        press(&mut client, KeyCode::Enter);
+        assert!(press(&mut client, KeyCode::Char('s')).is_some());
+
+        // A refusal is the owner's sentence, on the card that asked — the
+        // toast that carries it too is gone in four seconds.
+        client.views.wrote(&Wrote::NewsRefused {
+            said: "edgar needs a contact, as Your Name <you@example.org>".into(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("as Your Name"), "{body}");
+        assert!(
+            body.contains("EDITED"),
+            "a refusal discarded the draft:\n{body}"
+        );
+
+        // And an applied change discards it: the refetch behind the outcome is
+        // what the card then draws, so an edit mark over a landed change would
+        // be this pane disagreeing with the desk.
+        client.views.wrote(&Wrote::NewsSaved {
+            stack: vec!["edgar".into(), "macro".into(), "rss".into()],
+            checked: false,
+            verified: Vec::new(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(!body.contains("EDITED"), "{body}");
+        assert!(!body.contains("as Your Name"), "{body}");
+    }
+
+    #[test]
+    fn a_card_with_no_answer_yet_says_so_rather_than_claiming_an_empty_desk() {
+        // "the owner has not answered" and "this desk reads nothing" are two
+        // facts, and a blank card would merge them.
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
+        client.frame(120, 36);
+        let mut client = client;
+        on_news(&mut client);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("has not said what this desk"), "{body}");
+        // And every key on the card declines rather than pretending.
+        assert_eq!(press(&mut client, KeyCode::Char(' ')), None);
+        assert_eq!(press(&mut client, KeyCode::Char('s')), None);
+        assert!(content(&client.frame(120, 36)).contains("has not said"));
+    }
+
+    #[test]
+    fn a_click_lands_on_the_row_the_operator_can_see() {
+        // One click, one visible change: the row takes the focus *and* is
+        // picked, because a click that only moved a cursor would leave the
+        // operator reaching for the keyboard to finish what they started.
+        let mut client = armed();
+        let row = row_of(&client, "gdelt");
+        assert_eq!(click(&mut client, 70, row), None);
+        let frame = client.frame(120, 36);
+        assert!(line_with(&frame, "gdelt").contains("[x]"), "{frame}");
+        assert!(content(&frame).contains("EDITED"), "{frame}");
+        // The focus went with it, so the keys now mean what the card says.
+        assert!(content(&frame).contains("s save"), "{frame}");
+
+        // A click on another card's header moves the focus and picks nothing.
+        let header = row_of(&client, "▌ POLICY");
+        assert_eq!(click(&mut client, 12, header), None);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("no keys on this card"), "{body}");
+        assert!(!body.contains("s save"), "{body}");
+    }
+
+    #[test]
+    fn a_click_on_a_stated_key_word_does_exactly_what_the_key_does() {
+        // The words are found in the card's own rule, so a reworded footer
+        // moves its own affordances rather than leaving a rectangle over
+        // whatever the new sentence put there.
+        let mut client = armed();
+        on_news(&mut client);
+        let rule = row_of(&client, "s save");
+        let line = line_with(&client.frame(120, 36), "s save").to_string();
+        // Cells, not bytes: the frame is full of box-drawing characters and a
+        // byte offset would aim the click several columns short of the word.
+        let column = |word: &str| {
+            let byte = line
+                .find(word)
+                .unwrap_or_else(|| panic!("no {word} on {line}"));
+            line[..byte].chars().count() as u16
+        };
+
+        assert_eq!(
+            click(&mut client, column("save"), rule),
+            Some(Command::NewsSettings {
+                providers: vec!["macro".into(), "rss".into()],
+                contact: None,
+                verify: false,
+                offline: false,
+            })
+        );
+        // And `contact` opens the box the key opens.
+        client.views.wrote(&Wrote::NewsSaved {
+            stack: vec!["macro".into(), "rss".into()],
+            checked: false,
+            verified: Vec::new(),
+        });
+        client.frame(120, 36);
+        assert_eq!(click(&mut client, column("contact"), rule), None);
+        assert!(content(&client.frame(120, 36)).contains("EDGAR CONTACT"));
+    }
+
+    #[test]
+    fn the_lane_picker_sends_what_slash_mode_sends() {
+        let mut client = armed();
+        // DESK is where the focus opens, and the card names the key.
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("m switch lane"), "{body}");
+        press(&mut client, KeyCode::Char('m'));
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("WHICH DATA"), "{body}");
+        assert!(body.contains("synthetic (demo)"), "{body}");
+        // The fixture desk is synthetic · simulated, so the box opens on the
+        // row it is already running and Enter there changes nothing anyone can
+        // see — the same rule the model switcher opens by.
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            Some(Command::DeskMode {
+                data: "synthetic".into(),
+                book: "simulated".into()
+            })
+        );
+    }
+
+    #[test]
+    fn choosing_live_with_no_login_opens_the_form_and_comes_back_after_it() {
+        // Not sent and not refused: the picker steps aside for the box that
+        // fixes it. The fixture desk has no credential the owner can read.
+        let mut client = armed();
+        press(&mut client, KeyCode::Char('m'));
+        press(&mut client, KeyCode::Down);
+        assert_eq!(
+            press(&mut client, KeyCode::Enter),
+            None,
+            "a lane the desk cannot reach was sent"
+        );
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("ALPACA LOGIN"), "{body}");
+        assert!(!body.contains("WHICH DATA"), "{body}");
+
+        // A login the owner cannot read does not bring the picker back: that
+        // would put the operator on the row that sent them here.
+        fill(&mut client);
+        client.views.wrote(&Wrote::LoggedIn {
+            usable: false,
+            note: "stored, but no credential resolves".into(),
+        });
+        assert!(!content(&client.frame(120, 36)).contains("WHICH DATA"));
+
+        // One that works does, on the row they were reaching for.
+        press(&mut client, KeyCode::Char('m'));
+        press(&mut client, KeyCode::Down);
+        press(&mut client, KeyCode::Enter);
+        fill(&mut client);
+        client.views.wrote(&Wrote::LoggedIn {
+            usable: true,
+            note: "PKTEST… · ACTIVE".into(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("WHICH DATA"),
+            "the picker did not come back:\n{body}"
+        );
+        assert!(body.contains("live · alpaca"), "{body}");
+    }
+
+    #[test]
+    fn the_arrows_walk_through_the_news_rows_and_out_of_the_card() {
+        // A row cursor an operator cannot leave is the same fault as a card
+        // highlight that never moves — and NEWS sits second in the walk, so
+        // trapping it would put five cards beyond reach of the arrows.
+        let mut client = armed();
+        for _ in 0..7 {
+            press(&mut client, KeyCode::Down);
+        }
+        let body = content(&client.frame(120, 36));
+        assert!(
+            !body.contains("s save"),
+            "the walk never left NEWS:\n{body}"
+        );
+        assert!(body.contains("no keys on this card"), "{body}");
+        // And back up through it to the desk card.
+        for _ in 0..7 {
+            press(&mut client, KeyCode::Up);
+        }
+        assert!(content(&client.frame(120, 36)).contains("m switch lane"));
+    }
+
+    #[test]
+    fn a_check_is_read_per_member_and_never_off_the_flag_beside_them() {
+        // `verify.ok` is any-member: it is true when *one* source answered. A
+        // card that drew it as whole-stack health would report a dead feed as
+        // a clean check, so nothing here reads it — every row carries its own
+        // member's verdict.
+        //
+        // And a member can answer *and* be degraded, which is a third state
+        // neither a pass-list nor a fail-list can hold: `partial:` is a fact
+        // about one feed rather than a warning about the desk, and it is drawn
+        // dim beside the row that earned it.
+        let mut client = armed();
+        on_news(&mut client);
+        assert!(press(&mut client, KeyCode::Char('v')).is_some());
+        client.views.wrote(&Wrote::NewsSaved {
+            stack: vec!["macro".into(), "rss".into()],
+            checked: true,
+            verified: vec![
+                atlas::bus::NewsMember {
+                    name: "macro".into(),
+                    ok: true,
+                    detail: String::new(),
+                    quality_flags: vec!["partial: ecb: 502 from the calendar".into()],
+                },
+                atlas::bus::NewsMember {
+                    name: "rss".into(),
+                    ok: false,
+                    detail: "rss feed returned 503".into(),
+                    quality_flags: Vec::new(),
+                },
+            ],
+        });
+        let frame = client.frame(120, 36);
+        // The catalog row, not the stack row above it, which names macro too.
+        let macro_row = line_with(&frame, "[x] macro");
+        assert!(macro_row.contains("partial"), "{frame}");
+        assert!(line_with(&frame, "[x] rss").contains("rss feed"), "{frame}");
+        // The degraded member is not toned as a problem and the dead one is:
+        // a `partial:` drawn amber would train an operator to read past the
+        // row that is actually a failure.
+        let buffer = client.buffer(120, 36);
+        assert_eq!(
+            body_style_of(&buffer, "partial").fg,
+            Some(Theme::truecolor().text_dim)
+        );
+        assert_eq!(
+            body_style_of(&buffer, "rss feed").fg,
+            Some(Theme::truecolor().warning)
+        );
+
+        // A check that came back saying nothing is not a clean one.
+        assert!(press(&mut client, KeyCode::Char('v')).is_some());
+        client.views.wrote(&Wrote::NewsSaved {
+            stack: vec!["macro".into(), "rss".into()],
+            checked: true,
+            verified: Vec::new(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("did not say what it checked"), "{body}");
+        assert!(
+            !body.contains("partial"),
+            "a stale check outlived its request:\n{body}"
+        );
+    }
+
+    #[test]
+    fn the_news_card_renders_armed_at_120x36() {
+        let mut client = armed();
+        on_news(&mut client);
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn the_edited_news_card_renders_at_120x36() {
+        let mut client = armed();
+        on_news(&mut client);
+        press(&mut client, KeyCode::Down);
+        press(&mut client, KeyCode::Down);
+        press(&mut client, KeyCode::Down);
+        press(&mut client, KeyCode::Down);
+        press(&mut client, KeyCode::Char(' '));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn the_lane_picker_renders_at_120x36() {
+        let mut client = armed();
+        press(&mut client, KeyCode::Char('m'));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[test]
+    fn the_contact_box_renders_at_120x36() {
+        let mut client = armed();
+        on_news(&mut client);
+        press(&mut client, KeyCode::Char('c'));
         insta::assert_snapshot!(client.frame(120, 36));
     }
 }

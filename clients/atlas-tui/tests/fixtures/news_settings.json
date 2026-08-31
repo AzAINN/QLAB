@@ -1,0 +1,24 @@
+{
+  "lane": "live",
+  "stack": ["macro", "rss"],
+  "configured": true,
+  "edgar_contact_set": false,
+  "catalog": [
+    {"name": "alpaca", "tier": "secondary", "needs": "an Alpaca credential",
+     "cost": "symbol-tagged wire copy; one request per symbol",
+     "available": false, "default": false, "chosen": false},
+    {"name": "edgar", "tier": "primary", "needs": "QLAB_EDGAR_CONTACT",
+     "cost": "filings only; 10 requests/second, contact required",
+     "available": true, "default": true, "chosen": false},
+    {"name": "macro", "tier": "primary", "needs": "",
+     "cost": "central-bank calendars; one request per window",
+     "available": true, "default": true, "chosen": true},
+    {"name": "rss", "tier": "secondary", "needs": "",
+     "cost": "headlines only; no body text",
+     "available": true, "default": true, "chosen": true},
+    {"name": "gdelt", "tier": "wide", "needs": "",
+     "cost": "global coverage; 43s-75s per request",
+     "available": true, "default": false, "chosen": false}
+  ],
+  "outcomes": {"macro": "ok", "rss": "rss feed returned 503"}
+}

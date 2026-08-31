@@ -11,7 +11,7 @@
 //! the frame loop for the length of a request.
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
-use crate::model::{LlmCatalog, PredictorDetail, RegimePanel, Snapshot, Templates};
+use crate::model::{LlmCatalog, NewsSettings, PredictorDetail, RegimePanel, Snapshot, Templates};
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -131,6 +131,12 @@ pub enum Refetch {
     /// almost entirely re-fetching an answer the client already holds. It is
     /// asked for when the PREDICTORS view opens and when `r` is pressed there.
     Predictors,
+    /// What the desk reads the news from. No beat behind it for the same
+    /// reason as the board: it changes when an operator changes it, so a
+    /// cadence would spend a request per poll re-reading an answer this client
+    /// already holds. Asked for when SETTINGS opens, when `r` is pressed
+    /// there, and after the pane's own POST.
+    News,
 }
 
 /// The runtime's end of the poller.
@@ -163,6 +169,11 @@ impl PollerHandle {
     /// was.
     pub fn predictors(&self) {
         let _ = self.refetch.send(Refetch::Predictors);
+    }
+
+    /// Ask what the desk reads the news from, once. Same shape again.
+    pub fn news(&self) {
+        let _ = self.refetch.send(Refetch::News);
     }
 }
 
@@ -208,6 +219,11 @@ async fn poll_loop(
     let backends_url = format!("{base}/api/llm/backends");
     // No lane here either: the board is a registry row, identical in both.
     let predictors_url = format!("{base}/api/research/predictors");
+    // The lane, because the route reads it: `stack` and `lane` both follow the
+    // flag, and an offline desk resolves `synthetic` whatever is configured.
+    // Asking without it would let the owner answer about a desk mode this
+    // window is not pointed at.
+    let news_url = format!("{base}/api/news/settings?offline={lane}");
 
     // Two facts, not one. `up` is what the chips read — a payload this client
     // could actually use — and `reachable` is what the socket said.
@@ -345,10 +361,12 @@ async fn poll_loop(
                         let mut jump = first == Refetch::Now;
                         let mut catalog = first == Refetch::Backends;
                         let mut predictors = first == Refetch::Predictors;
+                        let mut news = first == Refetch::News;
                         while let Ok(next) = refetch.try_recv() {
                             jump |= next == Refetch::Now;
                             catalog |= next == Refetch::Backends;
                             predictors |= next == Refetch::Predictors;
+                            news |= next == Refetch::News;
                         }
                         if catalog {
                             match fetch::<LlmCatalog>(&client, &backends_url).await {
@@ -391,6 +409,29 @@ async fn poll_loop(
                                 // reasoning as the panel and the templates.
                                 Fetched::Failed(error) => {
                                     tracing::warn!(%error, "predictor board fetch failed")
+                                }
+                            }
+                        }
+                        if news {
+                            match fetch::<NewsSettings>(&client, &news_url).await {
+                                Fetched::Decoded(payload) => {
+                                    emit(&tx, AppEvent::News(Box::new(payload)))?
+                                }
+                                Fetched::Malformed(error) => emit(
+                                    &tx,
+                                    AppEvent::Http(HttpResult::Malformed {
+                                        url: news_url.clone(),
+                                        error,
+                                    }),
+                                )?,
+                                // What the desk reads is not whether the desk
+                                // is there: a failure here must not tell the
+                                // operator the owner went away when the
+                                // snapshot that decides that is still
+                                // arriving. Same reasoning as the panel, the
+                                // templates and the board.
+                                Fetched::Failed(error) => {
+                                    tracing::warn!(%error, "news settings fetch failed")
                                 }
                             }
                         }

@@ -360,6 +360,33 @@ pub enum Choice {
     Rejected(String),
 }
 
+/// What the owner did with a news stack. Two outcomes, and the second is not
+/// an error — the same split [`Choice`] makes, for the same reason.
+///
+/// The route refuses with **400 and a sentence**: an unknown source name, a
+/// source whose credential does not resolve, a missing or malformed EDGAR
+/// contact. Every one of those is a considered answer about a well-formed
+/// request, written for a human, and the remedy is inside it. Folding them
+/// into `Err` would put "edgar needs a contact, as Your Name
+/// <you@example.org>" in the same shape as a broken socket.
+#[derive(Debug)]
+pub enum News {
+    /// Applied. Carries the stack the owner *resolves* afterwards, which is
+    /// not always the list that was sent — an offline desk reads `synthetic`
+    /// whatever is configured — plus the verify, per member, when one was
+    /// asked for.
+    ///
+    /// **Per member, and never the `verify.ok` beside them.** That flag is
+    /// any-member: it is true when one source answered, and a client that read
+    /// it as whole-stack health would report a dead feed as a clean check.
+    Applied {
+        stack: Vec<String>,
+        verified: Vec<crate::bus::NewsMember>,
+    },
+    /// The owner would not read the news that way. Its own sentence.
+    Rejected(String),
+}
+
 /// What the venue said about the stored login.
 ///
 /// `/api/alpaca/test` answers **200 whatever happened** — a missing profile, a
@@ -814,6 +841,71 @@ impl WriteClient {
         Err(err.with_said(said))
     }
 
+    // -- the news stack ----------------------------------------------------
+
+    /// Choose which sources the desk reads its news from.
+    ///
+    /// It changes what the desk *reads*, never what it can execute: the route
+    /// writes `.env` and the process environment, takes no registry lock, and
+    /// touches no plan, approval or posture. Every gate between a plan and a
+    /// fill is unmoved by it.
+    ///
+    /// `contact` is an `Option` because "leave the stored one alone" and "use
+    /// this one" are two different requests, and an empty string is neither —
+    /// the owner would read one as a contact of nothing and refuse the shape.
+    /// It is an identity the SEC asks callers to send, not a credential: it is
+    /// carried as a plain `&str` rather than a [`Secret`], and it is still
+    /// never rendered anywhere but the box it is typed into.
+    ///
+    /// `offline` travels explicitly. The route defaults it to the desk mode,
+    /// and a window pointed at the other lane would then be told about a stack
+    /// it is not reading.
+    pub async fn set_news(
+        &self,
+        providers: &[String],
+        contact: Option<&str>,
+        verify: bool,
+        offline: bool,
+    ) -> Result<News, WriteError> {
+        let mut body = json!({
+            "providers": providers,
+            "verify": verify,
+            "offline": offline,
+        });
+        if let Some(contact) = contact {
+            body["edgar_contact"] = json!(contact);
+        }
+        match self.post("/api/news/settings", body).await {
+            Ok(said) => Ok(News::Applied {
+                // The owner's own resolution, read off the answer. A 200 with
+                // no stack is not a contract failure worth refusing the whole
+                // change over — the change *happened* — so it reports an empty
+                // resolution and the refetch behind it says what the desk now
+                // reads.
+                stack: said
+                    .get("stack")
+                    .and_then(Value::as_array)
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                verified: match verify {
+                    true => verified(&said),
+                    // Not asked, so not read: a members block on a request
+                    // that did not ask for one is not this call's answer.
+                    false => Vec::new(),
+                },
+            }),
+            Err(WriteError::Refused { status: 400, said }) => Ok(News::Rejected(sentence(&said))),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Ask the owner to put the stored login to the venue.
     ///
     /// One outcome, not two: the route answers 200 for a rejected key, a silent
@@ -923,6 +1015,59 @@ fn account_line(body: &Value) -> String {
     }
 }
 
+/// What a verify said, one row per member.
+///
+/// **The `verify.ok` beside the members is deliberately not read.** It is
+/// any-member — true when one source answered — so a client that reported it
+/// as the answer would draw a dead feed as a clean check. Every member is
+/// carried instead, including the ones that answered, because a member can be
+/// `ok` *and* carry a `partial:` flag and that is a third state neither a
+/// pass-list nor a fail-list can hold.
+///
+/// Empty when the answer carries no members at all. A save that was asked to
+/// check and said nothing about what it checked is a broken contract, and the
+/// caller reports it as one rather than as a clean check.
+fn verified(said: &Value) -> Vec<crate::bus::NewsMember> {
+    let Some(members) = said
+        .get("verify")
+        .and_then(|block| block.get("members"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    members
+        .iter()
+        .map(|(name, member)| {
+            // Absent is not "it answered". The owner always sends the flag, so
+            // its absence is a contract this client cannot read — and silence
+            // about a feed the desk is about to reason from must not pass as a
+            // clean one. Invariant 4.
+            let ok = member.get("ok").and_then(Value::as_bool);
+            crate::bus::NewsMember {
+                name: crate::format::bounded(name, SAID_MAX),
+                ok: ok == Some(true),
+                detail: match (ok, field(member, "detail")) {
+                    (None, said) => said
+                        .unwrap_or_else(|| "the owner did not say whether it answered".to_string()),
+                    (_, said) => said.unwrap_or_default(),
+                },
+                quality_flags: member
+                    .get("quality_flags")
+                    .and_then(Value::as_array)
+                    .map(|flags| {
+                        flags
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .filter(|flag| !flag.is_empty())
+                            .map(|flag| crate::format::bounded(flag, SAID_MAX))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
 /// One string field of an owner answer, absent when it is empty — the
 /// `Some("")`-is-absent rule this client holds everywhere.
 fn field(body: &Value, key: &str) -> Option<String> {
@@ -1022,6 +1167,50 @@ mod tests {
         let said = err.to_string();
         assert!(said.contains("400"));
         assert!(said.contains("human_confirmed=true is required"));
+    }
+
+    #[test]
+    fn a_verify_is_read_per_member_and_the_flag_beside_them_is_ignored() {
+        // `verify.ok` is any-member: true when one source answered. Reading it
+        // as the answer would report a dead feed as a clean check, so nothing
+        // here reads it — and a member can be `ok` *and* carry a `partial:`
+        // flag, which is a third state a pass/fail split cannot hold.
+        let said = serde_json::json!({
+            "verify": {
+                "ok": true,
+                "members": {
+                    "macro": {"ok": true, "detail": "",
+                              "quality_flags": ["partial: ecb: 502"]},
+                    "rss": {"ok": false, "detail": "rss feed 503", "quality_flags": []},
+                    "gdelt": {"detail": "", "quality_flags": []}
+                }
+            }
+        });
+        let members = verified(&said);
+        assert_eq!(members.len(), 3);
+        let of = |name: &str| {
+            members
+                .iter()
+                .find(|member| member.name == name)
+                .unwrap()
+                .said()
+        };
+        assert_eq!(of("macro"), ("partial: ecb: 502".to_string(), false));
+        assert_eq!(of("rss"), ("rss feed 503".to_string(), true));
+        // No flag at all is not "it answered": the owner always sends one, so
+        // its absence is a contract this client cannot read, and silence about
+        // a feed the desk reasons from may not pass as a clean one.
+        assert_eq!(
+            of("gdelt"),
+            (
+                "the owner did not say whether it answered".to_string(),
+                true
+            )
+        );
+        // And a body with no members at all is empty rather than a clean
+        // check invented here.
+        assert!(verified(&serde_json::json!({"stack": ["macro"]})).is_empty());
+        assert!(verified(&serde_json::json!({"verify": {"ok": true}})).is_empty());
     }
 
     #[test]

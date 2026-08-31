@@ -467,6 +467,59 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
                 false => "the desk is read-only — no window writes to it".to_string(),
             },
         ),
+        // The owner's own resolution, never the list that was sent: an
+        // offline desk reads `synthetic` whatever was ticked, and a receipt
+        // echoing the request would hide exactly that. The verify line rides
+        // with it when one was asked for, because "saved" and "saved and every
+        // source answered" are two different claims.
+        Wrote::NewsSaved {
+            stack,
+            checked,
+            verified,
+        } => {
+            let reads = match stack.is_empty() {
+                true => "the owner did not say what this desk now reads".to_string(),
+                false => format!("this desk reads {}", stack.join(" ")),
+            };
+            // Per member, never the any-member flag beside them: a check that
+            // reported "ok" because one source of four answered is the reading
+            // this line exists to make impossible. A member that answered with
+            // a `partial:` flag says so here too — it is neither a failure nor
+            // health, and the operator is the one who decides which.
+            let checked = match (checked, verified.is_empty()) {
+                (false, _) => None,
+                (true, true) => Some("the owner did not say what it checked".to_string()),
+                (true, false) => Some(
+                    verified
+                        .iter()
+                        .map(|member| {
+                            let (said, _) = member.said();
+                            format!("{} {said}", member.name)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                ),
+            };
+            Toast::new(
+                match verified.iter().any(|member| !member.ok) {
+                    // A source that did not answer is a desk reading less than
+                    // it was told to. The save itself worked, so it is a
+                    // warning rather than an alarm.
+                    true => Level::Warn,
+                    false => Level::Info,
+                },
+                "news sources",
+                match checked {
+                    Some(checked) => format!("{reads} — {checked}"),
+                    None => reads,
+                },
+            )
+        }
+        // `Warn`, not `Alarm`: the desk considered the stack and declined it,
+        // and nothing was written. The sentence carries the remedy.
+        Wrote::NewsRefused { said } => {
+            Toast::new(Level::Warn, "news sources refused", said.clone())
+        }
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

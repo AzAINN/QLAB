@@ -210,6 +210,35 @@ pub enum Command {
     /// cannot produce an item that creates a paper plan.
     #[cfg(feature = "operator")]
     Actionables,
+    /// Choose which sources the desk reads its news from.
+    ///
+    /// **It widens what the desk reads and never what it can do.** The owner's
+    /// route writes `.env` and the process environment; it takes no registry
+    /// lock and touches no plan, approval or posture, and every gate between a
+    /// plan and a fill is unmoved by it. Naming a wire feed here is not
+    /// permission to trade on what it says.
+    ///
+    /// `providers` is whatever the operator ticked, sent whole: the owner owns
+    /// the catalog and refuses a name it does not know, a source whose
+    /// credential does not resolve, and an empty list — an explicit "no real
+    /// sources" is `["synthetic"]`, exactly as its wizard writes it.
+    ///
+    /// `contact` is an identity the SEC asks EDGAR callers to send rather than
+    /// a credential, so it is a `String` and not a `Secret`. It still lives in
+    /// exactly two places — the box it is typed into and this body — and
+    /// `Debug` on this variant is the reason it is named rather than quoted
+    /// anywhere the dispatcher can log.
+    #[cfg(feature = "operator")]
+    NewsSettings {
+        providers: Vec<String>,
+        contact: Option<String>,
+        /// Whether to ask the owner to fetch one live window per member before
+        /// reporting. Off by default: it is minutes with `gdelt` chosen.
+        verify: bool,
+        /// The lane this window is pointed at, so the owner answers about the
+        /// desk being read rather than about its own default.
+        offline: bool,
+    },
     /// Ask the owner what its backends serve.
     ///
     /// A read, and the only one a keystroke asks for: the route probes daemons,
@@ -305,6 +334,21 @@ impl PartialEq for Command {
                     choice: y,
                 },
             ) => a == b && x == y,
+            #[cfg(feature = "operator")]
+            (
+                Command::NewsSettings {
+                    providers: a,
+                    contact: x,
+                    verify: p,
+                    offline: o,
+                },
+                Command::NewsSettings {
+                    providers: b,
+                    contact: y,
+                    verify: q,
+                    offline: n,
+                },
+            ) => a == b && x == y && p == q && o == n,
             #[cfg(feature = "operator")]
             (Command::Posture { armed: a }, Command::Posture { armed: b }) => a == b,
             #[cfg(feature = "operator")]
@@ -1011,7 +1055,12 @@ fn execute(query: &str, store: &Store, posture: Posture) -> Resolved {
             "plan {short} has no approval on record — /approve {short} opens one"
         ));
     }
+    // The `return` is what makes the two cfg arms one function: without it the
+    // operator block is a statement and the glass line below it would be dead
+    // code in this build. Clippy reads it as needless because it only ever sees
+    // one arm — see the `allow`, which is about the pair rather than the line.
     #[cfg(feature = "operator")]
+    #[allow(clippy::needless_return)]
     {
         return Resolved::OpenExecute(id.to_string());
     }

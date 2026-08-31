@@ -141,6 +141,11 @@ async fn main() -> Result<()> {
     let writes = Writes::new(&base, store.forced_glass, tx.clone())?;
 
     let poller = http::spawn_poller(base.clone(), offline, tx.clone());
+    // Once, at startup, because the startup door names what this desk reads on
+    // the step where the operator is choosing the lane it reads it for. The
+    // route rides no beat, so without this the door's line would be `--` until
+    // somebody opened SETTINGS — which is after the door is gone.
+    poller.news();
     // The stream holds the poller so the two feeds are one story: an event that
     // says the desk moved brings the next snapshot forward instead of letting
     // the frame show a plan that already executed for another whole interval.
@@ -345,6 +350,12 @@ fn ingest(
                     if store.nav.view == ViewId::Predictors {
                         poller.predictors();
                     }
+                    // Same rule on SETTINGS: `r` refreshes what the operator is
+                    // looking at, and the news answer rides no beat that would
+                    // ever refresh it otherwise.
+                    if store.nav.view == ViewId::Settings {
+                        poller.news();
+                    }
                 }
                 // A read, and the only one a keystroke asks for. The store
                 // decides whether asking again could learn anything — the
@@ -377,6 +388,9 @@ fn ingest(
                 if store.nav.view == ViewId::Predictors {
                     poller.predictors();
                 }
+                if store.nav.view == ViewId::Settings {
+                    poller.news();
+                }
             }
         }
     }
@@ -396,9 +410,13 @@ fn ingest(
         if store.nav.view != before {
             fx.on_view_switch();
             // The rail is clickable, so a mouse can arrive on PREDICTORS the
-            // same way a digit does — same edge, same single fetch.
+            // same way a digit does — same edge, same single fetch. SETTINGS
+            // too, and for the same reason.
             if store.nav.view == ViewId::Predictors {
                 poller.predictors();
+            }
+            if store.nav.view == ViewId::Settings {
+                poller.news();
             }
         }
     }
@@ -409,6 +427,14 @@ fn ingest(
     #[cfg(feature = "operator")]
     if atlas::dispatch::refetches(&ev) {
         poller.now();
+    }
+    // And the one payload no snapshot carries. The pane's own POST changes
+    // what `/api/news/settings` answers and nothing else on the desk, so the
+    // nudge above would bring back a snapshot that says nothing about it —
+    // and the card would keep drawing the stack the operator just replaced.
+    #[cfg(feature = "operator")]
+    if matches!(&ev, AppEvent::Wrote(atlas::bus::Wrote::NewsSaved { .. })) {
+        poller.news();
     }
     // And the one surface that is *waiting* for an answer rather than being
     // told about one. The login form sends and then has to hear what the owner

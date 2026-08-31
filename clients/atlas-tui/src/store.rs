@@ -11,8 +11,9 @@ use crate::cmd::CmdLine;
 use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
-    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig, Plan,
-    Policy, PredictorDetail, RegimePanel, Run, Snapshot, System, Template, Workflow,
+    Algorithm, Approval, Asset, Coordinator, DeskMode, LeaderboardRow, LlmCatalog, LlmConfig,
+    NewsSettings, Plan, Policy, PredictorDetail, RegimePanel, Run, Snapshot, System, Template,
+    Workflow,
 };
 use crate::net::http;
 use crate::ui::door::Door;
@@ -447,6 +448,12 @@ pub struct Store {
     /// view, so "would asking again learn anything" is answered by the
     /// operator pressing `r`, not by a TTL this client would have to invent.
     predictor_detail: Option<PredictorDetail>,
+    /// What the desk reads the news from, fetched when SETTINGS opens.
+    ///
+    /// No arrival stamp beside it either, and for `predictor_detail`'s reason:
+    /// the fetch is edge-triggered on entering the pane and on `r` there, so
+    /// there is no TTL for this client to invent.
+    news: Option<NewsSettings>,
     /// The newest chat timestamp at the moment `/clear` ran. The bus keeps
     /// every row and AUDIT still draws them — this window just stops drawing
     /// rows at or before the mark. A timestamp rather than a count, because
@@ -618,6 +625,7 @@ impl Store {
             backends: None,
             backends_at: None,
             predictor_detail: None,
+            news: None,
             chat_cleared_through: None,
             nav: Nav::default(),
             cmd: CmdLine::default(),
@@ -783,6 +791,13 @@ impl Store {
                 self.predictor_detail = Some(*detail);
                 self.dirty = true;
             }
+            // Replaced wholesale for the same reason: the route serves the
+            // whole answer, and merging two of them would draw a catalog from
+            // one reading beside a stack from another.
+            AppEvent::News(settings) => {
+                self.news = Some(*settings);
+                self.dirty = true;
+            }
             // A keystroke may move a selection and a resize moves everything;
             // both owe a frame even though neither is desk news. A mouse event
             // is a keystroke's shape: a wheel moved a scroll, a click moved
@@ -868,7 +883,15 @@ impl Store {
                     // `actionables` block back, and a client-side copy of what
                     // it just asked for would be a second account of a list the
                     // desk already owns.
-                    Wrote::Armed { .. }
+                    // And so is a news stack. The owner's answer to
+                    // `/api/news/settings` is what the card draws, and the
+                    // write brings a fresh one of those forward — a client
+                    // copy would be a second account of what the desk reads,
+                    // and a wrong one on an offline desk, which resolves
+                    // `synthetic` whatever was chosen.
+                    Wrote::NewsSaved { .. }
+                    | Wrote::NewsRefused { .. }
+                    | Wrote::Armed { .. }
                     | Wrote::Proposed { .. }
                     | Wrote::ProposalStarted { .. }
                     | Wrote::ProposalRefused { .. }
@@ -980,6 +1003,15 @@ impl Store {
     /// the two apart.
     pub fn predictor_detail(&self) -> Option<&PredictorDetail> {
         self.predictor_detail.as_ref()
+    }
+
+    /// What the desk reads the news from, if SETTINGS has fetched it.
+    ///
+    /// `None` is "not asked yet or not answered yet", never "this desk reads
+    /// no news" — the payload's own `configured` says that, and the card keeps
+    /// the two apart.
+    pub fn news(&self) -> Option<&NewsSettings> {
+        self.news.as_ref()
     }
 
     /// Today's proposals, as the owner last served them.

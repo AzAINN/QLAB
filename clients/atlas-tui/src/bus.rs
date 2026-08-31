@@ -1,5 +1,5 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
-use crate::model::{LlmCatalog, PredictorDetail, RegimePanel, Snapshot, Template};
+use crate::model::{LlmCatalog, NewsSettings, PredictorDetail, RegimePanel, Snapshot, Template};
 
 pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
@@ -33,6 +33,12 @@ pub enum AppEvent {
     /// model's per-fold series, and the bus should not grow to its widest
     /// passenger.
     PredictorDetail(Box<PredictorDetail>),
+    /// What the desk reads the news from, from `/api/news/settings`.
+    ///
+    /// Fetched when SETTINGS is entered rather than on a beat, for
+    /// `PredictorDetail`'s reason: it changes when an operator changes it, and
+    /// a cadence would be re-fetching an answer this client already holds.
+    News(Box<NewsSettings>),
     Sse(SseEvent),
     Http(HttpResult),
     ConnUp(Channel),
@@ -174,9 +180,77 @@ pub enum Wrote {
     /// place an order is the one the owner persisted, and a receipt composed
     /// from the request would report an arming a failed write never made.
     Armed { armed: bool },
+    /// The owner applied a news stack.
+    ///
+    /// `stack` is what it resolves *after* the change — its own answer, never
+    /// the list that was sent, because an offline desk resolves `synthetic`
+    /// whatever was chosen and a receipt echoing the request would hide that.
+    ///
+    /// `checked` is whether a verify was asked for at all, and `verified` is
+    /// what came back — per member, never the any-member flag beside it. The
+    /// two are separate because a save that asked and got nothing back is a
+    /// broken contract rather than a clean check, and one flag cannot say both.
+    NewsSaved {
+        stack: Vec<String>,
+        checked: bool,
+        verified: Vec<NewsMember>,
+    },
+    /// The owner would not read the news that way — an unknown name, a source
+    /// it cannot reach, a missing or malformed contact. Its own sentence,
+    /// which carries the remedy and never the contact.
+    NewsRefused { said: String },
     /// The request itself failed: no owner, a timeout, a non-2xx. `said` is the
     /// owner's words verbatim when there were any.
     Failed { what: String, said: String },
+}
+
+/// One member of a news verify, as the owner reports it.
+///
+/// **`ok` and `quality_flags` are separate claims, and the owner makes both.**
+/// A source can answer *and* be degraded — `partial: <feed>: <err>` — which is
+/// why the top-level `verify.ok` is any-member and may not be drawn as
+/// whole-stack health. Nothing in this client reads that flag: every surface
+/// that shows a verify shows it per member, which is the only shape that can
+/// say "three answered, one of them half".
+///
+/// Ungated, unlike the outcome that carries it: the NEWS card renders these
+/// beside its rows in both builds, and the glass one simply never has any.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewsMember {
+    pub name: String,
+    pub ok: bool,
+    /// The owner's own sentence about a member that did not answer. Empty when
+    /// it did.
+    pub detail: String,
+    pub quality_flags: Vec<String>,
+}
+
+impl NewsMember {
+    /// What to show beside this member, and whether it is a problem.
+    ///
+    /// Three answers rather than two, because there are three states: a member
+    /// that did not answer, one that answered whole, and one that answered
+    /// with a feed missing. The third is not a failure and is not health, and
+    /// folding it either way is exactly what the any-member `ok` flag would do.
+    pub fn said(&self) -> (String, bool) {
+        if !self.ok {
+            return (
+                match self.detail.is_empty() {
+                    true => "did not answer".to_string(),
+                    false => self.detail.clone(),
+                },
+                true,
+            );
+        }
+        match self
+            .quality_flags
+            .iter()
+            .find(|flag| flag.starts_with("partial:"))
+        {
+            Some(flag) => (flag.clone(), false),
+            None => ("ok".to_string(), false),
+        }
+    }
 }
 
 /// One frame off `/api/stream`, already split into the parts the desk uses.

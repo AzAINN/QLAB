@@ -779,6 +779,15 @@ impl Door {
                 false => t.warning,
             }),
         )));
+        // What the desk will read *about* those prices, and where to change
+        // it. Display only: the door decides the pair and the posture and
+        // nothing else, and this line is here because the lane above is the
+        // question an operator is answering when they most want to know what
+        // the answer implies.
+        lines.push(Line::from(Span::styled(
+            news_line(store),
+            Style::default().fg(t.text_dim),
+        )));
         lines.push(self.footer("Enter chooses · ↑↓ moves · Esc — synthetic · simulated"));
         lines
     }
@@ -991,6 +1000,22 @@ enum ModelRow {
     },
     /// Leave every surface as the desk has it.
     Keep,
+}
+
+/// What this desk reads its news from, and where an operator changes it.
+///
+/// Three states, and they are three different facts. A resolved stack is the
+/// owner's own answer for this lane; `not configured` is the owner saying there
+/// is none; and `--` is a route nothing has answered yet, which must not read
+/// as either of the other two — the same rule every value on this client is
+/// drawn by.
+fn news_line(store: &Store) -> String {
+    let said = match store.news() {
+        Some(news) if !news.stack.is_empty() => news.stack.join(" "),
+        Some(_) => "not configured".to_string(),
+        None => MISSING.to_string(),
+    };
+    format!(" news: {said} · change later: Settings ▸ NEWS")
 }
 
 /// A desk mode word the owner sent, matched against the two this client knows.

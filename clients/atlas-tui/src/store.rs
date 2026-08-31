@@ -439,6 +439,109 @@ impl Posture {
     }
 }
 
+// -- the terminal pane ------------------------------------------------------
+//
+// Gated as a block, and the gate is what makes the monitoring artifact's claim
+// true rather than merely stated: `vt100` is named here and in the widget, both
+// behind this feature, so nothing in the `--no-default-features` build
+// references the parser and none of it is linked (`nm target/debug/atlas |
+// grep -c vt100` is 0 there and non-zero armed). A pane field carried ungated
+// "for symmetry" would put the parser back into a binary that has no key to
+// open a terminal with.
+
+/// What the desk calls the child it starts, in the sentences about it.
+///
+/// A constant rather than the session's own label, for the reason
+/// `ui::widgets::terminal` states about the pane's title: the design rules the
+/// child is always the desk's own verb, so a sentence that could name something
+/// else would be the place that claim quietly stopped being true.
+#[cfg(feature = "operator")]
+const CHILD: &str = "qlab cli";
+
+/// What the desk adds to an ending `pty.rs` wrote.
+///
+/// `pty.rs` says *what happened* and deliberately stops there; how to start
+/// another is the desk's own vocabulary, and `/cli` is a word only here. Kept
+/// short because it is joined onto a sentence that has to fit on one border row
+/// — `ui::widgets::terminal` marks what does not fit rather than cutting it.
+#[cfg(feature = "operator")]
+const AGAIN: &str = " · /cli starts another";
+
+/// Where the pane's child is, as the desk has to draw it.
+///
+/// Three states because there are three frames. `Absent` is ATLAS's own chat,
+/// unchanged. `Running` is a terminal the operator can be typing into.
+/// `Ended` is neither: the child is gone and the pane is still up, holding the
+/// last thing it printed — which, when a session fails, is the only place the
+/// reason was written — under a border that says what happened.
+#[cfg(feature = "operator")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtyState {
+    Absent,
+    Running,
+    Ended {
+        /// `pty.rs`'s own account of the ending, plus [`AGAIN`].
+        said: String,
+    },
+}
+
+/// The pane: one screen, and whatever is left of the child that wrote it.
+#[cfg(feature = "operator")]
+struct Pane {
+    /// Advanced in the fold and nowhere else. A parser stepped from a `draw`
+    /// would make a frame a function of how many times it had been drawn.
+    parser: vt100::Parser,
+    child: PaneChild,
+}
+
+/// The child, in the two states a pane can hold it in.
+///
+/// One field rather than a session beside a sentence beside a focus flag:
+/// three claims about whether a child is live are three chances for two of
+/// them to disagree, and the disagreement that matters here — a keyboard
+/// pointed at a process that has ended — is the one `ui::widgets::terminal`
+/// says must never be drawn.
+#[cfg(feature = "operator")]
+#[derive(Debug)]
+enum PaneChild {
+    /// A live session, and whether the keyboard is its. The flag lives here so
+    /// that an ending takes it away structurally rather than by remembering to.
+    Live {
+        session: crate::pty::PtySession,
+        focused: bool,
+    },
+    /// The child is gone. This is what it left on the border.
+    Gone { said: String },
+}
+
+#[cfg(feature = "operator")]
+impl std::fmt::Debug for Pane {
+    /// Written out rather than derived: `vt100::Parser` has no `Debug`, and
+    /// `Store` derives one. What is worth reading is the shape of the screen
+    /// and which state the child is in — not several thousand cells.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (rows, cols) = self.parser.screen().size();
+        f.debug_struct("Pane")
+            .field("screen", &format_args!("{cols}x{rows}"))
+            .field("child", &self.child)
+            .finish()
+    }
+}
+
+/// Say why there is no pane, on the bus and to the caller.
+///
+/// The bus half is what reaches the operator (`ui::widgets::toast`); the
+/// returned value is what tells the caller there is nothing to draw. Both, for
+/// the reason `pty::PtySession::open` returns and posts the same sentence: a
+/// caller and a desk need different things from one refusal.
+#[cfg(feature = "operator")]
+fn refuse_pty(tx: &crate::bus::Tx, said: String) -> String {
+    let _ = tx.send(AppEvent::Pty(crate::pty::PtyEvent::Failed {
+        said: said.clone(),
+    }));
+    said
+}
+
 #[derive(Debug)]
 pub struct Store {
     pub snapshot: Option<Snapshot>,
@@ -691,6 +794,22 @@ pub struct Store {
     /// `--pick`: this run was started to choose, so the door opens whatever the
     /// desk says.
     door_forced: bool,
+    /// The ATLAS terminal pane, while one is open.
+    ///
+    /// Here beside `door` and `cmd` — *where the operator is looking* — and for
+    /// the same reason they are: a frame stays a pure function of
+    /// `(store, fx, instant)` only if the screen it draws is state, and a
+    /// renderer that stepped a parser would repaint differently every time it
+    /// was asked the same question.
+    ///
+    /// It holds the *session* as well as the screen, which no other field in
+    /// this struct does. The alternative was a handle in the runtime and a
+    /// mirror of its state here, and that is two accounts of whether a child is
+    /// live — with the refusal that depends on the answer living in `main.rs`,
+    /// which is in no test binary. Private, with the pane section above as the
+    /// whole protocol.
+    #[cfg(feature = "operator")]
+    pty: Option<Pane>,
 }
 
 impl Default for Store {
@@ -743,6 +862,8 @@ impl Store {
             door: None,
             door_settled: false,
             door_forced: false,
+            #[cfg(feature = "operator")]
+            pty: None,
         }
     }
 
@@ -834,6 +955,201 @@ impl Store {
     pub fn settle_door(&mut self) {
         self.door = None;
         self.door_settled = true;
+        self.dirty = true;
+    }
+
+    // -- the terminal pane -------------------------------------------------
+
+    /// Start a child in the ATLAS pane, or say why there is not one.
+    ///
+    /// `cols` and `rows` are the **inner** rect the child draws on, not the
+    /// pane: the widget renders into `block.inner(area)`, so a session told the
+    /// outer size wraps its output two columns wider than the screen it is
+    /// parsed onto. The caller measures; this holds both to the same number.
+    ///
+    /// `tx` is the desk's own bus, and what it is for is the bridge below. The
+    /// child is read by a blocking thread that posts `PtyEvent`; this forwards
+    /// each one as [`crate::bus::AppEvent::Pty`] so it arrives at the one drain
+    /// point that owns the store. One task per session, ending by itself when
+    /// the session's senders drop — a process-lifetime forwarder would outlive
+    /// every pane that ever used it.
+    ///
+    /// Requires a tokio runtime, because that bridge is a task. Every caller
+    /// has one: a pane is opened from the runtime's own loop.
+    ///
+    /// **Both refusals are also posted on the bus**, exactly as `pty.rs` posts
+    /// the sentence it returns: the `Err` is a value saying there is no pane,
+    /// and the event is a line to read. A caller acting on one need not repeat
+    /// the other.
+    #[cfg(feature = "operator")]
+    pub fn open_pty(
+        &mut self,
+        spawn: &dyn crate::pty::Spawn,
+        cols: u16,
+        rows: u16,
+        tx: crate::bus::Tx,
+    ) -> Result<(), String> {
+        // A second child is refused rather than started beside the first: there
+        // is one screen, one keyboard and one border here, and whichever
+        // session lost that race would go on running with nothing reading it
+        // and no way to be typed at.
+        if let Some(Pane {
+            child: PaneChild::Live { .. },
+            ..
+        }) = &self.pty
+        {
+            return Err(refuse_pty(
+                &tx,
+                format!("`{CHILD}` is already running in this pane"),
+            ));
+        }
+        let (pty_tx, mut pty_rx) = tokio::sync::mpsc::unbounded_channel::<crate::pty::PtyEvent>();
+        tokio::spawn(async move {
+            while let Some(event) = pty_rx.recv().await {
+                // The desk is gone, so there is nobody left to tell. The
+                // session is dropped with the store that held it, which stops
+                // the child; this task just stops with it.
+                if tx.send(AppEvent::Pty(event)).is_err() {
+                    break;
+                }
+            }
+        });
+        // `open` posts its own refusal down that bridge, so what is taken here
+        // is only the value.
+        let session = crate::pty::PtySession::open(spawn, cols, rows, pty_tx)
+            .map_err(|err| err.said().to_string())?;
+        // A fresh parser, never the last child's: a new session opening onto
+        // the previous one's output would be reading somebody else's prompt.
+        // No scrollback, because the pane offers no way to scroll into it — a
+        // multiplexer inside the pane is out of scope by decision.
+        self.pty = Some(Pane {
+            parser: vt100::Parser::new(rows, cols, 0),
+            child: PaneChild::Live {
+                session,
+                focused: false,
+            },
+        });
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Close the pane, and stop the child if there still is one.
+    ///
+    /// Dropping the session is what stops it: `pty.rs` hangs the child up on
+    /// `Drop`, so one kill path serves the pane being closed, the workstation
+    /// quitting, and the store simply going out of scope at the end of `main`.
+    #[cfg(feature = "operator")]
+    pub fn close_pty(&mut self) {
+        if self.pty.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Where the pane's child is, as the desk has to draw it.
+    #[cfg(feature = "operator")]
+    pub fn pty_state(&self) -> PtyState {
+        match &self.pty {
+            None => PtyState::Absent,
+            Some(Pane {
+                child: PaneChild::Live { .. },
+                ..
+            }) => PtyState::Running,
+            Some(Pane {
+                child: PaneChild::Gone { said },
+                ..
+            }) => PtyState::Ended { said: said.clone() },
+        }
+    }
+
+    /// The child's screen, for as long as there is a pane to draw it in.
+    ///
+    /// Still there after the child has ended, deliberately: the last thing a
+    /// session printed is where a failure explains itself, and a pane that
+    /// vanished with its child would take that with it.
+    #[cfg(feature = "operator")]
+    pub fn pty_screen(&self) -> Option<&vt100::Screen> {
+        self.pty.as_ref().map(|pane| pane.parser.screen())
+    }
+
+    /// Whether the keyboard is the child's.
+    #[cfg(feature = "operator")]
+    pub fn pty_focused(&self) -> bool {
+        matches!(
+            &self.pty,
+            Some(Pane {
+                child: PaneChild::Live { focused: true, .. },
+                ..
+            })
+        )
+    }
+
+    /// Give the keyboard to the child, or take it back.
+    ///
+    /// Only a live child can hold it, and that is structural rather than
+    /// checked: the flag is a field of the *live* arm, so an ending puts it out
+    /// of reach along with the session. A pane focused on a child that has
+    /// ended is the one state the widget must never be drawn in — every
+    /// keystroke into it is answered with a sentence about a process that
+    /// cannot take it, and the border would be offering a keyboard to nobody.
+    #[cfg(feature = "operator")]
+    pub fn pty_focus(&mut self, wanted: bool) {
+        if let Some(Pane {
+            child: PaneChild::Live { focused, .. },
+            ..
+        }) = &mut self.pty
+        {
+            if *focused != wanted {
+                *focused = wanted;
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Send keystrokes to the child.
+    ///
+    /// `&mut self` although the session writes through `&self`: a `draw` holds
+    /// `&Store`, and a renderer able to type into a process would be IO from
+    /// `ui/` with nothing in between. The borrow is the compiler enforcing what
+    /// `tests/operator_gate.rs` argues.
+    ///
+    /// Nothing happens when the child is gone, and that is not a swallowed
+    /// keystroke: [`Store::pty_focused`] is false whenever there is no live
+    /// child, so a key arriving here is a router that kept forwarding rather
+    /// than an operator's lost intent — and `pty.rs` says the loss anyway, for
+    /// the window in which a session outlives the news of its own ending.
+    #[cfg(feature = "operator")]
+    pub fn pty_write(&mut self, bytes: &[u8]) {
+        if let Some(Pane {
+            child: PaneChild::Live { session, .. },
+            ..
+        }) = &self.pty
+        {
+            session.write(bytes);
+        }
+    }
+
+    /// The pane changed shape: tell the child, and the screen it is parsed onto.
+    ///
+    /// Both, or the pane is broken in one of two ways — a child that was not
+    /// told wraps its output to a geometry it no longer has, and a parser that
+    /// was not told draws the answer into a grid of the old shape. The numbers
+    /// are the inner rect's, for [`Store::open_pty`]'s reason.
+    #[cfg(feature = "operator")]
+    pub fn pty_resize(&mut self, cols: u16, rows: u16) {
+        let Some(pane) = &mut self.pty else {
+            return;
+        };
+        // The caller measures the pane on every layout pass, so most calls here
+        // carry the size it already has — and neither half of the answer is
+        // free: `vt100` rewraps the whole grid, and the ioctl sends the child a
+        // SIGWINCH it would redraw its whole screen for.
+        if pane.parser.screen().size() == (rows, cols) {
+            return;
+        }
+        pane.parser.screen_mut().set_size(rows, cols);
+        if let PaneChild::Live { session, .. } = &pane.child {
+            session.resize(cols, rows);
+        }
         self.dirty = true;
     }
 
@@ -958,6 +1274,50 @@ impl Store {
             // is a keystroke's shape: a wheel moved a scroll, a click moved
             // the nav.
             AppEvent::Key(_) | AppEvent::Mouse(_) | AppEvent::Resize => self.dirty = true,
+            // The one place the child's screen moves. Every arm here is also
+            // the only place it moves *from*: `pty.rs` guarantees the order —
+            // every `Bytes` a child will ever write is posted before its
+            // `Exited`, and the `Exited` arrives once whoever caused the ending
+            // — so this fold never has to reason about a byte that outran an
+            // exit or a second announcement of one ending.
+            #[cfg(feature = "operator")]
+            AppEvent::Pty(event) => {
+                use crate::pty::PtyEvent;
+                match event {
+                    PtyEvent::Bytes(bytes) => {
+                        // No pane is not an error: closing one drops the
+                        // session while bytes already on the channel are still
+                        // in flight, and a store that built a pane out of them
+                        // would put a terminal back that the operator closed.
+                        if let Some(pane) = &mut self.pty {
+                            pane.parser.process(&bytes);
+                            // Without this the pane repaints on the 100 ms idle
+                            // floor, which is a terminal that lags every
+                            // keystroke by up to a tenth of a second.
+                            self.dirty = true;
+                        }
+                    }
+                    PtyEvent::Exited { said, .. } => {
+                        // The session goes with it, which is what takes the
+                        // keyboard back to the desk: focus is a field of the
+                        // live arm. The *screen* stays, because the last thing
+                        // a failing session printed is where it said why.
+                        if let Some(pane) = &mut self.pty {
+                            pane.child = PaneChild::Gone {
+                                said: format!("{said}{AGAIN}"),
+                            };
+                            self.dirty = true;
+                        }
+                    }
+                    // Nothing to hold: a `Failed` says something did **not**
+                    // happen — a child that never started, a keystroke that
+                    // went nowhere — and the pane's border can only speak for a
+                    // child that *ended*. It reaches the operator as a toast
+                    // (`toast::for_event`), which is this crate's own answer
+                    // for a failure with no surface of its own.
+                    PtyEvent::Failed { .. } => {}
+                }
+            }
             // The beat advances but does not dirty: the glyph is redrawn by the
             // idle heartbeat in the pacing rule, and dirtying here would force a
             // frame every 120 ms and make that rule decorative.

@@ -253,6 +253,54 @@ fn the_childs_screen_is_drawn_in_one_gated_place() {
 }
 
 #[test]
+fn the_parser_that_holds_a_childs_screen_is_gated_wherever_it_is_named() {
+    // The artifact claim the manifest makes about the three pty crates —
+    // "nothing in the glass build references them, so nothing of them is
+    // linked" — rests on `vt100` being named only behind this feature. The
+    // widget was gated for that reason; the store is the other half, and it is
+    // the half that would be easy to leave open, because one `Option` field
+    // costs a monitoring build nothing an operator would ever notice. It costs
+    // the *claim*, which is the part no behavioural test can recover:
+    // `nm target/debug/atlas | grep -c vt100` is 0 in the
+    // `--no-default-features` build and non-zero armed, and a parser named
+    // outside the gate puts it back.
+    // The literals as *code* spells them, `&` and `(` and all, for the reason
+    // the `.post(` pin above states: the parser is named in prose in four
+    // files, and a bare path would count the documentation that explains the
+    // gate as a breach of it.
+    assert_eq!(
+        production_files_mentioning("&vt100::Screen"),
+        vec!["store.rs".to_string(), "ui/widgets/terminal.rs".to_string()],
+        "the screen is handed out by the store that advances it and taken by the widget \
+         that draws it"
+    );
+    assert_eq!(
+        production_files_mentioning("vt100::Parser::new("),
+        vec!["store.rs".to_string()],
+        "one parser, built where the events that advance it are folded in"
+    );
+    // In both, behind the gate, pinned on the attribute's own text: a `cfg`
+    // naming the wrong feature compiles cleanly in both legs.
+    assert!(
+        source("store.rs").contains("#[cfg(feature = \"operator\")]\n    pty: Option<Pane>,"),
+        "the pane the store holds must be gated, verbatim"
+    );
+    assert!(
+        source("bus.rs").contains("#[cfg(feature = \"operator\")]\n    Pty(crate::pty::PtyEvent),"),
+        "the bus variant that carries a child's bytes must be gated, verbatim"
+    );
+    // And the session is held in the store rather than in the runtime. `main.rs`
+    // is in no test binary, so a child's lifecycle kept there would put "one
+    // child at a time" beyond the reach of every test in this suite — which is
+    // how the coordinator's own one-at-a-time rule was lost once already.
+    assert_eq!(
+        production_files_mentioning("PtySession"),
+        vec!["pty.rs".to_string(), "store.rs".to_string()],
+        "the session is opened where the state machine that refuses a second one lives"
+    );
+}
+
+#[test]
 fn the_one_click_book_is_gated_in_every_place_it_is_spelled() {
     // The card itself is ungated — a monitoring window shows the desk's open
     // question, which is what a monitoring window is *for* — so the gate is on

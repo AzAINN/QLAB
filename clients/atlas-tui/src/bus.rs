@@ -112,6 +112,22 @@ pub enum AppEvent {
     Http(HttpResult),
     ConnUp(Channel),
     ConnDown(Channel),
+    /// What the child in the ATLAS pane wrote, or the fact that it is over.
+    ///
+    /// On the bus rather than read where it is produced, for `Wrote`'s reason
+    /// and one more. A pty is drained by a blocking thread — this crate's tokio
+    /// is built without `io-util`, and a pane is not worth a second process API
+    /// — so the bytes have to cross into the async loop somewhere, and the one
+    /// drain point that owns the store is where every other producer already
+    /// crosses. It is also what keeps a frame a pure function of
+    /// `(store, fx, instant)`: the `vt100::Parser` lives in the store and
+    /// advances here, on an event, never inside a `draw`.
+    ///
+    /// **Gated with the module that produces it.** `PtyEvent` lives in `pty`,
+    /// which the monitoring build does not compile at all: it has no command
+    /// that opens a pane, so it has no child to hear from.
+    #[cfg(feature = "operator")]
+    Pty(crate::pty::PtyEvent),
     /// What the owner said about a write this client asked for.
     ///
     /// On the bus rather than handled where it is awaited: a write runs in its

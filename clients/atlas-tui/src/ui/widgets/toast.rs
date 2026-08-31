@@ -255,6 +255,18 @@ pub fn for_event(ev: &AppEvent) -> Option<Toast> {
             "owner payload malformed",
             format!("{} — from {url}", first_line(error)),
         )),
+        // The one thing a child can say that its own pane cannot carry. A
+        // `Bytes` is already on the screen and an `Exited` is on the pane's
+        // border (`terminal::draw`'s `said`); what is left is a sentence about
+        // something that did **not** reach the child — one that never started,
+        // a keystroke that went nowhere — and while a child is live that border
+        // is naming the keyboard rather than the news. A refusal an operator
+        // cannot see is the hung-key reading this workstation refuses
+        // everywhere else.
+        #[cfg(feature = "operator")]
+        AppEvent::Pty(crate::pty::PtyEvent::Failed { said }) => {
+            Some(Toast::new(Level::Alarm, "qlab cli", said.clone()))
+        }
         _ => None,
     }
 }

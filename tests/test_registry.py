@@ -1213,3 +1213,36 @@ def test_a_stale_workflow_can_still_be_resumed():
         assert resumed["current_phase"] == "analyst"
     finally:
         reg.close()
+
+
+def test_an_answered_universe_change_is_found_under_a_deep_pile(reg):
+    """Selection in SQL, not a window over the newest rows.
+
+    `_check_not_already_answered` used to scan the 500 newest terminal
+    approvals in Python, so a desk with a busy approval queue could lose an old
+    answer out of view and re-ask a question the operator had already refused.
+    600 newer terminal rows here is the shape that failed.
+    """
+    from qlab.governance.approval import build_universe_change_request
+    from qlab.state.registry import APPROVAL_KIND_UNIVERSE_CHANGE
+
+    answered = build_universe_change_request("ACWI", memo_decision_id="dec-1")
+    reg.create_approval_request(answered)
+    reg.transition_approval(answered["approval_id"], "rejected")
+    for i in range(600):
+        other = build_universe_change_request(
+            "BNDW", memo_decision_id=f"noise-{i}")
+        reg.create_approval_request(other)
+        reg.transition_approval(other["approval_id"], "rejected")
+
+    found = reg.answered_universe_change("ACWI", "dec-1")
+    assert found is not None
+    assert found["approval_id"] == answered["approval_id"]
+    assert found["status"] == "rejected"
+    assert found["kind"] == APPROVAL_KIND_UNIVERSE_CHANGE
+    # Bound to the pair: a later memo about the same name is a new question.
+    assert reg.answered_universe_change("ACWI", "dec-2") is None
+    # And a still-pending question is not an answer.
+    pending = build_universe_change_request("GLD", memo_decision_id="dec-3")
+    reg.create_approval_request(pending)
+    assert reg.answered_universe_change("GLD", "dec-3") is None

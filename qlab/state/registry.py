@@ -2449,6 +2449,34 @@ class Registry:
             [APPROVAL_KIND_UNIVERSE_CHANGE, wanted]))
         return rows[0] if rows else None
 
+    def answered_universe_change(self, ticker: str,
+                                 memo_decision_id: str) -> dict | None:
+        """The terminal answer this exact (ticker, memo) pair already had.
+
+        Bound to the pair, not to the ticker forever: a LATER scout memo is a
+        new question the operator is entitled to be asked, and only the one
+        they already answered may not be re-asked.
+
+        Selected in SQL over the whole table, for `pending_universe_change`'s
+        reason. The caller used to filter the newest terminal rows in Python,
+        which is a window and not a lookup — a desk with a busy approval queue
+        pushes an old answer out of view and re-asks a question that was
+        refused. `rejected` and `expired` are both answers: an expiry is the
+        operator declining to answer for long enough that the question lapsed.
+        """
+        wanted = str(ticker or "").strip().upper()
+        memo = str(memo_decision_id or "").strip()
+        if not wanted or not memo:
+            return None
+        rows = self._kinded(self._rows(
+            "SELECT * FROM approval_requests WHERE kind = ? "
+            "AND status IN ('rejected', 'expired') "
+            "AND upper(json_extract_string(summary, '$.ticker')) = ? "
+            "AND json_extract_string(summary, '$.memo_decision_id') = ? "
+            "ORDER BY created_at ASC LIMIT 1",
+            [APPROVAL_KIND_UNIVERSE_CHANGE, wanted, memo]))
+        return rows[0] if rows else None
+
     def transition_approval(self, approval_id: str, status: str, *,
                             challenge_digest: str | None = None,
                             decided_at: str | None = None,

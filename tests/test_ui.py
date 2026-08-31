@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -5144,3 +5146,121 @@ def test_a_broken_matrix_does_not_take_the_whole_reasoner_context_down(
     context = session.atlas_context(True)
     assert context["qualitative_matrix"]["rows"] == {}
     assert "registry unreadable" in context["qualitative_matrix"]["error"]
+
+
+# --- the Settings pane's news routes ---------------------------------------
+
+
+def _news_settings_env(monkeypatch, tmp_path):
+    """A workspace of this test's own, and no inherited news configuration.
+
+    `setenv` then `delenv` rather than `delenv(raising=False)`: the latter
+    records nothing when the name is already absent, so a test that goes on to
+    set it leaks the value into the next module.
+    """
+    monkeypatch.setenv("QLAB_WORKSPACE", str(tmp_path))
+    for name in ("QLAB_NEWS_PROVIDERS", "QLAB_NEWS_PROVIDER",
+                 "QLAB_EDGAR_CONTACT"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        "qlab.trader.alpaca_auth.resolve_alpaca_credentials", lambda: None)
+
+
+def test_news_settings_says_what_the_desk_reads_and_never_the_contact(
+        session, monkeypatch, tmp_path):
+    _news_settings_env(monkeypatch, tmp_path)
+
+    status, out = handle_api(session, "GET", "/api/news/settings", {}, {})
+    assert status == 200
+    # The fixture session is offline: the lane and the stack say so together.
+    assert out["lane"] == "synthetic"
+    assert out["stack"] == list(session.news_provider_for(True))
+    assert out["configured"] is False
+    assert out["edgar_contact_set"] is False
+    # Nothing has been fetched, so there is no outcome to report — not a
+    # guessed one.
+    assert out["outcomes"] == {}
+    assert [entry["name"] for entry in out["catalog"]] == [
+        "alpaca", "edgar", "macro", "rss", "gdelt"]
+    assert all(entry["chosen"] is False for entry in out["catalog"])
+
+    monkeypatch.setenv("QLAB_NEWS_PROVIDERS", "macro,rss")
+    monkeypatch.setenv("QLAB_EDGAR_CONTACT", "Jane Doe <jane@x.io>")
+    status, out = handle_api(
+        session, "GET", "/api/news/settings", {"offline": ["0"]}, {})
+    assert status == 200
+    assert out["lane"] == "live"
+    assert out["stack"] == ["macro", "rss"]
+    assert out["configured"] is True
+    assert [e["name"] for e in out["catalog"] if e["chosen"]] == ["macro", "rss"]
+    # The contact is a value this desk sends to the SEC and to nobody else:
+    # the pane learns that one is on file, never what it says.
+    assert out["edgar_contact_set"] is True
+    assert "jane@x.io" not in json.dumps(out)
+
+
+def test_news_settings_applies_a_stack_and_clears_the_cached_window(
+        session, monkeypatch, tmp_path):
+    from qlab.env import parse_env
+
+    _news_settings_env(monkeypatch, tmp_path)
+    session._desk_news = {"items": [], "outcomes": {"synthetic": "ok"}}
+
+    status, out = handle_api(session, "POST", "/api/news/settings", {},
+                             {"providers": ["macro"], "offline": False})
+    assert status == 200
+    assert out["stack"] == ["macro"]
+    assert out["configured"] is True
+    assert "verify" not in out
+    assert parse_env((tmp_path / ".env").read_text(encoding="utf-8")) == {
+        "QLAB_NEWS_PROVIDERS": "macro"}
+    # The running process reads it too, or the next heartbeat fetches the old
+    # stack and the pane reports a change that did not happen.
+    assert os.environ["QLAB_NEWS_PROVIDERS"] == "macro"
+    assert session._desk_news is None
+    assert out["outcomes"] == {}
+
+
+@pytest.mark.parametrize("body,expected", [
+    ({"providers": ["bloomberg"]}, "bloomberg"),
+    ({"providers": []}, "synthetic"),
+    ({"providers": ["alpaca"]}, "alpaca profile login"),
+    ({"providers": ["edgar"]}, "edgar"),
+    ({"providers": ["macro"], "edgar_contact": "nobody"}, "nobody"),
+])
+def test_news_settings_refuses_a_stack_it_cannot_honour(
+        session, monkeypatch, tmp_path, body, expected):
+    _news_settings_env(monkeypatch, tmp_path)
+
+    status, out = handle_api(session, "POST", "/api/news/settings", {},
+                             dict(body, offline=False))
+    assert status == 400
+    assert expected in out["error"]
+    assert not (tmp_path / ".env").exists(), "a refusal wrote configuration"
+
+
+def test_news_settings_verify_names_a_dead_member_and_still_applies(
+        session, monkeypatch, tmp_path):
+    """The pane's drop-a-dead-member affordance: report, then apply.
+
+    The caller chose the stack; the check tells them what it found. Refusing
+    the write here would make an unreachable source unconfigurable.
+    """
+    _news_settings_env(monkeypatch, tmp_path)
+
+    def dead(universe, provider=None, lookback_hours=72):
+        assert provider == "macro"
+        return {"ok": False,
+                "members": {"macro": {"ok": False, "error": "macro feed 503"}}}
+
+    monkeypatch.setattr("qlab.news.check.check_news", dead)
+    status, out = handle_api(
+        session, "POST", "/api/news/settings", {},
+        {"providers": ["macro"], "verify": True, "offline": False})
+    assert status == 200
+    assert out["verify"]["ok"] is False
+    assert out["verify"]["members"]["macro"]["ok"] is False
+    assert "503" in out["verify"]["members"]["macro"]["detail"]
+    assert out["stack"] == ["macro"]
+    assert os.environ["QLAB_NEWS_PROVIDERS"] == "macro"

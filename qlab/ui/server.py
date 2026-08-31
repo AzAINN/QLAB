@@ -3138,6 +3138,131 @@ class UISession:
             pass
         return ("synthetic",)
 
+    def news_settings(self, offline: bool) -> dict:
+        """What the desk reads, what it could read, and how the last fetch went.
+
+        Composed from the wizard's own catalog and from the window cache
+        ``fetch_desk_news`` publishes, so nothing here reaches the network and
+        the route is safe under the dispatch lock.
+
+        The EDGAR contact is reported as a bool and never as a value: it goes
+        to the SEC in a User-Agent and nowhere else, and a settings pane that
+        echoed it would put it on the wire in every snapshot.
+        """
+        from qlab.news import setup
+
+        stack = self.news_provider_for(offline)
+        window = self.desk_news_window()
+        named = (os.environ.get("QLAB_NEWS_PROVIDERS", "").strip()
+                 or os.environ.get("QLAB_NEWS_PROVIDER", "").strip())
+        return {
+            "lane": "synthetic" if offline else "live",
+            "stack": list(stack),
+            "configured": bool(named),
+            "edgar_contact_set": bool(
+                os.environ.get("QLAB_EDGAR_CONTACT", "").strip()),
+            "catalog": [
+                {"name": choice.name, "tier": choice.tier,
+                 "needs": choice.needs, "cost": choice.cost,
+                 "available": choice.available, "default": choice.default,
+                 # What this desk reads right now, which is not the same claim
+                 # as what a fresh desk would default to.
+                 "chosen": choice.name in stack}
+                for choice in setup.catalog(os.environ)
+            ],
+            # Empty before the first fetch: the window stand-in says so through
+            # its own error channel, and a guessed outcome would be a lie about
+            # a source nobody has called yet.
+            "outcomes": {str(name): str(outcome) for name, outcome
+                         in (window.get("outcomes") or {}).items()},
+        }
+
+    def _checked_news_stack(self, providers: object,
+                            contact: str | None) -> tuple[str, ...]:
+        """The stack to write, or a ValueError naming what cannot be honoured.
+
+        Fail loud: a source that cannot answer is refused here with the fix,
+        never written to be discovered dead on the first heartbeat — the same
+        rule ``run_wizard`` applies when it refuses alpaca without a credential.
+        """
+        from qlab.news import setup
+
+        if not isinstance(providers, list):
+            raise ValueError("providers must be a list of source names")
+        names = tuple(str(name).strip().lower() for name in providers
+                      if str(name).strip())
+        if not names:
+            raise ValueError(
+                "no news source was named; an explicit 'no real sources' is "
+                '["synthetic"], exactly as the wizard writes it')
+        known = _known_news_providers()
+        unknown = [name for name in names if name not in known]
+        if unknown:
+            raise ValueError(
+                f"unknown news provider(s) {', '.join(unknown)}; available: "
+                f"{', '.join(known)}")
+        catalog = {choice.name: choice for choice in setup.catalog(os.environ)}
+        for name in names:
+            choice = catalog.get(name)
+            if choice is None or choice.available or not choice.needs:
+                continue
+            if name == "alpaca":
+                raise ValueError(
+                    "alpaca is chosen but no Alpaca credential resolves: run "
+                    "`alpaca profile login` for a paper-only browser session, "
+                    "or put ALPACA_API_KEY and ALPACA_API_SECRET in .env at "
+                    "the workspace root")
+            if name == "edgar" and not contact:
+                raise ValueError(
+                    f"edgar needs a contact, as {setup.CONTACT_SHAPE}: the SEC "
+                    "requires a descriptive User-Agent with a contact, and "
+                    "this desk does not send an invented one")
+        return names
+
+    def apply_news_settings(self, providers: object, edgar_contact: object,
+                            verify: bool, *, offline: bool) -> dict:
+        """Apply a news choice the way ``qlab news-setup`` applies one.
+
+        This changes what the desk READS. It touches no posture, no approval
+        and no plan: choosing a source is a provenance decision, never an
+        authority one, and widening what Atlas reads must never widen what it
+        can execute.
+
+        ``verify`` does real network requests, one per member, so this method
+        must not be called under the dispatch lock — ``do_POST`` routes the
+        path around it. A failing member is reported and the change is still
+        applied: the caller chose the stack, and refusing the write would make
+        an unreachable source unconfigurable from the pane.
+        """
+        from qlab.news import setup
+
+        contact = (setup.validate_contact(str(edgar_contact))
+                   if edgar_contact is not None else None)
+        names = self._checked_news_stack(providers, contact)
+        plan = setup.SetupPlan(
+            read_news=names != ("synthetic",), providers=names,
+            edgar_contact=contact, verify=bool(verify))
+        report = setup.verify_plan(
+            plan, self.mandate.universe_whitelist,
+            environ=os.environ) if plan.verify else None
+        setup.apply_plan(plan, root=workspace_root(), environ=os.environ)
+        with self._news_lock:
+            # The next heartbeat must fetch through the new stack rather than
+            # publish a window the old one produced.
+            self._desk_news = None
+        payload = self.news_settings(offline)
+        if report is not None:
+            payload["verify"] = {
+                "ok": bool(report.get("ok")),
+                # Names and one sentence each: a member report also carries the
+                # credential description, which is not the pane's business.
+                "members": {
+                    str(name): {"ok": bool(member.get("ok")),
+                                "detail": str(member.get("error") or "")}
+                    for name, member in (report.get("members") or {}).items()},
+            }
+        return payload
+
     def mark_desk_read_stale(self, error: str) -> None:
         """Record that the read could not be recomposed.
 
@@ -4694,6 +4819,20 @@ def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None
 # ---------------------------------------------------------------------------
 # API dispatch (pure functions of the session; easy to unit-test)
 # ---------------------------------------------------------------------------
+def _known_news_providers() -> list[str]:
+    """Every provider name that can be written, first-party and plugin."""
+    from qlab.news.feed import PROVIDERS, load_plugin_providers
+
+    try:
+        load_plugin_providers()
+    except Exception:
+        # A broken plugin entry point is not this route's error to raise: the
+        # first-party names are still nameable, and the feed refuses the rest
+        # with its own sentence.
+        pass
+    return sorted(PROVIDERS)
+
+
 def handle_api(session: UISession, method: str, path: str,
                query: dict, body: dict) -> tuple[int, dict]:
     # bool("0") is True, so a flag arriving as text has to be parsed, never cast.
@@ -4921,6 +5060,25 @@ def handle_api(session: UISession, method: str, path: str,
         from qlab.news.providers.macro import upcoming
 
         return 200, {"upcoming": upcoming(datetime.now(timezone.utc))}
+
+    if method == "GET" and path == "/api/news/settings":
+        # Cache-only and network-free, like /api/news itself.
+        offline = _qbool(query, "offline", session.offline_default)
+        return 200, session.news_settings(offline)
+
+    if method == "POST" and path == "/api/news/settings":
+        # Network I/O when verify is asked for. do_POST runs this one outside
+        # the dispatch lock; it writes .env and the process environment, never
+        # the registry, so it does not need it.
+        offline = _flagbool(body.get("offline"), session.offline_default)
+        contact = body.get("edgar_contact")
+        try:
+            return 200, session.apply_news_settings(
+                body.get("providers"), contact,
+                _flagbool(body.get("verify"), False), offline=offline)
+        except ValueError as exc:
+            # The refusal names the source and the fix; nothing was written.
+            return 400, {"error": str(exc)}
 
     if method == "GET" and path == "/api/news":
         offline = _qbool(query, "offline", session.offline_default)
@@ -5622,7 +5780,8 @@ class _Handler(BaseHTTPRequestHandler):
                 # different answer, and the accepted trade for the same reason
                 # the GET route accepts serving a cached catalog at all.
                 self.session.llm_backends_catalog()
-            if parsed.path in ("/api/atlas/message", "/api/alpaca/test"):
+            if parsed.path in ("/api/atlas/message", "/api/alpaca/test",
+                               "/api/news/settings"):
                 # The whole route runs outside the lock, not just a warm-up: an
                 # answer is a model call, up to _ATLAS_REPLY_TIMEOUT_S of it,
                 # and one operator question must not freeze the snapshot poll,
@@ -5637,6 +5796,12 @@ class _Handler(BaseHTTPRequestHandler):
                 # no business holding the book while an operator waits on
                 # Alpaca. Storing a login does take the lock — that one writes
                 # an event row.
+                #
+                # A news-settings write is here for the credential probe's
+                # reason: with verify:true it fetches one live window per
+                # chosen source, which is minutes when gdelt is among them, and
+                # it writes .env and the process environment rather than the
+                # registry.
                 status, obj = handle_api(self.session, "POST", parsed.path,
                                          parse_qs(parsed.query), body)
             else:

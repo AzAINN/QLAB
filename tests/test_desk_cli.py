@@ -719,7 +719,7 @@ def _door_env(monkeypatch, tmp_path, *, providers=None, contact=None):
 
 
 def test_the_startup_door_offers_news_setup_and_takes_no_for_an_answer(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, capsys):
     from qlab.autopilot import cli
 
     _door_env(monkeypatch, tmp_path)
@@ -735,6 +735,9 @@ def test_the_startup_door_offers_news_setup_and_takes_no_for_an_answer(
 
     assert len(asked) == 1 and "Set up news sources now?" in asked[0]
     assert not (tmp_path / ".env").exists(), "declining wrote configuration"
+    # Declining is not a dead end: say where the same choice lives afterwards.
+    printed = capsys.readouterr().out
+    assert "qlab news-setup" in printed and "Settings" in printed
     assert record["spawned"][1:4] == ["-m", "qlab.autopilot.cli", "owner"]
 
 
@@ -757,7 +760,7 @@ def test_the_startup_door_runs_the_wizard_and_persists_the_answer(
 
 
 def test_the_startup_door_drops_edgar_for_one_run_without_persisting_it(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, capsys):
     from qlab.autopilot import cli
 
     _door_env(monkeypatch, tmp_path, providers="edgar,macro")
@@ -772,6 +775,7 @@ def test_the_startup_door_drops_edgar_for_one_run_without_persisting_it(
     _drive_cmd_tui(monkeypatch, tmp_path, ["tui"], owner_running=False)
 
     assert asked and "drop" in asked[0]
+    assert "qlab news-setup" in capsys.readouterr().out
     assert os.environ["QLAB_NEWS_PROVIDERS"] == "macro"
     assert not (tmp_path / ".env").exists(), "a one-run drop was persisted"
 

@@ -1088,6 +1088,13 @@ def _cmd_news_setup(args) -> int:
     return 0 if report is None or report.get("ok") else 1
 
 
+# Pure ASCII on purpose: this prints from a launch path whose stdout may be
+# encoded with the locale ANSI codepage under errors='strict' (see
+# _startup_banner), and a door that cannot print must not take the launch down.
+NEWS_DOOR_AGAIN = ("  You can change this any time: qlab news-setup, or "
+                   "Settings > NEWS on the desk.")
+
+
 def _news_startup_door(args, offline: bool) -> None:
     """Offer news setup at startup when the desk would otherwise guess.
 
@@ -1128,6 +1135,7 @@ def _news_door_body() -> None:
         print(f"\n  No news sources are configured; this desk would read: {would}")
         if input("  Set up news sources now? [y/N] ").strip().lower() not in (
                 "y", "yes"):
+            print(NEWS_DOOR_AGAIN)
             return
         plan = run_wizard(ask=input, env=os.environ, say=print)
         if plan.verify:
@@ -1161,6 +1169,7 @@ def _news_door_body() -> None:
             os.environ["QLAB_NEWS_PROVIDERS"] = ",".join(rest)
             print(f"  edgar dropped for this run only; this desk reads "
                   f"{','.join(rest)}. Nothing was saved.")
+            print(NEWS_DOOR_AGAIN)
             return
         print("  Answer 'enter' or 'drop'.")
     print("  Nothing was changed; starting the desk as configured. Run "

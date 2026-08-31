@@ -147,7 +147,17 @@
 
 ### Task C1: Docs, record, suites, build
 
-**Files:** `README.md` (the ATLAS description and the `/cli` line), `docs/atlas.md` (the three-ways-a-run-starts list is untouched; the chat/pane split is new), `CLAUDE.md` (the client's two shapes; the pty dependency), `planning-docs/2026-08-31-atlas-terminal-completion.md`.
+**Files and the exact sentences that become false** (verified at `51e8528`):
+- `README.md:411-417` — "`qlab cli` opens the real Claude CLI … The workstation spells both as `/cli` and `/build`." After this stream `/cli` opens a PANE inside ATLAS while `qlab cli` (the terminal verb) and `/build` still take the whole screen. Rewrite the last sentence and say what the pane is.
+- `docs/atlas.md:136-143` — "`/cli` opens the real Claude CLI … Both spawn a child that owns the terminal until it exits". The "both" is now false for `/cli`. State the split: `/cli` runs the child in the tab beside the desk sidebar; `/build` keeps the whole terminal.
+- `CLAUDE.md:89-93` — "The workstation's `/cli` and `/build` spawn those verbs (`clients/atlas-tui/src/handoff.rs`): leave the alternate screen …". `/cli` no longer leaves the screen; name `src/pty.rs` beside `handoff.rs` and say which verb takes which path. Also add the by-construction line: the monitoring build contains no pty, no spawn and no forwarded keystroke (`nm` counts, and note the redirected-`CARGO_TARGET_DIR` gotcha below).
+- `README.md:238` — "ten views on `1`–`9` and `0`" stays true; check the ATLAS row's description mentions the pane.
+- `docs/atlas.md:69` — the rights table row for `build`; check the `web`/`workflows` rows still read true beside the pane.
+- NEW: `planning-docs/2026-08-31-atlas-terminal-completion.md`.
+
+**Verification gotcha (from A3's review):** `nm target/debug/atlas` returns a FALSE 0/0/0 when `CARGO_TARGET_DIR` is redirected — the relative path does not resolve. Use the absolute path when re-checking the by-absence claim.
+
+**Live checks this stream owes and has never run** (name them in the record honestly): `qlab cli` has never actually run in the pane — every test child is a scripted `sh`; no wide-character or SGR fixture exists anywhere; a child's DECSCUSR cursor shape cannot reach the pane at all (tui-term's vt100 adapter has no `cursor_shape` override and `vt100 0.16` exposes no API), so a bar cursor renders as a block.
 
 - [ ] Full `python -m pytest`; both cargo legs; clippy both legs; `cargo fmt --check`; `cargo build --release`. Exact counts in the record, plus what has NOT run live (a real Claude CLI inside the pane on this machine) and every follow-up.
 - [ ] Commit `docs: the mind on the desk`.

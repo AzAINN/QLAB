@@ -896,8 +896,9 @@ def _cmd_cli(args) -> int:
     runtime_url = f"http://127.0.0.1:{args.port}"
     if not _owner_answers(runtime_url):
         raise SystemExit(cc.owner_down_remedy(runtime_url))
-    _rights_or_refuse(cc)  # read here so an unreadable file refuses, not raises
+    rights = _rights_or_refuse(cc)  # read once; refuses, never raises
     argv = cc.build_atlas_cli_argv(
+        rights=rights,
         runtime_url=runtime_url, offline=bool(getattr(args, "offline", False)))
     # The path already resolved, not a second cwd-dependent lookup — the same
     # reason `ClaudeSession.start` substitutes argv[0] rather than re-running

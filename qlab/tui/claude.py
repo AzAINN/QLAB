@@ -1086,7 +1086,8 @@ def atlas_persona() -> str:
         "wear — run `python -m qlab.agents.loader list` to see what parsed")
 
 
-def build_atlas_cli_argv(*, runtime_url: str, offline: bool) -> list[str]:
+def build_atlas_cli_argv(*, runtime_url: str, offline: bool,
+                         rights: dict[str, bool] | None = None) -> list[str]:
     """Interactive Claude, as Atlas, against this desk's owner.
 
     Not a headless run: there is no `--print` and no stream parser, because the
@@ -1098,7 +1099,9 @@ def build_atlas_cli_argv(*, runtime_url: str, offline: bool) -> list[str]:
     once more by the operator's rights, read here so both halves of the argv
     see the same three switches within one call.
     """
-    rights = _rights(None)
+    # One read per launch: the verb hands in what it already refused on, so
+    # the allowlist and the refusal cannot disagree across a file write.
+    rights = _rights(rights)
     # Withdrawing `web` empties the tool universe rather than just dropping the
     # two names from the allowlist: an un-allowlisted built-in still exists to
     # be prompted for, and a right the operator switched off should not be one

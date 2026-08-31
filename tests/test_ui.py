@@ -5497,3 +5497,176 @@ def test_the_heartbeat_tick_logs_one_qualitative_matrix_per_window(session):
         tick()
         assert len(session.registry.matrix_runs(
             source=DESK_MATRIX_SOURCE, limit=5)) == 1
+
+
+# --- booking the current proposal in one confirmed call --------------------
+#
+# `POST /api/desk/proposal/book` is the desk's one-click book: it approves the
+# desk's own pending question and executes it. The refusals matter more than
+# the happy path — every one of them has to land before any state moves.
+
+
+def _open_request(session, plan_id: str) -> str:
+    """A pending, plan-bound approval request — the desk's open question."""
+    _, created = handle_api(
+        session, "POST", "/api/approvals", {},
+        {"plan_id": plan_id, "offline": True})
+    return created["approval_id"]
+
+
+def _book_body(session, plan_id: str) -> dict:
+    plan = session.registry.get_plan(plan_id)
+    from qlab.state.registry import targets_hash
+
+    return {"plan_id": plan_id, "targets_hash": targets_hash(plan["targets"]),
+            "human_confirmed": True, "offline": True}
+
+
+def _booked_events(session) -> list[dict]:
+    return [event["payload"] for event
+            in session.registry.read_events_of_kind("proposal_booked", 20)]
+
+
+def test_the_current_proposal_books_in_one_confirmed_call(session):
+    # Two calls (approve, then execute) meant two chances to leave a desk with
+    # an approved-but-unbooked plan on it. One confirmation, one fill.
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {},
+        _book_body(session, plan_id))
+
+    assert status == 200
+    assert out["booked"] is True
+    assert out["approval_id"] == approval_id
+    assert out["execution"]["executed"] is True
+    # The approval was granted and then spent by this one call.
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "consumed")
+    assert session.registry.list_orders(50) != []
+    booked = _booked_events(session)
+    assert len(booked) == 1
+    assert booked[0]["plan_id"] == plan_id
+    assert booked[0]["approval_id"] == approval_id
+    assert booked[0]["targets_hash"] == _book_body(session, plan_id)["targets_hash"]
+
+
+def test_a_wrong_targets_hash_books_nothing_and_approves_nothing(session):
+    # The hash is what the confirm box binds to. A mismatch is not a near-miss
+    # to be repaired — it means the operator confirmed a different allocation.
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    body = _book_body(session, plan_id)
+    body["targets_hash"] = "0" * 16
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {}, body)
+
+    assert status == 400
+    assert out["error"] == "targets_hash does not match the plan"
+    # Nothing moved: still an unanswered question, no fill, no event.
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert session.registry.list_orders(50) == []
+    assert _booked_events(session) == []
+
+
+def test_a_superseded_plan_is_not_the_current_proposal(session):
+    # The older question was withdrawn on the record; a client holding a stale
+    # card must not be able to book it back to life.
+    from qlab.governance.proposal import supersede
+
+    older = _checked_plan(session)
+    older_approval = _open_request(session, older)
+    newer = _checked_plan(session, tilt=0.02)
+    _open_request(session, newer)
+    assert supersede(session.registry, newer) == [older]
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {},
+        _book_body(session, older))
+
+    assert status == 400
+    assert out["error"] == "not the current proposal"
+    assert session.registry.get_approval_request(older_approval)["status"] == (
+        "invalidated")
+    assert session.registry.list_orders(50) == []
+
+
+def test_a_truthy_human_confirmed_cannot_book(session):
+    # Exactly True. "yes" is a client bug or a smuggled confirmation, and
+    # either way it is not a human at a confirm box.
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    body = _book_body(session, plan_id)
+    body["human_confirmed"] = "yes"
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {}, body)
+
+    assert status == 400
+    assert out["error"] == "human_confirmed=true is required"
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert _booked_events(session) == []
+
+
+def test_an_already_approved_proposal_books_without_a_second_approval(session):
+    # An approved, unspent request is still the desk's live question. Booking
+    # it must not try to approve it twice — decide_approval only binds pending.
+    plan_id = _checked_plan(session)
+    approval_id = _approve(session, plan_id)
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "approved")
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {},
+        _book_body(session, plan_id))
+
+    assert (status, out["booked"]) == (200, True)
+    assert out["approval_id"] == approval_id
+    # Exactly one approval event: the one the human already made.
+    approved = session.registry.read_events_of_kind("approval_approved", 20)
+    assert len(approved) == 1
+
+
+def test_a_consumed_request_cannot_be_booked_again(session):
+    # The second click on a card that already filled. A consumed request is
+    # history, not a question, so there is no current proposal to book.
+    plan_id = _checked_plan(session)
+    _open_request(session, plan_id)
+    body = _book_body(session, plan_id)
+    status, _ = handle_api(session, "POST", "/api/desk/proposal/book", {}, body)
+    assert status == 200
+    orders = len(session.registry.list_orders(50))
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {}, body)
+
+    assert status == 400
+    assert out["error"] == "not the current proposal"
+    assert len(session.registry.list_orders(50)) == orders
+    assert len(_booked_events(session)) == 1
+
+
+def test_booking_refuses_when_no_pass_covers_the_hash(session):
+    # The plan was checked under a PASS, but the referee's latest word on that
+    # decision is now a FAIL. The gate re-reads the verdict rather than
+    # trusting that `state == "checked"` still means what it meant.
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    plan = session.registry.get_plan(plan_id)
+    session.registry.log_verdict(
+        plan["decision_id"], "FAIL", ["mandate drift"],
+        source="referee-agent", targets=plan["targets"])
+
+    status, out = handle_api(
+        session, "POST", "/api/desk/proposal/book", {},
+        _book_body(session, plan_id))
+
+    assert status == 400
+    assert "PASS" in out["error"]
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert session.registry.list_orders(50) == []

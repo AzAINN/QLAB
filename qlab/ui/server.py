@@ -78,6 +78,7 @@ GET  /api/approvals/<id>       one approval request
 POST /api/approvals/<id>/approve|reject|challenge   the human decision
 POST /api/plans/<id>/execute   execute by consuming a matching human approval
 GET  /api/desk/proposal        the single checked plan the desk is asking about
+POST /api/desk/proposal/book   approve and execute that one proposal, once
 POST /api/performance/backfill merge the broker's own equity history into the marks
 POST /api/recommend            an operational allocation recommendation
 POST /api/run_once             one autopilot iteration (analyze -> solve -> trade)
@@ -4553,6 +4554,78 @@ class UISession:
                                    {"approval_id": approval_id, "plan_id": plan_id})
         return {"executed": True, "approval_id": approval_id, **result}
 
+    def book_current_proposal(self, body: dict, offline: bool) -> dict:
+        """Approve the desk's own open question and execute it, once.
+
+        Composed from the two existing seams — ``decide_approval`` then
+        ``execute_plan_with_approval`` — and adds no execution primitive. What
+        it removes is the gap between them: approving and booking used to be
+        two calls, so a desk could be left holding an approved-but-unbooked
+        plan that nothing on screen was still asking about.
+
+        Every refusal lands *before* any transition. The order is deliberate:
+        the confirmation, then identity (is this still the desk's question),
+        then the hash the confirm box bound to, then the referee. A caller
+        that fails any of them has changed nothing.
+
+        The approval this grants is the one the execute gate then consumes, so
+        the two steps must not be separated by a lock release — they are not.
+        The whole route runs under the owner dispatch lock (`_LOCK`) exactly as
+        ``/api/plans/execute`` does, and this method takes no lock of its own
+        because `_LOCK` is not reentrant. The paper broker is in-process, so
+        holding it across the fill costs a dispatch turn, not a network round
+        trip; an out-of-process broker would have to be revisited here.
+        """
+        from qlab.governance.proposal import current_proposal
+
+        # Exactly True. "yes", 1 and [] are a client bug or a smuggled
+        # confirmation; neither is a human at a confirm box (invariant 3).
+        if body.get("human_confirmed") is not True:
+            raise ValueError("human_confirmed=true is required")
+        plan_id = str(body.get("plan_id") or "")
+        supplied_hash = str(body.get("targets_hash") or "")
+
+        # Sweep first: a request past its expiry is not live, and reading the
+        # stored status without sweeping would let a lapsed `pending` row look
+        # like an open question for as long as nothing else asked.
+        self.registry.expire_due_approvals(self._now_iso())
+        proposal = current_proposal(self.registry)
+        if proposal is None or str(proposal.get("plan_id") or "") != plan_id:
+            # Covers a superseded plan, a consumed one, and a plan that never
+            # had a request: in each case the desk is not asking about it.
+            raise ValueError("not the current proposal")
+        if supplied_hash != str(proposal.get("targets_hash") or ""):
+            # Not a near-miss to repair: a different hash means the operator
+            # confirmed a different allocation from the one on the record.
+            raise ValueError("targets_hash does not match the plan")
+        referee = proposal.get("referee") or {}
+        if referee.get("verdict") != "PASS":
+            raise ValueError(
+                f"no referee PASS covers targets_hash {supplied_hash}")
+
+        approval_id = str(proposal.get("approval_id") or "")
+        status = str(proposal.get("approval_state") or "")
+        if status == "pending":
+            # The same decide_approval the two-call path takes — one
+            # `approval_approved` row, same digest and book-revision binding.
+            self.decide_approval(approval_id, "approve")
+        elif status != "approved":
+            raise ValueError(f"the approval request is {status!r}, not live")
+
+        result = self.execute_plan_with_approval(
+            plan_id, {"approval_id": approval_id, "human_confirmed": True},
+            offline)
+        booked = result.get("executed") is True
+        if booked:
+            # Only a fill is a booking. Recording `proposal_booked` for a
+            # refused execution would forge the one audit line that says the
+            # desk acted.
+            self.registry.record_event("proposal_booked", {
+                "plan_id": plan_id, "targets_hash": supplied_hash,
+                "approval_id": approval_id})
+        return {"booked": booked, "execution": result,
+                "approval_id": approval_id}
+
     def allocation_policy(self) -> dict:
         from qlab.algorithms import get_operational_policy
 
@@ -5114,6 +5187,25 @@ def handle_api(session: UISession, method: str, path: str,
         from qlab.governance.proposal import current_proposal
 
         return 200, {"proposal": current_proposal(session.registry)}
+
+    if method == "POST" and path == "/api/desk/proposal/book":
+        # Client-only, deliberately: this route is NOT in OWNER_LAB_TOOLS, the
+        # `qlab-operator` MCP proxy, or the combined MCP server, so no agent
+        # surface can reach it. Booking is a human act at a confirm box bound
+        # to the plan's own targets_hash; an agent-reachable one-call book is
+        # exactly the execution path invariant 3 forbids.
+        clamped_off = _offline_for_book(session, off)
+        try:
+            result = session.book_current_proposal(body, clamped_off)
+        except KeyError as exc:
+            return 404, {"error": str(exc)}
+        except (ValueError, PermissionError) as exc:
+            return 400, {"error": str(exc)}
+        # Only a fill moved the book; a refused execution must not forge an
+        # "execution"-sourced mark.
+        if result.get("booked") is True:
+            _mark_after_mutation(session, "execution", clamped_off)
+        return 200, result
 
     if method == "POST" and path == "/api/desk/posture":
         # Arming a desk takes an explicit true: "yes", 1 and [] are refused

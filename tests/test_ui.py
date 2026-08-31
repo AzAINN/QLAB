@@ -6977,3 +6977,131 @@ def test_a_new_memo_may_re_ask_a_rejected_name(session):
         "kind": "universe_change", "ticker": contender,
         "memo_decision_id": "dec-new"})
     assert status == 200 and opened["deduped"] is False
+
+
+# -- Atlas rights: who may do what, set on the desk (K4) ---------------------
+#
+# The rights are the operator's stated intent, persisted like the desk posture.
+# They are not a security boundary: `/api/atlas/rights` is exactly as
+# unauthenticated as every other owner route, and anyone who can reach the port
+# can send or omit the chat-origin header. What they buy is that an Atlas the
+# operator narrowed is not carrying the ability, and that the owner refuses it
+# BY NAME in the window before the chat session turns over.
+
+_CHAT = {"X-Qlab-Origin": "chat"}
+
+
+def test_a_desk_that_never_set_rights_serves_all_three_and_the_path(session):
+    from qlab.tui.claude import atlas_rights_path
+
+    status, payload = handle_api(session, "GET", "/api/atlas/rights", {}, {})
+    assert status == 200
+    assert payload["rights"] == {"web": True, "workflows": True, "build": True}
+    assert payload["path"] == str(atlas_rights_path())
+
+
+def test_setting_one_right_persists_all_three_and_is_read_back(session):
+    from qlab.tui.claude import atlas_rights_path
+
+    status, out = handle_api(session, "POST", "/api/atlas/rights", {},
+                             {"workflows": False})
+    assert status == 200
+    assert out["rights"] == {"web": True, "workflows": False, "build": True}
+    # The file is self-describing: the full three-key object, not the delta.
+    on_disk = json.loads(atlas_rights_path().read_text(encoding="utf-8"))
+    assert on_disk == {"web": True, "workflows": False, "build": True}
+    _, back = handle_api(session, "GET", "/api/atlas/rights", {}, {})
+    assert back["rights"]["workflows"] is False
+
+
+def test_a_rights_change_is_on_the_record_field_by_field(session):
+    handle_api(session, "POST", "/api/atlas/rights", {},
+               {"workflows": False, "web": False})
+    events = [e for e in session.registry.read_events(50)
+              if e["kind"] == "desk.rights_changed"]
+    by_field = {e["payload"]["field"]: e["payload"] for e in events}
+    assert set(by_field) == {"workflows", "web"}
+    assert by_field["workflows"] == {"field": "workflows", "value": False,
+                                     "previous": True}
+    # An unchanged right records nothing: a second identical POST is not news.
+    handle_api(session, "POST", "/api/atlas/rights", {}, {"workflows": False})
+    again = [e for e in session.registry.read_events(50)
+             if e["kind"] == "desk.rights_changed"]
+    assert len(again) == len(events)
+
+
+def test_an_unknown_right_is_refused_by_name(session):
+    status, out = handle_api(session, "POST", "/api/atlas/rights", {},
+                             {"execute": False})
+    assert status == 400
+    assert "execute" in out["error"]
+
+
+def test_a_right_that_is_not_a_boolean_is_refused(session):
+    for value in ("yes", 1, [], None):
+        status, out = handle_api(session, "POST", "/api/atlas/rights", {},
+                                 {"workflows": value})
+        assert status == 400, value
+        assert "true or false" in out["error"]
+
+
+def test_a_corrupt_rights_file_refuses_with_the_readers_remedy(session):
+    from qlab.tui.claude import atlas_rights_path
+
+    path = atlas_rights_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    status, out = handle_api(session, "GET", "/api/atlas/rights", {}, {})
+    assert status == 500
+    assert str(path) in out["error"]
+    assert "delete it to restore the defaults" in out["error"]
+
+
+def test_without_the_workflows_right_the_chats_action_routes_refuse_by_name(
+        session):
+    handle_api(session, "POST", "/api/atlas/rights", {}, {"workflows": False})
+    refusal = "the workflows right is off — turn it on in Settings ▸ MODELS"
+    calls = [
+        ("/api/workflows/start", {"goal": "g", "kind": "portfolio_review"}),
+        ("/api/workflows/wf-1/resume", {}),
+        ("/api/atlas/tasks", {"kind": "held_record_change", "reason": "r"}),
+    ]
+    for path, body in calls:
+        status, out = handle_api(session, "POST", path, {}, body,
+                                 headers=_CHAT)
+        assert status == 403, path
+        assert out["error"] == refusal, path
+
+
+def test_the_workflows_right_binds_the_chat_and_not_the_operators_own_client(
+        session):
+    """Rights bound the chat Atlas. The heartbeat's autonomous dispatch and the
+    human at the workstation are not gated — a request with no chat origin is
+    served on its own gates, which is how the operator can still work a desk
+    they narrowed."""
+    handle_api(session, "POST", "/api/atlas/rights", {}, {"workflows": False})
+    status, out = handle_api(session, "POST", "/api/atlas/tasks", {},
+                             {"kind": "held_record_change", "reason": "r"})
+    assert status == 200
+    assert out.get("task_id")
+
+
+def test_with_the_workflows_right_the_chat_reaches_the_routes_own_gates(
+        session):
+    """The right granted, the refusal is the route's own — not the rights one."""
+    status, out = handle_api(session, "POST", "/api/atlas/tasks", {},
+                             {"kind": "held_record_change", "reason": "r"},
+                             headers=_CHAT)
+    assert status == 200 and out.get("task_id")
+
+
+def test_the_trigger_line_carries_the_reason_the_task_was_minted_for(session):
+    session.announce_desk_work(True, [{
+        "task_id": "abcdef1234567890", "trigger": "held_record_change",
+        "action": "workflow", "ticker": "ACWI",
+        "reason": "ACWI: primary +1, corroborated +0"}])
+    lines = [e["payload"]["text"] for e in session.registry.read_events(20)
+             if e["kind"] == "atlas_message"]
+    fired = [line for line in lines if "held_record_change fired" in line]
+    assert fired, lines
+    assert "ACWI: primary +1" in fired[0]

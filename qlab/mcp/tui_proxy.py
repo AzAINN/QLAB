@@ -39,6 +39,15 @@ def _refusal(path: str, exc: httpx.HTTPStatusError) -> OwnerRefused:
     )
 
 
+# Every request this proxy makes carries it, so the owner can tell an Atlas
+# tool call apart from the operator's own click at the workstation — both are
+# unauthenticated HTTP on the same port and are otherwise indistinguishable.
+# The owner reads it (`qlab/ui/server.py::_from_chat`) to apply the desk's
+# rights panel to the chat and not to the human. It states an ORIGIN; it is not
+# a credential, and nothing that protects a fill depends on it.
+CHAT_ORIGIN_HEADERS = {"X-Qlab-Origin": "chat"}
+
+
 class RuntimeClient:
     def __init__(self, base_url: str | None = None, *, offline: bool | None = None):
         self.base_url = (base_url or os.environ.get(
@@ -50,7 +59,8 @@ class RuntimeClient:
     def get(self, path: str, **params: Any) -> dict:
         try:
             response = httpx.get(
-                self.base_url + path, params=params, timeout=httpx.Timeout(30.0))
+                self.base_url + path, params=params,
+                headers=CHAT_ORIGIN_HEADERS, timeout=httpx.Timeout(30.0))
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise _refusal(path, exc) from exc
@@ -65,6 +75,7 @@ class RuntimeClient:
         try:
             response = httpx.post(
                 self.base_url + path, json=body or {},
+                headers=CHAT_ORIGIN_HEADERS,
                 timeout=httpx.Timeout(900.0, connect=10.0))
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

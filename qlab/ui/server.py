@@ -58,6 +58,9 @@ POST /api/atlas/pause            pause Atlas's autonomous work
 POST /api/atlas/resume           resume Atlas into a mode
 POST /api/atlas/message          ask Atlas a question; the configured reasoner
                                  answers on the bus (never grants authority)
+GET  /api/atlas/rights           the three rights and the file they live in
+POST /api/atlas/rights           set any subset of {web, workflows, build};
+                                 the operator's stated intent, not a boundary
 GET  /api/events               event stream with cursor and limit
 GET  /api/plans                recent order plans
 GET  /api/orders               recent orders
@@ -233,11 +236,6 @@ _METHOD_FIELDS = ("operational_policy", "max_holdings")
 # gate — a memo with thirty names must not become thirty questions.
 _MAX_CONTENDERS = 3
 
-# How many terminal approvals are read back when checking whether a universe
-# question was already answered. Generous because it spans every kind, not
-# just this one — see `_check_not_already_answered` for what it cannot promise.
-_ANSWERED_WINDOW = 500
-
 _MARKET_EVENT_LIMIT = 500
 # How many approvals of *each* actionable status ride in one /api/tui payload.
 # Per status, not shared — see `UISession.actionable_approvals`.
@@ -373,6 +371,14 @@ class UISession:
         # already recorded as approved. Always taken OUTSIDE `_mandate_lock`,
         # which stays the leaf around the override file itself.
         self._universe_lock = threading.Lock()
+        # Serialises the read -> merge -> write of the Atlas rights file, the
+        # posture's precedent and for its reason (invariant 9): the owner is
+        # threaded, and two POSTs each setting a different right would
+        # otherwise both start from the same `load_atlas_rights()` and the
+        # loser would write the file back without the winner's change. Its own
+        # lock, not `_LOCK` — the route already runs under the dispatch lock
+        # and `_LOCK` is not reentrant.
+        self._rights_lock = threading.Lock()
         # The operator's explicit choice; the persisted value is authoritative
         # when the caller passes none, and ``offline_default`` only seeds the
         # mode nobody has chosen yet — never a second opinion about it.
@@ -1085,6 +1091,76 @@ class UISession:
             self._posture = posture
         self.registry.record_event("desk.posture_chosen", {"armed": posture.armed})
         return self.posture_payload()
+
+    # -- Atlas's rights ------------------------------------------------------
+    #
+    # Set on the desk, not in a file the operator has to find. Like the posture,
+    # they are the operator's *stated intent* and never a security boundary:
+    # this route is exactly as unauthenticated as every other owner route, and
+    # the chat-origin header the enforcement reads is a statement anyone who can
+    # reach the port could make. What the rights buy is that a narrowed Atlas is
+    # not carrying the ability at all (`chat_tools`, the tools half) and that the
+    # owner refuses it by name in the window before the chat session turns over.
+    #
+    # The shape is imported from `qlab.tui.claude`, never respelled here: a
+    # writer and a reader that disagree about a key name is a right the operator
+    # believes they set and nothing honours.
+    def rights_payload(self) -> dict:
+        """The three rights and where they live.
+
+        The path rides along because the refusal the reader raises names it, and
+        a client showing a corrupt-file error needs to say which file.
+        """
+        from qlab.tui.claude import atlas_rights_path, load_atlas_rights
+
+        return {"rights": load_atlas_rights(), "path": str(atlas_rights_path())}
+
+    def set_rights(self, body: dict) -> dict:
+        """Record the operator's rights. Any subset in, all three on disk.
+
+        Booleans only — ``"yes"`` and ``1`` are refused rather than read as a
+        grant, the posture's precedent — and a key outside `ATLAS_RIGHTS_KEYS`
+        is refused by name rather than ignored: an operator who typed one
+        believes they withdrew something, and dropping it silently would leave
+        an authority they think is gone.
+
+        The FULL three-key object is written, so the file is self-describing
+        and never a delta the reader has to merge against a moving default.
+        Written atomically (tmp + replace) under `_rights_lock`, before the
+        audit events, so a failed write leaves no event claiming a change that
+        is not on disk.
+        """
+        from qlab.paths import replace_file
+        from qlab.tui.claude import (ATLAS_RIGHTS_KEYS, atlas_rights_path,
+                                     load_atlas_rights)
+
+        unknown = sorted(set(body) - set(ATLAS_RIGHTS_KEYS))
+        if unknown:
+            raise ValueError(
+                f"{', '.join(unknown)} is not a right this desk has — the "
+                f"rights are {', '.join(ATLAS_RIGHTS_KEYS)}")
+        for key, value in body.items():
+            if not isinstance(value, bool):
+                raise ValueError(f"{key} must be true or false")
+        with self._rights_lock:
+            previous = load_atlas_rights()
+            rights = dict(previous)
+            rights.update(body)
+            path = atlas_rights_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(rights, indent=2), encoding="utf-8")
+            replace_file(tmp, path)
+            changed = [key for key in ATLAS_RIGHTS_KEYS
+                       if rights[key] != previous[key]]
+            payload = {"rights": rights, "path": str(path)}
+        # One event per changed field, outside the lock. A right re-set to the
+        # value it already held is not news and records nothing.
+        for key in changed:
+            self.registry.record_event(
+                "desk.rights_changed",
+                {"field": key, "value": rights[key], "previous": previous[key]})
+        return payload
 
     # -- the method and the cap ----------------------------------------------
     def _cap_warning(self, policy_id: str, cap: int | None) -> str | None:
@@ -5073,7 +5149,13 @@ class UISession:
             template = TRIGGER_TEMPLATE.get(kind)
             what = (f"queued `{template}`" if template and action != "block"
                     else action or "noted")
-            self._record_atlas_reply(f"⚑ {kind} fired — Atlas {what} ({tid}).")
+            # The reason the trigger minted the task, verbatim. Without it the
+            # line says a kind fired and nothing about what moved, which is the
+            # one fact the operator needs to judge whether it should have.
+            reason = str(task.get("reason") or "").strip()
+            head = f"⚑ {kind} fired — Atlas {what} ({tid})"
+            self._record_atlas_reply(f"{head}: {reason}." if reason
+                                     else f"{head}.")
             announced["triggers"].append(tid)
         return announced
 
@@ -5320,31 +5402,20 @@ class UISession:
         evidence, a new scout run — is a new question the operator is entitled
         to be asked; only the answered one may not be re-asked.
 
-        Read over the two terminal statuses rather than by a registry query,
-        because this round owns the owner and not the registry. The window is
-        the honest limitation: on a desk with more than `_ANSWERED_WINDOW`
-        rejected or expired approvals of any kind, an old answer could fall out
-        of view. A `Registry.answered_universe_change` selecting on the pair in
-        SQL is the follow-up, and it belongs in a change that owns that file.
+        Selected in SQL by `Registry.answered_universe_change`, not filtered in
+        Python out of the newest few hundred terminal rows. That earlier
+        shape was a window and not a lookup: past the window an old answer fell
+        out of view and the same question went back on the operator's desk.
         """
-        from qlab.state.registry import APPROVAL_KIND_UNIVERSE_CHANGE
-
         if not memo_decision_id:
             return
-        for status in ("rejected", "expired"):
-            for row in self.registry.list_approval_requests(
-                    _ANSWERED_WINDOW, status):
-                if row.get("kind") != APPROVAL_KIND_UNIVERSE_CHANGE:
-                    continue
-                summary = row.get("summary") or {}
-                if (str(summary.get("ticker") or "").upper() != ticker
-                        or str(summary.get("memo_decision_id") or "")
-                        != memo_decision_id):
-                    continue
-                raise ValueError(
-                    f"the operator already answered this question about "
-                    f"{ticker} — the request was {status}. A later scout memo "
-                    "with new evidence may ask again; this one may not.")
+        row = self.registry.answered_universe_change(ticker, memo_decision_id)
+        if row is None:
+            return
+        raise ValueError(
+            f"the operator already answered this question about "
+            f"{ticker} — the request was {row['status']}. A later scout memo "
+            "with new evidence may ask again; this one may not.")
 
     @staticmethod
     def _check_catalog_ticker(ticker: str) -> None:
@@ -6159,8 +6230,68 @@ def _known_news_providers() -> list[str]:
     return sorted(PROVIDERS)
 
 
+# The header the MCP proxy stamps on every call it makes, and the only thing
+# that tells an Atlas tool call apart from the operator's own click: both are
+# unauthenticated HTTP on the same port, and the chat's requests otherwise look
+# exactly like the workstation's. It is a statement of ORIGIN, not a credential
+# — anyone who can reach the port can send it or omit it, the same way the desk
+# posture is intent and not a boundary. It exists so a right the operator
+# withdrew from the chat does not also disarm the human at the keyboard or the
+# heartbeat's own dispatch. Set in `qlab/mcp/tui_proxy.py`.
+CHAT_ORIGIN_HEADER = "X-Qlab-Origin"
+CHAT_ORIGIN = "chat"
+
+WORKFLOWS_RIGHT_REFUSAL = (
+    "the workflows right is off — turn it on in Settings ▸ MODELS")
+
+
+def _from_chat(headers) -> bool:
+    """Did this request come through the desk chat's MCP proxy?
+
+    Absent headers mean no: every in-process caller (the tests, the heartbeat)
+    passes none, and an unstated origin must never be read as the chat's.
+    """
+    if not headers:
+        return False
+    # `http.client.HTTPMessage.get` is case-insensitive; a plain dict is not,
+    # so in-process callers spell the header as the proxy sends it.
+    return str(headers.get(CHAT_ORIGIN_HEADER) or "").strip().lower() == (
+        CHAT_ORIGIN)
+
+
+def _refuse_without_workflows_right(headers) -> tuple[int, dict] | None:
+    """403 by name when the chat asks for work the operator withdrew.
+
+    This is the PRIMARY enforcement of the `workflows` right, not a second
+    belt: `chat_tools` shapes a session's grant when the session starts, so a
+    right withdrawn mid-conversation lands on the next one and the tool is
+    still offered for a turn. The owner is what covers that window.
+
+    Only chat-originated calls are gated. The heartbeat's autonomous dispatch
+    and the workstation's own buttons are the operator acting, and rights bound
+    the chat Atlas, not the operator. `web` and `build` have no owner-side
+    enforcement at all: nothing on this runtime serves a web fetch or spawns a
+    build, so those two are withdrawn where they are held — in the chat's tool
+    grant and in `qlab build` — by the tools half of this task.
+    """
+    if not _from_chat(headers):
+        return None
+    from qlab.tui.claude import load_atlas_rights
+
+    try:
+        rights = load_atlas_rights()
+    except RuntimeError as exc:
+        # A rights file this desk cannot read is not a grant. Fail loud, with
+        # the reader's own remedy, rather than acting on an assumed default.
+        return 500, {"error": str(exc)}
+    if rights.get("workflows", True):
+        return None
+    return 403, {"error": WORKFLOWS_RIGHT_REFUSAL}
+
+
 def handle_api(session: UISession, method: str, path: str,
-               query: dict, body: dict) -> tuple[int, dict]:
+               query: dict, body: dict, *,
+               headers=None) -> tuple[int, dict]:
     # bool("0") is True, so a flag arriving as text has to be parsed, never cast.
     off = _flagbool(body.get("offline"),
                     _qbool(query, "offline", session.offline_default))
@@ -6313,6 +6444,23 @@ def handle_api(session: UISession, method: str, path: str,
         if not isinstance(armed, bool):
             return 400, {"error": "armed must be true or false"}
         return 200, session.set_posture(armed)
+
+    if method == "GET" and path == "/api/atlas/rights":
+        try:
+            return 200, session.rights_payload()
+        except RuntimeError as exc:
+            # A rights file this desk did not write. 500 with the reader's own
+            # remedy — the client shows the sentence, and the operator can
+            # delete the file or set the rights from this very panel.
+            return 500, {"error": str(exc)}
+
+    if method == "POST" and path == "/api/atlas/rights":
+        try:
+            return 200, session.set_rights(body)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        except RuntimeError as exc:
+            return 500, {"error": str(exc)}
 
     if method == "POST" and path == "/api/alpaca/credentials":
         from qlab.trader.alpaca_auth import AlpacaAuthError, AlpacaConsentRequired
@@ -6618,6 +6766,9 @@ def handle_api(session: UISession, method: str, path: str,
             return 400, {"error": str(exc)}
 
     if method == "POST" and path == "/api/atlas/tasks":
+        refused = _refuse_without_workflows_right(headers)
+        if refused is not None:
+            return refused
         try:
             return 200, session.atlas_create_task(
                 str(body.get("kind") or ""), str(body.get("reason") or ""))
@@ -6723,6 +6874,9 @@ def handle_api(session: UISession, method: str, path: str,
         return 200, {"result": session.call_lab_tool(name, body, off)}
 
     if method == "POST" and path == "/api/workflows/start":
+        refused = _refuse_without_workflows_right(headers)
+        if refused is not None:
+            return refused
         # One research workflow at a time, refused BY NAME. The owner drives one
         # coordinator; a second start would register a graph nothing walks, and
         # a bare 409 leaves the operator no way to decide between waiting and
@@ -6792,6 +6946,14 @@ def handle_api(session: UISession, method: str, path: str,
         rest = path.removeprefix("/api/workflows/")
         workflow_id, separator, action = rest.rpartition("/")
         if separator and action in {"interrupt", "resume", "abandon"}:
+            if action == "resume":
+                # Resuming walks a graph's remaining phases, which is starting
+                # work. Interrupt and abandon only stop work already running,
+                # and a right that stopped the chat stopping something would
+                # leave a run nobody can halt.
+                refused = _refuse_without_workflows_right(headers)
+                if refused is not None:
+                    return refused
             try:
                 return 200, session.control_workflow(
                     workflow_id, action, body)
@@ -7174,11 +7336,13 @@ class _Handler(BaseHTTPRequestHandler):
                     # otherwise a settings panel opened against an unreachable
                     # daemon would freeze the whole desk for the probe timeout.
                     status, obj = handle_api(
-                        self.session, "GET", parsed.path, query, {})
+                        self.session, "GET", parsed.path, query, {},
+                        headers=self.headers)
                 else:
                     with _LOCK:
                         status, obj = handle_api(
-                            self.session, "GET", parsed.path, query, {})
+                            self.session, "GET", parsed.path, query, {},
+                            headers=self.headers)
             except Exception as exc:  # never crash the server on a bad call
                 status, obj = 500, {"error": repr(exc)}
             self._json(status, obj)
@@ -7415,11 +7579,13 @@ class _Handler(BaseHTTPRequestHandler):
                 # requested lane plus its baseline, then one run row written
                 # under `_LOCK` by `run_predictor_lane` itself.
                 status, obj = handle_api(self.session, "POST", parsed.path,
-                                         parse_qs(parsed.query), body)
+                                         parse_qs(parsed.query), body,
+                                         headers=self.headers)
             else:
                 with _LOCK:
                     status, obj = handle_api(self.session, "POST", parsed.path,
-                                             parse_qs(parsed.query), body)
+                                             parse_qs(parsed.query), body,
+                                             headers=self.headers)
         except Exception as exc:
             status, obj = 500, {"error": repr(exc)}
         self._json(status, obj)

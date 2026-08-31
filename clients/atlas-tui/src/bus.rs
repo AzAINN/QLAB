@@ -319,14 +319,31 @@ pub enum Wrote {
     /// cleared admission, which is a **result** and not a missing value. A
     /// client that rendered it as the chosen lane, or as absent, would report
     /// a refuted board as a successful one.
+    ///
+    /// `run_id` and `models` are not optional, and `models` is never empty:
+    /// `net::write::Board::read` refuses a 200 that lacks either, because a
+    /// board with no run and no lanes is a broken contract and would otherwise
+    /// be drawn in the tone reserved for a finding.
     PredictorRan {
-        run_id: Option<String>,
+        run_id: String,
         models: Vec<String>,
         champion: Option<String>,
     },
     /// The owner would not run that lane. Its own sentence — which, for the
     /// refusal an operator will actually hit, names every lane it does serve.
     PredictorRefused { said: String },
+    /// The request to fit a lane never got an answer.
+    ///
+    /// **Its own variant rather than a `Failed` the pane matches by name**, and
+    /// this is the one place on the bus where that distinction is load-bearing.
+    /// Every other write answers in milliseconds; a board is fitted for up to a
+    /// minute, so *some other* write will fail while one is in flight — and a
+    /// pane that read any `Failed` as its own would retire its in-flight line,
+    /// paint a news save's timeout as a board's, and re-arm the key that starts
+    /// a second run over the first. `lane` is what makes the match structural:
+    /// the pane compares it with what it is waiting on, and no change to
+    /// `dispatch::names`' prose can silently break that.
+    PredictorFailed { lane: String, said: String },
     /// The request itself failed: no owner, a timeout, a non-2xx. `said` is the
     /// owner's words verbatim when there were any.
     Failed { what: String, said: String },

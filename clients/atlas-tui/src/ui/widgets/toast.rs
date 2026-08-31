@@ -592,10 +592,9 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
         Wrote::PredictorRan {
             models, champion, ..
         } => {
-            let ran = match models.len() {
-                0 => "the owner did not say which lanes it ran".to_string(),
-                _ => models.join(", "),
-            };
+            // Never empty: `Board::read` refuses a 200 that named no lanes, so
+            // there is no "it ran nothing" case to spell here.
+            let ran = models.join(", ");
             Toast::new(
                 Level::Info,
                 "predictor board",
@@ -613,6 +612,14 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
         Wrote::PredictorRefused { said } => {
             Toast::new(Level::Warn, "predictor run refused", said.clone())
         }
+        // `Alarm` like every other broken request, and it names the lane: the
+        // operator asked for one board and the answer never came, so which one
+        // is the half they need to decide whether to ask again.
+        Wrote::PredictorFailed { lane, said } => Toast::new(
+            Level::Alarm,
+            "predictor run failed",
+            format!("run {lane} — {said}"),
+        ),
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

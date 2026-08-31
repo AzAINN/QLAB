@@ -563,7 +563,7 @@ pub enum Mandate {
 #[derive(Debug)]
 pub enum Board {
     Ran {
-        run_id: Option<String>,
+        run_id: String,
         /// The lanes the owner ran, in its own order. Not read as "what was
         /// asked for": the baseline is in here whether or not it was sent.
         models: Vec<String>,
@@ -1256,26 +1256,7 @@ impl WriteClient {
             .post_within("/api/research/predictors/run", body, PREDICTOR_RUN_DEADLINE)
             .await
         {
-            Ok(said) => Ok(Board::Ran {
-                run_id: field(&said, "run_id"),
-                models: said
-                    .get("models")
-                    .and_then(Value::as_array)
-                    .map(|names| {
-                        names
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .filter(|name| !name.is_empty())
-                            .map(str::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                // Absent and `null` collapse here, and they mean the same
-                // thing on this route: nothing cleared admission. `field`
-                // already treats an empty string as absent, which is the third
-                // spelling of the same answer.
-                champion: field(&said, "champion"),
-            }),
+            Ok(said) => Board::read(said),
             Err(WriteError::Refused { status: 400, said }) => Ok(Board::Rejected(sentence(&said))),
             Err(err) => Err(err),
         }
@@ -1384,6 +1365,53 @@ impl WriteClient {
             });
         }
         serde_json::from_str(&text).map_err(|err| WriteError::Unreadable(err.to_string()))
+    }
+}
+
+impl Board {
+    /// Read one 200 body from `/api/research/predictors/run`.
+    ///
+    /// **Fail loud rather than render a broken contract as a finding.** H1's
+    /// route always answers a `run_id` and a non-empty `models` — it appends
+    /// `ridge:none` itself, so a board of nothing is not a shape it can
+    /// produce. A reader that defaulted the two would paint "the owner named no
+    /// run · 0 fitted, nothing cleared admission" in the tone reserved for a
+    /// result, which is the worst of the three things this could do: an
+    /// operator would read a proxy's 200, or a route that changed shape, as the
+    /// desk having fitted a board and found nothing. Invariant 4.
+    ///
+    /// `champion` is the one field that may be absent, and that is exactly why
+    /// the other two may not: `null` there is the board's own answer, and it is
+    /// only legible as one if everything around it is known to be real.
+    fn read(body: Value) -> Result<Board, WriteError> {
+        let Some(run_id) = field(&body, "run_id") else {
+            return Err(WriteError::Unreadable(format!(
+                "the owner answered 200 for a predictor run without naming the run: {body}"
+            )));
+        };
+        let models: Vec<String> = match body.get("models").and_then(Value::as_array) {
+            Some(names) => names
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect(),
+            None => Vec::new(),
+        };
+        if models.is_empty() {
+            return Err(WriteError::Unreadable(format!(
+                "the owner answered 200 for a predictor run without saying which lanes it \
+                 fitted: {body}"
+            )));
+        }
+        Ok(Board::Ran {
+            run_id,
+            models,
+            // Absent, `null` and empty collapse here, and they mean the same
+            // thing on this route: nothing cleared admission. That is a result,
+            // and the two checks above are what make it readable as one.
+            champion: field(&body, "champion"),
+        })
     }
 }
 

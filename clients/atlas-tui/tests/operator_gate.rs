@@ -515,7 +515,7 @@ mod glass {
 #[cfg(feature = "operator")]
 mod operator {
     use atlas::model::Snapshot;
-    use atlas::net::write::{Booked, Choice, Execution, WriteClient};
+    use atlas::net::write::{Board, Booked, Choice, Execution, WriteClient};
     use atlas::store::Posture;
     use atlas::ui::widgets::confirm::Modal;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1439,6 +1439,139 @@ mod operator {
         match perform(&client, Command::Approve("a1".into())).await {
             Some(Wrote::Failed { what, .. }) => assert!(what.contains("a1"), "{what}"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    // -- the predictor run -------------------------------------------------
+
+    #[tokio::test]
+    async fn a_predictor_run_lands_on_the_route_the_owner_dispatches_on() {
+        // The route, the body keys, and the answer, through the dispatch seam
+        // rather than the client alone: which method a `Command` reaches and
+        // which `Wrote` each answer becomes is the half a view cannot pin.
+        let owner = spawn_owner(
+            200,
+            r#"{"run_id": "9f3c1d77aa20", "models": ["kernel:zz", "ridge:none"],
+                "champion": "kernel:zz", "ranking": ["kernel:zz", "ridge:none"]}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        assert_eq!(
+            perform(
+                &client,
+                Command::RunPredictor {
+                    model: "kernel:zz".into(),
+                    offline: true,
+                },
+            )
+            .await,
+            Some(Wrote::PredictorRan {
+                run_id: "9f3c1d77aa20".into(),
+                // The owner's own list, which carries the baseline it appended
+                // rather than the one lane that was asked for.
+                models: vec!["kernel:zz".into(), "ridge:none".into()],
+                champion: Some("kernel:zz".into()),
+            })
+        );
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/research/predictors/run");
+        // The two keys H1's contract requires, and nothing else: `universe`
+        // and `lookback_days` are left to the route's own defaults, because
+        // this client has no surface that chooses them.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen.body).unwrap(),
+            serde_json::json!({"model": "kernel:zz", "offline": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lane_the_owner_does_not_serve_is_a_refusal_and_not_a_failure() {
+        // The 400 an operator will actually hit, and it names every lane the
+        // owner does serve — the whole remedy. Reported as a broken request it
+        // would be buried under a transport error nobody can act on.
+        let owner = spawn_owner(
+            400,
+            r#"{"error": "unknown model 'forest:deep'; available: ('ridge:none', 'kernel:zz')"}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match perform(
+            &client,
+            Command::RunPredictor {
+                model: "forest:deep".into(),
+                offline: false,
+            },
+        )
+        .await
+        {
+            Some(Wrote::PredictorRefused { said }) => {
+                assert!(said.contains("available: ('ridge:none'"), "{said}");
+            }
+            other => panic!("a 400 from this route is a refusal: {other:?}"),
+        }
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&owner.only().body).unwrap()["offline"],
+            serde_json::json!(false),
+            "the window's own lane must travel"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_two_hundred_that_names_no_run_or_no_lanes_is_refused_not_rendered() {
+        // The shape this reader exists for. Defaulted, a 200 without these
+        // decodes to "no run · 0 fitted, nothing cleared admission" — a broken
+        // contract, or a proxy's answer, drawn in the tone reserved for a
+        // research finding. Invariant 4: refuse loudly.
+        for body in [
+            r#"{"models": ["kernel:zz", "ridge:none"], "champion": null}"#,
+            r#"{"run_id": "9f3c1d77aa20", "champion": null}"#,
+            r#"{"run_id": "9f3c1d77aa20", "models": [], "champion": null}"#,
+        ] {
+            let owner = spawn_owner(200, body);
+            let client = WriteClient::new(&owner.base).unwrap();
+            let err = client.run_predictor("kernel:zz", true).await.unwrap_err();
+            let said = err.to_string();
+            assert!(said.contains("unreadably"), "{body}: {said}");
+            // The body itself, so whoever reads the log can see what answered.
+            assert!(
+                said.contains("9f3c1d77aa20") || said.contains("kernel:zz"),
+                "{said}"
+            );
+        }
+
+        // And a board that admitted nothing is still a *result*: a `null`
+        // champion beside a real run and real lanes reads back cleanly.
+        let owner = spawn_owner(
+            200,
+            r#"{"run_id": "9f3c1d77aa20", "models": ["kernel:zz", "ridge:none"],
+                "champion": null}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        match client.run_predictor("kernel:zz", true).await.unwrap() {
+            Board::Ran { champion, .. } => assert_eq!(champion, None),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_predictor_run_that_never_landed_names_the_lane_it_was_about() {
+        // Its own outcome variant, carrying the lane. A board runs for up to a
+        // minute, so the pane waiting on one has to tell its own broken
+        // request from every other write's — see `bus::Wrote::PredictorFailed`.
+        let client = WriteClient::new("http://127.0.0.1:1").unwrap();
+        match perform(
+            &client,
+            Command::RunPredictor {
+                model: "kernel:zz".into(),
+                offline: true,
+            },
+        )
+        .await
+        {
+            Some(Wrote::PredictorFailed { lane, said }) => {
+                assert_eq!(lane, "kernel:zz");
+                assert!(!said.is_empty(), "a failure must carry the reason");
+            }
+            other => panic!("an unreachable owner is a predictor failure: {other:?}"),
         }
     }
 

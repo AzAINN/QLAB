@@ -600,8 +600,12 @@ mod armed {
                     // failure would bury the remedy under an error nobody can
                     // act on.
                     Ok(Board::Rejected(said)) => Wrote::PredictorRefused { said },
-                    Err(err) => Wrote::Failed {
-                        what: names(&Command::RunPredictor { model, offline }),
+                    // Its own failure variant, carrying the lane. See
+                    // `Wrote::PredictorFailed`: a board runs for a minute, so
+                    // the pane waiting on one has to be able to tell its own
+                    // broken request from every other write's.
+                    Err(err) => Wrote::PredictorFailed {
+                        lane: model,
                         said: err.to_string(),
                     },
                 }

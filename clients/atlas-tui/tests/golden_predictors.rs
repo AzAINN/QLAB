@@ -315,7 +315,7 @@ mod armed {
         let mut client = picking();
         press(&mut client, KeyCode::Enter);
         client.views.wrote(&Wrote::PredictorRan {
-            run_id: Some("9f3c1d77aa20".to_string()),
+            run_id: "9f3c1d77aa20".to_string(),
             models: vec!["groupwise:angle_zz".to_string(), "ridge:none".to_string()],
             champion: Some("groupwise:angle_zz".to_string()),
         });
@@ -335,7 +335,7 @@ mod armed {
         let mut client = picking();
         press(&mut client, KeyCode::Enter);
         client.views.wrote(&Wrote::PredictorRan {
-            run_id: Some("9f3c1d77aa20".to_string()),
+            run_id: "9f3c1d77aa20".to_string(),
             models: vec!["kernel:zz".to_string(), "ridge:none".to_string()],
             champion: None,
         });
@@ -352,8 +352,8 @@ mod armed {
     fn a_request_that_never_landed_does_not_leave_the_pane_in_flight() {
         let mut client = picking();
         press(&mut client, KeyCode::Enter);
-        client.views.wrote(&Wrote::Failed {
-            what: "run groupwise:angle_zz".to_string(),
+        client.views.wrote(&Wrote::PredictorFailed {
+            lane: "groupwise:angle_zz".to_string(),
             said: "the owner did not answer: connection refused".to_string(),
         });
         let frame = client.frame(120, 36);
@@ -372,7 +372,49 @@ mod armed {
     }
 
     #[test]
-    fn an_unrelated_write_does_not_retire_a_run_that_is_still_going() {
+    fn an_unrelated_failure_does_not_retire_a_run_that_is_still_going() {
+        // The probe the reviewer wrote. A board is fitted for up to a minute,
+        // so *some other* write will fail inside one — a news save that timed
+        // out, a command the chokepoint refused. A pane that read any `Failed`
+        // as its own would retire its in-flight line, paint that write's
+        // sentence as a board's, and re-arm the key that starts a second board
+        // over the first. The lane is what tells them apart.
+        let mut client = picking();
+        press(&mut client, KeyCode::Enter);
+        client.views.wrote(&Wrote::Failed {
+            what: "save the news sources".to_string(),
+            said: "the owner did not answer: operation timed out".to_string(),
+        });
+        let frame = client.frame(120, 36);
+        assert!(
+            content(&frame).contains("running groupwise:angle_zz…"),
+            "{frame}"
+        );
+        assert!(!content(&frame).contains("timed out"), "{frame}");
+        // And the key is still refused, because the run is still going.
+        press(&mut client, KeyCode::Enter);
+        assert!(content(&client.frame(120, 36)).contains("one run at a time"));
+
+        // A failure naming *another* lane is not this pane's either: two
+        // windows can be pointed at one owner.
+        client.views.wrote(&Wrote::PredictorFailed {
+            lane: "kernel:zz".to_string(),
+            said: "the owner did not answer".to_string(),
+        });
+        assert!(content(&client.frame(120, 36)).contains("running groupwise:angle_zz…"));
+
+        // Its own does retire it.
+        client.views.wrote(&Wrote::PredictorFailed {
+            lane: "groupwise:angle_zz".to_string(),
+            said: "the owner did not answer: connection refused".to_string(),
+        });
+        let frame = client.frame(120, 36);
+        assert!(content(&frame).contains("connection refused"), "{frame}");
+        assert!(!content(&frame).contains("running groupwise"), "{frame}");
+    }
+
+    #[test]
+    fn an_unrelated_success_does_not_retire_a_run_that_is_still_going() {
         // A board is fitted for a minute, so another pane's answer will land
         // in the middle of one. SETTINGS clears its waits on any outcome and
         // can; this pane must not, or it would offer to start a second run
@@ -439,6 +481,53 @@ mod armed {
     }
 
     #[test]
+    fn a_long_refusal_is_cut_on_a_word_rather_than_clipped_by_the_pane() {
+        // `SAID_MAX` is 200 and the pane is 77 cells, so the header renders
+        // this unwrapped. Clipped, the cut falls on the end of the sentence —
+        // which is where a refusal keeps its remedy — and the line reads as
+        // one that merely stopped.
+        let mut client = picking();
+        press(&mut client, KeyCode::Enter);
+        client.views.wrote(&Wrote::PredictorRefused {
+            said: format!("unknown model 'x'; available: {}", "y".repeat(200)),
+        });
+        let frame = client.frame(120, 36);
+        let said = line_with(&frame, "unknown model 'x'");
+        assert!(
+            said.contains('…'),
+            "the header was clipped, not cut: {said}"
+        );
+        // And the pane's own columns are intact: nothing ran into the rail.
+        assert!(said.contains('│'), "{said}");
+    }
+
+    #[test]
+    fn a_desk_disarmed_under_the_box_closes_the_question_it_can_no_longer_ask() {
+        // The posture arrives on a snapshot and can go back to GLASS
+        // mid-session. The chokepoint would refuse the write either way; what
+        // must not happen is a live picker left on screen in a window that has
+        // lost the authority to use it — still swallowing `q` and `Esc`,
+        // because `typing` claims the keyboard for as long as it is open.
+        let mut client = picking();
+        assert!(content(&client.frame(120, 36)).contains("RUN A PREDICTOR LANE"));
+        client.store.posture = Posture::Glass;
+        let frame = client.frame(120, 36);
+        assert!(!content(&frame).contains("RUN A PREDICTOR LANE"), "{frame}");
+        // And the keyboard is given back: `q` is the shell's again.
+        assert_eq!(press(&mut client, KeyCode::Char('q')), Some(Command::Quit));
+    }
+
+    #[test]
+    fn a_key_between_the_disarm_and_the_frame_emits_no_command() {
+        // The frame is what closes the box, so a key can arrive first. Enter
+        // must not emit a command the runtime would only then refuse.
+        let mut client = picking();
+        client.store.posture = Posture::Glass;
+        assert_eq!(press(&mut client, KeyCode::Enter), None);
+        assert!(!content(&client.frame(120, 36)).contains("RUN A PREDICTOR LANE"));
+    }
+
+    #[test]
     fn the_lane_picker_renders_at_120x36() {
         insta::assert_snapshot!(picking().frame(120, 36));
     }
@@ -455,7 +544,7 @@ mod armed {
         let mut client = picking();
         press(&mut client, KeyCode::Enter);
         client.views.wrote(&Wrote::PredictorRan {
-            run_id: Some("9f3c1d77aa20".to_string()),
+            run_id: "9f3c1d77aa20".to_string(),
             models: vec!["groupwise:angle_zz".to_string(), "ridge:none".to_string()],
             champion: Some("groupwise:angle_zz".to_string()),
         });

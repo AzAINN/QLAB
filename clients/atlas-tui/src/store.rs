@@ -1055,6 +1055,7 @@ impl Store {
                     Wrote::MethodSet { .. }
                     | Wrote::PredictorRan { .. }
                     | Wrote::PredictorRefused { .. }
+                    | Wrote::PredictorFailed { .. }
                     | Wrote::MethodRefused { .. }
                     | Wrote::NewsSaved { .. }
                     | Wrote::NewsRefused { .. }

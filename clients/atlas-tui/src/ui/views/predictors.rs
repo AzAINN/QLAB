@@ -132,7 +132,16 @@ pub struct PredictorsView {
 #[cfg(feature = "operator")]
 #[derive(Default)]
 struct Switch {
-    open: bool,
+    /// Whether the box is on screen.
+    ///
+    /// A `Cell` because the frame is one of the things that can close it: the
+    /// desk's posture arrives on a snapshot and can go back to GLASS
+    /// mid-session, and `draw` — which takes `&self`, deliberately — is where
+    /// that is first seen. A box left standing there would be a live picker in
+    /// a window the desk has disarmed, and `typing` would go on handing it the
+    /// keyboard. The same interior mutability `run_word` uses to retract an
+    /// affordance the frame can no longer offer.
+    open: std::cell::Cell<bool>,
     at: usize,
 }
 
@@ -293,7 +302,7 @@ impl View for PredictorsView {
                 self.offer_run(store);
                 return None;
             }
-            if self.switch.open {
+            if self.switch.open.get() {
                 return self.picker_key(k, store);
             }
         }
@@ -307,7 +316,7 @@ impl View for PredictorsView {
     fn typing(&self) -> bool {
         #[cfg(feature = "operator")]
         {
-            self.switch.open && self.box_fits()
+            self.switch.open.get() && self.box_fits()
         }
         #[cfg(not(feature = "operator"))]
         false
@@ -348,7 +357,7 @@ impl PredictorsView {
                     Style::default().fg(theme().text_dim),
                 )),
             ];
-            lines.extend(self.run_line());
+            lines.extend(self.run_line(inner.width as usize));
             f.render_widget(Paragraph::new(lines), inner);
             return;
         };
@@ -367,7 +376,7 @@ impl PredictorsView {
                     Style::default().fg(status_tone(board)),
                 )),
             ];
-            lines.extend(self.run_line());
+            lines.extend(self.run_line(inner.width as usize));
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
             return;
         }
@@ -473,7 +482,7 @@ impl PredictorsView {
             Style::default().fg(t.text_tertiary),
         ));
         let mut lines = vec![Line::from(spans), spec];
-        lines.extend(self.run_line());
+        lines.extend(self.run_line(inner.width as usize));
         lines
     }
 }
@@ -485,7 +494,7 @@ impl PredictorsView {
 /// the board above should not have to ask which build it is in.
 #[cfg(not(feature = "operator"))]
 impl PredictorsView {
-    fn run_line(&self) -> Option<Line<'static>> {
+    fn run_line(&self, _room: usize) -> Option<Line<'static>> {
         None
     }
 
@@ -505,12 +514,13 @@ impl PredictorsView {
     /// header that kept showing the old champion would read as the answer to
     /// the key just pressed. The box's own footer takes the other order — see
     /// `note_line`, and why the two are not one line.
-    fn run_line(&self) -> Option<Line<'static>> {
-        // The pane is 77 cells and every sentence here is already bounded at
-        // ingestion, so the header needs no cut of its own.
-        self.running_parts()
-            .or_else(|| self.said_parts())
-            .map(|(text, style)| Line::from(Span::styled(text, style)))
+    /// Bounded to the pane, which draws this line unwrapped. `SAID_MAX` is 200
+    /// and the pane is about 77 cells, so an owner refusal at the ingestion
+    /// bound would otherwise be clipped mid-word by the renderer — and the
+    /// clip falls on the *end* of the sentence, which is where a refusal keeps
+    /// its remedy. Cut with an ellipsis instead, so the line says it was cut.
+    fn run_line(&self, room: usize) -> Option<Line<'static>> {
+        bounded_line(self.running_parts().or_else(|| self.said_parts()), room)
     }
 
     /// The box's footer: what was last *said*, in preference to what is
@@ -522,23 +532,9 @@ impl PredictorsView {
     /// answer a key with the same sentence it was already showing, which reads
     /// as a keystroke that did nothing. The header keeps saying what is
     /// running; the footer says what just happened.
-    /// Bounded to the box, which wraps nothing: the owner's refusal is longer
-    /// than 66 cells and the header above is where it is read in full. A cut
-    /// here rather than a clip, because `format::bounded` ends on a word and
-    /// says so, where the renderer would end mid-quote.
+    /// Bounded to the box, which is narrower than the pane and wraps nothing.
     fn note_line(&self, room: usize) -> Option<Line<'static>> {
-        self.said_parts()
-            .or_else(|| self.running_parts())
-            .map(|(text, style)| {
-                // One cell short of the room, because the cut adds an
-                // ellipsis: bounded to the width exactly, that ellipsis is the
-                // character the renderer drops, and the line reads as a
-                // sentence that merely stopped.
-                Line::from(Span::styled(
-                    format::bounded(&text, room.saturating_sub(1)),
-                    style,
-                ))
-            })
+        bounded_line(self.said_parts().or_else(|| self.running_parts()), room)
     }
 
     /// The in-flight sentence, if a lane is being fitted.
@@ -613,7 +609,7 @@ impl PredictorsView {
         // box that is about to ask for another, it would be a verdict about a
         // question nobody is asking any more.
         self.said = None;
-        self.switch.open = true;
+        self.switch.open.set(true);
         self.switch.at = self.switch.at.min(choosable(store).len().saturating_sub(1));
     }
 
@@ -621,6 +617,14 @@ impl PredictorsView {
     // Every key claimed here owes a row in `input::KEYMAP` under its own
     // section, and a test reads this function to check it.
     fn picker_key(&mut self, k: KeyEvent, store: &mut Store) -> Option<Command> {
+        // The posture is a value that changes mid-session, and a key can arrive
+        // between the snapshot that disarmed the desk and the frame that would
+        // have closed this box. Checked here too, so Enter cannot emit a
+        // command the runtime would only then refuse.
+        if !store.posture.writes() {
+            self.switch.open.set(false);
+            return None;
+        }
         let rows = choosable(store).len();
         match k.code {
             KeyCode::Up => {
@@ -634,7 +638,7 @@ impl PredictorsView {
             // Nothing was sent, so there is nothing to undo: the box closes and
             // the board underneath is exactly as the owner last served it.
             KeyCode::Esc => {
-                self.switch.open = false;
+                self.switch.open.set(false);
                 None
             }
             KeyCode::Enter => self.run(store),
@@ -686,11 +690,13 @@ impl PredictorsView {
     /// the bus rather than out of the key that asked for it — see
     /// `views::Views::wrote`.
     ///
-    /// **Only the three outcomes that are about a board.** SETTINGS retires its
-    /// waits on any answer at all, and it can: its writes come back in
-    /// milliseconds. A board is fitted for a minute, so an unrelated news save
-    /// landing in the middle of one would clear an in-flight line for a run
-    /// that is still going — and the pane would then offer to start a second.
+    /// **Only the three outcomes that are about a board, and the failure only
+    /// when it names the lane in flight.** SETTINGS retires its waits on any
+    /// answer at all, and it can: its writes come back in milliseconds. A board
+    /// is fitted for a minute, so an unrelated write *will* answer inside one —
+    /// and a pane that took any `Failed` would clear an in-flight line for a
+    /// run that is still going, paint another write's sentence as a board's,
+    /// and re-arm the key that starts a second board over the first.
     pub fn wrote(&mut self, outcome: &crate::bus::Wrote) {
         use crate::bus::Wrote;
         match outcome {
@@ -702,7 +708,7 @@ impl PredictorsView {
                 models,
             } => {
                 self.running = None;
-                self.switch.open = false;
+                self.switch.open.set(false);
                 self.said = Some(Said::Ran(ran_line(run_id, champion, models)));
             }
             // Not confirmable and not a broken request: the owner considered
@@ -713,13 +719,16 @@ impl PredictorsView {
                 self.running = None;
                 self.said = Some(Said::Refused(crate::format::bounded(said, SAID_MAX)));
             }
-            // A request that never landed. The pane must not stay in flight
-            // over it: a board that refuses `r` forever after one timeout is a
-            // client that looks broken.
-            Wrote::Failed { what, said } if self.running.is_some() => {
+            // A request that never landed — and only if it was *this* pane's.
+            // The lane is compared rather than a sentence matched, because a
+            // board runs for a minute and some other write will fail inside
+            // one: a pane that took any failure would retire its in-flight
+            // line over a news save's timeout and re-arm the key that starts a
+            // second board over the first.
+            Wrote::PredictorFailed { lane, said } if self.running.as_deref() == Some(lane) => {
                 self.running = None;
                 self.said = Some(Said::Failed(crate::format::bounded(
-                    &format!("{what} — {said}"),
+                    &format!("run {lane} — {said}"),
                     SAID_MAX,
                 )));
             }
@@ -730,7 +739,17 @@ impl PredictorsView {
     /// The lane picker, drawn over the pane that opened it.
     fn draw_switch(&self, f: &mut Frame, inner: Rect, store: &Store) {
         use ratatui::widgets::{Block, Borders, Clear};
-        if !self.switch.open {
+        if !self.switch.open.get() {
+            return;
+        }
+        // The desk went back to GLASS while the box was up. Closed here rather
+        // than merely hidden: `typing` claims the keyboard for as long as the
+        // box is open, and a window that had stopped drawing a picker while
+        // still swallowing `q` and `Esc` for it would read as a hung client.
+        // The chokepoint would refuse the write either way — this is about the
+        // question staying on screen after the authority to ask it is gone.
+        if !store.posture.writes() {
+            self.switch.open.set(false);
             return;
         }
         // Refuse rather than open invisible, the rule every box on this
@@ -837,17 +856,32 @@ impl PredictorsView {
 #[cfg(feature = "operator")]
 const SAID_MAX: usize = 200;
 
+/// One sentence, cut to the room it is drawn in.
+///
+/// A cut rather than a clip: `format::bounded` ends on a word and says so with
+/// an ellipsis, where the renderer would end mid-quote and read as a sentence
+/// that merely stopped. One cell short of the room, because that ellipsis is
+/// the character the renderer would otherwise drop.
+#[cfg(feature = "operator")]
+fn bounded_line(said: Option<(String, Style)>, room: usize) -> Option<Line<'static>> {
+    let (text, style) = said?;
+    Some(Line::from(Span::styled(
+        format::bounded(&text, room.saturating_sub(1)),
+        style,
+    )))
+}
+
 /// The owner's account of a board it fitted, as one line.
 ///
 /// **The run and the verdict, and never a claim in between.** A `None` champion
 /// is the board saying nothing cleared admission — a result — so it is rendered
 /// as that rather than as an absence or, worse, as the lane that was asked for.
 #[cfg(feature = "operator")]
-fn ran_line(run_id: &Option<String>, champion: &Option<String>, models: &[String]) -> String {
-    let run = match run_id.as_deref() {
-        Some(id) => format!("run {}", head(id.to_string(), 8)),
-        None => "the owner named no run".to_string(),
-    };
+fn ran_line(run_id: &str, champion: &Option<String>, models: &[String]) -> String {
+    // Both are guaranteed by the reader behind the write half, which refuses a
+    // 200 that named no run and no lanes — so there is no absence to spell
+    // here, and the one `None` below is the board's own answer, not a gap.
+    let run = format!("run {}", head(run_id.to_string(), 8));
     match (champion.as_deref(), models.len()) {
         (Some(champion), _) => format!("{run} · champion {champion}"),
         // The count is the honest half of "nothing won": a board of one lane

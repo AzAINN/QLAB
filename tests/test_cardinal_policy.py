@@ -216,3 +216,38 @@ def test_a_cardinality_arm_must_be_a_min_variance_arm():
     arm = Arm("bad", "mvsk", "classical_multistart", params={"cardinality": 3})
     with pytest.raises(ValueError, match="cardinality"):
         solve_arm(arm, snapshot)
+
+
+def test_the_a6_basket_is_identical_whether_or_not_the_future_is_in_the_panel():
+    """The empirical look-ahead check, kept as a regression.
+
+    A6 beat every other arm in the ablation, and a selection that could see
+    forward is the cheapest way to produce exactly that. Handing the policy the
+    FULL price history and handing it the history truncated at the same
+    ``as_of`` must give byte-identical weights: ``DataSnapshot`` truncates at
+    construction, and the selection reads nothing but the moment set estimated
+    from that window.
+    """
+    import datetime as dt
+
+    from qlab.arms import Arm, MomentsConfig, solve_arm
+    from qlab.core import data as market
+    from qlab.core.types import DataSnapshot
+
+    tickers = ["ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
+    full = market.get_prices(tickers, "2010-01-01", "2020-12-31",
+                             offline=True, seed=7)
+    arm = Arm("A6", "min_variance", "classical", params={"cardinality": 4})
+    cfg = MomentsConfig(lookback_days=504)
+    as_of = dt.date(2018, 9, 28)
+
+    truncated = full.loc[full.index <= "2018-09-28"]
+    blind, blind_diag = solve_arm(
+        arm, DataSnapshot(tickers=tickers, prices=truncated, as_of=as_of),
+        moments=cfg)
+    offered_future, _ = solve_arm(
+        arm, DataSnapshot(tickers=tickers, prices=full, as_of=as_of),
+        moments=cfg)
+
+    assert blind.values == offered_future.values
+    assert len(blind_diag["selected"]) == 4

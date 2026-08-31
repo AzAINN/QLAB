@@ -33,9 +33,19 @@ Every entry has a category and one of three stages.
 
 Operational examples include HRP, equal risk contribution, minimum variance,
 and scenario CVaR. Research entries include classical multistart MVSK,
-regime-conditioned covariance, the volatility-target overlay, and the optional
-Dirac-3 adapter. `mandate.yaml` currently selects HRP as the paper allocation
-policy because it is the robust benchmark supported by the present evidence.
+regime-conditioned covariance, the volatility-target overlay,
+`cardinal_min_variance` (exact k-of-N selection, then min-variance on the chosen
+names), and the optional Dirac-3 adapter. `mandate.yaml` currently selects HRP
+as the paper allocation policy because it is the robust benchmark supported by
+the present evidence; the operator may choose another *operational* policy from
+the desk, never a research one.
+
+`cardinal_min_variance` met its pre-registered promotion gate on the ablation
+and stayed at research anyway — one repeated basket is not 57 selection
+decisions, and `OperationalPolicy.arm()` drops `params`, so promotion as
+specified would have run plain min-variance under the cardinal name. The
+numbers and the decision are in
+[the record](../planning-docs/2026-08-31-a6-cardinality-not-promoted.md).
 
 ### Why MVSK is still here
 
@@ -112,7 +122,16 @@ the TUI workforce view.
 
 - Referee PASS is bound to the exact reviewed targets.
 - A mandate enforces the whitelist, long-only weights, caps, turnover, order
-  count, and trailing-drawdown kill switch.
+  count, `max_holdings` (how many names a plan may hold — checked by
+  `Mandate.check_targets`, so every policy including HRP is held to it), and
+  trailing-drawdown kill switch.
+- The desk asks about **one proposal at a time**. A newer checked plan
+  supersedes the older pending one and invalidates its approval with a reason;
+  `GET /api/desk/proposal` is that one object, and
+  `POST /api/desk/proposal/book` approves and executes it in a single call. The
+  client posts the `targets_hash` its confirmation box displayed; the owner
+  re-validates the approval, the plan, and the referee PASS pinned to that hash
+  before any fill. One explicit human confirmation — one click, never zero.
 - Rebalances are two-phase, persisted by leg, transactional, and resumable
   without duplicate orders.
 - Every decision carries a challenger view and can be scored against realized
@@ -122,7 +141,8 @@ the TUI workforce view.
 
 ### Operator and agent surfaces
 
-- qlab tui is the terminal face of the owner runtime.
+- qlab tui is the terminal face of the owner runtime — ten views, Visuals on
+  key `0`.
 - qlab owner runs the same owner runtime headless, for a desk kept up as a
   service that workstations attach to.
 - The combined qlab MCP server is for headless orchestration and refuses to
@@ -140,7 +160,18 @@ the TUI workforce view.
   resumable from a new one.
 - Five least-privilege roles are generated from one neutral source for Claude
   Code and IBM Bob: moments analyst, challenger, optimization runner, referee,
-  and reporter.
+  and reporter. The `portfolio_watch` template adds a sixth, quarantined role:
+  `contender-scout`, whose whole grant is `WebSearch`, `WebFetch` and two
+  registry decision tools.
+- Operator choices that are not the governance document live in state, merged
+  by `load_mandate`: the operational method and `max_holdings` in
+  `state_path("mandate_overrides.json")` (`GET`/`POST /api/desk/method`), and
+  the three Atlas rights in `state_path("atlas_rights.json")`
+  (`GET`/`POST /api/atlas/rights`). `mandate.yaml` stays the shipped document.
+- `POST /api/research/predictors/run` runs one predictor lane and its baseline
+  from the desk; the board is the same artifact the research surface reads.
+- `GET /api/visuals` lists what this build can draw and `GET /api/visuals/<name>`
+  renders one as text, which is what the VISUALS view paints.
 
 ## Repository map
 

@@ -22,17 +22,16 @@ a check someone could later remove. That is the build a monitoring box runs, and
 it cannot be argued, configured or flagged into writing.
 
 The default build — what `cargo build --release` and `qlab tui` produce — is
-armed, and is protected the way the Textual client is: a fill needs the last six
-of the plan's own `targets_hash` typed into `ui::widgets::confirm`, the referee
-PASS is pinned to that same hash, and the owner re-validates every request and
-refuses without a persisted approval. What the armed build may *do* is the
-desk's answer rather than a launch flag: the owner persists a posture, serves it
-on `/api/tui`, and the client re-derives its scope from every snapshot.
-`--glass` is this window declining that authority for one session.
-
-It runs *alongside* the Textual TUI. Both read the same `/api/tui` snapshot, so
-there is no cutover cliff and no window in which the desk has two faces that
-disagree about it.
+armed, and a fill costs exactly one explicit confirmation: `ui::widgets::confirm`
+shows the allocation and the last six of the plan's own `targets_hash`, Enter
+posts that hash, the referee PASS is pinned to the same hash, and the owner
+re-validates every request and refuses without a persisted approval. One click,
+never zero — booking a proposal that way is one call
+(`POST /api/desk/proposal/book`) which approves and executes, not two boxes
+asking for the same hash twice. What the armed build may *do* is the desk's
+answer rather than a launch flag: the owner persists a posture, serves it on
+`/api/tui`, and the client re-derives its scope from every snapshot. `--glass`
+is this window declining that authority for one session.
 
 ## The glyph
 
@@ -64,11 +63,29 @@ pretending otherwise would just produce a worse Textual.
 
 ## The shell
 
-One frame is five regions: a ticker row, a nine-cell nav rail, the active
+One frame is five regions: a ticker row, a ten-cell nav rail, the active
 view, the pulse rail, and a status line that always states the posture — `GLASS`
 when this window holds no writer, whether because the build has none, because
-`--glass` declined it, or because the desk is not armed. Keys `1`–`9` and `Tab`/`BackTab`
-switch views, `r` jumps the poll queue, `q` quits.
+`--glass` declined it, or because the desk is not armed. Keys `1`–`9`, `0` and
+`Tab`/`BackTab` switch views — ATLAS, DESK, MKTS, BOOK, RSCH, PRED, WORK, AUDIT,
+SETT, VIS, in that order, because the digit keys index `ViewId::ALL` — `r` jumps
+the poll queue, `q` quits.
+
+The keys that do something beyond navigating are declared once in `input.rs`,
+which is also what the `?` overlay draws, so a key and its help cannot drift:
+
+| key | where | what |
+|---|---|---|
+| `b` | ATLAS, BOOK | book the desk's current proposal — opens the confirmation box |
+| `r` | PRED | refresh the board, and offer to run one of its lanes |
+| `Home` / `End` | VIS | the left and right edges of the drawing |
+| `m`, `↑↓`, `space` | SETT ▸ MODELS | pick a model; grant or withdraw a right |
+
+The MODELS card's three rights read `on`/`off` with what each one reaches —
+`web · chat, /cli tools`, `workflows · refused for chat`, `build · the /build
+key` — over one fixed line, `nothing here binds a non-chat caller`, which is the
+half no row can carry: a `qlab workforce run`, the owner's own coordinator, the
+heartbeat and a non-Claude reasoner are bound by none of them.
 
 `shell::draw` is a pure function of the store — no clock read, no socket, no
 client — so `tests/golden_shell.rs` pins the whole frame as text through a
@@ -76,8 +93,5 @@ client — so `tests/golden_shell.rs` pins the whole frame as text through a
 
 ## What is not here yet
 
-Of the seven views only DESK has content, and its tiles are placeholders; the
-rest name the task that builds them. Not yet here: the market chart, the book
-detail, the workforce flowchart, the audit trail, Settings, live quotes, the
-effect manager, and the command line. The Textual client remains the complete
-surface.
+The rail is out of digits: VIS sits on `0`, so an eleventh view fails loudly in
+a store test and needs a numbering decision before it can be added.

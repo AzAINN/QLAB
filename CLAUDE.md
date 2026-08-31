@@ -25,6 +25,7 @@ qlab workforce run "GOAL"           # headless governed run, streamed live
 qlab events                         # tail the owner's SSE audit bus
 qlab cli                            # interactive Claude as Atlas (proxy tools + read-only web)
 qlab build "add a heatmap visual"   # interactive Claude Code on this checkout
+qlab news-setup                     # wizard for the news providers
 python -m qlab.agents.loader sync   # regenerate .claude/agents + .bob/personas
 
 cd clients/atlas-tui && cargo test  # the Ratatui client (needs no owner)
@@ -37,9 +38,10 @@ Its default build now ships armed, so the by-construction claim narrows to the
 `--no-default-features` monitoring artifact: that binary contains no
 `net::write`, no confirm modal and no `Posture::Operator`, so invariant 3 holds
 there by absence. In the armed build,
-`human_confirmed` comes from a modal bound to the last six of the plan's own
-`targets_hash`, the referee PASS is pinned to that same hash, and the owner
-re-validates every write and refuses without a persisted approval. What the
+`human_confirmed` comes from one click on a box that displays the last six of
+the plan's own `targets_hash` and posts it, the referee PASS is pinned to that
+same hash, and the owner re-validates every write and refuses without a
+persisted approval. What the
 armed build may *do* is not a launch flag: the owner persists a posture, serves
 it on `/api/tui`, and the client re-derives its scope from every snapshot.
 `POST /api/desk/posture` is exactly as unauthenticated as every other owner
@@ -102,8 +104,9 @@ excluded from `[all]`, the staged runtime, and the default ablation.
    Tests must pass fully offline; synthetic fixtures stand in for market data.
 3. **Referee PASS is bound to the exact `targets_hash`** and plan execution
    requires a persisted checked plan plus explicit human confirmation
-   (`human_confirmed=True` from the TUI). Never introduce a raw-order tool or
-   an agent-reachable execution path.
+   (`human_confirmed=True` from the TUI). One explicit confirmation is one
+   click on the hash-bound BOOK box — never zero, and never a second one.
+   Never introduce a raw-order tool or an agent-reachable execution path.
 4. **Fail loud.** No silent fallbacks for missing data, credentials, or
    unconditioned tensors; refuse with a clear error instead.
 5. **`agents/*.md` is the single source of truth for roles.** After editing,

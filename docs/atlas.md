@@ -19,8 +19,9 @@ agrees, never how likely a price move is.
 
 Atlas escalates a material disagreement into the same registry-enforced debate
 the workforce uses — allowlisted claim, two-round ceiling, adjudication the
-reporter waits on. Its own tools are read-only in every mode: Atlas cannot
-trade, cannot approve, and holds no tool that builds a plan. What Propose mode
+reporter waits on. Its evidence tools are read-only in every mode: Atlas cannot
+trade, cannot approve, and holds no tool that builds a plan — the four chat
+action tools below start governed work and nothing else. What Propose mode
 permits is *starting a workflow whose reporter may prepare one* — and that plan
 is still checked, referee-bound, and inert until you confirm it. `Ctrl-B` opens
 its detail drawer from any view.
@@ -42,7 +43,55 @@ just registered — the same governed session a human would start, pointed at th
 owner over HTTP. One at a time; a second dispatch is refused with a reason
 rather than queued, because N Claude trees on one desk is a cost incident, not
 autonomy. Its stream is republished onto the audit bus, so an unattended run is
-something you can watch rather than a black box.
+something you can watch rather than a black box. The same rule holds for
+research started by hand: **one research workflow runs at a time**, and a second
+start is refused by name (409) rather than opening a second proposal against the
+same book.
+
+### Starting work from the chat, and the three rights
+
+Atlas can start its own work from the chat. Its action tools are four and are
+named: `workflow.start`, `workflow.resume`, `atlas.task.create`, and the
+read-only `approvals.list`. They are the one deliberate exemption to "Atlas
+holds no tool that writes" — starting a governed run is the thing the desk
+manager is for, and every run it starts is still gated by the template gate, the
+mode, and the referee. Work it queued that nobody answered expires rather than
+accumulating.
+
+Three rights narrow this from the desk (Settings ▸ MODELS; `GET`/`POST
+/api/atlas/rights`, persisted in `atlas_rights.json` under the state directory,
+all three granted when the file is absent):
+
+| right | what withdrawing it does |
+|---|---|
+| `web` | the chat and `qlab cli` are built without `WebSearch`/`WebFetch` |
+| `workflows` | the owner refuses `workflow.start`, `workflow.resume` and `atlas.task.create` — **for the desk chat only** |
+| `build` | `qlab build` and the `/build` key refuse and name the panel |
+
+The asymmetry is the part to read carefully: a `qlab workforce run`, the owner's
+own coordinator, the heartbeat's autonomous dispatch and a non-Claude reasoner
+making its own owner call are bound by none of these. Rights are an operator's
+stated intent, exactly like the posture — not a security boundary.
+
+### Watching the book: `portfolio_watch` and the scout
+
+A held name's qualitative record moving between windows — coverage,
+corroboration, primary documents — is the `held_record_change` trigger, and it
+maps to the `portfolio_watch` template: analyst → **scout** → reporter. The
+template creates no plan and touches no weight, which is what lets a desk in
+Research mode start it at all.
+
+The scout phase is the `contender-scout` role, and it has eyes, not hands. Its
+whole grant is `WebSearch`, `WebFetch`, `registry.recent_decisions` and
+`registry.log_decision`; no data, moments, solver, backtest, verdict, preview or
+order tool is reachable from it. On a backend without web tools it refuses the
+phase by name rather than answering from memory. Every claim in its memo carries
+a URL it actually fetched, and "nothing found" is a permitted finding.
+
+Its excerpts reach the desk only through the provenance-gated news lane. A
+contender *outside* the current universe becomes a `universe_change` approval —
+answered one at a time on AUDIT or from the ATLAS chat, and a name enters the
+mandate only by that answer.
 
     QLAB_ATLAS_AUTONOMOUS=0   # queue work, wait for you to press start
     QLAB_ATLAS_DRIVE=0        # dispatch only; drive runs by hand

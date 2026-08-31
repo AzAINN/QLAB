@@ -235,9 +235,10 @@ qlab tui
 ```
 
 `qlab tui` starts the owner runtime and opens the **Atlas workstation** — the
-Rust/Ratatui client in `clients/atlas-tui`, nine views on `1`–`9`: Atlas,
-Desk, Markets, Book, Research, Predictors, Workforce, Audit, Settings. The
-launcher refuses rather than falling back if the binary is not there.
+Rust/Ratatui client in `clients/atlas-tui`, ten views on `1`–`9` and `0`:
+Atlas, Desk, Markets, Book, Research, Predictors, Workforce, Audit, Settings,
+Visuals. The launcher refuses rather than falling back if the binary is not
+there.
 
 On ATLAS, `/ask` asks the desk what it would do: the gate ranks every
 registered template, the ones it permits become approvable proposals on the
@@ -246,6 +247,13 @@ registered template, the ones it permits become approvable proposals on the
 and approving are both writes, so a desk that is not armed can read the panel
 and not fill or act on it, and approving re-runs the same gate: no proposal
 creates a paper plan below Propose.
+
+The desk asks about **one proposal at a time** — a newer checked plan supersedes
+the older pending one, and the older approval is invalidated with the reason.
+`b`, or clicking BOOK on ATLAS or BOOK, opens a single box showing the
+allocation and the `targets_hash` it is bound to; Enter books it. That is one
+call (`POST /api/desk/proposal/book`) which approves and executes, and the owner
+re-validates the approval, the plan, and the referee PASS before any fill.
 
 The desk opens on **live data with the simulated book** — every operation
 available, no flags. `qlab --offline` is the synthetic no-network demo, and
@@ -274,7 +282,22 @@ mode that cannot create a paper plan, so Atlas researches unattended without the
 execution boundary moving. Dispatching work is not running it, so the owner
 starts a governed coordinator for the workflow Atlas registered — one at a time,
 with its reasoning republished onto the audit bus so an unattended run is
-watchable rather than a black box.
+watchable rather than a black box. One research workflow runs at a time: a
+second start is refused by name, so two runs can never leave two allocations
+behind.
+
+Atlas also starts work from the chat, within the rights you grant it —
+`workflow.start`, `workflow.resume`, `atlas.task.create`, and the read-only
+`approvals.list`, and nothing else — and work it queued that nobody answered
+expires rather than accumulating.
+
+A held name's public record changing is a trigger, and the template it maps to
+is `portfolio_watch`: analyst → **contender-scout** → reporter. The scout has
+eyes, not hands — `WebSearch`, `WebFetch`, and two registry decision tools, no
+data, solver, or trade tool exists in its grant. Its excerpts reach the desk
+only through the provenance-gated news lane, and a contender outside the
+universe becomes a `universe_change` approval you answer on AUDIT or from ATLAS.
+Nothing it says moves a weight.
 
 Reaching a fill needs `propose` mode **and** your explicit confirmation.
 → [Atlas, modes, and the workforce](docs/atlas.md)
@@ -307,6 +330,7 @@ qlab records what it measured, including when that is unflattering.
 | Simple benchmarks beat the MVSK arms out of sample (2018–2026) | MVSK stays research-stage |
 | Quantum-inspired feature augmentation hurts the vol forecast — one variant lost 12 of 12 samples | off by default ([write-up](planning-docs/2026-07-30-ml-lane.md)) |
 | Multistart's winning basin appears at restart 2–4 against a budget of 100–160 | early stopping: **71s → 6.5s**, identical answers ([write-up](planning-docs/2026-07-30-optimizer-audit.md)) |
+| Exact 4-of-7 selection beat HRP on the ablation panel — and picked the same four names at 56 of 57 rebalances | met the gate, stayed research-stage ([write-up](planning-docs/2026-08-31-a6-cardinality-not-promoted.md)) |
 
 The augmentation's *first* measurement looked like a 4× win. It was an artifact
 of a cache that ignored its seed, so a robustness sweep silently returned one
@@ -322,9 +346,10 @@ broken sweep, not a strong result.
 | `qlab desk` / `qlab workforce` / `qlab events` | one-shot CLI verbs over the owner's HTTP and event stream |
 
 The workstation is the desk's one client, and a paper trade is held to one
-rule: the fill needs the last six of the plan's own `targets_hash` typed into a
-confirm modal, a referee PASS pinned to that same hash, and an owner that
-re-validates the request and refuses it without a persisted approval. Whether
+rule: exactly one explicit confirmation. It is one click on a box that
+*displays* the last six of the plan's own `targets_hash` — the client posts that
+hash, the referee PASS is pinned to the same hash, and the owner re-validates
+the request and refuses it without a persisted approval. Whether
 this window may write at all is the owner's persisted posture, asked once at
 startup — not a launch flag.
 
@@ -391,6 +416,13 @@ prompts, so every edit is one you approve; if it touches `qlab/` or
 `clients/atlas-tui/` you are offered `qlab --restart runtime` and never given
 it. The workstation spells both as `/cli` and `/build`.
 
+Both verbs read the rights the desk holds — set on Settings ▸ MODELS, persisted
+in `atlas_rights.json` under the state directory. With `web` withdrawn,
+`qlab cli` is built without the two web tools; with `build` withdrawn,
+`qlab build` refuses and names the panel. The third right, `workflows`, is
+refused for the desk chat and for nothing else: nothing on that card binds a
+`qlab workforce run`, the owner's own coordinator, or the heartbeat's dispatch.
+
 **Tests**
 
 ```bash
@@ -424,6 +456,15 @@ Two smaller measured findings worth acting on: minimum variance pins to the
 per-asset cap with an effective 3.7 of 25 positions, so its in-sample volatility
 advantage is out-of-sample concentration risk; and the scenario-CVaR LP
 overtakes SLSQP past roughly 50 assets while diversifying better.
+
+Cardinality met its pre-registered promotion gate and was not promoted: exact
+4-of-7 then min-variance (ablation arm A6) beat HRP on sortino, 0.9485 to
+0.6565, with a drawdown 3pp shallower — but it chose the *same* four names at 56
+of 57 rebalances, so the arm holds one selection decision rather than 57, and
+across four seeds the margin fell from +0.2920 to +0.0034 with the confidence
+intervals overlapping. The next evaluation is a 20-name spec whose volatility
+profile actually varies across draws, plus an execution path that carries `k`
+end to end.
 
 On operations: real Alpaca paper integration, market-calendar scheduling, the
 Bob adapters, and porting more of the surface into `atlas-tui`. The

@@ -45,8 +45,7 @@ the desk, never a research one.
 and stayed at research anyway — one repeated basket is not 57 selection
 decisions, and `OperationalPolicy.arm()` drops `params`, so promotion as
 specified would have run plain min-variance under the cardinal name. The
-numbers and the decision are in
-[the record](../planning-docs/2026-08-31-a6-cardinality-not-promoted.md).
+numbers and the decision are recorded in the project's design record.
 
 ### Why MVSK is still here
 
@@ -157,8 +156,7 @@ the TUI workforce view.
   without duplicate orders — except that a plan that **part-filled and then
   failed** is not resumable today: the approval survives, but
   `check_approval_for_execution`'s `book_revision` binding refuses the resume,
-  so it needs a person. See
-  [the completion record](../planning-docs/2026-09-01-standing-authority-completion.md).
+  so it needs a person.
 - Every decision carries a challenger view and can be scored against realized
   outcomes by the reflection loop.
 - No MCP tool accepts a raw order.
@@ -225,6 +223,5 @@ the TUI workforce view.
     clients/        atlas-tui, the Ratatui client for the same owner runtime
     docs/           operator setup guides
     configs/        universe and staged experiment specs
-    planning-docs/  the published design records (the full dated record is local)
     tests/          offline-first regression suite
 

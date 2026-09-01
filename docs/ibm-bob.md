@@ -68,8 +68,7 @@ which is precisely what every qlab role already asserts about itself.
 Being straight about current state: `.bob/personas/*.yaml` is qlab's neutral
 projection of a role, not yet a file Bob loads. Emitting real
 `.bob/custom_modes.yaml` from the same source is the next step, and it is
-tracked with the open schema questions in
-[planning-docs/2026-07-26-ibm-bob-integration-options.md](../planning-docs/2026-07-26-ibm-bob-integration-options.md)
+tracked with the open schema questions in the project's design record,
 alongside the seams a Bob Shell coordinator backend would attach to. The model
 invocation record already carries a `backend` column, so a Bob-served phase is
 auditable the day it exists.

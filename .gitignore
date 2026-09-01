@@ -54,21 +54,9 @@ media/demo/*.gif
 # Azain's own running notes.
 /TODO.md
 
-# Internal working record — dated status, plans, reviews and ledgers stay local.
-# The exceptions are the eight the public docs cite: README's three
-# negative-result write-ups, the Bob options doc, and the standing-authority
-# set that the completion record links onward to. Adding a link from README or
-# docs/ to any other file here means un-ignoring it in the same commit, or it
-# renders as a 404 on GitHub.
-/planning-docs/*
-!/planning-docs/2026-07-26-ibm-bob-integration-options.md
-!/planning-docs/2026-07-30-ml-lane.md
-!/planning-docs/2026-07-30-optimizer-audit.md
-!/planning-docs/2026-08-31-a6-cardinality-not-promoted.md
-!/planning-docs/2026-09-01-pre-push-review-findings.md
-!/planning-docs/2026-09-01-standing-authority-completion.md
-!/planning-docs/2026-09-01-standing-authority-design.md
-!/planning-docs/2026-09-01-standing-authority-plan.md
+# Internal working record — dated status, plans, reviews and ledgers. Kept
+# local: none of it is published. Nothing under docs/ or README may link here.
+/planning-docs/
 
 # Logo candidates rendered while picking a project mark. Scratch output, not the
 # artwork itself — a chosen logo belongs in media/ under its own name.

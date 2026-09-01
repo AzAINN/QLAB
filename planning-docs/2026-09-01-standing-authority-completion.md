@@ -317,6 +317,22 @@ reaches the kill switch.
   `QLAB_ATLAS_INTERVAL_S`, and in `docs/atlas.md`; the coupling is enforced by
   nothing (F11).
 
+## The monitoring build can see a grant and cannot stop one
+
+Verified with `nm` on both legs at this branch's tip: the `--no-default-features`
+artifact carries **0** `revoke_authority` symbols and 460 authority symbols; the
+armed build carries 10 and 460. So the read-only binary renders the AUTHORITY
+card — the grant, its ceilings, what is left of it, and any anomaly — and has no
+way to revoke.
+
+That is correct by construction rather than an oversight: `net::write` is
+`#[cfg(feature = "operator")]`, and a monitoring artifact that could withdraw
+authority would not be read-only. It is written down because the consequence is
+not obvious from either half. An operator watching a desk through a glass window
+who sees a grant standing must reach for an armed client or
+`POST /api/desk/authority/revoke`; the window in front of them will not do it.
+The client says as much at runtime (`settings.rs:372`); until now no document did.
+
 ## Follow-ups
 
 | # | Follow-up | Why |

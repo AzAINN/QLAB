@@ -616,12 +616,11 @@ def test_the_prime_measures_the_lane_the_book_will_be_revalidated_against(
         monkeypatch):
     """The prime and the book must not disagree about `offline`.
 
-    `book_under_grant` clamps through `_offline_for_book` before it does
-    anything else, because on an Alpaca-book desk the data lane can never
-    contradict the book. The two agree today only because
-    `qlab/autopilot/cli.py` happens to pass `offline=mode.offline`; `serve()`'s
-    own default is `True`, and a beat honouring that verbatim would measure the
-    wrong lane and skip the prime on exactly the desk that needs it.
+    `book_under_grant` clamps through `_offline_for_standing_book` before it
+    does anything else, because the data lane can never contradict the book and
+    the flag a beat is handed is one no operator chose. `serve()`'s own default
+    is `True`, so a beat honouring it verbatim would measure the wrong lane and
+    skip the prime on exactly the desk that needs it.
     """
     import qlab.governance.proposal as proposal_module
     from qlab.core.data import DataPolicy
@@ -630,6 +629,7 @@ def test_the_prime_measures_the_lane_the_book_will_be_revalidated_against(
     live = UISession(offline_default=True, registry=Registry(":memory:"),
                      desk_mode=DeskMode("live", "alpaca"))
     assert live.desk_mode.offline is False
+    _grant(live)
     seen: list[bool] = []
     policy = DataPolicy(
         mode="operational", provider="synthetic", feed=None,
@@ -641,7 +641,6 @@ def test_the_prime_measures_the_lane_the_book_will_be_revalidated_against(
         live, "data_health",
         lambda offline, purpose="paper_proposal": (
             seen.append(offline) or {"blocked": True, "reason": "no feed"}))
-    monkeypatch.setattr(live, "live_grant", lambda: {"grant_id": "g"})
     monkeypatch.setattr(proposal_module, "current_proposal",
                         lambda registry: {"plan_id": "p"})
 
@@ -649,6 +648,31 @@ def test_the_prime_measures_the_lane_the_book_will_be_revalidated_against(
 
     # The desk mode's own lane, never the flag.
     assert seen == [False, False]
+
+
+def test_a_grant_that_no_longer_stands_primes_no_execution_permit(
+        session, monkeypatch):
+    """The prime's gate is the STANDING grant, not the newest row.
+
+    `live_grant` answers with a revoked or lapsed grant on purpose, so
+    `check_grant_covers` can refuse it by name rather than fall back to an
+    older and probably broader one. Nothing books under it — so gating the
+    252-day execution snapshot on it made a desk whose authority was withdrawn
+    pay for a book that can never happen, under the owner's dispatch lock.
+    """
+    grant = _grant(session)
+    _proposal(session)
+    calls = _demanding_lane(session, monkeypatch)
+    session.registry.revoke_authority_grant(
+        grant["grant_id"], "operator said stop")
+    assert session.live_grant() is not None      # the row is still the newest
+    assert session.standing_grant() is None
+
+    _tick(session)()
+
+    assert calls == []
+    assert _events(session, hb.PERMIT_PRIMED_EVENT) == []
+    assert any("grant revoked at" in reason for reason in _reasons(session))
 
 
 def test_a_permit_that_cannot_be_measured_leaves_the_tick_and_the_book_alive(
@@ -665,3 +689,35 @@ def test_a_permit_that_cannot_be_measured_leaves_the_tick_and_the_book_alive(
     assert "announced" in result and "driven" in result
     assert _events(session, ui_server.GRANT_REFUSED_EVENT)[-1]["anomalies"] == [
         "no execution data permit is on record for this book"]
+
+
+# --- the lane the beat books on, after the operator moved it ----------------
+#
+# `build_owner_tick` captures `offline` in its closure at owner start and never
+# re-reads it — unlike `session.autonomous`, which is re-read every tick. So a
+# desk-mode POST moved the click's lane and left the beat's where the launcher
+# had put it, and the unattended path went on pricing, deciding its permit and
+# revalidation demands, and BOOKING on a flag no operator had chosen.
+
+
+def test_a_desk_mode_flip_changes_the_lane_the_next_beat_books_on(
+        session, monkeypatch):
+    """No owner restart. The same tick closure, both lanes."""
+    from qlab.core.desk_mode import DeskMode
+
+    lanes: list[bool] = []
+    # The book's first act is to measure the desk on its own lane. Recorded
+    # rather than performed, so the live leg costs this suite no network.
+    monkeypatch.setattr(session, "refresh_grant_anomalies",
+                        lambda offline: lanes.append(offline) or [])
+    tick = _tick(session)          # built on a SYNTHETIC desk: offline=True
+    tick()
+    assert lanes == [True]
+
+    session.set_desk_mode(DeskMode("live", "simulated"))
+    tick()                         # the same closure, no owner restart
+
+    assert lanes == [True, False]
+    assert session.set_desk_mode(DeskMode("synthetic", "simulated")).offline
+    tick()
+    assert lanes == [True, False, True]

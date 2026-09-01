@@ -8937,3 +8937,151 @@ def test_a_revoke_the_owner_cannot_confirm_fails_loud(session, monkeypatch):
     with pytest.raises(RuntimeError, match="could not be confirmed"):
         handle_api(session, "POST", "/api/desk/authority/revoke", {},
                    {"reason": "the operator pressed R"})
+
+
+# --- standing authority, branch fix round -----------------------------------
+#
+# The whole-branch review found the authority core sound and the trace around
+# it thin: the unattended path skipped the post-fill hooks every clicked route
+# runs, and its most common refusal defeated its own dedupe.
+
+
+def test_an_automatic_fill_leaves_the_same_trace_as_a_clicked_one(session):
+    """The post-fill hooks are the click's, and the beat must run them too.
+
+    After a real automatic fill there were ZERO equity marks and a stale
+    valuation cache survived untouched — so a headless owner recorded no equity
+    observation at the very moment it acted unattended (the next mark is the
+    daily one or an hourly poll), and an Alpaca desk served a pre-fill
+    valuation for the whole TTL.
+    """
+    _live_grant(session)
+    _proposal_awaiting(session)
+    book = session.current_book(True)
+    assert session.registry.equity_marks(50, book=book) == []
+    # Only an Alpaca book populates this for real; seeded here so the drop is
+    # observable on a simulated desk, which is what the suite trades.
+    session._valuation_cache = ((True, session.desk_mode.book), time.monotonic(),
+                                {"equity": 1.0, "stale": True})
+
+    assert session.book_under_grant(True)["booked"] is True
+
+    marks = session.registry.equity_marks(50, book=book)
+    assert [mark["source"] for mark in marks] == ["execution"]
+    assert session._valuation_cache is None
+
+
+def test_a_refused_automatic_book_forges_no_execution_mark(session):
+    """`execution` provenance asserts that legs filled. A refusal moved no
+    book, so it must leave no mark — the rule the clicked routes state."""
+    _live_grant(session, max_notional=1.0)
+    _proposal_awaiting(session)
+
+    assert session.book_under_grant(True) is None
+
+    assert session.registry.equity_marks(50) == []
+
+
+def test_an_equity_mark_that_fails_does_not_hide_the_automatic_fill(
+        session, monkeypatch):
+    """The trade already happened. A mark that cannot be taken fails loud into
+    the audit bus and never unwinds a fill — and never costs the day's ceiling
+    its count, because the booked row is written first."""
+    _live_grant(session)
+    _proposal_awaiting(session)
+    monkeypatch.setattr(session, "record_equity_mark", _raise_mark)
+
+    result = session.book_under_grant(True)
+
+    assert result["booked"] is True
+    assert len(_grant_events(session, ui_server.GRANT_BOOKED_EVENT)) == 1
+    failed = _grant_events(session, "equity_mark_failed")
+    assert len(failed) == 1 and "the venue vanished" in failed[0]["error"]
+
+
+def _raise_mark(source, offline):
+    raise RuntimeError("the venue vanished")
+
+
+def test_a_stale_plan_is_refused_once_and_not_once_a_beat(session):
+    """The dedupe has to survive the refusal it exists for.
+
+    The age reason embedded the growing age, so every beat was a distinct
+    state and the automatic path's most common refusal wrote a row per beat
+    until the approval expired — ~26 for one stale proposal. The number is
+    recorded beside the refusal now, outside the deduped key.
+    """
+    _live_grant(session)
+    plan_id, _ = _proposal_awaiting(session)
+
+    # Four beats, 30 s apart, over one plan that stays exactly as stale as it
+    # is: only the measured age moves.
+    for extra in (1, 31, 61, 91):
+        _age_plan(session, plan_id, ui_server.MAX_AUTO_BOOK_AGE_S + extra)
+        assert session.book_under_grant(True) is None
+
+    rows = _grant_events(session, ui_server.GRANT_REFUSED_EVENT)
+    assert len(rows) == 1, [row["reasons"] for row in rows]
+    assert rows[0]["reasons"] == [
+        f"plan is stale, past the {ui_server.MAX_AUTO_BOOK_AGE_S}s the "
+        "automatic path allows"]
+    # The age is not lost, only moved: it rides on the payload, where a growing
+    # number cannot make one state look like many.
+    assert rows[0]["plan_age_s"] >= ui_server.MAX_AUTO_BOOK_AGE_S
+
+
+def test_the_state_changing_still_writes_a_second_refusal(session):
+    """Deduped, not silenced. What the record has to show is each state the
+    desk was in and when it changed."""
+    grant = _live_grant(session)
+    plan_id, _ = _proposal_awaiting(session)
+    _age_plan(session, plan_id, ui_server.MAX_AUTO_BOOK_AGE_S + 1)
+    assert session.book_under_grant(True) is None
+
+    session.registry.revoke_authority_grant(grant["grant_id"], "operator said stop")
+    assert session.book_under_grant(True) is None
+
+    rows = _grant_events(session, ui_server.GRANT_REFUSED_EVENT)
+    assert len(rows) == 2
+    assert any("grant revoked at" in reason for reason in rows[-1]["reasons"])
+
+
+def test_a_plan_whose_age_cannot_be_read_records_no_age(session):
+    """A field that declines to guess. The refusal says so in words; the
+    measurement must not invent a number beside it."""
+    _live_grant(session)
+    plan_id, _ = _proposal_awaiting(session)
+    session.registry.con.execute(
+        "UPDATE plans SET created_at='' WHERE plan_id=?", [plan_id])
+
+    assert session.book_under_grant(True) is None
+
+    rows = _grant_events(session, ui_server.GRANT_REFUSED_EVENT)
+    assert rows[-1]["plan_age_s"] is None
+    assert any("the plan's age could not be read" in reason
+               for reason in rows[-1]["reasons"])
+
+
+def test_the_standing_book_takes_its_lane_from_the_desk_and_not_the_flag(session):
+    """`_offline_for_book`'s own argument, applied to the case it did not cover.
+
+    That helper clamps only an Alpaca book, because the flag it is handed came
+    from a request an operator made. The beat's flag is one NOBODY chose — it
+    is `serve()`'s launcher default, captured in the tick's closure at owner
+    start — so on a simulated desk it was honoured verbatim and the unattended
+    path priced, revalidated and BOOKED on a lane the operator had moved away
+    from.
+    """
+    lanes: list[bool] = []
+    real = session.refresh_grant_anomalies
+    session.refresh_grant_anomalies = (
+        lambda offline: lanes.append(offline) or real(offline))
+    _live_grant(session)
+    _proposal_awaiting(session)
+
+    # The live flag a beat started before the operator chose SYNTHETIC would
+    # hand it. The desk's own lane wins, and the fill happens offline.
+    assert session.book_under_grant(False)["booked"] is True
+
+    assert lanes == [True]
+    assert session.desk_mode.book == "simulated"        # not the clamped case

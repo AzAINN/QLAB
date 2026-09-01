@@ -6059,21 +6059,38 @@ class UISession:
                 "already be at the broker is resumed by a human, never by a "
                 "grant")
         try:
-            age = (datetime.fromisoformat(now_iso)
-                   - datetime.fromisoformat(
-                       str(plan.get("created_at") or ""))).total_seconds()
+            age = self._plan_age_s(plan, now_iso)
         except Exception as exc:
             reasons.append(f"the plan's age could not be read: {exc}")
         else:
             if age > MAX_AUTO_BOOK_AGE_S:
+                # The measured age is deliberately NOT in this sentence. A beat
+                # runs every 30 s and the age grows with each one, so a reason
+                # carrying it made every refusal a distinct state and defeated
+                # `_record_grant_refusal`'s dedupe on the automatic path's most
+                # common refusal — a row per beat until the approval expired.
+                # The number is recorded beside the refusal instead.
                 reasons.append(
-                    f"plan is {age:.0f}s old, past the {MAX_AUTO_BOOK_AGE_S}s "
-                    "the automatic path allows")
+                    f"plan is stale, past the {MAX_AUTO_BOOK_AGE_S}s the "
+                    "automatic path allows")
         return reasons
 
+    @staticmethod
+    def _plan_age_s(plan: dict, now_iso: str) -> float:
+        """Seconds since the plan was written.
+
+        Raises when the timestamp cannot be read, which is the whole contract:
+        absence is not freshness, and the automatic path refuses on it. One
+        measurement shared by the refusal that names it and the row that
+        records it, so the sentence and the number cannot disagree.
+        """
+        return (datetime.fromisoformat(now_iso)
+                - datetime.fromisoformat(
+                    str(plan.get("created_at") or ""))).total_seconds()
+
     def _record_grant_refusal(self, grant: dict | None, plan_id: str,
-                              reasons: list[str],
-                              anomalies: list[str]) -> None:
+                              reasons: list[str], anomalies: list[str],
+                              *, measured: dict | None = None) -> None:
         """Record why the standing path booked nothing — once per distinct state.
 
         A beat evaluates this every 30 s, so an unchanged refusal is written
@@ -6081,14 +6098,27 @@ class UISession:
         keys its row on the approval rather than on the sweep. Deduped against
         the newest refusal only, which is one row read: what the record has to
         show is each state the desk was in and when it changed.
+
+        ``measured`` carries numbers that MOVE while the state does not — the
+        plan's age, which grows by a beat's interval every beat. They ride on
+        the recorded payload and sit deliberately OUTSIDE the dedupe key: with
+        the age inside the deduped text the stale-plan refusal, the automatic
+        path's most common one, wrote a row per beat until the approval expired
+        (~26 rows for one stale proposal) — the dedupe failing at exactly the
+        refusal it exists for. The key is projected out of the stored payload
+        rather than compared whole, so anything measured beside it is ignored.
         """
-        payload = {"grant_id": (grant or {}).get("grant_id"),
-                   "plan_id": plan_id, "reasons": list(reasons),
-                   "anomalies": list(anomalies)}
+        key = {"grant_id": (grant or {}).get("grant_id"),
+               "plan_id": plan_id, "reasons": list(reasons),
+               "anomalies": list(anomalies)}
         newest = self.registry.read_events_of_kind(GRANT_REFUSED_EVENT, 1)
-        if newest and newest[-1].get("payload") == payload:
-            return
-        self.registry.record_event(GRANT_REFUSED_EVENT, payload)
+        if newest:
+            seen = newest[-1].get("payload")
+            if isinstance(seen, dict) and {
+                    name: seen.get(name) for name in key} == key:
+                return
+        self.registry.record_event(
+            GRANT_REFUSED_EVENT, {**key, **(measured or {})})
 
     def book_under_grant(self, offline: bool) -> dict | None:
         """Book the desk's own proposal if a live grant covers it.
@@ -6103,7 +6133,13 @@ class UISession:
         the hash, the referee PASS pinned to the plan's own ``targets_hash``,
         the approval and the execute gate are ``_book_checked_plan``, shared
         with the click rather than copied beside it — so a grant cannot come to
-        mean a check the click still makes.
+        mean a check the click still makes. A fill leaves the same trace, too:
+        the post-fill hooks below are the clicked routes' own.
+
+        ``offline`` is the beat's raw flag and is NOT honoured — the standing
+        path takes its lane from the desk mode on every book. See
+        ``_offline_for_standing_book``; the parameter stays because the
+        heartbeat's call site is written against it.
 
         Must be called under the owner dispatch lock and takes none of its own
         (``_LOCK`` is not reentrant, and the reads that decide have to still be
@@ -6113,8 +6149,8 @@ class UISession:
         from qlab.governance.proposal import current_proposal
 
         # The data lane may never contradict the book, on an unattended path
-        # least of all — see `_offline_for_book`.
-        offline = _offline_for_book(self, offline)
+        # least of all — and the flag handed in is one no operator chose.
+        offline = _offline_for_standing_book(self)
         # Measured HERE, before the early return below, and published for the
         # card. The read path prices nothing, so this is the only measurement
         # the desk makes — and a desk with no open proposal is both the common
@@ -6139,10 +6175,21 @@ class UISession:
         grant = self.live_grant()
         books_today = None if grant is None else self._grant_books_today(
             str(grant.get("grant_id") or ""), date.today().isoformat())
+        # One instant for both, so the age that decides and the age that is
+        # recorded cannot differ by the two reads between them.
+        now_iso = self._now_iso()
         reasons = self.grant_refusals(grant, plan, anomalies=anomalies,
-                                      books_today=books_today)
+                                      books_today=books_today, now_iso=now_iso)
         if reasons:
-            self._record_grant_refusal(grant, plan_id, reasons, anomalies)
+            try:
+                age: float | None = round(self._plan_age_s(plan, now_iso), 1)
+            except Exception:
+                # Not a swallow: `grant_refusals` has already put "the plan's
+                # age could not be read" in `reasons` above, so the record says
+                # so in words. This field only declines to guess a number.
+                age = None
+            self._record_grant_refusal(grant, plan_id, reasons, anomalies,
+                                       measured={"plan_age_s": age})
             return None
 
         try:
@@ -6166,6 +6213,18 @@ class UISession:
                 "approval_id": result.get("approval_id"),
                 "targets_hash": proposal.get("targets_hash"),
                 "trading_date": date.today().isoformat()})
+            # The post-fill hooks EVERY clicked route runs
+            # (`/api/desk/proposal/book`, `/api/plans/execute`): an
+            # execution-sourced equity mark and a dropped valuation cache. An
+            # unattended fill must leave the same trace as a clicked one —
+            # without this a headless owner records no equity observation at
+            # the very moment it acted alone (the next mark is the daily one or
+            # an hourly poll) and an Alpaca desk serves a pre-fill valuation
+            # for the whole TTL. Called in the beat's lock phase, which is the
+            # lock context the click's dispatch holds, and AFTER the booked row
+            # above: that row is the day's budget ledger, and a mark that
+            # cannot be taken must not cost the ceiling its count.
+            _mark_after_mutation(self, "execution", offline)
         return result
 
     # -- standing authority: granting it, and taking it back ----------------
@@ -6995,10 +7054,36 @@ def _offline_for_book(session: UISession, off: bool) -> bool:
     it verbatim on an Alpaca-book desk could reconstruct the synthetic+alpaca
     pairing ``DeskMode.__post_init__`` forbids. The real book always runs on
     the desk mode's own data lane instead.
+
+    A *clicked* book only, therefore. The unattended one is handed no operator
+    flag at all and clamps unconditionally — see ``_offline_for_standing_book``.
     """
     if session.desk_mode.book == "alpaca":
         return session.desk_mode.offline
     return off
+
+
+def _offline_for_standing_book(session: UISession) -> bool:
+    """The lane an UNATTENDED book runs on: the desk's own, every time.
+
+    ``_offline_for_book``'s own argument, applied to the case it does not
+    cover. That one clamps only an Alpaca book because the flag it is handed
+    came from a request an operator made; the standing path is handed a flag
+    **nobody chose** — ``build_owner_tick`` captures ``serve()``'s launcher
+    default once at owner start and never re-reads it, unlike ``autonomous``,
+    which is re-read each tick. So after ``POST /api/desk_mode`` moves a
+    *simulated* desk between synthetic and live data, the click follows the new
+    lane while the beat would go on pricing, deciding its permit and
+    revalidation demands, and BOOKING on the startup lane until the owner is
+    restarted. Bounded — simulated book, paper only, drift and mandate gates
+    unchanged — and still an unattended fill honouring a flag no operator set.
+
+    Takes no flag at all, so no caller can supply one, and is read at each book
+    rather than per tick so no closure can capture it. ``desk_mode`` is one
+    frozen dataclass that ``set_desk_mode`` replaces wholesale, so this single
+    attribute read needs no lock.
+    """
+    return session.desk_mode.offline
 
 
 def _mark_after_mutation(session: UISession, source: str, offline: bool) -> None:

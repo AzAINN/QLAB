@@ -416,7 +416,7 @@ def prime_execution_permit(session, offline: bool) -> str:
     registry = getattr(session, "registry", None)
     policy_of = getattr(session, "data_policy", None)
     measure = getattr(session, "data_health", None)
-    live_grant = getattr(session, "live_grant", None)
+    standing_grant = getattr(session, "standing_grant", None)
     if registry is None or not callable(policy_of) or not callable(measure):
         return ""
     # Cheapest and most selective first: a desk that has ever recorded one
@@ -426,16 +426,14 @@ def prime_execution_permit(session, offline: bool) -> str:
         return ""
     # The data lane can never contradict the book, and the lane measured here
     # has to be the one the book is revalidated against: `book_under_grant`
-    # clamps this way before it does anything else. Imported rather than
-    # re-derived — a second copy of that rule is a second place for it to
-    # drift, which is what the shared booking gate exists to prevent. The raw
-    # flag is the tick's, and only `qlab/autopilot/cli.py` happens to pass one
-    # already equal to the desk mode's; `serve()`'s own default is True, so a
-    # beat honouring it verbatim would skip the prime on exactly the desk that
-    # needs it.
-    from qlab.ui.server import _offline_for_book
+    # clamps through this same helper before it does anything else. Imported
+    # rather than re-derived — a second copy of that rule is a second place for
+    # it to drift, which is what the shared booking gate exists to prevent. The
+    # raw flag is the tick's, captured once at owner start, so it is stale the
+    # moment a desk-mode POST lands and is not honoured here either.
+    from qlab.ui.server import _offline_for_standing_book
 
-    offline = _offline_for_book(session, offline)
+    offline = _offline_for_standing_book(session)
     if not policy_of(offline).execution_eligible:
         # Demo, test and historical lanes. The execute gate demands no permit
         # on them, so neither may this: reading the policy flag *as* the answer
@@ -453,7 +451,17 @@ def prime_execution_permit(session, offline: bool) -> str:
     # Only where a book is actually possible. A desk holding no standing
     # authority, or with nothing on it to book, must not start taking execution
     # snapshots because of a feature it is not using.
-    if not callable(live_grant) or live_grant() is None:
+    #
+    # `standing_grant`, never `live_grant`: that one returns the newest row
+    # whatever state it is in, because `check_grant_covers` has to refuse a
+    # revoked or lapsed grant BY NAME rather than fall back to an older and
+    # probably broader one. Nothing books under a grant `standing_grant`
+    # answers None for, so a desk whose only grant was withdrawn or has expired
+    # would otherwise pay the one-time 252-day snapshot under `_LOCK` for a
+    # book that can never happen. Latched to once per desk, so this is needless
+    # rather than unsafe — and needless work under the dispatch lock is the
+    # defect this whole function was fixed for once already.
+    if not callable(standing_grant) or standing_grant() is None:
         return ""
     from qlab.governance.proposal import current_proposal
 

@@ -1,12 +1,23 @@
 """Standing paper authority: an expiring, revocable, code-checked grant.
 
-**This is inert by default and must stay that way until reviewed.** No grant
-exists unless a human creates one, no code path creates one on its own, and Atlas
-can neither create, edit, nor read-around one. The plan requires a separate
+**Reviewed, and now wired.** This module shipped inert pending a separate
 design review of the grant schema, revocation, anomaly pauses, and the operator
-experience before standing authority is actually used; this module implements
-the schema and the checks so that review has something concrete to examine, not
-so the desk can start trading unattended.
+experience. That review has been performed, and its record is
+``planning-docs/2026-09-01-standing-authority-design.md``; the owner's own
+heartbeat now books under a grant this module clears
+(``UISession.book_under_grant``, ``qlab/ui/server.py``). Four things the review
+changed, enforced below or at that call site: a **``max_books_per_day``
+ceiling**, because the per-plan ceilings bounded how large one fill could be
+and never how many a grant covers; **anomaly inputs that are computed** from
+live desk state rather than four booleans nobody supplied; a **freshness bound
+on the automatic path** (``MAX_AUTO_BOOK_AGE_S``), because the click is itself
+a freshness proof while a grant checks ceilings and never recency; and a
+**refusal to touch a plan that has already started**, because a half-filled
+book is resumed by a human and never by a beat.
+
+Inert *by default* is unchanged, and is not what the review relaxed: no grant
+exists unless a human creates one, no code path creates one on its own, and
+Atlas can neither create, edit, nor read-around one.
 
 Design rules, all enforced here in deterministic code:
 

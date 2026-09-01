@@ -201,6 +201,25 @@ consume a grant. Granting is not a keystroke: it is a `POST` to
 Anything that writes is refused on a desk you have not armed, and on a window
 started with `--glass`. → **[every key, by pane](docs/cli.md#keys-by-pane)**
 
+> **Developer recommendation — drive the desk through Atlas, not around it.**
+> Open a model and ask it to run the work. `/cli` opens the real Claude CLI as a
+> pane inside ATLAS, wearing the Atlas persona and holding only the desk
+> manager's own tools through the owner-backed proxy — no shell, no filesystem.
+> Ask it in plain language to start a review, read the record, or chase a
+> contender, and it drives the same governed surface you would. On a desk that
+> reasons with a local model — **IBM Granite** through Ollama, chosen at the
+> startup door and changed on Settings ▸ MODELS — the same conversation happens
+> in the ATLAS chat instead; `/cli` is a Claude verb and refuses by name
+> elsewhere.
+>
+> This is the abstraction worth having: you state intent, the desk enforces the
+> boundary, and the work stays visible — `7` shows the workflow phase by phase,
+> `8` shows every decision on the audit bus. **If you cannot pinpoint what the
+> desk is doing or why, this is the route to take.** Asking Atlas what it would
+> do next and watching the run it starts tells you more than reading the state
+> by hand, and it costs no authority: the model proposes, the gate still
+> refuses, and a fill still needs your click or a grant you signed.
+
 ## Atlas
 
 Atlas is the desk manager. It runs on a heartbeat inside the owner, evaluates

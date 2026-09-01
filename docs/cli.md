@@ -34,11 +34,16 @@ qlab autopilot --once --offline                # proposal-only daily ops on an N
 qlab recommend --as-of 2026-06-30 --offline    # print one allocation (YYYY-MM-DD), no trade
 ```
 
-`run-once` and `watch` are the two that can book without a click, and only when
-the operator has exported `QLAB_AUTOPILOT_EXECUTE=1` for that process — an
-out-of-band authorization no agent can set, and one that skips the confirmation
-alone: the referee PASS, the cost gate, reconcile and the mandate still have to
-clear. `daily-ops` and `autopilot` never trade.
+`run-once` and `watch` are the two **CLI verbs** that can book without a click,
+and only when the operator has exported `QLAB_AUTOPILOT_EXECUTE=1` for that
+process — an out-of-band authorization no agent can set, and one that skips the
+confirmation alone: the referee PASS, the cost gate, reconcile and the mandate
+still have to clear. `daily-ops` and `autopilot` never trade.
+
+They are no longer the only clickless path. A running `qlab`/`qlab owner` books
+on its own 30-second beat whenever a **standing grant** covers the desk's
+current proposal — see [standing authority](#standing-authority) below. No CLI
+verb creates a grant.
 
 **Research, experiments, and data**
 
@@ -108,6 +113,65 @@ posture you are in.
 | PRED | `r` run the board · `Enter` open a model · `↑`/`↓` pick |
 | WORK | `i` ask · `S` start a workflow · `Enter` open a run |
 | AUDIT | `a` answer the waiting approval · `R` reject it |
-| SETT | `Tab` between cards · `a` Alpaca login · `t` test it · `m` desk mode / model / method · `k` cardinality · `c` news source · `s` save · `v` verify |
+| SETT | `Tab` between cards · `a` Alpaca login · `t` test it · `m` desk mode / model / method · `k` cardinality · `c` news source · `R` revoke the standing grant (AUTHORITY) · `s` save · `v` verify |
 | VIS | `Enter` render the selected artifact · `↑`/`↓` pick · `h`/`j`/`k`/`l` pan |
 | MKTS | `s` sort · `↑`/`↓` pick |
+
+`R` on the AUTHORITY card has no confirmation box and nothing to type. That is
+deliberate: withdrawing authority is the safe direction, revocation is
+idempotent, and a box between an operator and "stop" is a hazard. The
+consequence is real — an accidental `R` costs a trip to the route to grant
+again.
+
+## Standing authority
+
+A **grant** lets the owner book a proposal it already covers on its own
+30-second beat, with no click. It is the operator's authority given in advance,
+and it is bounded in every direction.
+
+Granting is not a keystroke and is not a CLI verb. It is one POST that names
+every ceiling; there are no defaults, and a missing ceiling refuses:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8765/api/desk/authority \
+  -H 'Content-Type: application/json' \
+  -d '{"allowed_universe": ["SPY", "AGG", "GLD"],
+       "max_notional": 25000, "max_turnover": 0.35,
+       "max_orders": 8, "max_books_per_day": 2, "ttl_days": 7}'
+```
+
+Every one of those keys is required and must be positive; `ttl_days` is 1..30.
+`granted_by` is optional and defaults to `operator`. The **method is the
+desk's**, never the caller's — a grant pins `mandate.operational_policy` as it
+stands when the grant is written, so changing the method later ends that
+grant's cover, which is the safe direction.
+
+```bash
+curl -sS http://127.0.0.1:8765/api/desk/authority          # what stands, and what is left
+curl -sS -X POST http://127.0.0.1:8765/api/desk/authority/revoke \
+  -H 'Content-Type: application/json' -d '{"reason": "done for the week"}'
+```
+
+Revocation takes a reason and **no grant id**: the owner holds one live grant
+and is the only thing that knows which, so a stale card naming an older one is
+the hazard. Revoking when nothing stands is a 400 with a sentence, never a 409.
+
+What a grant does **not** move: the referee PASS pinned to the plan's own
+`targets_hash`, the mandate, the cost gate, reconcile, and the owner's
+execution-time revalidation all still run, in the order they run today. A grant
+replaces the per-plan click and nothing else, and `PAPER_AUTO` is the only mode
+it can express.
+
+The beat refuses, and says which, when the plan exceeds a ceiling, touches a
+symbol outside the grant's universe (the plan is refused **whole**, never
+trimmed to fit), is older than 120 seconds, has already started, or when an
+anomaly suspends the grant: a halted book, an unclean reconcile, no execution
+data permit, or a rejected or expired order in the recent window. An anomaly
+input the owner cannot compute counts as an anomaly. Every automatic fill and
+every distinct refusal is written to the audit bus (`authority.booked`,
+`authority.refused`), and the booked rows *are* the daily budget ledger.
+
+No agent can reach any of this: no MCP tool, chat action tool or proxy verb
+creates, edits, reads or consumes a grant, and both write routes refuse a chat
+origin. `POST /api/desk/authority` is exactly as unauthenticated as every other
+owner route — what bounds a grant is its own ceilings, not the port.

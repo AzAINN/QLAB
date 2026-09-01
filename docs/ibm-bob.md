@@ -23,9 +23,10 @@ which regime call, what the news actually supports — stays with the governed
 roles and their evidence trail.
 
 Bob also brings an approval model that composes with qlab's rather than
-competing with it. Bob asks before it acts; qlab refuses unless a human
-confirms. Two independent gates on the same action is the correct number for a
-desk that touches a book.
+competing with it. Bob asks before it acts; qlab refuses unless the operator
+has confirmed — per plan on the hash-bound box, or in advance through a bounded
+standing grant they signed themselves. Two independent gates on the same action
+is the correct number for a desk that touches a book.
 
 ## The connection: `.bob/mcp.json`
 
@@ -39,7 +40,9 @@ talks to the owner over HTTP only. Bob can read the portfolio, the regime panel,
 the audit trail, the research runs, and the algorithm catalog; it can request a
 *dry* rebalance preview. It cannot execute a paper trade, because no MCP tool
 here accepts a raw order and execution requires `human_confirmed=True` from the
-TUI.
+TUI. Nor can it arrange one: standing authority is the only other form of
+confirmation the owner accepts, no MCP surface names a grant, and both grant
+routes refuse a chat origin outright.
 
 The `alwaysAllow` list in that file is the governance boundary made concrete:
 pure observation is auto-approved, and every tool that persists a decision,

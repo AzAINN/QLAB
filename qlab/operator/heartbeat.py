@@ -34,6 +34,10 @@ from datetime import date
 
 # A quiet desk should not spin: the default cadence is slow enough to be cheap
 # and fast enough that a human watching the rail sees it breathing.
+# COUPLED, and the coupling is one-way: the owner's `_ANOMALY_STALE_AFTER_S`
+# (120 s, `qlab/ui/server.py`) is four of these beats and does not scale with
+# this value, so an interval above 120 s makes every AUTHORITY card read
+# unmeasured between beats, with no warning.
 DEFAULT_INTERVAL_S = 30.0
 MIN_INTERVAL_S = 5.0
 

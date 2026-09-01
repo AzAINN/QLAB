@@ -14,7 +14,8 @@ own it.
         |       +-- the Atlas workstation and the CLI verbs observe over HTTP
         |       +-- qlab-operator gives the Claude workforce role-bound HTTP tools
         |
-        +-- explicit human confirmation is required for paper execution
+        +-- paper execution needs the operator's confirmation: one click on
+            the hash-bound box, or a standing grant they signed in advance
 
 When no owner runtime is running, Claude Code can launch the combined qlab MCP
 server from .mcp.json. That server mounts the research and trader namespaces
@@ -131,9 +132,33 @@ the TUI workforce view.
   `POST /api/desk/proposal/book` approves and executes it in a single call. The
   client posts the `targets_hash` its confirmation box displayed; the owner
   re-validates the approval, the plan, and the referee PASS pinned to that hash
-  before any fill. One explicit human confirmation — one click, never zero.
+  before any fill. One explicit human confirmation — one click, never two.
+- **Standing authority** is the second way that proposal becomes a fill, and
+  the only one with no click (`qlab/governance/authority.py`, the
+  `authority_grants` table, `book_under_grant` in `qlab/ui/server.py`). The
+  operator writes one grant with every ceiling explicit — universe, notional,
+  turnover, order count, `max_books_per_day`, and a TTL of at most 30 days —
+  through `POST /api/desk/authority`, which refuses a chat origin, a missing
+  ceiling, and a non-finite number. While that grant stands, the owner's own
+  30-second heartbeat books a referee-passed proposal the grant covers,
+  reaching `approved` through the same `decide_approval` the click calls: two
+  ways in, one way to execute. It refuses a plan outside any ceiling, a plan
+  touching a symbol outside the grant's universe (refused **whole**, never
+  trimmed), a plan older than `MAX_AUTO_BOOK_AGE_S = 120` s — the click is a
+  freshness proof, and nothing else supplies one — a plan that has already
+  started, and anything an anomaly suspends: a halted book, an unclean
+  reconcile, no execution data permit, or a rejected or expired order in the
+  recent window. An anomaly input the owner cannot compute is itself an
+  anomaly. `PAPER_AUTO` is the only mode a grant can express. `R` on
+  Settings ▸ AUTHORITY revokes at once, no box and nothing typed, and
+  revocation is checked before anything else. No agent can create, read or
+  consume a grant.
 - Rebalances are two-phase, persisted by leg, transactional, and resumable
-  without duplicate orders.
+  without duplicate orders — except that a plan that **part-filled and then
+  failed** is not resumable today: the approval survives, but
+  `check_approval_for_execution`'s `book_revision` binding refuses the resume,
+  so it needs a person. See
+  [the completion record](../planning-docs/2026-09-01-standing-authority-completion.md).
 - Every decision carries a challenger view and can be scored against realized
   outcomes by the reflection loop.
 - No MCP tool accepts a raw order.

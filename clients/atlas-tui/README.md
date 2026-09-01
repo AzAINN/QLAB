@@ -23,7 +23,8 @@ is the build a monitoring box runs, and it cannot be argued, configured or
 flagged into writing.
 
 The default build — what `cargo build --release` and `qlab tui` produce — is
-armed, and a fill costs exactly one explicit confirmation: `ui::widgets::confirm`
+armed, and a fill booked *from here* costs exactly one explicit confirmation:
+`ui::widgets::confirm`
 shows the allocation and the last six of the plan's own `targets_hash`, Enter
 posts that hash, the referee PASS is pinned to the same hash, and the owner
 re-validates every request and refuses without a persisted approval. One click,
@@ -33,6 +34,14 @@ asking for the same hash twice. What the armed build may *do* is the desk's
 answer rather than a launch flag: the owner persists a posture, serves it on
 `/api/tui`, and the client re-derives its scope from every snapshot. `--glass`
 is this window declining that authority for one session.
+
+This client is not the only way a fill happens. Under a **standing grant** the
+owner books on its own beat with no client attached, and neither `--glass` nor
+an unarmed posture touches that — they bound what *this window* may write, not
+what the desk may do. The client's part is the AUTHORITY card on SETT: it shows
+the live grant and what is left of it, and `R` revokes it at once with no box
+and nothing typed. It cannot create one; granting is a route
+(`POST /api/desk/authority`) and deliberately not a keystroke.
 
 ## The glyph
 

@@ -12,6 +12,19 @@ default 30s). Each tick it evaluates deterministic triggers against owner facts
 and recomposes its **read**: one view across the regime panel, the news record,
 and what the workforce concluded.
 
+Keep that interval under 120 seconds. The owner's anomaly staleness bound is a
+fixed 120s that does not scale with it, so a slower beat leaves the AUTHORITY
+card reading "not measured yet" between beats.
+
+The same beat is the one thing on this page that can move money, and it is not
+Atlas doing it: under a **standing grant** the *owner* books a referee-passed
+proposal the grant already covers, at most once a tick, with no click. That is
+the operator's authority, written to `authority_grants` before any of it can
+happen. Atlas has no tool that creates, reads or consumes a grant, and both
+write routes refuse a chat origin — an Atlas that could grant itself authority
+would make the object decorative. See
+[the CLI reference](cli.md#standing-authority).
+
 The read leads with the part a number cannot express — the **tensions**, where
 the evidence disagrees with itself. "Prices are calm but the coverage is not"
 is the case Atlas exists to surface. Conviction describes how much the evidence
@@ -35,7 +48,9 @@ point: Observe permits no workflow at all, so a desk that opened there sat
 inert. Research is the highest mode that still cannot create a paper plan — the
 template gate refuses every plan-creating template below Propose — so Atlas
 researches unattended without the execution boundary moving an inch. Reaching a
-fill still needs Propose *and* your explicit confirmation.
+fill still needs Propose *and* either your explicit confirmation or a standing
+grant you signed — and the mode gate is upstream of both, so nothing Atlas does
+in `research` produces a plan for a grant to cover.
 
 Dispatching work is not the same as running it. A workflow's phases only advance
 while a coordinator walks them, so the owner starts one itself for the run Atlas
@@ -183,9 +198,12 @@ There are two valid Claude modes:
    dependency graph the registry enforces: analyst, bounded challenger debate,
    optimizer on the final persisted decision, referee gate, then reporter. They
    can inspect, research, persist judgments, and request a dry rebalance
-   preview. No role can book a fill: the BOOK box on the Atlas workstation is
-   the one confirmation, bound to the plan's own `targets_hash`, and the owner
-   re-validates the approval and the referee PASS before any leg is sent.
+   preview. No role can book a fill, and none can grant one: the BOOK box on
+   the Atlas workstation is the operator's per-plan confirmation, bound to the
+   plan's own `targets_hash`, and a standing grant is the only other form the
+   owner accepts — written by the operator over HTTP, refused from a chat
+   origin, and invisible to every role. Either way the owner re-validates the
+   approval and the referee PASS before any leg is sent.
 
 Starting a retired standalone quant-lab or quant-trader module now delegates to
 the guarded combined server, so those module paths cannot recreate the old

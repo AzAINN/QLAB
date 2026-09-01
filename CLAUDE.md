@@ -16,6 +16,11 @@ python -m pytest                    # full offline suite (no network needed)
 python -m pytest tests/test_ui.py  -q          # one module while iterating
 qlab                                # the desk (owner + Atlas workstation; --offline; --restart warns, asks a tier, archives)
 qlab owner                          # same owner runtime, headless
+                                    # (either one's 30s beat books a proposal a
+                                    # standing grant already covers, with no
+                                    # click — invariant 3. No CLI verb grants:
+                                    # POST /api/desk/authority does, and
+                                    # Settings > AUTHORITY revokes on `R`)
 qlab run-once --offline --dry-run   # one governed autopilot cycle, no orders
                                     # (proposal-only by default: it opens an
                                     # approval request. run-once and watch
@@ -58,7 +63,11 @@ route — `/api/desk_mode`, the approval decisions and the execute path all
 predate this branch and are equally open to anyone who can reach the port. The
 posture is an operator's stated intent, not a security boundary, and must never
 be read as one: what protects a fill is the hash-bound confirm, the referee pin,
-and the owner's own re-validation.
+and the owner's own re-validation. The client is no longer the only door — under
+a standing grant (invariant 3) the owner's own beat books with no click, and
+`POST /api/desk/authority` is as unauthenticated as the rest. There, the
+protection is the grant's own ceilings, the same referee pin, and the same
+re-validation; the client's confirm box is not what stops that path.
 
 Quantum research is an isolated offline lane: `pip install -e
 ".[offline-quantum]"` then `python -m pytest tests/test_quantum.py`. It is
@@ -94,6 +103,13 @@ excluded from `[all]`, the staged runtime, and the default ablation.
   highest mode that cannot create a paper plan; `check_startable` refuses every
   plan-creating template below `propose`. Widening what Atlas *researches* must
   never widen what it can *execute*.
+- **The beat can book.** Under a standing grant the owner's heartbeat books a
+  referee-passed proposal with no click (`book_under_grant` in
+  `qlab/ui/server.py`, called from the LOCK phase of `build_owner_tick` in
+  `qlab/operator/heartbeat.py`; the model is `qlab/governance/authority.py`).
+  It is the operator's authority, never Atlas's — Atlas cannot see, create or
+  consume a grant, and `qlab/operator/` reaching into `qlab/ui/` for this is
+  the first such import (function-scoped and lazy, so no cycle).
 - **The real Claude CLI opens on the desk**, two ways, and the argv for both is
   built in one place (`qlab/tui/claude.py`, tested in `tests/test_claude_cli.py`).
   `qlab cli` is interactive Claude wearing `agents/atlas.md`, its tool universe
@@ -122,15 +138,31 @@ excluded from `[all]`, the staged runtime, and the default ablation.
 2. **Tests never open `.lab/registry.duckdb`** — use `Registry(":memory:")`.
    Tests must pass fully offline; synthetic fixtures stand in for market data.
 3. **Referee PASS is bound to the exact `targets_hash`** on every execution
-   path. On the desk path, execution also requires a persisted checked plan
-   plus explicit human confirmation (`human_confirmed=True` from the client):
-   one confirmation is one click on the hash-bound BOOK box — never zero, and
-   never a second one. Two out-of-band hatches skip that confirmation and
-   nothing else — `QLAB_AUTOPILOT_EXECUTE=1` for `qlab run-once`/`qlab watch`
-   (`qlab/autopilot/loop.py`) and `QLAB_HEADLESS_EXECUTE=1` for the headless
-   MCP (`qlab/mcp/quant_trader.py`). Each authorizes one process the operator
-   started; no agent can set either, and neither skips the referee, the cost
-   gate, reconcile, or the mandate.
+   path, and execution always requires a persisted checked plan. There are
+   **three** recorded forms of confirmation, and no fourth:
+   - **the click** — `human_confirmed=True` from the client, one click on the
+     hash-bound BOOK box, never zero and never a second one;
+   - **a persisted standing grant** (`qlab/governance/authority.py`,
+     `authority_grants`) — the operator writes ceilings once
+     (`POST /api/desk/authority`), and the owner's own 30 s beat books a
+     referee-passed proposal the grant covers, with no click. It is bounded
+     (universe, notional, turnover, orders, `max_books_per_day`, ≤ 30 days),
+     revocable in one keystroke, suspended by any anomaly, refused for any
+     plan older than `MAX_AUTO_BOOK_AGE_S = 120` s or already started, and it
+     reaches `approved` through the same `decide_approval` the click calls —
+     two ways in, one way to execute. `PAPER_AUTO` is the only mode; no live
+     mode is expressible;
+   - **two out-of-band env hatches** — `QLAB_AUTOPILOT_EXECUTE=1` for
+     `qlab run-once`/`qlab watch` (`qlab/autopilot/loop.py`) and
+     `QLAB_HEADLESS_EXECUTE=1` for the headless MCP
+     (`qlab/mcp/quant_trader.py`), each authorizing one process the operator
+     started.
+
+   None of the three skips anything else: the referee PASS pinned to the
+   plan's own hash, the mandate, the cost gate, reconcile and execution-time
+   revalidation all still run. No agent can set an env hatch, and **no agent
+   can reach a grant** — no MCP tool, chat action tool or proxy verb creates,
+   edits, reads or consumes one, and both write routes refuse chat origin.
    Never introduce a raw-order tool or an agent-reachable execution path.
 4. **Fail loud.** No silent fallbacks for missing data, credentials, or
    unconditioned tensors; refuse with a clear error instead.

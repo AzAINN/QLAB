@@ -53,12 +53,20 @@ excluded from `[all]`, the staged runtime, and the default ablation.
 2. **Tests never open `.lab/registry.duckdb`** — use `Registry(":memory:")`.
    Tests must pass fully offline; synthetic fixtures stand in for market data.
 3. **Referee PASS is bound to the exact `targets_hash`** on every execution
-   path. On the desk path, execution also requires a persisted checked plan
-   plus explicit human confirmation (`human_confirmed=True` from the client).
-   Two out-of-band hatches skip that confirmation and nothing else —
-   `QLAB_AUTOPILOT_EXECUTE=1` for `qlab run-once`/`qlab watch` and
-   `QLAB_HEADLESS_EXECUTE=1` for the headless MCP — each authorizing one
-   process the operator started; no agent can set either. Never introduce a
+   path, and execution always requires a persisted checked plan. Three
+   recorded forms of confirmation, and no fourth: (a) the click —
+   `human_confirmed=True` from the client, on the hash-bound BOOK box; (b) a
+   persisted standing grant (`qlab/governance/authority.py`), written once by
+   the operator with every ceiling explicit, under which the owner's own 30 s
+   beat books with no click — bounded, revocable in one keystroke, suspended
+   by any anomaly, and refused for a plan older than 120 s or already started;
+   (c) two out-of-band hatches — `QLAB_AUTOPILOT_EXECUTE=1` for `qlab
+   run-once`/`qlab watch` and `QLAB_HEADLESS_EXECUTE=1` for the headless MCP —
+   each authorizing one process the operator started. None of the three skips
+   the referee, the mandate, the cost gate, reconcile, or execution-time
+   revalidation. No agent can set an env hatch, and no agent can reach a
+   grant: no MCP tool, chat action tool or proxy verb creates, edits, reads or
+   consumes one, and both write routes refuse chat origin. Never introduce a
    raw-order tool or an agent-reachable execution path.
 4. **Fail loud.** No silent fallbacks for missing data, credentials, or
    unconditioned tensors; refuse with a clear error instead.

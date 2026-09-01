@@ -53,7 +53,8 @@ expertise and deterministic code supplying the discipline. An agent chooses the
 estimation window and argues the regime call; an algorithm solves the
 allocation; deterministic code enforces the mandate, binds the referee's verdict
 to the exact weights it approved, and refuses any execution without a matching
-human approval. No agent has an order tool, and no code path would give one.
+approval the operator authorized — per plan, or in advance through a bounded
+standing grant. No agent has an order tool, and no code path would give one.
 
 - **Twenty instruments, by contract.** Anything outside `mandate.yaml` is
   rejected before a plan can form.
@@ -68,7 +69,11 @@ human approval. No agent has an order tool, and no code path would give one.
   than passes ([`view_provenance.py`](qlab/research/view_provenance.py)).
 - **A human gate that is not advisory.** Nothing reaches the book until a person
   confirms against a hash of the exact approved weights. Move one number and the
-  approval dies.
+  approval dies. A person may instead sign a **standing grant** — every ceiling
+  written out, at most 30 days, revocable in one keystroke — and the desk then
+  books what that grant already covers on its own beat. That is still the
+  person's authority, given ahead of time rather than per plan; every other gate
+  is unchanged.
 
 ### AI approach and architecture
 
@@ -82,7 +87,9 @@ flowchart LR
     R -- "PASS pinned to targets_hash" --> G[checked plan]
     P --> G
     G --> H{{human confirm<br/>against the plan's own hash}}
+    G --> S{{or a standing grant<br/>the operator signed<br/>ceilings · TTL · revocable}}
     H --> V[owner re-validates:<br/>approval · data permit<br/>leg count · mandate]
+    S --> V
     V --> B[(simulated book)]
     V -- "any check fails" --> X[refused, with reasons]
 ```
@@ -156,7 +163,7 @@ one per digit, numbered as the nav rail lists them:
 | `6` | PRED | the predictor board — models ranked against their control |
 | `7` | WORK | the workforce: five roles and the phase they are on |
 | `8` | AUDIT | the event bus, and any approval waiting on you |
-| `9` | SETT | desk mode, models, method, news sources, rights |
+| `9` | SETT | desk mode, models, method, news sources, rights, standing authority |
 | `0` | VIS | research artifacts drawn as text |
 
 Everywhere: `r` refreshes, `/` opens the command line, `?` shows help, `q` quits.
@@ -169,11 +176,22 @@ Propose. Watch it on `7`. A run that ends in a plan leaves a proposal on BOOK,
 where `b` opens one box showing the allocation and the last six of the
 `targets_hash` it is bound to, and `Enter` books it.
 
-That is the single explicit confirmation. The owner then re-validates the
-approval, the plan, the data permit, the leg count, and the mandate before any
-fill, and refuses with a reason if any of them moved. The desk asks about one
-proposal at a time — a newer checked plan supersedes an older pending one, and
-the older approval is invalidated with the reason.
+That is the explicit confirmation, and it is one click, never two. The owner
+then re-validates the approval, the plan, the data permit, the leg count, and
+the mandate before any fill, and refuses with a reason if any of them moved.
+The desk asks about one proposal at a time — a newer checked plan supersedes an
+older pending one, and the older approval is invalidated with the reason.
+
+**Standing authority** is the other way that proposal becomes a fill. On SETT,
+the AUTHORITY card shows the live grant and what is left of it — days, books
+left today, and every ceiling — and `R` revokes it at once, with no box and
+nothing typed. While a grant stands, the owner's own 30-second beat books a
+proposal the grant covers, with no click; it refuses anything the grant does not
+cover, anything an anomaly suspends (a halt, a dirty reconcile, no data permit,
+a recent rejected order), a plan older than 120 seconds, and a plan that has
+already started. Nothing else is skipped, and no agent can create, read or
+consume a grant. Granting is not a keystroke: it is a `POST` to
+`/api/desk/authority` that states every ceiling explicitly.
 
 Anything that writes is refused on a desk you have not armed, and on a window
 started with `--glass`. → **[every key, by pane](docs/cli.md#keys-by-pane)**
@@ -208,7 +226,9 @@ only through the provenance-gated news lane, and a contender outside the
 universe becomes a `universe_change` approval you answer on AUDIT or from ATLAS.
 Nothing it says moves a weight.
 
-Reaching a fill needs `propose` mode **and** your explicit confirmation.
+Reaching a fill needs `propose` mode **and** either your explicit confirmation
+or a standing grant you signed. Atlas has no part in the second one: it cannot
+see, create or consume a grant, and its mode never widens what may execute.
 → [Atlas, modes, and the workforce](docs/atlas.md)
 
 ## One writer, always
@@ -224,7 +244,8 @@ qlab
     |       +-- the Atlas workstation and the CLI verbs observe over HTTP
     |       +-- qlab-operator gives the Claude workforce role-bound HTTP tools
     |
-    +-- explicit human confirmation is required for paper execution
+    +-- paper execution needs the operator's confirmation: one click on the
+        hash-bound box, or a standing grant they signed in advance
 ```
 
 Every other surface talks HTTP. No MCP tool accepts a raw order.
@@ -254,11 +275,14 @@ broken sweep, not a strong result.
 | `qlab owner` | the same owner runtime, headless — for a desk kept up as a service |
 | `qlab desk` / `qlab workforce` / `qlab events` | one-shot CLI verbs over the owner's HTTP and event stream |
 
-The workstation is the desk's one client, and a paper trade is held to one
-rule: exactly one explicit confirmation. It is one click on a box that
-*displays* the last six of the plan's own `targets_hash` — the client posts that
-hash, the referee PASS is pinned to the same hash, and the owner re-validates
-the request and refuses it without a persisted approval. Whether
+The workstation is the desk's one client, and a paper trade booked from it is
+held to one rule: exactly one explicit confirmation. It is one click on a box
+that *displays* the last six of the plan's own `targets_hash` — the client posts
+that hash, the referee PASS is pinned to the same hash, and the owner
+re-validates the request and refuses it without a persisted approval. The
+workstation is not the only door: under a standing grant the owner books on its
+own beat with no client involved, and the workstation's part in that is to
+*show* the grant and revoke it (Settings ▸ AUTHORITY, `R`). Whether
 this window may write at all is the owner's persisted posture, asked once at
 startup — not a launch flag. The same door asks which mind runs Atlas, once, on
 a desk whose answer the owner has never recorded; Settings ▸ MODELS is where

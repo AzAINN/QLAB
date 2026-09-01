@@ -142,6 +142,11 @@ That is enough to run the desk offline. Live data and a real Alpaca paper book
 need one more step. → **[full install guide](docs/install.md)** — Python, the
 Rust toolchain per platform, and the Alpaca CLI
 
+On **Windows**, that guide covers both lanes: native PowerShell with the MSVC or
+MSYS2 toolchain, or **WSL2**, which skips the Windows toolchain and follows the
+Linux path throughout. No git? The **Code ▸ Download ZIP** button works, though
+`git pull` is how you take updates.
+
 ## Using the desk
 
 ```bash

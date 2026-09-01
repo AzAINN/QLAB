@@ -11,6 +11,83 @@ is what `qlab tui` draws. You need **Python 3.10+** and, for the workstation, a
 **Rust toolchain**. Real prices and a real paper book additionally need the
 **Alpaca CLI** (or API keys). Everything below is one-time.
 
+> **Python: the package floor and the suite floor differ.** The package
+> installs and runs on **3.10+**, which is what `requires-python` declares. The
+> *test suite* wants **3.13**, which is what CI runs: one assertion pins a JSON
+> error message only CPython 3.13 words that way. On 3.10–3.12 qlab works and
+> `python -m pytest` shows a failure that is about your interpreter, not your
+> install. Use 3.13 if you intend to run the suite.
+
+**On Windows, choose a lane before you start.** Everything here works natively
+in PowerShell, and the Windows blocks below are written for it. The alternative
+is **WSL2**, where you follow the *Linux* instructions throughout and get the
+same desk — no MSVC toolchain, and the environment CI actually builds on.
+Section 0 sets up either.
+
+### 0 · Get the code
+
+qlab is a public repository, so cloning needs no account or token:
+
+```bash
+git clone https://github.com/AzAINN/QLAB && cd QLAB
+```
+
+No git installed? The repository's **Code ▸ Download ZIP** button gives the same
+tree — but `git clone` is worth the install, since `git pull` is how you take
+updates and the ZIP has no history to update from.
+
+Everything after this point runs from that directory.
+
+<details>
+<summary><b>Windows via WSL2</b> — install once, then follow every Linux block</summary>
+
+WSL2 runs a real Ubuntu kernel alongside Windows. It is the shortest path on
+Windows because it skips the MSVC toolchain entirely and matches CI.
+
+1. **Install WSL** in PowerShell **as Administrator**, then reboot:
+   ```powershell
+   wsl --install
+   ```
+   That enables the feature and installs Ubuntu by default. On an older Windows
+   10 build, run `wsl --update` first. Afterwards launch **Ubuntu** from the
+   Start menu and create your Linux username and password (it is not your
+   Windows one).
+
+2. **Clone into the Linux filesystem, not `/mnt/c/`.** This is the mistake worth
+   avoiding up front: the Windows drives are mounted over a network protocol, so
+   a `cargo build` or a pytest run under `/mnt/c/...` is several times slower and
+   file-watching misbehaves. Keep the repo in your Linux home:
+   ```bash
+   cd ~ && git clone https://github.com/AzAINN/QLAB && cd QLAB
+   ```
+   You can still reach it from Windows at `\\wsl$\Ubuntu\home\<user>\QLAB`, and
+   VS Code opens it directly with the **WSL** extension.
+
+3. **Python.** Ubuntu ships Python but not the venv module or pip:
+   ```bash
+   sudo apt update && sudo apt install -y python3-venv python3-pip
+   ```
+   If `python3 -V` is below 3.13 and you want the suite green, add the deadsnakes
+   PPA (`sudo add-apt-repository ppa:deadsnakes/ppa`) and install
+   `python3.13-venv`, then build the venv with `python3.13 -m venv .venv`.
+
+4. **Follow the Linux blocks** from here — section 1 for Python and qlab, the
+   Linux toolchain block in section 2 for Rust, and section 3's prebuilt-binary
+   or Go route for the Alpaca CLI (Homebrew on Linux works too).
+
+Two WSL-specific notes for later:
+
+- **The browser login works**, but WSL has no browser of its own. Install
+  `wslu` (`sudo apt install -y wslu`) so `alpaca profile login` can hand the
+  OAuth URL to your Windows browser; otherwise copy the printed URL across by
+  hand.
+- **The owner's port is reachable from Windows.** The desk listens on
+  `127.0.0.1:8765` inside WSL, and WSL2 forwards localhost, so
+  `http://localhost:8765` works from a Windows browser. Run the terminal client
+  inside the WSL shell — Windows Terminal renders it correctly.
+
+</details>
+
 ### 1 · Python and qlab
 
 A virtual environment is recommended:
@@ -63,6 +140,10 @@ with `rustup`, plus your platform's C linker / build tools.
 Rust on Windows needs a C linker and the system libraries to link against. Pick
 **one** of the two toolchains below — MSVC is the default and best-supported;
 MSYS2/GNU is the option if you would rather not install Visual Studio.
+
+*Third option:* the **WSL2** route in section 0 avoids this section entirely —
+inside WSL you install the Linux toolchain below instead, and build
+`atlas` rather than `atlas.exe`.
 
 **Option A — MSVC (default, recommended).** Rust's default `stable-msvc`
 toolchain uses the Microsoft C++ build tools: the **MSVC v143 compiler/linker**
@@ -209,4 +290,4 @@ export ALPACA_API_KEY=...
 export ALPACA_API_SECRET=...     # the value the CLI calls ALPACA_SECRET_KEY
 ```
 
-→ [data lanes and whose book](docs/data-and-book.md) · [news setup](docs/news-setup.md)
+→ [data lanes and whose book](data-and-book.md) · [news setup](news-setup.md)

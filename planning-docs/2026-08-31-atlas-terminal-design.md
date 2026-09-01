@@ -38,10 +38,15 @@ Verified against `main` at `222c293`:
 
 - **The column follows the child, not the config.** ATLAS keeps one identity
   and two bodies: the terminal pane while a child is running, today's chat
-  otherwise. The desk sidebar — proposal card, tensions, your-call pointers —
-  stays in both. That sidebar is what makes an agent session *on the desk*
-  rather than beside it, and it is why the pane is not simply a bigger
-  hand-off.
+  otherwise. **Correction, made after measuring the real frame:** what stays
+  beside the pane is the shell's PULSE rail (regime, stress, drawdown, gross —
+  live desk state drawn for every view), not the proposal card. The card, the
+  refusals and the your-call pointers live in ATLAS's *own* WOULD DO column,
+  which is precisely the width the pane takes. An earlier draft of this ruling
+  named the wrong panel; the arithmetic was right and the justification was
+  not. What still makes this a desk rather than a terminal is the rail plus the
+  live market state beside it — and, because a proposal waiting while the
+  operator watches Claude must not be silent, the pane says so itself.
   What the chosen mind decides is whether a child can be started at all:
   Claude offers `/cli`, a local reasoner refuses it by name with the reason
   (`qlab cli` is a Claude verb).

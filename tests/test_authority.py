@@ -32,8 +32,8 @@ def reg():
 def _grant(**over):
     kwargs = dict(
         allowed_universe=["ACWI", "BNDW"], max_notional=5000.0,
-        max_turnover=0.5, max_orders=4, allowed_policy="hrp",
-        granted_by="operator", ttl_days=7, now=NOW)
+        max_turnover=0.5, max_orders=4, max_books_per_day=2,
+        allowed_policy="hrp", granted_by="operator", ttl_days=7, now=NOW)
     kwargs.update(over)
     return build_grant(**kwargs)
 
@@ -75,12 +75,30 @@ def test_grant_requires_universe_ceilings_and_an_author():
             _grant(**{field: 0})
 
 
+def test_a_grant_must_say_how_many_books_a_day():
+    """The per-plan ceilings bound one book; nothing bounded how many.
+
+    A seven-day grant with generous per-plan ceilings would otherwise authorise
+    a fill on every heartbeat, which is not what "book the next rebalance"
+    means. The ceiling has no default, so a caller cannot forget it quietly.
+    """
+    with pytest.raises(TypeError, match="max_books_per_day"):
+        build_grant(allowed_universe=["ACWI"], max_notional=5000.0,
+                    max_turnover=0.5, max_orders=4, allowed_policy="hrp",
+                    granted_by="operator", now=NOW)
+    for bad in (0, -1, None):
+        with pytest.raises(AuthorityError,
+                           match="max_books_per_day must be a positive"):
+            _grant(max_books_per_day=bad)
+    assert _grant(max_books_per_day=3)["max_books_per_day"] == 3
+
+
 # --- coverage is fail-closed --------------------------------------------------
 
 
 def test_a_conforming_plan_is_covered():
     assert check_grant_covers(_grant(), _plan(), now_iso=NOW_ISO,
-                              policy_id="hrp") == []
+                              policy_id="hrp", books_today=0) == []
 
 
 def test_absent_grant_refuses():
@@ -128,6 +146,40 @@ def test_ceilings_are_enforced():
         _grant(), too_many, now_iso=NOW_ISO, policy_id="hrp"))
 
 
+def test_the_day_is_spent_at_the_daily_ceiling():
+    grant = _grant(max_books_per_day=2)
+    for spent in (0, 1):
+        assert check_grant_covers(grant, _plan(), now_iso=NOW_ISO,
+                                  policy_id="hrp", books_today=spent) == []
+    for spent in (2, 3):
+        reasons = check_grant_covers(grant, _plan(), now_iso=NOW_ISO,
+                                     policy_id="hrp", books_today=spent)
+        assert any(f"booked {spent} today" in r and "ceiling of 2" in r
+                   for r in reasons)
+
+
+def test_a_day_that_cannot_be_counted_refuses():
+    """A ceiling the caller did not evaluate refuses, naming what is missing.
+
+    The alternative — skipping the check when no count is supplied — makes
+    forgetting the count the most permissive thing a caller can do.
+    """
+    reasons = check_grant_covers(_grant(), _plan(), now_iso=NOW_ISO,
+                                 policy_id="hrp")
+    assert any("day's book count is unknown" in r for r in reasons)
+
+
+def test_a_grant_with_no_daily_ceiling_refuses():
+    """Absence is a missing ceiling, never an unlimited one."""
+    absent = _grant()
+    absent.pop("max_books_per_day")
+    for grant in (absent, dict(_grant(), max_books_per_day=None),
+                  dict(_grant(), max_books_per_day=0)):
+        reasons = check_grant_covers(grant, _plan(), now_iso=NOW_ISO,
+                                     policy_id="hrp", books_today=0)
+        assert any("max_books_per_day" in r for r in reasons), grant
+
+
 def test_a_different_policy_is_not_covered():
     reasons = check_grant_covers(_grant(), _plan(), now_iso=NOW_ISO,
                                  policy_id="mvsk")
@@ -141,13 +193,15 @@ def test_anomalies_suspend_without_revoking():
     assert len(anomalies) == 4
     grant = _grant()
     reasons = check_grant_covers(grant, _plan(), now_iso=NOW_ISO,
-                                 policy_id="hrp", anomalies=anomalies)
+                                 policy_id="hrp", anomalies=anomalies,
+                                 books_today=0)
     assert all("suspended by anomaly" in r for r in reasons)
     # Suspension is not revocation: the grant itself is untouched.
     assert grant.get("revoked_at") is None
     # Clearing the anomalies restores coverage.
     assert check_grant_covers(grant, _plan(), now_iso=NOW_ISO,
-                              policy_id="hrp", anomalies=[]) == []
+                              policy_id="hrp", anomalies=[],
+                              books_today=0) == []
 
 
 def test_no_anomalies_when_the_desk_is_clean():
@@ -180,3 +234,73 @@ def test_grant_roundtrips_and_revokes(reg):
 def test_no_grant_exists_by_default(reg):
     """The feature is inert: nothing creates a grant on its own."""
     assert reg.list_authority_grants() == []
+
+
+def test_the_daily_ceiling_roundtrips_through_the_registry(reg):
+    gid = reg.create_authority_grant(_grant(max_books_per_day=3))
+    assert reg.get_authority_grant(gid)["max_books_per_day"] == 3
+    assert reg.list_authority_grants()[0]["max_books_per_day"] == 3
+
+
+def test_a_row_written_before_the_ceiling_existed_refuses(reg):
+    """The pre-column INSERT, verbatim: thirteen columns, no daily ceiling.
+
+    A grant already in an operator's registry must never outrank one granted
+    today, so the NULL the migration leaves behind refuses.
+    """
+    reg.con.execute(
+        "INSERT INTO authority_grants (grant_id, mode, allowed_universe, "
+        "max_notional, max_turnover, max_orders, allowed_policy, valid_from, "
+        "expires_at, revoked_at, revoked_reason, granted_by, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ["old-1", "paper_auto", '["ACWI","BNDW"]', 5000.0, 0.5, 4, "hrp",
+         NOW_ISO, "2026-08-24T12:00:00+00:00", None, None, "operator", NOW_ISO])
+    old = reg.get_authority_grant("old-1")
+    assert old["max_books_per_day"] is None
+    # The same plan, the same instant: covered under today's grant, refused
+    # under the old row solely because that row names no daily ceiling.
+    assert check_grant_covers(_grant(), _plan(), now_iso=NOW_ISO,
+                              policy_id="hrp", books_today=0) == []
+    assert any("max_books_per_day" in r for r in check_grant_covers(
+        old, _plan(), now_iso=NOW_ISO, policy_id="hrp", books_today=0))
+
+
+def test_authority_grants_gains_the_daily_ceiling_on_an_existing_table(tmp_path):
+    """A table created before `max_books_per_day` existed must be migrated.
+
+    _SCHEMA never touches an already-created table, so without the explicit
+    ALTER this fails only on a desk that has run before — every test would
+    pass on a fresh registry while the real one refused to write a grant at all.
+    A file-backed registry is the only place an existing database can be shown;
+    it is a tmp_path DB, never `.lab/registry.duckdb`.
+    """
+    path = tmp_path / "registry.duckdb"
+    reg = Registry(str(path))
+    reg.con.execute("DROP TABLE authority_grants")
+    # The pre-column DDL, verbatim from the parent commit.
+    reg.con.execute(
+        "CREATE TABLE authority_grants (grant_id VARCHAR PRIMARY KEY, "
+        "mode VARCHAR, allowed_universe JSON, max_notional DOUBLE, "
+        "max_turnover DOUBLE, max_orders INTEGER, allowed_policy VARCHAR, "
+        "valid_from VARCHAR, expires_at VARCHAR, revoked_at VARCHAR, "
+        "revoked_reason VARCHAR, granted_by VARCHAR, created_at VARCHAR)")
+    reg.con.execute(
+        "INSERT INTO authority_grants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ["old-1", "paper_auto", '["ACWI","BNDW"]', 5000.0, 0.5, 4, "hrp",
+         NOW_ISO, "2026-08-24T12:00:00+00:00", None, None, "operator", NOW_ISO])
+    reg.close()
+
+    reg = Registry(str(path))
+    try:
+        old = reg.get_authority_grant("old-1")
+        # The column exists (the read would KeyError otherwise) and the
+        # pre-column row is NULL, which check_grant_covers owes an answer for.
+        assert "max_books_per_day" in old
+        assert old["max_books_per_day"] is None
+        assert any("max_books_per_day" in r for r in check_grant_covers(
+            old, _plan(), now_iso=NOW_ISO, policy_id="hrp", books_today=0))
+        # And a grant written after the migration carries its ceiling.
+        gid = reg.create_authority_grant(_grant(max_books_per_day=3))
+        assert reg.get_authority_grant(gid)["max_books_per_day"] == 3
+    finally:
+        reg.close()

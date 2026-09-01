@@ -15,7 +15,8 @@ Design rules, all enforced here in deterministic code:
   never blocked by any other condition.
 * **Scoped.** Universe, notional, turnover, and order count are ceilings the
   plan must fit inside; a plan touching anything outside the allowed universe
-  is refused whole, not trimmed to fit.
+  is refused whole, not trimmed to fit. Books per day bounds how *many* plans
+  a grant covers, which the per-plan ceilings alone never did.
 * **Anomaly-paused.** A halted book, a dirty reconcile, a stale data permit, or
   a recent order anomaly suspends a grant without revoking it.
 * **Never sufficient alone.** A grant replaces the *per-plan human approval*,
@@ -48,6 +49,7 @@ def build_grant(
     max_notional: float,
     max_turnover: float,
     max_orders: int,
+    max_books_per_day: int,
     allowed_policy: str,
     granted_by: str,
     ttl_days: int = 7,
@@ -65,7 +67,8 @@ def build_grant(
         raise AuthorityError("a grant must record who granted it")
     for name, value in (("max_notional", max_notional),
                         ("max_turnover", max_turnover),
-                        ("max_orders", max_orders)):
+                        ("max_orders", max_orders),
+                        ("max_books_per_day", max_books_per_day)):
         if value is None or float(value) <= 0:
             raise AuthorityError(f"{name} must be a positive ceiling")
     if not 1 <= int(ttl_days) <= MAX_GRANT_DAYS:
@@ -80,6 +83,7 @@ def build_grant(
         "max_notional": float(max_notional),
         "max_turnover": float(max_turnover),
         "max_orders": int(max_orders),
+        "max_books_per_day": int(max_books_per_day),
         "allowed_policy": allowed_policy,
         "valid_from": now.isoformat(),
         "expires_at": (now + timedelta(days=int(ttl_days))).isoformat(),
@@ -94,11 +98,17 @@ def check_grant_covers(
     now_iso: str,
     policy_id: str,
     anomalies: list[str] | None = None,
+    books_today: int | None = None,
 ) -> list[str]:
     """Reasons this grant does NOT cover this plan right now (empty = covered).
 
-    Fail-closed at every branch: a missing, revoked, expired, out-of-scope, or
-    anomaly-suspended grant refuses.
+    Fail-closed at every branch: a missing, revoked, expired, out-of-scope,
+    anomaly-suspended, or daily-spent grant refuses.
+
+    `books_today` is how many books this grant has already made on today's
+    trading date, counted by the caller — this module never touches the
+    registry. It has no default that means "unlimited": an unsupplied count is
+    a ceiling that cannot be evaluated, and that refuses.
     """
     if not grant:
         return ["no standing authority grant"]
@@ -148,6 +158,24 @@ def check_grant_covers(
         reasons.append(
             f"plan has {len(legs)} legs, above the grant ceiling "
             f"{int(grant.get('max_orders') or 0)}")
+
+    # The per-plan ceilings bound one book; this one bounds how many. A grant
+    # that names no daily ceiling was written before the ceiling existed, and a
+    # missing ceiling refuses — it never reads as unlimited, or the oldest row
+    # in a desk's registry would outrank every grant made since.
+    books_ceiling = grant.get("max_books_per_day")
+    if books_ceiling is None or int(books_ceiling) <= 0:
+        reasons.append(
+            "grant names no max_books_per_day ceiling; a missing daily "
+            "ceiling refuses rather than reading as unlimited")
+    elif books_today is None:
+        reasons.append(
+            "the day's book count is unknown; a daily ceiling that cannot be "
+            "evaluated refuses")
+    elif int(books_today) >= int(books_ceiling):
+        reasons.append(
+            f"grant has booked {int(books_today)} today, at its ceiling of "
+            f"{int(books_ceiling)}")
 
     # An anomaly suspends a grant without revoking it: the authority survives,
     # but it does not apply while the desk is in a state a human should see.

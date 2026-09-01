@@ -465,6 +465,15 @@ class Registry:
         # no kind at all.
         self.con.execute(
             "ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS kind VARCHAR")
+        # How many books a day a grant covers. NULL is a grant written before
+        # the ceiling existed, and check_grant_covers refuses it: a missing
+        # ceiling is not an unlimited one, or the oldest grant in a desk's
+        # registry would outrank every grant made since. Added by ALTER only,
+        # like `kind` above, so fresh and migrated databases agree on the
+        # column order the named INSERT below no longer depends on.
+        self.con.execute(
+            "ALTER TABLE authority_grants ADD COLUMN IF NOT EXISTS "
+            "max_books_per_day INTEGER")
 
     def _partition_account_by_book(self) -> None:
         """Move a pre-book `account` row onto the book key.
@@ -2241,13 +2250,23 @@ class Registry:
     # -- standing authority grants (inert unless a human creates one) -------
     def create_authority_grant(self, grant: dict) -> str:
         gid = str(grant["grant_id"])
+        # Named columns, not positional: the migration appends
+        # max_books_per_day to an existing table, and a positional VALUES list
+        # would either miscount or write every field one column to the left.
+        # A grant with no daily ceiling stores NULL and is refused on read —
+        # build_grant is where a ceiling is demanded, and it demands this one.
         self.con.execute(
-            "INSERT INTO authority_grants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO authority_grants (grant_id, mode, allowed_universe, "
+            "max_notional, max_turnover, max_orders, allowed_policy, "
+            "valid_from, expires_at, revoked_at, revoked_reason, granted_by, "
+            "created_at, max_books_per_day) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [gid, grant.get("mode"), _j(grant.get("allowed_universe") or []),
              grant.get("max_notional"), grant.get("max_turnover"),
              grant.get("max_orders"), grant.get("allowed_policy"),
              grant.get("valid_from"), grant.get("expires_at"), None, None,
-             grant.get("granted_by"), _now()])
+             grant.get("granted_by"), _now(),
+             grant.get("max_books_per_day")])
         self.record_event("authority.granted",
                           {"grant_id": gid, "mode": grant.get("mode"),
                            "expires_at": grant.get("expires_at")})

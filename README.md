@@ -14,10 +14,148 @@ The whole design is one boundary:
 
 Nothing an agent says can move that boundary. That is the point of the project.
 
-[![qlab demo — the Atlas workstation on live data](https://img.youtube.com/vi/Mhk9sOC2GfE/maxresdefault.jpg)](https://youtu.be/Mhk9sOC2GfE)
+[![qlab demo — a governed allocation from proposal to fill](https://img.youtube.com/vi/AFBifFmD0Tk/maxresdefault.jpg)](https://youtu.be/AFBifFmD0Tk)
 
-**▶ [Watch the demo](https://youtu.be/Mhk9sOC2GfE)** — the workstation on live
-data, a governed workforce run, and the plan stopping at the human gate.
+**▶ [Watch the demo](https://youtu.be/AFBifFmD0Tk)** — a checked allocation
+going from referee PASS to a booked fill through one human confirmation, and a
+predictor board that reports its own null result.
+
+## AI Builders Challenge — Wildcard submission
+
+|  |  |
+|---|---|
+| **Challenge theme** | Wildcard — Build Intelligent Systems for the Future of Work |
+| **Category fit** | AI co-workers · decision intelligence · workflow orchestration |
+| **Demo video** | **[youtu.be/AFBifFmD0Tk](https://youtu.be/AFBifFmD0Tk)** (2:48) |
+| **Primary development tool** | IBM Bob |
+| **Status** | Paper trading only. The book is simulated; no real money moves. |
+
+### Problem statement
+
+The best portfolio methods are not secret. Shrinkage estimation, regime
+detection, hierarchical risk parity, CVaR optimisation — these are what
+institutional desks actually run, and decades of published research back them.
+For most individual investors they may as well not exist, because using them
+well needs expertise most people never get the chance to build: which estimator
+suits which regime, how to backtest without fooling yourself, how to read a news
+record with discipline instead of reacting to headlines. So capable people fall
+back on gut feel, generic index products, or copy-trading, while the strategies
+that would genuinely serve them sit unused in papers and institutional
+codebases.
+
+AI can carry that expertise; it can hold the judgment a desk analyst holds. What
+has been missing is the structure around it — grounding for its claims, an audit
+trail for its reasoning, and a hard line between advising and executing. The
+barrier to top-tier quantitative investing is no longer information. It is
+trustworthy access.
+
+### Solution description
+
+qlab is a personal quant desk that runs in a terminal. It gives an individual
+the methods an institutional desk uses, with AI supplying the expertise and
+deterministic code supplying the discipline.
+
+The whole system turns on one boundary: **AI owns judgment, algorithms own
+numbers, deterministic code owns rigor.** An agent chooses the estimation window
+and argues the regime call. An algorithm computes the covariance and solves the
+allocation. Deterministic code enforces the mandate, binds the referee's verdict
+to the exact weights it approved, and refuses every execution that does not
+carry a matching human approval. No agent in the system has an order tool, and
+there is no code path that would give one.
+
+What that buys is a research assistant you can actually act on:
+
+- **Twenty instruments, by contract.** Anything outside `mandate.yaml`'s
+  whitelist is rejected before a plan can form.
+- **Evidence over novelty.** The predictor board ranks seven models against
+  their own control and reports whether the winner means anything — on the
+  current run it named a champion and then declared the result *not
+  established*, because shuffling the target reproduces a champion that good
+  about one time in six.
+- **Grounded qualitative analysis.** News is read into a point-in-time, hashed
+  archive. When the desk turns that record into a research view, every claim is
+  checked back against the archive; an invented quote or a citation to a record
+  that does not exist raises rather than passes
+  ([`view_provenance.py`](qlab/research/view_provenance.py)).
+- **A human gate that is not advisory.** Nothing reaches the book until a person
+  confirms against a hash of the exact approved weights. Move one number and the
+  approval dies.
+
+### AI approach and architecture
+
+Five AI roles walk a governed pipeline. Each role's authority is declared in
+`agents/*.md` — a single source of truth projected into both `.claude/agents/`
+and `.bob/personas/` by `python -m qlab.agents.loader sync`. No role has
+filesystem, shell, or execution tools.
+
+```mermaid
+flowchart LR
+    subgraph roles["AI roles — judgment only"]
+        A[analyst<br/>window · shrinkage · regime]
+        C[challenger<br/>argues the opposite case]
+        O[optimizer<br/>runs a cataloged solver]
+        R{referee<br/>read-only · must PASS}
+        P[reporter<br/>builds the preview]
+    end
+    A --> C --> O --> R --> P
+    R -- "PASS pinned to targets_hash" --> G
+    P --> G[checked plan]
+    G --> H{{human confirm<br/>against the plan's own hash}}
+    H --> V[owner re-validates:<br/>approval · data permit<br/>leg count · mandate]
+    V --> B[(simulated book)]
+    V -- "any check fails" --> X[refused, with reasons]
+```
+
+Three properties make this more than a prompt chain:
+
+1. **The phase graph is not user input.** It is an in-process argument, and the
+   registry validates dependency closure — a graph without a referee cannot
+   reach a reporter, so no caller can drop the gate.
+2. **One process owns the database.** A single owner runtime holds the only
+   DuckDB handle; every client, CLI verb, and MCP server reaches it over HTTP
+   and has no code path to a handle of its own.
+3. **Refusal is a first-class result.** Stale data, a moved book, a truncated
+   plan, or a mandate breach each return a reason rather than an exception —
+   and the demo video shows the desk refusing a human-confirmed execution
+   because the price feed was one session stale.
+
+Model routing is per-role and recorded per invocation. Reasoning can run on
+**IBM Granite** locally through Ollama, or on a hosted model; the authority a
+role holds does not change with the model behind it.
+
+### How IBM Bob was used
+
+Bob enters qlab as a **client of the governed surface, never as a new authority
+inside it** — the same rule every other agent surface follows.
+
+- **Planning and architecture.** qlab was designed in Bob before it was
+  written. The boundary the whole codebase now enforces — AI owns judgment,
+  algorithms own numbers, deterministic code owns rigor — along with the
+  referee gate, the phase graph, and the single-writer rule, was planned there
+  first, and Bob was returned to mid-build to refine that architecture as the
+  desk grew. The design record is in [`planning-docs/`](planning-docs/), 56
+  dated documents including the ones that record what did *not* work.
+- **Implementation.** Bob carried the early implementation directly. When its
+  trial allowance was spent the build continued in Claude Code, working from
+  the plan Bob had produced. That the structure held afterwards is the point
+  worth making: the governance boundary was already decided, so later work
+  filled it in rather than renegotiating it.
+- **Wired: Bob as an MCP client of the desk.** `.bob/mcp.json` connects Bob to
+  `qlab/mcp/tui_proxy.py`, a stdio MCP server that never opens DuckDB and whose
+  authority is capped at observation, research, workforce coordination, and
+  *dry* rebalance previews. The `alwaysAllow` list is read-only by
+  construction. Bob can therefore drive the desk without being able to book a
+  trade.
+- **One org chart, two orchestrators.** `agents/*.md` is the single source for
+  every role, projected into `.bob/personas/` alongside `.claude/agents/`.
+- **Stated plainly:** `.bob/personas/*.yaml` is qlab's own neutral projection,
+  not a format Bob loads today. It demonstrates that the role definitions can
+  target a second orchestrator; it does not yet make Bob run the workforce.
+  Bob Shell as a second coordinator backend, and native custom modes generated
+  from the same source, are designed and documented but not built — see
+  [the integration analysis](planning-docs/2026-07-26-ibm-bob-integration-options.md)
+  for all four lanes and why the unbuilt ones are unbuilt.
+
 
 ## Setup
 
@@ -51,7 +189,7 @@ python -m pip install -e ".[all]"                             # data, hmm, optim
 | Extra | Pulls in | Needed for |
 |---|---|---|
 | `operator` | httpx, fastmcp | the `qlab` desk, the CLI verbs, the Claude MCP proxy |
-| `data` | yfinance, pyarrow | live/cached daily bars (`--live`) |
+| `data` | yfinance, pyarrow | live/cached daily bars (the default lane) |
 | `trader` | alpaca-py | the Alpaca paper book (`--alpaca-book`) and Alpaca market data |
 | `optimize` | cvxpy | the faster convex solver path |
 | `hmm` | hmmlearn | the Gaussian-HMM regime posterior (the deterministic ensemble runs without it) |
@@ -231,10 +369,10 @@ export ALPACA_API_SECRET=...     # the value the CLI calls ALPACA_SECRET_KEY
 ## First run
 
 ```bash
-qlab tui
+qlab
 ```
 
-`qlab tui` starts the owner runtime and opens the **Atlas workstation** — the
+`qlab` starts the owner runtime and opens the **Atlas workstation** — the
 Rust/Ratatui client in `clients/atlas-tui`, ten views on `1`–`9` and `0`:
 Atlas, Desk, Markets, Book, Research, Predictors, Workforce, Audit, Settings,
 Visuals. The launcher refuses rather than falling back if the binary is not
@@ -264,11 +402,70 @@ book is one word away:
 
 ```bash
 qlab                      # real prices, qlab's simulated book
-qlab tui --alpaca-book    # real prices and your Alpaca paper book (implies --live)
+qlab --alpaca-book        # real prices and your Alpaca paper book
 ```
 
 Both are paper-only. There is no live-trading path to select and the browser
 login cannot grant one. → [data lanes and whose book](docs/data-and-book.md)
+
+## Using the desk
+
+The workstation opens on **DESK**. Ten panes, one per digit — the digits are the
+nav rail's own numbering, so what you press is what you see listed.
+
+| key | pane | what it answers |
+|---|---|---|
+| `1` | ATLAS | the desk manager: ask it something, see what it would do next |
+| `2` | DESK | the one-screen read — equity, regime, allocation, news, verdict |
+| `3` | MKTS | the mandate's twenty instruments and their prices |
+| `4` | BOOK | positions, drift, the current proposal, and the confirm box |
+| `5` | RSCH | every research run, reproducible from its own spec |
+| `6` | PRED | the predictor board — models ranked against their control |
+| `7` | WORK | the workforce: five roles and the phase they are on |
+| `8` | AUDIT | the event bus, and any approval waiting on you |
+| `9` | SETT | desk mode, models, method, news sources, rights |
+| `0` | VIS | research artifacts drawn as text |
+
+Everywhere: `r` refreshes, `/` opens the command line, `?` shows help, `q` quits.
+`Tab` cycles panes if you would rather not use digits.
+
+### The loop
+
+**1 · Ask what it would do.** On ATLAS, type `/ask`. The gate ranks every
+registered template and the WOULD DO panel shows both halves — what this desk
+may start now, and what it refuses, with the reason. A refusal is information;
+it tells you which mode or which precondition is in the way.
+
+**2 · Approve one.** `/do <template>` approves a proposal, which is what
+actually starts a governed run. Approving re-runs the same gate, so a proposal
+made in `research` mode cannot execute on a permit it no longer holds.
+
+**3 · Watch it work.** `7` shows the five roles advancing — analyst, challenger,
+optimizer, referee, reporter. `8` shows the same run as raw events. A run that
+ends in a plan leaves a proposal on BOOK.
+
+**4 · Book it, or don't.** On BOOK, `b` opens one box showing the allocation and
+the last six of the `targets_hash` it is bound to; `Enter` books it. That is the
+single explicit confirmation — the owner then re-validates the approval, the
+plan, the data permit, the leg count, and the mandate before any fill, and
+refuses with a reason if any of them moved. `n` steps through plans, `x` is the
+older two-step execute path.
+
+### Keys worth knowing, by pane
+
+| pane | keys |
+|---|---|
+| ATLAS | `i` focus the chat · `Enter` send · `b` book the current proposal · `c` copy · `PgUp`/`PgDn` scroll |
+| BOOK | `b` book · `n` next plan · `x` execute · `s` sort · `h` heatmap mode · `p` period |
+| PRED | `r` run the board · `Enter` open a model · `↑`/`↓` pick |
+| WORK | `i` ask · `S` start a workflow · `Enter` open a run |
+| AUDIT | `a` answer the waiting approval · `R` reject it |
+| SETT | `Tab` move between cards · `a` Alpaca login · `t` test it · `m` desk mode / model / method · `k` cardinality · `c` news source · `s` save · `v` verify |
+| VIS | `Enter` render the selected artifact · `↑`/`↓` pick · `h`/`j`/`k`/`l` pan |
+
+Anything that writes is refused on a desk you have not armed, and on a window
+started with `--glass`. The pane still draws; the key just does nothing, and the
+status line says which posture you are in.
 
 ## Atlas
 
@@ -309,7 +506,7 @@ DuckDB is both the research registry and the paper book, and exactly one process
 opens it.
 
 ```
-qlab tui
+qlab
     |
     +-- owner HTTP runtime ---- DuckDB registry and paper book
     |       |

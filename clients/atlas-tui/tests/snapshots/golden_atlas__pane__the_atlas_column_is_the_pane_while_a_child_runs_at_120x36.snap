@@ -3,7 +3,7 @@ source: tests/golden_atlas.rs
 expression: "client.frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
-"▌1 ATLAS│┌ ▌ ATLAS ──────────────────────────────────────────────────────── qlab cli ┐│▌ PULSE                          "
+"▌1 ATLAS│┌ ▌ ATLAS ─────────────── 2 need your call · 4 BOOK ────────────── qlab cli ┐│▌ PULSE                          "
 " 2 DESK ││the desk is up on :8765                                                    ││ desk stress  …                  "
 " 3 MKTS ││> what changed in the regime read?                                         ││ regime CALM  robust UNCERTAIN   "
 " 4 BOOK ││                                                                           ││ drawdown 0.0%  tier NONE        "

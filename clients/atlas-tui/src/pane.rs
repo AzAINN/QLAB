@@ -83,6 +83,28 @@ pub fn open(
     opened
 }
 
+/// What quitting the workstation did to the child, when it did anything.
+///
+/// The kill needs no code — the session drops with the store at the end of
+/// `main`, and `pty.rs` hangs the child up on `Drop` — so what is owed is the
+/// *saying so*, and an operator who quit with Claude mid-answer should not have
+/// to infer it. Not a toast: nothing draws another frame after the loop
+/// returns, and anything printed before the terminal guard restores is wiped
+/// with the alternate screen, so the runtime prints this on stderr afterwards.
+///
+/// Here rather than inline in `main.rs` for this module's own reason: the
+/// binary is in no test binary, and both arms of a sentence are worth pinning.
+/// An `Ended` pane gets none — that child is already gone, and it said so on
+/// the pane's own border while the operator was looking at it.
+pub fn quit_note(state: &PtyState) -> Option<&'static str> {
+    match state {
+        PtyState::Running => {
+            Some("the Claude session in the ATLAS pane was ended with this window")
+        }
+        PtyState::Absent | PtyState::Ended { .. } => None,
+    }
+}
+
 /// The frame moved the pane: tell the child what it is drawing on now.
 ///
 /// Called after every frame with what the last one published, which is empty

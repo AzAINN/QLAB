@@ -380,7 +380,7 @@ async fn a_window_with_no_room_for_a_terminal_is_told_so_and_gets_no_child() {
     // columns panics inside the parser. The sentence is on the bus as well as
     // in the value, because the bus is what puts it on screen.
     let (mut store, mut views, (tx, mut rx)) = desk();
-    let column = atlas::ui::shell::pane_column(Rect::new(0, 0, 45, 20));
+    let column = atlas::ui::shell::pane_column(Rect::new(0, 0, 45, 20), &store);
     let said = atlas::pane::open(&mut store, &mut views, &WAITING, column, tx)
         .expect_err("a column with no room for a terminal");
     assert!(said.contains("no room"), "{said}");
@@ -408,8 +408,28 @@ async fn the_column_a_pane_gets_is_wider_than_the_one_beside_the_desk_rail() {
     // The measurement `/cli` makes is the layout's own, and at a width where
     // the rail gives its column up the two differ by the whole rail — which is
     // the difference between a terminal and a refusal.
-    let narrow = atlas::ui::shell::pane_column(Rect::new(0, 0, 96, 36));
+    let (store, _views, _bus) = desk();
+    let narrow = atlas::ui::shell::pane_column(Rect::new(0, 0, 96, 36), &store);
     assert_eq!(narrow.width, 87);
-    let wide = atlas::ui::shell::pane_column(Rect::new(0, 0, 120, 36));
+    let wide = atlas::ui::shell::pane_column(Rect::new(0, 0, 120, 36), &store);
     assert_eq!(wide.width, 77);
+}
+
+// -- what quitting the workstation did to the child -------------------------
+
+#[test]
+fn quitting_with_a_child_running_says_so_and_says_nothing_otherwise() {
+    // The kill needs no code — the session drops with the store — so what is
+    // pinned is the sentence, and both arms of it. An `Ended` pane gets none:
+    // that child is already gone, and it said so on the pane's own border while
+    // the operator was looking at it.
+    let said = atlas::pane::quit_note(&PtyState::Running).expect("a live child is ended by this");
+    assert!(said.contains("ATLAS pane"), "{said}");
+    assert_eq!(atlas::pane::quit_note(&PtyState::Absent), None);
+    assert_eq!(
+        atlas::pane::quit_note(&PtyState::Ended {
+            said: "`qlab cli` ended on its own · /cli starts another".to_string()
+        }),
+        None
+    );
 }

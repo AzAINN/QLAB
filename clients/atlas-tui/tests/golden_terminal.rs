@@ -37,10 +37,24 @@ const ENDED: &str = "`qlab cli` ended on its own · /cli starts another";
 /// border — which is how the runtime sizes one, because the pty is told the
 /// inner rect and not the pane.
 fn pane(w: u16, h: u16, focused: bool, said: Option<&str>) -> String {
+    waiting_pane(w, h, focused, said, None)
+}
+
+/// The same pane, with the one thing the *top* border can carry: what the desk
+/// is waiting on the operator for while this column is a terminal. Composed by
+/// `ui::views::atlas` in production — the widget only has to draw it, or drop
+/// it where there is no room.
+fn waiting_pane(
+    w: u16,
+    h: u16,
+    focused: bool,
+    said: Option<&str>,
+    waiting: Option<&str>,
+) -> String {
     let mut parser = vt100::Parser::new(h.saturating_sub(2), w.saturating_sub(2), 0);
     parser.process(FROM_THE_CHILD);
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    term.draw(|f| terminal::draw(f, f.area(), parser.screen(), focused, said))
+    term.draw(|f| terminal::draw(f, f.area(), parser.screen(), focused, said, waiting))
         .unwrap();
     format!("{}", term.backend())
 }
@@ -199,4 +213,34 @@ fn a_pane_too_short_to_read_refuses_for_its_own_reason() {
     let frame = pane(80, 4, false, None);
     assert!(frame.contains("43×5"), "{frame}");
     assert!(frame.contains("80×4"), "{frame}");
+}
+
+// -- what the desk is waiting for, on the row that has room for it -----------
+
+#[test]
+fn the_top_border_carries_what_the_desk_is_waiting_on_the_operator_for() {
+    // The pane is drawn over the panel that would have said this, so the
+    // border is the only row left to say it on. Between the two names, not
+    // over either.
+    let frame = waiting_pane(77, 10, false, None, Some("1 needs your call · 4 BOOK"));
+    let top = frame.lines().next().unwrap_or_default().to_string();
+    assert!(top.contains("1 needs your call · 4 BOOK"), "{frame}");
+    assert!(top.contains("ATLAS"), "{frame}");
+    assert!(top.contains("qlab cli"), "{frame}");
+}
+
+#[test]
+fn a_pane_with_no_room_for_the_count_drops_it_rather_than_the_names() {
+    // The rule this border already follows: a *key* is the last thing to go,
+    // and a count is news. Drawn over the child's own name it would be worse
+    // than absent — `title_top`s overwrite rather than wrap.
+    let frame = waiting_pane(44, 10, false, None, Some("1 needs your call · 4 BOOK"));
+    let top = frame.lines().next().unwrap_or_default().to_string();
+    assert!(!top.contains("needs your call"), "{frame}");
+    assert!(top.contains("ATLAS") && top.contains("qlab cli"), "{frame}");
+    // And the keys are still on the bottom row, which is the half that matters.
+    assert!(
+        footer(&frame).contains("ctrl-]") || footer(&frame).contains("i or click"),
+        "{frame}"
+    );
 }

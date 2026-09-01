@@ -186,16 +186,13 @@ async fn main() -> Result<()> {
         Reader { handle: reader, tx },
     )
     .await;
-    // The pane's child dies with this process either way — the session is
-    // dropped with the store at the end of `main`, and `pty.rs` hangs the child
-    // up on `Drop` — and an operator who quit with a session open is owed the
-    // sentence rather than a silence they have to infer from. Said here and not
-    // as a toast: nothing draws another frame after the loop returns, and
-    // anything printed before the guard restores is wiped with the alternate
-    // screen.
+    // What quitting did to the child, if it did anything. Read before the
+    // guard is dropped and printed after: nothing draws another frame once the
+    // loop has returned, and anything printed while the alternate screen is up
+    // goes with it. The sentence and the rule that picks it are
+    // `pane::quit_note`'s, where both arms have a test.
     #[cfg(feature = "operator")]
-    let ending = (store.pty_state() != atlas::store::PtyState::Absent)
-        .then_some("the Claude session in the ATLAS pane was ended with this window");
+    let ending = atlas::pane::quit_note(&store.pty_state());
     drop(_guard);
     #[cfg(feature = "operator")]
     if let Some(said) = ending {
@@ -565,11 +562,15 @@ fn ingest(
                 // put a single refusal in two boxes.
                 #[cfg(feature = "operator")]
                 Some(Command::OpenCli) => {
+                    // Measured before the store is borrowed to open on: the
+                    // column is a fact about the frame and the desk together,
+                    // and the open takes the store whole.
+                    let column = ui::shell::pane_column(fx.rects.frame.get(), store);
                     let _ = atlas::pane::open(
                         store,
                         views,
                         &atlas::pty::DeskCli::from_env(),
-                        ui::shell::pane_column(fx.rects.frame.get()),
+                        column,
                         bus.clone(),
                     );
                 }

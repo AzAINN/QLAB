@@ -850,11 +850,13 @@ mod pane {
         // The rect the runtime opens with: the column a pane will be drawn in,
         // asked of the layout that will draw it.
         client.frame(w, h);
+        let column =
+            atlas::ui::shell::pane_column(ratatui::layout::Rect::new(0, 0, w, h), &client.store);
         atlas::pane::open(
             &mut client.store,
             &mut client.views,
             &Waiting,
-            atlas::ui::shell::pane_column(ratatui::layout::Rect::new(0, 0, w, h)),
+            column,
             tx.clone(),
         )
         .expect("the child started");
@@ -1030,11 +1032,126 @@ mod pane {
             // measures the pane and the child is given what is inside it.
             assert_eq!(
                 atlas::ui::widgets::terminal::inner(atlas::ui::shell::pane_column(
-                    ratatui::layout::Rect::new(0, 0, w, h)
+                    ratatui::layout::Rect::new(0, 0, w, h),
+                    &client.store
                 )),
                 client.views.pane_inner(),
                 "at {w}×{h} the column `/cli` measured is not the one the frame drew"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_question_waiting_on_the_operator_is_named_on_the_panes_own_border() {
+        // The panel that would have said this is the column the pane took, and
+        // nothing else on the frame carries it: the status line has no
+        // approvals chip and the nav rail's BOOK is a label with no count. So a
+        // plan waiting on a human while the operator watches Claude would be
+        // silent — which is the one thing a session *on the desk* may not be.
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 120, 36);
+        let frame = client.frame(120, 36);
+        // The fixture desk: one pending plan approval and one checked plan,
+        // which is exactly what the WOULD DO panel's own gate counts.
+        assert!(frame.contains("2 need your call · 4 BOOK"), "{frame}");
+    }
+
+    #[tokio::test]
+    async fn a_desk_waiting_on_nobody_says_nothing_on_the_border() {
+        // A count that appeared on every frame is a count nobody reads, and one
+        // that said `0` would be a question mark over a desk with no question.
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        // The owner's own answer for a desk with nothing outstanding.
+        let now = store
+            .last_snapshot_at
+            .unwrap_or_else(std::time::Instant::now);
+        store.apply(
+            AppEvent::Snapshot(Box::new(
+                serde_json::from_str::<atlas::model::Snapshot>(r#"{"approvals": [], "plans": []}"#)
+                    .unwrap(),
+            )),
+            now,
+        );
+        harness::no_door(&mut store);
+        store.posture = Posture::Operator;
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('1'));
+        let _tx = with_pane(&mut client, 120, 36);
+        let frame = client.frame(120, 36);
+        assert!(!frame.contains("your call"), "{frame}");
+        // And the border is otherwise the one the other tests read.
+        assert!(frame.contains("qlab cli"), "{frame}");
+        assert!(
+            frame.contains("the keyboard is the desk's · i or click to give it to Claude"),
+            "{frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_click_on_a_pane_refusing_its_own_size_leaves_the_ask_row_alone() {
+        // The pane's rect is retracted where the widget refuses, so the click
+        // falls through — and it used to land on an ask-row rect published by a
+        // frame that drew no row. That row then claimed `typing()`, the shell
+        // handed this view every key, and the pane's own guard swallowed them:
+        // a workstation that had stopped answering `q`, with no key on screen
+        // to undo it.
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 120, 36);
+        let frame = client.frame(50, 36);
+        assert!(frame.contains("a terminal needs"), "{frame}");
+        client.mouse(MouseEventKind::Down(MouseButton::Left), 20, 32);
+        assert!(
+            !client.views.typing(atlas::store::ViewId::Atlas),
+            "a click on a refusing pane armed a row nobody drew:\n{frame}"
+        );
+        assert_eq!(
+            atlas::ui::shell::on_key(
+                crossterm::event::KeyEvent::new(
+                    KeyCode::Char('q'),
+                    crossterm::event::KeyModifiers::NONE
+                ),
+                &mut client.store,
+                &mut client.views,
+            ),
+            Some(atlas::cmd::Command::Quit),
+            "the workstation stopped answering its own key"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_atlas_retracts_the_rect_the_runtime_resizes_from() {
+        // Read after every frame, including the ones another view drew, which
+        // makes it the one published rect with a reader that does not care
+        // which pane is on screen.
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 120, 36);
+        client.frame(120, 36);
+        assert_ne!(client.views.pane_inner(), ratatui::layout::Rect::default());
+        client.press(KeyCode::Char('4'));
+        client.frame(120, 36);
+        assert_eq!(client.views.pane_inner(), ratatui::layout::Rect::default());
+    }
+
+    #[tokio::test]
+    async fn what_cli_measures_holds_while_the_command_line_has_a_row() {
+        // The strip is a row the command line borrows from the content while it
+        // has focus. Assumed rather than read, it is a `/cli` admitted into a
+        // column one row taller than the frame will give it — and the pane has
+        // a floor in rows as well as columns.
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 120, 36);
+        client.store.nav.focus = atlas::store::Focus::Command;
+        client.frame(120, 36);
+        assert_eq!(
+            atlas::ui::widgets::terminal::inner(atlas::ui::shell::pane_column(
+                ratatui::layout::Rect::new(0, 0, 120, 36),
+                &client.store
+            )),
+            client.views.pane_inner(),
+            "the borrowed row is not in what `/cli` measures"
+        );
     }
 }

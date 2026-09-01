@@ -92,12 +92,7 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     fill(f, area, t.bg_base);
     let stale = stale_for(store, now);
 
-    // The suggestion strip is a row the command line borrows from the content
-    // while it has focus, and gives back when it does not: a permanent strip
-    // would cost every view a row for a hint nobody is reading. Below
-    // `CMD_MIN_H` there is no row to borrow — see `draw_suggestions` for where
-    // the line says what it would have said there.
-    let strip = u16::from(store.nav.focus == Focus::Command && area.height >= CMD_MIN_H);
+    let strip = strip_rows(store, area.height);
     let rows = Layout::vertical([
         Constraint::Length(1),     // ticker
         Constraint::Min(0),        // rails + content
@@ -195,6 +190,21 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
 /// and cannot widen it. Keyed on the *child* like everything else in this
 /// stream: a desk with no session laid out differently would be a client whose
 /// panels moved for a reason nothing on screen explains.
+/// The suggestion strip's height on this frame.
+///
+/// A row the command line borrows from the content while it has focus, and
+/// gives back when it does not: a permanent strip would cost every view a row
+/// for a hint nobody is reading. Below [`CMD_MIN_H`] there is no row to borrow
+/// — see `draw_suggestions` for where the line says what it would have said
+/// there.
+///
+/// One spelling, because [`pane_column`] has to answer about a frame that has
+/// not been drawn yet: a row assumed rather than read is a `/cli` admitted into
+/// a column the pane then refuses by one row.
+fn strip_rows(store: &Store, height: u16) -> u16 {
+    u16::from(store.nav.focus == Focus::Command && height >= CMD_MIN_H)
+}
+
 fn rail_width(width: u16, for_a_pane: bool) -> u16 {
     match for_a_pane && width.saturating_sub(NAV_W + PULSE_W + 1) < PANE_MIN_W {
         true => 0,
@@ -223,18 +233,18 @@ fn pane_showing(_store: &Store) -> bool {
 /// with no room for a terminal is found out — which has to be right, because
 /// the alternative is a child nobody can see running behind a refusal.
 ///
-/// The same `Layout` calls `draw` makes, so the rail this gives up and the one
-/// that frame gives up cannot disagree. The one thing assumed rather than read
-/// is the suggestion strip, which is a row the command line borrows *while it
-/// has focus* — and the line that ran `/cli` has already given the focus back.
-/// A row out either way is corrected by the resize after the first frame; the
-/// width, which decides the refusal, is exact.
+/// The same `Layout` calls `draw` makes, with the same rail and the same
+/// borrowed strip, so what this measures and what that frame carves cannot
+/// disagree. Both halves matter: the width decides the refusal, and the height
+/// decides it too — the pane has a floor in rows as well as columns, and a row
+/// assumed rather than read is a `/cli` admitted into a column the next frame
+/// refuses.
 #[cfg(feature = "operator")]
-pub fn pane_column(frame: Rect) -> Rect {
+pub fn pane_column(frame: Rect, store: &Store) -> Rect {
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(0),
+        Constraint::Length(strip_rows(store, frame.height)),
         Constraint::Length(1),
     ])
     .split(frame);

@@ -25,9 +25,9 @@ use crate::cmd::Command;
 use crate::format::{self, MISSING};
 use crate::fx::FlashTracker;
 use crate::model::{ActionItem, Event, PredictorMetrics, Predictors};
-#[cfg(feature = "operator")]
-use crate::store::PtyState;
 use crate::store::Store;
+#[cfg(feature = "operator")]
+use crate::store::{PtyState, ViewId};
 use crate::theme::theme;
 use crate::ui::views::View;
 #[cfg(feature = "operator")]
@@ -44,6 +44,59 @@ use ratatui::{
     Frame,
 };
 use std::time::Instant;
+
+/// What the desk is waiting on the operator for, in the words the pane's top
+/// border carries — or nothing, when it is waiting on nobody.
+///
+/// **The line exists because the pane is drawn over the WOULD DO column.** The
+/// proposal card, the gate's refusals and the your-call pointers are not on
+/// screen while a child runs, the status line carries no approvals chip and the
+/// nav rail's `BOOK` is a label with no count — so without this a plan waiting
+/// on a human is invisible for as long as the operator watches Claude, which is
+/// the one thing a session *on the desk* may not do. A5 writes it for the
+/// reason it writes [`CLOSES`]: a new state's information, not a rewording of
+/// the widget's own two sentences.
+///
+/// **Counted the way the panel it replaces counts**, so the two cannot disagree
+/// about whether the desk has a question: the card when there is a proposal —
+/// which *is* the your-call item, and whose checked plan the list would
+/// otherwise count a second time — the pending plan approvals and checked plans
+/// when there is not, and a universe change as one item however many are
+/// pending, exactly as that list treats them.
+///
+/// The pointer is BOOK's own digit and label rather than a word to type: while
+/// the desk holds the keyboard that digit still moves the view, and the ledger
+/// is where every one of these is drawn in full.
+#[cfg(feature = "operator")]
+fn waiting_on_you(store: &Store) -> Option<String> {
+    let pending = |a: &&crate::model::Approval| a.status.as_deref() == Some("pending");
+    let universe = store
+        .approvals()
+        .iter()
+        .any(|a| pending(&a) && a.is_universe_change());
+    let listed = match store.proposal().is_some() {
+        true => 1,
+        false => {
+            store
+                .approvals()
+                .iter()
+                .filter(|a| pending(a) && !a.is_universe_change())
+                .count()
+                + store
+                    .plans()
+                    .iter()
+                    .filter(|p| p.state.as_deref() == Some("checked"))
+                    .count()
+        }
+    };
+    let waiting = listed + usize::from(universe);
+    let at = format!("{} {}", ViewId::Book.digit(), ViewId::Book.label());
+    match waiting {
+        0 => None,
+        1 => Some(format!("1 needs your call · {at}")),
+        n => Some(format!("{n} need your call · {at}")),
+    }
+}
 
 /// The way out of a pane whose child has ended, added to the ending the store
 /// composed.
@@ -188,6 +241,14 @@ impl View for AtlasView {
         // The same rule for the pane, and it is the whole of what makes a click
         // on it answerable: only the frame that draws one says where it is.
         self.no_pane();
+        // And the ask row's, which `draw_input` republishes on every frame that
+        // reaches it — and two paths below do not: the pane's, and the width
+        // refusal's. A row rect that outlived one of those lets a click focus a
+        // field the frame never drew, and under a pane refusing its own size
+        // that is worse than an invisible row: the row claims `typing()`, the
+        // shell hands this view every key, and the key that would take the
+        // keyboard back is the one the pane had no room to name.
+        self.no_input_row();
         // The column follows the child, not the config: a pane while one is
         // running or has just ended, today's chat otherwise. Above the width
         // refusal below, because a pane too narrow refuses in its own words —
@@ -215,7 +276,14 @@ impl View for AtlasView {
                 PtyState::Ended { said } => Some(format!("{said} · {CLOSES}")),
                 _ => None,
             };
-            terminal::draw(f, area, screen, store.pty_focused(), said.as_deref());
+            terminal::draw(
+                f,
+                area,
+                screen,
+                store.pty_focused(),
+                said.as_deref(),
+                waiting_on_you(store).as_deref(),
+            );
             return;
         }
         if area.width < CHAT_MIN || area.height < 4 {
@@ -278,6 +346,13 @@ impl View for AtlasView {
     /// from another pane brings ATLAS up and asks for the item instead.
     fn left(&self) {
         self.drew_nothing();
+        // And the pane's rects, for a reason `drew`'s does not cover: the
+        // runtime reads the inner one after *every* frame, including the ones
+        // another view drew, so this is the one published rect with a reader
+        // that does not care which pane is on screen. Harmless today — a resize
+        // to the size the child already has is a no-op — and a claim about a
+        // frame nobody is looking at either way.
+        self.no_pane();
     }
 
     /// Whether the ask row currently owns the keyboard.
@@ -507,6 +582,15 @@ impl AtlasView {
             && column >= rect.x
             && column < rect.x.saturating_add(rect.width)
     }
+
+    /// This frame drew no ask row. Two bodies, for `no_book_word`'s reason.
+    #[cfg(feature = "operator")]
+    fn no_input_row(&self) {
+        self.input_row.set(Rect::default());
+    }
+
+    #[cfg(not(feature = "operator"))]
+    fn no_input_row(&self) {}
 
     /// This frame drew no pane. Two bodies, for `no_book_word`'s reason.
     ///

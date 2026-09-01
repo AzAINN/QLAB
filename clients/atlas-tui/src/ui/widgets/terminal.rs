@@ -38,7 +38,7 @@ use crate::theme::theme;
 use crate::ui::widgets::{panel_header, refuse};
 use ratatui::{
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders},
     Frame,
@@ -56,6 +56,14 @@ const CHILDS: &str = "the keyboard is Claude's · ctrl-] returns it";
 /// of a terminal pane can already see — that the other end is Claude.
 const DESKS_SHORT: &str = "desk's keyboard · i or click to give it";
 const CHILDS_SHORT: &str = "Claude's keyboard · ctrl-] returns it";
+
+/// What the two names on the top border occupy: `▌ ATLAS` with a space either
+/// side, and [`CHILD`], which carries its own padding.
+///
+/// Counted rather than measured because the left title is built from
+/// [`panel_header`], whose glyph and label are fixed here — and a count drawn
+/// over either name is the failure this exists to prevent.
+const TITLES_W: usize = 9 + CHILD.len();
 
 /// The chrome a sentence on the border spends on something other than itself:
 /// the two corners, and a space either side so the words do not touch the line.
@@ -127,7 +135,24 @@ pub fn fits(area: Rect) -> bool {
 /// start another. It is `Some` exactly when there is no live child, and the
 /// border then states the ending instead of offering a keyboard to a process
 /// that has ended.
-pub fn draw(f: &mut Frame, area: Rect, screen: &vt100::Screen, focused: bool, said: Option<&str>) {
+///
+/// `waiting` is what the desk is waiting on the operator for, composed by the
+/// column that knows (`ui::views::atlas`) and drawn here because the top border
+/// is the only row left. **It exists because this pane is drawn over the WOULD
+/// DO column** — the proposal card, the refusals and the your-call pointers are
+/// not on screen while a child runs, and a question that went silent because
+/// the operator was watching Claude is the one thing a session *on the desk*
+/// must not do. Dropped rather than shortened on a narrow pane: the rule this
+/// border already follows is that a *key* is the last thing to go, and this is
+/// news.
+pub fn draw(
+    f: &mut Frame,
+    area: Rect,
+    screen: &vt100::Screen,
+    focused: bool,
+    said: Option<&str>,
+    waiting: Option<&str>,
+) {
     if !fits(area) {
         refuse(
             f,
@@ -156,6 +181,14 @@ pub fn draw(f: &mut Frame, area: Rect, screen: &vt100::Screen, focused: bool, sa
         (false, true) => t.text_secondary,
         (false, false) => t.text_dim,
     };
+    // Centred, so it sits between the two names rather than over either: the
+    // block draws its own rule through the cells on both sides of it, which is
+    // what makes this read as one border row and not three titles. Drawn only
+    // where all three fit with a cell of rule either side — `title_top`s
+    // overwrite one another rather than wrapping, and a count printed over the
+    // child's name would be worse than no count.
+    let top = area.width as usize;
+    let waiting = waiting.filter(|w| w.chars().count() + TITLES_W + 4 <= top);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(match focused {
@@ -169,6 +202,16 @@ pub fn draw(f: &mut Frame, area: Rect, screen: &vt100::Screen, focused: bool, sa
         .title_top(title)
         .title_top(
             Line::from(Span::styled(CHILD, Style::default().fg(t.text_tertiary))).right_aligned(),
+        )
+        .title_top(
+            Line::from(match waiting {
+                Some(waiting) => Span::styled(
+                    format!(" {waiting} "),
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                ),
+                None => Span::raw(""),
+            })
+            .centered(),
         )
         .title_bottom(Line::from(Span::styled(
             format!(" {} ", footer(room(area.width), focused, said)),

@@ -1,4 +1,4 @@
-"""Alpaca paper submission: tradability, limit pricing, REST recovery.
+"""Alpaca paper submission: tradability, limit pricing, REST recovery, halt.
 
 The real venue is never contacted. A fake trading client stands in for it, so
 the submission contract — refuse untradable/non-fractionable symbols, price a
@@ -32,15 +32,32 @@ class _Order:
         self.id = "order-1"
 
 
+class _Account:
+    """Alpaca's account object — only the fields ``portfolio_state`` reads."""
+
+    def __init__(self, equity=10_000.0, cash=10_000.0, trading_blocked=False):
+        self.equity = equity
+        self.cash = cash
+        self.trading_blocked = trading_blocked
+
+
 class _FakeTrading:
     """Minimal stand-in for alpaca TradingClient."""
 
-    def __init__(self, assets=None):
+    def __init__(self, assets=None, *, account=None, positions=()):
         self.assets = assets or {}
         self.submitted = []
+        self.account = account if account is not None else _Account()
+        self.positions = list(positions)
 
     def get_asset(self, ticker):
         return self.assets.get(ticker, _Asset())
+
+    def get_account(self):
+        return self.account
+
+    def get_all_positions(self):
+        return list(self.positions)
 
     def submit_order(self, request):
         self.submitted.append(request)
@@ -220,3 +237,86 @@ def test_recovery_maps_terminal_broker_statuses():
             sup, {"c": {"client_order_id": "c", "state": status}})
         assert transitions[0].state == expected
         assert transitions[0].terminal is True
+
+
+# --- halted: the venue's flag OR qlab's own latch ----------------------------
+#
+# `portfolio_state()["halted"]` is the one field every halt reader on the desk
+# goes through — the grant suspension, `daily_ops`, `risk_report`, the desk
+# cards. It answers "may this book trade", and on the Alpaca book two
+# independent parties can say no. The simulated book's pin lives here rather
+# than in test_trader.py so the two answers to the same field sit side by side:
+# the simulated venue is qlab, so it has one source, and gaining a second would
+# be the regression.
+
+
+def _halted_broker(monkeypatch, *, venue_blocked, qlab_latch):
+    """An Alpaca broker whose venue flag and registry latch are set apart."""
+    broker = _broker(
+        monkeypatch,
+        _FakeTrading(account=_Account(trading_blocked=venue_blocked)))
+    # `set_halt` UPDATEs; the row has to exist before the latch can be written,
+    # which on a real desk is what the account's first read does.
+    broker.reg.init_account(10_000.0, book=broker.name)
+    broker.reg.set_halt(qlab_latch, book=broker.name)
+    return broker
+
+
+def test_qlabs_latch_halts_the_alpaca_book_while_the_venue_stays_open(
+        alpaca_modules, monkeypatch):
+    """The regression. The drawdown kill switch latches `alpaca_paper`; Alpaca
+    knows nothing about it and keeps `trading_blocked` False. Reporting only
+    the venue's flag told the operator a halted book was trading — and told a
+    standing grant it was live while every booking it authorised was refused.
+    """
+    broker = _halted_broker(monkeypatch, venue_blocked=False, qlab_latch=True)
+    assert broker.portfolio_state([])["halted"] is True
+
+
+def test_the_venue_alone_still_halts_the_alpaca_book(alpaca_modules, monkeypatch):
+    broker = _halted_broker(monkeypatch, venue_blocked=True, qlab_latch=False)
+    assert broker.portfolio_state([])["halted"] is True
+
+
+def test_neither_source_halted_reports_a_trading_alpaca_book(
+        alpaca_modules, monkeypatch):
+    broker = _halted_broker(monkeypatch, venue_blocked=False, qlab_latch=False)
+    assert broker.portfolio_state([])["halted"] is False
+
+
+def test_the_alpaca_book_reads_its_own_latch_never_the_default_book(
+        alpaca_modules, monkeypatch):
+    """`Registry.set_halt` is per book by design and `DEFAULT_BOOK` is
+    `simulated_paper`. A halt on the simulated book is not a halt on Alpaca —
+    reading the default book would make the OR leak across venues, which is the
+    cross-book leak the account partitioning exists to stop.
+    """
+    broker = _halted_broker(monkeypatch, venue_blocked=False, qlab_latch=False)
+    broker.reg.init_account(10_000.0, book="simulated_paper")
+    broker.reg.set_halt(True, book="simulated_paper")
+    assert broker.portfolio_state([])["halted"] is False
+
+
+def test_the_simulated_book_still_reports_exactly_its_own_latch():
+    """Regression pin: the simulated book was already correct and unchanged.
+
+    Its `halted` is qlab's registry latch for `simulated_paper` and nothing
+    else — there is no venue to disagree with.
+    """
+    from qlab.trader.broker import SimulatedPaperBroker
+
+    reg = Registry(":memory:")
+
+    def marks(tickers):
+        return {t: 100.0 for t in tickers}
+    marks.synthetic = True
+
+    broker = SimulatedPaperBroker(reg, marks, starting_cash=10_000.0)
+    assert broker.portfolio_state(["ACWI"])["halted"] is False
+    reg.set_halt(True, book=broker.name)
+    assert broker.portfolio_state(["ACWI"])["halted"] is True
+    # And its answer is its own book's, not another venue's.
+    reg.set_halt(False, book=broker.name)
+    reg.init_account(10_000.0, book="alpaca_paper")
+    reg.set_halt(True, book="alpaca_paper")
+    assert broker.portfolio_state(["ACWI"])["halted"] is False

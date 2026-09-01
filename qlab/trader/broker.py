@@ -264,11 +264,20 @@ class AlpacaPaperBroker(Broker):
         if not self.reg.get_account(self.name):
             self.reg.init_account(equity, book=self.name)
         self.reg.update_high_water_mark(equity, book=self.name)
-        hwm = float(self.reg.get_account(self.name).get("high_water_mark", equity)
-                    or equity)
+        row = self.reg.get_account(self.name)
+        hwm = float(row.get("high_water_mark", equity) or equity)
+        # Halted by ANYONE. Two independent parties can stop this book and they
+        # fail differently, so an operator handed one boolean must see either:
+        # `acct.trading_blocked` is the VENUE refusing — Alpaca will not accept
+        # an order at all — while the registry's `halted` column is the MANDATE
+        # refusing: qlab's own kill switch, latched by `Registry.set_halt` from
+        # `qlab/trader/plan.py` and `qlab/autopilot/loop.py`. The latch is
+        # written `book=broker.name`, so it is read for THIS book — never
+        # `DEFAULT_BOOK` (`simulated_paper`), which would both miss this book's
+        # halt and inherit a halt on a venue nobody is trading.
         return {"cash": float(acct.cash), "equity": equity, "positions": positions,
                 "weights": weights, "high_water_mark": max(hwm, equity),
-                "halted": bool(acct.trading_blocked)}
+                "halted": bool(acct.trading_blocked) or bool(row.get("halted"))}
 
     def submit_notional(self, client_order_id: str, ticker: str, side: str,
                         notional: float) -> dict:

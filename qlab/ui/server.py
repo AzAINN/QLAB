@@ -5796,12 +5796,13 @@ class UISession:
                 self.registry, offline=offline,
                 starting_cash=self.mandate.paper_capital, seed=self.seed,
                 universe=tickers, book=self.desk_mode.book)
-            # `halted` — the book's own halt flag. Per book, and both kinds:
-            # the registry column the kill switch latches (`Registry.set_halt`,
-            # written by `qlab/trader/plan.py` and `qlab/autopilot/loop.py`) on
-            # the simulated book, and the venue's `trading_blocked` on the
-            # Alpaca one. `portfolio_state` is where those become one field,
-            # and it is the same field `portfolio()` shows the operator.
+            # `halted` — the book's own halt flag, halted by ANYONE. Both
+            # kinds on both books: the registry column the kill switch latches
+            # (`Registry.set_halt`, written by `qlab/trader/plan.py` and
+            # `qlab/autopilot/loop.py`) for that book, OR'd on the Alpaca one
+            # with the venue's `trading_blocked`. `portfolio_state` is where
+            # those become one field, and it is the same field `portfolio()`
+            # shows the operator.
             halted = bool(broker.portfolio_state(tickers)["halted"])
         except Exception as exc:
             unknown.append(f"the book's halt flag could not be read: {exc}")
@@ -6157,11 +6158,45 @@ class UISession:
             # incomplete-legs RuntimeError, say — would otherwise leave it
             # spendable against a plan that just proved it cannot execute.
             # Withdraw it naming the fault, then re-raise: the caller still
-            # gets the failure, and a transition that fails here chains onto
-            # it rather than replacing it.
-            self.registry.transition_approval(
-                approval_id, "invalidated",
-                invalidated_reason=f"execution raised: {exc}"[:200])
+            # gets the failure.
+            #
+            # Unless the plan reached the broker. `execute_plan` sets
+            # `submitted` BEFORE it iterates legs (`qlab/trader/plan.py`) and
+            # accepts that state again on a later call, so each leg replays
+            # through its stable `client_order_id` without double-booking —
+            # that resume is what the state is for. Withdrawing here would
+            # strand the placed legs with no live authority to finish them and
+            # no request to reconcile the filled ones against, which is the
+            # defect `withdraw_orphans` skips a `submitted` plan for
+            # (`qlab/governance/proposal.py`); this sibling was missed. The
+            # skip is `submitted` and nothing wider: every other state means
+            # the legs never left, so today's withdrawal still runs.
+            try:
+                mid_execution = str(
+                    (self.registry.get_plan(plan_id) or {}).get("state")
+                    or "") == "submitted"
+                if not mid_execution:
+                    self.registry.transition_approval(
+                        approval_id, "invalidated",
+                        invalidated_reason=f"execution raised: {exc}"[:200])
+            except Exception as bookkeeping:
+                # The execution's failure is the one the operator has to act
+                # on; a registry failure while recording that must chain onto
+                # it, never replace it. `transition_approval` raises
+                # PermissionError on an illegal edge — an approval the
+                # execution consumed before it raised, say — and this route
+                # answers PermissionError with a 400, so replacing would
+                # report a lifecycle refusal in place of the real fault.
+                raise exc from bookkeeping
+            if mid_execution:
+                raise RuntimeError(
+                    f"plan {plan_id} failed mid-execution: {exc}. Its state is "
+                    "'submitted', so legs may already be at the broker: "
+                    f"approval {approval_id} is kept live and the plan is "
+                    "resumed by re-executing it against that same approval. Do "
+                    "not re-propose — a new plan would book on top of the legs "
+                    "this one already placed."
+                ) from exc
             raise
         booked = result.get("executed") is True
         if booked:

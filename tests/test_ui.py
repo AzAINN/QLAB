@@ -5878,6 +5878,138 @@ def test_an_execution_that_raises_does_not_leave_a_live_approval(session,
     assert approval["status"] == "invalidated"
     assert "incomplete persisted legs" in approval["invalidated_reason"]
     assert _booked_events(session) == []
+    # What makes this the *before* case, and the boundary the tests below sit
+    # on the other side of: the plan never reached `submitted`, so nothing of
+    # it is at the broker and the authority has nothing left to authorise.
+    assert session.registry.get_plan(plan_id)["state"] == "checked"
+
+
+# --- A4: a plan that reached the broker keeps its authority -------------------
+#
+# `execute_plan` sets the plan `submitted` BEFORE it iterates legs
+# (`qlab/trader/plan.py`) and accepts that state again on a later call, so a
+# run that died mid-execution replays each leg through its stable
+# `client_order_id` without double-booking. Withdrawing the approval when the
+# broker raises on leg 2 of 20 therefore destroys the very authority the resume
+# needs, and strands the filled legs with no request to reconcile them against.
+# `withdraw_orphans` (`qlab/governance/proposal.py`) skips a `submitted` plan
+# for exactly this reason; this sibling was missed.
+
+
+def _broker_fails_on_leg(monkeypatch, nth: int, message: str) -> None:
+    """Let `execute_plan` run for real, with the venue refusing leg `nth` once.
+
+    Patching `execute_plan` itself would assert around the ordering under test
+    — the point is that the plan really is `submitted` when the raise happens,
+    which only the real function can establish. Failing once and then healing
+    is what lets the same test drive the resume the kept authority is for.
+    """
+    from qlab.trader.broker import SimulatedPaperBroker
+
+    real = SimulatedPaperBroker.submit_notional
+    calls = {"n": 0}
+
+    def _submit(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == nth:
+            raise RuntimeError(message)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(SimulatedPaperBroker, "submit_notional", _submit)
+
+
+def test_a_failure_after_the_legs_reached_the_broker_keeps_the_approval(
+        session, monkeypatch):
+    # Leg 1 of 20 fills, leg 2 is refused by the venue. The book has moved and
+    # the plan is mid-execution: the approval is the only thing that can
+    # finish it, so it must survive, and the error must say so — an operator
+    # reading only the failure has to know the plan is in flight and its
+    # authority intact, not re-propose on top of a half-booked plan.
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    _broker_fails_on_leg(monkeypatch, 2, "venue rejected the order")
+
+    with pytest.raises(RuntimeError,
+                       match="venue rejected the order") as raised:
+        session.book_current_proposal(_book_body(session, plan_id), True)
+
+    message = str(raised.value)
+    assert "submitted" in message
+    assert approval_id in message
+    assert "kept" in message
+    approval = session.registry.get_approval_request(approval_id)
+    assert approval["status"] == "approved"
+    assert not approval["invalidated_reason"]
+    assert session.registry.get_plan(plan_id)["state"] == "submitted"
+    # A half-booked plan, not a failure that changed nothing: leg 1 really
+    # filled and leg 2's row rolled back with its transaction.
+    assert [row["state"] for row in session.registry.list_orders(50)] == [
+        "filled"]
+    # Nothing filled the plan, so nothing may claim the desk booked it.
+    assert _booked_events(session) == []
+
+
+def test_the_kept_approval_is_what_finishes_the_half_booked_plan(session,
+                                                                 monkeypatch):
+    """The resume, end to end — the reason the authority is kept at all.
+
+    The venue refuses the first leg, so the plan is `submitted` with no fill:
+    the book has not moved, the approval still binds it, and re-executing
+    against that same approval places every leg and spends it. With the
+    approval withdrawn this answers `blocked_by: approval` and the plan can
+    only be re-proposed — which is a different plan from the one at the broker.
+    """
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    _broker_fails_on_leg(monkeypatch, 1, "venue timed out")
+
+    with pytest.raises(RuntimeError, match="venue timed out"):
+        session.book_current_proposal(_book_body(session, plan_id), True)
+
+    assert session.registry.get_plan(plan_id)["state"] == "submitted"
+    assert session.registry.list_orders(50) == []
+
+    result = session.execute_plan_with_approval(
+        plan_id, {"approval_id": approval_id}, True)
+
+    assert result["executed"] is True
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "consumed")
+    assert len(session.registry.list_orders(50)) == len(
+        session.mandate.universe_whitelist)
+
+
+def test_a_withdrawal_that_cannot_move_the_approval_reports_the_real_failure(
+        session, monkeypatch):
+    """The bookkeeping must not become the story.
+
+    `transition_approval` refuses an illegal edge with `PermissionError`, and
+    the book route answers `PermissionError` with a 400 — so a withdrawal that
+    cannot run replaced a genuine fault with a refusal describing the approval
+    lifecycle, and turned a 500 into a 400. Reached the way it happens: the
+    execution consumed the approval and then raised, so `approved -> consumed`
+    has already been spent and `consumed -> invalidated` is not a legal edge.
+    """
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    real = session.registry.record_event
+
+    def _record(kind, payload):
+        if kind == "approval_consumed":
+            raise RuntimeError("the audit write failed")
+        return real(kind, payload)
+
+    monkeypatch.setattr(session.registry, "record_event", _record)
+
+    with pytest.raises(RuntimeError, match="the audit write failed") as raised:
+        handle_api(session, "POST", "/api/desk/proposal/book", {},
+                   _book_body(session, plan_id))
+
+    # Chained onto the real failure rather than replacing it — which is what
+    # the comment on this block always claimed and the code did not do.
+    assert isinstance(raised.value.__cause__, PermissionError)
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "consumed")
 
 
 # --- F3: one research workflow at a time -------------------------------------
@@ -8005,3 +8137,29 @@ def test_a_started_plan_is_never_even_offered_to_the_automatic_path(session):
     assert session.book_under_grant(True) is None
     assert session.registry.list_orders(50) == []
     assert _grant_events(session, ui_server.GRANT_BOOKED_EVENT) == []
+
+
+def test_a_grant_book_that_fails_mid_execution_keeps_its_approval_too(
+        session, monkeypatch):
+    """The `submitted` skip lives in the gate both paths take, so it holds for
+    a grant exactly as it does for a click.
+
+    The started-plan rule stops the automatic path *resuming* one, which is a
+    different moment: this is the beat's own book failing on leg 2, and the
+    plan it half-placed is left for a human with its authority intact. A fault
+    on the way to the broker is not a refusal, so it propagates to the beat
+    rather than being filed as a reason the grant did not cover the plan.
+    """
+    _live_grant(session)
+    plan_id, approval_id = _proposal_awaiting(session)
+    _broker_fails_on_leg(monkeypatch, 2, "venue rejected the order")
+
+    with pytest.raises(RuntimeError, match="venue rejected the order"):
+        session.book_under_grant(True)
+
+    approval = session.registry.get_approval_request(approval_id)
+    assert approval["status"] == "approved"
+    assert not approval["invalidated_reason"]
+    assert session.registry.get_plan(plan_id)["state"] == "submitted"
+    assert _grant_events(session, ui_server.GRANT_BOOKED_EVENT) == []
+    assert _grant_events(session, ui_server.GRANT_REFUSED_EVENT) == []

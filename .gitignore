@@ -48,3 +48,7 @@ Thumbs.db
 media/voiceover/out/
 media/demo/*.mp4
 media/demo/*.gif
+
+# Logo candidates rendered while picking a project mark. Scratch output, not the
+# artwork itself — a chosen logo belongs in media/ under its own name.
+/.logo/

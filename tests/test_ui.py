@@ -8245,3 +8245,397 @@ def test_a_grant_book_that_fails_mid_execution_keeps_its_approval_too(
     assert session.registry.get_plan(plan_id)["state"] == "submitted"
     assert _grant_events(session, ui_server.GRANT_BOOKED_EVENT) == []
     assert _grant_events(session, ui_server.GRANT_REFUSED_EVENT) == []
+
+
+# --- standing authority: granting it, and taking it back, on the desk ------
+#
+# The three routes the AUTHORITY card is built on. The payload contract is
+# binding: the workstation deserializes the whole thing or none of it, so a
+# field of the wrong type takes the card down rather than one row of it, and a
+# `{}` where a `null` belongs draws standing authority with no ceilings at all.
+# Both writes refuse the chat outright, as the rights route does — an Atlas
+# that could grant itself authority would make the whole object decorative.
+
+_AUTHORITY_FIELDS = {
+    "grant_id", "mode", "allowed_universe", "max_notional", "max_turnover",
+    "max_orders", "max_books_per_day", "valid_from", "expires_at",
+    "granted_by", "books_today", "days_left"}
+
+
+def _grant_body(session, **over) -> dict:
+    """Every ceiling, explicitly — which is what the route demands."""
+    body = {
+        "allowed_universe": list(session.mandate.universe_whitelist),
+        "max_notional": 100_000.0,
+        # A FRACTION, never a percentage: the card renders this times 100, so a
+        # 35 here would draw 3500.0% and nothing would catch it.
+        "max_turnover": 0.35,
+        "max_orders": 50,
+        "max_books_per_day": 2,
+        "ttl_days": 7,
+        "granted_by": "operator",
+    }
+    body.update(over)
+    return body
+
+
+def _grant_through_the_route(session, **over) -> dict:
+    status, said = handle_api(session, "POST", "/api/desk/authority", {},
+                              _grant_body(session, **over))
+    assert status == 200, said
+    return said["grant"]
+
+
+def _authority(session) -> dict:
+    status, payload = handle_api(session, "GET", "/api/desk/authority", {}, {})
+    assert status == 200, payload
+    return payload
+
+
+def test_a_desk_holding_no_grant_answers_null_and_not_an_empty_grant(session):
+    """`null`, never `{}`.
+
+    An empty object deserializes into a grant whose every ceiling is absent,
+    and the card draws that as standing authority with no bounds instead of the
+    remedy for holding none. It is a silent misread, not an error.
+    """
+    payload = _authority(session)
+    assert set(payload) == {"grant", "anomalies"}
+    assert payload["grant"] is None
+    assert payload["anomalies"] == []
+
+
+def test_the_authority_read_asks_for_no_lane_or_parameter(session):
+    """A route that demanded one would answer non-2xx to the client that has
+    none, and the card would read "nothing has said what may book itself"
+    forever with no owner-down signal to explain it."""
+    status, bare = handle_api(session, "GET", "/api/desk/authority", {}, {})
+    assert status == 200 and set(bare) == {"grant", "anomalies"}
+    status, with_offline = handle_api(
+        session, "GET", "/api/desk/authority", {"offline": ["1"]}, {})
+    assert status == 200 and set(with_offline) == {"grant", "anomalies"}
+
+
+def test_a_standing_grant_is_served_with_every_ceiling_and_its_own_types(
+        session):
+    """Every scalar's type is load-bearing: one wrong one fails serde for the
+    WHOLE payload, and the card never populates. There is no per-field
+    tolerance."""
+    made = _grant_through_the_route(session)
+    payload = _authority(session)
+    grant = payload["grant"]
+
+    assert grant == made, "the create answer and the read must be one object"
+    assert set(grant) == _AUTHORITY_FIELDS
+    assert isinstance(grant["grant_id"], str) and grant["grant_id"]
+    assert grant["mode"] == "paper_auto"
+    assert grant["allowed_universe"] == sorted(
+        session.mandate.universe_whitelist)
+    assert all(isinstance(t, str) for t in grant["allowed_universe"])
+    assert isinstance(grant["max_notional"], float)
+    assert grant["max_notional"] == 100_000.0
+    # A fraction on the wire, because a fraction is what the card multiplies.
+    assert isinstance(grant["max_turnover"], float)
+    assert grant["max_turnover"] == 0.35
+    for name in ("max_orders", "max_books_per_day", "books_today",
+                 "days_left"):
+        assert isinstance(grant[name], int), name
+        assert not isinstance(grant[name], bool), name
+    assert grant["max_orders"] == 50 and grant["max_books_per_day"] == 2
+    assert isinstance(grant["valid_from"], str)
+    assert isinstance(grant["expires_at"], str)
+    assert grant["granted_by"] == "operator"
+    assert all(isinstance(a, str) for a in payload["anomalies"])
+
+
+def test_days_left_is_whole_days_and_never_claims_one_the_grant_lacks(session):
+    """Floored, and computed by the OWNER. A second arithmetic in a client
+    whose wall clock is minutes out is how a card comes to disagree with the
+    desk about whether anything can still book — and rounding up would promise
+    a day the grant does not have."""
+    week = _grant_through_the_route(session, ttl_days=7)
+    # Seven days granted a moment ago is six whole days plus 23:59 — six.
+    assert week["days_left"] == 6
+    session.registry.con.execute("DELETE FROM authority_grants")
+    day = _grant_through_the_route(session, ttl_days=1)
+    assert day["days_left"] == 0
+
+
+def test_books_today_is_what_the_grant_has_spent_not_what_is_left(session):
+    """The client subtracts. A count that meant "remaining" would invert
+    `books_left()` silently and draw a spent day as a full one.
+
+    Three per day and one book, so spent (1) and remaining (2) are different
+    numbers: a ceiling of two would make the two readings agree and the test
+    prove nothing.
+    """
+    _grant_through_the_route(session, max_turnover=2.0, max_books_per_day=3)
+    _proposal_awaiting(session)
+
+    assert session.book_under_grant(True)["booked"] is True
+
+    grant = _authority(session)["grant"]
+    assert grant["books_today"] == 1
+    assert grant["max_books_per_day"] == 3
+
+
+def test_a_revoked_grant_no_longer_stands_on_the_desk(session):
+    """`live_grant` deliberately returns a revoked row so the gate refuses it
+    BY NAME rather than falling back to an older, broader one. What the desk
+    SHOWS is narrower: a card reading "standing · 6 d left" over authority the
+    operator withdrew an hour ago is the one thing it must never say."""
+    _grant_through_the_route(session)
+    status, said = handle_api(session, "POST", "/api/desk/authority/revoke",
+                              {}, {"reason": "revoked by the operator"})
+    assert status == 200, said
+    assert _authority(session)["grant"] is None
+    assert session.live_grant()["revoked_at"]
+
+
+def test_an_expired_grant_no_longer_stands_either(session):
+    _live_grant(session, now=datetime.now(timezone.utc) - timedelta(days=8))
+    assert session.live_grant() is not None
+    assert _authority(session)["grant"] is None
+
+
+def test_the_anomalies_are_served_beside_a_grant_and_without_one(session):
+    """Both halves arrive together and neither implies the other: a desk with
+    no grant can still have anomalies, and a grant with none is simply live."""
+    session.registry.set_halt(True, book=_open_book(session))
+
+    bare = _authority(session)
+    assert bare["grant"] is None
+    assert bare["anomalies"] == ["account is halted"]
+
+    _grant_through_the_route(session)
+    held = _authority(session)
+    assert held["grant"] is not None
+    assert held["anomalies"] == ["account is halted"]
+
+
+def test_a_grant_made_on_the_route_is_the_one_the_owner_books_under(session):
+    """The round trip that matters: composed by the route, persisted, and then
+    honoured by the gate the beat calls."""
+    made = _grant_through_the_route(session, max_turnover=2.0)
+    _proposal_awaiting(session)
+
+    result = session.book_under_grant(True)
+
+    assert result["booked"] is True
+    booked = _grant_events(session, ui_server.GRANT_BOOKED_EVENT)
+    assert [row["grant_id"] for row in booked] == [made["grant_id"]]
+
+
+def test_the_route_composes_the_grant_through_build_grant(session, monkeypatch):
+    """A1's review made this a requirement rather than a suggestion: every rule
+    about what a grant must carry lives in `build_grant`, so a route that
+    assembled its own dict would be a second place for "every ceiling required,
+    no defaults" to be true — or to quietly stop being."""
+    from qlab.governance import authority as authority_module
+
+    def _boom(**kwargs):
+        raise AssertionError(f"composed with {sorted(kwargs)}")
+
+    monkeypatch.setattr(authority_module, "build_grant", _boom)
+    with pytest.raises(AssertionError) as excinfo:
+        handle_api(session, "POST", "/api/desk/authority", {},
+                   _grant_body(session))
+    handed = str(excinfo.value)
+    for ceiling in ("max_notional", "max_turnover", "max_orders",
+                    "max_books_per_day", "ttl_days", "allowed_universe",
+                    "allowed_policy", "granted_by"):
+        assert ceiling in handed, ceiling
+
+
+@pytest.mark.parametrize("missing", [
+    "allowed_universe", "max_notional", "max_turnover", "max_orders",
+    "max_books_per_day", "ttl_days"])
+def test_a_missing_ceiling_is_refused_by_name(session, missing):
+    body = _grant_body(session)
+    body.pop(missing)
+    status, refused = handle_api(session, "POST", "/api/desk/authority", {},
+                                 body)
+    assert status == 400
+    # Keyed on `error` and nothing else: a refusal body under any other key is
+    # shown to the operator as raw JSON instead of the owner's sentence.
+    assert set(refused) == {"error"}
+    assert missing in refused["error"], refused
+    assert session.live_grant() is None
+
+
+@pytest.mark.parametrize("ceiling", [
+    "max_notional", "max_turnover", "max_orders", "max_books_per_day"])
+def test_a_ceiling_of_zero_is_refused_like_a_missing_one(session, ceiling):
+    status, refused = handle_api(
+        session, "POST", "/api/desk/authority", {},
+        _grant_body(session, **{ceiling: 0}))
+    assert status == 400
+    assert ceiling in refused["error"]
+    assert session.live_grant() is None
+
+
+def test_a_ttl_past_the_month_is_refused_and_so_is_none_at_all(session):
+    status, refused = handle_api(session, "POST", "/api/desk/authority", {},
+                                 _grant_body(session, ttl_days=31))
+    assert status == 400 and "ttl_days" in refused["error"]
+    status, zero = handle_api(session, "POST", "/api/desk/authority", {},
+                              _grant_body(session, ttl_days=0))
+    assert status == 400 and "ttl_days" in zero["error"]
+    assert session.live_grant() is None
+
+
+def test_there_is_no_live_authority_to_grant(session):
+    """The module's own refusal, reaching the operator unaltered."""
+    status, refused = handle_api(session, "POST", "/api/desk/authority", {},
+                                 _grant_body(session, mode="live"))
+    assert status == 400
+    assert "there is no live authority" in refused["error"]
+    assert session.live_grant() is None
+
+
+def test_a_universe_that_is_one_string_is_not_a_universe_of_letters(session):
+    """`sorted("AAPL")` is `['A', 'A', 'L', 'P']` — a grant scoped to four
+    letters that name no instrument, which then refuses every plan it sees for
+    a reason nobody can read."""
+    status, refused = handle_api(
+        session, "POST", "/api/desk/authority", {},
+        _grant_body(session, allowed_universe="AAPL"))
+    assert status == 400 and "allowed_universe" in refused["error"]
+    assert session.live_grant() is None
+
+
+def test_a_universe_of_non_strings_is_refused(session):
+    status, refused = handle_api(
+        session, "POST", "/api/desk/authority", {},
+        _grant_body(session, allowed_universe=["SPY", 7]))
+    assert status == 400 and "allowed_universe" in refused["error"]
+    assert session.live_grant() is None
+
+
+@pytest.mark.parametrize("ceiling,value", [
+    ("max_notional", "lots"),
+    ("max_turnover", None),
+    ("max_orders", True),
+    ("max_books_per_day", 2.5),
+])
+def test_a_ceiling_that_is_not_the_number_it_claims_is_refused(
+        session, ceiling, value):
+    """`float("5")` and `int(True)` both succeed, and `int(2.5)` truncates: a
+    ceiling arrived at by coercion is a ceiling nobody typed. `None` is the
+    absent case and is refused by `build_grant` under the same name."""
+    status, refused = handle_api(
+        session, "POST", "/api/desk/authority", {},
+        _grant_body(session, **{ceiling: value}))
+    assert status == 400
+    assert ceiling in refused["error"], refused
+    assert session.live_grant() is None
+
+
+def test_the_grant_pins_the_desks_own_policy_and_not_the_callers(session):
+    """A grant is authority over THIS desk's method. `grant_refusals` checks a
+    plan against `mandate.operational_policy`, so a policy off the wire either
+    covers nothing or covers something the operator never set here."""
+    _grant_through_the_route(session, allowed_policy="min_variance:classical")
+    stored = session.live_grant()
+    assert stored["allowed_policy"] == session.mandate.operational_policy
+
+
+def test_the_chat_may_not_grant_itself_standing_authority(session):
+    """An Atlas that could grant itself authority would make the whole object
+    decorative. Nothing in the chat's grant reaches this route today; the
+    refusal predates the tool on purpose."""
+    status, refused = handle_api(session, "POST", "/api/desk/authority", {},
+                                 _grant_body(session), headers=_CHAT)
+    assert status == 403
+    assert refused["error"] == ui_server.AUTHORITY_IS_THE_OPERATORS
+    assert session.live_grant() is None
+
+
+def test_the_chat_may_not_revoke_the_operators_grant(session):
+    """Withdrawing is the safe direction, but it is still the operator's act:
+    an Atlas that could revoke could also stop a desk the operator meant to
+    leave running, and no agent decides what standing authority exists."""
+    made = _grant_through_the_route(session)
+    status, refused = handle_api(
+        session, "POST", "/api/desk/authority/revoke", {},
+        {"reason": "atlas said so"}, headers=_CHAT)
+    assert status == 403
+    assert refused["error"] == ui_server.AUTHORITY_IS_THE_OPERATORS
+    assert _authority(session)["grant"]["grant_id"] == made["grant_id"]
+    assert not session.live_grant()["revoked_at"]
+
+
+def test_reading_what_may_book_itself_is_not_setting_it(session):
+    """The GET stays open, exactly as the rights read does."""
+    made = _grant_through_the_route(session)
+    status, payload = handle_api(session, "GET", "/api/desk/authority", {}, {},
+                                 headers=_CHAT)
+    assert status == 200
+    assert payload["grant"]["grant_id"] == made["grant_id"]
+
+
+def test_revoking_returns_the_grant_it_withdrew_and_records_the_reason(session):
+    made = _grant_through_the_route(session)
+    status, said = handle_api(
+        session, "POST", "/api/desk/authority/revoke", {},
+        {"reason": "revoked by the operator on the desk"})
+
+    assert status == 200
+    # Keyed on `grant`: a `revoked` key instead would lose the id off the toast.
+    assert said["grant"]["grant_id"] == made["grant_id"]
+    assert set(said["grant"]) == _AUTHORITY_FIELDS
+    row = session.registry.get_authority_grant(made["grant_id"])
+    assert row["revoked_at"] and said["revoked_at"] == row["revoked_at"]
+    assert row["revoked_reason"] == "revoked by the operator on the desk"
+    assert _authority(session)["grant"] is None
+    # Recorded like every other governance transition.
+    revoked = _grant_events(session, "authority.revoked")
+    assert [row["grant_id"] for row in revoked] == [made["grant_id"]]
+
+
+def test_revoking_names_no_grant_id_at_all(session):
+    """The owner holds one live grant and is the only thing that knows which; a
+    body naming one could withdraw the grant a card read seconds ago rather
+    than the one standing now. A reason, and nothing else."""
+    made = _grant_through_the_route(session)
+    status, said = handle_api(session, "POST", "/api/desk/authority/revoke",
+                              {}, {"reason": "the operator pressed R"})
+    assert status == 200 and said["grant"]["grant_id"] == made["grant_id"]
+
+
+def test_a_revocation_must_say_why(session):
+    _grant_through_the_route(session)
+    status, refused = handle_api(session, "POST", "/api/desk/authority/revoke",
+                                 {}, {})
+    assert status == 400 and "reason" in refused["error"]
+    assert not session.live_grant()["revoked_at"]
+
+
+def test_revoking_nothing_is_a_400_with_a_sentence_and_not_a_conflict(session):
+    """A well-formed request about a desk already in the state it asks for. Any
+    other status renders as "the grant may still stand" — the opposite of what
+    happened — and pressing R twice is the likeliest way to reach this."""
+    status, refused = handle_api(session, "POST", "/api/desk/authority/revoke",
+                                 {}, {"reason": "the operator pressed R"})
+    assert status == 400
+    assert set(refused) == {"error"}
+    assert refused["error"] == ui_server.NOTHING_TO_REVOKE
+
+    _grant_through_the_route(session)
+    handle_api(session, "POST", "/api/desk/authority/revoke", {},
+               {"reason": "first press"})
+    status, again = handle_api(session, "POST", "/api/desk/authority/revoke",
+                               {}, {"reason": "second press"})
+    assert status == 400 and again["error"] == ui_server.NOTHING_TO_REVOKE
+
+
+def test_a_revoked_grant_stops_the_owner_booking_under_it(session):
+    """The whole point of the key: what the route withdraws, the beat obeys."""
+    _grant_through_the_route(session, max_turnover=2.0)
+    handle_api(session, "POST", "/api/desk/authority/revoke", {},
+               {"reason": "the operator pressed R"})
+    _proposal_awaiting(session)
+
+    assert session.book_under_grant(True) is None
+    assert session.registry.list_orders(50) == []
+    assert any("revoked" in reason for reason in _refusals(session))

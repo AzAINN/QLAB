@@ -876,3 +876,65 @@ def test_the_one_click_book_is_on_no_agent_surface():
                          "proposal_book", "book_proposal",
                          "/api/desk/proposal/book"):
             assert spelling not in names, f"{where} exposes {spelling}"
+
+
+def test_no_agent_surface_can_reach_a_standing_grant():
+    """A census, not a spot check — and the property the whole design rests on.
+
+    A standing grant replaces the per-plan human confirmation, so an agent that
+    could create, read around, or withdraw one would have handed itself the one
+    thing invariant 3 keeps out of its reach. The routes are the operator's and
+    refuse chat origin; this is what makes "no MCP tool, no chat action tool
+    and no proxy verb names a grant" a fact rather than an intention.
+
+    Every surface an agent can see at once, by every name a grant could
+    plausibly wear — including the personas, which the design record's surface
+    table says are unchanged *deliberately*.
+    """
+    from qlab.agents.loader import load_agents
+    from qlab.mcp.quant_lab import register_lab_tools
+    from qlab.mcp.quant_trader import register_trader_tools, TraderState
+    from qlab.mcp.guardrails import LabState
+    from qlab.mcp.tui_proxy import register_proxy_tools
+    from qlab.state.registry import Registry
+    from qlab.tui.claude import (
+        CHAT_ACTION_BASES, _CHAT_TOOLS, _LAB_TOOL_BASES, _PROXY_TOOLS)
+    from qlab.ui.server import OWNER_LAB_TOOLS
+
+    reg = Registry(":memory:")
+    # `qlab/mcp/server.py` mounts exactly these two registrations over one
+    # registry, so the combined surface below IS the headless server's.
+    combined = StubApp()
+    register_lab_tools(combined, LabState(offline=True, registry=reg))
+    register_trader_tools(combined, TraderState(registry=reg, offline=True))
+    owner_side = StubApp()
+    register_lab_tools(owner_side, LabState(offline=True, registry=reg),
+                       owner_only=True)
+    proxy = StubApp()
+    register_proxy_tools(proxy, object())
+
+    surfaces = {
+        "OWNER_LAB_TOOLS": set(OWNER_LAB_TOOLS),
+        "the chat's lab bases": set(_LAB_TOOL_BASES),
+        "the chat's proxy tools": set(_PROXY_TOOLS),
+        "the chat's action tools": set(_CHAT_TOOLS) | set(CHAT_ACTION_BASES),
+        "the qlab-operator proxy": set(proxy.names),
+        "the combined server": set(combined.names),
+        "the combined server, owner-only": set(owner_side.names),
+    }
+    for agent in load_agents():
+        surfaces[f"the {agent.name} persona"] = set(agent.tools)
+
+    for where, names in surfaces.items():
+        assert names, f"{where} is empty; the census would prove nothing"
+        reaching = sorted(
+            name for name in names
+            if any(word in name.lower()
+                   for word in ("grant", "authority", "standing", "revoke")))
+        assert reaching == [], f"{where} exposes {reaching}"
+        # And by every spelling the three routes could be registered under.
+        for spelling in ("desk.authority", "desk_authority",
+                         "authority_grant", "grant_authority",
+                         "revoke_authority", "authority.revoke",
+                         "/api/desk/authority", "/api/desk/authority/revoke"):
+            assert spelling not in names, f"{where} exposes {spelling}"

@@ -17,6 +17,9 @@ POST /api/desk_mode            choose the data source and the book
 POST /api/desk/posture         arm the desk, or put it back to read-only
 GET  /api/desk/method          the operational method + holdings cap, and the choices
 POST /api/desk/method          choose the operational method and/or the cap
+GET  /api/desk/authority       the standing grant a fill may happen under, if any
+POST /api/desk/authority       grant standing authority: every ceiling, explicitly
+POST /api/desk/authority/revoke  withdraw the standing grant; a reason, and no id
 POST /api/alpaca/credentials   store an Alpaca paper login (never switches book)
 POST /api/alpaca/test          ask the venue whether the stored login works
 GET  /api/llm/backends         model backends, availability, and what they serve
@@ -6085,6 +6088,186 @@ class UISession:
                 "trading_date": date.today().isoformat()})
         return result
 
+    # -- standing authority: granting it, and taking it back ----------------
+    def standing_grant(self) -> dict | None:
+        """The grant that stands right now, or ``None`` — what the desk SHOWS.
+
+        Narrower than ``live_grant``, and deliberately. That one returns the
+        newest row whatever state it is in, because ``check_grant_covers`` has
+        to refuse a revoked or lapsed grant *by name* rather than fall back to
+        an older and probably broader one. This answers the other question:
+        whether anything may book itself at all. A card reading
+        "standing · 6 d left" over authority the operator withdrew an hour ago
+        is the one sentence it must never say, and nothing books under a grant
+        this returns ``None`` for — so "none" is the true answer.
+
+        The three lifecycle conditions are compared exactly as
+        ``check_grant_covers`` compares them: lexicographically, over the same
+        offset-aware ISO shape both sides write. One rule for "is this grant in
+        its window", never two.
+        """
+        grant = self.live_grant()
+        if grant is None or grant.get("revoked_at"):
+            return None
+        now_iso = self._now_iso()
+        expires_at = str(grant.get("expires_at") or "")
+        if not expires_at or now_iso >= expires_at:
+            return None
+        valid_from = str(grant.get("valid_from") or "")
+        if valid_from and now_iso < valid_from:
+            return None
+        return grant
+
+    def _grant_days_left(self, grant: dict) -> int | None:
+        """Whole days until this grant expires, floored — ``None`` if unreadable.
+
+        Computed here because a grant expires against the OWNER's clock: a
+        client re-deriving it from ``expires_at`` on a machine whose wall time
+        is minutes out is how a card comes to disagree with the desk about
+        whether anything can still book. Floored rather than rounded up, so it
+        never claims a day the grant does not have — 0 means some part of
+        today, and a grant already past its expiry is not served at all.
+        """
+        try:
+            expires = datetime.fromisoformat(
+                str(grant.get("expires_at") or ""))
+            return int((expires - datetime.now(timezone.utc)).days)
+        except (TypeError, ValueError):
+            # A naive stamp, or one no parser accepts. The rest of the payload
+            # is still true; a day count nobody could compute is not.
+            return None
+
+    def _serve_grant(self, grant: dict) -> dict:
+        """One persisted grant in the shape every authority route answers in."""
+        grant_id = str(grant.get("grant_id") or "")
+        return _grant_payload(
+            grant,
+            books_today=self._grant_books_today(
+                grant_id, date.today().isoformat()),
+            days_left=self._grant_days_left(grant))
+
+    def authority_payload(self, offline: bool) -> dict:
+        """What may book itself, and what would stop it.
+
+        Both halves always, and neither implies the other: the anomalies are
+        read off live desk state rather than off the grant, so a desk holding
+        none can still have them, and a grant with none is simply live.
+
+        No parameter decides anything here. A route that demanded a lane would
+        answer non-2xx to a client that did not know the word, and the card
+        would read "nothing has said what may book itself" forever with no
+        owner-down signal to explain it.
+
+        The anomaly half is the expensive one — a broker, a reconcile, a permit
+        and a page of orders, per call — and it is deliberately uncached
+        (``_grant_anomalies`` says why: a cache keyed on ``run_revision`` would
+        go on reporting a clean desk after a halt). It runs under the dispatch
+        lock like every other route and takes none of its own.
+        """
+        grant = self.standing_grant()
+        return {
+            # ``None``, never ``{}``: an empty object deserializes into a grant
+            # whose every ceiling is absent, and the card draws THAT as
+            # standing authority with no bounds instead of the remedy for
+            # holding none. A silent misread, not an error.
+            "grant": None if grant is None else self._serve_grant(grant),
+            "anomalies": self._grant_anomalies(offline),
+        }
+
+    def grant_authority(self, body: dict) -> dict:
+        """Compose and persist one standing grant from the ceilings sent.
+
+        **Composed by ``build_grant``, never assembled here.** Every rule about
+        what a grant must carry — each ceiling present and positive, a TTL
+        inside ``MAX_GRANT_DAYS``, a paper mode, a named granter — lives in
+        ``qlab/governance/authority.py``. A route that built its own dict would
+        be a second place for "every ceiling required, no defaults" to be true,
+        which is exactly how it comes to stop being.
+
+        What this owns is the boundary: the JSON shapes the composer would
+        silently coerce, the one bound it has a default for, and the two fields
+        the desk supplies rather than the caller.
+        """
+        from qlab.governance.authority import MAX_GRANT_DAYS, build_grant
+
+        universe = body.get("allowed_universe")
+        if not isinstance(universe, list) or not all(
+                isinstance(ticker, str) for ticker in universe):
+            # A bare string is the dangerous shape, not the absent one:
+            # ``sorted("SPY")`` is ['P', 'S', 'Y'], a universe of letters that
+            # names no instrument and then refuses every plan it ever sees.
+            raise ValueError(
+                "allowed_universe must be a list of ticker strings")
+        ceilings = {
+            "max_notional": _grant_number(body, "max_notional", float),
+            "max_turnover": _grant_number(body, "max_turnover", float),
+            "max_orders": _grant_number(body, "max_orders", int),
+            "max_books_per_day": _grant_number(body, "max_books_per_day", int),
+            "ttl_days": _grant_number(body, "ttl_days", int),
+        }
+        if ceilings["ttl_days"] is None:
+            # The one bound ``build_grant`` has a default for (7 days), and a
+            # default is what this route must not let stand: how long authority
+            # runs is the operator's decision, and a TTL nobody typed is one
+            # nobody chose. The RANGE stays the module's.
+            raise ValueError(
+                "ttl_days must be set explicitly: standing authority runs for "
+                f"a stated number of days, 1..{MAX_GRANT_DAYS}")
+        mode = body.get("mode")
+        grant = build_grant(
+            allowed_universe=universe,
+            # The desk's own method, never the caller's. ``grant_refusals``
+            # checks a plan against ``mandate.operational_policy``, so a policy
+            # off the wire either covers nothing or covers a method the
+            # operator never set here. Changing the method later ends this
+            # grant's cover, which is the safe direction.
+            allowed_policy=self.mandate.operational_policy,
+            # One desk, one human, and no identity service — ``decide_approval``
+            # names the same actor the same way.
+            granted_by=str(body.get("granted_by") or "operator"),
+            # Passed through only when sent, so an attempt at a live mode is
+            # refused by the module's own sentence rather than dropped.
+            **({} if mode is None else {"mode": mode}),
+            **ceilings)
+        self.registry.create_authority_grant(grant)
+        row = self.registry.get_authority_grant(grant["grant_id"])
+        if row is None:
+            raise RuntimeError(
+                "the grant was composed but could not be read back; nothing "
+                "may book under authority the registry did not keep")
+        # Answered off the persisted row, so what the create says is exactly
+        # what the next read will say.
+        return {"grant": self._serve_grant(row)}
+
+    def revoke_authority(self, body: dict) -> dict:
+        """Withdraw whatever standing authority the desk is holding.
+
+        **A reason, and no id.** The owner holds one live grant and is the only
+        thing that knows which; a body naming one could withdraw the grant a
+        card read seconds ago rather than the one standing now, and "revoke
+        whatever stands" is the safe reading of a card that may be stale.
+        Recorded with its reason like every other governance transition.
+        """
+        reason = str(body.get("reason") or "").strip()
+        if not reason:
+            raise ValueError(
+                "a revocation must carry a reason; withdrawing authority is "
+                "recorded like every other governance transition")
+        grant = self.standing_grant()
+        if grant is None:
+            # A well-formed request about a desk already in the state it asks
+            # for: a sentence and a 400, never a 409. An unexpected status
+            # renders as "the grant may still stand", the opposite of what
+            # happened — and pressing the revoke key twice is the likeliest way
+            # to arrive here.
+            raise ValueError(NOTHING_TO_REVOKE)
+        grant_id = str(grant.get("grant_id") or "")
+        self.registry.revoke_authority_grant(grant_id, reason)
+        row = self.registry.get_authority_grant(grant_id) or grant
+        return {"grant": self._serve_grant(row),
+                "revoked_at": row.get("revoked_at"),
+                "revoked_reason": row.get("revoked_reason")}
+
     def book_current_proposal(self, body: dict, offline: bool) -> dict:
         """Approve the desk's own open question and execute it, once.
 
@@ -6716,6 +6899,89 @@ RIGHTS_ARE_THE_OPERATORS = (
     "in Settings ▸ MODELS")
 
 
+# --- standing authority on the wire ----------------------------------------
+#
+# What a fill may happen under with no human at the box. The write routes are
+# the operator's alone: an Atlas that could grant itself standing authority
+# would make the whole object decorative, so both refuse chat origin exactly as
+# `POST /api/atlas/rights` does. Reading stays open — what may book itself is a
+# fact about the desk, and reading it is not setting it.
+AUTHORITY_IS_THE_OPERATORS = (
+    "Atlas does not grant itself standing authority — the operator grants it "
+    "on the desk, in Settings ▸ AUTHORITY")
+NOTHING_TO_REVOKE = "there is no standing grant to revoke"
+
+
+def _grant_number(body: dict, name: str, cast):
+    """One ceiling off the wire, as the number it claims to be or not at all.
+
+    ``None`` for an absent key, deliberately: ``build_grant`` is what refuses a
+    missing ceiling, by name, in the one place every ceiling rule lives. What
+    this refuses is the coercion that would otherwise happen quietly on the way
+    there — ``float("5")`` and ``int(True)`` both succeed and ``int(2.5)``
+    truncates, so a ceiling arrived at that way is a ceiling nobody typed.
+    """
+    value = body.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"{name} must be a number, not {type(value).__name__}")
+    if cast is int and float(value) != int(value):
+        raise ValueError(f"{name} must be a whole number, not {value}")
+    return cast(value)
+
+
+def _grant_payload(grant: dict, *, books_today: int | None,
+                   days_left: int | None) -> dict:
+    """One grant as the desk serves it: the ceilings, and what is left of them.
+
+    These keys and these types are the contract the Atlas workstation codes
+    against, and it deserializes the payload whole or not at all — one field of
+    the wrong type takes the card down rather than one row of it.
+
+    Every scalar is its declared type or ``None``, never a default. A
+    ``max_notional`` of 0.0 standing in for a column that could not be read is
+    a grant authorising nothing; a ``books_today`` of 0 standing in for a count
+    that could not be made is a full day's budget still to spend. Both are
+    statements about what happens next that nobody made.
+    """
+    universe = grant.get("allowed_universe")
+    return {
+        "grant_id": str(grant.get("grant_id") or ""),
+        "mode": str(grant.get("mode") or ""),
+        # A list or nothing: a JSON column that came back as a bare string
+        # would iterate into single characters, and a universe of letters names
+        # no instrument.
+        "allowed_universe": ([str(ticker) for ticker in universe]
+                             if isinstance(universe, list) else []),
+        "max_notional": _opt_float(grant.get("max_notional")),
+        # A FRACTION, as ``build_grant`` stored it. The card renders this times
+        # a hundred, so a percentage here draws 3500.0% and nothing catches it.
+        "max_turnover": _opt_float(grant.get("max_turnover")),
+        "max_orders": _opt_int(grant.get("max_orders")),
+        # NULL on a grant written before the ceiling existed, and it stays
+        # null: ``check_grant_covers`` refuses such a grant, and the card draws
+        # `--` rather than a budget nobody set.
+        "max_books_per_day": _opt_int(grant.get("max_books_per_day")),
+        "valid_from": str(grant.get("valid_from") or ""),
+        "expires_at": str(grant.get("expires_at") or ""),
+        "granted_by": str(grant.get("granted_by") or ""),
+        # SPENT, not remaining. The client subtracts to say what is left; a
+        # count that meant "left" would invert that arithmetic in silence.
+        "books_today": _opt_int(books_today),
+        "days_left": _opt_int(days_left),
+    }
+
+
+def _opt_float(value) -> float | None:
+    return None if value is None else float(value)
+
+
+def _opt_int(value) -> int | None:
+    return None if value is None else int(value)
+
+
 def _from_chat(headers) -> bool:
     """Did this request come from the desk chat's Atlas?
 
@@ -6933,6 +7199,46 @@ def handle_api(session: UISession, method: str, path: str,
         if not isinstance(armed, bool):
             return 400, {"error": "armed must be true or false"}
         return 200, session.set_posture(armed)
+
+    if method == "GET" and path == "/api/desk/authority":
+        # Open, like the rights read. What may book itself is a fact about the
+        # desk; reading it is not setting it, and the card polls this on the
+        # snapshot's own beat because what is LEFT of a grant moves on the
+        # owner's heartbeat with nothing on the client to prompt a refetch.
+        return 200, session.authority_payload(off)
+
+    if method == "POST" and path == "/api/desk/authority":
+        if _from_chat(headers):
+            # Nothing in the chat's grant reaches this route today, and the
+            # refusal predates the tool on purpose: a standing grant replaces
+            # the per-plan human confirmation, so an Atlas that could compose
+            # one would have handed itself the one thing invariant 3 keeps out
+            # of an agent's reach. Pinned by a census across every agent
+            # surface in tests/test_mcp_server.py.
+            return 403, {"error": AUTHORITY_IS_THE_OPERATORS}
+        try:
+            return 200, session.grant_authority(body)
+        except ValueError as exc:
+            # `AuthorityError` is a ValueError, so the composer's own sentence
+            # — the one naming the ceiling that is missing or not positive —
+            # is what the operator reads. Keyed on `error` and nothing else:
+            # any other key is shown as raw JSON instead of the sentence.
+            return 400, {"error": str(exc)}
+
+    if method == "POST" and path == "/api/desk/authority/revoke":
+        if _from_chat(headers):
+            # Withdrawing is the safe direction, but it is still the operator's
+            # act: an agent that could revoke could stop a desk the operator
+            # meant to leave running, and no agent decides what authority
+            # exists.
+            return 403, {"error": AUTHORITY_IS_THE_OPERATORS}
+        try:
+            return 200, session.revoke_authority(body)
+        except ValueError as exc:
+            # 400 for "nothing to revoke" too, and never a 409: the client
+            # renders an unexpected status as "the grant may still stand",
+            # which is the opposite of what happened.
+            return 400, {"error": str(exc)}
 
     if method == "GET" and path == "/api/atlas/rights":
         try:

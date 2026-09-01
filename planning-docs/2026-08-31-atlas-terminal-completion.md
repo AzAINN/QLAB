@@ -26,9 +26,13 @@ gated `#[cfg(feature = "operator")]`: `PtySession::open` puts `qlab cli` on a
 `portable-pty` slave, drops the slave, and a blocking reader thread posts
 `PtyEvent::Bytes` / `Exited` / `Failed` onto the existing bus. `Spawn` is a
 trait so a scripted `sh` stands in for the child in tests. The child is always
-the desk's own verb — `DeskCli` builds `[launcher, "cli"]` byte-identical to
-`handoff::argv`, because which tools and which persona a session gets is decided
-in `qlab/tui/claude.py` and must not be re-answered where nothing checks it.
+the desk's own verb — `DeskCli` builds `[launcher, handoff::CLI]`, the launcher
+and the word both owned by `handoff.rs`, because which tools and which persona a
+session gets is decided in `qlab/tui/claude.py` and must not be re-answered
+where nothing checks it. (Written as "byte-identical to `handoff::argv`": true
+until the fix round removed `Child::Cli`, the dead variant the last bullet of
+this record predicted. `handoff::argv` spells `build` now and the shared word is
+the constant.)
 
 **A2 — the terminal widget** (`385a5d7`, `a92f8de`).
 `src/ui/widgets/terminal.rs` renders a `&vt100::Screen` through `tui-term`'s
@@ -145,8 +149,10 @@ is how the stale "the column is 45" survived a whole task.
   two bodies. Keying on the child rather than on the configured mind keeps one
   less piece of state, leaves a Claude desk with no session behaving exactly as
   it does today, and means no frame can claim a terminal that is not there.
-- **The child is always `qlab cli`**, never `claude` directly, on both the pane
-  and the hand-off. A client assembling its own command line would be a second
+- **The child is always a `qlab` verb**, never `claude` directly, on both the
+  pane and the hand-off — `qlab cli` in the pane, `qlab build` on the
+  full-screen hand-off, and after the fix round those are the only two the
+  client can spell. A client assembling its own command line would be a second
   unreviewed answer to "which tools does this session get", living where
   nothing checks it.
 - **The pane is operator-only by construction.** The monitoring build contains
@@ -253,10 +259,12 @@ offline suites and all of it is what an operator meets first.
 
 - **No real `qlab cli` has ever run in the pane.** Every child in every test is
   a scripted `sh`. The stack has been proven end to end with `printf` and with
-  an interactive `sh` reading keystrokes back, and the argv is pinned
-  byte-identical to `handoff::argv` — but Claude's own CLI, with its alternate
-  screen, its resize handling and its own idea of the cursor, has never been on
-  the other end of this pty on this machine.
+  an interactive `sh` reading keystrokes back, and the argv is pinned against
+  the launcher and the word `handoff.rs` owns (`handoff::CLI`; it read
+  "byte-identical to `handoff::argv`" until the fix round removed the dead
+  `Child::Cli`) — but Claude's own CLI, with its alternate screen, its resize
+  handling and its own idea of the cursor, has never been on the other end of
+  this pty on this machine.
 - **No wide-character or SGR fixture exists anywhere.** Nothing in this
   codebase feeds the parser a CJK glyph, an emoji, a combining mark or a colour
   run. `vt100` and `tui-term` are presumed correct on all of it. A pane that

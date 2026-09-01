@@ -28,6 +28,14 @@
 //! owner too old to carry the field is silent, not negative, and its silence
 //! keeps the reading it had before the field existed.
 //!
+//! The mind has the same flag now, and for the same reason: `llm_payload()`
+//! serves `chosen: bool`, false only where no config file was ever written. It
+//! is a second question and not a restatement of the first — a desk that named
+//! its pair a year ago has still never been asked which mind runs Atlas — so
+//! the walk opens on **the first question nobody has answered** rather than
+//! always at the top. Before that, a chosen desk mode retired the whole door,
+//! and the model question was unreachable on every desk that had one.
+//!
 //! The same fact drives the first question's marker. A row is `chosen` only
 //! when something named that half — the operator with a keystroke, or an owner
 //! that says so — and `assumed` otherwise; before the flag, a fallback the
@@ -99,7 +107,7 @@
 use crate::cmd::{self, Command, ModelChoice};
 use crate::format::{self, MISSING};
 use crate::model::DeskMode;
-use crate::store::{Store, ViewId};
+use crate::store::{Store, Unchosen, ViewId};
 use crate::theme::theme;
 use crate::ui::views::Views;
 use crate::ui::widgets::{panel_header, refuse};
@@ -175,6 +183,41 @@ const LIVE: &str = "live";
 const SIMULATED: &str = "simulated";
 const ALPACA: &str = "alpaca";
 
+/// The mind the door reserves and will not run, by the name an operator knows
+/// it by.
+///
+/// **Named, not built** (design ruling). Omitting it would read as a desk that
+/// had never heard of it, and an operator who came to this box to point Atlas
+/// at Codex would leave without an answer; offering it would be this client
+/// claiming a backend the owner has no id, launcher or MCP wiring for. So it is
+/// on the list and refuses, which is the same shape a daemon the desk cannot
+/// reach already has one row up.
+const CODEX: &str = "codex";
+
+/// What the row says, and what it says when it is chosen.
+///
+/// Two lengths for two places: [`DOOR_W`] leaves 68 cells for a row and 112 for
+/// a footer note ([`SAID_MAX`]), and the whole reason is worth more than the
+/// row has room for. Neither is the owner's sentence — there is no backend on
+/// the wire to have one — so this client owns the words, which it may do
+/// precisely because it is refusing rather than reporting.
+const CODEX_ROW: &str = "not built: a backend, a launcher and MCP wiring";
+const CODEX_REFUSAL: &str =
+    "codex is named, not built: it needs its own backend id, a launcher and MCP \
+     wiring in ~/.codex/config.toml";
+
+/// The row that fetches the catalog the model question is built from.
+///
+/// It exists because of where the catalog comes from: nothing polls it, and the
+/// one thing that asks is a keystroke ([`Command::Backends`], sent by the
+/// `models →` row on the way in). A door that OPENED on the model question
+/// crossed no such transition and `Store::consider_door` has nowhere to send a
+/// command, so the ask becomes the first row — one keystroke, visible, and the
+/// only thing on this question an operator could act on before the desk has
+/// said what it can run.
+const ASK: &str = "ask what this desk can run";
+const ASK_SAID: &str = "nothing has asked yet";
+
 /// Which question the door is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -201,6 +244,17 @@ pub enum Step {
 #[derive(Debug)]
 pub struct Door {
     step: Step,
+    /// The question this door was opened *for* — the first one nobody had
+    /// answered ([`Door::wanted`]).
+    ///
+    /// Held rather than re-derived, because `step` moves with the walk and this
+    /// does not, and two things read it: a door opened only about the mind
+    /// writes only the mind (it never put the pair to anybody), and its answer
+    /// is the last thing it was waiting for, so answering retires it. Deriving
+    /// it live would flip the moment the owner's next snapshot said the mind
+    /// was chosen — which is the snapshot that arrives *because* the operator
+    /// just answered.
+    opened: Step,
     /// What the operator has chosen, while they have.
     ///
     /// Absent is **the desk's own pair, read live**. A door opened before the
@@ -232,6 +286,7 @@ impl Default for Door {
     fn default() -> Self {
         Self {
             step: Step::Mode,
+            opened: Step::Mode,
             data: None,
             book: None,
             at: 0,
@@ -244,20 +299,74 @@ impl Default for Door {
 }
 
 impl Door {
-    /// Whether a desk opening now needs a door.
+    /// Whether a desk opening now needs a door, and which question it opens on.
     ///
     /// Two arms, and they answer different questions. `forced` is `--pick`: the
     /// operator started this run to choose, so the door opens whatever the desk
-    /// says. The other is the store-driven one, and it now means what it was
-    /// specified to mean — the owner **answered** and this desk is one nobody
-    /// has chosen. `Store::desk_unchosen` owns that word, because which
-    /// payloads count is a fact about the wire rather than about this box.
+    /// says — and opens at the top, because what they asked for is the walk and
+    /// not whichever half of it the desk happens not to have answered. The
+    /// other is the store-driven one, and it means what it was specified to
+    /// mean: the owner **answered** and something here is a thing nobody has
+    /// chosen. [`Unchosen`] owns which payloads count, because that is a fact
+    /// about the wire rather than about this box.
+    ///
+    /// **The step is the first question nobody has answered**, and that is the
+    /// whole of what this task changed. Keying the walk on the desk *mode's*
+    /// flag alone meant a desk whose pair was named long ago could never be
+    /// asked about its mind at all: there was no state in which this returned
+    /// true, and if there had been, the question would have opened two Enters
+    /// away from the one that was actually open.
     ///
     /// `answered` is required on the second arm and not on the first. Without
     /// it every client would open a door in the second before its first poll
     /// lands, on a desk that was about to say exactly which one it is.
-    pub fn wanted(forced: bool, answered: bool, unchosen: bool) -> bool {
-        forced || (answered && unchosen)
+    pub fn wanted(forced: bool, answered: bool, unchosen: Unchosen) -> Option<Step> {
+        if forced {
+            return Some(Step::Mode);
+        }
+        if !answered || !unchosen.any() {
+            return None;
+        }
+        Some(match unchosen.desk {
+            true => Step::Mode,
+            false => Step::Model,
+        })
+    }
+
+    /// A door opening on one question.
+    ///
+    /// The cursor stays on the first row rather than on what the desk runs, and
+    /// that is not a shortcut: the catalog the model question is built from is
+    /// fetched by a keystroke and nothing has pressed one yet, so at the moment
+    /// a door opens there is no list to place a cursor against. The first row of
+    /// that list is [`ASK`], which is the one that fetches it, and
+    /// [`Door::settle_model_cursor`] places the cursor properly when the answer
+    /// lands.
+    pub fn opening(step: Step) -> Self {
+        Self {
+            step,
+            opened: step,
+            ..Self::default()
+        }
+    }
+
+    /// Re-open the model cursor on what the desk runs, now that the desk has
+    /// said what it can run.
+    ///
+    /// Called by the store on the *first* catalog only. Two doors need it and
+    /// for one reason: neither had a catalog at the moment its cursor was set —
+    /// the walked-in one because `models →` asks for the catalog and advances in
+    /// the same keystroke, the opened-on-it one because nothing had asked at
+    /// all. A cursor left where it was would sit on whichever pair the catalog
+    /// happens to list first, where Enter is a change nobody asked for, which is
+    /// exactly what [`Door::current_model`] exists to prevent.
+    pub fn settle_model_cursor(&mut self, store: &Store) {
+        if self.step != Step::Model {
+            return;
+        }
+        self.at = self.current_model(store);
+        self.top = 0;
+        self.scroll();
     }
 
     /// Which question is up. Public so a test can pin the walk rather than
@@ -375,6 +484,14 @@ impl Door {
     /// `claude` alone because the tier map owns its model.
     fn model_rows(&self, store: &Store) -> Vec<ModelRow> {
         let mut rows = Vec::new();
+        // First, and only on a door that opened here: the walked-in door asked
+        // for the catalog with the keystroke that got it here, so a row asking
+        // again would be an affordance for something already in flight — and it
+        // would appear for the one frame between the two, taking the cursor with
+        // it. See [`ASK`] for why the row exists at all.
+        if self.opened == Step::Model && store.backends().is_none() {
+            rows.push(ModelRow::Ask);
+        }
         for surface in cmd::SURFACES {
             for offer in cmd::offers(surface, store) {
                 rows.push(ModelRow::Offer {
@@ -386,6 +503,9 @@ impl Door {
                 });
             }
         }
+        // Under the surfaces it would answer on if it existed, and above the
+        // skip, because it is a mind and not a way out of the question.
+        rows.push(ModelRow::Codex);
         rows.push(ModelRow::Keep);
         rows
     }
@@ -522,6 +642,18 @@ impl Door {
                 None
             }
             Step::Model => match self.model_rows(store).get(self.at)? {
+                // The one row here that asks the owner something instead of
+                // telling it something. It is not an answer, so the door stays
+                // up — and the row goes as soon as the catalog lands.
+                ModelRow::Ask => Some(Command::Backends),
+                // Refused in this client's own words, unlike every other
+                // refusal on this list: there is no backend on the wire to have
+                // given one. Saying so is what makes it a reservation rather
+                // than a gap.
+                ModelRow::Codex => {
+                    self.note = Some(CODEX_REFUSAL.to_string());
+                    None
+                }
                 // Shown on the list and refused here, in the owner's own
                 // sentence rather than a second opinion composed by this
                 // client — the rule `/model` already submits by.
@@ -536,7 +668,18 @@ impl Door {
                     surface,
                     choice: Some(choice),
                     ..
-                } => chose(surface, choice.clone()),
+                } => {
+                    // A door opened only about the mind has just been answered,
+                    // and a question that has been answered is not one to keep
+                    // asking — the rule the arming step is derived by. The
+                    // walked-in door stays up, because there the pair is still
+                    // waiting to be applied on the way out and the *other*
+                    // surface is still an open row.
+                    if self.opened == Step::Model {
+                        self.closed = true;
+                    }
+                    chose(surface, choice.clone())
+                }
                 // A pair with no choice behind it cannot happen — `cmd::Offer`
                 // carries one for everything it does not refuse — and saying so
                 // is cheaper than a branch that silently does nothing.
@@ -557,7 +700,11 @@ impl Door {
     /// key here whose meaning does not depend on where the cursor is.
     ///
     /// On the second it is the skip: the models stay as the desk has them, and
-    /// the pair from the first question is applied on the way out.
+    /// the pair from the first question is applied on the way out. On a door
+    /// that *opened* on the second, it is the same key with nothing left to
+    /// skip — there is no pair waiting, so it means what the last row means,
+    /// and [`Door::finish`] writes the mind the desk already runs for the
+    /// reason it writes the pair.
     fn escape(&mut self, store: &mut Store, views: &mut Views) -> Option<Command> {
         // The same rule one question earlier, and the safe answer there is
         // read-only: a human pressing Escape to get out of the way must never
@@ -587,14 +734,27 @@ impl Door {
     /// the catalog would have to drop one of them.
     ///
     /// It is written **unconditionally**, including when the pair is what the
-    /// desk already reads. This client cannot tell a persisted choice from the
-    /// owner's default — `desk_mode_payload` serves both identically — and the
-    /// POST is what makes the answer durable, so a door that skipped the write
-    /// on an unchanged pair would leave the desk exactly as unchosen as it
-    /// found it.
+    /// desk already reads: the POST is what makes the answer durable, so a door
+    /// that skipped the write on an unchanged pair would leave the desk exactly
+    /// as unchosen as it found it and open again on the next run. (The owner
+    /// can now *say* whether anybody chose — that flag is what opens this door
+    /// — but saying so is not the same as somebody having answered the question
+    /// it is up for.)
+    ///
+    /// That rule is why a door opened on the model question writes the mind the
+    /// desk already runs rather than nothing at all, and why it writes no pair:
+    /// it never put the pair to anybody.
     fn finish(&mut self, store: &mut Store, views: &mut Views) -> Option<Command> {
-        let (data, book) = (self.data(store), self.book(store));
         self.closed = true;
+        // A door that never asked about the pair does not write one: the desk
+        // named its own long ago, and a POST of it here would be this box
+        // claiming a decision it put to nobody. What it writes instead is the
+        // answer it *did* take, by the rule two paragraphs up — the mind the
+        // desk is already running, sent so that "keep" is durable.
+        if self.opened == Step::Model {
+            return kept(store);
+        }
+        let (data, book) = (self.data(store), self.book(store));
         // The third step, and the only condition it has: the desk is about to
         // be pointed at the real book and the owner cannot read a login for it.
         // Not a form of its own — SETTINGS owns the one box in this client a
@@ -612,10 +772,18 @@ impl Door {
     /// The default is the current config, so an operator who presses Enter
     /// twice changes nothing — and one who does not recognise their own choice
     /// on the list is being told something true about it.
+    ///
+    /// [`ASK`] outranks both when it is there, because it is there exactly when
+    /// there is no list: a cursor parked on the skip of a question with no
+    /// answers on it would hide the one row that can produce them.
     fn current_model(&self, store: &Store) -> usize {
         let rows = self.model_rows(store);
         rows.iter()
-            .position(|row| matches!(row, ModelRow::Offer { current: true, .. }))
+            .position(|row| matches!(row, ModelRow::Ask))
+            .or_else(|| {
+                rows.iter()
+                    .position(|row| matches!(row, ModelRow::Offer { current: true, .. }))
+            })
             .unwrap_or(rows.len().saturating_sub(1))
     }
 
@@ -797,7 +965,16 @@ impl Door {
         let t = theme();
         let rows = self.model_rows(store);
         let cap = self.cap();
-        let mut lines = vec![panel_header("which minds"), section("per surface")];
+        // What the list is *of*, and it is only "per surface" once the desk has
+        // said what it can run. On the frame a door that opened here draws,
+        // there is no surface row at all — the rows are the ask and the two
+        // this client owns — and heading them "per surface" would caption a
+        // list that is not there.
+        let of = match rows.iter().any(|row| matches!(row, ModelRow::Offer { .. })) {
+            true => "per surface",
+            false => "the desk has not said what it can run",
+        };
+        let mut lines = vec![panel_header("which minds"), section(of)];
         if self.top > 0 {
             lines.push(marker(format!(" ▴ {} above", self.top)));
         }
@@ -816,6 +993,11 @@ impl Door {
                     refusal.is_none(),
                     refusal.as_deref(),
                 )),
+                ModelRow::Ask => lines.push(self.row(i, ASK, None, true, Some(ASK_SAID))),
+                // Dim and unchoosable, which is the tone a row the desk cannot
+                // serve already carries one line up — the operator learns what
+                // this row is from the same signal, not from a new one.
+                ModelRow::Codex => lines.push(self.row(i, CODEX, None, false, Some(CODEX_ROW))),
                 ModelRow::Keep => {
                     lines.push(self.row(i, "keep what the desk is using", None, true, None))
                 }
@@ -989,6 +1171,11 @@ enum ModeRow {
 /// One row of the second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelRow {
+    /// Ask the owner what its backends serve. Present only while nothing has —
+    /// see [`ASK`].
+    Ask,
+    /// The mind this door reserves and refuses. See [`CODEX`].
+    Codex,
     Offer {
         surface: &'static str,
         value: String,
@@ -1096,6 +1283,39 @@ fn posture(armed: bool) -> Option<Command> {
         let _ = armed;
         None
     }
+}
+
+/// The mind the desk is already running, sent so that answer is durable.
+///
+/// The rule [`Door::finish`] writes the pair by, one question further in: the
+/// POST is what makes an answer durable, so a door that skipped it on "keep
+/// what the desk is using" would leave the mind exactly as unchosen as it found
+/// it and open again on the next run. Nothing here *changes* — the values are
+/// the owner's own, and re-sending them is what makes the owner stop reporting
+/// that nobody has answered.
+///
+/// The reasoner, named as the surface that is not the workforce rather than by
+/// its position in `cmd::SURFACES`, which is the owner's own order and not a
+/// contract about which of the two this is. It is the surface this question's
+/// own footnote is about and the one an operator means by "which mind runs
+/// Atlas"; the workforce keeps whatever it had, because the owner replaces one
+/// surface per POST and a keystroke carries one command.
+///
+/// A desk that named no pair composes nothing: this refuses rather than
+/// inventing a backend, and the door closes having written nothing — which
+/// leaves the question open, and open is what it is.
+fn kept(store: &Store) -> Option<Command> {
+    let surface = cmd::SURFACES.into_iter().find(|s| *s != cmd::WORKFORCE)?;
+    let running = store.llm()?.reasoner.as_ref()?;
+    let backend = format::text(running.backend.as_ref())?;
+    let model = format::text(running.model.as_ref())?;
+    chose(
+        surface,
+        ModelChoice::Pair {
+            backend: backend.to_string(),
+            model: model.to_string(),
+        },
+    )
 }
 
 /// The model choice, in the build that has somewhere to send it.
@@ -1218,23 +1438,64 @@ mod tests {
         // against, and an owner that has not answered *yet* is not — a client
         // that opened one in the second before its first poll would ask about a
         // desk that was about to name itself.
-        assert!(
-            Door::wanted(false, true, true),
+        assert_eq!(
+            Door::wanted(false, true, unchosen(true, true)),
+            Some(Step::Mode),
             "answered, and said nothing"
         );
-        assert!(
-            !Door::wanted(false, true, false),
+        assert_eq!(
+            Door::wanted(false, true, unchosen(false, false)),
+            None,
             "the owner named the desk"
         );
-        assert!(
-            !Door::wanted(false, false, true),
+        assert_eq!(
+            Door::wanted(false, false, unchosen(true, true)),
+            None,
             "nothing has answered yet"
         );
-        // And the flag, which is the arm that works on a desk that did answer —
-        // the only way to ask again, because the owner cannot report that
-        // nobody has chosen (see this module's header).
-        assert!(Door::wanted(true, false, false));
-        assert!(Door::wanted(true, true, false));
+        // And the flag, which asks a desk that answered everything — the walk
+        // from the top, because what `--pick` asks for is the walk and not
+        // whichever half of it happens to be open.
+        assert_eq!(
+            Door::wanted(true, false, unchosen(false, false)),
+            Some(Step::Mode)
+        );
+        assert_eq!(
+            Door::wanted(true, true, unchosen(false, true)),
+            Some(Step::Mode)
+        );
+    }
+
+    /// The owner's two `chosen` flags, as this client reads them.
+    fn unchosen(desk: bool, mind: bool) -> Unchosen {
+        Unchosen { desk, mind }
+    }
+
+    #[test]
+    fn the_door_opens_on_the_first_question_nobody_has_answered() {
+        // The whole of what this task changed. Keying the walk on the desk
+        // mode's flag alone meant a desk whose pair was named long ago could
+        // never be asked about its mind at all — and if it had been, the
+        // question would have opened two Enters away from the one that was
+        // open.
+        assert_eq!(
+            Door::wanted(false, true, unchosen(false, true)),
+            Some(Step::Model),
+            "a desk that named its pair was not asked about its mind"
+        );
+        // The pair outranks it, because it is the question in front: a desk
+        // that has answered neither is walked, not jumped.
+        assert_eq!(
+            Door::wanted(false, true, unchosen(true, true)),
+            Some(Step::Mode)
+        );
+        // And a mind somebody chose is not a question. Both remaining corners,
+        // so a pass cannot come from the other one.
+        assert_eq!(
+            Door::wanted(false, true, unchosen(true, false)),
+            Some(Step::Mode)
+        );
+        assert_eq!(Door::wanted(false, true, unchosen(false, false)), None);
     }
 
     #[test]
@@ -1300,6 +1561,54 @@ mod tests {
             store,
             &mut Views::new(),
         )
+    }
+
+    /// A desk that named its pair long ago, with the owner's flag on the *mind*
+    /// in whichever of its three states the caller is asking about.
+    ///
+    /// Its own fixture rather than a parameter on `desk_said`: every test that
+    /// reads it is about the question the pair being settled leaves open, and
+    /// the pair here is deliberately `chosen: true` so nothing about it is.
+    #[cfg(feature = "operator")]
+    fn mind_said(chosen: Option<bool>) -> Store {
+        let mut store = Store::default();
+        store.apply(
+            AppEvent::Snapshot(Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "desk_mode": {
+                        "data": SYNTHETIC, "book": SIMULATED,
+                        "label": "SYNTHETIC", "offline": true, "chosen": true,
+                        "credentials": "no ALPACA_API_KEY_ID in the environment or .env",
+                        "credentials_ok": false,
+                    },
+                    "llm": {
+                        "reasoner": {"backend": "ollama", "model": "qwen2.5:7b"},
+                        "workforce": {"backend": "claude", "model": "inherit"},
+                        "reasoner_enabled": false,
+                        "chosen": chosen,
+                    }
+                }))
+                .unwrap(),
+            )),
+            Instant::now(),
+        );
+        store.posture = crate::store::Posture::Operator;
+        store
+    }
+
+    /// The second question's lines as an operator reads them.
+    #[cfg(feature = "operator")]
+    fn model_said(door: &Door, store: &Store) -> String {
+        door.model_lines(store)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// One box's lines as an operator reads them.
@@ -1541,6 +1850,204 @@ mod tests {
         // The last row is always the skip, so a walk that recognises nothing on
         // the list still has an answer that changes nothing.
         assert_eq!(rows.last(), Some(&ModelRow::Keep));
+    }
+
+    /// A door that has been given a box to draw in.
+    ///
+    /// `cap` is read off the frame the door was last handed, and one that has
+    /// never been drawn has room for exactly one row — so a test that reads the
+    /// second question's *lines* has to hand it a box first, exactly as the
+    /// runtime does before it reads its first event.
+    #[cfg(feature = "operator")]
+    fn drawn(door: Door) -> Door {
+        door.area.set(Rect::new(0, 0, DOOR_W, 30));
+        door
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_desk_that_named_its_pair_and_no_mind_opens_on_the_mind_alone() {
+        // The state this task exists for, through the store that opens the
+        // door: the pair was answered long ago, so there is one question left
+        // and the box opens on it rather than two Enters away from it.
+        let store = mind_said(Some(false));
+        let door = store.door().expect("an unchosen mind owes a door");
+        assert_eq!(door.step(&store), Step::Model);
+        // And the two readings that are not that. `true` is somebody's answer;
+        // absence is an owner too old to carry the field, and reading its
+        // silence as `false` would open this box on every launch of every desk
+        // that already has a mind.
+        for chosen in [Some(true), None] {
+            assert!(
+                mind_said(chosen).door().is_none(),
+                "chosen: {chosen:?} opened a door"
+            );
+        }
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_door_that_opened_on_the_mind_question_asks_what_the_desk_can_run() {
+        // Nothing polls the catalog and the only thing that asks for it is a
+        // keystroke — `models →`, on the way in. A door that OPENED here
+        // crossed no such transition, so without this row the first question an
+        // operator is ever asked about which mind runs Atlas offers no mind.
+        let mut store = mind_said(Some(false));
+        let mut door = store.take_door().unwrap();
+        assert_eq!(door.model_rows(&store).first(), Some(&ModelRow::Ask));
+        assert_eq!(door.at, 0, "the cursor opened past the only row that acts");
+        assert_eq!(
+            press(&mut door, KeyCode::Enter, &mut store),
+            Some(Command::Backends)
+        );
+        assert!(door.standing(), "asking is not answering");
+        // Gone the moment the desk has said, and absent on the walked-in path
+        // whether it has or not: there the keystroke that arrived already
+        // asked, and a row offering to ask again would appear for exactly the
+        // frames between the two — taking the cursor with it.
+        let answered = with_catalog(mind_said(Some(false)), true);
+        assert!(!door.model_rows(&answered).contains(&ModelRow::Ask));
+        let walked = cursor_on(0, Step::Model);
+        assert!(!walked.model_rows(&store).contains(&ModelRow::Ask));
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn the_catalog_settles_the_cursor_of_a_door_that_had_none_to_settle_it_on() {
+        // Both doors that reach the model question set their cursor before the
+        // catalog exists — the walked-in one because `models →` asks and
+        // advances in one keystroke, this one because nothing had asked at all.
+        // A cursor left where it was sits on whichever pair the catalog happens
+        // to list first, and Enter there is a change nobody asked for.
+        let store = with_catalog(mind_said(Some(false)), true);
+        let door = store.door().expect("the door survived the catalog");
+        let rows = door.model_rows(&store);
+        assert!(
+            matches!(&rows[door.at], ModelRow::Offer { surface, value, current: true, .. }
+                     if *surface == "reasoner" && value == "ollama:qwen2.5:7b"),
+            "the cursor did not open on what the desk runs: {:?}",
+            rows.get(door.at)
+        );
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn codex_is_on_the_list_and_refuses_by_name_with_the_reason() {
+        // Named, not built — the design's own ruling. Leaving it off the list
+        // reads as a desk that never heard of it; offering it would be this
+        // client claiming a backend the owner has no id or launcher for.
+        let mut store = with_catalog(mind_said(Some(false)), true);
+        let mut door = drawn(store.take_door().unwrap());
+        let rows = door.model_rows(&store);
+        assert!(rows.contains(&ModelRow::Codex), "{rows:?}");
+        let drawn_rows = model_said(&door, &store);
+        assert!(drawn_rows.contains(CODEX), "{drawn_rows}");
+        assert!(
+            drawn_rows.contains(CODEX_ROW),
+            "the row refuses without saying why:\n{drawn_rows}"
+        );
+        // Chosen, it says what it would take and changes nothing: no command,
+        // and the question is still up.
+        door.at = rows.iter().position(|row| row == &ModelRow::Codex).unwrap();
+        assert_eq!(press(&mut door, KeyCode::Enter, &mut store), None);
+        assert!(door.standing(), "a refusal closed the door");
+        let refused = model_said(&door, &store);
+        assert!(
+            refused.contains("~/.codex/config.toml"),
+            "the refusal did not name what codex is missing:\n{refused}"
+        );
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn answering_the_mind_question_retires_the_door_that_opened_on_it() {
+        // A door opened for one question has had its answer, and a question
+        // that has been answered is not one to keep asking.
+        let mut store = with_catalog(mind_said(Some(false)), true);
+        let mut door = store.take_door().unwrap();
+        // The cursor opens on what the desk runs, so the row above it is a
+        // change — an answer rather than a re-statement.
+        press(&mut door, KeyCode::Up, &mut store);
+        let acted = press(&mut door, KeyCode::Enter, &mut store);
+        assert!(matches!(acted, Some(Command::SetLlm { .. })), "{acted:?}");
+        assert!(!door.standing(), "the answered question stayed up");
+        // And the same key on the walked-in door does *not* retire it: there
+        // the pair is still waiting to be applied on the way out, and the other
+        // surface is still an open row.
+        let mut walked = cursor_on(0, Step::Model);
+        walked.at = walked.current_model(&store);
+        assert!(matches!(
+            press(&mut walked, KeyCode::Enter, &mut store),
+            Some(Command::SetLlm { .. })
+        ));
+        assert!(walked.standing(), "choosing one surface closed the other");
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn keeping_the_mind_the_desk_runs_is_written_so_the_question_stays_answered() {
+        // The rule the pair is written by, one question further in: the POST is
+        // what makes an answer durable, so a door that skipped it on "keep"
+        // would leave the mind exactly as unchosen as it found it and open
+        // again on the next run. What it must NOT write is a pair — this door
+        // never put one to anybody.
+        let running = || Command::SetLlm {
+            surface: "reasoner".to_string(),
+            choice: ModelChoice::Pair {
+                backend: "ollama".to_string(),
+                model: "qwen2.5:7b".to_string(),
+            },
+        };
+        let mut store = with_catalog(mind_said(Some(false)), true);
+        let mut door = store.take_door().unwrap();
+        door.at = door.model_rows(&store).len() - 1;
+        assert_eq!(
+            press(&mut door, KeyCode::Enter, &mut store),
+            Some(running())
+        );
+        assert!(!door.standing());
+        // Esc is the same answer by the same rule: there is no pair here to
+        // skip, so the key that gets out of the way means what the last row
+        // means.
+        let mut store = with_catalog(mind_said(Some(false)), true);
+        let mut door = store.take_door().unwrap();
+        assert_eq!(press(&mut door, KeyCode::Esc, &mut store), Some(running()));
+        assert!(!door.standing());
+        // The walked-in door still applies the pair on the way out, which is
+        // the behaviour the split above must not have taken away.
+        let mut walked = cursor_on(0, Step::Model);
+        walked.at = walked.model_rows(&store).len() - 1;
+        assert_eq!(
+            press(&mut walked, KeyCode::Enter, &mut store),
+            Some(Command::DeskMode {
+                data: SYNTHETIC.to_string(),
+                book: SIMULATED.to_string()
+            })
+        );
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn the_two_rows_this_question_gained_fit_the_box() {
+        // [`DOOR_W`]'s claim, applied to the rows nothing else measures: these
+        // two are the only ones here whose words this client owns, so they are
+        // the only ones a wrap could be introduced in by an edit. A row one
+        // cell over wraps onto an unindented second line, exactly as the alpaca
+        // row's constant says of the question before this one.
+        let store = mind_said(Some(false));
+        let lines = drawn(Door::opening(Step::Model)).model_lines(&store);
+        for needle in [ASK, CODEX_ROW] {
+            let row = lines
+                .iter()
+                .find(|line| line.spans.iter().any(|span| span.content.contains(needle)))
+                .unwrap_or_else(|| panic!("{needle} is not on the question"));
+            assert!(
+                row.width() <= (DOOR_W - 2) as usize,
+                "{needle} takes {} of the {} cells the box has",
+                row.width(),
+                DOOR_W - 2
+            );
+        }
     }
 
     #[cfg(feature = "operator")]

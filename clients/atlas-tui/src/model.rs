@@ -277,6 +277,22 @@ pub struct LlmConfig {
     /// naming a reasoner model does not switch it on — the owner refuses to
     /// infer one from the other, so nothing here may either.
     pub reasoner_enabled: Option<bool>,
+    /// Whether anybody ever answered *which mind runs this desk*, as against the
+    /// pair the owner has to serve while nobody has.
+    ///
+    /// The one thing the pair cannot say about itself: a desk nobody has asked
+    /// serves byte-identical values to one whose operator picked exactly them,
+    /// which is why the owner names the difference rather than leaving it to be
+    /// inferred (`server.py::llm_payload`).
+    ///
+    /// **`None` reads as chosen, and that is the opposite of what it means on
+    /// [`DeskMode`].** There the absence of a *block* is a desk that was never
+    /// named to this client; here the owner has always sent the block, so a
+    /// missing flag is an owner too old to carry one — and reading that silence
+    /// as `false` would open a modal about the mind on every launch of every
+    /// desk that already has one. Only `Some(false)` is the owner asserting the
+    /// negative.
+    pub chosen: Option<bool>,
     #[serde(default, deserialize_with = "null_or_default")]
     pub availability: Vec<LlmBackend>,
     pub probed_at: Option<String>,

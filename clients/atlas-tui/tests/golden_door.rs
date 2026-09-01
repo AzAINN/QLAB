@@ -41,6 +41,53 @@ fn unsaid() -> Store {
     answered("")
 }
 
+/// The captured desk with its two `chosen` flags set to the state this door was
+/// unable to ask about: the pair was named long ago, and nobody has ever
+/// answered which mind runs Atlas.
+///
+/// Patched on the JSON rather than on the decoded struct, for the reason the
+/// harness decodes its fixture at all — the arm here is a field on the wire,
+/// and a hand-built struct would prove nothing about whether it arrives.
+fn a_desk_with_no_mind() -> Store {
+    let mut json: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/tui_snapshot.json")).unwrap();
+    json["desk_mode"]["chosen"] = serde_json::Value::Bool(true);
+    json["llm"]["chosen"] = serde_json::Value::Bool(false);
+    let mut store = Store::default();
+    // The harness's own two, so this frame is comparable with every other
+    // golden: one address rather than whichever port the binary saw, and a
+    // mocked clock twelve seconds after the fixture's own `llm.probed_at`.
+    store.base = "http://127.0.0.1:8765".to_string();
+    store.wall = Some(1_785_696_869);
+    let now = Instant::now();
+    store.apply(AppEvent::ConnUp(Channel::Owner), now);
+    store.apply(
+        AppEvent::Snapshot(Box::new(serde_json::from_value::<Snapshot>(json).unwrap())),
+        now,
+    );
+    store
+}
+
+#[test]
+fn a_desk_that_named_its_pair_and_no_mind_is_still_asked_something() {
+    // The whole of what the desk-mode flag alone could not express: this desk
+    // answered the pair question, so the door it used to get was no door at all
+    // — and the question about the mind was unreachable on every desk that had
+    // ever named itself. A window that cannot choose is shown the statement it
+    // is shown for the pair, which is the existing rule and not a new one.
+    let mut store = a_desk_with_no_mind();
+    store.forced_glass = true;
+    assert!(
+        store.door().is_some(),
+        "a settled pair retired the whole door"
+    );
+    // The door's own sentence, not the status line's posture chip — that chip
+    // reads GLASS on every frame this window draws, so a pin on the word alone
+    // would pass with no door up at all.
+    let frame = Client::new(store).frame(120, 36);
+    assert!(frame.contains("points it nowhere"), "{frame}");
+}
+
 #[test]
 fn a_desk_that_has_not_said_what_it_is_pointed_at_opens_a_door() {
     let client = Client::new(unsaid());
@@ -379,6 +426,69 @@ mod armed {
         insta::assert_snapshot!(client.frame(120, 36));
     }
 
+    /// The desk this task exists for, watched by a window the desk armed: the
+    /// pair was answered long ago and the mind never was.
+    fn no_mind() -> Client {
+        let mut store = a_desk_with_no_mind();
+        store.posture = Posture::Operator;
+        let client = Client::new(store);
+        client.frame(120, 36);
+        client
+    }
+
+    #[test]
+    fn a_desk_that_never_chose_a_mind_is_asked_which_one_runs_atlas() {
+        let mut client = no_mind();
+        let frame = client.frame(120, 36);
+        // Straight at the question nobody has answered, and not at the one
+        // somebody did: a walk that opened on the pair would put this two
+        // Enters away, which is where it has been all along.
+        assert!(frame.contains("WHICH MINDS"), "{frame}");
+        assert!(
+            !frame.contains("THIS DESK"),
+            "a settled pair was asked about again:\n{frame}"
+        );
+        // Nothing polls the catalog and the only thing that asks for it is a
+        // keystroke — so on this path the row that asks is the one thing on the
+        // question an operator can act on.
+        assert!(frame.contains("ask what this desk can run"), "{frame}");
+        assert_eq!(press(&mut client, KeyCode::Enter), Some(Command::Backends));
+        assert!(client.store.door().is_some(), "asking is not answering");
+    }
+
+    #[test]
+    fn answering_which_mind_runs_atlas_retires_the_question() {
+        let mut client = no_mind();
+        client.store.apply(
+            AppEvent::Backends(
+                serde_json::from_str::<LlmCatalog>(include_str!("fixtures/llm_backends.json"))
+                    .unwrap(),
+            ),
+            Instant::now(),
+        );
+        let frame = client.frame(120, 36);
+        assert!(
+            !frame.contains("ask what this desk can run"),
+            "the row survived the answer it asked for:\n{frame}"
+        );
+        assert!(frame.contains("codex"), "{frame}");
+        // The catalog settles the cursor on what the desk runs, so one row up
+        // is a change — an answer rather than a re-statement of the default.
+        press(&mut client, KeyCode::Up);
+        let acted = press(&mut client, KeyCode::Enter);
+        assert!(matches!(acted, Some(Command::SetLlm { .. })), "{acted:?}");
+        assert!(
+            client.store.door().is_none(),
+            "the question that was answered stayed up"
+        );
+        assert!(!client.frame(120, 36).contains("WHICH MINDS"));
+    }
+
+    #[test]
+    fn the_mind_question_a_desk_opens_on_renders_at_120x36() {
+        insta::assert_snapshot!(no_mind().frame(120, 36));
+    }
+
     #[test]
     fn keeping_the_models_sends_the_desk_and_nothing_else() {
         // The skip: Enter on the last row applies the pair the first question
@@ -387,7 +497,11 @@ mod armed {
         for code in [KeyCode::Down, KeyCode::Down, KeyCode::Enter] {
             press(&mut client, code);
         }
-        let rows = 6; // four claude tiers, one ollama model, and the claude row
+        // Four claude tiers, one ollama model, the workforce's claude row and
+        // its ollama one, and the codex row the door reserves. Over-pressed on
+        // purpose: `step_by` clamps at the last row, so the count is a floor
+        // rather than an arithmetic this test has to keep in step with.
+        let rows = 8;
         for _ in 0..rows + 2 {
             press(&mut client, KeyCode::Down);
         }

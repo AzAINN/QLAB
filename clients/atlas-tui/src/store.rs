@@ -16,7 +16,7 @@ use crate::model::{
     RegimePanel, Run, Snapshot, System, Template, VisualAnswer, VisualEntry, Workflow,
 };
 use crate::net::http;
-use crate::ui::door::Door;
+use crate::ui::door::{Door, Step};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -342,6 +342,29 @@ pub struct AssetFacts<'a> {
     pub realized_vol: Option<f64>,
     /// Closing prices, oldest first.
     pub history: &'a [f64],
+}
+
+/// The questions this desk has never had an answer to.
+///
+/// One value rather than two arguments, because the two are read together and
+/// only ever together: [`Door::wanted`] decides both whether a door is owed and
+/// which question it opens on, and a pair of bare `bool`s in that signature is
+/// a transposition nothing would catch. What each field means on the wire —
+/// including why their silences read in opposite directions — is
+/// [`Store::unchosen`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unchosen {
+    /// The data source and the book.
+    pub desk: bool,
+    /// Which mind answers on this desk.
+    pub mind: bool,
+}
+
+impl Unchosen {
+    /// Whether there is a question here at all.
+    pub fn any(self) -> bool {
+        self.desk || self.mind
+    }
 }
 
 /// What this window may do to the desk.
@@ -932,36 +955,57 @@ impl Store {
         // an owner that serves a posture — and a door that only opened for an
         // unchosen *desk mode* would leave those with no way to arm at all.
         //
+        // It opens the walk where the walk has always started: the arming
+        // question is derived on top of whatever step the door is on
+        // ([`Door::step`]), so it names no step of its own.
+        //
         // `answered` gates it for the reason it gates the other: absence
         // before the first poll is not an owner saying nobody chose.
-        if Door::wanted(self.door_forced, answered, self.desk_unchosen())
-            || (answered && self.asking_posture())
-        {
-            self.door = Some(Door::default());
+        let step = Door::wanted(self.door_forced, answered, self.unchosen())
+            .or_else(|| (answered && self.asking_posture()).then_some(Step::Mode));
+        if let Some(step) = step {
+            self.door = Some(Door::opening(step));
             self.dirty = true;
         }
     }
 
-    /// Whether the desk on the wire is one nobody has chosen.
+    /// What the owner says nobody has chosen on this desk.
     ///
-    /// Two shapes, and they are two different silences:
+    /// The desk's pair and the mind that answers on it are two questions, asked
+    /// of two payload blocks and answerable separately — which is the whole
+    /// point of reading them apart. A desk that named its pair a year ago has
+    /// still never been asked which mind runs Atlas, and one flag standing for
+    /// both is precisely what made that question unreachable.
     ///
-    /// * **no `desk_mode` block at all** — an owner too old to serve one, or a
-    ///   payload missing it. The desk this client is watching has not been
-    ///   named to it, which is the arm the door shipped with.
-    /// * **`chosen: false`** — the owner saying, in as many words, that the
-    ///   concrete pair it is serving is the fallback nobody picked. This is the
-    ///   state the door was specified against and could not observe until the
-    ///   owner learned to say it.
-    ///
-    /// **`chosen` absent on a block that *is* there is not unchosen.** That is
-    /// every owner built before the field existed, and guessing would open a
-    /// modal over every desk that has already answered — a regression loud
-    /// enough to make the field unshippable. Silence keeps the old reading.
-    fn desk_unchosen(&self) -> bool {
-        match self.desk_mode() {
-            None => true,
-            Some(mode) => mode.chosen == Some(false),
+    /// **The two silences are read in opposite directions, deliberately.** A
+    /// missing `desk_mode` block is a desk that has not been named to this
+    /// client at all — the arm the door shipped with. A missing `chosen` on the
+    /// `llm` block is an owner too old to carry the field, and the owner has
+    /// always sent that block; reading its silence as "nobody chose" would open
+    /// a modal on every launch of every desk that already has a mind.
+    /// [`crate::model::LlmConfig::chosen`] states the same rule at the field.
+    fn unchosen(&self) -> Unchosen {
+        Unchosen {
+            // Two shapes, and they are two different silences:
+            //
+            // * **no `desk_mode` block at all** — an owner too old to serve
+            //   one, or a payload missing it.
+            // * **`chosen: false`** — the owner saying, in as many words, that
+            //   the concrete pair it is serving is the fallback nobody picked.
+            //
+            // **`chosen` absent on a block that *is* there is not unchosen.**
+            // That is every owner built before the field existed, and guessing
+            // would open a modal over every desk that has already answered — a
+            // regression loud enough to make the field unshippable.
+            desk: match self.desk_mode() {
+                None => true,
+                Some(mode) => mode.chosen == Some(false),
+            },
+            // One shape only, for the reason above: `Some(false)` is the owner
+            // saying no config file was ever written, and everything else —
+            // including an owner that sends no routing at all — leaves the
+            // reading this client had before the field existed.
+            mind: self.llm().and_then(|llm| llm.chosen) == Some(false),
         }
     }
 
@@ -1245,9 +1289,25 @@ impl Store {
             // instant it arrived rather than with a clock read here — the fold
             // is told the instant the frame is paced against.
             AppEvent::Backends(catalog) => {
+                // Whether this is the *first* catalog, read before it lands,
+                // because it decides one thing and only one: a door that has
+                // been sitting on the model question with nothing to offer is
+                // the one whose cursor has to be placed now. An operator
+                // already walking a list must never have it moved under them.
+                let first = self.backends.is_none();
                 self.backends = Some(catalog);
                 self.backends_at = Some(now);
                 self.dirty = true;
+                // Taken and put back rather than borrowed, the way every other
+                // reader of the door does it: settling the cursor reads the
+                // catalog that just landed, and `&mut self.door` would hold the
+                // store for all of it.
+                if first {
+                    if let Some(mut door) = self.door.take() {
+                        door.settle_model_cursor(self);
+                        self.door = Some(door);
+                    }
+                }
             }
             // Replaced wholesale like the catalog: the route serves the whole
             // newest board, and merging two boards would render rows from two
@@ -2924,6 +2984,54 @@ mod tests {
         assert!(
             store.wants_backends(t0 + CATALOG_TTL),
             "a daemon that came up since is what the operator is looking for"
+        );
+    }
+
+    #[test]
+    fn a_mind_nobody_chose_owes_a_door_and_a_mind_somebody_chose_does_not() {
+        // [`Store::unchosen`]'s second half, read the way the door reads it —
+        // through the payload, because which shapes count is a fact about the
+        // wire rather than about the box. The pair is `chosen: true` in every
+        // row here, so nothing that opens is opening about the pair.
+        let opened = |llm: serde_json::Value| {
+            let mut store = Store::default();
+            apply(
+                &mut store,
+                snap(json!({
+                    "desk_mode": {"data": "synthetic", "book": "simulated",
+                                  "label": "SYNTHETIC", "chosen": true},
+                    "llm": llm
+                })),
+            );
+            store
+        };
+        let running = json!({"backend": "claude", "model": "inherit"});
+        let asked = opened(json!({"reasoner": running, "chosen": false}));
+        let door = asked
+            .door()
+            .expect("a desk whose pair was named was never asked about its mind");
+        // And on that question, not two Enters away from it.
+        assert_eq!(door.step(&asked), Step::Model);
+        assert!(opened(json!({"reasoner": running, "chosen": true}))
+            .door()
+            .is_none());
+        // The third state, which is what makes the flag additive: an owner too
+        // old to carry it is silent, and silence keeps the reading this client
+        // had before the field existed. Both spellings of that silence, because
+        // a payload can lose the field or the whole block.
+        assert!(opened(json!({"reasoner": running})).door().is_none());
+        let mut bare = Store::default();
+        apply(
+            &mut bare,
+            snap(
+                json!({"desk_mode": {"data": "synthetic", "book": "simulated",
+                                      "label": "SYNTHETIC", "chosen": true}}),
+            ),
+        );
+        assert!(
+            bare.door().is_none(),
+            "an owner that sent no routing was read \
+                                        as one saying nobody chose"
         );
     }
 

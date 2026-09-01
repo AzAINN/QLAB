@@ -408,3 +408,75 @@ without a click" claim, a new standing-authority section with the real field
 names, and the `R` key), `docs/atlas.md` (the heartbeat, the mode paragraph, the
 deployment section), `docs/ibm-bob.md` and `clients/atlas-tui/README.md` (both
 claimed a fill costs exactly one confirmation).
+
+## What the branch review found after this record was written
+
+The counts and claims above were true when written, at `c8a5b57`. A
+whole-branch review and a scoped re-review followed, each with a fix round;
+the branch merged at `e08e7ce`. This section records what they found rather
+than rewriting what preceded them.
+
+### The deadlock the suite could not have caught either way
+
+The first fix round made the standing path call `_mark_after_mutation` after an
+automatic fill, so an unattended book leaves the same trace as a clicked one —
+an execution-sourced equity mark and a valuation-cache drop. That call now runs
+**inside `_LOCK`**, from the heartbeat's observe phase, which is the one shape
+that could freeze the owner for every client at once.
+
+The suite cannot answer whether that is safe, and it is worth knowing why
+before someone trusts a green run here: **`_tick` passes a fresh
+`threading.Lock()`, not the module object.** Every test of this path holds a
+lock nothing else contends. The re-review established the answer by reading the
+call graph — `_mark_after_mutation` reaches `invalidate_valuation` (a bare
+attribute store), `record_equity_mark` → `portfolio` → `get_broker` /
+`portfolio_state`, and registry calls; `qlab/state/registry.py` takes no lock,
+and the only lock anywhere on the path is `qlab/core/data.py`'s `_CACHE_LOCK`,
+an `RLock` leaf over filesystem I/O that cannot reach back into `server.py` —
+and then by experiment: a real fill driven while holding the production
+`ui_server._LOCK` with a 45-second faulthandler armed. It booked in 0.055 s,
+wrote the mark and dropped the cache. Both clicked routes already call the same
+function under the same lock.
+
+### A lane frozen at startup, and a lane named by a flag nobody read
+
+`build_owner_tick` captured `offline` in its closure at owner start and never
+re-read it, so a runtime `POST /api/desk_mode` flip left standing books pricing,
+deciding permits and executing on the startup lane until restart. The fix
+derives the lane per book from `session.desk_mode.offline` rather than
+re-reading per tick — a per-tick re-read would have moved the news fetch, desk
+read, matrix, judgment request, `atlas_observe` and the autonomous start onto a
+new lane as a side effect of a book-scoped fix. Deriving at the book cannot go
+stale by construction: the helper takes no flag, so no caller can supply one.
+
+That left two `offline` parameters that nothing read — one in
+`book_under_grant`, one in `prime_execution_permit`, the second having gone
+dead in the same round unnoticed. Both were removed rather than kept for
+signature compatibility, on the grounds that the parameter *names the lane an
+unattended fill runs on*: a future caller would pass a flag believing it
+controlled where a real fill prices and executes.
+
+**Carried, and deliberately not fixed:** the tick's read half — news, desk read,
+matrix, judgment request, `atlas_observe`, the autonomous start — still runs on
+the captured startup flag. Only the book, the prime and the anomaly
+measurements follow the live desk mode. A desk-mode flip leaves that divergence
+until the owner restarts.
+
+### The third recurrence of the same testing lesson
+
+The section above records two assertions on this branch that passed vacuously.
+The re-review found a third variant: the lane fix's *prime* half had no failing
+test at all — reverting it alone left 2065 of 2065 green, because every bit of
+failing power lived in the sibling half of the same commit. A fix round closed
+it with an ablation demonstrated in both directions. The lesson is now that a
+two-site fix needs a pin per site: one test that fails when either half is
+reverted is indistinguishable, from the outside, from one test that pins one
+half and ignores the other.
+
+### Counts at the merged tip
+
+`e08e7ce`: full suite **2067 passed, 10 skipped** — run in the worktree and
+again on the merged tree in the main checkout, identical. `cargo test` (ARMED)
+**1247**, `cargo test --no-default-features` (GLASS) **783**, clippy clean on
+both legs, `cargo fmt --check` clean. Still every count offline and synthetic;
+**What has NEVER RUN LIVE** above is unchanged by any of this.

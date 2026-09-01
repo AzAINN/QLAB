@@ -238,7 +238,8 @@ qlab tui
 Rust/Ratatui client in `clients/atlas-tui`, ten views on `1`–`9` and `0`:
 Atlas, Desk, Markets, Book, Research, Predictors, Workforce, Audit, Settings,
 Visuals. The launcher refuses rather than falling back if the binary is not
-there.
+there. ATLAS is the desk chat by default and a live `qlab cli` terminal while
+one is running — `/cli` opens the pane in that same column, sidebar beside it.
 
 On ATLAS, `/ask` asks the desk what it would do: the gate ranks every
 registered template, the ones it permits become approvable proposals on the
@@ -351,7 +352,9 @@ rule: exactly one explicit confirmation. It is one click on a box that
 hash, the referee PASS is pinned to the same hash, and the owner re-validates
 the request and refuses it without a persisted approval. Whether
 this window may write at all is the owner's persisted posture, asked once at
-startup — not a launch flag.
+startup — not a launch flag. The same door asks which mind runs Atlas, once, on
+a desk whose answer the owner has never recorded; Settings ▸ MODELS is where
+it changes after that.
 
 ## Running qlab
 
@@ -414,7 +417,15 @@ plus read-only web — no shell and no filesystem. `qlab build` opens Claude Cod
 on this checkout with its own default tools and its own interactive permission
 prompts, so every edit is one you approve; if it touches `qlab/` or
 `clients/atlas-tui/` you are offered `qlab --restart runtime` and never given
-it. The workstation spells both as `/cli` and `/build`.
+it. The workstation spells both as `/cli` and `/build`, and they no longer do
+the same thing to the screen. `/cli` opens the session as a **pane inside the
+ATLAS tab** — a real pseudoterminal running that same `qlab cli`, taking the
+chat and WOULD DO columns while the desk's sidebar and the PULSE rail stay
+beside it; `i` or a click gives it the keyboard, `ctrl-]` takes it back, and
+the pane's own border says which of you holds it. `/build`, and `qlab cli`
+typed at a shell, still take the whole terminal until the child exits. A desk
+that reasons with a local model refuses `/cli` by name — `qlab cli` is a Claude
+verb — and the monitoring build has no pane at all.
 
 Both verbs read the rights the desk holds — set on Settings ▸ MODELS, persisted
 in `atlas_rights.json` under the state directory. With `web` withdrawn,

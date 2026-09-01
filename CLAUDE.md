@@ -36,8 +36,14 @@ cd clients/atlas-tui && cargo run   # run it against the owner on QLAB_UI_PORT
 replacement. Both read `/api/tui`, and neither ever holds a registry handle.
 Its default build now ships armed, so the by-construction claim narrows to the
 `--no-default-features` monitoring artifact: that binary contains no
-`net::write`, no confirm modal and no `Posture::Operator`, so invariant 3 holds
-there by absence. In the armed build,
+`net::write`, no confirm modal, no `Posture::Operator`, and — since the ATLAS
+terminal pane landed — no pty, no spawn and no forwarded keystroke, so
+invariant 3 holds there by absence. Verify it with `nm`, minding three traps:
+build each leg to its own snapshot first (both write the same
+`target/debug/atlas` and silently overwrite each other), give `nm` an ABSOLUTE
+path (a relative one under a redirected `CARGO_TARGET_DIR` reports a false 0),
+and count the mangled symbol path `5atlas3pty` — the loose `atlas.*pty` matches
+`is_empty` and is nonzero on both legs. In the armed build,
 `human_confirmed` comes from one click on a box that displays the last six of
 the plan's own `targets_hash` and posts it, the referee PASS is pinned to that
 same hash, and the owner re-validates every write and refuses without a
@@ -86,11 +92,16 @@ excluded from `[all]`, the staged runtime, and the default ablation.
   narrowed to `WebSearch,WebFetch` plus the owner-backed proxy — no shell, no
   filesystem. `qlab build "<request>"` is Claude Code on this checkout with its
   own default tools and its own interactive permission prompts, because the
-  operator is in the loop. The workstation's `/cli` and `/build` spawn those
-  verbs (`clients/atlas-tui/src/handoff.rs`): leave the alternate screen,
-  disable mouse capture and raw mode, run the child on the inherited terminal,
-  restore, repaint. A build that touched `qlab/` or `clients/atlas-tui/` is
-  *offered* `qlab --restart runtime` and never given it.
+  operator is in the loop. The workstation spawns those same two verbs by two
+  different paths. `/build` takes `clients/atlas-tui/src/handoff.rs`: leave the
+  alternate screen, disable mouse capture and raw mode, run the child on the
+  inherited terminal, restore, repaint. `/cli` takes
+  `clients/atlas-tui/src/pty.rs` and `src/pane.rs`: the child runs on a
+  pseudoterminal inside the ATLAS column, the screen is never handed over, and
+  the desk sidebar stays beside it. On both paths the child is `qlab cli` or
+  `qlab build`, never `claude` directly — the tool universe is decided in
+  `qlab/tui/claude.py` and nowhere else. A build that touched `qlab/` or
+  `clients/atlas-tui/` is *offered* `qlab --restart runtime` and never given it.
 - **Algorithm catalog** (`qlab/algorithms/catalog.py`): every method is
   `operational`, `research`, or `offline`. `algorithms.solve` enforces the
   stage in code — research/offline entries are visible but not agent-runnable.

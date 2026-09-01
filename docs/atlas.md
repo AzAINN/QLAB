@@ -138,9 +138,15 @@ The ATLAS view's chat box is the desk assistant and the command row at once.
 `/approve` and `/execute` open the hash-bound boxes, `/clear` empties this
 window's chat pane. `/cli` opens the real Claude CLI wearing the Atlas persona
 through the owner-backed proxy — owner tools plus read-only web, no shell and
-no filesystem — and `/build` opens Claude Code on this checkout. Both spawn a
-child that owns the terminal until it exits; a window the desk declined
-operator authority to is offered neither.
+no filesystem — and `/build` opens Claude Code on this checkout. What each does
+to the screen is now different. `/cli` runs its child on a pseudoterminal
+**inside the ATLAS tab**: the pane takes the chat and WOULD DO columns, the desk
+sidebar and the PULSE rail stay drawn beside it, `i` or a click hands the
+keyboard over, `ctrl-]` takes it back, and `c` closes a pane whose child has
+ended. `/build` still leaves the workstation and gives the child the whole
+terminal until it exits. A window the desk declined operator authority to is
+offered neither, and `/cli` alone is also refused by name on a desk that
+reasons with a local model — `qlab cli` is a Claude verb.
 
 For a core-only install:
 

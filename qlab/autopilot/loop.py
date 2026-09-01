@@ -310,7 +310,10 @@ def daily_ops(
                                             state.get("high_water_mark", state["equity"]))
     alerts = []
     if dd_breached:
-        reg.set_halt(True)
+        # The latch names the book the drawdown was measured on. Defaulted, it
+        # halted DEFAULT_BOOK while the breached venue stayed tradable — the
+        # same book mismatch the plan's pre-trade check had.
+        reg.set_halt(True, book=broker.name)
         alerts.append("kill_switch:drawdown")
 
     today = date.today()

@@ -163,10 +163,16 @@ def register_trader_tools(app, st: TraderState) -> None:
 
         Deliberately ungated: it only ever moves the desk to the safe side, and
         an agent that can stop trading faster than a human is a feature.
+
+        Named by book: the halt is per-book, so a defaulted call halts
+        DEFAULT_BOOK — which on an Alpaca desk is a book nobody is trading,
+        leaving the traded one live. The book is returned because an operator
+        told only "halted" cannot tell which desk stopped.
         """
-        st.registry.set_halt(True)
-        st.registry.record_event("halt", {"by": "tool"})
-        return {"halted": True}
+        book = st.broker.name
+        st.registry.set_halt(True, book=book)
+        st.registry.record_event("halt", {"by": "tool", "book": book})
+        return {"halted": True, "book": book}
 
     @app.tool(name="resume")
     def resume() -> dict:
@@ -178,16 +184,20 @@ def register_trader_tools(app, st: TraderState) -> None:
         with ``QLAB_HEADLESS_EXECUTE=1``, which an agent connected over MCP
         cannot set.
         """
+        book = st.broker.name
         if os.environ.get("QLAB_HEADLESS_EXECUTE") != "1":
             # The real state, not a hardcoded True: the refusal must describe
-            # the switch as it stands, or a caller learns the wrong fact.
-            return {"halted": bool(st.registry.get_account().get("halted")),
+            # the switch as it stands, or a caller learns the wrong fact — and
+            # the switch it must describe is this desk's book, not DEFAULT_BOOK,
+            # which on an Alpaca desk is a row nobody trades against.
+            return {"halted": bool(st.registry.get_account(book).get("halted")),
+                    "book": book,
                     "error": "clearing the kill switch is not agent-reachable: "
                              "the operator must authorize this process out of "
                              "band (QLAB_HEADLESS_EXECUTE=1)"}
-        st.registry.set_halt(False)
-        st.registry.record_event("resume", {"by": "tool"})
-        return {"halted": False}
+        st.registry.set_halt(False, book=book)
+        st.registry.record_event("resume", {"by": "tool", "book": book})
+        return {"halted": False, "book": book}
 
     @app.tool(name="risk_report")
     def risk_report() -> dict:

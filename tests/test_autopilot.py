@@ -124,6 +124,47 @@ def test_daily_ops_drift_trigger_builds_proposal_without_execution(monkeypatch):
     reg.close()
 
 
+def test_daily_ops_latches_the_halt_on_the_book_it_measured(monkeypatch):
+    """The kill switch must latch the book whose drawdown breached.
+
+    `daily_ops` measures the drawdown on the broker it opened, so latching
+    `DEFAULT_BOOK` instead halts a venue nobody is trading and leaves the
+    breached one tradable -- the docstring already promises the book decides
+    "which book the trailing-drawdown kill switch is evaluated against before
+    it latches the halt".
+    """
+    import qlab.autopilot.loop as loop
+    from qlab.trader.broker import SimulatedPaperBroker, default_price_provider
+    from qlab.trader.mandate import load_mandate
+
+    class _AlpacaNamedBroker(SimulatedPaperBroker):
+        # Only the name decides which account row the halt lands on; the real
+        # adapter needs credentials and a network.
+        name = "alpaca_paper"
+
+    reg = Registry(":memory:")
+    mandate = load_mandate()
+    broker = _AlpacaNamedBroker(
+        reg, default_price_provider(offline=True), mandate.paper_capital,
+        universe=mandate.universe_whitelist)
+    # A peak this book never recovered from: a 90% drawdown, far past the 15%
+    # kill switch.
+    reg.update_high_water_mark(100_000.0, book=broker.name)
+    # The book nobody is trading exists and is clear, so latching it is visible.
+    reg.init_account(mandate.paper_capital, book="simulated_paper")
+    monkeypatch.setattr(loop, "get_broker", lambda *a, **k: broker)
+    # The latch happens before any trigger is considered; no proposal is needed
+    # to observe which book it wrote, and skipping them keeps this test tight.
+    monkeypatch.setattr(loop, "evaluate_triggers", lambda _state: [])
+
+    result = loop.daily_ops(registry=reg, mandate=mandate, offline=True)
+
+    assert "kill_switch:drawdown" in result["alerts"]
+    assert reg.get_account("alpaca_paper")["halted"] is True
+    assert reg.get_account("simulated_paper")["halted"] is False
+    reg.close()
+
+
 def test_autopilot_cli_once_prints_fired_triggers(monkeypatch, capsys):
     import qlab.autopilot.cli as cli
 

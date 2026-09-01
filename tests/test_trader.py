@@ -37,6 +37,45 @@ def _broker(reg):
         starting_cash=10000.0, universe=CORE)
 
 
+class _AlpacaNamedBroker(SimulatedPaperBroker):
+    """A simulated book answering to the Alpaca book's name.
+
+    The account row -- cash, high-water mark, halt -- is keyed by
+    ``Broker.name``, and every book-mismatch bug is invisible on the book that
+    happens to be ``DEFAULT_BOOK``. The real Alpaca adapter needs credentials
+    and a network, so the name is the only part of it these tests need.
+    """
+
+    name = "alpaca_paper"
+
+
+def _alpaca_book(reg):
+    mandate = load_mandate()
+    return _AlpacaNamedBroker(
+        reg, default_price_provider(offline=True),
+        mandate.paper_capital, universe=mandate.universe_whitelist)
+
+
+def _deploy_fully(reg, broker, mandate):
+    """Put the book fully invested so a later plan is a rebalance, not a deploy."""
+    w = mandate.universe_whitelist
+    full = {t: 1.0 / len(w) for t in w}
+    plan = build_plan(reg, broker, mandate, full, "dec-full")
+    reg.log_verdict("dec-full", "PASS", [], "deterministic", targets=full)
+    execute_plan(reg, broker, plan, mandate)
+    return full
+
+
+def _reshuffle(mandate):
+    """Targets that move weight between two names: gross is unchanged and one
+    position grows, so this is never a liquidation and never gets the waiver."""
+    w = mandate.universe_whitelist
+    targets = {t: 1.0 / len(w) for t in w}
+    targets[w[0]] = targets[w[0]] + 0.02
+    targets[w[1]] = targets[w[1]] - 0.02
+    return targets
+
+
 def test_mandate_rejects_offuniverse_ticker():
     m = load_mandate()
     with pytest.raises(MandateViolation):
@@ -599,18 +638,21 @@ def test_resume_needs_the_same_out_of_band_authorization_execution_does(
     register_trader_tools(app, st)
 
     monkeypatch.delenv("QLAB_HEADLESS_EXECUTE", raising=False)
-    assert app.tools["halt"]() == {"halted": True}
-    assert bool(tmp_registry.get_account().get("halted")) is True
+    # The book is pinned, not defaulted: the halt is per-book, so a return that
+    # does not name one cannot say which desk stopped.
+    assert app.tools["halt"]() == {"halted": True, "book": "simulated_paper"}
+    assert bool(tmp_registry.get_account("simulated_paper").get("halted")) is True
 
     refused = app.tools["resume"]()
     assert refused["halted"] is True
+    assert refused["book"] == "simulated_paper"
     assert "QLAB_HEADLESS_EXECUTE=1" in refused["error"]
     # The refusal is real: the kill switch did not move.
-    assert bool(tmp_registry.get_account().get("halted")) is True
+    assert bool(tmp_registry.get_account("simulated_paper").get("halted")) is True
 
     monkeypatch.setenv("QLAB_HEADLESS_EXECUTE", "1")
-    assert app.tools["resume"]() == {"halted": False}
-    assert bool(tmp_registry.get_account().get("halted")) is False
+    assert app.tools["resume"]() == {"halted": False, "book": "simulated_paper"}
+    assert bool(tmp_registry.get_account("simulated_paper").get("halted")) is False
 
 
 def test_daily_order_cap_is_cumulative_across_plans(reg_and_broker):
@@ -767,6 +809,101 @@ def test_non_liquidation_refused_under_halt(reg_and_broker):
     reg.log_verdict("dec-reshuffle", "PASS", [], "deterministic", targets=reshuffle)
     with pytest.raises(MandateViolation, match="halted"):
         execute_plan(reg, broker, p2, mandate)
+
+
+def test_halt_latched_on_the_alpaca_book_refuses_the_next_plan_there(tmp_registry):
+    """The kill switch must stop the book it fired for.
+
+    ``build_plan``/``execute_plan`` latch ``set_halt(True, book=broker.name)``,
+    so an execute-time check that reads ``DEFAULT_BOOK`` reads a book nobody
+    halted: on an Alpaca desk the drawdown switch fired and the very next plan
+    executed anyway.
+    """
+    reg = tmp_registry
+    broker = _alpaca_book(reg)
+    mandate = replace(load_mandate(), max_turnover_per_rebalance=3.0)
+    _deploy_fully(reg, broker, mandate)
+
+    # Exactly what plan.py latches when the drawdown kill switch fires.
+    reg.set_halt(True, book=broker.name)
+
+    reshuffle = _reshuffle(mandate)
+    p2 = build_plan(reg, broker, mandate, reshuffle, "dec-reshuffle")
+    assert p2.pre_trade["liquidating"] is False
+    reg.log_verdict("dec-reshuffle", "PASS", [], "deterministic", targets=reshuffle)
+    with pytest.raises(MandateViolation, match="halted"):
+        execute_plan(reg, broker, p2, mandate)
+
+
+def test_a_halt_on_one_book_does_not_halt_the_other(tmp_registry):
+    """Reading ``DEFAULT_BOOK`` at execute time is wrong in both directions: it
+    misses the halt on another venue AND stops a venue nobody halted. The
+    per-book design ("a halt on one venue is not a halt on all") must survive.
+    """
+    reg = tmp_registry
+    broker = _alpaca_book(reg)
+    mandate = replace(load_mandate(), max_turnover_per_rebalance=3.0)
+    _deploy_fully(reg, broker, mandate)
+
+    reg.init_account(mandate.paper_capital, book="simulated_paper")
+    reg.set_halt(True, book="simulated_paper")
+    assert reg.get_account("simulated_paper")["halted"] is True
+    assert reg.get_account("alpaca_paper")["halted"] is False
+
+    reshuffle = _reshuffle(mandate)
+    p2 = build_plan(reg, broker, mandate, reshuffle, "dec-reshuffle")
+    reg.log_verdict("dec-reshuffle", "PASS", [], "deterministic", targets=reshuffle)
+    assert execute_plan(reg, broker, p2, mandate)["state"] == "reconciled"
+
+
+def test_liquidation_still_executes_under_a_halt_on_its_own_book(tmp_registry):
+    """The carve-out survives being pointed at the right book: a halt refuses
+    everything EXCEPT de-risking, and de-risking is how a halted desk gets flat.
+    """
+    reg = tmp_registry
+    broker = _alpaca_book(reg)
+    mandate = replace(load_mandate(), max_turnover_per_rebalance=3.0)
+    _deploy_fully(reg, broker, mandate)
+
+    reg.set_halt(True, book=broker.name)
+    assert reg.get_account(broker.name)["halted"] is True
+
+    w = mandate.universe_whitelist
+    reduced = {t: 0.5 / len(w) for t in w}
+    p2 = build_plan(reg, broker, mandate, reduced, "dec-liq")
+    assert p2.pre_trade["liquidating"] is True
+    reg.log_verdict("dec-liq", "PASS", [], "deterministic", targets=reduced)
+    assert execute_plan(reg, broker, p2, mandate)["state"] == "reconciled"
+
+
+def test_halt_tool_latches_the_book_the_desk_is_trading(tmp_registry, monkeypatch):
+    """`halt`/`resume` must move the switch on the book in use, and the refusal
+    must name the book it read -- an operator told "halted" about a book nobody
+    is trading has been told nothing.
+    """
+    from qlab.mcp.quant_trader import TraderState, register_trader_tools
+
+    st = TraderState(registry=tmp_registry, offline=True)
+    # Only the book's NAME decides which account row the halt lands on, so a
+    # simulated broker wearing the Alpaca name is the whole Alpaca desk here.
+    st.broker = _alpaca_book(tmp_registry)
+    app = _StubApp()
+    register_trader_tools(app, st)
+
+    monkeypatch.delenv("QLAB_HEADLESS_EXECUTE", raising=False)
+    assert app.tools["halt"]() == {"halted": True, "book": "alpaca_paper"}
+    assert tmp_registry.get_account("alpaca_paper")["halted"] is True
+    assert tmp_registry.get_account("simulated_paper")["halted"] is False
+
+    refused = app.tools["resume"]()
+    assert refused["halted"] is True
+    assert refused["book"] == "alpaca_paper"
+    assert "QLAB_HEADLESS_EXECUTE=1" in refused["error"]
+    assert tmp_registry.get_account("alpaca_paper")["halted"] is True
+
+    monkeypatch.setenv("QLAB_HEADLESS_EXECUTE", "1")
+    assert app.tools["resume"]() == {"halted": False, "book": "alpaca_paper"}
+    assert tmp_registry.get_account("alpaca_paper")["halted"] is False
 
 
 def test_simulated_positions_carry_unrealized_pl():

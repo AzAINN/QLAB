@@ -293,9 +293,16 @@ def execute_plan(registry: Registry, broker: Broker, plan: OrderPlan,
         # A halted account (kill switch already latched) executes ONLY a genuine
         # liquidation; a fresh non-liquidation plan is refused even if its own
         # drawdown check would pass.
-        if registry.get_account().get("halted") and not is_liquidating:
+        #
+        # Named by book, because the halt is per-book and both latches write
+        # `broker.name`. Defaulted, this read landed on DEFAULT_BOOK: the switch
+        # fired on the Alpaca book, latched `alpaca_paper`, and the next plan's
+        # check read `simulated_paper`, found it clear, and executed. It leaked
+        # the other way too — the simulated book's halt stopped a venue nobody
+        # had halted.
+        if registry.get_account(broker.name).get("halted") and not is_liquidating:
             raise MandateViolation(
-                "account is halted; only liquidation may execute")
+                f"the {broker.name} book is halted; only liquidation may execute")
         drift = max((abs(float(live_w.get(t, 0.0)) - float(assumed.get(t, 0.0)))
                      for t in set(assumed) | set(live_w)), default=0.0)
         if drift > 1e-3:

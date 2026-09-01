@@ -1,5 +1,11 @@
 # Full-surface review — 2026-07-29
 
+> **Historical, corrected 2026-09-01.** The findings below are stated in the
+> present tense of the `77c5fe9` tree and are not current: G1's bare-flag
+> execution path was closed by `0dccd91` and `ee55606` (execution now consumes
+> a persisted, plan-bound approval), and the T-series describes the retired
+> Textual client.
+
 Three parallel deep reviews over the whole runtime (registry/operator core,
 owner API/lifecycle, TUI/Claude session), run against the tree at `77c5fe9`
 just before the desk-mode merge. Every finding below survived an explicit

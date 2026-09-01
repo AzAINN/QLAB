@@ -11,14 +11,17 @@ Read README.md first; it is the authoritative overview.
 ## Commands
 
 ```bash
-python -m pip install -e ".[operator,data,optimize,mcp,dev]"   # dev setup
+python -m pip install -e ".[operator,data,optimize,mcp,trader,dev]"  # what CI installs
 python -m pytest                    # full offline suite (no network needed)
 python -m pytest tests/test_ui.py  -q          # one module while iterating
 qlab                                # the desk (owner + Atlas workstation; --offline; --restart warns, asks a tier, archives)
 qlab owner                          # same owner runtime, headless
 qlab run-once --offline --dry-run   # one governed autopilot cycle, no orders
-                                    # (run-once is proposal-only: it opens an
-                                    # approval request, never books a fill)
+                                    # (proposal-only by default: it opens an
+                                    # approval request. run-once and watch
+                                    # book a fill only when the operator has
+                                    # exported QLAB_AUTOPILOT_EXECUTE=1;
+                                    # daily-ops and autopilot never trade)
 qlab batch configs/specs/ablation_v1.yaml --offline   # staged ablation
 qlab desk                           # one-card desk status (owner must be up)
 qlab workforce run "GOAL"           # headless governed run, streamed live
@@ -73,10 +76,15 @@ excluded from `[all]`, the staged runtime, and the default ablation.
 - The combined `qlab` MCP server (`qlab/mcp/server.py`) is for headless
   sessions and refuses to start while an owner runtime is alive (port guard).
 - **Claude workforce**: the TUI can launch Claude as a coordinator whose only
-  built-in tool is an allowlisted Agent dispatcher for five roles
-  (moments-analyst → challenger → optimization-runner → referee → reporter).
-  Phase state persists in the registry (`workflows`/`workflow_steps`) and is
-  resumable. No Claude role has filesystem, shell, or execution tools.
+  built-in tool is an allowlisted Agent dispatcher for eight roles — the six
+  workflow phases (moments-analyst, contender-scout, challenger,
+  optimization-runner, referee, reporter) and the advisory data-qa and
+  signal-qa — plus the quarantined news-extractor when the goal names news or
+  views (`qlab/tui/claude.py`). The rebalance graph is analyst → challenger →
+  optimizer → referee → reporter; `portfolio_watch` is analyst → scout →
+  reporter, and the scout is the only workforce role granted WebSearch and
+  WebFetch. Phase state persists in the registry (`workflows`/`workflow_steps`)
+  and is resumable. No Claude role has filesystem, shell, or execution tools.
 - **The owner drives its own coordinator** (`qlab/operator/coordinator.py`).
   Registering a workflow is not running it — phases advance only while a
   coordinator walks them — so an Atlas dispatch spawns the same governed
@@ -113,10 +121,16 @@ excluded from `[all]`, the staged runtime, and the default ablation.
    registry through the owner API (or the combined server when no owner runs).
 2. **Tests never open `.lab/registry.duckdb`** — use `Registry(":memory:")`.
    Tests must pass fully offline; synthetic fixtures stand in for market data.
-3. **Referee PASS is bound to the exact `targets_hash`** and plan execution
-   requires a persisted checked plan plus explicit human confirmation
-   (`human_confirmed=True` from the TUI). One explicit confirmation is one
-   click on the hash-bound BOOK box — never zero, and never a second one.
+3. **Referee PASS is bound to the exact `targets_hash`** on every execution
+   path. On the desk path, execution also requires a persisted checked plan
+   plus explicit human confirmation (`human_confirmed=True` from the client):
+   one confirmation is one click on the hash-bound BOOK box — never zero, and
+   never a second one. Two out-of-band hatches skip that confirmation and
+   nothing else — `QLAB_AUTOPILOT_EXECUTE=1` for `qlab run-once`/`qlab watch`
+   (`qlab/autopilot/loop.py`) and `QLAB_HEADLESS_EXECUTE=1` for the headless
+   MCP (`qlab/mcp/quant_trader.py`). Each authorizes one process the operator
+   started; no agent can set either, and neither skips the referee, the cost
+   gate, reconcile, or the mandate.
    Never introduce a raw-order tool or an agent-reachable execution path.
 4. **Fail loud.** No silent fallbacks for missing data, credentials, or
    unconditioned tensors; refuse with a clear error instead.

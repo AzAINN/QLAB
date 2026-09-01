@@ -5,9 +5,9 @@ Which prices the desk reads, whose book it trades, and where it writes. See the
 
 ## Two independent switches
 
-The desk opens on offline synthetic data with a simulated book, so it runs with
-no account at all. Two independent things can be switched on: the data lane and
-the book.
+The desk opens on live market data with a simulated book, so it runs with no
+account at all: the default provider needs no key, and every fill is qlab's
+own. Two independent things can be switched on: the data lane and the book.
 
     alpaca profile login      # browser OAuth; paper-only by construction
     qlab                      # online market data, qlab's own simulated book

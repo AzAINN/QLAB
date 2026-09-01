@@ -11,7 +11,7 @@ own it.
         |
         +-- owner HTTP runtime ---- DuckDB registry and paper book
         |       |
-        |       +-- TUI and web clients observe or request actions over HTTP
+        |       +-- the Atlas workstation and the CLI verbs observe over HTTP
         |       +-- qlab-operator gives the Claude workforce role-bound HTTP tools
         |
         +-- explicit human confirmation is required for paper execution
@@ -151,10 +151,13 @@ the TUI workforce view.
   launched under the TUI. It observes the owner over HTTP and cannot execute a
   paper trade or open DuckDB.
 - Claude runs as an isolated, session-local qlab coordinator, not a developer.
-  Its only built-in tool is an allowlisted Agent dispatcher for the five domain
-  roles. The role files are generated into a temporary project at launch so the
-  Windows command line stays short. No role receives Read, Bash, Edit, Write,
-  browser, raw-order, or paper-execution tools.
+  Its only built-in tool is an allowlisted Agent dispatcher for eight roles —
+  the six workflow phases and the two advisory ones — plus the quarantined
+  news-extractor on a goal that names news or views. The role files are
+  generated into a temporary project at launch so the Windows command line
+  stays short. No role receives Read, Bash, Edit, Write, raw-order, or
+  paper-execution tools, and only contender-scout receives WebSearch and
+  WebFetch.
 - Workforce runs persist analyst → challenger → optimizer → referee → reporter
   phase state in the owner registry, so a stopped CLI session is inspectable and
   resumable from a new one.
@@ -192,7 +195,7 @@ the TUI workforce view.
       operator/     Atlas supervisor, heartbeat, model routing, coordinator driver
       research/     purged walk-forward prediction and quantum-inspired features
       tui/          owner-client plumbing: API client, Claude session, theme
-      ui/           owner HTTP runtime and local web client
+      ui/           owner HTTP runtime: the one DuckDB writer, no client
     agents/         source-of-truth role definitions
     clients/        atlas-tui, the Ratatui client for the same owner runtime
     docs/           operator setup guides

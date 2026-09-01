@@ -1,5 +1,11 @@
 # Atlas Workstation — Ratatui Rewrite Implementation Plan
 
+> **Historical, corrected 2026-09-01.** The posture default has since inverted:
+> `clients/atlas-tui/Cargo.toml` sets `default = ["operator"]`, so the shipped
+> build is armed and Part IV's "read-only by construction" now describes only
+> the `--no-default-features` artifact — see
+> [2026-08-06-armed-desk-design.md](2026-08-06-armed-desk-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the Textual (Python) workstation `qlab/tui/` with a single Rust/Ratatui client grown out of `clients/atlas-tui`, adding live-motion visuals (tachyonfx effects, flash decay, scrolling ticker, animated pipelines) and a FinceptTerminal-grade portfolio/markets surface, while preserving every governance invariant.

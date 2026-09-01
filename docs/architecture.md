@@ -156,8 +156,8 @@ the TUI workforce view.
   news-extractor on a goal that names news or views. The role files are
   generated into a temporary project at launch so the Windows command line
   stays short. No role receives Read, Bash, Edit, Write, raw-order, or
-  paper-execution tools, and only contender-scout receives WebSearch and
-  WebFetch.
+  paper-execution tools, and among them only contender-scout receives
+  WebSearch and WebFetch.
 - Workforce runs persist analyst → challenger → optimizer → referee → reporter
   phase state in the owner registry, so a stopped CLI session is inspectable and
   resumable from a new one.

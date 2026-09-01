@@ -1,20 +1,24 @@
-//! Giving the terminal away for a while: the real Claude CLI, run from inside the workstation.
+//! Giving the terminal away for a while: Claude Code on this checkout, run from inside the workstation.
 //!
 //! `/cli` and `/build` are the only keys on this desk that stop being about the
-//! desk. Everything else here turns a keystroke into a request; these two turn a
-//! keystroke into a *child process* that wants the same terminal this client is
-//! painting on. So the whole of this module is one sequence — give the screen
-//! back, run the child, take the screen again, repaint — and the reason it is a
-//! module with a trait in front of it rather than four lines in `main.rs` is
-//! invariant 10: `main.rs` has no test harness, and an order that has to be
-//! right is the last thing that should only be checkable by running it.
+//! desk, and only one of the two still comes through here. Everything else
+//! turns a keystroke into a request; these two turn it into a *child process* —
+//! `/cli`'s child gets a pseudoterminal of its own inside ATLAS's column
+//! (`pty.rs`) and leaves the desk on screen, and only `/build`'s wants the same
+//! terminal this client is painting on. So the whole of this module is one
+//! sequence — give the screen back, run the child, take the screen again,
+//! repaint — and the reason it is a module with a trait in front of it rather
+//! than four lines in `main.rs` is invariant 10: `main.rs` has no test harness,
+//! and an order that has to be right is the last thing that should only be
+//! checkable by running it.
 //!
 //! **What is spawned is the desk's own verb, never `claude` directly.** Which
 //! tools a Claude session gets, which MCP config it reads and which persona it
 //! wears is decided in one place — `qlab/tui/claude.py`, tested there — and a
 //! client that assembled its own `claude` command line would be a second,
 //! unreviewed answer to that question living where nothing checks it. This file
-//! knows two words: `cli` and `build`.
+//! knows two words: `build`, which it spawns, and [`CLI`], which the pane
+//! does.
 //!
 //! **The reader is paused across the whole of it.** This client keeps a
 //! background task on the same stdin the child is about to want; left running
@@ -37,14 +41,27 @@
 /// gated is the `Command` variant that can reach it and the `run` below that
 /// acts on it — a monitoring build can describe this and has no key that
 /// produces one.
+///
+/// One variant, since `/cli` stopped handing the terminal over: the pane in
+/// ATLAS's column is what an interactive Claude gets now, and a `Cli` arm here
+/// that no `Command` could produce was a hand-off nothing could ask for. The
+/// enum stays an enum because the `match` below is what makes a second child
+/// added later a compile error rather than a silent inheritance of `/build`'s
+/// rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Child {
-    /// Interactive Claude as Atlas, bounded to the owner's proxy plus
-    /// read-only web.
-    Cli,
     /// Claude Code on this checkout, with the operator's request as turn one.
     Build(String),
 }
+
+/// The desk's verb for an interactive Claude session: `<launcher> cli`.
+///
+/// Here rather than in `pty.rs`, beside [`launcher`] and the paragraph above
+/// that says why the child is a `qlab` verb at all: "which qlab" and "which
+/// verb" are one answer, and the pane is only the current caller of it. The
+/// tests spell the word out rather than reading it from here — an assertion
+/// that takes both sides from the same constant pins nothing.
+pub const CLI: &str = "cli";
 
 /// The launcher this client hands work to.
 ///
@@ -66,9 +83,12 @@ pub fn launcher() -> String {
 }
 
 /// What gets spawned, in full.
+///
+/// A `match` over one variant, deliberately: it is the compiler's half of the
+/// note on [`Child`], and a `let` would let a second child slip through with
+/// `/build`'s argv.
 pub fn argv(child: &Child, launcher: &str) -> Vec<String> {
     match child {
-        Child::Cli => vec![launcher.to_string(), "cli".to_string()],
         Child::Build(request) => vec![launcher.to_string(), "build".to_string(), request.clone()],
     }
 }
@@ -167,12 +187,17 @@ pub fn run(child: Child, launcher: &str, host: &mut dyn Host) -> Vec<String> {
         Ok(Some(_)) => {}
     }
 
-    // Only after a build, and only ever as an offer. `/cli`'s session has no
-    // filesystem tools, so asking git after it would be a sentence with no
-    // cause; and a desk restarted out from under an operator who was mid-
-    // approval is not something a keystroke may decide (invariant 8 says the
-    // restart is needed, not that this client may perform it).
-    if matches!(child, Child::Build(_)) && host.desk_sources_changed() {
+    // Only ever an offer: a desk restarted out from under an operator who was
+    // mid-approval is not something a keystroke may decide (invariant 8 says
+    // the restart is needed, not that this client may perform it).
+    //
+    // Asked of every child, because a build is the only child there is. It used
+    // to be `matches!(child, Child::Build(_))`, guarding against a `/cli`
+    // hand-off whose session has no filesystem tools — that child is a pane
+    // now, and a condition whose false arm nothing can construct is a condition
+    // no test can reach. A second variant added to `Child` breaks `argv` above,
+    // which is where the rule is restated for whoever adds it.
+    if host.desk_sources_changed() {
         notes.push(
             "this build touched code the desk serves — restart it to pick it up: \
              qlab --restart runtime"

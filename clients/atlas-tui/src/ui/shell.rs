@@ -177,19 +177,6 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     fx.rects.chips.set(chips(rows[3]));
 }
 
-/// How wide the desk rail is, on a frame this wide, with or without a pane in
-/// the column beside it.
-///
-/// [`PULSE_W`], except while a child is running in ATLAS's column and what
-/// would be left for it is under [`PANE_MIN_W`]. WOULD DO has already gone by
-/// then — the pane spans both of ATLAS's own columns, and that panel is a
-/// proposal ranking DESK and BOOK also carry — so the rail is the last thing to
-/// go, and it goes only when what it is standing beside would be unusable.
-///
-/// A shell decision rather than the view's, because a view is handed its column
-/// and cannot widen it. Keyed on the *child* like everything else in this
-/// stream: a desk with no session laid out differently would be a client whose
-/// panels moved for a reason nothing on screen explains.
 /// The suggestion strip's height on this frame.
 ///
 /// A row the command line borrows from the content while it has focus, and
@@ -205,6 +192,19 @@ fn strip_rows(store: &Store, height: u16) -> u16 {
     u16::from(store.nav.focus == Focus::Command && height >= CMD_MIN_H)
 }
 
+/// How wide the desk rail is, on a frame this wide, with or without a pane in
+/// the column beside it.
+///
+/// [`PULSE_W`], except while a child is running in ATLAS's column and what
+/// would be left for it is under [`PANE_MIN_W`]. WOULD DO has already gone by
+/// then — the pane spans both of ATLAS's own columns, and that panel is a
+/// proposal ranking DESK and BOOK also carry — so the rail is the last thing to
+/// go, and it goes only when what it is standing beside would be unusable.
+///
+/// A shell decision rather than the view's, because a view is handed its column
+/// and cannot widen it. Keyed on the *child* like everything else in this
+/// stream: a desk with no session laid out differently would be a client whose
+/// panels moved for a reason nothing on screen explains.
 fn rail_width(width: u16, for_a_pane: bool) -> u16 {
     match for_a_pane && width.saturating_sub(NAV_W + PULSE_W + 1) < PANE_MIN_W {
         true => 0,

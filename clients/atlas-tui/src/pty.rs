@@ -228,7 +228,9 @@ impl DeskCli {
 impl Spawn for DeskCli {
     fn command(&self) -> CommandBuilder {
         let mut command = CommandBuilder::new(&self.launcher);
-        command.arg("cli");
+        // The word from `handoff`, beside the launcher it goes with: one place
+        // answers "which qlab, which verb" for both the pane and the hand-off.
+        command.arg(crate::handoff::CLI);
         // Overrides, on top of the base environment the builder seeded itself
         // with. `env` marks each of these as the caller's own, which is what
         // `iter_extra_env_as_str` — and the test below — can tell apart from a

@@ -278,6 +278,42 @@ async fn one_key_closes_a_pane_whose_child_has_ended() {
 }
 
 #[tokio::test]
+async fn a_window_that_lost_its_arming_can_still_leave_a_dead_pane() {
+    // The posture is the owner's to change and it can change under a live pane,
+    // which is how a desk ends up glass with a terminal in its main column.
+    // Closing a dead pane writes nothing — the child is gone and the session
+    // with it — so this key is not the posture's to refuse, and the alternative
+    // is a chat the operator cannot get back to until the desk is re-armed.
+    let (mut store, mut views, (tx, mut rx)) = desk();
+    atlas::pane::open(&mut store, &mut views, &Script("exit 0"), COLUMN, tx)
+        .expect("the child started");
+    until(&mut store, &mut rx, "the child to end", |store| {
+        matches!(store.pty_state(), PtyState::Ended { .. })
+    })
+    .await;
+
+    store.posture = atlas::store::Posture::Glass;
+    assert_eq!(press(&mut store, &mut views, KeyCode::Char('c')), None);
+    assert_eq!(
+        store.pty_state(),
+        PtyState::Absent,
+        "a desk flipped to glass under a pane cannot leave the one it is holding"
+    );
+}
+
+#[tokio::test]
+async fn a_window_that_lost_its_arming_still_may_not_close_a_live_one() {
+    // The other half, and the reason the key moved rather than the whole block:
+    // what makes closing safe is the *ending*, not the posture. A running child
+    // is still a Claude session one keystroke may not end.
+    let (mut store, mut views, (tx, _rx)) = desk();
+    atlas::pane::open(&mut store, &mut views, &WAITING, COLUMN, tx).expect("the child started");
+    store.posture = atlas::store::Posture::Glass;
+    press(&mut store, &mut views, KeyCode::Char('c'));
+    assert_eq!(store.pty_state(), PtyState::Running);
+}
+
+#[tokio::test]
 async fn the_key_that_closes_a_dead_pane_leaves_a_live_child_alone() {
     // One keystroke may not end a Claude session. Ctrl-C interrupts the child
     // (`keys_pty.rs`), and this key is for the pane it leaves behind.
@@ -408,11 +444,19 @@ async fn the_column_a_pane_gets_is_wider_than_the_one_beside_the_desk_rail() {
     // The measurement `/cli` makes is the layout's own, and at a width where
     // the rail gives its column up the two differ by the whole rail — which is
     // the difference between a terminal and a refusal.
+    //
+    // Three widths, because the completion record states three and a number
+    // stated nowhere else is how the stale "the column is 45" survived a whole
+    // task. 96 is where the rail has already gone (96 − 8 − 1); 120 and 160
+    // both keep it (width − 8 − 34 − 1), and the widest is the one the record
+    // quoted with no test behind it.
     let (store, _views, _bus) = desk();
     let narrow = atlas::ui::shell::pane_column(Rect::new(0, 0, 96, 36), &store);
     assert_eq!(narrow.width, 87);
     let wide = atlas::ui::shell::pane_column(Rect::new(0, 0, 120, 36), &store);
     assert_eq!(wide.width, 77);
+    let wider = atlas::ui::shell::pane_column(Rect::new(0, 0, 160, 36), &store);
+    assert_eq!(wider.width, 117);
 }
 
 // -- what quitting the workstation did to the child -------------------------

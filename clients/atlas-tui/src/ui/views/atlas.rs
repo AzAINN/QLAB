@@ -477,6 +477,29 @@ impl AtlasView {
                 None
             }
             _ => {
+                // The way out of a pane whose child has ended, and the key the
+                // border names there. Outside the posture gate below, unlike
+                // every other key in this block: closing a dead pane writes
+                // nothing — the child is gone and the session with it — and a
+                // desk flipped to glass while a pane was up would otherwise
+                // hold a dead terminal in its main column with no key that
+                // clears it. Only on an ending, in both postures: closing a
+                // pane drops the session, which stops the child, and one
+                // unconfirmed keystroke may not end a Claude session. A running
+                // one is interrupted first (Ctrl-C, inside the pane), and this
+                // is for what it leaves behind.
+                //
+                // Its help row stays a `w` row: a window that was never armed
+                // can have no pane to close, and the pane's own border names
+                // this key in the state it works in — which is where an
+                // operator looking at a dead pane is already looking.
+                #[cfg(feature = "operator")]
+                if k.code == KeyCode::Char('c')
+                    && matches!(store.pty_state(), PtyState::Ended { .. })
+                {
+                    store.close_pty();
+                    return None;
+                }
                 #[cfg(feature = "operator")]
                 if store.posture.writes() {
                     // The pane's focus key, claimed before the ask row's own —
@@ -488,18 +511,6 @@ impl AtlasView {
                     // field one state later.
                     if k.code == KeyCode::Char('i') && store.pty_state() != PtyState::Absent {
                         store.pty_focus(true);
-                        return None;
-                    }
-                    // The way out of a pane whose child has ended, and the key
-                    // the border names there. Only on an ending: closing a pane
-                    // drops the session, which stops the child — and one
-                    // unconfirmed keystroke may not end a Claude session. A
-                    // running one is interrupted first (Ctrl-C, inside the
-                    // pane), and this is for what it leaves behind.
-                    if k.code == KeyCode::Char('c')
-                        && matches!(store.pty_state(), PtyState::Ended { .. })
-                    {
-                        store.close_pty();
                         return None;
                     }
                     // The booking key, claimed only while the ask row is idle

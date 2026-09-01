@@ -1,4 +1,4 @@
-//! `/cli` and `/build`: what the workstation does with the terminal while the real Claude CLI holds it.
+//! `/cli` and `/build`: the desk's two Claude words, and what the hand-off does with the terminal.
 //!
 //! Two things are pinned here and neither is about HTTP. First the *order* of
 //! the hand-off — a child that inherits a terminal still in raw mode with the
@@ -16,7 +16,7 @@
 //! palette resolves. So the reader is paused around the child and whatever
 //! queued behind it is thrown away, and both are pinned here by position.
 //!
-//! The spawner is fake, deliberately: what a real `qlab cli` does with an
+//! The spawner is fake, deliberately: what a real `qlab build` does with an
 //! inherited tty cannot be observed from a test harness that has no tty, so
 //! what is testable is the sequence around it, and that is what this file is.
 
@@ -87,21 +87,25 @@ fn the_screen_is_given_up_before_the_child_and_taken_back_after_it() {
         exit: Some(0),
         ..Default::default()
     };
-    let notes = handoff::run(Child::Cli, "qlab", &mut host);
+    let notes = handoff::run(Child::Build("add a visual".into()), "qlab", &mut host);
     assert_eq!(
         host.calls,
         vec![
             "pause".to_string(),
             "leave".to_string(),
-            "spawn:qlab cli".to_string(),
+            "spawn:qlab build add a visual".to_string(),
             "enter".to_string(),
             "drain".to_string(),
             "resume".to_string(),
             "redraw".to_string(),
+            // The git question is last and outside the sequence: it is asked of
+            // the checkout after the screen is back, not of the child.
+            "git".to_string(),
         ],
         "the reader stops before the screen comes down and starts after it goes back"
     );
-    // A clean run says nothing: the operator watched it happen.
+    // A clean run over a clean checkout says nothing: the operator watched it
+    // happen.
     assert!(notes.is_empty(), "{notes:?}");
 }
 
@@ -115,17 +119,18 @@ fn a_child_that_never_started_still_gets_the_screen_back_and_says_why() {
         spawn_fails: true,
         ..Default::default()
     };
-    let notes = handoff::run(Child::Cli, "qlab", &mut host);
+    let notes = handoff::run(Child::Build("add a visual".into()), "qlab", &mut host);
     assert_eq!(
         host.calls,
         vec![
             "pause".to_string(),
             "leave".to_string(),
-            "spawn:qlab cli".to_string(),
+            "spawn:qlab build add a visual".to_string(),
             "enter".to_string(),
             "drain".to_string(),
             "resume".to_string(),
             "redraw".to_string(),
+            "git".to_string(),
         ],
         "a child that never started still hands the terminal back"
     );
@@ -135,14 +140,14 @@ fn a_child_that_never_started_still_gets_the_screen_back_and_says_why() {
 
 #[test]
 fn a_child_that_refused_carries_its_own_exit_code_back() {
-    // `qlab cli` refuses by name when the Claude binary is absent or the owner
-    // is down, and its sentence is printed onto a screen this client is about
-    // to paint over. The code is what survives, so the note has to name it.
+    // `qlab build` refuses by name when the Claude binary is absent, and its
+    // sentence is printed onto a screen this client is about to paint over. The
+    // code is what survives, so the note has to name it.
     let mut host = Fake {
         exit: Some(2),
         ..Default::default()
     };
-    let notes = handoff::run(Child::Cli, "qlab", &mut host);
+    let notes = handoff::run(Child::Build("add a visual".into()), "qlab", &mut host);
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains('2'), "{notes:?}");
 }
@@ -191,20 +196,6 @@ fn a_build_that_changed_nothing_the_desk_serves_offers_nothing() {
     };
     let notes = handoff::run(Child::Build("read the code".into()), "qlab", &mut host);
     assert!(host.calls.contains(&"git".to_string()));
-    assert!(notes.is_empty(), "{notes:?}");
-}
-
-#[test]
-fn the_cli_never_asks_git_anything() {
-    // It changed no files by construction — its session has no filesystem
-    // tools — so a restart offer after it would be a sentence with no cause.
-    let mut host = Fake {
-        exit: Some(0),
-        dirty: true,
-        ..Default::default()
-    };
-    let notes = handoff::run(Child::Cli, "qlab", &mut host);
-    assert!(!host.calls.contains(&"git".to_string()));
     assert!(notes.is_empty(), "{notes:?}");
 }
 
@@ -297,11 +288,20 @@ fn the_child_is_the_desks_own_verb_and_never_claude_directly() {
     // to that question living where nothing tests it.
     // The launcher is a parameter and not an env read, so this asserts the
     // same thing in a shell that has `QLAB_BIN` set as in one that does not.
-    assert_eq!(handoff::argv(&Child::Cli, "qlab"), vec!["qlab", "cli"]);
+    let child = Child::Build("do it".into());
     assert_eq!(
-        handoff::argv(&Child::Build("do it".into()), "/opt/qlab/bin/qlab"),
+        handoff::argv(&child, "/opt/qlab/bin/qlab"),
         vec!["/opt/qlab/bin/qlab", "build", "do it"]
     );
+    // Destructured rather than matched, so a second `Child` added without a
+    // `Command` that produces it fails to compile here. This file used to build
+    // a `Child::Cli` nothing in the client could: `/cli` opens a pane
+    // (`pane_column.rs`) and hands the terminal to nobody.
+    let Child::Build(request) = &child;
+    assert_eq!(request, "do it");
+    // The other verb still has one spelling, next to the launcher it goes with,
+    // and `pty.rs` pins the argv the pane builds out of the two.
+    assert_eq!(handoff::CLI, "cli");
 }
 
 // -- the grammar ------------------------------------------------------------

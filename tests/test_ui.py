@@ -7507,3 +7507,501 @@ def test_the_anomaly_read_takes_no_lock_of_its_own(session):
     """
     with ui_server._LOCK:
         assert session._grant_anomalies(True) == []
+
+
+# --- standing authority: the owner books what a live grant covers -----------
+#
+# `book_under_grant` is the automatic half of the desk's one booking gate.
+# Exactly one step differs from the click — a persisted grant stands in for the
+# per-plan human confirmation — and every other check is `_book_checked_plan`,
+# shared with `book_current_proposal` rather than copied beside it. A grant
+# checks ceilings and never recency, so the automatic path carries its own
+# maximum plan age; the click needs none, because the click IS the freshness
+# proof.
+
+
+def _grant_fields(session, **over) -> dict:
+    fields = {
+        "allowed_universe": list(session.mandate.universe_whitelist),
+        "max_notional": 100_000.0,
+        "max_turnover": 2.0,
+        "max_orders": 50,
+        "max_books_per_day": 2,
+        "allowed_policy": session.mandate.operational_policy,
+        "granted_by": "operator",
+        "ttl_days": 7,
+    }
+    fields.update(over)
+    return fields
+
+
+def _live_grant(session, patch: dict | None = None, **over) -> dict:
+    """A persisted grant that covers the desk's own even-weight rebalance.
+
+    `patch` writes fields `build_grant` refuses to compose (an invalid mode, a
+    missing ceiling) — the shapes a hand-built or pre-migration row can hold.
+    """
+    from qlab.governance.authority import build_grant
+
+    grant = build_grant(**_grant_fields(session, **over))
+    grant.update(patch or {})
+    session.registry.create_authority_grant(grant)
+    return grant
+
+
+def _age_plan(session, plan_id: str, seconds: float) -> None:
+    """Backdate a persisted plan: the automatic path reads its age."""
+    created = (datetime.now(timezone.utc)
+               - timedelta(seconds=seconds)).isoformat()
+    session.registry.con.execute(
+        "UPDATE plans SET created_at=? WHERE plan_id=?", [created, plan_id])
+
+
+def _grant_events(session, kind: str) -> list[dict]:
+    return [event["payload"]
+            for event in session.registry.read_events_of_kind(kind, 50)]
+
+
+def _refusals(session) -> list[str]:
+    events = _grant_events(session, ui_server.GRANT_REFUSED_EVENT)
+    assert events, "a refusal that says nothing is a refusal nobody can audit"
+    return events[-1]["reasons"]
+
+
+def _proposal_awaiting(session, tilt: float = 0.0) -> tuple[str, str]:
+    plan_id = _checked_plan(session, tilt=tilt)
+    return plan_id, _open_request(session, plan_id)
+
+
+def test_a_covered_proposal_books_itself_and_names_the_grant(session):
+    grant = _live_grant(session)
+    plan_id, approval_id = _proposal_awaiting(session)
+
+    result = session.book_under_grant(True)
+
+    assert result is not None
+    assert result["booked"] is True
+    assert result["approval_id"] == approval_id
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "consumed")
+    assert session.registry.list_orders(50) != []
+    # Every automatic fill says so, naming the grant that covered it.
+    booked = _grant_events(session, ui_server.GRANT_BOOKED_EVENT)
+    assert len(booked) == 1
+    assert booked[0]["grant_id"] == grant["grant_id"]
+    assert booked[0]["plan_id"] == plan_id
+    assert booked[0]["approval_id"] == approval_id
+    assert booked[0]["trading_date"] == date.today().isoformat()
+
+
+def test_a_desk_asking_nothing_is_not_a_refusal(session):
+    """The quiet case. A beat writing a row every 30 s to say the desk has no
+    open question would bury the refusals that mean something."""
+    _live_grant(session)
+    assert session.book_under_grant(True) is None
+    assert _grant_events(session, ui_server.GRANT_REFUSED_EVENT) == []
+    assert _grant_events(session, ui_server.GRANT_BOOKED_EVENT) == []
+
+
+def test_no_grant_books_nothing_and_says_which(session):
+    plan_id, approval_id = _proposal_awaiting(session)
+
+    assert session.book_under_grant(True) is None
+
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert session.registry.list_orders(50) == []
+    assert _refusals(session) == ["no standing authority grant"]
+
+
+def test_a_revoked_grant_books_nothing(session):
+    grant = _live_grant(session)
+    session.registry.revoke_authority_grant(grant["grant_id"], "operator said stop")
+    plan_id, _ = _proposal_awaiting(session)
+
+    assert session.book_under_grant(True) is None
+
+    assert session.registry.list_orders(50) == []
+    assert _refusals(session) == [
+        f"grant revoked at "
+        f"{session.registry.get_authority_grant(grant['grant_id'])['revoked_at']}"
+        f": operator said stop"]
+
+
+def test_an_expired_grant_books_nothing(session):
+    _live_grant(session, now=datetime.now(timezone.utc) - timedelta(days=8))
+    _proposal_awaiting(session)
+
+    assert session.book_under_grant(True) is None
+    assert any("grant expired at" in reason for reason in _refusals(session))
+
+
+def test_a_grant_not_yet_in_effect_books_nothing(session):
+    _live_grant(session, now=datetime.now(timezone.utc) + timedelta(days=1))
+    _proposal_awaiting(session)
+
+    assert session.book_under_grant(True) is None
+    assert "grant is not yet in effect" in _refusals(session)
+
+
+@pytest.mark.parametrize("over,patch,fragment", [
+    # A plan touching anything outside the grant is refused WHOLE, never
+    # trimmed to fit.
+    ({"allowed_universe": ["SPY"]}, {},
+     "plan touches symbols outside the grant"),
+    ({"max_notional": 1.0}, {}, "exceeds the grant ceiling"),
+    ({"max_turnover": 0.5}, {}, "turnover"),
+    ({"max_orders": 1}, {}, "above the grant ceiling"),
+    ({"allowed_policy": "mean_variance"}, {}, "grant covers policy"),
+    # Shapes `build_grant` will not compose but a row can still hold.
+    ({}, {"mode": "live_auto"}, "is not a paper mode"),
+    ({}, {"max_books_per_day": None},
+     "grant names no max_books_per_day ceiling"),
+])
+def test_every_reason_the_grant_check_makes_refuses_the_automatic_path(
+        session, over, patch, fragment):
+    """`check_grant_covers` is the gate, not a hint: each reason it can return
+    books nothing, moves no approval, and lands in the record by name."""
+    _live_grant(session, patch, **over)
+    plan_id, approval_id = _proposal_awaiting(session)
+
+    assert session.book_under_grant(True) is None
+
+    assert session.registry.list_orders(50) == []
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert _grant_events(session, ui_server.GRANT_BOOKED_EVENT) == []
+    assert any(fragment in reason for reason in _refusals(session))
+
+
+def test_a_plan_a_second_inside_the_automatic_bound_still_books(session):
+    _live_grant(session)
+    plan_id, _ = _proposal_awaiting(session)
+    _age_plan(session, plan_id, ui_server.MAX_AUTO_BOOK_AGE_S - 1)
+
+    result = session.book_under_grant(True)
+
+    assert result is not None and result["booked"] is True
+
+
+def test_a_plan_a_second_past_the_automatic_bound_refuses(session):
+    """Without this the desk books a correctly-sized fill against a stale
+    analysis every 30 s, and no human ever sees the interval."""
+    _live_grant(session)
+    plan_id, approval_id = _proposal_awaiting(session)
+    _age_plan(session, plan_id, ui_server.MAX_AUTO_BOOK_AGE_S + 1)
+
+    assert session.book_under_grant(True) is None
+
+    assert session.registry.list_orders(50) == []
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert any(
+        f"past the {ui_server.MAX_AUTO_BOOK_AGE_S}s the automatic path allows"
+        in reason for reason in _refusals(session))
+
+
+def test_the_automatic_bound_is_strictly_tighter_than_the_approval_ttl():
+    """The ordering is the whole point: a grant may only book a plan far
+    younger than the approval that authorises it, so a human keeps the
+    interval between the two to book by hand or to let lapse."""
+    import inspect
+
+    from qlab.governance import approval
+
+    ttl = inspect.signature(approval.build_approval_request).parameters[
+        "ttl_seconds"].default
+    assert ui_server.MAX_AUTO_BOOK_AGE_S < ttl
+
+
+def test_the_click_still_books_a_plan_the_automatic_path_calls_stale(session):
+    """Freshness is the automatic path's bound alone. The click IS the
+    freshness proof — a human looking at a card refuses by not pressing it —
+    so a plan the grant will not touch is still theirs to book by hand."""
+    _live_grant(session)
+    plan_id, _ = _proposal_awaiting(session)
+    _age_plan(session, plan_id, ui_server.MAX_AUTO_BOOK_AGE_S + 60)
+
+    assert session.book_under_grant(True) is None
+
+    status, out = handle_api(session, "POST", "/api/desk/proposal/book", {},
+                             _book_body(session, plan_id))
+    assert (status, out["booked"]) == (200, True)
+
+
+def test_a_plan_whose_age_cannot_be_read_refuses(session):
+    # Absence refuses: an unreadable timestamp is not a fresh one.
+    _live_grant(session)
+    plan_id, _ = _proposal_awaiting(session)
+    session.registry.con.execute(
+        "UPDATE plans SET created_at='' WHERE plan_id=?", [plan_id])
+
+    assert session.book_under_grant(True) is None
+    assert any("the plan's age could not be read" in reason
+               for reason in _refusals(session))
+
+
+def test_the_days_budget_refuses_once_the_ceiling_is_reached(session):
+    _live_grant(session, max_books_per_day=1)
+    _proposal_awaiting(session)
+    assert session.book_under_grant(True)["booked"] is True
+
+    _proposal_awaiting(session, tilt=0.02)
+
+    assert session.book_under_grant(True) is None
+    assert "grant has booked 1 today, at its ceiling of 1" in _refusals(session)
+
+
+def test_the_day_resets_on_the_next_trading_date(session):
+    """Counted by TRADING date off the row, never by the event's wall clock:
+    UTC rolls over at midnight while a trading date does not."""
+    grant = _live_grant(session, max_books_per_day=1)
+    # Recorded a moment ago by the clock, on yesterday's trading date.
+    session.registry.record_event(ui_server.GRANT_BOOKED_EVENT, {
+        "grant_id": grant["grant_id"], "plan_id": "yesterday",
+        "trading_date": (date.today() - timedelta(days=1)).isoformat()})
+    _proposal_awaiting(session)
+
+    assert session.book_under_grant(True)["booked"] is True
+
+
+def test_a_book_spends_the_day_it_records_not_the_day_it_was_written(session):
+    """The mirror of the reset: a row whose clock says yesterday but whose
+    trading date says today still spends today's budget."""
+    grant = _live_grant(session, max_books_per_day=1)
+    session.registry.record_event(ui_server.GRANT_BOOKED_EVENT, {
+        "grant_id": grant["grant_id"], "plan_id": "earlier-today",
+        "trading_date": date.today().isoformat()})
+    session.registry.con.execute(
+        "UPDATE events SET ts=? WHERE kind=?",
+        [(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+         ui_server.GRANT_BOOKED_EVENT])
+    _proposal_awaiting(session)
+
+    assert session.book_under_grant(True) is None
+    assert "grant has booked 1 today, at its ceiling of 1" in _refusals(session)
+
+
+def test_another_grants_book_does_not_spend_this_grants_day(session):
+    grant = _live_grant(session, max_books_per_day=1)
+    session.registry.record_event(ui_server.GRANT_BOOKED_EVENT, {
+        "grant_id": "some-other-grant", "plan_id": "elsewhere",
+        "trading_date": date.today().isoformat()})
+    _proposal_awaiting(session)
+
+    assert session.book_under_grant(True)["booked"] is True
+    assert grant["grant_id"] != "some-other-grant"
+
+
+def test_a_hand_booked_order_spends_none_of_the_grants_day(session):
+    """The count is of what this feature books, not of every order: an
+    operator's own click must not exhaust the desk's standing budget."""
+    _live_grant(session, max_books_per_day=1)
+    by_hand, _ = _proposal_awaiting(session)
+    status, out = handle_api(session, "POST", "/api/desk/proposal/book", {},
+                             _book_body(session, by_hand))
+    assert (status, out["booked"]) == (200, True)
+
+    _proposal_awaiting(session, tilt=0.02)
+
+    assert session.book_under_grant(True)["booked"] is True
+
+
+def test_a_day_that_cannot_be_counted_refuses(session, monkeypatch):
+    _live_grant(session)
+    _proposal_awaiting(session)
+    real = session.registry.read_events_of_kind
+
+    def _boom(kind, limit=60):
+        if kind == ui_server.GRANT_BOOKED_EVENT:
+            raise RuntimeError("events unreadable")
+        return real(kind, limit)
+
+    monkeypatch.setattr(session.registry, "read_events_of_kind", _boom)
+
+    assert session.book_under_grant(True) is None
+    assert session.registry.list_orders(50) == []
+    assert "the day's book count is unknown; a daily ceiling that cannot be " \
+           "evaluated refuses" in _refusals(session)
+
+
+def test_an_anomaly_suspends_the_grant_without_revoking_it(session):
+    grant = _live_grant(session)
+    _proposal_awaiting(session)
+    session.registry.set_halt(True, book=_open_book(session))
+
+    assert session.book_under_grant(True) is None
+
+    assert session.registry.list_orders(50) == []
+    assert "grant suspended by anomaly: account is halted" in _refusals(session)
+    # The anomalies recorded beside the refusal are the ones that gated it —
+    # read once and carried, not re-read for the record.
+    assert _grant_events(session, ui_server.GRANT_REFUSED_EVENT)[-1][
+        "anomalies"] == ["account is halted"]
+    # Suspension is not revocation: the authority survives it and applies again
+    # the moment the desk is out of the state a human should see.
+    assert session.registry.get_authority_grant(
+        grant["grant_id"])["revoked_at"] is None
+    session.registry.set_halt(False, book=_open_book(session))
+    assert session.book_under_grant(True)["booked"] is True
+
+
+def test_a_referee_pass_that_misses_the_hash_refuses_even_under_a_grant(session):
+    """A grant replaces the per-plan human confirmation and nothing else. The
+    PASS is still pinned to the plan's own targets_hash (invariant 3)."""
+    from qlab.state.registry import targets_hash
+
+    _live_grant(session)
+    plan_id, approval_id = _proposal_awaiting(session)
+    plan = session.registry.get_plan(plan_id)
+    # The referee's latest word on this decision covers a different allocation.
+    session.registry.log_verdict(
+        plan["decision_id"], "PASS", ["a different basket"],
+        source="referee-agent", targets={"SPY": 1.0})
+
+    assert session.book_under_grant(True) is None
+
+    assert session.registry.list_orders(50) == []
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert _refusals(session) == [
+        f"no referee PASS covers targets_hash {targets_hash(plan['targets'])}"]
+
+
+def test_the_automatic_path_reaches_approved_the_way_the_click_does(session):
+    """Two ways to reach `approved`, one way to execute. The standing path
+    takes the same `decide_approval(..., "approve")` the click takes and the
+    same gate consumes it; it never books around the approval record."""
+    _live_grant(session)
+    plan_id, approval_id = _proposal_awaiting(session)
+
+    assert session.book_under_grant(True)["booked"] is True
+
+    approved = session.registry.read_events_of_kind("approval_approved", 20)
+    assert [e["payload"]["approval_id"] for e in approved] == [approval_id]
+    consumed = session.registry.read_events_of_kind("approval_consumed", 20)
+    assert [e["payload"]["approval_id"] for e in consumed] == [approval_id]
+    assert session.registry.get_approval_request(approval_id)["consumed_at"]
+
+
+def test_an_approval_a_human_already_gave_is_booked_without_a_second_approve(
+        session):
+    _live_grant(session)
+    plan_id = _checked_plan(session)
+    approval_id = _approve(session, plan_id)
+
+    assert session.book_under_grant(True)["approval_id"] == approval_id
+
+    approved = session.registry.read_events_of_kind("approval_approved", 20)
+    assert len(approved) == 1
+
+
+def test_an_unchanged_refusal_is_recorded_once_not_on_every_beat(session):
+    """Thirty rows an hour saying one thing is not a record of anything."""
+    _proposal_awaiting(session)
+
+    for _ in range(3):
+        assert session.book_under_grant(True) is None
+    assert len(_grant_events(session, ui_server.GRANT_REFUSED_EVENT)) == 1
+
+    # A refusal that changed is a new fact and is recorded.
+    _live_grant(session, max_notional=1.0)
+    assert session.book_under_grant(True) is None
+    refusals = _grant_events(session, ui_server.GRANT_REFUSED_EVENT)
+    assert len(refusals) == 2
+    assert any("exceeds the grant ceiling" in reason
+               for reason in refusals[-1]["reasons"])
+
+
+def test_booking_under_a_grant_takes_no_lock_of_its_own(session):
+    """B3's beat calls this inside the owner dispatch lock, exactly where the
+    clicked route already runs. `_LOCK` is a plain `threading.Lock`, so a
+    helper that took it would deadlock the desk on the first beat."""
+    _live_grant(session)
+    _proposal_awaiting(session)
+
+    with ui_server._LOCK:
+        assert session.book_under_grant(True)["booked"] is True
+
+
+def test_the_clicked_paths_refusals_are_word_for_word_unchanged(session):
+    """Steps 2-6 are shared with the standing path, so they are read by a
+    caller that has no client to answer. Not one word of what a human sees at
+    a refused click may move: these are the exact sentences."""
+    plan_id, _ = _proposal_awaiting(session)
+    body = _book_body(session, plan_id)
+
+    def _error(**over) -> str:
+        status, out = handle_api(session, "POST", "/api/desk/proposal/book",
+                                 {}, dict(body, **over))
+        assert status == 400
+        return out["error"]
+
+    assert _error(human_confirmed=False) == "human_confirmed=true is required"
+    assert _error(plan_id="0" * 16) == "not the current proposal"
+    assert _error(targets_hash="0" * 16) == "targets_hash does not match the plan"
+
+    plan = session.registry.get_plan(plan_id)
+    session.registry.log_verdict(
+        plan["decision_id"], "FAIL", ["mandate drift"], source="referee-agent",
+        targets=plan["targets"])
+    assert _error() == (
+        f"no referee PASS covers targets_hash {body['targets_hash']}")
+
+
+def test_the_clicked_path_books_without_any_grant_at_all(session):
+    """A grant is the automatic path's authority, never a precondition of the
+    human's. The desk that has never granted one books exactly as before."""
+    plan_id, approval_id = _proposal_awaiting(session)
+
+    status, out = handle_api(session, "POST", "/api/desk/proposal/book", {},
+                             _book_body(session, plan_id))
+
+    assert (status, out["booked"]) == (200, True)
+    assert out["approval_id"] == approval_id
+    assert _grant_events(session, ui_server.GRANT_BOOKED_EVENT) == []
+    assert len(_booked_events(session)) == 1
+
+
+def test_a_started_plan_is_left_for_a_human_even_under_a_covering_grant(
+        session, monkeypatch):
+    """`execute_plan` accepts a `submitted` plan so a half-filled book can be
+    resumed, and its halt gate sits inside `if not already_started:` — so a
+    resumed plan completes past a kill switch latched in the interim. That is a
+    trade a person may make and a 30-second beat may not: book, a leg fails,
+    the switch latches, the next beat resumes, and a non-liquidating rebalance
+    completes through a halt."""
+    from qlab.governance import proposal as proposal_mod
+
+    _live_grant(session)
+    plan_id, approval_id = _proposal_awaiting(session)
+    proposal = proposal_mod.current_proposal(session.registry)
+    session.registry.set_plan_state(plan_id, "submitted")
+    # The desk's own read already declines to offer a started plan, so the
+    # refusal is reached here by handing it back deliberately: the gate must
+    # refuse on the plan's own persisted state, not lean on that filter.
+    assert proposal_mod.current_proposal(session.registry) is None
+    monkeypatch.setattr("qlab.governance.proposal.current_proposal",
+                        lambda registry, now_iso=None: proposal)
+
+    assert session.book_under_grant(True) is None
+
+    assert session.registry.list_orders(50) == []
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "pending")
+    assert _refusals(session) == [
+        "plan is 'submitted', not 'checked'; a plan whose legs may already be "
+        "at the broker is resumed by a human, never by a grant"]
+
+
+def test_a_started_plan_is_never_even_offered_to_the_automatic_path(session):
+    """The other half of the same guarantee, and the reason the refusal above
+    needs a monkeypatch to reach: a plan at the broker is not the desk's open
+    question, so a beat finds nothing to book at all."""
+    _live_grant(session)
+    plan_id, _ = _proposal_awaiting(session)
+    session.registry.set_plan_state(plan_id, "submitted")
+
+    assert session.book_under_grant(True) is None
+    assert session.registry.list_orders(50) == []
+    assert _grant_events(session, ui_server.GRANT_BOOKED_EVENT) == []

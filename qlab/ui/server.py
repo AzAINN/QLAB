@@ -251,6 +251,26 @@ _ORDER_ANOMALY_WINDOW_HOURS = 24
 # is honest: an anomaly with more than this many *newer* legs inside the same
 # window is not seen, and a grant's own `max_orders` ceiling sits well below it.
 _ORDER_ANOMALY_SCAN = 200
+# The automatic path's own maximum plan age — the one bound a grant cannot
+# supply. `check_grant_covers` checks ceilings and never recency, while the
+# click IS a freshness proof: a human looks at a card built from a poll seconds
+# old and refuses by not pressing it. An approval lives 900 s
+# (`build_approval_request`'s `ttl_seconds`) and a book whose revision has not
+# moved passes the drift check trivially for all of it, so without this bound
+# the desk books a correctly-sized fill against a quarter-hour-old analysis
+# every 30 seconds and no human ever sees the interval. Strictly tighter than
+# the TTL, deliberately: a plan the grant calls stale is left for a human, who
+# can still book it by hand until the approval expires.
+MAX_AUTO_BOOK_AGE_S = 120
+# What the standing path writes. One row naming the grant behind every
+# automatic fill, and one per distinct refusal — the day's book count is read
+# back off the booked rows, by the trading date each row carries.
+GRANT_BOOKED_EVENT = "authority.booked"
+GRANT_REFUSED_EVENT = "authority.refused"
+# How many automatic books the daily count reads. `read_events_of_kind` caps at
+# 500, so this is the widest window available without a registry-side count; a
+# window saturated with today's rows refuses rather than under-counting.
+_GRANT_BOOK_SCAN = 500
 _STREAM_PAGE_CEILING = 5000
 _QUOTE_REFRESH_TTL_SECONDS = 30.0
 _QUOTE_MIN_INTERVAL_SECONDS = 5.0
@@ -5846,6 +5866,202 @@ class UISession:
             recent_order_anomaly=recent_order_anomaly,
         ) + unknown
 
+    # -- standing authority: what a live grant may book ----------------------
+    def live_grant(self) -> dict | None:
+        """The desk's most recent statement of standing authority, or ``None``.
+
+        The newest row, whatever state it is in — deliberately not "the newest
+        *usable* one". A revoked or expired grant is returned so
+        ``check_grant_covers`` refuses it *by name*; skipping it would fall
+        back to an older and probably broader grant, widening the authority an
+        operator had just withdrawn or let lapse. Replacing a grant is what
+        replaces it, and a new grant is newer.
+        """
+        rows = self.registry.list_authority_grants(1)
+        return rows[0] if rows else None
+
+    def _grant_books_today(self, grant_id: str,
+                           trading_date: str) -> int | None:
+        """How many books this grant made on ``trading_date`` — ``None`` if unknown.
+
+        By the TRADING date each row carries, never by the event's wall clock:
+        the rule ``AtlasSupervisor._within_daily_budget`` follows for
+        autonomous workflows, and for its reason — UTC rolls over at midnight
+        while a trading date does not, so counting by ``ts`` would hand a beat
+        running after 00:00 UTC a second day's authority on one trading day.
+
+        It counts what this feature books, not every order: a fill the operator
+        clicked spends none of the desk's standing budget, and an order the
+        autopilot placed is not a book under this grant either.
+
+        ``None`` rather than 0 when the count cannot be established — an
+        unreadable events table, or a page so full of today's rows that an
+        older one may be out of view. ``check_grant_covers`` refuses an
+        unsupplied count by name; a silent 0 would be the most permissive thing
+        this could return.
+        """
+        try:
+            rows = self.registry.read_events_of_kind(
+                GRANT_BOOKED_EVENT, _GRANT_BOOK_SCAN)
+        except Exception:
+            return None
+        today = [row for row in rows
+                 if str((row.get("payload") or {}).get("trading_date") or "")
+                 == trading_date]
+        if len(rows) >= _GRANT_BOOK_SCAN and len(today) == len(rows):
+            # The page is the newest N of this kind and every row in it is
+            # today's, so an older book of today's may sit outside it.
+            return None
+        return sum(1 for row in today
+                   if str((row.get("payload") or {}).get("grant_id") or "")
+                   == grant_id)
+
+    def grant_refusals(self, grant: dict | None, plan: dict, *,
+                       anomalies: list[str], books_today: int | None,
+                       now_iso: str | None = None) -> list[str]:
+        """Why this grant does not cover this plan right now (empty = covered).
+
+        ``check_grant_covers`` composed with the three things the governance
+        module cannot know: the day's book count, which it refuses to assume
+        (an unsupplied count is a ceiling it cannot evaluate), the plan's
+        state, and the plan's age. The last two are not ceilings at all.
+
+        The age bound belongs to the automatic path alone —
+        ``MAX_AUTO_BOOK_AGE_S``, and see the constant for why the click needs
+        none. An unreadable timestamp refuses: absence is not freshness.
+        """
+        from qlab.governance.authority import check_grant_covers
+
+        now_iso = now_iso or self._now_iso()
+        reasons = check_grant_covers(
+            grant, plan, now_iso=now_iso,
+            policy_id=self.mandate.operational_policy,
+            anomalies=anomalies, books_today=books_today)
+
+        # Only a plan that has not started. `execute_plan` accepts `checked`
+        # OR `submitted` so a half-filled book can be resumed, and its halt
+        # gate sits inside `if not already_started:` (`qlab/trader/plan.py`) —
+        # so a resumed plan completes past a kill switch latched in the
+        # interim. That is a deliberate trade for a human's resume, where
+        # leaving a book half-rebalanced is its own hazard. It is not one a
+        # 30-second beat may make: book, leg 3 of 20 fails, the switch latches,
+        # the next beat resumes, and a non-liquidating rebalance completes
+        # through a halt. Stated positively so no future plan state has to be
+        # remembered — anything but `checked` is left for a person, who can
+        # still resume it by hand. `current_proposal` already offers only
+        # `checked` plans; this does not lean on that.
+        state = str(plan.get("state") or "")
+        if state != "checked":
+            reasons.append(
+                f"plan is {state!r}, not 'checked'; a plan whose legs may "
+                "already be at the broker is resumed by a human, never by a "
+                "grant")
+        try:
+            age = (datetime.fromisoformat(now_iso)
+                   - datetime.fromisoformat(
+                       str(plan.get("created_at") or ""))).total_seconds()
+        except Exception as exc:
+            reasons.append(f"the plan's age could not be read: {exc}")
+        else:
+            if age > MAX_AUTO_BOOK_AGE_S:
+                reasons.append(
+                    f"plan is {age:.0f}s old, past the {MAX_AUTO_BOOK_AGE_S}s "
+                    "the automatic path allows")
+        return reasons
+
+    def _record_grant_refusal(self, grant: dict | None, plan_id: str,
+                              reasons: list[str],
+                              anomalies: list[str]) -> None:
+        """Record why the standing path booked nothing — once per distinct state.
+
+        A beat evaluates this every 30 s, so an unchanged refusal is written
+        once instead of 2,880 times a day; the same reason `_note_mid_execution`
+        keys its row on the approval rather than on the sweep. Deduped against
+        the newest refusal only, which is one row read: what the record has to
+        show is each state the desk was in and when it changed.
+        """
+        payload = {"grant_id": (grant or {}).get("grant_id"),
+                   "plan_id": plan_id, "reasons": list(reasons),
+                   "anomalies": list(anomalies)}
+        newest = self.registry.read_events_of_kind(GRANT_REFUSED_EVENT, 1)
+        if newest and newest[-1].get("payload") == payload:
+            return
+        self.registry.record_event(GRANT_REFUSED_EVENT, payload)
+
+    def book_under_grant(self, offline: bool) -> dict | None:
+        """Book the desk's own proposal if a live grant covers it.
+
+        ``None`` when nothing is covered — the desk is asking nothing, there is
+        no grant, or the grant refuses this plan right now — and the shared
+        gate's own result when a book was attempted (its ``booked`` says
+        whether a fill happened). A refusal writes nothing but the refusal.
+
+        Only step 1 of the clicked path differs: a persisted grant stands in
+        for the per-plan human confirmation, and for *nothing else*. Identity,
+        the hash, the referee PASS pinned to the plan's own ``targets_hash``,
+        the approval and the execute gate are ``_book_checked_plan``, shared
+        with the click rather than copied beside it — so a grant cannot come to
+        mean a check the click still makes.
+
+        Must be called under the owner dispatch lock and takes none of its own
+        (``_LOCK`` is not reentrant, and the reads that decide have to still be
+        true when the write happens — exactly as ``book_current_proposal``
+        holds the lock across approve-then-execute).
+        """
+        from qlab.governance.proposal import current_proposal
+
+        # The data lane may never contradict the book, on an unattended path
+        # least of all — see `_offline_for_book`.
+        offline = _offline_for_book(self, offline)
+        proposal = current_proposal(self.registry)
+        if proposal is None:
+            # The desk is asking nothing. Not a refusal: a beat writing a row
+            # every 30 s to say so would bury the ones that mean something.
+            return None
+        plan_id = str(proposal.get("plan_id") or "")
+        plan = self.registry.get_plan(plan_id)
+        if plan is None:
+            # Unreachable through `current_proposal`, which resolved this row a
+            # moment ago under the same lock. Loud rather than silent anyway.
+            self._record_grant_refusal(
+                None, plan_id, ["the proposal's plan could not be read"], [])
+            return None
+
+        grant = self.live_grant()
+        # Read once and carried: the anomalies that gated this book are the
+        # ones recorded beside it, and two reads a second apart can disagree.
+        anomalies = self._grant_anomalies(offline)
+        books_today = None if grant is None else self._grant_books_today(
+            str(grant.get("grant_id") or ""), date.today().isoformat())
+        reasons = self.grant_refusals(grant, plan, anomalies=anomalies,
+                                      books_today=books_today)
+        if reasons:
+            self._record_grant_refusal(grant, plan_id, reasons, anomalies)
+            return None
+
+        try:
+            result = self._book_checked_plan(
+                plan_id, str(proposal.get("targets_hash") or ""), offline)
+        except (ValueError, PermissionError, KeyError) as exc:
+            # The shared gate's own refusals, in its own words: the clicked
+            # route answers these with a 400/404 and this path has no client to
+            # answer. The referee is the one that matters most — a PASS that
+            # does not cover the plan's own targets_hash refuses here exactly
+            # as it does under a click. Anything else raised on the way to the
+            # broker is a fault, not a refusal, and propagates to the beat.
+            self._record_grant_refusal(grant, plan_id, [str(exc)], anomalies)
+            return None
+        if result.get("booked") is True:
+            # Every automatic fill says so, naming the grant. This row is also
+            # what the day's count is read back from, which is why it carries
+            # the trading date rather than leaving it to the event's clock.
+            self.registry.record_event(GRANT_BOOKED_EVENT, {
+                "grant_id": grant.get("grant_id"), "plan_id": plan_id,
+                "approval_id": result.get("approval_id"),
+                "targets_hash": proposal.get("targets_hash"),
+                "trading_date": date.today().isoformat()})
+        return result
+
     def book_current_proposal(self, body: dict, offline: bool) -> dict:
         """Approve the desk's own open question and execute it, once.
 
@@ -5855,10 +6071,33 @@ class UISession:
         two calls, so a desk could be left holding an approved-but-unbooked
         plan that nothing on screen was still asking about.
 
+        This method is *only* the human confirmation. Everything after it is
+        ``_book_checked_plan``, shared with the standing-authority path so that
+        a grant replaces this one step and no other.
+        """
+        # Exactly True. "yes", 1 and [] are a client bug or a smuggled
+        # confirmation; neither is a human at a confirm box (invariant 3).
+        if body.get("human_confirmed") is not True:
+            raise ValueError("human_confirmed=true is required")
+        return self._book_checked_plan(
+            str(body.get("plan_id") or ""),
+            str(body.get("targets_hash") or ""), offline)
+
+    def _book_checked_plan(self, plan_id: str, supplied_hash: str,
+                           offline: bool) -> dict:
+        """Identity, hash, referee, approve, execute — the gate both paths take.
+
+        Shared verbatim between the clicked path (``book_current_proposal``)
+        and the standing one (``book_under_grant``) rather than copied beside
+        them: the design record's ruling is that a grant replaces the per-plan
+        human confirmation and *nothing else*, and two copies of these checks
+        is exactly how a grant would quietly come to mean more than that.
+
         Every refusal lands *before* any transition. The order is deliberate:
-        the confirmation, then identity (is this still the desk's question),
-        then the hash the confirm box bound to, then the referee. A caller
-        that fails any of them has changed nothing.
+        identity (is this still the desk's question), then the hash the confirm
+        box bound to, then the referee. A caller that fails any of them has
+        changed nothing, and the refusal sentences are what the desk shows a
+        human — they are the same words on both paths.
 
         The approval this grants is the one the execute gate then consumes, so
         the two steps must not be separated by a lock release — they are not.
@@ -5877,13 +6116,6 @@ class UISession:
         approval granted here is the one the execute gate reads.
         """
         from qlab.governance.proposal import current_proposal
-
-        # Exactly True. "yes", 1 and [] are a client bug or a smuggled
-        # confirmation; neither is a human at a confirm box (invariant 3).
-        if body.get("human_confirmed") is not True:
-            raise ValueError("human_confirmed=true is required")
-        plan_id = str(body.get("plan_id") or "")
-        supplied_hash = str(body.get("targets_hash") or "")
 
         # Sweep first: a request past its expiry is not live, and reading the
         # stored status without sweeping would let a lapsed `pending` row look
@@ -5914,7 +6146,8 @@ class UISession:
 
         # No `human_confirmed` in this body: the gate consumes the approval
         # record, never a boolean, and passing one would suggest the callee
-        # reads it. The confirmation was checked at the top of this method.
+        # reads it. What authorised the book was settled by the caller — a
+        # human at the confirm box, or the grant that covered the plan.
         try:
             result = self.execute_plan_with_approval(
                 plan_id, {"approval_id": approval_id}, offline)

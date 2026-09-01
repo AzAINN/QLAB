@@ -6377,9 +6377,23 @@ class UISession:
             # skip is `submitted` and nothing wider: every other state means
             # the legs never left, so today's withdrawal still runs.
             try:
-                mid_execution = str(
-                    (self.registry.get_plan(plan_id) or {}).get("state")
-                    or "") == "submitted"
+                plan = self.registry.get_plan(plan_id) or {}
+                mid_execution = str(plan.get("state") or "") == "submitted"
+                # `execute_plan`'s own `already_started` predicate, read the
+                # same way (`qlab/trader/plan.py`): a leg with a filled order
+                # is a leg that moved the book. It decides which remedy the
+                # error may name, because the approval binds the book revision
+                # it was granted against — so once a leg fills, re-executing is
+                # refused for a revision mismatch AND invalidates the approval
+                # on the way past. Naming one remedy for both cases would
+                # instruct the operator to destroy the authority this branch
+                # exists to preserve. Short-circuited: only the mid-execution
+                # branch reads the legs.
+                resumable = mid_execution and not any(
+                    (self.registry.get_order(
+                        str(leg.get("client_order_id") or "")) or {}
+                     ).get("state") == "filled"
+                    for leg in (plan.get("legs") or []))
                 if not mid_execution:
                     self.registry.transition_approval(
                         approval_id, "invalidated",
@@ -6394,13 +6408,23 @@ class UISession:
                 # report a lifecycle refusal in place of the real fault.
                 raise exc from bookkeeping
             if mid_execution:
+                remedy = (
+                    "No leg has filled, so the approval still binds the book "
+                    "it was granted against: resume by re-executing this plan "
+                    "against that same approval, and each leg replays through "
+                    "its own client_order_id. Do not re-propose — a new plan "
+                    "would book on top of the legs this one already placed."
+                    if resumable else
+                    "A leg has already FILLED, so the book moved and the "
+                    "approval no longer binds it: re-executing now is refused "
+                    "with 'book moved since approval (revision mismatch)' and "
+                    "invalidates the approval on the way past. Reconcile the "
+                    "placed legs by hand instead, and do not re-propose on top "
+                    "of them.")
                 raise RuntimeError(
                     f"plan {plan_id} failed mid-execution: {exc}. Its state is "
-                    "'submitted', so legs may already be at the broker: "
-                    f"approval {approval_id} is kept live and the plan is "
-                    "resumed by re-executing it against that same approval. Do "
-                    "not re-propose — a new plan would book on top of the legs "
-                    "this one already placed."
+                    "'submitted', so legs may already be at the broker and "
+                    f"approval {approval_id} is kept live. {remedy}"
                 ) from exc
             raise
         booked = result.get("executed") is True

@@ -5936,7 +5936,13 @@ def test_a_failure_after_the_legs_reached_the_broker_keeps_the_approval(
     message = str(raised.value)
     assert "submitted" in message
     assert approval_id in message
-    assert "kept" in message
+    assert "kept live" in message
+    # The remedy is branched on whether a leg filled, and this is the filled
+    # side: re-executing is refused for a book-revision mismatch and takes the
+    # approval with it, so the one thing the error must not say is "resume".
+    assert "A leg has already FILLED" in message
+    assert "Reconcile the placed legs by hand" in message
+    assert "resume by re-executing" not in message
     approval = session.registry.get_approval_request(approval_id)
     assert approval["status"] == "approved"
     assert not approval["invalidated_reason"]
@@ -5947,6 +5953,38 @@ def test_a_failure_after_the_legs_reached_the_broker_keeps_the_approval(
         "filled"]
     # Nothing filled the plan, so nothing may claim the desk booked it.
     assert _booked_events(session) == []
+
+
+def test_a_part_filled_plan_cannot_be_resumed_which_is_why_the_error_says_so(
+        session, monkeypatch):
+    """The fact the filled branch's remedy rests on, executed rather than
+    asserted.
+
+    The approval binds `book_revision` at approval time, and a filled leg moves
+    it — so the resume the unfilled branch names is, on a part-filled plan,
+    refused for a revision mismatch AND invalidates the approval on the way
+    past. Keeping the authority is necessary but not yet sufficient here: the
+    carve-out `execute_plan` already makes one layer down (`already_started`,
+    `qlab/trader/plan.py`) has no counterpart at the approval layer. When it
+    gains one, this test and the sentence it pins change together.
+    """
+    plan_id = _checked_plan(session)
+    approval_id = _open_request(session, plan_id)
+    _broker_fails_on_leg(monkeypatch, 2, "venue rejected the order")
+
+    with pytest.raises(RuntimeError, match="venue rejected the order"):
+        session.book_current_proposal(_book_body(session, plan_id), True)
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "approved")
+
+    result = session.execute_plan_with_approval(
+        plan_id, {"approval_id": approval_id}, True)
+
+    assert result["executed"] is False
+    assert result["blocked_by"] == "approval"
+    assert "book moved since approval (revision mismatch)" in result["reasons"]
+    assert session.registry.get_approval_request(approval_id)["status"] == (
+        "invalidated")
 
 
 def test_the_kept_approval_is_what_finishes_the_half_booked_plan(session,
@@ -5963,11 +6001,17 @@ def test_the_kept_approval_is_what_finishes_the_half_booked_plan(session,
     approval_id = _open_request(session, plan_id)
     _broker_fails_on_leg(monkeypatch, 1, "venue timed out")
 
-    with pytest.raises(RuntimeError, match="venue timed out"):
+    with pytest.raises(RuntimeError, match="venue timed out") as raised:
         session.book_current_proposal(_book_body(session, plan_id), True)
 
     assert session.registry.get_plan(plan_id)["state"] == "submitted"
     assert session.registry.list_orders(50) == []
+    # The other side of the branch: nothing filled, so the resume below is the
+    # remedy the error is allowed to name — and the next lines run it.
+    message = str(raised.value)
+    assert "No leg has filled" in message
+    assert "resume by re-executing this plan against that same approval" in (
+        message)
 
     result = session.execute_plan_with_approval(
         plan_id, {"approval_id": approval_id}, True)

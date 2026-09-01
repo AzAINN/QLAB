@@ -55,6 +55,8 @@ MATRIX_SCAN = 6
 # which composes every reason a grant declines. These two are the beat's: a
 # fault on the way to the broker, which is NOT a refusal and must never be
 # filed as one, and the first execution data permit on a lane that demands one.
+# That second row is also the beat's own latch, for the case where there is no
+# permit to latch on — see `prime_execution_permit`.
 BOOK_FAILED_EVENT = "authority.book_failed"
 PERMIT_PRIMED_EVENT = "authority.permit_primed"
 
@@ -384,18 +386,28 @@ def prime_execution_permit(session, offline: bool) -> str:
     suspended, by name, and the gate re-measures at the door regardless, so
     this permit is never what authorises a fill.
 
-    Only on ABSENCE, and that is the line that keeps it honest: a recorded
-    answer is never re-asked. Re-measuring over a permit that said no is how a
-    refusal gets argued into a permission, one beat at a time. The same rule
-    bounds the cost — at most one extra snapshot per desk, on the first beat
-    where a live grant and an open question coincide — which is why a desk that
-    has ever booked, and every offline or demo desk, pays one indexed row read
+    Asked ONCE, and that is the line that keeps it honest: a recorded answer
+    is never re-asked. Re-measuring over a permit that said no is how a refusal
+    gets argued into a permission, one beat at a time — and a *blocked* lane
+    records no permit at all (``data_health`` returns before
+    ``record_data_permit``), so the beat's own ``authority.permit_primed`` row
+    is what latches the retry there. Without that second gate a desk with a
+    broken execution feed re-takes a 252-day snapshot under the owner's
+    dispatch lock every 30 seconds, each attempt failing only after the
+    provider times out, with the snapshot poll and every approval queued behind
+    it. Together the two gates bound this to **one measurement per desk,
+    whatever it answers**: a desk that has ever booked, one that has already
+    asked, and every offline or demo desk each pay an indexed row read or two
     here and nothing else.
 
     Returns what it did, for the tick's result, or ``""`` when there was
     nothing to do. Raises what the measurement raises: what a beat does with a
     fault is the caller's decision, and a permit that could not be taken is not
-    a permit.
+    a permit. A raise is deliberately NOT latched — ``data_health`` turns the
+    expected outage (``DataUnavailable``) into a blocked report, which is an
+    answer and does latch, so an exception arriving here is an unexpected fault
+    rather than a lane saying no, and disabling standing authority permanently
+    on one blip would be worse than asking again.
     """
     registry = getattr(session, "registry", None)
     policy_of = getattr(session, "data_policy", None)
@@ -408,10 +420,31 @@ def prime_execution_permit(session, offline: bool) -> str:
     # desk resolves broker credentials.
     if registry.current_data_permit("execution") is not None:
         return ""
+    # The data lane can never contradict the book, and the lane measured here
+    # has to be the one the book is revalidated against: `book_under_grant`
+    # clamps this way before it does anything else. Imported rather than
+    # re-derived — a second copy of that rule is a second place for it to
+    # drift, which is what the shared booking gate exists to prevent. The raw
+    # flag is the tick's, and only `qlab/autopilot/cli.py` happens to pass one
+    # already equal to the desk mode's; `serve()`'s own default is True, so a
+    # beat honouring it verbatim would skip the prime on exactly the desk that
+    # needs it.
+    from qlab.ui.server import _offline_for_book
+
+    offline = _offline_for_book(session, offline)
     if not policy_of(offline).execution_eligible:
         # Demo, test and historical lanes. The execute gate demands no permit
         # on them, so neither may this: reading the policy flag *as* the answer
         # would give every offline desk a permanent anomaly instead.
+        return ""
+    # Asked once, whatever the answer. The permit gate above cannot close on a
+    # blocked lane, because a blocked lane records no permit — this is the
+    # record of having asked, and it does the job `_record_grant_refusal`'s
+    # dedupe does for the refusal it would otherwise write every beat, one gate
+    # earlier because here the repeated cost is a network snapshot under the
+    # dispatch lock and not a row. Nothing re-opens it: a permit arriving by
+    # any other door closes the gate above instead.
+    if registry.read_events_of_kind(PERMIT_PRIMED_EVENT, 1):
         return ""
     # Only where a book is actually possible. A desk holding no standing
     # authority, or with nothing on it to book, must not start taking execution
@@ -534,14 +567,22 @@ def build_owner_tick(session, lock, *, offline: bool,
             # phase in both halves of the tick; the reasoner's model call, the
             # only part of a tick that does not, is a different phase entirely.
             #
-            # HERE rather than lower down, and the placement is the point: the
-            # held-record rule reads the book, an autonomous start dispatches a
-            # coordinator, the sweep drives one, and every second they spend
-            # under this lock comes out of `MAX_AUTO_BOOK_AGE_S` — the bound
-            # that says an unattended fill must be against an analysis a human
-            # could still have been looking at. Before the announce for a
-            # second reason: the desk must not ask an operator to press BOOK on
-            # a proposal this same tick is about to book itself.
+            # HERE rather than lower down: the held-record rule reads the
+            # book, an autonomous start dispatches a coordinator and the sweep
+            # drives one, so every second they spend under this lock would come
+            # out of `MAX_AUTO_BOOK_AGE_S`, the bound that says an unattended
+            # fill must be against an analysis a human could still have been
+            # looking at. This is the earliest point after the observe, NOT the
+            # earliest point in the tick: `refresh_desk_read` and
+            # `atlas_judgment_request` have already run under this lock (the
+            # latter takes a 252-day `data_health` of its own), and on a
+            # reasoner desk the model call sits between phase one and here. So
+            # the position spends less of the freshness budget; it does not
+            # guarantee it. Overrunning the bound is a refusal and not a bad
+            # fill — the desk books nothing and says the plan is stale.
+            # Before the announce for a second reason: the desk must not ask an
+            # operator to press BOOK on a proposal this same tick is about to
+            # book itself.
             try:
                 note = prime_execution_permit(session, offline)
                 if note:

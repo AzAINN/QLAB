@@ -587,6 +587,70 @@ def test_a_blocked_lane_records_no_permit_and_the_grant_stays_suspended(
     assert primed[0]["permit_id"] is None
 
 
+def test_a_blocked_lane_is_measured_once_and_not_on_every_beat(
+        session, monkeypatch):
+    """A blocked lane records no permit, so the permit gate can never close on
+    it. Without the beat's own record of having asked, a desk with a broken
+    execution feed re-takes a 252-day snapshot under the owner's dispatch lock
+    every 30 s, forever, each attempt failing only after the provider times
+    out — and writes 2,880 event rows a day saying so."""
+    _grant(session)
+    _proposal(session)
+    calls = _demanding_lane(session, monkeypatch, blocked=True)
+    tick = _tick(session)
+
+    tick()
+    tick()
+    tick()
+
+    assert calls == ["execution"]
+    assert len(_events(session, hb.PERMIT_PRIMED_EVENT)) == 1
+    # Nothing about the refusal is softened by asking only once.
+    assert session.registry.current_data_permit("execution") is None
+    assert session.registry.list_orders(50) == []
+    assert _events(session, ui_server.GRANT_REFUSED_EVENT)[-1]["anomalies"] == [
+        "no execution data permit is on record for this book"]
+
+
+def test_the_prime_measures_the_lane_the_book_will_be_revalidated_against(
+        monkeypatch):
+    """The prime and the book must not disagree about `offline`.
+
+    `book_under_grant` clamps through `_offline_for_book` before it does
+    anything else, because on an Alpaca-book desk the data lane can never
+    contradict the book. The two agree today only because
+    `qlab/autopilot/cli.py` happens to pass `offline=mode.offline`; `serve()`'s
+    own default is `True`, and a beat honouring that verbatim would measure the
+    wrong lane and skip the prime on exactly the desk that needs it.
+    """
+    import qlab.governance.proposal as proposal_module
+    from qlab.core.data import DataPolicy
+    from qlab.core.desk_mode import DeskMode
+
+    live = UISession(offline_default=True, registry=Registry(":memory:"),
+                     desk_mode=DeskMode("live", "alpaca"))
+    assert live.desk_mode.offline is False
+    seen: list[bool] = []
+    policy = DataPolicy(
+        mode="operational", provider="synthetic", feed=None,
+        allow_network=False, allow_cache=True, allow_synthetic=True,
+        require_fresh=False, execution_eligible=True)
+    monkeypatch.setattr(live, "data_policy",
+                        lambda offline: seen.append(offline) or policy)
+    monkeypatch.setattr(
+        live, "data_health",
+        lambda offline, purpose="paper_proposal": (
+            seen.append(offline) or {"blocked": True, "reason": "no feed"}))
+    monkeypatch.setattr(live, "live_grant", lambda: {"grant_id": "g"})
+    monkeypatch.setattr(proposal_module, "current_proposal",
+                        lambda registry: {"plan_id": "p"})
+
+    hb.prime_execution_permit(live, True)      # the tick's raw flag
+
+    # The desk mode's own lane, never the flag.
+    assert seen == [False, False]
+
+
 def test_a_permit_that_cannot_be_measured_leaves_the_tick_and_the_book_alive(
         session, monkeypatch):
     """A prime that throws costs the book its permit, never its attempt: the

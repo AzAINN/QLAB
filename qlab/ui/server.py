@@ -5775,9 +5775,12 @@ class UISession:
         Takes no lock and touches no session state, so it is callable both
         under the owner dispatch lock (``_LOCK``, which is not reentrant, so a
         helper that took it would deadlock the booking route) and outside it,
-        as the heartbeat will. Deliberately uncached: ``Registry.run_revision``
-        moves only on ``log_run``, so a cache keyed on it the way the research
-        summaries are would go on reporting a clean desk after a halt.
+        as the heartbeat does. Lock-free is not write-free: the two
+        ``portfolio_state`` calls each ratchet the book's high-water mark, a
+        monotone registry write ``portfolio()`` already makes off-lock on every
+        poll. Deliberately uncached: ``Registry.run_revision`` moves only on
+        ``log_run``, so a cache keyed on it the way the research summaries are
+        would go on reporting a clean desk after a halt.
         """
         from qlab.governance.authority import detect_anomalies
         from qlab.trader.broker import get_broker
@@ -5828,8 +5831,15 @@ class UISession:
         # permit — the row `create_approval` binds an approval to and
         # `check_approval_for_execution` re-checks at the door.
         data_execution_eligible = True
+        # Two reads, two sentences: a policy that raises is not a permit that
+        # could not be read, and saying so would name an input never looked for.
         try:
-            if self.data_policy(offline).execution_eligible:
+            needs_permit = bool(self.data_policy(offline).execution_eligible)
+        except Exception as exc:
+            needs_permit = False   # quiet; the sentence below is the anomaly
+            unknown.append(f"the desk's data policy could not be read: {exc}")
+        if needs_permit:
+            try:
                 permit = self.registry.current_data_permit("execution")
                 if permit is None:
                     # Absence here is not ineligibility, it is silence: this
@@ -5839,8 +5849,8 @@ class UISession:
                 else:
                     data_execution_eligible = bool(
                         permit.get("eligible_for_execution"))
-        except Exception as exc:
-            unknown.append(f"the data permit could not be read: {exc}")
+            except Exception as exc:
+                unknown.append(f"the data permit could not be read: {exc}")
 
         # `recent_order_anomaly` — a leg the venue rejected or expired inside
         # the window. The terminal states are `qlab/trader/lifecycle.py`'s, on
@@ -5853,10 +5863,22 @@ class UISession:
                 datetime.now(timezone.utc)
                 - timedelta(hours=_ORDER_ANOMALY_WINDOW_HOURS)
             ).isoformat()
+            page = self.registry.list_orders(_ORDER_ANOMALY_SCAN)
             recent_order_anomaly = any(
                 str(order.get("state") or "") in (REJECTED, EXPIRED)
                 and str(order.get("created_at") or "") >= cutoff
-                for order in self.registry.list_orders(_ORDER_ANOMALY_SCAN))
+                for order in page)
+            # The page is newest-first, so a FULL one whose oldest row is still
+            # inside the window stopped short of the window's far edge and did
+            # not read everything in it. Everywhere else here ignorance
+            # suspends; without this it would proceed — a rejection hidden
+            # behind a page of newer fills would report a clean desk, and about
+            # seventeen full books at the 30s beat exhaust the page.
+            if (len(page) == _ORDER_ANOMALY_SCAN
+                    and str(page[-1].get("created_at") or "") >= cutoff):
+                unknown.append(
+                    "recent orders could not be read past the newest "
+                    f"{_ORDER_ANOMALY_SCAN} legs")
         except Exception as exc:
             unknown.append(f"recent orders could not be read: {exc}")
 

@@ -7641,6 +7641,88 @@ def test_the_anomaly_read_takes_no_lock_of_its_own(session):
         assert session._grant_anomalies(True) == []
 
 
+def test_the_halt_flag_comes_from_the_book_not_the_default_account_row(
+        session, monkeypatch):
+    """A venue that blocks trading suspends, with the ledger row unhalted.
+
+    `qlab/trader/plan.py` reads `registry.get_account().get("halted")` — the
+    DEFAULT_BOOK row, which knows nothing of a venue's own `trading_blocked`.
+    Substituting that source passed every other test here, so this is the pin:
+    the halt flag is the broker's own `portfolio_state`, where the per-book
+    latch and the venue's block are one field (`qlab/trader/broker.py`).
+    """
+    from qlab.state.registry import DEFAULT_BOOK
+
+    _open_book(session)
+    ledger = session.registry.get_account(DEFAULT_BOOK)
+    assert not ledger["halted"]          # the ledger says the desk is fine
+    cash = float(ledger["cash"])
+
+    class _BlockedVenue:
+        name = "alpaca_paper"
+
+        def portfolio_state(self, tickers):
+            # Cash and positions agreeing with the ledger, so the only thing
+            # this test can trip is the halt flag.
+            return {"halted": True, "positions": {}, "weights": {},
+                    "cash": cash, "equity": cash, "high_water_mark": cash}
+
+    monkeypatch.setattr("qlab.trader.broker.get_broker",
+                        lambda *a, **k: _BlockedVenue())
+    assert session._grant_anomalies(True) == ["account is halted"]
+
+
+def _fill_a_page(session, *, hours_ago: float) -> None:
+    """A full `_ORDER_ANOMALY_SCAN` page of filled legs, stamped in the past."""
+    for i in range(ui_server._ORDER_ANOMALY_SCAN):
+        session.registry.add_order(f"leg-fill-{i}", "plan-1", "SPY", "buy", 1.0)
+        session.registry.update_order_state(f"leg-fill-{i}", "filled")
+    stamp = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+    session.registry.con.execute(
+        "UPDATE orders SET created_at=? WHERE client_order_id LIKE 'leg-fill-%'",
+        [stamp])
+
+
+def test_a_rejection_behind_a_full_page_of_newer_legs_still_suspends(session):
+    """The page is newest-first, so a busy day can push a rejection off it.
+
+    Reported as unread rather than as a clean desk: this is the one direction
+    the design must not fail in, and everywhere else here ignorance suspends.
+    """
+    session.registry.add_order("leg-rejected", "plan-1", "SPY", "buy", 100.0)
+    session.registry.update_order_state("leg-rejected", "rejected")
+    session.registry.con.execute(
+        "UPDATE orders SET created_at=? WHERE client_order_id=?",
+        [(datetime.now(timezone.utc) - timedelta(hours=20)).isoformat(),
+         "leg-rejected"])
+    assert session._grant_anomalies(True) == [
+        "a recent order was rejected or expired"]
+
+    # A full page of NEWER legs, all still inside the window, hides it.
+    _fill_a_page(session, hours_ago=19)
+    assert session._grant_anomalies(True) == [
+        "recent orders could not be read past the newest "
+        f"{ui_server._ORDER_ANOMALY_SCAN} legs"]
+
+
+def test_a_full_page_that_reaches_past_the_window_is_read_to_the_end(session):
+    # The opposite guard: the page did reach the window's far edge, so nothing
+    # inside it went unread and a long order history must not suspend forever.
+    _fill_a_page(session, hours_ago=ui_server._ORDER_ANOMALY_WINDOW_HOURS + 1)
+    assert session._grant_anomalies(True) == []
+
+
+def test_a_data_policy_that_cannot_be_read_names_the_policy(session,
+                                                            monkeypatch):
+    # Not "the data permit could not be read": no permit was ever looked for.
+    def _boom(*a, **k):
+        raise RuntimeError("provider unresolvable")
+
+    monkeypatch.setattr(session, "data_policy", _boom)
+    assert session._grant_anomalies(True) == [
+        "the desk's data policy could not be read: provider unresolvable"]
+
+
 # --- standing authority: the owner books what a live grant covers -----------
 #
 # `book_under_grant` is the automatic half of the desk's one booking gate.

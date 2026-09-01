@@ -18,7 +18,7 @@ qlab tui                            # terminal workstation (starts/attaches owne
 qlab ui --no-browser                # same owner runtime, web client
 qlab run-once --offline --dry-run   # one governed autopilot cycle, no orders
 qlab batch configs/specs/ablation_v1.yaml --offline   # staged ablation
-python -m qlab.agents.loader sync   # regenerate .Codex/agents + .bob/personas
+python -m qlab.agents.loader sync   # regenerate .claude/agents + .bob/personas
 ```
 
 Quantum research is an isolated offline lane: `pip install -e
@@ -34,11 +34,11 @@ excluded from `[all]`, the staged runtime, and the default ablation.
   (`qlab/mcp/tui_proxy.py`) — talks to it over HTTP only.
 - The combined `qlab` MCP server (`qlab/mcp/server.py`) is for headless
   sessions and refuses to start while an owner runtime is alive (port guard).
-- **Codex workforce**: the TUI can launch Codex as a coordinator whose only
+- **Claude workforce**: the TUI can launch Claude as a coordinator whose only
   built-in tool is an allowlisted Agent dispatcher for five roles
   (moments-analyst → challenger → optimization-runner → referee → reporter).
   Phase state persists in the registry (`workflows`/`workflow_steps`) and is
-  resumable. No Codex role has filesystem, shell, or execution tools.
+  resumable. No Claude role has filesystem, shell, or execution tools.
 - **Algorithm catalog** (`qlab/algorithms/catalog.py`): every method is
   `operational`, `research`, or `offline`. `algorithms.solve` enforces the
   stage in code — research/offline entries are visible but not agent-runnable.
@@ -57,7 +57,7 @@ excluded from `[all]`, the staged runtime, and the default ablation.
 4. **Fail loud.** No silent fallbacks for missing data, credentials, or
    unconditioned tensors; refuse with a clear error instead.
 5. **`agents/*.md` is the single source of truth for roles.** After editing,
-   run `python -m qlab.agents.loader sync`; never hand-edit `.Codex/agents/`
+   run `python -m qlab.agents.loader sync`; never hand-edit `.claude/agents/`
    or `.bob/personas/`.
 6. **Resolve files through `qlab/paths.py`** (`data_path`, `state_path`,
    `workspace_root`) — never `Path(__file__).parents[...]`; wheels install

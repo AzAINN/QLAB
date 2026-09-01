@@ -64,6 +64,21 @@
 - [ ] **Step 2–4:** red → green. Mirror `withdraw_orphans`' skip and cite it.
 - [ ] **Step 5:** commit `fix(desk): a plan that reached the broker keeps its authority`.
 
+### Task A5: The kill switch halts the book it fired for
+
+**Files:** `qlab/trader/plan.py`, `qlab/mcp/quant_trader.py`, `qlab/autopilot/loop.py`, `tests/test_trader.py` (or the module that covers the halt path).
+
+`Registry.set_halt(halted, book=DEFAULT_BOOK)` is per-book by design — its docstring says "A halt on one venue is not a halt on all" — and `DEFAULT_BOOK` is `"simulated_paper"` while the Alpaca broker is `"alpaca_paper"`. Two mismatches follow, both verified:
+
+1. **The kill switch does not stop the book it fired for.** `qlab/trader/plan.py:148` and `:310` latch `set_halt(True, book=broker.name)`, but the pre-trade check at `:296` reads `registry.get_account().get("halted")` — the *default* book. On an Alpaca paper book the drawdown kill switch fires, latches `alpaca_paper`, and the next plan's check reads `simulated_paper`, finds it clear, and executes.
+2. **An operator's explicit halt may halt the wrong book.** `qlab/mcp/quant_trader.py:167`/`:188` and `qlab/autopilot/loop.py:313` call `set_halt` with no book, and `quant_trader.py:184` reports `get_account()` with no book — so on an Alpaca desk the halt tool writes and reads a book nobody is trading.
+
+This is in scope because the whole automatic path rests on the kill switch suspending a grant: an auto-booker that keeps booking after a drawdown halt is the worst failure this stream could ship. Task A2 already reads `broker.portfolio_state()["halted"]`, which is correct for both books — that path is fine and is the shape to follow.
+
+- [ ] **Step 1:** failing tests — a halt latched on `alpaca_paper` refuses the next non-liquidating plan on that book (today it executes); a halt on one book does NOT halt the other (the per-book design must survive the fix); the halt tool and the autopilot latch the book actually in use; `get_account` reporting names its book.
+- [ ] **Step 2–4:** red → green. Thread the book through rather than changing `DEFAULT_BOOK` — the default is right for a single-book desk and wrong only where the caller knows better.
+- [ ] **Step 5:** commit `fix(trader): the kill switch halts the book it fired for`.
+
 ### Task B1: Granting and revoking, refused to the chat
 
 **Files:** `qlab/ui/server.py` (`GET/POST /api/desk/authority`, `POST /api/desk/authority/revoke`), `tests/test_ui.py`, `tests/test_mcp_server.py`.

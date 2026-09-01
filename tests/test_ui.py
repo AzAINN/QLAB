@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -8343,6 +8344,9 @@ def test_a_desk_holding_no_grant_answers_null_and_not_an_empty_grant(session):
     and the card draws that as standing authority with no bounds instead of the
     remedy for holding none. It is a silent misread, not an error.
     """
+    # Measured first, so what this pins is the GRANT half: an unmeasured desk
+    # answers a sentence rather than an empty list, and that is its own test.
+    session.refresh_grant_anomalies(True)
     payload = _authority(session)
     assert set(payload) == {"grant", "anomalies"}
     assert payload["grant"] is None
@@ -8446,6 +8450,7 @@ def test_the_anomalies_are_served_beside_a_grant_and_without_one(session):
     """Both halves arrive together and neither implies the other: a desk with
     no grant can still have anomalies, and a grant with none is simply live."""
     session.registry.set_halt(True, book=_open_book(session))
+    session.refresh_grant_anomalies(True)
 
     bare = _authority(session)
     assert bare["grant"] is None
@@ -8579,9 +8584,12 @@ def test_the_grant_pins_the_desks_own_policy_and_not_the_callers(session):
     """A grant is authority over THIS desk's method. `grant_refusals` checks a
     plan against `mandate.operational_policy`, so a policy off the wire either
     covers nothing or covers something the operator never set here."""
-    _grant_through_the_route(session, allowed_policy="min_variance:classical")
+    caller = "not-this-desks-method"
+    assert caller != session.mandate.operational_policy
+    _grant_through_the_route(session, allowed_policy=caller)
     stored = session.live_grant()
     assert stored["allowed_policy"] == session.mandate.operational_policy
+    assert stored["allowed_policy"] != caller
 
 
 def test_the_chat_may_not_grant_itself_standing_authority(session):
@@ -8683,3 +8691,249 @@ def test_a_revoked_grant_stops_the_owner_booking_under_it(session):
     assert session.book_under_grant(True) is None
     assert session.registry.list_orders(50) == []
     assert any("revoked" in reason for reason in _refusals(session))
+
+
+# --- standing authority, fix round 1 ---------------------------------------
+#
+# Five findings, and the first two are the ones that mattered: a ceiling the
+# JSON parser accepts but no arithmetic bounds, and a card refresh that priced
+# the book on the request's lane every three seconds — which re-anchored the
+# high-water mark and disabled the drawdown kill switch as pure collateral of
+# drawing a settings card.
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("ceiling", [
+    "max_notional", "max_turnover", "max_orders", "max_books_per_day",
+    "ttl_days"])
+def test_a_non_finite_ceiling_is_refused_by_name(session, ceiling, value):
+    """A ceiling that is not a number defeats every bound built on it.
+
+    `NaN` compares false against every `>` in `check_grant_covers`, so a grant
+    carrying one covers a plan of any size — and `Infinity` bounds nothing by
+    construction. The type guard passed both: they ARE floats.
+    """
+    status, refused = handle_api(
+        session, "POST", "/api/desk/authority", {},
+        _grant_body(session, **{ceiling: value}))
+    assert status == 400
+    assert ceiling in refused["error"], refused
+    assert "finite" in refused["error"]
+    assert session.live_grant() is None
+
+
+def test_a_non_finite_ceiling_would_have_covered_anything(session):
+    """The bound the whole feature rests on, shown failing. Reverting the
+    finiteness guard makes this grant cover a plan 90,000x its own ceiling."""
+    from qlab.governance.authority import check_grant_covers
+
+    status, _ = handle_api(
+        session, "POST", "/api/desk/authority", {},
+        _grant_body(session, max_notional=float("nan"),
+                    max_turnover=float("inf")))
+    assert status == 400
+    plan = {"targets": {"SPY": 1.0}, "pre_trade": {"turnover": 5.0},
+            "legs": [{"notional": 9e12}]}
+    # And with a ceiling the route WILL compose, that plan is refused.
+    _grant_through_the_route(session, allowed_universe=["SPY"])
+    reasons = check_grant_covers(
+        session.live_grant(), plan, now_iso=session._now_iso(),
+        policy_id=session.mandate.operational_policy, anomalies=[],
+        books_today=0)
+    assert any("notional" in reason for reason in reasons)
+    assert any("turnover" in reason for reason in reasons)
+
+
+def test_the_owner_refuses_a_body_carrying_nan_at_all(session, monkeypatch):
+    """`json.loads` accepts `NaN`, `Infinity` and `-Infinity` by default — a
+    non-standard extension no client needs and every ceiling is defeated by.
+    Refused at the parse boundary, so no route has to remember."""
+    import http.client
+    import json as json_module
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    import qlab.ui.server as server_module
+
+    handler = type("H", (server_module._Handler,), {"session": session})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        body = json_module.dumps(_grant_body(session)).encode()
+        body = body.replace(b"100000.0", b"NaN")
+        conn.request("POST", "/api/desk/authority", body=body)
+        response = conn.getresponse()
+        payload = json_module.loads(response.read())
+        assert response.status == 400
+        # The PARSE boundary's own sentence, not the route's finiteness guard:
+        # the point is that no route has to remember, so this must be refused
+        # before any handler sees the body.
+        assert "not valid JSON" in payload["error"]
+        assert "NaN is not a JSON number" in payload["error"]
+        assert session.live_grant() is None
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_the_authority_read_never_prices_the_book(session, monkeypatch):
+    """The card refresh must not value the portfolio.
+
+    It did, on the *request's* lane, every three seconds — and a valuation on a
+    lane other than the one `/api/tui` polls re-anchors the book's high-water
+    mark (`Registry.update_high_water_mark`), after which no drawdown can ever
+    reach the kill switch. A settings card must not be able to do that.
+    """
+    import qlab.trader.broker as broker_module
+    import qlab.trader.reconcile as reconcile_module
+
+    priced: list[str] = []
+    real_broker = broker_module.get_broker
+    # Counted, never raised: `_grant_anomalies` catches every exception its
+    # inputs throw and reports them as anomalies, so a probe that raised would
+    # be swallowed into a sentence and the test would pass on a read that had
+    # priced the book twice.
+    monkeypatch.setattr(broker_module, "get_broker",
+                        lambda *a, **k: (priced.append("broker"),
+                                         real_broker(*a, **k))[1])
+    monkeypatch.setattr(reconcile_module, "reconcile",
+                        lambda *a, **k: priced.append("reconcile"))
+
+    _grant_through_the_route(session)
+    status, payload = handle_api(session, "GET", "/api/desk/authority", {}, {})
+    assert status == 200
+    assert payload["grant"] is not None
+    assert priced == [], f"the authority read priced the book: {priced}"
+
+
+def test_the_authority_read_takes_no_lane_at_all(session):
+    """By construction, not by care: a read with no lane parameter cannot take
+    one from the request, so no future caller can reintroduce the split."""
+    import inspect
+
+    params = list(inspect.signature(session.authority_payload).parameters)
+    assert params == [], params
+
+
+def test_the_card_serves_what_the_beat_measured(session):
+    """One lane and one cadence: the beat measures on the book's own lane, and
+    every card refresh in between serves that same answer."""
+    session.registry.set_halt(True, book=_open_book(session))
+    session.refresh_grant_anomalies(True)
+
+    payload = _authority(session)
+    assert payload["anomalies"] == ["account is halted"]
+
+
+def test_an_unmeasured_desk_says_so_rather_than_reading_clean(session):
+    """An empty list means "nothing would suspend a grant", which is a claim.
+    Before the first beat nobody has looked, and unknown suspends."""
+    payload = _authority(session)
+    assert payload["anomalies"] == [ui_server.ANOMALIES_UNMEASURED]
+
+
+def test_a_measurement_too_old_to_trust_reads_as_unmeasured(session,
+                                                            monkeypatch):
+    """A beat that stopped must not leave a clean desk on the card forever —
+    the exact failure `_grant_anomalies` refuses a run_revision cache for."""
+    session.refresh_grant_anomalies(True)
+    assert _authority(session)["anomalies"] == []
+
+    later = time.monotonic() + ui_server._ANOMALY_STALE_AFTER_S + 1.0
+    monkeypatch.setattr(ui_server.time, "monotonic", lambda: later)
+    assert _authority(session)["anomalies"] == [ui_server.ANOMALIES_UNMEASURED]
+
+
+def test_switching_the_desk_lane_drops_the_measurement(session):
+    """A measurement is about one lane's book. Carrying it across a switch is
+    how the card would report the old feed's state as the new one's."""
+    from qlab.core.desk_mode import DeskMode
+
+    session.refresh_grant_anomalies(True)
+    assert _authority(session)["anomalies"] == []
+
+    session.set_desk_mode(DeskMode("live", "simulated"))
+    assert _authority(session)["anomalies"] == [ui_server.ANOMALIES_UNMEASURED]
+
+
+def test_the_beat_measures_even_when_the_desk_asks_nothing(session):
+    """A desk with no open proposal is the common state, and it is exactly when
+    the card is read. If only a proposal triggered a measurement, the card
+    would read "not measured" forever on an idle desk."""
+    assert session.book_under_grant(True) is None
+    assert _authority(session)["anomalies"] == []
+
+
+def test_a_method_change_shows_on_the_card_as_a_pause(session):
+    """One keystroke on the METHOD card ends a grant's cover, and nothing said
+    so: the card read `standing · 6 d left` with no anomalies while the gate
+    refused every plan by policy. Named on the READ path only — the gate keeps
+    computing its own."""
+    _grant_through_the_route(session)
+    session.mandate.operational_policy = "min_variance"
+    session.refresh_grant_anomalies(True)
+
+    anomalies = _authority(session)["anomalies"]
+    assert len(anomalies) == 1
+    assert "hrp" in anomalies[0] and "min_variance" in anomalies[0]
+    # Not in the list the gate hands to `check_grant_covers`, which composes
+    # its own policy refusal and must not be handed a second one.
+    assert session._grant_anomalies(True) == []
+
+
+def test_a_grant_with_no_daily_ceiling_does_not_stand(session):
+    """A row written before `max_books_per_day` existed. `check_grant_covers`
+    refuses it unconditionally, so a card reading `standing · books --` is
+    safe and inexplicable at once — the shape this stream has fixed twice."""
+    _live_grant(session, patch={"max_books_per_day": None})
+    assert session.live_grant() is not None
+    assert _authority(session)["grant"] is None
+
+
+def test_a_grant_in_a_mode_that_is_not_paper_does_not_stand(session):
+    _live_grant(session, patch={"mode": "live_auto"})
+    assert session.live_grant() is not None
+    assert _authority(session)["grant"] is None
+
+
+def test_an_empty_author_is_refused_rather_than_renamed(session):
+    """`build_grant` demands a named granter. Coercing `""` to "operator"
+    papered over an author nobody supplied."""
+    status, refused = handle_api(session, "POST", "/api/desk/authority", {},
+                                 _grant_body(session, granted_by=""))
+    assert status == 400
+    assert "who granted it" in refused["error"]
+    assert session.live_grant() is None
+
+
+def test_an_author_that_is_not_a_name_is_refused(session):
+    status, refused = handle_api(session, "POST", "/api/desk/authority", {},
+                                 _grant_body(session, granted_by=7))
+    assert status == 400 and "granted_by" in refused["error"]
+    assert session.live_grant() is None
+
+
+def test_a_grant_that_cannot_be_read_back_fails_loud(session, monkeypatch):
+    """The read-back keeps the create answer identical to the next GET through
+    the `allowed_universe` JSON round trip. If it cannot be read, nothing may
+    book under authority the registry did not keep."""
+    monkeypatch.setattr(session, "_read_grant_row", lambda gid: None)
+    with pytest.raises(RuntimeError, match="could not be read back"):
+        handle_api(session, "POST", "/api/desk/authority", {},
+                   _grant_body(session))
+
+
+def test_a_revoke_the_owner_cannot_confirm_fails_loud(session, monkeypatch):
+    """`... or grant` answered `revoked_at: null` on a *successful* revoke —
+    a 200 that says the grant was not withdrawn. The honest answer to "I
+    cannot confirm" is loud, which the client renders as "may still stand"."""
+    _grant_through_the_route(session)
+    monkeypatch.setattr(session, "_read_grant_row", lambda gid: None)
+    with pytest.raises(RuntimeError, match="could not be confirmed"):
+        handle_api(session, "POST", "/api/desk/authority/revoke", {},
+                   {"reason": "the operator pressed R"})

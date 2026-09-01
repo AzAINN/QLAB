@@ -107,6 +107,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import threading
 import time
@@ -169,6 +170,27 @@ _STREAM_LOCK_WAIT_SECONDS = 2.0
 # changes when this desk trades. Any mutation drops the cache, so a fill shows
 # up at once rather than up to this long later.
 _VALUATION_TTL_SECONDS = 15.0
+# The card's anomaly list is measured on the BEAT and never on a card refresh.
+# `_grant_anomalies` prices the book, and a valuation on a lane other than the
+# one `/api/tui` is polled with re-anchors the book's high-water mark
+# (`Registry.update_high_water_mark`), after which no drawdown ever reaches the
+# kill switch — five re-anchors in three poll cycles, as collateral of drawing
+# a settings card every three seconds. So the read serves what the beat
+# published and prices nothing itself.
+#
+# Older than this, the published answer is not served at all: the beat is 30s,
+# so four missed beats is a beat that stopped, and a card showing a clean desk
+# out of a dead beat is exactly the failure `_grant_anomalies` refuses a
+# `run_revision` cache for.
+_ANOMALY_STALE_AFTER_S = 120.0
+# What the card says when nobody has looked yet. Not an empty list: empty is
+# the claim "nothing would suspend a grant", and before the first beat that is
+# a claim nobody made. Unknown suspends, the same rule the gate follows.
+# Front-loaded: the card cuts this to the width left beside its label, so the
+# words that say WHICH state the desk is in have to survive the cut.
+ANOMALIES_UNMEASURED = (
+    "not measured yet — the desk measures what would suspend a grant on its "
+    "own beat")
 # The archive summary and the three run summaries share one staleness budget:
 # a poll is 30s apart, so this is "at most one rebuild per poll" and never a
 # stale answer, because a logged run invalidates them regardless.
@@ -475,6 +497,16 @@ class UISession:
         self._last_robust_state: str | None = None
         # (key, monotonic stamp, payload) for the display valuation.
         self._valuation_cache: tuple[tuple[bool, str], float, dict] | None = None
+        # (monotonic stamp, anomalies) published by the beat, served by the
+        # AUTHORITY card. Its own lock and a leaf below `_LOCK`: the beat
+        # publishes under the dispatch lock and a card read takes it too, so
+        # what is handed out is never a list a writer is halfway through
+        # replacing (invariant 9). No lane in the key — the desk has one lane
+        # at a time and `set_desk_mode` drops this when it changes, which is
+        # the only way a published measurement can come to be about another
+        # book.
+        self._anomaly_lock = threading.Lock()
+        self._anomaly_cache: tuple[float, list[str]] | None = None
         self.heartbeat = None
         # Autonomy is a runtime switch the operator owns from the UI.
         # The env var only seeds its initial value.
@@ -1097,6 +1129,10 @@ class UISession:
         # covers that, but dropping it here means the switch is visible on the
         # very next poll rather than after the TTL.
         self.invalidate_valuation()
+        # A measurement is about one book on one lane. Carrying it across a
+        # switch is how the card would report the old feed's state as the new
+        # one's — and the halt flag it carries is per-book.
+        self.invalidate_grant_anomalies()
         save_desk_mode(mode)
         self.retune_market_stream()
         return mode
@@ -5892,6 +5928,46 @@ class UISession:
             recent_order_anomaly=recent_order_anomaly,
         ) + unknown
 
+    def refresh_grant_anomalies(self, offline: bool) -> list[str]:
+        """Measure what would suspend a grant, and publish it for the card.
+
+        The beat's call, and the only thing on this runtime that measures.
+        `_grant_anomalies` builds a broker and runs a reconcile, so calling it
+        per request put a VALUATION on a card refresh — on the request's lane,
+        three seconds apart, alternating with the lane `/api/tui` was polled
+        with. Each cross-lane valuation re-anchors the high-water mark, and a
+        re-anchored mark can never reach the drawdown kill switch. One lane,
+        one cadence, and the reader takes what this leaves.
+
+        Returns the list as well as publishing it, so the gate keeps reading
+        once and carrying the answer it gated on.
+        """
+        anomalies = self._grant_anomalies(offline)
+        with self._anomaly_lock:
+            self._anomaly_cache = (time.monotonic(), list(anomalies))
+        return anomalies
+
+    def invalidate_grant_anomalies(self) -> None:
+        """Drop the published measurement — the book or its lane changed."""
+        with self._anomaly_lock:
+            self._anomaly_cache = None
+
+    def _card_anomalies(self) -> list[str]:
+        """What the AUTHORITY card shows, measured by the beat and never here.
+
+        Absence and staleness both read as unmeasured rather than as clean:
+        an empty list is the claim "nothing would suspend a grant", and a beat
+        that stopped must not leave that claim standing on the card.
+        """
+        with self._anomaly_lock:
+            cached = self._anomaly_cache
+        if cached is None:
+            return [ANOMALIES_UNMEASURED]
+        stamp, anomalies = cached
+        if time.monotonic() - stamp > _ANOMALY_STALE_AFTER_S:
+            return [ANOMALIES_UNMEASURED]
+        return list(anomalies)
+
     # -- standing authority: what a live grant may book ----------------------
     def live_grant(self) -> dict | None:
         """The desk's most recent statement of standing authority, or ``None``.
@@ -6039,6 +6115,13 @@ class UISession:
         # The data lane may never contradict the book, on an unattended path
         # least of all — see `_offline_for_book`.
         offline = _offline_for_book(self, offline)
+        # Measured HERE, before the early return below, and published for the
+        # card. The read path prices nothing, so this is the only measurement
+        # the desk makes — and a desk with no open proposal is both the common
+        # state and exactly when an operator opens the settings panel. Read
+        # once and carried from here: the anomalies that gate this book are the
+        # ones recorded beside it, and two reads a second apart can disagree.
+        anomalies = self.refresh_grant_anomalies(offline)
         proposal = current_proposal(self.registry)
         if proposal is None:
             # The desk is asking nothing. Not a refusal: a beat writing a row
@@ -6054,9 +6137,6 @@ class UISession:
             return None
 
         grant = self.live_grant()
-        # Read once and carried: the anomalies that gated this book are the
-        # ones recorded beside it, and two reads a second apart can disagree.
-        anomalies = self._grant_anomalies(offline)
         books_today = None if grant is None else self._grant_books_today(
             str(grant.get("grant_id") or ""), date.today().isoformat())
         reasons = self.grant_refusals(grant, plan, anomalies=anomalies,
@@ -6116,6 +6196,23 @@ class UISession:
         valid_from = str(grant.get("valid_from") or "")
         if valid_from and now_iso < valid_from:
             return None
+        # The two refusals `check_grant_covers` makes about the GRANT itself
+        # rather than about a plan, applied here for revocation's reason: a
+        # grant that refuses every plan it will ever see is not standing. A row
+        # written before `max_books_per_day` existed drew as
+        # `standing · 6 d left · books --` while the gate refused everything —
+        # honest about the wire and silent about the consequence, which is the
+        # shape this stream has already fixed twice.
+        from qlab.governance.authority import VALID_MODES
+
+        if grant.get("mode") not in VALID_MODES:
+            return None
+        try:
+            ceiling = grant.get("max_books_per_day")
+            if ceiling is None or int(ceiling) <= 0:
+                return None
+        except (TypeError, ValueError):
+            return None
         return grant
 
     def _grant_days_left(self, grant: dict) -> int | None:
@@ -6146,7 +6243,7 @@ class UISession:
                 grant_id, date.today().isoformat()),
             days_left=self._grant_days_left(grant))
 
-    def authority_payload(self, offline: bool) -> dict:
+    def authority_payload(self) -> dict:
         """What may book itself, and what would stop it.
 
         Both halves always, and neither implies the other: the anomalies are
@@ -6158,20 +6255,36 @@ class UISession:
         would read "nothing has said what may book itself" forever with no
         owner-down signal to explain it.
 
-        The anomaly half is the expensive one — a broker, a reconcile, a permit
-        and a page of orders, per call — and it is deliberately uncached
-        (``_grant_anomalies`` says why: a cache keyed on ``run_revision`` would
-        go on reporting a clean desk after a halt). It runs under the dispatch
-        lock like every other route and takes none of its own.
+        **No lane, by construction.** This read takes no ``offline`` argument
+        and prices nothing: the anomaly half is measured on the beat
+        (``refresh_grant_anomalies``) and served from there. A card refresh
+        that valued the book on the request's lane re-anchored the high-water
+        mark every three seconds and disabled the drawdown kill switch, so the
+        parameter is absent rather than merely unused — a caller cannot pass a
+        lane that does not exist.
         """
         grant = self.standing_grant()
+        anomalies = self._card_anomalies()
+        if grant is not None:
+            allowed = str(grant.get("allowed_policy") or "")
+            current = str(self.mandate.operational_policy or "")
+            if allowed and allowed != current:
+                # One keystroke on the METHOD card ends a grant's cover, and
+                # nothing said so: the card read `standing` with no anomalies
+                # while the gate refused every plan by policy. Appended to the
+                # READ path only — `check_grant_covers` composes its own
+                # version of this refusal from the plan's policy, and handing
+                # it a second one would double the reason it records.
+                anomalies = anomalies + [
+                    f"the grant covers policy {allowed!r}; the desk's method "
+                    f"is now {current!r}"]
         return {
             # ``None``, never ``{}``: an empty object deserializes into a grant
             # whose every ceiling is absent, and the card draws THAT as
             # standing authority with no bounds instead of the remedy for
             # holding none. A silent misread, not an error.
             "grant": None if grant is None else self._serve_grant(grant),
-            "anomalies": self._grant_anomalies(offline),
+            "anomalies": anomalies,
         }
 
     def grant_authority(self, body: dict) -> dict:
@@ -6213,6 +6326,10 @@ class UISession:
             raise ValueError(
                 "ttl_days must be set explicitly: standing authority runs for "
                 f"a stated number of days, 1..{MAX_GRANT_DAYS}")
+        author = body.get("granted_by")
+        if author is not None and not isinstance(author, str):
+            raise ValueError(
+                f"granted_by must be a name, not {type(author).__name__}")
         mode = body.get("mode")
         grant = build_grant(
             allowed_universe=universe,
@@ -6223,14 +6340,17 @@ class UISession:
             # grant's cover, which is the safe direction.
             allowed_policy=self.mandate.operational_policy,
             # One desk, one human, and no identity service — ``decide_approval``
-            # names the same actor the same way.
-            granted_by=str(body.get("granted_by") or "operator"),
+            # names the same actor the same way. The default stands in for an
+            # ABSENT key only: an empty string was sent by someone, and
+            # ``build_grant`` refuses an unnamed granter by name rather than
+            # having this route quietly sign the grant for them.
+            granted_by="operator" if author is None else author,
             # Passed through only when sent, so an attempt at a live mode is
             # refused by the module's own sentence rather than dropped.
             **({} if mode is None else {"mode": mode}),
             **ceilings)
         self.registry.create_authority_grant(grant)
-        row = self.registry.get_authority_grant(grant["grant_id"])
+        row = self._read_grant_row(grant["grant_id"])
         if row is None:
             raise RuntimeError(
                 "the grant was composed but could not be read back; nothing "
@@ -6238,6 +6358,17 @@ class UISession:
         # Answered off the persisted row, so what the create says is exactly
         # what the next read will say.
         return {"grant": self._serve_grant(row)}
+
+    def _read_grant_row(self, grant_id: str) -> dict | None:
+        """The persisted grant row.
+
+        Its own seam so the failure both callers guard against can be reached
+        by a test — the way ``set_method`` extracted its mandate reload. Both
+        answer off the row rather than off what they just built, so the create
+        says exactly what the next read will and the revoke says only what the
+        registry actually kept.
+        """
+        return self.registry.get_authority_grant(grant_id)
 
     def revoke_authority(self, body: dict) -> dict:
         """Withdraw whatever standing authority the desk is holding.
@@ -6263,7 +6394,17 @@ class UISession:
             raise ValueError(NOTHING_TO_REVOKE)
         grant_id = str(grant.get("grant_id") or "")
         self.registry.revoke_authority_grant(grant_id, reason)
-        row = self.registry.get_authority_grant(grant_id) or grant
+        row = self._read_grant_row(grant_id)
+        if row is None or not row.get("revoked_at"):
+            # Falling back to the pre-revoke row answered 200 with
+            # ``revoked_at: null`` — a success that says the grant was not
+            # withdrawn. ``standing_grant`` proved ``revoked_at`` was NULL a
+            # line ago, so the UPDATE must have applied; if the read cannot
+            # confirm it, the honest answer is loud. The client renders that as
+            # "the grant may still stand", which is exactly what is true.
+            raise RuntimeError(
+                f"the revocation of grant {grant_id} could not be confirmed; "
+                "the desk cannot say whether standing authority still holds")
         return {"grant": self._serve_grant(row),
                 "revoked_at": row.get("revoked_at"),
                 "revoked_reason": row.get("revoked_reason")}
@@ -6951,6 +7092,12 @@ def _grant_number(body: dict, name: str, cast):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(
             f"{name} must be a number, not {type(value).__name__}")
+    # Before the whole-number check, which cannot convert either of them.
+    # `NaN` is a float and passes every type guard, and it compares FALSE
+    # against every `>` in `check_grant_covers` — so a grant carrying one is
+    # bounded by nothing at all, and `Infinity` says so out loud.
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{name} must be a finite number")
     if cast is int and float(value) != int(value):
         raise ValueError(f"{name} must be a whole number, not {value}")
     return cast(value)
@@ -7004,6 +7151,22 @@ def _opt_float(value) -> float | None:
 
 def _opt_int(value) -> int | None:
     return None if value is None else int(value)
+
+
+def _refuse_json_constant(token: str):
+    """`json.loads` accepts NaN/Infinity/-Infinity; this owner accepts none.
+
+    They are not JSON — RFC 8259 has no such literals — and no client sends
+    them, but every bound this runtime enforces is a comparison, and `NaN`
+    compares false against all of them. A standing grant carrying one bounds
+    nothing: the reviewer posted `max_notional: NaN, max_turnover: Infinity`
+    and `check_grant_covers` returned no refusals for a plan of $9e12 at 500%
+    turnover. Refused at the parse boundary rather than in each route, because
+    a route that has to remember is a route that will forget — and the served
+    payload would then carry a bare `NaN`, which fails the client's decode for
+    the whole object, leaving the card dark over an unbounded grant.
+    """
+    raise ValueError(f"{token} is not a JSON number")
 
 
 def _from_chat(headers) -> bool:
@@ -7229,7 +7392,7 @@ def handle_api(session: UISession, method: str, path: str,
         # desk; reading it is not setting it, and the card polls this on the
         # snapshot's own beat because what is LEFT of a grant moves on the
         # owner's heartbeat with nothing on the client to prompt a refetch.
-        return 200, session.authority_payload(off)
+        return 200, session.authority_payload()
 
     if method == "POST" and path == "/api/desk/authority":
         if _from_chat(headers):
@@ -8368,7 +8531,8 @@ class _Handler(BaseHTTPRequestHandler):
         # truncated request into an unrequested paper trade, and every other
         # POST into a 200 computed from parameters the caller never sent.
         try:
-            body = json.loads(raw or b"{}")
+            body = json.loads(raw or b"{}",
+                              parse_constant=_refuse_json_constant)
         except (ValueError, UnicodeDecodeError) as exc:
             self._json(400, {"error": f"request body is not valid JSON: {exc}"})
             return

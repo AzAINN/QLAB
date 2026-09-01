@@ -13,6 +13,7 @@ urllib, never by binding a real socket.
 
 from __future__ import annotations
 
+import pathlib
 import urllib.error
 
 import pytest
@@ -938,3 +939,18 @@ def test_no_agent_surface_can_reach_a_standing_grant():
                          "revoke_authority", "authority.revoke",
                          "/api/desk/authority", "/api/desk/authority/revoke"):
             assert spelling not in names, f"{where} exposes {spelling}"
+
+    # Names are not reach. A surface calling the route from a tool named
+    # `desk_settings_read` passes every assertion above, so the routes are also
+    # pinned absent from the SOURCE of every agent-facing module: the proxy
+    # forwards owner routes by path, and the chat's grant is built there too.
+    import qlab.mcp
+    import qlab.tui.claude
+
+    sources = sorted(pathlib.Path(qlab.mcp.__file__).parent.glob("*.py"))
+    sources.append(pathlib.Path(qlab.tui.claude.__file__))
+    assert len(sources) >= 5, sources
+    for source in sources:
+        text = source.read_text()
+        for route in ("/api/desk/authority", "/api/desk/authority/revoke"):
+            assert route not in text, f"{source.name} names {route}"

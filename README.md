@@ -201,24 +201,37 @@ consume a grant. Granting is not a keystroke: it is a `POST` to
 Anything that writes is refused on a desk you have not armed, and on a window
 started with `--glass`. → **[every key, by pane](docs/cli.md#keys-by-pane)**
 
-> **Developer recommendation — drive the desk through Atlas, not around it.**
-> Open a model and ask it to run the work. `/cli` opens the real Claude CLI as a
-> pane inside ATLAS, wearing the Atlas persona and holding only the desk
-> manager's own tools through the owner-backed proxy — no shell, no filesystem.
-> Ask it in plain language to start a review, read the record, or chase a
-> contender, and it drives the same governed surface you would. On a desk that
-> reasons with a local model — **IBM Granite** through Ollama, chosen at the
-> startup door and changed on Settings ▸ MODELS — the same conversation happens
-> in the ATLAS chat instead; `/cli` is a Claude verb and refuses by name
-> elsewhere.
+> **Developer recommendation — drive qlab from your own agent CLI.** Leave the
+> desk running, open Codex, Claude Code, Bob or any MCP-speaking CLI in a second
+> terminal, and point it at qlab's operator proxy. Then just ask it: *read the
+> book, start a rebalance review, tell me what the scout found.* It drives the
+> desk through Atlas while you watch the same run in the workstation.
 >
-> This is the abstraction worth having: you state intent, the desk enforces the
-> boundary, and the work stays visible — `7` shows the workflow phase by phase,
-> `8` shows every decision on the audit bus. **If you cannot pinpoint what the
-> desk is doing or why, this is the route to take.** Asking Atlas what it would
-> do next and watching the run it starts tells you more than reading the state
-> by hand, and it costs no authority: the model proposes, the gate still
-> refuses, and a fill still needs your click or a grant you signed.
+> ```jsonc
+> // the client's MCP config — .bob/mcp.json is a working copy
+> "qlab-operator": {
+>   "command": "python",
+>   "args": ["-m", "qlab.mcp.tui_proxy"],
+>   "env": {
+>     "QLAB_RUNTIME_URL": "http://127.0.0.1:8765",
+>     "QLAB_OFFLINE": "0"        // omit and it defaults to 1 — synthetic
+>   }
+> }
+> ```
+>
+> This is the clean abstraction. The proxy is stdio — nothing to host — and it
+> **never opens DuckDB**: all fifty tools delegate to the running owner over
+> HTTP, so the one-writer rule holds no matter how many agents you point at it.
+> Its authority is capped at observation, research, workforce coordination,
+> daily operations and *dry* previews. There is no execution tool on it, so the
+> agent can research and propose all day and a fill still needs your click or a
+> grant you signed.
+>
+> **If you cannot pinpoint what the desk is doing or why, this is the route to
+> take.** You get the reasoning in your CLI and the consequences on screen —
+> `7` shows the workflow phase by phase, `8` shows every decision on the audit
+> bus — instead of reading state by hand. → **[Bob as a governed
+> client](docs/ibm-bob.md)** shows the same wiring end to end.
 
 ## Atlas
 

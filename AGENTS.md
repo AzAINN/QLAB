@@ -15,7 +15,6 @@ python -m pip install -e ".[operator,data,optimize,mcp,dev]"   # dev setup
 python -m pytest                    # full offline suite (no network needed)
 python -m pytest tests/test_ui.py  -q          # one module while iterating
 qlab tui                            # terminal workstation (starts/attaches owner)
-qlab ui --no-browser                # same owner runtime, web client
 qlab run-once --offline --dry-run   # one governed autopilot cycle, no orders
 qlab batch configs/specs/ablation_v1.yaml --offline   # staged ablation
 python -m qlab.agents.loader sync   # regenerate .claude/agents + .bob/personas
@@ -28,15 +27,18 @@ excluded from `[all]`, the staged runtime, and the default ablation.
 ## Architecture in sixty seconds
 
 - **One DuckDB writer, always.** The owner HTTP runtime (`qlab/ui/server.py`,
-  started by `qlab tui` or `qlab ui`) is the only process that opens
-  `.lab/registry.duckdb`. Every other surface — the Textual TUI
-  (`qlab/tui/`), the web client, and the `qlab-operator` MCP proxy
-  (`qlab/mcp/tui_proxy.py`) — talks to it over HTTP only.
+  started by `qlab` or `qlab owner`) is the only process that opens
+  `.lab/registry.duckdb`. Every other surface — the Atlas workstation
+  (`clients/atlas-tui`), the CLI verbs, and the `qlab-operator` MCP proxy
+  (`qlab/mcp/tui_proxy.py`) — talks to it over HTTP only. The Textual and web
+  clients are retired; `qlab/tui/` retains only client plumbing.
 - The combined `qlab` MCP server (`qlab/mcp/server.py`) is for headless
   sessions and refuses to start while an owner runtime is alive (port guard).
 - **Claude workforce**: the TUI can launch Claude as a coordinator whose only
-  built-in tool is an allowlisted Agent dispatcher for five roles
-  (moments-analyst → challenger → optimization-runner → referee → reporter).
+  built-in tool is an allowlisted Agent dispatcher for eight roles
+  — the six workflow phases (moments-analyst, contender-scout, challenger,
+  optimization-runner, referee, reporter) and the advisory data-qa and
+  signal-qa. Only contender-scout holds WebSearch/WebFetch.
   Phase state persists in the registry (`workflows`/`workflow_steps`) and is
   resumable. No Claude role has filesystem, shell, or execution tools.
 - **Algorithm catalog** (`qlab/algorithms/catalog.py`): every method is
@@ -50,10 +52,14 @@ excluded from `[all]`, the staged runtime, and the default ablation.
    registry through the owner API (or the combined server when no owner runs).
 2. **Tests never open `.lab/registry.duckdb`** — use `Registry(":memory:")`.
    Tests must pass fully offline; synthetic fixtures stand in for market data.
-3. **Referee PASS is bound to the exact `targets_hash`** and plan execution
-   requires a persisted checked plan plus explicit human confirmation
-   (`human_confirmed=True` from the TUI). Never introduce a raw-order tool or
-   an agent-reachable execution path.
+3. **Referee PASS is bound to the exact `targets_hash`** on every execution
+   path. On the desk path, execution also requires a persisted checked plan
+   plus explicit human confirmation (`human_confirmed=True` from the client).
+   Two out-of-band hatches skip that confirmation and nothing else —
+   `QLAB_AUTOPILOT_EXECUTE=1` for `qlab run-once`/`qlab watch` and
+   `QLAB_HEADLESS_EXECUTE=1` for the headless MCP — each authorizing one
+   process the operator started; no agent can set either. Never introduce a
+   raw-order tool or an agent-reachable execution path.
 4. **Fail loud.** No silent fallbacks for missing data, credentials, or
    unconditioned tensors; refuse with a clear error instead.
 5. **`agents/*.md` is the single source of truth for roles.** After editing,

@@ -92,6 +92,19 @@ which does not travel. Three demo tapes hard-coded a home directory; 84
 absolute-path links in a governance record rendered dead on GitHub; the
 manifest had no `[project.urls]`.
 
+## Decided, not changed
+
+**The Python floor.** `pyproject.toml` declares `requires-python = ">=3.10"`
+and `docs/install.md` says 3.10+. Nothing in `qlab/` uses a post-3.10 feature,
+so the *package* claim is true — but the *suite* is not: `tests/test_ui.py:2276`
+asserts json's "trailing comma" wording, which only CPython 3.13 emits, and CI
+pins 3.13. A stranger on 3.11 installs happily and then sees a red suite.
+Left as-is deliberately: narrowing `requires-python` to 3.13 would shrink the
+supported audience to fix a test, and loosening the assertion is a code change
+better made with a 3.10 CI leg beside it than in the minutes before a push.
+Whichever is chosen, `docs/install.md` should say which version the *suite*
+needs.
+
 ## Judged clean
 
 No secrets, credentials, tokens, private keys, DSNs or real financial

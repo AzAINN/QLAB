@@ -16,6 +16,17 @@
 //! installed, which is a fact about a machine rather than about this code.
 
 #![cfg(feature = "operator")]
+// Unix, and only the *tests*. `portable-pty` is cross-platform and `src/pty.rs`
+// compiles and runs everywhere — what is POSIX is this file's fixtures and the
+// properties it pins: the children are scripted `sh`, the assertions are on
+// exact bytes including the `\r\n` a POSIX line discipline puts there, and the
+// endings are SIGHUP, ESRCH and a reaped `wait`. On Windows a POSIX `sh` need
+// not resolve at all and ConPTY translates differently, so these would fail for
+// reasons that say nothing about the code under test. What Windows CI should
+// keep checking is the census in `operator_gate.rs`, which is not gated.
+#![cfg(unix)]
+
+mod one_pty;
 
 use atlas::pty::{PtyEvent, PtySession, Spawn};
 use portable_pty::CommandBuilder;
@@ -121,6 +132,7 @@ fn silence(rx: &mut UnboundedReceiver<PtyEvent>, about: &str) {
 
 #[test]
 fn a_child_yields_its_bytes_and_then_says_it_ended() {
+    let _pty = one_pty::turn();
     let (tx, mut rx) = unbounded_channel();
     let session =
         PtySession::open(&Script("printf 'hello\\n'"), 40, 10, tx).expect("the child started");
@@ -146,6 +158,7 @@ fn a_child_yields_its_bytes_and_then_says_it_ended() {
 
 #[test]
 fn a_non_zero_exit_is_a_sentence_naming_the_status() {
+    let _pty = one_pty::turn();
     let (tx, mut rx) = unbounded_channel();
     let session = PtySession::open(&Script("exit 3"), 40, 10, tx).expect("the child started");
 
@@ -161,6 +174,7 @@ fn a_non_zero_exit_is_a_sentence_naming_the_status() {
 
 #[test]
 fn a_binary_the_desk_does_not_have_is_refused_by_name() {
+    let _pty = one_pty::turn();
     let (tx, mut rx) = unbounded_channel();
     let refusal = PtySession::open(&Missing, 40, 10, tx).expect_err("there is no such binary");
 
@@ -190,6 +204,7 @@ fn a_binary_the_desk_does_not_have_is_refused_by_name() {
 
 #[test]
 fn what_the_desk_writes_reaches_the_child() {
+    let _pty = one_pty::turn();
     let (tx, mut rx) = unbounded_channel();
     let session = PtySession::open(
         &Script("read line; printf 'you said %s\\n' \"$line\""),
@@ -211,6 +226,7 @@ fn what_the_desk_writes_reaches_the_child() {
 
 #[test]
 fn the_child_is_told_how_big_the_pane_is_and_how_big_it_became() {
+    let _pty = one_pty::turn();
     let (tx, mut rx) = unbounded_channel();
     // `stty size` prints rows then columns, so the child is reporting the size
     // this side set rather than one it chose. The `read` between the two is what
@@ -235,6 +251,7 @@ fn the_child_is_told_how_big_the_pane_is_and_how_big_it_became() {
 
 #[test]
 fn after_the_child_is_gone_a_keystroke_is_said_and_a_resize_is_not() {
+    let _pty = one_pty::turn();
     let (tx, mut rx) = unbounded_channel();
     let session = PtySession::open(&Script("printf 'bye\\n'"), 40, 10, tx).expect("started");
     let (_, over) = until_it_ends(&mut rx);
@@ -259,6 +276,7 @@ fn after_the_child_is_gone_a_keystroke_is_said_and_a_resize_is_not() {
 
 #[test]
 fn killing_the_child_ends_it_and_killing_it_again_is_a_no_op() {
+    let _pty = one_pty::turn();
     let (tx, mut rx) = unbounded_channel();
     let mut session = PtySession::open(&Script("sleep 30"), 40, 10, tx).expect("the child started");
 
@@ -278,6 +296,7 @@ fn killing_the_child_ends_it_and_killing_it_again_is_a_no_op() {
 
 #[test]
 fn dropping_the_session_kills_the_child_rather_than_orphaning_it() {
+    let _pty = one_pty::turn();
     let (tx, mut rx) = unbounded_channel();
     let session = PtySession::open(&Script("sleep 30"), 40, 10, tx).expect("the child started");
     drop(session);

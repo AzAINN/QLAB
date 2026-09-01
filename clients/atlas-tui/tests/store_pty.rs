@@ -21,6 +21,23 @@
 //! Gated with the module it is about: a monitoring build has no pane, no
 //! parser, and no key that could open either.
 #![cfg(feature = "operator")]
+// Unix, and only the tests: `portable-pty` is cross-platform and `src/pty.rs`
+// builds everywhere, but every pane here is opened onto a scripted `sh` and the
+// screens are read back through the `\r\n` a POSIX pty writes. `pty_session.rs`
+// states the whole reason. Whole-file rather than per-test, because the two
+// tests here that drive no child — bytes with no pane, and a lost keystroke —
+// are the negative controls for the ones that do and prove nothing apart from
+// them.
+#![cfg(unix)]
+// A turn is held across every `.await` in this file, which is what
+// `clippy::await_holding_lock` names — and the hazard it names is absent: a
+// `#[tokio::test]` runtime is current-thread with one task on it, so nothing
+// else is waiting to make progress, and the turn has to outlive the child
+// rather than the `open`. `one_pty::turn()` is the only lock taken here;
+// `one_pty/mod.rs` states the whole reason.
+#![allow(clippy::await_holding_lock)]
+
+mod one_pty;
 
 use atlas::bus::AppEvent;
 use atlas::pty::{PtyEvent, Spawn};
@@ -163,6 +180,7 @@ fn said(ev: &AppEvent) -> String {
 
 #[tokio::test]
 async fn the_childs_bytes_reach_the_screen_and_owe_a_frame() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, _rx)) = desk();
     store
         .open_pty(&WAITING, 40, 10, tx)
@@ -205,6 +223,7 @@ async fn bytes_with_no_pane_to_draw_them_are_not_a_pane() {
 
 #[tokio::test]
 async fn a_child_that_ends_says_what_happened_and_how_to_start_another() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, mut rx)) = desk();
     store
         .open_pty(&Script("printf 'bye\\r\\n'"), 40, 10, tx)
@@ -236,6 +255,7 @@ async fn a_child_that_ends_says_what_happened_and_how_to_start_another() {
 
 #[tokio::test]
 async fn a_non_zero_exit_keeps_its_own_status_in_the_sentence() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, _rx)) = desk();
     store.open_pty(&WAITING, 40, 10, tx).expect("started");
 
@@ -261,6 +281,7 @@ async fn a_non_zero_exit_keeps_its_own_status_in_the_sentence() {
 
 #[tokio::test]
 async fn an_ending_heard_after_the_pane_was_closed_does_not_put_it_back() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, _rx)) = desk();
     store.open_pty(&WAITING, 40, 10, tx).expect("started");
     store.close_pty();
@@ -285,6 +306,7 @@ async fn an_ending_heard_after_the_pane_was_closed_does_not_put_it_back() {
 
 #[tokio::test]
 async fn a_second_child_is_refused_by_name() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, mut rx)) = desk();
     store
         .open_pty(&WAITING, 40, 10, tx.clone())
@@ -317,6 +339,7 @@ async fn a_second_child_is_refused_by_name() {
 
 #[tokio::test]
 async fn a_child_that_never_started_is_refused_by_name_and_leaves_no_pane() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, mut rx)) = desk();
 
     let refused = store
@@ -339,6 +362,7 @@ async fn a_child_that_never_started_is_refused_by_name_and_leaves_no_pane() {
 
 #[tokio::test]
 async fn the_keyboard_goes_back_to_the_desk_when_the_child_ends() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, _rx)) = desk();
     store.open_pty(&WAITING, 40, 10, tx).expect("started");
     store.pty_focus(true);
@@ -365,6 +389,7 @@ async fn the_keyboard_goes_back_to_the_desk_when_the_child_ends() {
 
 #[tokio::test]
 async fn the_keyboard_is_only_ever_a_live_childs() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, _rx)) = desk();
     // No pane at all.
     store.pty_focus(true);
@@ -387,6 +412,7 @@ async fn the_keyboard_is_only_ever_a_live_childs() {
 
 #[tokio::test]
 async fn what_the_desk_types_reaches_the_child() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, mut rx)) = desk();
     store
         .open_pty(&Script("read x; printf 'got %s\\r\\n' \"$x\""), 40, 10, tx)
@@ -404,6 +430,7 @@ async fn what_the_desk_types_reaches_the_child() {
 
 #[tokio::test]
 async fn the_pane_and_the_child_are_resized_together() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, mut rx)) = desk();
     // `stty size` prints rows then columns, so the child reports the size this
     // side set. The `read` between the two orders the second measurement after
@@ -443,6 +470,7 @@ async fn the_pane_and_the_child_are_resized_together() {
 
 #[tokio::test]
 async fn closing_the_pane_ends_the_child_and_takes_the_pane_with_it() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, mut rx)) = desk();
     store.open_pty(&WAITING, 40, 10, tx).expect("started");
 
@@ -468,6 +496,7 @@ async fn closing_the_pane_ends_the_child_and_takes_the_pane_with_it() {
 
 #[tokio::test]
 async fn a_child_started_after_another_ended_gets_a_clean_screen() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, _rx)) = desk();
     store
         .open_pty(&WAITING, 40, 10, tx.clone())
@@ -542,6 +571,7 @@ async fn a_keystroke_that_never_reached_the_child_is_said() {
 
 #[tokio::test]
 async fn a_dead_childs_ending_must_not_end_the_child_that_replaced_it() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, mut rx)) = desk();
     store
         .open_pty(&WAITING, 40, 10, tx.clone())
@@ -587,6 +617,7 @@ async fn a_dead_childs_ending_must_not_end_the_child_that_replaced_it() {
 
 #[tokio::test]
 async fn a_dead_childs_last_bytes_must_not_land_on_the_new_childs_screen() {
+    let _pty = one_pty::turn();
     let (mut store, (tx, _rx)) = desk();
     store
         .open_pty(&WAITING, 40, 10, tx.clone())

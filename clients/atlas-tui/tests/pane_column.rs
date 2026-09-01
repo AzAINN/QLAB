@@ -14,23 +14,48 @@
 //! (`stty size`) wherever the claim is that it was told.
 //!
 //! Gated with the pane: a monitoring build has no `/cli` and no column to give.
+//!
+//! **Gated per test rather than per file, and only on unix.** `portable-pty` is
+//! cross-platform and `src/pane.rs` compiles and runs everywhere; what is POSIX
+//! is the fixtures — scripted `sh` children, `stty size` for the measurement,
+//! `\r\n` in what comes back — so on Windows these would fail for reasons that
+//! say nothing about the geometry they exist to pin. The three claims here that
+//! need no child (the two `pane_column` widths and `quit_note`) are pure
+//! functions of the layout and stay on every platform.
 #![cfg(feature = "operator")]
+// A turn is held across every `.await` in this file, which is what
+// `clippy::await_holding_lock` names — and the hazard it names is absent: a
+// `#[tokio::test]` runtime is current-thread with one task on it, so nothing
+// else is waiting to make progress, and the turn has to outlive the child
+// rather than the `open`. `one_pty::turn()` is the only lock taken here;
+// `one_pty/mod.rs` states the whole reason.
+#![allow(clippy::await_holding_lock)]
+
+#[cfg(unix)]
+mod one_pty;
 
 use atlas::bus::AppEvent;
-use atlas::pty::{PtyEvent, Spawn};
 use atlas::store::{PtyState, Store, ViewId};
 use atlas::ui::views::Views;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use portable_pty::CommandBuilder;
 use ratatui::layout::Rect;
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+// Everything below is a real child on a real pty: the POSIX half of the file.
+#[cfg(unix)]
+use atlas::pty::{PtyEvent, Spawn};
+#[cfg(unix)]
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+#[cfg(unix)]
+use portable_pty::CommandBuilder;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 /// How long a test waits for a child with a millisecond of work to do.
 ///
 /// `store_pty.rs`'s reason, unchanged: nothing here measures time, and the
 /// deadline exists only so an implementation that never forwards fails with a
 /// sentence instead of hanging the suite.
+#[cfg(unix)]
 const PATIENCE: Duration = Duration::from_secs(20);
 
 /// The ATLAS column at a 120×36 terminal, measured off the real frame: the nav
@@ -39,6 +64,7 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// Written as the rect a `draw` is handed rather than as two numbers, because
 /// the whole of what this file is about is that the pane takes the *area* and
 /// the child is given what is inside it.
+#[cfg(unix)]
 const COLUMN: Rect = Rect {
     x: 9,
     y: 1,
@@ -47,8 +73,10 @@ const COLUMN: Rect = Rect {
 };
 
 /// A scripted child, on a `PATH` this file chose.
+#[cfg(unix)]
 struct Script(&'static str);
 
+#[cfg(unix)]
 impl Spawn for Script {
     fn command(&self) -> CommandBuilder {
         let mut cmd = CommandBuilder::new("sh");
@@ -64,12 +92,16 @@ impl Spawn for Script {
 /// `store_pty.rs`'s shape: `stty size` prints rows then columns, and the `read`
 /// between the two orders the second measurement after the resize, because
 /// bytes to a pty arrive in order.
+#[cfg(unix)]
 const MEASURING: Script = Script("stty size; read go; stty size");
 /// A child that waits for a line and says nothing until it has one.
+#[cfg(unix)]
 const WAITING: Script = Script("read x");
 /// A binary the desk does not have.
+#[cfg(unix)]
 struct Missing;
 
+#[cfg(unix)]
 impl Spawn for Missing {
     fn command(&self) -> CommandBuilder {
         CommandBuilder::new("/nonexistent/qlab")
@@ -89,11 +121,13 @@ fn desk() -> (Store, Views, Bus) {
 }
 
 /// One keystroke, routed exactly as the runtime routes it.
+#[cfg(unix)]
 fn press(store: &mut Store, views: &mut Views, code: KeyCode) -> Option<atlas::cmd::Command> {
     atlas::ui::shell::on_key(KeyEvent::new(code, KeyModifiers::NONE), store, views)
 }
 
 /// The child's screen as text, or the empty string when there is no pane.
+#[cfg(unix)]
 fn screen(store: &Store) -> String {
     store
         .pty_screen()
@@ -103,6 +137,7 @@ fn screen(store: &Store) -> String {
 
 /// The screen's size as the parser holds it, in the order a terminal is spoken
 /// about: columns then rows.
+#[cfg(unix)]
 fn parsed_size(store: &Store) -> (u16, u16) {
     let (rows, cols) = store.pty_screen().expect("a pane").size();
     (cols, rows)
@@ -110,6 +145,7 @@ fn parsed_size(store: &Store) -> (u16, u16) {
 
 /// Fold whatever the bus carries into the store until the desk shows what the
 /// test is waiting for.
+#[cfg(unix)]
 async fn until(
     store: &mut Store,
     rx: &mut UnboundedReceiver<AppEvent>,
@@ -133,8 +169,10 @@ async fn until(
 
 // -- the geometry -----------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_child_is_given_the_rect_inside_the_border_and_not_the_pane() {
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, mut rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &MEASURING, COLUMN, tx).expect("the child started");
     // The parser first: it is the screen the child's bytes are painted onto,
@@ -156,8 +194,10 @@ async fn the_child_is_given_the_rect_inside_the_border_and_not_the_pane() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_frame_that_moved_the_pane_tells_the_child_its_new_size() {
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, mut rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &MEASURING, COLUMN, tx).expect("the child started");
     until(&mut store, &mut rx, "the opening size", |store| {
@@ -187,11 +227,13 @@ async fn a_frame_that_moved_the_pane_tells_the_child_its_new_size() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_frame_that_drew_no_pane_resizes_nothing() {
     // The rect a frame publishes when it drew no pane is empty, and a child
     // told it would be given a screen with no cells on it. The runtime calls
     // this after *every* frame, including the ones another view drew.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, _rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &WAITING, COLUMN, tx).expect("the child started");
     atlas::pane::resized(&mut store, Rect::default());
@@ -200,11 +242,13 @@ async fn a_frame_that_drew_no_pane_resizes_nothing() {
 
 // -- the ask row the pane is drawn over -------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_half_typed_question_does_not_eat_the_panes_keys() {
     // A4's likeliest real bug: `typing()` answers on the ask row's own state,
     // so a question half-typed before `/cli` would keep claiming every
     // printable key — for a row the pane is now drawn over.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, _rx)) = desk();
     press(&mut store, &mut views, KeyCode::Char('w'));
     press(&mut store, &mut views, KeyCode::Char('h'));
@@ -228,11 +272,13 @@ async fn a_half_typed_question_does_not_eat_the_panes_keys() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_printable_key_while_the_pane_is_up_is_not_a_question() {
     // The other half: the row is settled when the pane opens, and nothing may
     // re-arm it while the pane holds the column — one printable key would
     // otherwise put `typing()` back and take the workstation's keys with it.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, _rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &WAITING, COLUMN, tx).expect("the child started");
     press(&mut store, &mut views, KeyCode::Char('w'));
@@ -246,10 +292,12 @@ async fn a_printable_key_while_the_pane_is_up_is_not_a_question() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_question_comes_back_to_a_row_that_is_on_screen_again() {
     // Settling is not a mode: once the pane is gone the row is a row again,
     // and the first printable key types into it.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, _rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &WAITING, COLUMN, tx).expect("the child started");
     store.close_pty();
@@ -259,8 +307,10 @@ async fn the_question_comes_back_to_a_row_that_is_on_screen_again() {
 
 // -- leaving a dead pane ----------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn one_key_closes_a_pane_whose_child_has_ended() {
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, mut rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &Script("exit 0"), COLUMN, tx)
         .expect("the child started");
@@ -277,6 +327,7 @@ async fn one_key_closes_a_pane_whose_child_has_ended() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_window_that_lost_its_arming_can_still_leave_a_dead_pane() {
     // The posture is the owner's to change and it can change under a live pane,
@@ -284,6 +335,7 @@ async fn a_window_that_lost_its_arming_can_still_leave_a_dead_pane() {
     // Closing a dead pane writes nothing — the child is gone and the session
     // with it — so this key is not the posture's to refuse, and the alternative
     // is a chat the operator cannot get back to until the desk is re-armed.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, mut rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &Script("exit 0"), COLUMN, tx)
         .expect("the child started");
@@ -301,11 +353,13 @@ async fn a_window_that_lost_its_arming_can_still_leave_a_dead_pane() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_window_that_lost_its_arming_still_may_not_close_a_live_one() {
     // The other half, and the reason the key moved rather than the whole block:
     // what makes closing safe is the *ending*, not the posture. A running child
     // is still a Claude session one keystroke may not end.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, _rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &WAITING, COLUMN, tx).expect("the child started");
     store.posture = atlas::store::Posture::Glass;
@@ -313,18 +367,22 @@ async fn a_window_that_lost_its_arming_still_may_not_close_a_live_one() {
     assert_eq!(store.pty_state(), PtyState::Running);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_key_that_closes_a_dead_pane_leaves_a_live_child_alone() {
     // One keystroke may not end a Claude session. Ctrl-C interrupts the child
     // (`keys_pty.rs`), and this key is for the pane it leaves behind.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, _rx)) = desk();
     atlas::pane::open(&mut store, &mut views, &WAITING, COLUMN, tx).expect("the child started");
     press(&mut store, &mut views, KeyCode::Char('c'));
     assert_eq!(store.pty_state(), PtyState::Running);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn cli_on_a_dead_pane_restarts_in_place() {
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, mut rx)) = desk();
     atlas::pane::open(
         &mut store,
@@ -348,6 +406,7 @@ async fn cli_on_a_dead_pane_restarts_in_place() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn cli_while_a_child_is_running_is_refused_and_the_first_child_keeps_the_pane() {
     // A pane whose child has *ended* is replaced; a live one is not. Closing
@@ -355,6 +414,7 @@ async fn cli_while_a_child_is_running_is_refused_and_the_first_child_keeps_the_p
     // `/cli` on a working Claude session would end it to make room for its
     // successor. The store refuses by name instead, and the first child is
     // still there to answer for itself.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, mut rx)) = desk();
     atlas::pane::open(
         &mut store,
@@ -378,11 +438,13 @@ async fn cli_while_a_child_is_running_is_refused_and_the_first_child_keeps_the_p
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_retry_that_fails_replaces_the_panes_sentence_rather_than_adding_one() {
     // One frame, one story about one child. A retry that leaves the previous
     // ending on the border and puts its own refusal in a toast is two
     // sentences about two different children on screen at once.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (tx, mut rx)) = desk();
     atlas::pane::open(
         &mut store,
@@ -409,6 +471,7 @@ async fn a_retry_that_fails_replaces_the_panes_sentence_rather_than_adding_one()
 
 // -- a window with no room --------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_window_with_no_room_for_a_terminal_is_told_so_and_gets_no_child() {
     // Loud rather than degraded: a child opened behind a refusal is a session

@@ -17,6 +17,22 @@
 //! Gated with the pane it is about: a monitoring build has no child to type at
 //! and no key that could open one.
 #![cfg(feature = "operator")]
+// Unix, and only the tests: `portable-pty` is cross-platform and `src/pty.rs`
+// builds everywhere, but every claim here is answered by a scripted `sh` child
+// reading what was typed at it, and `Ctrl-C` is answered by that child dying of
+// SIGINT. `pty_session.rs` states the whole reason. Whole-file rather than
+// per-test, because the two tests that open no pane are the "and with no child"
+// arm of the routing claims beside them.
+#![cfg(unix)]
+// A turn is held across every `.await` in this file, which is what
+// `clippy::await_holding_lock` names — and the hazard it names is absent: a
+// `#[tokio::test]` runtime is current-thread with one task on it, so nothing
+// else is waiting to make progress, and the turn has to outlive the child
+// rather than the `open`. `one_pty::turn()` is the only lock taken here;
+// `one_pty/mod.rs` states the whole reason.
+#![allow(clippy::await_holding_lock)]
+
+mod one_pty;
 
 use atlas::bus::AppEvent;
 use atlas::cmd::Command;
@@ -133,6 +149,7 @@ async fn every_key_the_desk_claims_belongs_to_the_child_while_the_pane_has_it() 
     // keys the whole workstation depends on, and all three are characters a
     // session needs to be able to type. A pane that let the shell keep them
     // would be a terminal an operator cannot use.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (_tx, mut rx)) =
         desk_with(&Script("read x; printf 'read [%s]\\r\\n' \"$x\"")).await;
     store.pty_focus(true);
@@ -166,6 +183,7 @@ async fn ctrl_c_interrupts_the_child_and_does_not_quit_the_desk() {
     // The ruling this task exists for. A terminal that cannot interrupt its own
     // child is not a terminal, so `Ctrl-C` stops being an unconditional quit
     // for exactly as long as the pane holds the keyboard.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (_tx, mut rx)) = desk_with(&WAITING).await;
     store.pty_focus(true);
 
@@ -190,6 +208,7 @@ async fn ctrl_c_interrupts_the_child_and_does_not_quit_the_desk() {
 async fn the_keyboard_comes_back_on_ctrl_bracket_and_the_next_q_quits() {
     // The way out, and the exchange it buys: quitting is still one key away,
     // and the pane's border already names the key that gets there.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (_tx, mut rx)) =
         desk_with(&Script("read x; printf 'len %s\\r\\n' \"${#x}\"")).await;
     store.pty_focus(true);
@@ -222,6 +241,7 @@ async fn the_terminal_that_spells_ctrl_bracket_as_ctrl_five_is_understood_too() 
     // as `5` with control down unless the kitty protocol is negotiated — which
     // this client does not negotiate. A router that only knew the bracket would
     // have shipped a border naming a key that does nothing.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (_tx, _rx)) = desk_with(&WAITING).await;
     store.pty_focus(true);
 
@@ -237,6 +257,7 @@ async fn a_child_that_has_ended_takes_no_keys_and_says_nothing_per_keystroke() {
     // Carried from A1, and binding: a write to a dead child is *said*, one
     // sentence per keystroke, so a pane left focused after an exit would fill
     // the desk with them. The ending takes the keyboard back with the child.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (_tx, mut rx)) = desk_with(&WAITING).await;
     store.pty_focus(true);
 
@@ -338,6 +359,7 @@ async fn with_no_pane_at_all_every_key_is_what_it_was() {
 async fn with_a_child_running_but_unfocused_every_key_is_what_it_was() {
     // The pin the whole change rests on: opening a pane changes nothing until
     // the operator hands it the keyboard.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (_tx, _rx)) = desk_with(&WAITING).await;
     assert_eq!(store.pty_state(), PtyState::Running);
     assert!(!store.pty_focused());
@@ -348,6 +370,7 @@ async fn with_a_child_running_but_unfocused_every_key_is_what_it_was() {
 
 #[tokio::test]
 async fn i_gives_the_keyboard_to_a_running_child() {
+    let _pty = one_pty::turn();
     let (mut store, mut views, (_tx, _rx)) = desk_with(&WAITING).await;
     store.posture = Posture::Operator;
     store.nav.view = ViewId::Atlas;
@@ -386,6 +409,7 @@ async fn a_dead_pane_does_not_hand_the_focus_key_to_a_row_nobody_can_see() {
     // The pane keeps the column after its child ends, so the ask row is not on
     // screen — and a key that focused it would arm a field the operator cannot
     // see, which is the hung-client reading this pane must never produce.
+    let _pty = one_pty::turn();
     let (mut store, mut views, (_tx, _rx)) = desk_with(&WAITING).await;
     store.posture = Posture::Operator;
     store.nav.view = ViewId::Atlas;

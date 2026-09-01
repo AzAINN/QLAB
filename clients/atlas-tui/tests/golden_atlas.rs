@@ -14,6 +14,9 @@
 //! pass on chrome.
 
 mod harness;
+// Only where `mod pane` below is: unix for the child, `operator` for the pane.
+#[cfg(all(unix, feature = "operator"))]
+mod one_pty;
 
 use atlas::bus::{AppEvent, Channel};
 use atlas::model::Snapshot;
@@ -810,19 +813,34 @@ fn a_your_call_word_the_short_sidebar_clipped_off_is_not_clickable() {
 /// it. The child is real — a pane cannot exist without one — but the bytes on
 /// its screen are folded in synchronously, because what is pinned here is the
 /// column and not a child's timing.
+///
+/// **The child, and only the child, is unix.** `portable-pty` is cross-platform
+/// and the column these frames pin is drawn the same everywhere; what is POSIX
+/// is the fixture — a scripted `sh`, and the `\r\n` its pty carries — so the
+/// frames that need a live one are gated per test and the one claim here that
+/// needs no child stays on every platform.
 #[cfg(feature = "operator")]
 mod pane {
     use super::*;
-    use atlas::bus::AppEvent;
-    use atlas::pty::{PtyEvent, Spawn};
     use atlas::store::Posture;
+
+    #[cfg(unix)]
+    use crate::one_pty;
+    #[cfg(unix)]
+    use atlas::bus::AppEvent;
+    #[cfg(unix)]
+    use atlas::pty::{PtyEvent, Spawn};
+    #[cfg(unix)]
     use portable_pty::CommandBuilder;
+    #[cfg(unix)]
     use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
     /// A child that waits for a line and says nothing until it has one, so the
     /// pane stays up for as long as the frame is being read.
+    #[cfg(unix)]
     struct Waiting;
 
+    #[cfg(unix)]
     impl Spawn for Waiting {
         fn command(&self) -> CommandBuilder {
             let mut cmd = CommandBuilder::new("sh");
@@ -835,16 +853,19 @@ mod pane {
 
     /// What the child has written when these frames are drawn. CR-LF because a
     /// pty carries both, exactly as `golden_terminal.rs` feeds its parser.
+    #[cfg(unix)]
     const SAID: &[u8] = b"the desk is up on :8765\r\n> what changed in the regime read?\r\n";
 
     /// The stamp the first pane of a run is given (`store_pty.rs` pins the
     /// numbering); every frame here opens exactly one.
+    #[cfg(unix)]
     const FIRST: u64 = 1;
 
     /// An armed ATLAS with a child running in its column.
     ///
     /// The sender is handed back because the store's forwarder holds the other
     /// end: dropped here, the bus would close under a live session.
+    #[cfg(unix)]
     fn with_pane(client: &mut Client, w: u16, h: u16) -> UnboundedSender<AppEvent> {
         let (tx, _rx) = unbounded_channel();
         // The rect the runtime opens with: the column a pane will be drawn in,
@@ -882,15 +903,19 @@ mod pane {
         client
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_atlas_column_is_the_pane_while_a_child_runs_at_120x36() {
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 120, 36);
         insta::assert_snapshot!(client.frame(120, 36));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_pane_spans_the_chat_and_the_would_do_column_and_the_desk_rail_stays() {
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 120, 36);
         let frame = client.frame(120, 36);
@@ -925,11 +950,13 @@ mod pane {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_pane_too_narrow_beside_the_desk_rail_takes_the_rail_too() {
         // Below sixty columns a pane is not one an operator can work in, and
         // the rail is the last thing to go rather than the thing that stays
         // while the terminal becomes unusable. At 96 the pane would be 53.
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 96, 36);
         let frame = client.frame(96, 36);
@@ -946,8 +973,10 @@ mod pane {
         assert!(frame.contains("PULSE"), "{frame}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn closing_the_pane_gives_the_column_back_exactly_as_it_was() {
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let before = client.frame(120, 36);
         let _tx = with_pane(&mut client, 120, 36);
@@ -960,11 +989,13 @@ mod pane {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_dead_pane_says_on_its_border_which_key_gives_the_column_back() {
         // `Ended` keeps the pane up — the last thing a failing session printed
         // is where it said why — so the border owes the way out as well as the
         // way to start another. Both sentences, on one row.
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 120, 36);
         client.store.apply(
@@ -987,6 +1018,7 @@ mod pane {
         assert!(frame.contains("the desk is up on :8765"), "{frame}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_pane_shrunk_below_its_floor_hands_no_keyboard_to_a_click() {
         // `/cli` refuses a window with no room, but a window can be *made* too
@@ -997,6 +1029,7 @@ mod pane {
         // pass on a click path that does nothing anywhere.
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 120, 36);
         let frame = client.frame(45, 20);
@@ -1017,6 +1050,7 @@ mod pane {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn what_cli_measures_is_the_column_the_frame_draws() {
         // The opening size and the drawn pane come from two places — the
@@ -1024,6 +1058,7 @@ mod pane {
         // sized from the first while drawn into the second would wrap to a
         // geometry nothing on screen has. Both widths, including the one where
         // the desk rail gives its column up.
+        let _pty = one_pty::turn();
         for (w, h) in [(120u16, 36u16), (96, 36)] {
             let mut client = armed_atlas();
             let _tx = with_pane(&mut client, w, h);
@@ -1041,6 +1076,7 @@ mod pane {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_question_waiting_on_the_operator_is_named_on_the_panes_own_border() {
         // The panel that would have said this is the column the pane took, and
@@ -1048,6 +1084,7 @@ mod pane {
         // approvals chip and the nav rail's BOOK is a label with no count. So a
         // plan waiting on a human while the operator watches Claude would be
         // silent — which is the one thing a session *on the desk* may not be.
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 120, 36);
         let frame = client.frame(120, 36);
@@ -1056,10 +1093,12 @@ mod pane {
         assert!(frame.contains("2 need your call · 4 BOOK"), "{frame}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_desk_waiting_on_nobody_says_nothing_on_the_border() {
         // A count that appeared on every frame is a count nobody reads, and one
         // that said `0` would be a question mark over a desk with no question.
+        let _pty = one_pty::turn();
         let mut store = harness::fixture_store();
         store.posture = Posture::Operator;
         // The owner's own answer for a desk with nothing outstanding.
@@ -1088,6 +1127,7 @@ mod pane {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_click_on_a_pane_refusing_its_own_size_leaves_the_ask_row_alone() {
         // The pane's rect is retracted where the widget refuses, so the click
@@ -1098,6 +1138,7 @@ mod pane {
         // to undo it.
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 120, 36);
         let frame = client.frame(50, 36);
@@ -1121,11 +1162,13 @@ mod pane {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn leaving_atlas_retracts_the_rect_the_runtime_resizes_from() {
         // Read after every frame, including the ones another view drew, which
         // makes it the one published rect with a reader that does not care
         // which pane is on screen.
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 120, 36);
         client.frame(120, 36);
@@ -1135,12 +1178,14 @@ mod pane {
         assert_eq!(client.views.pane_inner(), ratatui::layout::Rect::default());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn what_cli_measures_holds_while_the_command_line_has_a_row() {
         // The strip is a row the command line borrows from the content while it
         // has focus. Assumed rather than read, it is a `/cli` admitted into a
         // column one row taller than the frame will give it — and the pane has
         // a floor in rows as well as columns.
+        let _pty = one_pty::turn();
         let mut client = armed_atlas();
         let _tx = with_pane(&mut client, 120, 36);
         client.store.nav.focus = atlas::store::Focus::Command;

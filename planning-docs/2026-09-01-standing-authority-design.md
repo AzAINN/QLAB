@@ -71,6 +71,30 @@ compute is itself an anomaly — unknown suspends, never proceeds.
   and in the audit stream afterwards.
 - **Revoking is one keystroke** from that same surface.
 
+### 5. Freshness — the risk the review nearly missed
+
+The click is not only consent; it is a **freshness proof**, and removing it
+removes a guarantee nothing else provides. Every binding on an approval —
+`plan_digest`, `targets_hash`, `book_revision` — is a content address of the
+*past*: each says "nothing has changed since a human looked". A human pressing
+BOOK is looking at a card built from a poll seconds old, at market data whose
+staleness the desk shows them, and they refuse by not pressing it.
+
+`check_grant_covers` checks ceilings, never recency. An approval lives 900
+seconds (`approval.py`'s `ttl_seconds`), and a book whose revision has not
+moved passes the drift check trivially the whole time — so the automatic
+path's real hazard is not an oversized fill, which the mandate already bounds.
+It is a **correctly-sized fill against a stale analysis, repeated every 30
+seconds, with no human ever seeing the interval.**
+
+So the automatic path carries a maximum plan age of its own, strictly tighter
+than the approval TTL: `MAX_AUTO_BOOK_AGE_S = 120`. A plan older than that is
+refused by the grant and left for a human, who can still book it by hand until
+the approval expires. The number is a constant rather than a grant field in
+this stream — one more operator-set ceiling is one more to get wrong, and the
+conservative bound needs no tuning to be safe. Making it configurable is a
+follow-up, not a gap.
+
 ## Rulings
 
 - **The owner books; the agent never does.** No MCP tool, no chat action tool,
@@ -86,6 +110,10 @@ compute is itself an anomaly — unknown suspends, never proceeds.
 - **The heartbeat is the trigger**, at most one book per tick (30 s default,
   `qlab/operator/heartbeat.py`). A proposal that a live grant covers is booked
   by the owner on its own beat; nothing an agent runs reaches it.
+- **A grant reaches `approved` the way a human does.** The automatic path
+  performs the same `decide_approval(..., "approve")` the click performs, so
+  one execution path survives with two ways to reach an approved record —
+  rather than a second path that books around the approval object.
 - **Absence refuses.** No grant, an expired grant, an unreadable grant, an
   uncomputable anomaly input, or a bound the owner cannot evaluate all refuse
   the automatic path. The clicked path is unaffected by any of it.

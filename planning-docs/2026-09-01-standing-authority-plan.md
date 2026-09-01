@@ -48,7 +48,11 @@
 
 **Interfaces produced:** steps 2–6 of `book_current_proposal` extracted to one private method both paths call; `UISession.book_under_grant(offline) -> dict | None` returning `None` when nothing is covered, and the execution result when a fill happened; `grant_refusals(...)` composing `check_grant_covers` with the day's count.
 
-- [ ] **Step 1:** failing tests — a covered proposal books and records the grant id; every refusal reason from `check_grant_covers` refuses; the day's limit refuses once reached and resets on the next trading date; an anomaly suspends without revoking; a referee PASS that does not match the plan's own hash refuses *even under a grant*; the clicked path is unchanged (regression pin, byte-identical refusals).
+**Freshness (ruled, binding).** The automatic path refuses a plan older than `MAX_AUTO_BOOK_AGE_S = 120`, strictly tighter than the approval's 900-second TTL. The click is a freshness proof — a human looks at a card seconds old and refuses by not pressing — and a grant checks ceilings, never recency; without this bound the desk books a correctly-sized fill against a stale analysis every 30 seconds. Define the constant beside the gate, state the reason, and pin both sides of the boundary.
+
+**One execution path (ruled, binding).** The automatic path calls the same `decide_approval(..., "approve")` the click calls; it never books around the approval record. Two ways to reach `approved`, one way to execute.
+
+- [ ] **Step 1:** failing tests — a covered proposal books and records the grant id; a plan older than `MAX_AUTO_BOOK_AGE_S` refuses while the same plan a second younger books; every refusal reason from `check_grant_covers` refuses; the day's limit refuses once reached and resets on the next trading date; an anomaly suspends without revoking; a referee PASS that does not match the plan's own hash refuses *even under a grant*; the clicked path is unchanged (regression pin, byte-identical refusals).
 - [ ] **Step 2–4:** red → green. The extraction must not change one word of the clicked path's refusals.
 - [ ] **Step 5:** commit `feat(authority): the owner books what a live grant covers`.
 

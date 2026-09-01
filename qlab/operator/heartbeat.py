@@ -17,6 +17,11 @@ quiet tick still costs nothing; and when it does run, the tick splits in two so
 the completion happens with the dispatch lock RELEASED. A model call inside the
 lock would hold the snapshot poll, the SSE poll and every approval behind it
 for the reasoner's whole timeout.
+
+The one thing here that moves money is standing authority: a beat books the
+desk's own proposal when a live grant already covers it. That call belongs in a
+LOCK phase and nowhere else, it happens at most once a tick, and a fault inside
+it is contained — a beat that dies takes the desk's autonomy with it.
 """
 
 from __future__ import annotations
@@ -44,6 +49,14 @@ CORROBORATED_DELTA = 2
 # run IS this window, so a scan of one would always find nothing to compare
 # against; a few more cover a registry where a window was logged twice in a day.
 MATRIX_SCAN = 6
+
+# The beat's own standing-authority events. The book and the refusal belong to
+# the owner (`GRANT_BOOKED_EVENT`, `GRANT_REFUSED_EVENT`, `qlab/ui/server.py`),
+# which composes every reason a grant declines. These two are the beat's: a
+# fault on the way to the broker, which is NOT a refusal and must never be
+# filed as one, and the first execution data permit on a lane that demands one.
+BOOK_FAILED_EVENT = "authority.book_failed"
+PERMIT_PRIMED_EVENT = "authority.permit_primed"
 
 
 class AtlasHeartbeat:
@@ -336,6 +349,97 @@ def _count(row: Mapping, column: str) -> int:
         return 0
 
 
+def _record(session, kind: str, payload: dict) -> None:
+    """Record one event, and never let the recorder take the tick down.
+
+    The rule ``tick_once`` already states about its own error handler: a thing
+    whose only job is to report a failure must not become one. A registry that
+    cannot be written is loud everywhere else in this tick.
+    """
+    try:
+        session.registry.record_event(kind, payload)
+    except Exception:
+        pass
+
+
+def prime_execution_permit(session, offline: bool) -> str:
+    """Record the desk's FIRST execution data permit, so a grant can ever fire.
+
+    The chicken-and-egg this breaks: on a lane whose policy is
+    execution-eligible, ``UISession._grant_anomalies`` suspends every grant
+    until a ``purpose="execution"`` permit is on record, and the only writer of
+    one inside the owner is ``execute_plan_with_approval`` — the execute gate
+    itself. A desk that has never booked has no permit, so standing authority
+    can never fire on it at all. The clicked path primes itself, because a
+    human's first fill goes through that gate; the unattended path has no first
+    fill to be primed by. That asymmetry is why the concession is the beat's
+    and lives here, rather than inside the owner's booking gate where it would
+    also change what a click means.
+
+    It MEASURES, it never asserts. ``data_health(offline, purpose="execution")``
+    is the identical call the execute gate makes at the door, through the same
+    ``evaluate_panel_health`` and ``build_permit``; this supplies none of its
+    inputs and overrides none of its fields. A blocked lane records no permit
+    at all and an ineligible panel records its refusal — both leave the grant
+    suspended, by name, and the gate re-measures at the door regardless, so
+    this permit is never what authorises a fill.
+
+    Only on ABSENCE, and that is the line that keeps it honest: a recorded
+    answer is never re-asked. Re-measuring over a permit that said no is how a
+    refusal gets argued into a permission, one beat at a time. The same rule
+    bounds the cost — at most one extra snapshot per desk, on the first beat
+    where a live grant and an open question coincide — which is why a desk that
+    has ever booked, and every offline or demo desk, pays one indexed row read
+    here and nothing else.
+
+    Returns what it did, for the tick's result, or ``""`` when there was
+    nothing to do. Raises what the measurement raises: what a beat does with a
+    fault is the caller's decision, and a permit that could not be taken is not
+    a permit.
+    """
+    registry = getattr(session, "registry", None)
+    policy_of = getattr(session, "data_policy", None)
+    measure = getattr(session, "data_health", None)
+    live_grant = getattr(session, "live_grant", None)
+    if registry is None or not callable(policy_of) or not callable(measure):
+        return ""
+    # Cheapest and most selective first: a desk that has ever recorded one
+    # stops here forever, and never reaches the policy read — which on a live
+    # desk resolves broker credentials.
+    if registry.current_data_permit("execution") is not None:
+        return ""
+    if not policy_of(offline).execution_eligible:
+        # Demo, test and historical lanes. The execute gate demands no permit
+        # on them, so neither may this: reading the policy flag *as* the answer
+        # would give every offline desk a permanent anomaly instead.
+        return ""
+    # Only where a book is actually possible. A desk holding no standing
+    # authority, or with nothing on it to book, must not start taking execution
+    # snapshots because of a feature it is not using.
+    if not callable(live_grant) or live_grant() is None:
+        return ""
+    from qlab.governance.proposal import current_proposal
+
+    if current_proposal(registry) is None:
+        return ""
+
+    health = measure(offline, purpose="execution")
+    if not isinstance(health, Mapping):
+        raise RuntimeError("the data lane did not answer with a health report")
+    permit_id = str(health.get("permit_id") or "")
+    note = (f"recorded the desk's first execution data permit {permit_id}"
+            if permit_id else
+            "no execution data permit could be recorded: "
+            f"{str(health.get('reason') or 'the data lane answered nothing')[:200]}")
+    _record(session, PERMIT_PRIMED_EVENT, {
+        "permit_id": permit_id or None,
+        "eligible_for_execution": bool(health.get("eligible_for_execution")),
+        "blocked": bool(health.get("blocked")),
+        "reason": health.get("reason"),
+        "note": note})
+    return note
+
+
 def build_owner_tick(session, lock, *, offline: bool,
                      autonomous: bool = False) -> Callable[[], dict]:
     """The owner's tick: fetch externally, then compose and observe under lock.
@@ -417,6 +521,57 @@ def build_owner_tick(session, lock, *, offline: bool,
             # `handed` is empty unless the reasoner ran, so a desk with the
             # flag off calls exactly what it called before.
             result = session.atlas_observe(offline, **handed)
+            # Standing authority: the owner's own beat books the desk's own
+            # proposal when a live grant already covers it. Everything else in
+            # this closure is bookkeeping; this is the one thing that fills.
+            #
+            # UNDER THE LOCK, always. `book_under_grant` takes none of its own
+            # (`_LOCK` is not reentrant, so a helper that took it would
+            # deadlock the desk on the first beat) and the reads that decide —
+            # proposal, grant, anomalies, the day's count — have to still be
+            # true when the write happens, exactly as the clicked route holds
+            # the lock across approve-then-execute. This closure runs in a lock
+            # phase in both halves of the tick; the reasoner's model call, the
+            # only part of a tick that does not, is a different phase entirely.
+            #
+            # HERE rather than lower down, and the placement is the point: the
+            # held-record rule reads the book, an autonomous start dispatches a
+            # coordinator, the sweep drives one, and every second they spend
+            # under this lock comes out of `MAX_AUTO_BOOK_AGE_S` — the bound
+            # that says an unattended fill must be against an analysis a human
+            # could still have been looking at. Before the announce for a
+            # second reason: the desk must not ask an operator to press BOOK on
+            # a proposal this same tick is about to book itself.
+            try:
+                note = prime_execution_permit(session, offline)
+                if note:
+                    result["authority_permit"] = note
+            except Exception as exc:
+                # A permit that could not be measured is not a permit, and the
+                # book is still ATTEMPTED — so the refusal that lands names the
+                # desk's real state ("no execution data permit is on record")
+                # rather than the beat's own bad luck.
+                result["authority_permit_error"] = str(exc)[:200]
+            book = getattr(session, "book_under_grant", None)
+            if callable(book):
+                try:
+                    booked = book(offline)
+                    # Its own key, and only when there IS one: `None` is the
+                    # quiet answer (a desk asking nothing), and a field that
+                    # changes JSON type mid-run poisons the tick for a typed
+                    # client — the rule the reap and expire errors follow.
+                    if isinstance(booked, dict):
+                        result["authority_booked"] = booked
+                except Exception as exc:
+                    # A beat that dies takes the desk's autonomy with it, so a
+                    # fault on the way to the broker is contained here — and
+                    # recorded under its own kind, because it is NOT a refusal.
+                    # The owner files every refusal itself, in the grant's own
+                    # words; a crash filed beside them would read as a grant
+                    # that declined.
+                    result["authority_error"] = str(exc)[:200]
+                    _record(session, BOOK_FAILED_EVENT,
+                            {"error": str(exc)[:400]})
             # Beside the observe rather than inside it: the supervisor's
             # triggers are evaluated from owner FACTS, and the qualitative
             # window is not one of them — it is a per-window record only this

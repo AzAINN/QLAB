@@ -123,6 +123,16 @@ a drawdown breach. Every automatic fill is evented and stated on the desk.
 CLAUDE.md invariant 3 gains that second, recorded form of confirmation and
 keeps its refusal of any agent-reachable execution path.
 
+## Known gaps, recorded rather than fixed
+
+- **A declined question costs a second door.** An operator who picks a mind is
+  asked once; one who declines with keep/Esc on the *walked-in* door writes
+  only the pair, and is asked the mind on the next run. The mind-only door's
+  own keep/Esc does write, so the durability rule is applied to one declined
+  question and not to the other — the same question. The blocker is real (one
+  `Command` per keystroke), the inconsistency is not defensible, and it is
+  named here so it is a decision rather than an accident.
+
 ## Out of scope, by decision
 
 Codex (named above); the standing authorization (next stream); a hosted or

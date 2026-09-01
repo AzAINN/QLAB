@@ -427,6 +427,15 @@ pub const KEYMAP: &[Binding] = &[
         Source::View(ViewId::Atlas),
         "give the keyboard to the pane — while a child is running there",
     ),
+    // The pane's own border names this one as well, in the single state it
+    // works in: an operator asking how to get out of a dead pane is looking at
+    // the pane, not at this overlay.
+    w(
+        "Char('c')",
+        "c",
+        Source::View(ViewId::Atlas),
+        "close a pane whose child has ended — the chat comes back",
+    ),
     // -- ATLAS, the ask row -----------------------------------------------
     w(
         "Char('i')",

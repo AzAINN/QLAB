@@ -406,3 +406,75 @@ fn the_shell_hands_the_runtime_a_command_rather_than_acting_itself() {
     );
     assert_eq!(got, Some(Command::OpenCli));
 }
+
+// -- which mind the desk reasons with ---------------------------------------
+
+/// A desk whose owner says which backend runs Atlas.
+///
+/// Folded through `Store::apply` rather than assigned, so what is refused below
+/// is refused off the payload a running client actually holds.
+fn reasoning_with(backend: &str) -> Store {
+    let mut store = Store::default();
+    let snapshot: atlas::model::Snapshot = serde_json::from_str(&format!(
+        r#"{{"llm": {{"reasoner": {{"backend": "{backend}", "model": "granite3.3:8b"}}}}}}"#
+    ))
+    .unwrap();
+    store.apply(
+        atlas::bus::AppEvent::Snapshot(Box::new(snapshot)),
+        std::time::Instant::now(),
+    );
+    store.posture = Posture::Operator;
+    store
+}
+
+#[test]
+fn a_local_reasoner_is_refused_the_cli_by_name() {
+    // The pane runs `qlab cli`, which is a Claude verb whatever this desk
+    // reasons with. A window that opened it anyway would put a second mind in
+    // the tab the operator configured for the first one.
+    let store = reasoning_with("granite");
+    match resolved("/cli ", &store, Posture::Operator) {
+        Resolved::Refused(said) => {
+            assert!(said.contains("Claude"), "{said}");
+            assert!(said.contains("granite"), "{said}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_claude_desk_opens_the_pane_and_a_desk_that_named_nobody_is_unchanged() {
+    // Silent on a claude reasoner, and silent when nothing has named one: a
+    // refusal on an unnamed backend would be a distinction this client
+    // invented, and the door is what asks that question (Task B2).
+    for store in [reasoning_with("claude"), armed()] {
+        assert_eq!(resolved("/cli ", &store, Posture::Operator), Resolved::Cli);
+    }
+}
+
+#[test]
+fn a_local_reasoner_still_gets_the_build() {
+    // `/build` opens Claude Code on this checkout, which is a different
+    // question from which mind runs the desk — and the MODELS card says so.
+    let store = reasoning_with("granite");
+    assert_eq!(
+        resolved("/build add a visual", &store, Posture::Operator),
+        Resolved::Build("add a visual".into())
+    );
+}
+
+#[test]
+fn the_cli_brings_atlas_up_because_that_is_where_the_pane_is_drawn() {
+    let mut store = armed();
+    store.nav.view = atlas::store::ViewId::Book;
+    let mut views = atlas::ui::views::Views::new();
+    // The accepted scope, as the second Enter submits it: a bare `/cli`
+    // is still the picker and rewrites the buffer instead of acting.
+    let got = atlas::ui::shell::run_line("/cli ", &mut store, &mut views);
+    assert_eq!(got, Some(Command::OpenCli));
+    assert_eq!(
+        store.nav.view,
+        atlas::store::ViewId::Atlas,
+        "a child started on a column nobody is looking at"
+    );
+}

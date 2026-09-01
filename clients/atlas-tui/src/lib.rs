@@ -23,6 +23,12 @@ pub mod handoff;
 pub mod input;
 pub mod model;
 pub mod net;
+/// What `/cli` does to the desk: a child starts, ATLAS's column changes hands,
+/// and every frame after it tells that child what it is drawing on. Here rather
+/// than in `main.rs` for `dispatch`'s reason — the binary has no test harness,
+/// and the pane's geometry is the easiest thing in this stream to get wrong.
+#[cfg(feature = "operator")]
+pub mod pane;
 /// A child of this process on a pseudoterminal, so the ATLAS tab can hold a
 /// real `qlab cli` beside the desk rather than instead of it. Gated with the
 /// commands that can reach one: the monitoring build has no key that opens a

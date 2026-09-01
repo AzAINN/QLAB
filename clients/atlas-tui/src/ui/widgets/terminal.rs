@@ -90,13 +90,37 @@ const MIN_H: u16 = 5;
 /// that claim quietly stopped being true.
 const CHILD: &str = " qlab cli ";
 
+/// The child's own rect inside a pane drawn at `area`.
+///
+/// The geometry contract as a function, so the two places that need it — the
+/// column that publishes what to resize to, and the call that opens a session —
+/// cannot spell it differently. `tui-term` renders into the block's inner rect,
+/// so this is what the pty must be sized to.
+pub fn inner(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+/// Whether a pane of this size draws a terminal rather than the refusal below.
+///
+/// Asked by the column before it publishes a rect a click can land on: a click
+/// hands the keyboard to the child, and the refusal has no border to say which
+/// key takes it back — so a keyboard lost over one could not be found again.
+pub fn fits(area: Rect) -> bool {
+    area.width >= MIN_W && area.height >= MIN_H
+}
+
 /// Draw the child's screen, and the border that says who is typing into it.
 ///
 /// **`area` is the whole pane, border included, and the pty must be sized to
-/// what is inside it** — `(area.width - 2, area.height - 2)`. `tui-term` renders
-/// into the block's inner rect, so a child told the outer size wraps its output
-/// two columns wider than the pane it is drawn in, and the fold lands two rows
-/// below the last one on screen.
+/// what is inside it** — [`inner`], which is `(area.width - 2, area.height - 2)`.
+/// `tui-term` renders into the block's inner rect, so a child told the outer
+/// size wraps its output two columns wider than the pane it is drawn in, and the
+/// fold lands two rows below the last one on screen.
 ///
 /// `said` is the sentence a child that is no longer running left behind — the
 /// store's `PtyState::Ended`, which already names what happened *and* how to
@@ -104,7 +128,7 @@ const CHILD: &str = " qlab cli ";
 /// border then states the ending instead of offering a keyboard to a process
 /// that has ended.
 pub fn draw(f: &mut Frame, area: Rect, screen: &vt100::Screen, focused: bool, said: Option<&str>) {
-    if area.width < MIN_W || area.height < MIN_H {
+    if !fits(area) {
         refuse(
             f,
             area,
@@ -223,6 +247,19 @@ mod tests {
     /// case the short forms exist for, small enough that A5 has already dropped
     /// the board and given the pane the whole content width.
     const NARROW: usize = 41;
+
+    #[test]
+    fn the_rect_the_child_is_given_is_the_block_the_pane_actually_draws() {
+        // The contract, checked against the block rather than restated: a
+        // padding or a border this pane stopped drawing would change what is
+        // inside it, and a child still told `(w-2, h-2)` would wrap to a
+        // geometry nothing on screen has.
+        let area = Rect::new(9, 1, 77, 34);
+        assert_eq!(
+            inner(area),
+            Block::default().borders(Borders::ALL).inner(area)
+        );
+    }
 
     #[test]
     fn the_long_sentence_is_drawn_whole_or_not_at_all() {

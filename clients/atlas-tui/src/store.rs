@@ -555,8 +555,12 @@ impl std::fmt::Debug for Pane {
 /// returned value is what tells the caller there is nothing to draw. Both, for
 /// the reason `pty::PtySession::open` returns and posts the same sentence: a
 /// caller and a desk need different things from one refusal.
+///
+/// `pub(crate)` because the seam above this one refuses too — a window with no
+/// room for a terminal — and a second way of saying "there is no pane" would be
+/// the one that reaches nobody.
 #[cfg(feature = "operator")]
-fn refuse_pty(tx: &crate::bus::Tx, said: String) -> String {
+pub(crate) fn refuse_pty(tx: &crate::bus::Tx, said: String) -> String {
     let _ = tx.send(AppEvent::Pty {
         pane: NO_PANE,
         event: crate::pty::PtyEvent::Failed { said: said.clone() },

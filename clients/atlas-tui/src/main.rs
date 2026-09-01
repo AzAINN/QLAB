@@ -172,12 +172,12 @@ async fn main() -> Result<()> {
     // line-buffered would sit in the kernel until Enter.
     //
     // The handle is kept, and the sender with it, because the reader has to be
-    // stoppable: `/cli` and `/build` hand this same stdin to a child, and a
-    // reader still on it steals the operator's keystrokes and then replays them
-    // into the desk's command line. See `handoff`.
+    // stoppable: `/build` hands this same stdin to a child, and a reader still
+    // on it steals the operator's keystrokes and then replays them into the
+    // desk's command line. See `handoff`.
     let reader = spawn_terminal_events(tx.clone());
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    run(
+    let outcome = run(
         &mut terminal,
         &mut store,
         &mut rx,
@@ -185,7 +185,23 @@ async fn main() -> Result<()> {
         &writes,
         Reader { handle: reader, tx },
     )
-    .await
+    .await;
+    // The pane's child dies with this process either way — the session is
+    // dropped with the store at the end of `main`, and `pty.rs` hangs the child
+    // up on `Drop` — and an operator who quit with a session open is owed the
+    // sentence rather than a silence they have to infer from. Said here and not
+    // as a toast: nothing draws another frame after the loop returns, and
+    // anything printed before the guard restores is wiped with the alternate
+    // screen.
+    #[cfg(feature = "operator")]
+    let ending = (store.pty_state() != atlas::store::PtyState::Absent)
+        .then_some("the Claude session in the ATLAS pane was ended with this window");
+    drop(_guard);
+    #[cfg(feature = "operator")]
+    if let Some(said) = ending {
+        eprintln!("atlas: {said}");
+    }
+    outcome
 }
 
 /// The stdin reader, held so it can be stopped and started again.
@@ -227,6 +243,10 @@ async fn run(
     // this replaced — every selection and crosshair an operator moved was
     // dropped before the frame that would have drawn it.
     let mut views = Views::new();
+    // A sender of this loop's own bus, cloned once: `/cli` starts a child that
+    // writes onto it, and the reader that holds the other copy is stopped and
+    // restarted around the full-screen hand-off.
+    let bus = reader.tx.clone();
 
     // One frame before the first event, or the operator stares at the shell's
     // leftovers until the ticker fires. It is also what publishes the first set
@@ -282,6 +302,7 @@ async fn run(
                 store,
                 poller,
                 writes,
+                &bus,
                 &mut views,
                 &mut fx,
                 &mut toasts,
@@ -296,6 +317,7 @@ async fn run(
                 store,
                 poller,
                 writes,
+                &bus,
                 &mut views,
                 &mut fx,
                 &mut toasts,
@@ -328,6 +350,7 @@ async fn run(
                     store,
                     poller,
                     writes,
+                    &bus,
                     &mut views,
                     &mut fx,
                     &mut toasts,
@@ -390,6 +413,15 @@ async fn run(
                 fx.process(elapsed, f.buffer_mut(), area);
             })?;
             last_frame = now;
+            // After the frame, never inside one. The pane's size is known only
+            // where the layout is decided, and `Store::pty_resize` takes
+            // `&mut Store` precisely so a renderer cannot reshape a process —
+            // so the column publishes the rect it drew and this hands it on. A
+            // terminal the operator resized needs no special case: the next
+            // frame reports the new rect, and a frame that drew no pane
+            // publishes an empty one, which resizes nothing.
+            #[cfg(feature = "operator")]
+            atlas::pane::resized(store, views.pane_inner());
         }
         // Decided after the frame, from the state the frame left behind: an
         // effect that just finished must let the loop go back to blocking.
@@ -421,6 +453,10 @@ fn ingest(
     store: &mut Store,
     poller: &PollerHandle,
     writes: &Writes,
+    // The desk's own bus, for the one command that starts a child writing onto
+    // it. Handed in rather than held by the store: a pane's forwarder is the
+    // session's, and it ends when that session's senders drop.
+    bus: &Tx,
     views: &mut Views,
     fx: &mut Fx,
     toasts: &mut toast::ToastQueue,
@@ -440,6 +476,10 @@ fn ingest(
     // no `Command` variant that could ask for a hand-off there.
     #[cfg(not(feature = "operator"))]
     let _ = opening;
+    // And carried unused there too: no key in that build opens a pane, so
+    // nothing of this loop's bus is ever handed to a child.
+    #[cfg(not(feature = "operator"))]
+    let _ = bus;
     let mut quit = false;
     if let AppEvent::Key(key) = &ev {
         if key.kind == KeyEventKind::Press {
@@ -498,14 +538,45 @@ fn ingest(
                 // read that reached it would be a request this command never
                 // meant. The pane has already recorded what it is waiting on.
                 Some(Command::RenderVisual(name)) => poller.visual(&name),
-                // The two hand-offs. Recorded, not performed: this function has
-                // no terminal, and the loop above is what owns the screen the
-                // child is about to want. Above the dispatch arm for the same
-                // reason `Backends` is — neither is a request, and a hand-off
-                // that fell through to the writer would be a `Command` sent to
-                // an owner that has no verb for it.
+                // The two words that start a child, and they no longer do the
+                // same thing. Both are above the dispatch arm for the reason
+                // `Backends` is — neither is a request, and a `Command` that
+                // fell through to the writer would be one sent to an owner that
+                // has no verb for it.
+                //
+                // `/cli` opens the pane in ATLAS's own column rather than
+                // taking the screen, which is the whole of what makes this a
+                // session *on* the desk. Acted on here rather than recorded the
+                // way the hand-off below is: it needs no screen, and it has to
+                // run on the loop that owns the bus the child's bytes arrive
+                // on — `Store::open_pty` spawns the task that bridges them, and
+                // spawning off the runtime panics.
+                //
+                // The rect is the column a pane will be drawn in, asked of
+                // the layout that will draw it: the desk rail gives its own up
+                // for a pane that would otherwise be too narrow, so the column
+                // is wider than the one this frame is showing. `Resolved::Cli`
+                // has already brought ATLAS up, so the next frame draws it
+                // there; anything the geometry misses by, the resize after that
+                // frame corrects.
+                //
+                // The `Err` is dropped deliberately: both refusals are on the
+                // bus already (`Store::open_pty`), and toasting one here would
+                // put a single refusal in two boxes.
                 #[cfg(feature = "operator")]
-                Some(Command::OpenCli) => *opening = Some(Child::Cli),
+                Some(Command::OpenCli) => {
+                    let _ = atlas::pane::open(
+                        store,
+                        views,
+                        &atlas::pty::DeskCli::from_env(),
+                        ui::shell::pane_column(fx.rects.frame.get()),
+                        bus.clone(),
+                    );
+                }
+                // And `/build` keeps the full-screen hand-off: Claude Code
+                // editing this checkout wants the whole terminal. Recorded, not
+                // performed — this function has no terminal, and the loop above
+                // owns the screen the child is about to want.
                 #[cfg(feature = "operator")]
                 Some(Command::OpenBuild(request)) => *opening = Some(Child::Build(request)),
                 // The only place a keystroke reaches the network. A view

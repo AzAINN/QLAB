@@ -32,6 +32,8 @@ use crate::theme::theme;
 use crate::ui::views::View;
 #[cfg(feature = "operator")]
 use crate::ui::widgets::confirm;
+#[cfg(feature = "operator")]
+use crate::ui::widgets::terminal;
 use crate::ui::widgets::{md, panel_block, panel_header, pipeline, proposal, refuse};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -42,6 +44,19 @@ use ratatui::{
     Frame,
 };
 use std::time::Instant;
+
+/// The way out of a pane whose child has ended, added to the ending the store
+/// composed.
+///
+/// The one line of border copy this view writes rather than the widget: the
+/// store's sentence says what happened and that `/cli` starts another, and
+/// neither of them knows which key on *this* pane gives the column back to the
+/// chat. A new state's sentence, not a rewording of the widget's two — and the
+/// key it names is `keys`' own, so the row in `input::KEYMAP` and this string
+/// are the same claim written twice, deliberately, in the two places an
+/// operator reads it.
+#[cfg(feature = "operator")]
+const CLOSES: &str = "c closes the pane";
 
 /// The sidebar's fixed width: a model id (`krr:quantum_gram` is 16), its badge,
 /// and metric pairs at the widths the board serves. The chat takes the rest,
@@ -147,6 +162,20 @@ pub struct AtlasView {
     /// and nowhere else, because the layout is decided in `draw`.
     #[cfg(feature = "operator")]
     pane: std::cell::Cell<Rect>,
+    /// The child's own rect inside that pane — what the runtime resizes it to
+    /// after the frame.
+    ///
+    /// Published here rather than derived by the caller, because the layout is
+    /// decided here and a second opinion about the pane's size is a child
+    /// wrapping to a geometry nothing on screen has. Read after the frame and
+    /// never during one: `Store::pty_resize` takes `&mut Store` exactly so a
+    /// renderer cannot reshape a process.
+    ///
+    /// A second cell rather than the same one the click reads, because they are
+    /// different rects: a click on the border is a click on the pane, and the
+    /// child owns none of it.
+    #[cfg(feature = "operator")]
+    pane_inner: std::cell::Cell<Rect>,
 }
 
 impl View for AtlasView {
@@ -159,6 +188,36 @@ impl View for AtlasView {
         // The same rule for the pane, and it is the whole of what makes a click
         // on it answerable: only the frame that draws one says where it is.
         self.no_pane();
+        // The column follows the child, not the config: a pane while one is
+        // running or has just ended, today's chat otherwise. Above the width
+        // refusal below, because a pane too narrow refuses in its own words —
+        // naming the width a *terminal* needs — and ATLAS's sentence about a
+        // chat would be about a column that is not on screen.
+        #[cfg(feature = "operator")]
+        if let Some(screen) = store.pty_screen() {
+            // Nothing of this view's own is drawn, so nothing of it may be
+            // approved off the back of the frame either.
+            self.drew_nothing();
+            if terminal::fits(area) {
+                // Both rects, and only while there is a terminal under them:
+                // the click's is the whole pane, because the border is the
+                // pane's own row and clicking it is clicking the pane; the
+                // child's is what is inside it. Below the widget's floor the
+                // pane refuses in its own words, and a child resized to those
+                // few cells would be given a screen it cannot work in — so it
+                // keeps the geometry it had until there is a pane to show it.
+                self.pane.set(area);
+                self.pane_inner.set(terminal::inner(area));
+            }
+            // The ending, plus the one thing the store's sentence cannot know:
+            // which key on *this* pane gives the column back.
+            let said = match store.pty_state() {
+                PtyState::Ended { said } => Some(format!("{said} · {CLOSES}")),
+                _ => None,
+            };
+            terminal::draw(f, area, screen, store.pty_focused(), said.as_deref());
+            return;
+        }
         if area.width < CHAT_MIN || area.height < 4 {
             // Nothing is on screen, so nothing may be approved off the back of
             // it. Every path out of this function settles `drew`, because the
@@ -356,13 +415,40 @@ impl AtlasView {
                         store.pty_focus(true);
                         return None;
                     }
+                    // The way out of a pane whose child has ended, and the key
+                    // the border names there. Only on an ending: closing a pane
+                    // drops the session, which stops the child — and one
+                    // unconfirmed keystroke may not end a Claude session. A
+                    // running one is interrupted first (Ctrl-C, inside the
+                    // pane), and this is for what it leaves behind.
+                    if k.code == KeyCode::Char('c')
+                        && matches!(store.pty_state(), PtyState::Ended { .. })
+                    {
+                        store.close_pty();
+                        return None;
+                    }
                     // The booking key, claimed only while the ask row is idle
                     // — the same corner the focus key sits in, and the same
                     // rule: an empty unfocused row yields the letter, a row
                     // being typed into keeps it. A question that starts with
                     // this letter is focused first.
+                    //
+                    // Live under a pane too, unlike the card's clickable word:
+                    // the word is a claim about what this frame drew and the
+                    // key is a binding to what the *desk* is holding, which is
+                    // why BOOK offers the same key from a pane that draws no
+                    // card of this one's either.
                     if k.code == KeyCode::Char('b') && self.ask.is_empty() && !self.focused {
                         self.ask_to_book(store);
+                        return None;
+                    }
+                    // Everything left, while a pane holds this column, is
+                    // nobody's. The ask row is not on screen — the pane is
+                    // drawn over it — so a key routed to it would be typed into
+                    // a row nobody can see, and the *next* key would find
+                    // `typing()` true and take the workstation's own keys with
+                    // it, which is the hung-client reading exactly.
+                    if store.pty_state() != PtyState::Absent {
                         return None;
                     }
                     return self.ask_key(k);
@@ -423,9 +509,36 @@ impl AtlasView {
     }
 
     /// This frame drew no pane. Two bodies, for `no_book_word`'s reason.
+    ///
+    /// Both rects, because both are claims about a frame: a click answered
+    /// about a pane that is gone would hand the keyboard to a child on a screen
+    /// nobody is looking at, and a size published by a frame that drew no
+    /// terminal would reshape a child to a column it is not in.
     #[cfg(feature = "operator")]
     fn no_pane(&self) {
         self.pane.set(Rect::default());
+        self.pane_inner.set(Rect::default());
+    }
+
+    /// The child's own rect on the last frame, empty when that frame drew no
+    /// pane. Read by the runtime after the frame, and by nothing else.
+    #[cfg(feature = "operator")]
+    pub fn pane_inner(&self) -> Rect {
+        self.pane_inner.get()
+    }
+
+    /// A pane has taken this column: settle the ask row under it.
+    ///
+    /// `typing()` answers on the row's own state, so a question half-typed
+    /// before `/cli` would go on claiming every printable key for a row the
+    /// pane is now drawn over — and `q`, `r` and the digits with it. Cleared
+    /// rather than hidden: a row that kept its text would re-arm that claim the
+    /// moment the pane closed around a question the operator had forgotten
+    /// typing.
+    #[cfg(feature = "operator")]
+    pub fn pane_opened(&mut self) {
+        self.ask.clear();
+        self.focused = false;
     }
 
     #[cfg(not(feature = "operator"))]

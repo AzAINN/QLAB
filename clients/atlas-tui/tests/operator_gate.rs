@@ -160,6 +160,83 @@ fn the_write_half_is_gated_the_way_the_compiler_reads_it() {
 }
 
 #[test]
+fn the_column_a_child_runs_in_is_one_gated_branch_with_one_caller() {
+    // The fourth authority, after the write, the spawn and the keystroke: this
+    // client can give a *column* of the desk to another program. Everything
+    // that decides when it does is gated, and each of those decisions has
+    // exactly one place — a second branch that drew a pane, or a second call
+    // that opened one, would be a second answer to a question the design gives
+    // one answer to.
+    //
+    // Pinned on the attribute's verbatim text, for this file's standing reason:
+    // a `cfg` naming the wrong feature compiles cleanly in both legs.
+    assert!(
+        source("lib.rs").contains("#[cfg(feature = \"operator\")]\npub mod pane;"),
+        "lib.rs must gate `pane` on the operator feature, verbatim"
+    );
+    assert!(
+        source("ui/views/atlas.rs").contains(
+            "#[cfg(feature = \"operator\")]\n        if let Some(screen) = store.pty_screen() {"
+        ),
+        "the branch that gives ATLAS's column to a child must be gated, verbatim"
+    );
+    // One column draws a child, and it is ATLAS's. A second view rendering the
+    // same screen would be a second border making its own claims about who
+    // holds the keyboard.
+    assert_eq!(
+        production_files_mentioning("terminal::draw("),
+        vec!["ui/views/atlas.rs".to_string()],
+        "the pane is drawn in one column"
+    );
+    // And one place opens a child, one resizes it, and both are the seam the
+    // runtime reaches through — `main.rs` is in no test binary, so a lifecycle
+    // kept there would be beyond the reach of every test in this suite.
+    assert_eq!(
+        production_files_mentioning("open_pty("),
+        vec!["pane.rs".to_string(), "store.rs".to_string()],
+        "the store owns the open and the pane seam is its only caller"
+    );
+    assert_eq!(
+        production_files_mentioning("pty_resize("),
+        vec!["pane.rs".to_string(), "store.rs".to_string()],
+        "the store owns the resize and the pane seam is its only caller"
+    );
+    assert_eq!(
+        production_files_mentioning("pane::open("),
+        vec!["main.rs".to_string()],
+        "`/cli` opens a child from the runtime loop and nowhere else"
+    );
+    // The resize is called after a frame, never from inside one: `draw` takes
+    // `&Store` and this takes `&mut Store`, so the compiler holds the rule —
+    // and the census says where the one caller is, which is the runtime.
+    assert_eq!(
+        production_files_mentioning("pane::resized("),
+        vec!["main.rs".to_string()],
+        "the pane is resized from the loop that owns the frames"
+    );
+}
+
+#[test]
+fn no_view_or_widget_can_open_a_child() {
+    // `ui/` renders and returns `Command`s, which is why the pane's own
+    // geometry is published from `draw` and acted on outside it. A view that
+    // could open or resize a session would be IO from a renderer with nothing
+    // in between — the same arrangement `no_view_or_widget_can_reach_the_writer`
+    // refuses one authority over.
+    let mut reachers = files_mentioning("pane::open");
+    reachers.extend(files_mentioning("open_pty"));
+    reachers.extend(files_mentioning("DeskCli"));
+    let escaped: Vec<&String> = reachers.iter().filter(|f| never_io(f)).collect();
+    assert!(
+        escaped.is_empty(),
+        "nothing that renders may open a child, found: {escaped:?}"
+    );
+    // And the search really ran: a walk that cannot read the tree returns no
+    // matches, which reads exactly like a crate no renderer can spawn from.
+    assert!(files_mentioning("open_pty").contains(&"pane.rs".to_string()));
+}
+
+#[test]
 fn no_write_call_site_exists_outside_the_gated_module() {
     // The artifact claim, structurally. Every way `reqwest` can be asked to
     // mutate something, not just the one this crate happens to use today: a
@@ -670,6 +747,47 @@ mod glass {
                 "the gated module is the one that owns the child: {held:?}"
             );
         }
+        // And the seam that would give a child a column of the desk, on the
+        // same terms: `atlas::pane` is not in this crate either, so what is
+        // checked is the gate's own text and that the file it removes is the
+        // one deciding when ATLAS stops being a chat.
+        assert!(
+            super::source("lib.rs").contains("#[cfg(feature = \"operator\")]\npub mod pane;"),
+            "lib.rs must gate `pane` on the operator feature, verbatim"
+        );
+        let pane = super::source("pane.rs");
+        for held in ["pub fn open(", "pub fn resized(", "store.open_pty("] {
+            assert!(
+                pane.contains(held),
+                "the gated module is the one that opens the column: {held:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_monitoring_window_is_offered_neither_the_word_nor_the_pane() {
+        // The word: `/cli` is a write scope, so the picker offers it to no
+        // window this artifact can produce — there is no `Posture::Operator`
+        // here to ask the other half of the question with, which is the whole
+        // of what makes this an absence rather than a disabled key.
+        use atlas::cmd::{parse, suggestions};
+        use atlas::store::{Posture, Store};
+        let offered = suggestions(&parse(""), &Store::default(), Posture::Glass);
+        assert!(
+            !offered.iter().any(|s| s.value == "/cli"),
+            "a monitoring window was offered the word that opens a pane"
+        );
+        // And the strip really had something to offer, or the check above
+        // passes on an empty list.
+        assert!(offered.iter().any(|s| s.value == "/view"));
+        // The pane: the branch that would draw one is gated, so the column is
+        // not something this build can be argued into.
+        assert!(
+            super::source("ui/views/atlas.rs").contains(
+                "#[cfg(feature = \"operator\")]\n        if let Some(screen) = store.pty_screen() {"
+            ),
+            "the column that draws a child must be gated, verbatim"
+        );
     }
 
     #[test]

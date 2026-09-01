@@ -237,6 +237,23 @@ impl Views {
     #[cfg(not(feature = "operator"))]
     pub fn open_login(&mut self) {}
 
+    /// The child's own rect on the last frame, empty when that frame drew no
+    /// terminal pane.
+    ///
+    /// Routed through the registry for `confirm`'s reason — the runtime has one
+    /// question to ask and cannot ask it of the wrong surface — and answered by
+    /// ATLAS alone, because that is the only column a pane is ever drawn in.
+    #[cfg(feature = "operator")]
+    pub fn pane_inner(&self) -> Rect {
+        self.atlas.pane_inner()
+    }
+
+    /// A pane has just taken ATLAS's column: settle the ask row under it.
+    #[cfg(feature = "operator")]
+    pub fn pane_opened(&mut self) {
+        self.atlas.pane_opened();
+    }
+
     /// The modal the active view is showing, if any.
     ///
     /// Routed through the registry rather than reached for on a view, so the

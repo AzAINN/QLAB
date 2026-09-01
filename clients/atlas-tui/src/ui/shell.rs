@@ -49,6 +49,14 @@ pub const NAV_W: u16 = 8;
 /// The pulse rail. Wide enough for a label column and a value column at the
 /// widths `format` produces; narrower and the money figures start truncating.
 pub const PULSE_W: u16 = 34;
+/// The narrowest column a Claude session is worth running in.
+///
+/// Measured, not chosen: at 120×36 the settled pane is 77 cells, and the
+/// widget's own floor is the width at which a border can still *name the key
+/// that returns the keyboard* — which is a pane an operator can leave, not one
+/// they can work in. Below this the desk rail gives up its column, because a
+/// rail standing beside a terminal nobody can use is the wrong half to keep.
+const PANE_MIN_W: u16 = 60;
 /// The label column inside the rails.
 const LABEL_W: usize = 11;
 /// The read panel: header, four facts, and the rule its block reserves.
@@ -97,10 +105,11 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
         Constraint::Length(1),     // command line / status
     ])
     .split(area);
+    let rail = rail_width(rows[1].width, pane_showing(store));
     let cols = Layout::horizontal([
         Constraint::Length(NAV_W),
         Constraint::Min(0),
-        Constraint::Length(PULSE_W),
+        Constraint::Length(rail),
     ])
     .split(rows[1]);
 
@@ -126,9 +135,18 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
         views.draw(store.nav.view, f, content, store, &fx.flashes, now);
     }
 
-    let pulse = left_rule(f, cols[2], t);
-    fill(f, pulse, t.bg_surface);
-    draw_pulse(f, pulse, store, t, fx, now);
+    match rail > 0 {
+        true => {
+            let pulse = left_rule(f, cols[2], t);
+            fill(f, pulse, t.bg_surface);
+            draw_pulse(f, pulse, store, t, fx, now);
+        }
+        // The rail gave its column to a pane that could not work without it.
+        // Its rects are published empty rather than left standing: an effect
+        // over a zero rect is a no-op (`fx::ShellRects`), and one aimed at
+        // where the rail used to be would sweep across the child's screen.
+        false => publish_rail(&fx.rects, Rect::ZERO, Rect::ZERO, None),
+    }
 
     draw_suggestions(f, rows[2], store);
     draw_status(f, rows[3], store, t, stale, strip == 0);
@@ -162,6 +180,71 @@ pub fn draw(f: &mut Frame, store: &Store, views: &Views, fx: &Fx, now: Instant) 
     fx.rects.frame.set(area);
     fx.rects.content.set(content);
     fx.rects.chips.set(chips(rows[3]));
+}
+
+/// How wide the desk rail is, on a frame this wide, with or without a pane in
+/// the column beside it.
+///
+/// [`PULSE_W`], except while a child is running in ATLAS's column and what
+/// would be left for it is under [`PANE_MIN_W`]. WOULD DO has already gone by
+/// then — the pane spans both of ATLAS's own columns, and that panel is a
+/// proposal ranking DESK and BOOK also carry — so the rail is the last thing to
+/// go, and it goes only when what it is standing beside would be unusable.
+///
+/// A shell decision rather than the view's, because a view is handed its column
+/// and cannot widen it. Keyed on the *child* like everything else in this
+/// stream: a desk with no session laid out differently would be a client whose
+/// panels moved for a reason nothing on screen explains.
+fn rail_width(width: u16, for_a_pane: bool) -> u16 {
+    match for_a_pane && width.saturating_sub(NAV_W + PULSE_W + 1) < PANE_MIN_W {
+        true => 0,
+        false => PULSE_W,
+    }
+}
+
+/// Whether this frame is drawing a child in ATLAS's column.
+///
+/// Two bodies rather than a `cfg` at the call site: the monitoring build has no
+/// pane to lay a frame out around, so its layout has one shape.
+#[cfg(feature = "operator")]
+fn pane_showing(store: &Store) -> bool {
+    store.nav.view == ViewId::Atlas && store.pty_state() != crate::store::PtyState::Absent
+}
+
+#[cfg(not(feature = "operator"))]
+fn pane_showing(_store: &Store) -> bool {
+    false
+}
+
+/// The column a terminal pane would be drawn in, on a frame this size.
+///
+/// Asked by `/cli`, one frame before there is a pane to measure: a child's
+/// screen is sized at the moment it starts, and this is also where a window
+/// with no room for a terminal is found out — which has to be right, because
+/// the alternative is a child nobody can see running behind a refusal.
+///
+/// The same `Layout` calls `draw` makes, so the rail this gives up and the one
+/// that frame gives up cannot disagree. The one thing assumed rather than read
+/// is the suggestion strip, which is a row the command line borrows *while it
+/// has focus* — and the line that ran `/cli` has already given the focus back.
+/// A row out either way is corrected by the resize after the first frame; the
+/// width, which decides the refusal, is exact.
+#[cfg(feature = "operator")]
+pub fn pane_column(frame: Rect) -> Rect {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(0),
+        Constraint::Length(1),
+    ])
+    .split(frame);
+    let cols = Layout::horizontal([
+        Constraint::Length(NAV_W),
+        Constraint::Min(0),
+        Constraint::Length(rail_width(rows[1].width, true)),
+    ])
+    .split(rows[1]);
+    inside_rule(cols[1])
 }
 
 /// The frame height the suggestion strip needs: the tape, two rows of content
@@ -618,6 +701,11 @@ fn submit(store: &mut Store, views: &mut Views) -> Option<Command> {
         // to the runtime that owns the screen.
         #[cfg(feature = "operator")]
         Resolved::Cli => {
+            // ATLAS comes up for `Ask`'s reason: the pane is drawn in this
+            // column and nowhere else, so a `/cli` typed from BOOK would start
+            // a child on a frame nobody is looking at — and the first news of
+            // it would be the desk's own keys behaving oddly.
+            store.nav.view = ViewId::Atlas;
             done(store);
             Some(Command::OpenCli)
         }
@@ -759,9 +847,17 @@ fn left_rule(f: &mut Frame, area: Rect, t: &Theme) -> Rect {
     let rule = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(t.border_dim));
-    let inner = rule.inner(area);
+    let inner = inside_rule(area);
     f.render_widget(rule, area);
     inner
+}
+
+/// What a rule leaves for the pane beside it, without drawing one.
+///
+/// The same block, so a layout asked about before the frame that draws it —
+/// see [`pane_column`] — cannot answer one cell wider than the frame will.
+fn inside_rule(area: Rect) -> Rect {
+    Block::default().borders(Borders::LEFT).inner(area)
 }
 
 fn draw_nav(f: &mut Frame, area: Rect, store: &Store, t: &Theme) {

@@ -498,7 +498,9 @@ mod armed {
             !client.frame(120, 36).contains("ask to execute"),
             "the fixture no longer scrolls; this test is checking nothing"
         );
-        for _ in 0..36 {
+        // One press per row above it, so a binding added anywhere earlier in
+        // the table moves this number — as ATLAS's pane-closing key just did.
+        for _ in 0..37 {
             client.press(KeyCode::Down);
         }
         let frame = client.frame(120, 36);

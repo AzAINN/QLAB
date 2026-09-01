@@ -799,3 +799,242 @@ fn a_your_call_word_the_short_sidebar_clipped_off_is_not_clickable() {
     // would satisfy the assertion above while proving nothing at all.
     assert!(ran > 0, "no click ever ran a word");
 }
+
+// -- the column while a child runs ------------------------------------------
+
+/// The pane in the ATLAS column: what an operator sees while `qlab cli` is
+/// running on this desk, and what stays beside it.
+///
+/// Gated with the pane and armed, because both are true of the only window that
+/// can open one: a monitoring build has no `/cli`, and a glass window is refused
+/// it. The child is real — a pane cannot exist without one — but the bytes on
+/// its screen are folded in synchronously, because what is pinned here is the
+/// column and not a child's timing.
+#[cfg(feature = "operator")]
+mod pane {
+    use super::*;
+    use atlas::bus::AppEvent;
+    use atlas::pty::{PtyEvent, Spawn};
+    use atlas::store::Posture;
+    use portable_pty::CommandBuilder;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+
+    /// A child that waits for a line and says nothing until it has one, so the
+    /// pane stays up for as long as the frame is being read.
+    struct Waiting;
+
+    impl Spawn for Waiting {
+        fn command(&self) -> CommandBuilder {
+            let mut cmd = CommandBuilder::new("sh");
+            cmd.arg("-c");
+            cmd.arg("read x");
+            cmd.env("PATH", "/bin:/usr/bin:/usr/local/bin");
+            cmd
+        }
+    }
+
+    /// What the child has written when these frames are drawn. CR-LF because a
+    /// pty carries both, exactly as `golden_terminal.rs` feeds its parser.
+    const SAID: &[u8] = b"the desk is up on :8765\r\n> what changed in the regime read?\r\n";
+
+    /// The stamp the first pane of a run is given (`store_pty.rs` pins the
+    /// numbering); every frame here opens exactly one.
+    const FIRST: u64 = 1;
+
+    /// An armed ATLAS with a child running in its column.
+    ///
+    /// The sender is handed back because the store's forwarder holds the other
+    /// end: dropped here, the bus would close under a live session.
+    fn with_pane(client: &mut Client, w: u16, h: u16) -> UnboundedSender<AppEvent> {
+        let (tx, _rx) = unbounded_channel();
+        // The rect the runtime opens with: the column a pane will be drawn in,
+        // asked of the layout that will draw it.
+        client.frame(w, h);
+        atlas::pane::open(
+            &mut client.store,
+            &mut client.views,
+            &Waiting,
+            atlas::ui::shell::pane_column(ratatui::layout::Rect::new(0, 0, w, h)),
+            tx.clone(),
+        )
+        .expect("the child started");
+        client.store.apply(
+            AppEvent::Pty {
+                pane: FIRST,
+                event: PtyEvent::Bytes(SAID.to_vec()),
+            },
+            client.now,
+        );
+        // The frame that publishes the pane's own rect, and the resize the
+        // runtime does after every one of them.
+        client.frame(w, h);
+        atlas::pane::resized(&mut client.store, client.views.pane_inner());
+        tx
+    }
+
+    fn armed_atlas() -> Client {
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('1'));
+        client
+    }
+
+    #[tokio::test]
+    async fn the_atlas_column_is_the_pane_while_a_child_runs_at_120x36() {
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 120, 36);
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+
+    #[tokio::test]
+    async fn the_pane_spans_the_chat_and_the_would_do_column_and_the_desk_rail_stays() {
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 120, 36);
+        let frame = client.frame(120, 36);
+
+        // The measured column: rail 8 and its rule, then 77 cells of ATLAS,
+        // then the desk rail. The child is given what is inside the border.
+        assert_eq!(
+            client.views.pane_inner(),
+            ratatui::layout::Rect {
+                x: 10,
+                y: 2,
+                width: 75,
+                height: 32
+            },
+            "{frame}"
+        );
+        // The pane took both of ATLAS's own columns.
+        for gone in ["Ask Atlas", "WOULD DO", "PREDICTOR BOARD"] {
+            assert!(!frame.contains(gone), "{gone} survived the pane:\n{frame}");
+        }
+        // And the desk rail beside it did not move: this is a desk with a
+        // terminal in it, not a terminal.
+        for kept in ["PULSE", "BREADTH", "MOVERS", "ATLAS READ"] {
+            assert!(frame.contains(kept), "{kept} left the frame:\n{frame}");
+        }
+        // The child's own lines, inside the border that says whose keyboard
+        // it is.
+        assert!(frame.contains("the desk is up on :8765"), "{frame}");
+        assert!(
+            frame.contains("the keyboard is the desk's · i or click to give it to Claude"),
+            "{frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pane_too_narrow_beside_the_desk_rail_takes_the_rail_too() {
+        // Below sixty columns a pane is not one an operator can work in, and
+        // the rail is the last thing to go rather than the thing that stays
+        // while the terminal becomes unusable. At 96 the pane would be 53.
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 96, 36);
+        let frame = client.frame(96, 36);
+        assert_eq!(client.views.pane_inner().width, 85, "{frame}");
+        assert!(!frame.contains("PULSE"), "the rail stayed:\n{frame}");
+        assert!(frame.contains("the desk is up on :8765"), "{frame}");
+    }
+
+    #[test]
+    fn the_desk_rail_is_only_dropped_for_a_pane() {
+        // The same 96 columns with no child: nothing about the rail changes,
+        // because the rule is about the room a *terminal* needs.
+        let frame = armed_atlas().frame(96, 36);
+        assert!(frame.contains("PULSE"), "{frame}");
+    }
+
+    #[tokio::test]
+    async fn closing_the_pane_gives_the_column_back_exactly_as_it_was() {
+        let mut client = armed_atlas();
+        let before = client.frame(120, 36);
+        let _tx = with_pane(&mut client, 120, 36);
+        assert_ne!(client.frame(120, 36), before, "the pane drew nothing");
+        client.store.close_pty();
+        assert_eq!(
+            client.frame(120, 36),
+            before,
+            "the chat did not come back byte for byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_pane_says_on_its_border_which_key_gives_the_column_back() {
+        // `Ended` keeps the pane up — the last thing a failing session printed
+        // is where it said why — so the border owes the way out as well as the
+        // way to start another. Both sentences, on one row.
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 120, 36);
+        client.store.apply(
+            AppEvent::Pty {
+                pane: FIRST,
+                event: PtyEvent::Exited {
+                    status: 0,
+                    said: "`qlab cli` ended on its own".to_string(),
+                },
+            },
+            client.now,
+        );
+        let frame = client.frame(120, 36);
+        assert!(
+            frame.contains("`qlab cli` ended on its own · /cli starts another · c closes the pane"),
+            "the pane's border does not say how to leave it:\n{frame}"
+        );
+        // And the child's last words are still under it, which is what keeping
+        // a dead pane up is for.
+        assert!(frame.contains("the desk is up on :8765"), "{frame}");
+    }
+
+    #[tokio::test]
+    async fn a_pane_shrunk_below_its_floor_hands_no_keyboard_to_a_click() {
+        // `/cli` refuses a window with no room, but a window can be *made* too
+        // small after the child is running. The pane then refuses in the
+        // widget's own words, and a refusal has no border to name the key that
+        // takes the keyboard back — so a click on one may not give it away. The
+        // same click on a pane that is drawn must still work, or this would
+        // pass on a click path that does nothing anywhere.
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mut client = armed_atlas();
+        let _tx = with_pane(&mut client, 120, 36);
+        let frame = client.frame(45, 20);
+        // The widget's own refusal, wrapped: the column is 36 because the desk
+        // rail has already given its own up, and 36 is still under the floor.
+        assert!(frame.contains("this pane is 36×18"), "{frame}");
+        client.mouse(MouseEventKind::Down(MouseButton::Left), 20, 8);
+        assert!(
+            !client.store.pty_focused(),
+            "a click on a refusal took the keyboard:\n{frame}"
+        );
+
+        client.frame(120, 36);
+        client.mouse(MouseEventKind::Down(MouseButton::Left), 40, 8);
+        assert!(
+            client.store.pty_focused(),
+            "the click never worked on a drawn pane either"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_cli_measures_is_the_column_the_frame_draws() {
+        // The opening size and the drawn pane come from two places — the
+        // layout asked one frame early, and the layout itself — and a child
+        // sized from the first while drawn into the second would wrap to a
+        // geometry nothing on screen has. Both widths, including the one where
+        // the desk rail gives its column up.
+        for (w, h) in [(120u16, 36u16), (96, 36)] {
+            let mut client = armed_atlas();
+            let _tx = with_pane(&mut client, w, h);
+            client.frame(w, h);
+            // Through the widget's own inner rect on both sides: `/cli`
+            // measures the pane and the child is given what is inside it.
+            assert_eq!(
+                atlas::ui::widgets::terminal::inner(atlas::ui::shell::pane_column(
+                    ratatui::layout::Rect::new(0, 0, w, h)
+                )),
+                client.views.pane_inner(),
+                "at {w}×{h} the column `/cli` measured is not the one the frame drew"
+            );
+        }
+    }
+}

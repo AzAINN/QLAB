@@ -971,7 +971,9 @@ pub(crate) const WORKFORCE: &str = "workforce";
 /// owner's route takes a boolean; these are the two words that become one.
 const SWITCH: [&str; 2] = ["on", "off"];
 
-/// The backend whose model the workforce's routing ignores.
+/// The owner's own `model_routing.CLAUDE_BACKEND`: the backend whose model the
+/// workforce's routing ignores, and the one `qlab cli` launches whatever else a
+/// desk is configured with — which is why `/cli` refuses on any other.
 const CLAUDE: &str = "claude";
 
 /// What the claude backend calls "let the tiers decide" — the first entry of
@@ -1033,8 +1035,8 @@ fn scoped(scope: Scope, query: &str, store: &Store, posture: Posture) -> Resolve
         Scope::Do => act(query, store, posture),
         Scope::Approve => approve(query, store, posture),
         Scope::Execute => execute(query, store, posture),
-        Scope::Cli => hand_off(Scope::Cli, query, posture),
-        Scope::Build => hand_off(Scope::Build, query, posture),
+        Scope::Cli => hand_off(Scope::Cli, query, store, posture),
+        Scope::Build => hand_off(Scope::Build, query, store, posture),
         Scope::Clear => match query.is_empty() {
             true => Resolved::ClearChat,
             false => {
@@ -1044,13 +1046,23 @@ fn scoped(scope: Scope, query: &str, store: &Store, posture: Posture) -> Resolve
     }
 }
 
+/// The backend the owner says Atlas reasons with, when it has named one.
+///
+/// An empty string is not a name: the owner serves the pair whole and a surface
+/// nobody has chosen for arrives with its halves absent or blank, which is the
+/// same fact and must read as one.
+fn reasoner_backend(store: &Store) -> Option<&str> {
+    let backend = store.llm()?.reasoner.as_ref()?.backend.as_deref()?;
+    (!backend.trim().is_empty()).then_some(backend)
+}
+
 /// The two lines that hand this terminal to a child.
 ///
 /// One function for both, because the posture rule and the shape of the
 /// refusal are identical and only the argument differs: `/cli` takes none and
 /// `/build` takes all of it. Split into two would have been two copies of the
 /// gate, which is how one of them comes to be missing it.
-fn hand_off(scope: Scope, query: &str, posture: Posture) -> Resolved {
+fn hand_off(scope: Scope, query: &str, store: &Store, posture: Posture) -> Resolved {
     // The posture first, exactly as `/mode` and `/model`: an unarmed window is
     // refused for being unarmed, whatever it typed.
     if !posture.writes() {
@@ -1059,6 +1071,26 @@ fn hand_off(scope: Scope, query: &str, posture: Posture) -> Resolved {
             scope.word(),
             posture.label()
         ));
+    }
+    // Then which mind this desk reasons with, and only for the pane. `/cli`
+    // puts a Claude session in the tab Atlas already runs in, so a desk
+    // configured for a local reasoner would be running two minds in one column
+    // — and the operator's own answer to "which mind runs Atlas" is the one
+    // that decides. `/build` is a different question (Claude Code editing this
+    // checkout) and the MODELS card says so, which is why this is not shared.
+    //
+    // Silent when nothing has named a backend: that desk has not answered the
+    // question yet — the startup door is what asks it — and a refusal there
+    // would be a distinction this client invented.
+    if scope == Scope::Cli {
+        if let Some(backend) = reasoner_backend(store) {
+            if backend != CLAUDE {
+                return Resolved::Refused(format!(
+                    "`qlab cli` is a Claude verb and this desk reasons with {backend} — \
+                     SETTINGS ▸ MODELS is where that changes"
+                ));
+            }
+        }
     }
     match scope {
         Scope::Cli if query.is_empty() => {

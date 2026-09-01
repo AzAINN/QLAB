@@ -225,6 +225,6 @@ the TUI workforce view.
     clients/        atlas-tui, the Ratatui client for the same owner runtime
     docs/           operator setup guides
     configs/        universe and staged experiment specs
-    planning-docs/  current status, delivery map, and archived plans
+    planning-docs/  the published design records (the full dated record is local)
     tests/          offline-first regression suite
 

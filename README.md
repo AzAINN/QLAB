@@ -115,12 +115,13 @@ it** — the same rule every agent surface here follows.
 qlab was designed in Bob before it was written. The boundary the codebase now
 enforces, along with the referee gate, the phase graph, and the single-writer
 rule, was planned there first, and Bob was returned to mid-build to refine that
-architecture as the desk grew; the design record is 56 dated documents in
-[`planning-docs/`](planning-docs/), including the ones recording what did *not*
-work. Bob carried the early implementation directly, and when its trial
-allowance was spent the build continued in Claude Code against the plan Bob had
-produced — the governance boundary was already decided, so later work filled it
-in rather than renegotiating it.
+architecture as the desk grew; the design record ran to 56 dated documents, and
+the ones this repository publishes are in [`planning-docs/`](planning-docs/) —
+among them the records of what did *not* work. Bob carried the early
+implementation directly, and when its trial allowance was spent the build
+continued in Claude Code against the plan Bob had produced — the governance
+boundary was already decided, so later work filled it in rather than
+renegotiating it.
 
 Wired today: `.bob/mcp.json` connects Bob to `qlab/mcp/tui_proxy.py`, an MCP
 server that never opens DuckDB and whose authority is capped at observation,
@@ -359,7 +360,8 @@ cd clients/atlas-tui && cargo test     # the Rust client, offline fixtures, no o
 - [IBM Bob](docs/ibm-bob.md) — Bob as a governed client of the desk
 - [UI validity](UI_VALIDITY.md) — what each surface's numbers do and do not
   support
-- [planning-docs/](planning-docs/) — dated status, audits, and superseded plans
+- [planning-docs/](planning-docs/) — the published design records: the
+  negative results, and the standing-authority design, plan and outcome
 
 ## Current direction
 

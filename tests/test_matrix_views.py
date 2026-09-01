@@ -352,7 +352,7 @@ def test_the_ablation_spec_carries_the_arm_and_the_runner_honours_it():
     from qlab.paths import workspace_root
 
     spec = yaml.safe_load(
-        (workspace_root() / "configs/specs/ablation_v1.yaml").read_text())
+        (workspace_root() / "configs/specs/ablation_v1.yaml").read_text(encoding="utf-8"))
     a5 = next(a for a in spec["arms"] if a["id"] == "A5")
     assert a5["params"]["views_source"] == "qualitative_matrix"
 

@@ -443,7 +443,7 @@ def test_the_env_files_mode_survives_the_atomic_swap(tmp_path):
     os.chmod(target, 0o600)
     write_env_values([("QLAB_NEWS_PROVIDERS", "macro")], root=tmp_path, environ={})
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
-    assert "ALPACA_API_KEY=x\n" in target.read_text()
+    assert "ALPACA_API_KEY=x\n" in target.read_text(encoding="utf-8")
 
 
 def test_a_mostly_lf_file_with_one_crlf_line_is_still_edited_in_place(tmp_path):

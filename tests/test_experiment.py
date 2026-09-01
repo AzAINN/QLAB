@@ -32,7 +32,7 @@ def test_the_published_ablation_pins_its_tickers_by_value():
     from qlab.paths import workspace_root
 
     spec = yaml.safe_load(
-        (workspace_root() / "configs/specs/ablation_v1.yaml").read_text())
+        (workspace_root() / "configs/specs/ablation_v1.yaml").read_text(encoding="utf-8"))
     assert spec["data"]["tickers"] == [
         "ACWI", "BNDW", "GSG", "IGF", "GLD", "VNQ", "EMB"]
     assert "universe" not in spec["data"]

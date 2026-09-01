@@ -951,6 +951,6 @@ def test_no_agent_surface_can_reach_a_standing_grant():
     sources.append(pathlib.Path(qlab.tui.claude.__file__))
     assert len(sources) >= 5, sources
     for source in sources:
-        text = source.read_text()
+        text = source.read_text(encoding="utf-8")
         for route in ("/api/desk/authority", "/api/desk/authority/revoke"):
             assert route not in text, f"{source.name} names {route}"

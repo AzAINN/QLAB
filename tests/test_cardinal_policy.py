@@ -177,7 +177,7 @@ def _spec() -> dict:
     from qlab.paths import workspace_root
 
     return yaml.safe_load(
-        (workspace_root() / "configs/specs/ablation_v1.yaml").read_text())
+        (workspace_root() / "configs/specs/ablation_v1.yaml").read_text(encoding="utf-8"))
 
 
 def test_arm_a6_varies_only_the_cardinality_against_a1():

@@ -23,7 +23,8 @@ qlab --claude auto             # Claude workforce startup: offer (default) | aut
 qlab owner                     # the owner runtime headless, for a desk kept up as a service
 ```
 
-**Governed autopilot** — proposal-only; these never book a fill:
+**Governed autopilot** — proposal-only by default: a cleared plan becomes an
+approval request, not a fill.
 
 ```bash
 qlab run-once --offline --dry-run             # one full cycle: analyze + propose, no trade
@@ -32,6 +33,12 @@ qlab daily-ops --offline                       # heartbeat: reconcile, risk, ref
 qlab autopilot --once --offline                # proposal-only daily ops on an NYSE trading morning
 qlab recommend --as-of 2026-06-30 --offline    # print one allocation (YYYY-MM-DD), no trade
 ```
+
+`run-once` and `watch` are the two that can book without a click, and only when
+the operator has exported `QLAB_AUTOPILOT_EXECUTE=1` for that process — an
+out-of-band authorization no agent can set, and one that skips the confirmation
+alone: the referee PASS, the cost gate, reconcile and the mandate still have to
+clear. `daily-ops` and `autopilot` never trade.
 
 **Research, experiments, and data**
 

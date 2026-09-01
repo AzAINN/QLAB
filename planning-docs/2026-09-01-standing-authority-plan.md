@@ -79,6 +79,18 @@ This is in scope because the whole automatic path rests on the kill switch suspe
 - [ ] **Step 2–4:** red → green. Thread the book through rather than changing `DEFAULT_BOOK` — the default is right for a single-book desk and wrong only where the caller knows better.
 - [ ] **Step 5:** commit `fix(trader): the kill switch halts the book it fired for`.
 
+### Task A6: A book is halted if anyone halted it
+
+**Files:** `qlab/trader/broker.py`, `tests/test_alpaca_broker.py` (and any module covering `portfolio_state`).
+
+Task A5 fixed the execute gate; this is the reporting half of the same defect, and it is what makes the desk *honest* rather than merely safe. `qlab/trader/broker.py:121` (simulated) reports `"halted"` from qlab's own registry latch — correct. `:271` (Alpaca) reports `bool(acct.trading_blocked)`, the **venue's** flag, and never reads qlab's latch. So on an Alpaca desk the drawdown kill switch latches `alpaca_paper`, and `portfolio_state()["halted"]` still says `False`.
+
+Everything downstream inherits that lie: Task A2's `_grant_anomalies` sees no halt and reports the grant **live**, `daily_ops`, `risk_report` and the desk cards all say the book is trading. A5's fix means no fill actually happens — the plan gate refuses — but the operator is told a grant is live while every attempt is refused, which is the worst kind of correct: safe and inexplicable.
+
+- [ ] **Step 1:** failing tests — with qlab's latch set on `alpaca_paper` and the venue clear, `portfolio_state()["halted"]` is True; with the venue blocked and qlab's latch clear it is also True; with both clear it is False; the simulated book is unchanged (regression pin).
+- [ ] **Step 2–4:** red → green. `halted` becomes "halted by anyone" — the OR of the venue flag and qlab's latch for **this broker's own book**, never the default book. Say in a comment which source each disjunct is, because they fail differently: the venue's flag is the broker refusing, qlab's latch is the mandate refusing.
+- [ ] **Step 5:** commit `fix(broker): a book is halted if the venue or the mandate says so`.
+
 ### Task B1: Granting and revoking, refused to the chat
 
 **Files:** `qlab/ui/server.py` (`GET/POST /api/desk/authority`, `POST /api/desk/authority/revoke`), `tests/test_ui.py`, `tests/test_mcp_server.py`.

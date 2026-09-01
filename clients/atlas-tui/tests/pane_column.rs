@@ -459,6 +459,24 @@ async fn the_column_a_pane_gets_is_wider_than_the_one_beside_the_desk_rail() {
     assert_eq!(wider.width, 117);
 }
 
+#[tokio::test]
+async fn the_rail_goes_at_the_width_that_would_leave_the_pane_under_its_floor() {
+    // `PANE_MIN_W` is the last number in the record's measured-layout paragraph
+    // with nothing reading it: the suite constrained it only to a range, so 60
+    // could have been 61 and no test would have said so. It is a threshold, so
+    // what pins it is the pair of frames either side of it.
+    //
+    // One column apart: at 103 the rail is kept and what is left for the pane is
+    // exactly its floor (103 − 8 − 34 − 1 = 60); at 102 that would be 59, so the
+    // rail goes and the pane takes the content width instead (102 − 8 − 1 = 93).
+    // A different floor moves the step, and both numbers change with it.
+    let (store, _views, _bus) = desk();
+    let kept = atlas::ui::shell::pane_column(Rect::new(0, 0, 103, 36), &store);
+    assert_eq!(kept.width, 60, "the narrowest frame the desk rail survives");
+    let dropped = atlas::ui::shell::pane_column(Rect::new(0, 0, 102, 36), &store);
+    assert_eq!(dropped.width, 93, "one column narrower, and the rail goes");
+}
+
 // -- what quitting the workstation did to the child -------------------------
 
 #[test]

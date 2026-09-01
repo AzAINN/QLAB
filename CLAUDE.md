@@ -32,8 +32,8 @@ cd clients/atlas-tui && cargo test  # the Ratatui client (needs no owner)
 cd clients/atlas-tui && cargo run   # run it against the owner on QLAB_UI_PORT
 ```
 
-`clients/atlas-tui` is a second client for the same owner runtime, not a
-replacement. Both read `/api/tui`, and neither ever holds a registry handle.
+`clients/atlas-tui` is the owner runtime's only client — the Textual and web
+clients are retired. It reads `/api/tui` and never holds a registry handle.
 Its default build now ships armed, so the by-construction claim narrows to the
 `--no-default-features` monitoring artifact: that binary contains no
 `net::write`, no confirm modal, no `Posture::Operator`, and — since the ATLAS

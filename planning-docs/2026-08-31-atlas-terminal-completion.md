@@ -131,13 +131,13 @@ Two more the plan asserted and the work refuted, recorded for the same reason:
 Read off the real 120×36 frame, not derived: ATLAS is rail 8 · chat 45 · WOULD
 DO 32 · sidebar 33. A terminal confined to the chat's 45 columns would make
 Claude unusable, so while a child runs the pane spans chat **and** WOULD DO —
-77 columns at 120, 117 at 160, 87 at 96 once the rail is gone — and the sidebar
-stays, because it is the desk context that makes this a desk rather than a
-terminal and so is the last thing to go. Below `PANE_MIN_W` 60 the sidebar goes
-too and the pane takes the whole content width; below the widget's own 43×5 it
-refuses. All four numbers are pinned by a test rather than left as prose: a
-number checked nowhere is how the stale "the column is 45" survived a whole
-task.
+77 columns at 120, 117 at 160, and 87 at 96 where the sidebar has already gone
+— and otherwise the sidebar stays, because it is the desk context that makes
+this a desk rather than a terminal and so is the last thing to go. Below
+`PANE_MIN_W` 60 for the pane the sidebar goes too and the pane takes the whole
+content width; below the widget's own 43×5 it refuses. Every one of these
+numbers is pinned by a test rather than left as prose: a number checked nowhere
+is how the stale "the column is 45" survived a whole task.
 
 ## The rulings that shaped the work
 
@@ -281,11 +281,47 @@ offline suites and all of it is what an operator meets first.
 ## Suite hygiene: the pty tests exhaust pseudoterminals
 
 The Rust suites open real pseudoterminals, and at full parallelism this machine
-runs out of them: `failed to openpty: Os { code: -6 }`, a different test each
-run, and it reproduces on the unmodified tree, so it is the harness and not the
-diff. Both legs were run with `--test-threads=4`, which is stable. The remedy
-is to **serialise the pty tests** — a shared mutex or a serial guard — and on
-no account to weaken an assertion to make a flake go away.
+has run out of them: `failed to openpty: Os { code: -6 }`, a different test each
+run, reproducing on the unmodified tree — the harness, not the diff. Both legs
+were therefore run at `--test-threads=4`, which is stable and is what the counts
+below were measured at.
+
+Recorded honestly: it did **not** reproduce here. The armed leg was also run
+once at full default parallelism after the prescribed runs, and passed
+identically (1218 / 0 / 1). So the failure is intermittent and load-dependent,
+not a standing property of the tree, and a single green full-parallelism run is
+not evidence that it is gone. The remedy remains to **serialise the pty tests**
+— a shared mutex or a serial guard — and on no account to weaken an assertion
+to make a flake go away.
+
+## The suites, the build, and the census
+
+Run from the worktree, fully offline, nothing touching a live owner. This task
+changed no product code, so these are the suites over `425d520`.
+
+| Suite | Result |
+|---|---|
+| `python -m pytest` (full) | **1889 passed, 10 skipped**, 151.77 s |
+| `cargo test -- --test-threads=4` (armed) | **1218 passed, 0 failed, 1 ignored**, 28 binaries |
+| `cargo test --no-default-features -- --test-threads=4` (monitoring) | **770 passed, 0 failed, 0 ignored**, 28 binaries |
+| `cargo clippy --all-targets -- -D warnings`, both legs | clean |
+| `cargo fmt --check` | clean |
+| `cargo build --release` | `clients/atlas-tui/target/release/atlas`, 8,560,384 bytes |
+
+The by-absence census, with each leg built and snapshotted to its own filename
+before counting and every path given to `nm` in full:
+
+| symbol | armed | monitoring |
+|---|---|---|
+| `5atlas3pty` | 212 | **0** |
+| `5atlas4pane` | 3 | **0** |
+| `portable_pty` | 923 | **0** |
+| `vt100` | 509 | **0** |
+| `tui_term` | 23 | **0** |
+
+The loose pattern is recorded beside them because it reads as a failed check
+when nothing is wrong: `atlas.*pty` counts 621 armed and **20** on the
+monitoring build, since `pty` matches inside `is_empty`.
 
 ## Follow-ups
 
@@ -357,6 +393,15 @@ deliberately not in this branch; each names the task that surfaced it.
   `poller.news()`/`poller.rights()` calls beside it. A dropped call degrades to
   the documented ASK-row keystroke rather than a silent break, which is a third
   reason that row exists.
+- **`handoff::Child::Cli` has lost its production caller** (found while writing
+  this record). `/cli` now resolves to `pane::open`, and the only remaining
+  construction sites for the `Cli` variant are in `tests/cli_handoff.rs` —
+  `handoff.rs` is unchanged and still tested exactly as the design ruled, but
+  the half of it that hands the screen to a `qlab cli` child is now reachable
+  from tests alone. That is the shape invariant 10 exists to catch, arrived at
+  from the other direction: not a seam with no caller, but a caller removed
+  from under a live seam. Either the variant goes or something production has
+  to want it; neither is this stream's to decide.
 - **The booking keystroke stands.** The standing authorization is decided in the
   design record — authority from a persisted operator record, never from a
   boolean an agent can set, bounded and revocable — and is the next stream's

@@ -18,8 +18,9 @@ build** — every write it can make goes through the owner's governed API.
 The by-construction claim narrows to one artifact: built with
 `--no-default-features`, this crate contains no `net::write`, no confirm modal,
 no `Posture::Operator`, and no pty, spawn or forwarded keystroke, so invariant 3
-holds there by absence rather than by a check someone could later remove. That is the build a monitoring box runs, and
-it cannot be argued, configured or flagged into writing.
+holds there by absence rather than by a check someone could later remove. That
+is the build a monitoring box runs, and it cannot be argued, configured or
+flagged into writing.
 
 The default build — what `cargo build --release` and `qlab tui` produce — is
 armed, and a fill costs exactly one explicit confirmation: `ui::widgets::confirm`
@@ -77,7 +78,7 @@ which is also what the `?` overlay draws, so a key and its help cannot drift:
 | key | where | what |
 |---|---|---|
 | `b` | ATLAS, BOOK | book the desk's current proposal — opens the confirmation box |
-| `i`, `ctrl-]`, `c` | ATLAS | the `/cli` terminal pane: hand it the keyboard, take it back, close it once its child has ended |
+| `i`, `ctrl-]`, `c` | ATLAS | the `/cli` pane: hand it the keyboard, take it back, close it once its child ended |
 | `r` | PRED | refresh the board, and offer to run one of its lanes |
 | `Home` / `End` | VIS | the left and right edges of the drawing |
 | `m`, `↑↓`, `space` | SETT ▸ MODELS | pick a model; grant or withdraw a right |

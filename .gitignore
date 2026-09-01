@@ -16,6 +16,9 @@ htmlcov/
 
 # Lab state (registry, artifacts, cache, summaries) — regenerated, never committed
 .lab/
+# ...and the archives `qlab --restart` makes of it. Same content, same reasons,
+# and at ~100 MB a directory one `git add -A` away from the remote.
+.lab-archive/
 
 # Local secrets
 .env
@@ -23,6 +26,9 @@ htmlcov/
 # Machine-local orchestration state and personal scratch
 .claude/settings.local.json
 .claude/launch.json
+# Worktrees this tooling registers inside the checkout. Ignored here rather
+# than in `.git/info/exclude`, which does not travel to a clone.
+.claude/worktrees/
 .superpowers/
 codex-info-log/
 

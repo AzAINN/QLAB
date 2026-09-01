@@ -10,7 +10,7 @@
 
 **Spec:** `planning-docs/2026-08-31-atlas-terminal-design.md` — binding. Read it before Task 1.
 
-**Implementation map (read for anchors, not for authority):** `/private/tmp/claude-501/-Users-azainmac-codebases-quant-trading-agent/6dd5395d-5770-477d-9be4-417121f1329c/scratchpad/atlas-terminal-map.md` — 1428 lines, every claim carrying a `file:line`.
+**Implementation map:** a 1428-line map of the surfaces this plan touches — the ATLAS layout, the event loop, the doors, the LLM routes — every claim carrying a `file:line`, was written to the session's scratchpad and is deliberately not committed. It was an anchor for the implementers, never an authority: the spec above is the authority, and the tree is the fact.
 
 ## Global Constraints
 
@@ -24,7 +24,7 @@
 - **The child is always `qlab cli`**, never `claude` directly (design ruling; `src/handoff.rs` holds the same rule).
 - Invariant 4 (fail loud), invariant 10 (every seam needs a caller and a test that fails if reverted), invariant 8 (restart the owner after changing code it serves).
 - Comment density: constraints the code cannot show, not narration. No AI-attribution trailers in commits. Commit by pathspec.
-- Tests never open `.lab/registry.duckdb`; Python tests use `Registry(":memory:")`; run them with `/Users/azainmac/codebases/quant-trading-agent/.venv/bin/python -m pytest <targets> -p no:cacheprovider` and no `-q` (the repo's addopts has it).
+- Tests never open `.lab/registry.duckdb`; Python tests use `Registry(":memory:")`; run them with the repo's own interpreter, `.venv/bin/python -m pytest <targets> -p no:cacheprovider`, and no `-q` (the repo's addopts has it).
 
 ## Rulings carried into the plan
 

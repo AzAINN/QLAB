@@ -15,7 +15,7 @@ Set Shell zsh
 
 # Invisible setup: venv on PATH, isolated state, demo port.
 Hide
-Type "cd /Users/azainmac/codebases/quant-trading-agent && export PATH=$PWD/.venv/bin:$PATH QLAB_STATE_DIR=/private/tmp/qlab-demo-state QLAB_UI_PORT=8799 && clear"
+Type "cd "$(git rev-parse --show-toplevel)" && export PATH=$PWD/.venv/bin:$PATH QLAB_STATE_DIR=/private/tmp/qlab-demo-state QLAB_UI_PORT=8799 && clear"
 Enter
 Sleep 2s
 Show

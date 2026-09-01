@@ -12,7 +12,7 @@ Set TypingSpeed 70ms
 Set Shell zsh
 
 Hide
-Type "cd /Users/azainmac/codebases/quant-trading-agent && export QLAB_UI_PORT=8765 && clear"
+Type "cd "$(git rev-parse --show-toplevel)" && export QLAB_UI_PORT=8765 && clear"
 Enter
 Sleep 2s
 Show

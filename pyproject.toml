@@ -84,6 +84,13 @@ all = [
 # Standalone autopilot — runnable with no Claude/Bob session at all.
 qlab = "qlab.autopilot.cli:main"
 
+# Where a reader who found this on PyPI goes next. Placed after every other
+# `[project.*]` table: a TOML table captures the keys that follow it, and put
+# higher up this one silently swallowed `dependencies`.
+[project.urls]
+Homepage = "https://github.com/AzAINN/quant-trading-agent"
+Repository = "https://github.com/AzAINN/quant-trading-agent"
+
 [tool.setuptools.packages.find]
 include = ["qlab*"]
 

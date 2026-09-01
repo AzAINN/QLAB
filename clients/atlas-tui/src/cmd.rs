@@ -726,7 +726,13 @@ impl Scope {
             Scope::Do => "a proposal the desk is offering, in full",
             Scope::Approve => "a pending approval id, or a checked plan id — opens the approve box",
             Scope::Execute => "a checked plan id with its approval on record — opens the hash box",
-            Scope::Cli => "nothing — Enter opens the Claude CLI as Atlas, on this terminal",
+            // "on this terminal" until the pane landed, and it was the whole
+            // of what changed: the child no longer takes the alternate screen
+            // and hands it back on exit. `/build` still does, which is why only
+            // one of these two lines moved.
+            Scope::Cli => {
+                "nothing — Enter runs the Claude CLI as Atlas, in the tab beside the desk"
+            }
             Scope::Build => {
                 "opens Claude Code on this checkout — it can edit files, with your approval"
             }

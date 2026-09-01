@@ -49,6 +49,40 @@ fn slash_focuses_the_line_and_the_line_opens_already_in_the_picker() {
     assert!(command_row(&frame).contains('/'), "{}", command_row(&frame));
 }
 
+/// The strip's own words for the two keys that start a child, and they are not
+/// the same words any more.
+///
+/// Ungated on purpose: `hint` is read out of `Scope` with no posture in it, so
+/// the line an operator sees is the same in both artifacts and a wording that
+/// drifted in one of them would be a wording that drifted in both.
+#[test]
+fn the_cli_hint_says_the_child_runs_in_the_tab_and_build_still_takes_the_screen() {
+    let mut client = Client::fixture();
+    client.press(KeyCode::Char('/'));
+    type_line(&mut client, "cli ");
+    let frame = client.frame(120, 36);
+    let offered = strip(&frame);
+    assert!(offered.contains("in the tab beside the desk"), "{offered}");
+    // The sentence it replaced. `/cli` left the alternate screen and gave the
+    // whole terminal to the child until it exited; it opens a pane in ATLAS
+    // now, and a strip still promising the old thing is the copy this task
+    // exists to correct.
+    assert!(!offered.contains("on this terminal"), "{offered}");
+
+    // And `/build` is untouched, which is the other half of the split: one key
+    // moved into the tab and the other did not, so a hint that had been
+    // reworded to match its neighbour would be wrong in the other direction.
+    let mut client = Client::fixture();
+    client.press(KeyCode::Char('/'));
+    type_line(&mut client, "build ");
+    let frame = client.frame(120, 36);
+    let offered = strip(&frame);
+    assert!(
+        offered.contains("opens Claude Code on this checkout"),
+        "{offered}"
+    );
+}
+
 #[test]
 fn the_line_owns_every_printable_key_including_the_ones_the_shell_claims() {
     // `q` quits, `r` refreshes and the digits switch views — and all three are

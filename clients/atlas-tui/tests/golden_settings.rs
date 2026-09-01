@@ -3234,13 +3234,18 @@ mod rights {
     /// SETTINGS. Its claude case therefore asserted the absence of a sentence
     /// on a read-only DESK view — an assertion no wording could have failed.
     fn armed_reasoning_on(backend: &str) -> Client {
+        armed_reasoning_with(backend, "")
+    }
+
+    /// The same desk, plus whatever `extra` adds to the `llm` payload.
+    fn armed_reasoning_with(backend: &str, extra: &str) -> Client {
         let mut store = harness::fixture_store();
         store.apply(
             AppEvent::Snapshot(Box::new(
                 serde_json::from_str::<Snapshot>(&format!(
                     r#"{{"llm": {{"reasoner": {{"backend": "{backend}", "model": "inherit"}},
                                   "workforce": {{"backend": "claude", "model": "inherit"}},
-                                  "reasoner_enabled": true}}}}"#
+                                  "reasoner_enabled": true{extra}}}}}"#
                 ))
                 .unwrap(),
             )),
@@ -3252,6 +3257,74 @@ mod rights {
         let mut client = Client::new(store);
         client.press(KeyCode::Char('9'));
         client
+    }
+
+    /// One backend the owner reports as down, with the reason it gave.
+    fn down(backend: &str, reason: &str) -> String {
+        format!(
+            r#", "availability": [{{"name": "{backend}", "available": false, "reason": "{reason}"}}]"#
+        )
+    }
+
+    #[test]
+    fn a_note_the_card_cannot_hold_is_counted_and_never_dropped() {
+        // The cliff, from the side that used to be silent. A backend name long
+        // enough to take the sentence past the card's own width costs three
+        // rows against the one slack row there is, and the note used to be
+        // struck from the queue *before* the count could see it — so the card
+        // drew the reading, said nothing, and an operator had no way to know a
+        // sentence existed. It is counted now, like every reason.
+        let body = content(&armed_reasoning_with("ollamaollama", "").frame(120, 36));
+        assert!(body.contains("▾ 1 more"), "{body}");
+        assert!(!body.contains("chat: ollamaollama"), "{body}");
+        // The reading it qualifies is untouched: the note is what gives way.
+        assert!(body.contains("ollamaollama · inherit"), "{body}");
+    }
+
+    #[test]
+    fn the_count_is_every_sentence_off_screen_and_not_only_the_owners() {
+        // One slack row, an owner sentence that fits it, and the note. Both are
+        // off screen — the marker takes the row — and the number says two. It
+        // said `▾ 1 more` while hiding both, which is the same silence with a
+        // number in front of it.
+        let said = "no ollama at 127.0.0.1:11434";
+        let body = content(&armed_reasoning_with("ollama", &down("ollama", said)).frame(120, 36));
+        assert!(body.contains("▾ 2 more"), "{body}");
+        assert!(!body.contains(said), "{body}");
+        assert!(!body.contains("chat: ollama ·"), "{body}");
+    }
+
+    #[test]
+    fn the_width_that_wraps_the_rights_line_defers_the_section_rather_than_clipping_the_note() {
+        // 118 columns is the last width at which the card is as wide as the
+        // line the rights end with. At 117 it is one narrower, that line wraps,
+        // and the section costs five rendered rows against the four it used to
+        // charge — so the card overran its own inner rect and the `Paragraph`
+        // clipped the last thing on it, which was this note. No count, no
+        // marker, nothing: the exact failure the marker exists to prevent,
+        // reached through the one cost on this card that was a literal.
+        let wide = content(&armed_reasoning_on("ollama").frame(118, 36));
+        assert!(
+            wide.contains("nothing here binds a non-chat caller"),
+            "{wide}"
+        );
+        assert!(
+            wide.contains("chat: ollama · /cli: claude's verb"),
+            "{wide}"
+        );
+        assert!(!wide.contains('▾'), "{wide}");
+
+        // One column narrower, the section says what it could not draw and the
+        // note is still on the card. Both, and in that order: a frame that had
+        // merely stopped drawing the rights would pass the second assertion.
+        let tight = content(&armed_reasoning_on("ollama").frame(117, 36));
+        assert!(tight.contains("▾ 3 rights need 6 rows"), "{tight}");
+        assert!(
+            tight.contains("chat: ollama · /cli: claude's verb"),
+            "{tight}"
+        );
+        // And the reading above it is untouched at either width.
+        assert!(tight.contains("ollama · inherit"), "{tight}");
     }
 
     #[test]

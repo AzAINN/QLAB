@@ -4231,15 +4231,29 @@ fn draw_models(
     // anything is dropped rather than after — `views::desk::fit` makes the same
     // reservation, for the same reason.
     let mut left = budget.saturating_sub(usize::from(deferred.is_some()));
-    // The tab note joins the queue last, and only when the sentences the
-    // *owner* wrote have room to spare. It is this client's own copy about a
-    // configuration that will read the same on the next frame, and a card with
-    // one row of slack and a down daemon would otherwise count both and draw
-    // neither — trading the remedy an operator can act on for a line that is
-    // still there after they have run it.
+    // The tab note joins the queue **last, and whenever a row is left to speak
+    // about it with**. Last is the priority: the owner's sentences are remedies
+    // an operator can act on and this one is a configuration that will read the
+    // same on the next frame, so it is drawn out of what they leave.
+    //
+    // What it is *not* is admitted only when it fits, which is what this was.
+    // A note that did not fit used to be dropped before the `hidden` count
+    // below could see it, so a card with one row of slack and a down daemon
+    // said `▾ 1 more` with two sentences off screen, and a note past the card's
+    // width vanished with no marker at all. Losing a sentence silently is the
+    // failure this whole section is built against and a wrong count is the same
+    // failure wearing a number, so the note now takes its chances in the same
+    // loop as every reason and is counted by the same `hidden`.
+    //
+    // `left > 0` is the one condition, and it is not a second mechanism: it is
+    // the row the marker itself would need. With none, the deferral below is
+    // already spending that row on a sentence this card ranks above this one —
+    // the unreadable-rights refusal, which would collapse into a bare
+    // `▾ 2 more` and send an operator to resize a terminal over a file they
+    // have to fix. So the ranking is stated rather than discovered: the owner's
+    // refusals, then the section deferral, then the owner's reasons, then this.
     if let Some(said) = tab {
-        let wanted: usize = notes.iter().map(cost).sum();
-        if wanted + cost(&said) <= left {
+        if left > 0 {
             notes.push(said);
         }
     }
@@ -4407,7 +4421,16 @@ fn last_rights_line(note: Option<&str>, inner_w: usize) -> (Line<'static>, usize
                 // has narrowed would tone the default state as a problem.
                 Style::default().fg(t.text_dim),
             )),
-            1,
+            // Measured, never assumed. This was a hardcoded `1` on the reading
+            // that [`ASYMMETRY`] is written to one row "at the card's own
+            // width" — true at the baseline and false three columns under it.
+            // At 37 cells the line is exactly the card; at 36 it wraps, the
+            // section renders five rows against the four it charged, and the
+            // `Paragraph` clips whatever the card put last. What it clipped was
+            // the tab note, with no count and no sign — the one failure this
+            // card's marker exists to prevent, reached through the one cost on
+            // it that was a literal.
+            wrapped_rows(ASYMMETRY.chars().count() + 1, inner_w),
         );
     };
     let said = to_room(said, inner_w.saturating_mul(2).saturating_sub(1));
@@ -4520,8 +4543,17 @@ fn shapes(field: &str) -> &'static str {
 /// Rights are an operator's stated intent, exactly like the posture, and this
 /// line is what keeps the card from reading as more than that.
 ///
-/// Written to one row at the card's own width: the block draws 38 cells here,
-/// and a second row is one this column does not have (see [`MODELS_H`]).
+/// Written to one row at the card's own width: the block draws 38 cells at the
+/// baseline and a second row is one this column does not have (see
+/// [`MODELS_H`]).
+///
+/// **"At the card's own width" is a reading, not a constant.** With the leading
+/// space this line is 37 cells, and the card is 37 wide at a 118-column
+/// terminal and 36 at 117 — so three columns under the baseline it wraps, and
+/// the section costs five rows rather than four. [`last_rights_line`] measures
+/// that rather than asserting it, and the four-or-none rule then defers the
+/// whole section with its own count. Shortening this sentence would move the
+/// width it happens at; it would not remove one.
 const ASYMMETRY: &str = "nothing here binds a non-chat caller";
 
 /// What shape the ATLAS tab takes on this desk, and which mind decides it.
@@ -4543,10 +4575,19 @@ const ASYMMETRY: &str = "nothing here binds a non-chat caller";
 /// pane and no posture that passes this — by construction rather than by
 /// wording.
 ///
-/// One row or none. This card has a single slack row for it and a note past 37
-/// cells is counted rather than drawn, which is what bounds both sentences —
-/// and why the claude one does not repeat the backend name the `reasoner` row
-/// two above already carries.
+/// **One row, or a number saying it is missing.** This card has a single slack
+/// row for the note at the baseline, and a sentence past the card's own width
+/// costs three (`wrapped_rows` reserves a row for the word break), so both are
+/// written well inside 37 cells — which is why the claude one does not repeat
+/// the backend name the `reasoner` row two above already carries, and why the
+/// other one carries a name the owner chose and this client cannot bound. What
+/// happens when it does not fit is [`draw_models`]'s shared `hidden` count, the
+/// same one every owner sentence goes through: it is counted into the `▾`
+/// marker rather than dropped, wherever the card has a row to say so with. It
+/// was dropped, once, and silently — admitted to the queue only if it fitted,
+/// so the count could not see it. The one case that is still an omission is a
+/// card whose last row is already carrying a refusal that outranks this line,
+/// and the ranking that decides it is written at the call site.
 ///
 /// Silent when nothing has named a mind: the startup door is what asks, and a
 /// note on an unanswered desk would be a distinction this client invented.

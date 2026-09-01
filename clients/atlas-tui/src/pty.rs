@@ -903,6 +903,15 @@ mod tests {
         fn process_id(&self) -> Option<u32> {
             None
         }
+
+        /// Windows-only in the trait, and `None` is the honest answer: this
+        /// fake never spawned anything, so there is no OS handle to hand back.
+        /// Absent on unix, which is why its omission compiled here and failed
+        /// only on the Windows CI leg.
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
     }
 
     /// A master that only ever fails — the one thing a real pty will not do on

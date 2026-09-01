@@ -368,7 +368,7 @@ def _record(session, kind: str, payload: dict) -> None:
         pass
 
 
-def prime_execution_permit(session, offline: bool) -> str:
+def prime_execution_permit(session) -> str:
     """Record the desk's FIRST execution data permit, so a grant can ever fire.
 
     The chicken-and-egg this breaks: on a lane whose policy is
@@ -428,9 +428,10 @@ def prime_execution_permit(session, offline: bool) -> str:
     # has to be the one the book is revalidated against: `book_under_grant`
     # clamps through this same helper before it does anything else. Imported
     # rather than re-derived — a second copy of that rule is a second place for
-    # it to drift, which is what the shared booking gate exists to prevent. The
-    # raw flag is the tick's, captured once at owner start, so it is stale the
-    # moment a desk-mode POST lands and is not honoured here either.
+    # it to drift, which is what the shared booking gate exists to prevent.
+    # Taken as no argument for the same reason it is taken as none there: the
+    # beat's own flag is `serve()`'s launcher default, captured once at owner
+    # start, so it is stale the moment a desk-mode POST lands.
     from qlab.ui.server import _offline_for_standing_book
 
     offline = _offline_for_standing_book(session)
@@ -596,7 +597,7 @@ def build_owner_tick(session, lock, *, offline: bool,
             # operator to press BOOK on a proposal this same tick is about to
             # book itself.
             try:
-                note = prime_execution_permit(session, offline)
+                note = prime_execution_permit(session)
                 if note:
                     result["authority_permit"] = note
             except Exception as exc:
@@ -608,7 +609,7 @@ def build_owner_tick(session, lock, *, offline: bool,
             book = getattr(session, "book_under_grant", None)
             if callable(book):
                 try:
-                    booked = book(offline)
+                    booked = book()
                     # Its own key, and only when there IS one: `None` is the
                     # quiet answer (a desk asking nothing), and a field that
                     # changes JSON type mid-run poisons the tick for a typed

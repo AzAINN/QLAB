@@ -17,6 +17,12 @@ Nothing in production references any of it — `grep` for the module across
 > review has something concrete to examine, not so the desk can start trading
 > unattended.
 
+> **Superseded 2026-09-01 (record only).** Both claims above — that `grep`
+> returns only the module itself, and the docstring quoted here — were true
+> when written and no longer describe the module: this stream wired it at
+> `dcd7e00` and rewrote that paragraph in the fix round. They stand as the
+> record of what the review was looking at.
+
 That review is this document. The stream does not invent a second authority
 model; it reviews the one that exists, fixes what the review finds, and wires
 it. What the module already guarantees, and this record adopts unchanged:

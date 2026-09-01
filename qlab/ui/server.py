@@ -6090,7 +6090,7 @@ class UISession:
 
     def _record_grant_refusal(self, grant: dict | None, plan_id: str,
                               reasons: list[str], anomalies: list[str],
-                              *, measured: dict | None = None) -> None:
+                              *, measured: dict) -> None:
         """Record why the standing path booked nothing — once per distinct state.
 
         A beat evaluates this every 30 s, so an unchanged refusal is written
@@ -6107,6 +6107,12 @@ class UISession:
         (~26 rows for one stale proposal) — the dedupe failing at exactly the
         refusal it exists for. The key is projected out of the stored payload
         rather than compared whole, so anything measured beside it is ignored.
+
+        REQUIRED, and required at every write site, so an `authority.refused`
+        row has one shape whichever branch wrote it: two of the three omitted
+        it, leaving a reader to tell an absent `plan_age_s` from a null one
+        when neither meant what it looked like. `None` is now the only way to
+        say there was no age to take, and the reasons say so in words.
         """
         key = {"grant_id": (grant or {}).get("grant_id"),
                "plan_id": plan_id, "reasons": list(reasons),
@@ -6117,10 +6123,9 @@ class UISession:
             if isinstance(seen, dict) and {
                     name: seen.get(name) for name in key} == key:
                 return
-        self.registry.record_event(
-            GRANT_REFUSED_EVENT, {**key, **(measured or {})})
+        self.registry.record_event(GRANT_REFUSED_EVENT, {**key, **measured})
 
-    def book_under_grant(self, offline: bool) -> dict | None:
+    def book_under_grant(self) -> dict | None:
         """Book the desk's own proposal if a live grant covers it.
 
         ``None`` when nothing is covered — the desk is asking nothing, there is
@@ -6136,11 +6141,6 @@ class UISession:
         mean a check the click still makes. A fill leaves the same trace, too:
         the post-fill hooks below are the clicked routes' own.
 
-        ``offline`` is the beat's raw flag and is NOT honoured — the standing
-        path takes its lane from the desk mode on every book. See
-        ``_offline_for_standing_book``; the parameter stays because the
-        heartbeat's call site is written against it.
-
         Must be called under the owner dispatch lock and takes none of its own
         (``_LOCK`` is not reentrant, and the reads that decide have to still be
         true when the write happens — exactly as ``book_current_proposal``
@@ -6149,7 +6149,11 @@ class UISession:
         from qlab.governance.proposal import current_proposal
 
         # The data lane may never contradict the book, on an unattended path
-        # least of all — and the flag handed in is one no operator chose.
+        # least of all. Derived here and taken as no argument, so a caller
+        # cannot hand this path a lane at all: the flag a beat holds is
+        # `serve()`'s launcher default, captured once at owner start, and an
+        # unattended fill must never price or revalidate against one no
+        # operator chose.
         offline = _offline_for_standing_book(self)
         # Measured HERE, before the early return below, and published for the
         # card. The read path prices nothing, so this is the only measurement
@@ -6168,8 +6172,10 @@ class UISession:
         if plan is None:
             # Unreachable through `current_proposal`, which resolved this row a
             # moment ago under the same lock. Loud rather than silent anyway.
+            # No plan is no age, and that is what `None` says here.
             self._record_grant_refusal(
-                None, plan_id, ["the proposal's plan could not be read"], [])
+                None, plan_id, ["the proposal's plan could not be read"], [],
+                measured={"plan_age_s": None})
             return None
 
         grant = self.live_grant()
@@ -6180,14 +6186,18 @@ class UISession:
         now_iso = self._now_iso()
         reasons = self.grant_refusals(grant, plan, anomalies=anomalies,
                                       books_today=books_today, now_iso=now_iso)
+        try:
+            age: float | None = round(self._plan_age_s(plan, now_iso), 1)
+        except Exception:
+            # Not a swallow: `grant_refusals` has already put "the plan's age
+            # could not be read" in `reasons` above, so a refusal that lands
+            # says so in words. This field only declines to guess a number.
+            age = None
+        # Measured here rather than in each branch: the refusal the gate
+        # composes and the one the shared gate raises are the same beat's, so
+        # they record the same age, taken at the same instant the freshness
+        # rule used.
         if reasons:
-            try:
-                age: float | None = round(self._plan_age_s(plan, now_iso), 1)
-            except Exception:
-                # Not a swallow: `grant_refusals` has already put "the plan's
-                # age could not be read" in `reasons` above, so the record says
-                # so in words. This field only declines to guess a number.
-                age = None
             self._record_grant_refusal(grant, plan_id, reasons, anomalies,
                                        measured={"plan_age_s": age})
             return None
@@ -6202,7 +6212,8 @@ class UISession:
             # does not cover the plan's own targets_hash refuses here exactly
             # as it does under a click. Anything else raised on the way to the
             # broker is a fault, not a refusal, and propagates to the beat.
-            self._record_grant_refusal(grant, plan_id, [str(exc)], anomalies)
+            self._record_grant_refusal(grant, plan_id, [str(exc)], anomalies,
+                                       measured={"plan_age_s": age})
             return None
         if result.get("booked") is True:
             # Every automatic fill says so, naming the grant. This row is also

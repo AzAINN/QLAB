@@ -261,7 +261,7 @@ class _Narrow:
 
     def __init__(self, registry, *, book=None, reasoner=False, watch=None):
         self.registry = registry
-        self.books: list[bool] = []
+        self.books = 0                 # attempts: the book takes no lane
         self.judged = 0
         self._book = book
         self._reasoner = reasoner
@@ -270,11 +270,11 @@ class _Narrow:
     def atlas_observe(self, offline, **handed):
         return {"state": "idle", "created_tasks": []}
 
-    def book_under_grant(self, offline):
-        self.books.append(offline)
+    def book_under_grant(self):
+        self.books += 1
         if self._watch is not None:
             self._watch("book")
-        return self._book(offline) if self._book is not None else None
+        return self._book() if self._book is not None else None
 
     # -- the reasoner split, when a test asks for it
     def atlas_judgment_request(self, offline):
@@ -294,7 +294,7 @@ def test_an_exception_inside_the_book_leaves_the_tick_alive(session, monkeypatch
     _grant(session)
     _proposal(session)
 
-    def _explode(offline):
+    def _explode():
         raise RuntimeError("the broker vanished mid-plan")
 
     monkeypatch.setattr(session, "book_under_grant", _explode)
@@ -318,13 +318,14 @@ def test_a_beat_that_faulted_still_books_on_the_next_one(session, monkeypatch):
     _grant(session)
     _proposal(session)
     real = session.book_under_grant
-    calls: list[bool] = []
+    calls = 0
 
-    def _flaky(offline):
-        calls.append(offline)
-        if len(calls) == 1:
+    def _flaky():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
             raise RuntimeError("a transient fault")
-        return real(offline)
+        return real()
 
     monkeypatch.setattr(session, "book_under_grant", _flaky)
     tick = _tick(session)
@@ -340,7 +341,7 @@ def test_a_beat_that_faulted_still_books_on_the_next_one(session, monkeypatch):
 def test_a_registry_that_cannot_record_the_fault_still_leaves_the_tick_alive(reg):
     """An error handler must never take the loop down — the rule `tick_once`
     already states about its own `on_error`."""
-    def _explode(offline):
+    def _explode():
         raise RuntimeError("the broker vanished mid-plan")
 
     session = _Narrow(reg, book=_explode)
@@ -364,7 +365,7 @@ def test_the_beat_attempts_at_most_one_book_per_tick(reg):
     tick()
     tick()
 
-    assert session.books == [True, True]
+    assert session.books == 2
 
 
 def _held(lock) -> bool:
@@ -402,7 +403,7 @@ def test_the_reasoner_split_books_once_and_in_the_lock_phase(reg):
     build_owner_tick(session, lock, offline=True)()
 
     assert seen == [("judge", False), ("book", True)]
-    assert session.books == [True]
+    assert session.books == 1
 
 
 # --- the permit chicken-and-egg: the beat records the first one -------------
@@ -618,9 +619,10 @@ def test_the_prime_measures_the_lane_the_book_will_be_revalidated_against(
 
     `book_under_grant` clamps through `_offline_for_standing_book` before it
     does anything else, because the data lane can never contradict the book and
-    the flag a beat is handed is one no operator chose. `serve()`'s own default
-    is `True`, so a beat honouring it verbatim would measure the wrong lane and
-    skip the prime on exactly the desk that needs it.
+    the flag a beat holds is one no operator chose. `serve()`'s own default is
+    `True`, so a beat honouring it verbatim would measure the wrong lane and
+    skip the prime on exactly the desk that needs it — which is why neither
+    this nor the book takes a lane argument at all.
     """
     import qlab.governance.proposal as proposal_module
     from qlab.core.data import DataPolicy
@@ -644,9 +646,61 @@ def test_the_prime_measures_the_lane_the_book_will_be_revalidated_against(
     monkeypatch.setattr(proposal_module, "current_proposal",
                         lambda registry: {"plan_id": "p"})
 
-    hb.prime_execution_permit(live, True)      # the tick's raw flag
+    hb.prime_execution_permit(live)
 
     # The desk mode's own lane, never the flag.
+    assert seen == [False, False]
+
+
+def test_the_prime_takes_the_desk_lane_where_the_click_would_take_the_flag(
+        monkeypatch):
+    """The one desk shape where the prime's half of that fix is visible.
+
+    Its sibling above runs an `alpaca` book, and `_offline_for_book` clamps an
+    alpaca book to the desk mode too — so on that desk both helpers answer the
+    same and the assertion passes whichever one the prime calls. Every other
+    prime test runs a synthetic or simulated desk whose tick flag and desk mode
+    already agree. Reverting only the prime to the click's helper on the beat's
+    own flag therefore passed the whole suite: the lane fix was pinned for the
+    book and pinned by nothing for the prime.
+
+    A SIMULATED book on a LIVE data lane is the distinguishing case, because
+    that is exactly where `_offline_for_book` hands the flag straight back. The
+    prime and the book must measure the same lane — a permit taken on one lane
+    does not license a fill revalidated against another — so what is asserted
+    here is the desk's lane, twice, against a flag that says otherwise.
+    """
+    import qlab.governance.proposal as proposal_module
+    from qlab.core.data import DataPolicy
+    from qlab.core.desk_mode import DeskMode
+
+    live = UISession(offline_default=True, registry=Registry(":memory:"),
+                     desk_mode=DeskMode("live", "simulated"))
+    # The fixture guard, and the whole reason this test exists beside its
+    # sibling: on THIS desk the two helpers disagree, so the assertion below
+    # can only be satisfied by the standing one. If a future edit moves the
+    # desk into the clamped case, this fails rather than going quietly vacuous.
+    assert live.desk_mode.offline is False
+    assert ui_server._offline_for_book(live, True) is True
+    _grant(live)
+    seen: list[bool] = []
+    policy = DataPolicy(
+        mode="operational", provider="synthetic", feed=None,
+        allow_network=False, allow_cache=True, allow_synthetic=True,
+        require_fresh=False, execution_eligible=True)
+    monkeypatch.setattr(live, "data_policy",
+                        lambda offline: seen.append(offline) or policy)
+    monkeypatch.setattr(
+        live, "data_health",
+        lambda offline, purpose="paper_proposal": (
+            seen.append(offline) or {"blocked": True, "reason": "no feed"}))
+    monkeypatch.setattr(proposal_module, "current_proposal",
+                        lambda registry: {"plan_id": "p"})
+
+    hb.prime_execution_permit(live)
+
+    # The policy read and the health measurement, both on the desk's own lane.
+    # Reads `[True, True]` under the click's helper on any flag a beat holds.
     assert seen == [False, False]
 
 

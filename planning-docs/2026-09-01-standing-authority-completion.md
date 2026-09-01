@@ -355,6 +355,30 @@ recorded in [pre-push review findings](2026-09-01-pre-push-review-findings.md).
   both are now red-on-revert, proven by a clean 2x2. Red-first is not enough on
   its own; the ablation is what proves the test is load-bearing.
 
+## Verification
+
+Every suite run from the worktree root at the docs commit, offline, with no
+owner runtime involved.
+
+| Suite | Result |
+|---|---|
+| `python -m pytest` (full offline suite) | **2056 passed, 10 skipped**, 1437 warnings, 157.79s |
+| `cargo test` (armed, default features, full parallelism) | **1247 passed, 0 failed, 1 ignored** across 28 test binaries |
+| `cargo test --no-default-features` (glass, full parallelism) | **783 passed, 0 failed, 0 ignored** across 28 test binaries |
+| `cargo clippy --all-targets -- -D warnings` | clean, 0 warnings |
+| `cargo clippy --all-targets --no-default-features -- -D warnings` | clean, 0 warnings |
+| `cargo fmt --check` | clean, no output |
+| `cargo build --release` | ok in 57.32s → `clients/atlas-tui/target/release/atlas`, 8,576,928 bytes (8.2 MiB) |
+
+Both cargo legs ran at full parallelism — the pty tests hold a shared mutex, so
+`--test-threads` was deliberately not passed. Neither cargo leg needs an owner,
+and no test in either language opens `.lab/registry.duckdb`.
+
+Every one of those counts is offline and synthetic. See **What has NEVER RUN
+LIVE** above for what that does and does not establish — the suites prove the
+code does what the tests say, and nothing about what a live owner or a real
+Alpaca account does with it.
+
 ## Docs changed
 
 `CLAUDE.md` invariant 3 now names **three** recorded forms of confirmation — the

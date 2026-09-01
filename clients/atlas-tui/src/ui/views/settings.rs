@@ -4153,15 +4153,12 @@ fn draw_models(
     let inner_w = area.width.max(1) as usize;
     let cost = |reason: &String| wrapped_rows(reason.chars().count() + 1, inner_w);
     let mut notes = unreachable_reasons(llm);
-    // The hand-off asymmetry, and only where it is one: `/cli` and `/build`
-    // start the real Claude CLI, so a desk reasoning on anything else has two
-    // minds in it and the `build` row above says nothing about which one the
-    // key opens. Silent on a claude reasoner, where there is no distinction to
-    // draw.
-    let handoff = handoff_note(llm);
+    // What shape the tab ATLAS draws takes on this desk, in the one row this
+    // card has for it. Posture, not build — see [`atlas_note`].
+    let tab = atlas_note(llm, store.posture.writes());
     // A note that exists is either shown whole or counted, and the count needs
     // a row of its own.
-    let floor = MODELS_MIN_H + u16::from(!notes.is_empty() || handoff.is_some());
+    let floor = MODELS_MIN_H + u16::from(!notes.is_empty() || tab.is_some());
     if area.height < floor {
         refuse(
             f,
@@ -4234,13 +4231,13 @@ fn draw_models(
     // anything is dropped rather than after — `views::desk::fit` makes the same
     // reservation, for the same reason.
     let mut left = budget.saturating_sub(usize::from(deferred.is_some()));
-    // The hand-off note joins the queue last, and only when the sentences the
+    // The tab note joins the queue last, and only when the sentences the
     // *owner* wrote have room to spare. It is this client's own copy about a
-    // distinction that does not move, and a card with one row of slack and a
-    // down daemon would otherwise count both and draw neither — trading the
-    // remedy an operator can act on for a line that says the same thing on
-    // every desk.
-    if let Some(said) = handoff {
+    // configuration that will read the same on the next frame, and a card with
+    // one row of slack and a down daemon would otherwise count both and draw
+    // neither — trading the remedy an operator can act on for a line that is
+    // still there after they have run it.
+    if let Some(said) = tab {
         let wanted: usize = notes.iter().map(cost).sum();
         if wanted + cost(&said) <= left {
             notes.push(said);
@@ -4527,26 +4524,52 @@ fn shapes(field: &str) -> &'static str {
 /// and a second row is one this column does not have (see [`MODELS_H`]).
 const ASYMMETRY: &str = "nothing here binds a non-chat caller";
 
-/// What one surface's reasoner means for the two keys that hand off.
+/// What shape the ATLAS tab takes on this desk, and which mind decides it.
 ///
-/// `/cli` and `/build` start the real Claude CLI whatever this desk reasons
-/// with, so a granite or ollama reasoner is a second mind the `build` row says
-/// nothing about. Silent on a claude reasoner and silent when nothing has named
-/// one: a note that fires on every desk is a note nobody reads, and one that
-/// fires on an unnamed backend would be a distinction this client invented.
-fn handoff_note(llm: &LlmConfig) -> Option<String> {
-    let backend = surface_backend(llm.reasoner.as_ref())?;
-    if backend == CLAUDE {
+/// **The tab has two bodies, and the mind decides whether it can hold the
+/// second.** `/cli` no longer hands the workstation to a child: it runs the
+/// desk's own Claude verb inside ATLAS's own column, so a claude desk's tab is
+/// the chat or a live terminal. A desk reasoning on anything else has one body
+/// — that verb refuses by name there — while the chat itself still answers, on
+/// the local model. Neither half is on any row of this card: `reasoner` names
+/// the mind without saying which surface it drives, and `build` names a right
+/// without saying which mind the key opens.
+///
+/// **The posture, never the build**, exactly as [`Card::footer`] gates on it.
+/// `/cli` and `/build` are both `writes` scopes, so a window the desk has not
+/// armed is offered neither and may not be told what they would do. It is also
+/// what keeps the read-only card one frame in both artifacts: the sentence that
+/// names a pane cannot render in a `--no-default-features` build, which has no
+/// pane and no posture that passes this — by construction rather than by
+/// wording.
+///
+/// One row or none. This card has a single slack row for it and a note past 37
+/// cells is counted rather than drawn, which is what bounds both sentences —
+/// and why the claude one does not repeat the backend name the `reasoner` row
+/// two above already carries.
+///
+/// Silent when nothing has named a mind: the startup door is what asks, and a
+/// note on an unanswered desk would be a distinction this client invented.
+fn atlas_note(llm: &LlmConfig, writes: bool) -> Option<String> {
+    if !writes {
         return None;
     }
-    Some(format!("/cli, /build: {CLAUDE}, not {backend}"))
+    let backend = surface_backend(llm.reasoner.as_ref())?;
+    if backend == CLAUDE {
+        return Some("ATLAS: the chat, or a /cli terminal".to_string());
+    }
+    // The mirror of the refusal the key itself gives, which sends the operator
+    // to this card: the chat is the local model's, the verb is claude's.
+    Some(format!("chat: {backend} · /cli: {CLAUDE}'s verb"))
 }
 
-/// The backend the two hand-off keys open, whatever this desk reasons with.
+/// The one mind the desk's Claude verbs run, whatever this desk reasons with.
 ///
 /// Its own constant beside the row that renders `claude · tiers decide`, and
-/// the same string: the owner's `model_routing.CLAUDE_BACKEND`, which is what
-/// `qlab cli` and `qlab --build` launch however the reasoner is configured.
+/// the same string: the owner's `model_routing.CLAUDE_BACKEND`. `/build`
+/// launches it however the reasoner is configured; `/cli` is the same verb and
+/// therefore refuses rather than opening a second mind's terminal in the tab
+/// Atlas already runs in, which is the asymmetry [`atlas_note`] states.
 const CLAUDE: &str = "claude";
 
 /// The owner's reason for every backend a surface runs on and cannot reach.

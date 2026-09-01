@@ -443,6 +443,61 @@ fn a_short_column_never_shows_a_tone_the_stamp_has_not_dated() {
 }
 
 #[test]
+fn a_window_with_neither_key_is_told_what_neither_key_does() {
+    // The tab note is entirely about `/cli`, and `/cli` is a `writes` scope: a
+    // window the desk has not armed is offered the word nowhere, so a card that
+    // described it here would be the greyed-affordance claim this pane refuses.
+    //
+    // This test is deliberately ungated, and that is the point. It is the one
+    // assertion that runs in BOTH legs, and the monitoring artifact — which has
+    // no pane at all — passes it by holding no posture that writes, rather than
+    // by any wording. The read-only card is one frame in either binary.
+    let client = models_from(&format!(
+        r#"{{"reasoner": {{"backend": "ollama", "model": "granite3.3:8b"}},
+             "workforce": {{"backend": "claude", "model": "inherit"}},
+             "reasoner_enabled": true,
+             "probed_at": "{PROBED}"}}"#
+    ));
+    let body = content(&client.frame(120, 36));
+    // The row itself is empty, rather than merely free of two known sentences:
+    // the note is the last thing this card draws, so what is asserted is that
+    // *nothing* is under the line the rights end with. A wording check would
+    // pass on any third sentence, including the one this replaced.
+    let rows: Vec<&str> = body.lines().collect();
+    let at = rows
+        .iter()
+        .position(|row| row.contains(ASYMMETRY))
+        .unwrap_or_else(|| panic!("the rights line is not on this frame:\n{body}"));
+    // Char offsets, not byte ones: the rules and separators on these rows are
+    // multi-byte and a byte index would cut into one.
+    let column = rows[at]
+        .chars()
+        .collect::<Vec<_>>()
+        .windows(ASYMMETRY.chars().count())
+        .position(|w| w.iter().collect::<String>() == ASYMMETRY)
+        .unwrap();
+    // The pane's own right border sits at the end of every one of these rows
+    // and is not the card's content, so it is dropped rather than trimmed —
+    // trimming would also swallow a sentence that ended in one.
+    let under: String = rows[at + 1]
+        .chars()
+        .skip(column)
+        .filter(|c| *c != '│')
+        .collect();
+    assert!(
+        under.trim().is_empty(),
+        "under the rights: {under:?}\n{body}"
+    );
+    // The reading itself is untouched — this is a sentence the card drops, not
+    // a card that stopped answering.
+    assert!(body.contains("ollama · granite3.3:8b"), "{body}");
+    assert!(body.contains(ASYMMETRY), "{body}");
+}
+
+/// The last line of the rights section, which the tab note is drawn under.
+const ASYMMETRY: &str = "nothing here binds a non-chat caller";
+
+#[test]
 fn a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half() {
     // The remedy is the last third of the owner's longest sentence, so half of
     // one is a fix an operator cannot run. `views::desk::fit` makes the same
@@ -3169,35 +3224,85 @@ mod rights {
         );
     }
 
-    #[test]
-    fn the_hand_off_line_names_the_second_mind_and_is_silent_when_there_is_only_one() {
-        // `/cli` and `/build` start the real Claude CLI whatever this desk
-        // reasons with, so a granite or ollama reasoner is a mind the `build`
-        // row says nothing about. The fixture desk reasons on ollama.
-        let client = armed();
-        let body = content(&client.frame(120, 36));
-        assert!(body.contains("/cli, /build: claude, not ollama"), "{body}");
-
-        // And silent on a claude reasoner, where there is no distinction to
-        // draw: a note that fires on every desk is a note nobody reads.
+    /// An armed desk reasoning on whatever `backend` names.
+    ///
+    /// **Both orderings here are load-bearing, and the test this replaced had
+    /// neither.** `Store::apply` recomputes the posture from the payload it
+    /// just installed, so a window armed *before* a snapshot carrying no desk
+    /// mode is glass again by the time the card draws; and that same snapshot
+    /// opens the startup door, which swallows the keystroke that reaches
+    /// SETTINGS. Its claude case therefore asserted the absence of a sentence
+    /// on a read-only DESK view — an assertion no wording could have failed.
+    fn armed_reasoning_on(backend: &str) -> Client {
         let mut store = harness::fixture_store();
-        store.posture = Posture::Operator;
-        with_rights(&mut store, rights_payload(true, true, true));
         store.apply(
             AppEvent::Snapshot(Box::new(
-                serde_json::from_str::<Snapshot>(
-                    r#"{"llm": {"reasoner": {"backend": "claude", "model": "inherit"},
-                                "workforce": {"backend": "claude", "model": "inherit"},
-                                "reasoner_enabled": true}}"#,
-                )
+                serde_json::from_str::<Snapshot>(&format!(
+                    r#"{{"llm": {{"reasoner": {{"backend": "{backend}", "model": "inherit"}},
+                                  "workforce": {{"backend": "claude", "model": "inherit"}},
+                                  "reasoner_enabled": true}}}}"#
+                ))
                 .unwrap(),
             )),
             Instant::now(),
         );
+        store.posture = Posture::Operator;
+        with_rights(&mut store, rights_payload(true, true, true));
+        harness::no_door(&mut store);
         let mut client = Client::new(store);
         client.press(KeyCode::Char('9'));
+        client
+    }
+
+    #[test]
+    fn a_local_reasoner_desk_is_told_which_half_it_keeps_and_which_it_cannot_have() {
+        // The fixture desk reasons on ollama, and `/cli` runs the desk's own
+        // Claude verb — so that key is refused by name here while the chat is
+        // answered by the local model regardless. The card is where that
+        // refusal sends the operator, so it says the same thing from this side.
+        let client = armed();
         let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("chat: ollama · /cli: claude's verb"),
+            "{body}"
+        );
+        // And not the sentence it replaced, which claimed the key opens claude
+        // on a desk where it opens nothing.
         assert!(!body.contains("/cli, /build:"), "{body}");
+    }
+
+    #[test]
+    fn a_claude_desk_is_told_the_tab_has_two_bodies() {
+        // The shape ruling, on the one desk that can hold both: `/cli` is a
+        // terminal inside the tab now, not a hand-off that takes the screen,
+        // so the card says ATLAS is either — where before it said nothing at
+        // all to a claude desk.
+        let body = content(&armed_reasoning_on("claude").frame(120, 36));
+        assert!(
+            body.contains("ATLAS: the chat, or a /cli terminal"),
+            "{body}"
+        );
+        // One line, not two: the local desk's sentence is the other branch of
+        // the same row, and both on one card would be one row past the slack.
+        assert!(!body.contains("chat: claude ·"), "{body}");
+    }
+
+    #[test]
+    fn neither_sentence_costs_more_than_the_one_row_the_card_has_for_it() {
+        // 37 cells is the widest this card draws whole (the cliff is pinned by
+        // `a_reason_that_will_not_fit_whole_is_counted_rather_than_cut_in_half`),
+        // and a note past it is counted — which would replace the sentence with
+        // a number on every desk rather than on a badly-configured one.
+        for (desk, said) in [
+            ("ollama", "chat: ollama · /cli: claude's verb"),
+            ("claude", "ATLAS: the chat, or a /cli terminal"),
+        ] {
+            let body = content(&armed_reasoning_on(desk).frame(120, 36));
+            // The anchor first, or the count assertion below passes on a card
+            // that drew no sentence at all.
+            assert!(body.contains(said), "{desk}: {body}");
+            assert!(!body.contains('▾'), "{desk}: {body}");
+        }
     }
 
     #[test]

@@ -284,6 +284,14 @@ pub enum Card {
     #[default]
     Desk,
     News,
+    /// The standing grant a fill may happen under, what is left of it, and the
+    /// key that takes it away.
+    ///
+    /// **It leads the left column, ahead of the two cards about how the desk
+    /// solves**, because it is the only card on this pane that decides whether
+    /// a human is in the loop at all. METHOD and POLICY change what a plan
+    /// *is*; this one changes who has to press something before it books.
+    Authority,
     /// How this desk solves, and how many names it may hold. The one card that
     /// changes what the desk *proposes* rather than what it reads or displays —
     /// and still not what it may book.
@@ -299,9 +307,10 @@ impl Card {
     /// The walk order, and only the walk has one: the glass build has no focus
     /// to move, so nothing there reads this.
     #[cfg(feature = "operator")]
-    const ALL: [Card; 8] = [
+    const ALL: [Card; 9] = [
         Card::Desk,
         Card::News,
+        Card::Authority,
         Card::Method,
         Card::Policy,
         Card::Theme,
@@ -336,6 +345,10 @@ impl Card {
             // that reads as "help" on a workstation with a help overlay is one
             // an operator presses expecting something else.
             (true, Card::Method) => "m method · k cap",
+            // One key, and the sentence says what is *not* between it and the
+            // grant. An operator who has met the BOOK box will reach for a
+            // challenge here; the rule is where they are told there is none.
+            (true, Card::Authority) => "R revokes — no box, nothing typed",
             (true, _) => "no keys on this card",
             // The pane-level line the cards inherited, kept whole on the two
             // cards it was always about.
@@ -353,6 +366,10 @@ impl Card {
             // what the owner will accept — and the rule has 38 cells here,
             // which is what picks this sentence over a longer one.
             (false, Card::Models) => "read-only — cannot grant a right",
+            // A glass window still reads the whole grant — what may book
+            // without a human is exactly what a monitoring window is for — and
+            // says which half of it a key cannot reach.
+            (false, Card::Authority) => "read-only — cannot revoke a grant",
             (false, _) => "read-only",
         }
     }
@@ -375,6 +392,7 @@ impl Card {
             Card::News => &[("contact", 'c'), ("save", 's'), ("verify", 'v')],
             Card::Models => &[("model", 'm')],
             Card::Method => &[("method", 'm'), ("cap", 'k')],
+            Card::Authority => &[("revokes", 'R')],
             _ => &[],
         }
     }
@@ -432,6 +450,9 @@ pub struct SettingsView {
     /// was last said back.
     #[cfg(feature = "operator")]
     rights: RightsDraft,
+    /// The one revocation in flight, and whatever was last said back.
+    #[cfg(feature = "operator")]
+    authority: AuthorityDraft,
     /// How many source rows the last frame drew, published the way `area` is:
     /// the cursor is clamped against the catalog that is on screen, and the
     /// catalog moves under it every time the owner answers.
@@ -574,6 +595,26 @@ struct RightsDraft {
     note: Option<String>,
 }
 
+/// What the AUTHORITY card is holding while the owner is asked.
+///
+/// **No draft of anything, and nothing this card could compose.** It draws the
+/// owner's own grant and sends one request that carries a reason; there is no
+/// ceiling typed here, no id chosen here, and therefore nothing an `Esc` could
+/// discard or that could disagree with what the desk reports.
+#[cfg(feature = "operator")]
+#[derive(Default)]
+struct AuthorityDraft {
+    /// Whether a revocation is in flight.
+    ///
+    /// One at a time, so a held key cannot put two revocations on the owner's
+    /// audit bus for one decision — and refused *out loud*, because a key that
+    /// silently did nothing reads as a dead card rather than a busy one.
+    sending: bool,
+    /// What this card, or the owner, last said about a change. Retired by the
+    /// next keystroke, like the switcher's note.
+    note: Option<String>,
+}
+
 /// What the METHOD card is holding, before and while the owner is asked.
 ///
 /// **No draft of the choice itself.** Unlike NEWS, nothing here is staged: a
@@ -673,17 +714,24 @@ impl View for SettingsView {
         // the terminal grows — which is the trade this pane can make, because
         // the owner writes a rationale *per method* and the picker `m` opens
         // renders every one of them.
+        //
+        // **AUTHORITY leads the column**, ahead of both. What it says is
+        // whether a fill needs a human at all, which outranks how the desk
+        // solves and what every solve is held to — and the walk order is the
+        // draw order, so an operator arriving from NEWS meets it first.
         let left = Layout::vertical([
+            Constraint::Length(AUTHORITY_H),
             Constraint::Length(METHOD_H),
             Constraint::Length(POLICY_H),
             Constraint::Min(0),
             Constraint::Length(THEME_H),
         ])
         .split(cols[0]);
-        self.draw_method(f, left[0], store, at);
-        draw_policy(f, left[1], store, at);
-        draw_rationale(f, left[2], store);
-        draw_theme(f, left[3], at);
+        self.draw_authority(f, left[0], store, at);
+        self.draw_method(f, left[1], store, at);
+        draw_policy(f, left[2], store, at);
+        draw_rationale(f, left[3], store);
+        draw_theme(f, left[4], at);
 
         // MODELS sits directly under SYSTEM rather than growing SYSTEM a row.
         // The two answer the same question — what this desk is made of — and
@@ -715,9 +763,10 @@ impl View for SettingsView {
             &[
                 (Card::Desk, top[0]),
                 (Card::News, top[1]),
-                (Card::Method, left[0]),
-                (Card::Policy, left[1]),
-                (Card::Theme, left[3]),
+                (Card::Authority, left[0]),
+                (Card::Method, left[1]),
+                (Card::Policy, left[2]),
+                (Card::Theme, left[4]),
                 (Card::System, right[0]),
                 (Card::Models, right[1]),
                 (Card::Universe, right[2]),
@@ -961,6 +1010,19 @@ impl SettingsView {
 
     fn publish(&self, area: Rect) {
         self.area.set(area);
+    }
+
+    /// The AUTHORITY card with whatever this window last heard about a
+    /// revocation over it.
+    fn draw_authority(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+        authority_card(
+            f,
+            area,
+            store,
+            at,
+            self.authority.note.as_deref(),
+            self.authority.sending,
+        );
     }
 
     fn forget_hits(&self) {
@@ -1208,6 +1270,16 @@ impl SettingsView {
                 self.news.note = None;
                 self.news.contact_box = Some(self.news.contact.clone().unwrap_or_default());
             }
+            // **One keystroke, and nothing between it and the owner.** Every
+            // other key on this workstation that moves an authority opens
+            // something first — the BOOK box asks for six characters of the
+            // plan's own `targets_hash`, and the login form asks for a word
+            // before it destroys a stored profile. This one does not, and the
+            // asymmetry is the point rather than an omission: those boxes exist
+            // to put a human in front of a *fill*, and a box in front of "stop"
+            // delays the only action that cannot make things worse. Do not add
+            // a confirmation here for symmetry with the BOOK box.
+            KeyCode::Char('R') if self.focus.get() == Card::Authority => return self.revoke(store),
             KeyCode::Char('s') if self.focus.get() == Card::News => return self.save(store, false),
             KeyCode::Char('v') if self.focus.get() == Card::News => return self.save(store, true),
             _ => {}
@@ -1229,6 +1301,7 @@ impl SettingsView {
         self.news.note = None;
         self.method.note = None;
         self.rights.note = None;
+        self.authority.note = None;
         let last = self.news_rows.get().saturating_sub(1);
         if self.focus.get() == Card::News && self.news_rows.get() > 0 {
             let at = self.news.at.min(last);
@@ -1323,6 +1396,46 @@ impl SettingsView {
         Some(Command::SetRight {
             field: right,
             value: !held,
+        })
+    }
+
+    /// Withdraw the standing grant, at once.
+    ///
+    /// **Nothing is composed here and nothing is confirmed here.** The request
+    /// carries a reason and no id: the owner holds one live grant and is the
+    /// only thing that knows which, so revoking "whatever stands" is the safe
+    /// reading of a card that may be seconds old. And there is no box — see the
+    /// `R` arm in [`SettingsView::keys`] for why the asymmetry with the BOOK
+    /// box is deliberate.
+    ///
+    /// Two local refusals, both said out loud rather than swallowed. A key that
+    /// silently did nothing reads as a dead card, and one of these is the state
+    /// an operator will actually hit: pressing `R` twice.
+    fn revoke(&mut self, store: &Store) -> Option<Command> {
+        self.authority.note = None;
+        // One at a time. The route records a governance transition, and a held
+        // key would put two revocations of one grant on the owner's audit bus.
+        if self.authority.sending {
+            self.authority.note = Some(ASKING.to_string());
+            return None;
+        }
+        // Refused here rather than sent, because the owner answers the same
+        // 400 and the card already says there is nothing standing. This is the
+        // one refusal this pane makes about a grant; every other rule about one
+        // is the owner's.
+        let standing = store
+            .authority()
+            .is_some_and(|authority| authority.grant.is_some());
+        if !standing {
+            self.authority.note = Some("no grant to revoke".to_string());
+            return None;
+        }
+        self.authority.sending = true;
+        Some(Command::RevokeAuthority {
+            // The surface, not a sentence about the desk: the owner records why
+            // authority was withdrawn, and what this client knows is that a
+            // human pressed the key on this card.
+            reason: "revoked by the operator on the desk".to_string(),
         })
     }
 
@@ -1635,6 +1748,38 @@ impl SettingsView {
             Wrote::RightFailed { field, said } if self.rights.sending == Some(*field) => {
                 self.rights.sending = None;
                 self.rights.note = Some(format::bounded(said, SAID_MAX));
+                return;
+            }
+            _ => {}
+        }
+        // And the revocation, on its own three outcomes and on nothing else,
+        // for the reason the rights wait above states: the card is one
+        // keystroke from a second write, and a wait retired by an unrelated
+        // broken request would re-arm `R` over a revocation still in flight.
+        match outcome {
+            Wrote::AuthorityRevoked { .. } if self.authority.sending => {
+                self.authority.sending = false;
+                // Nothing is copied onto the card: the poll behind this outcome
+                // is what the rows then draw, and a receipt composed here would
+                // be a second account of a registry row only the owner read.
+                self.authority.note = None;
+                return;
+            }
+            // Not confirmable and not a broken request: the owner considered
+            // the change and declined it, so its sentence stands on the card
+            // beside the grant that is still where it was.
+            Wrote::AuthorityRefused { said } if self.authority.sending => {
+                self.authority.sending = false;
+                self.authority.note = Some(format::bounded(said, SAID_MAX));
+                return;
+            }
+            // A request that never landed. The card must not stay waiting over
+            // one, and the sentence has to leave the grant's own state open:
+            // nothing here knows whether the owner acted before the socket
+            // died, and the poll behind the card is what will say.
+            Wrote::AuthorityFailed { said } if self.authority.sending => {
+                self.authority.sending = false;
+                self.authority.note = Some(format::bounded(said, SAID_MAX));
                 return;
             }
             _ => {}
@@ -3093,6 +3238,14 @@ impl SettingsView {
     fn draw_cap(&self, _f: &mut Frame, _area: Rect, _store: &Store) {}
     fn forget_hits(&self) {}
 
+    /// The AUTHORITY card with nothing over it. Every fact on it is the
+    /// owner's, and in this build there is no note and no request that could
+    /// hold a different answer — the whole grant is read, and none of it can be
+    /// touched.
+    fn draw_authority(&self, f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
+        authority_card(f, area, store, at, None, false);
+    }
+
     /// The METHOD card with nothing over it. Every fact on it is the owner's,
     /// and in this build there is no note and no request that could hold a
     /// different answer.
@@ -3126,9 +3279,28 @@ impl SettingsView {
 /// Header, five rows, and three of slack for a credential description long
 /// enough to wrap — the one value on this card that is a sentence — plus the
 /// rule the block reserves, which is where the card's own footer is drawn.
+///
+/// **Unchanged when AUTHORITY arrived**, and the top band is the one slot that
+/// paid nothing. It was tried at eight: the credential's slack is what makes a
+/// book this desk cannot log into legible, and NEWS beside it draws its catalog
+/// out of the same rows — at eight it showed two sources of five and counted
+/// the rest, which turns the card an operator ticks into a pager.
 const DESK_H: u16 = 10;
-/// Header, eight rows, and the rule.
-const POLICY_H: u16 = 10;
+/// Header, five rows, and the rule.
+///
+/// **Seven rather than ten since AUTHORITY arrived**, and this is where three
+/// of that card's rows came from. Two are redundancy rather than fact:
+/// `algorithm`, `objective` and `solver` are one pipeline identity — in every
+/// payload this desk serves they are the same id the `policy` row already
+/// names — and they are now one row carrying all three values.
+///
+/// The third is the `method` label ("Hierarchical risk parity"), which is one
+/// keystroke away rather than gone: the picker `m` opens on the card above
+/// lists every method by id, arm and label, with the owner's rationale beside
+/// it. What stays here is what an operator cannot get that way — the id they
+/// type, the pipeline that ran, and the four constraints every solve is held
+/// to.
+const POLICY_H: u16 = 7;
 
 /// Header, seven rows, and the rule.
 ///
@@ -3143,7 +3315,46 @@ const POLICY_H: u16 = 10;
 /// somebody believes is fine. The entries take what is left and say how many
 /// they did not draw, because every one of them is in the picker `m` opens,
 /// whole, with the owner's rationale beside it.
-const METHOD_H: u16 = 9;
+///
+/// **Eight rather than nine since AUTHORITY arrived**, and one row is all this
+/// card could give: what it drops is counted on its own last line and every
+/// entry it drops is in that picker, but the *warning* is on this card and
+/// nowhere else, and the longest one the owner composes — two clauses joined by
+/// ` · ` — needs five wrapped rows at this width. Seven put the second clause,
+/// which is the half an operator acts on, past the budget, and
+/// `the_owners_cap_warning_is_drawn_whole_and_outranks_the_lists` is the pin
+/// that said so.
+const METHOD_H: u16 = 8;
+
+/// Header, four rows, and the rule.
+///
+/// **Six rows the pane did not have, and this is where they came from.** At
+/// 120x36 SETTINGS drew forty-eight rows of card into forty-eight rows of
+/// space: both columns were full, and every card that could was already
+/// counting or wrapping what it had no room for. An eighth card is therefore a
+/// redistribution, and the three slots that paid are the three that lose least:
+///
+/// * the rationale under POLICY, two rows — the slot [`METHOD_H`] already names
+///   as the only elastic one on this pane, whose sentence is rendered whole,
+///   per method, in the picker `m` opens. It draws in no rows at 120x36 and
+///   returns as the terminal grows.
+/// * [`POLICY_H`], three rows — two of redundancy and one label the picker
+///   carries whole.
+/// * [`METHOD_H`], one row — a budget card that counts what it drops. One and
+///   not two: its warning is on that card and nowhere else, and five wrapped
+///   rows is what the longest one the owner composes needs.
+///
+/// DESK and NEWS pay nothing — the band was tried a row shorter and NEWS became
+/// a pager over the catalog an operator ticks — and the right column pays
+/// nothing either.
+///
+/// Four body rows is what that bought, and it is one short of the five this
+/// card would like: the mode and the days left share the first, the books left
+/// today take the second, the three scalar ceilings the third, and the fourth
+/// is contested — see the tail of [`authority_card`] for the order and why the
+/// universe is the statement that yields.
+const AUTHORITY_H: u16 = 6;
+
 /// Header, seven rows, and the rule.
 const SYSTEM_H: u16 = 9;
 /// Header, eight rows, one of slack, and the rule.
@@ -3428,6 +3639,258 @@ fn news_card(
     );
     card(f, area, Card::News, title, at, rows);
     shown
+}
+
+/// What may book without a human, what is left of it, and the key that takes
+/// it away.
+///
+/// **The card an operator revokes from, which is why what is *left* leads it.**
+/// A grant's ceilings are what somebody set; the days it has left and the books
+/// it has spent today are what is about to happen, and a card that drew only
+/// the ceilings would say a desk with nothing left could still book.
+///
+/// Three states, and the pane's absence rule keeps them apart. Nothing has
+/// answered — including an owner too old to serve the route — is not a desk
+/// with no grant, and neither is a desk with a grant. Only the middle one is
+/// good news.
+///
+/// The draft is passed in rather than reached for, so the glass build draws the
+/// same card from the same code with nothing to pass — the read-only half is an
+/// absence of arguments rather than a second renderer.
+fn authority_card(
+    f: &mut Frame,
+    area: Rect,
+    store: &Store,
+    at: Option<Card>,
+    note: Option<&str>,
+    sending: bool,
+) {
+    let t = theme();
+    let Some(authority) = store.authority() else {
+        card(
+            f,
+            area,
+            Card::Authority,
+            "authority",
+            at,
+            vec![absent("nothing has said what may book itself")],
+        );
+        return;
+    };
+    // A wrapped sentence spans the card less its one leading space; a value
+    // starts after the label column and the space `kv` puts after it.
+    let wide = (area.width as usize).saturating_sub(1);
+    let room = (area.width as usize).saturating_sub(LABEL_W + 1);
+    // The card's own body, in rows: its height less the rule the block reserves
+    // and the header the first line is.
+    let mut budget = (area.height as usize).saturating_sub(2);
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let take = |rows: &mut Vec<Line<'static>>, budget: &mut usize, line: Line<'static>| {
+        if *budget > 0 {
+            *budget -= 1;
+            rows.push(line);
+        }
+    };
+
+    // What is standing, first and always. `none` is the owner's own answer and
+    // not this pane's default — the two are told apart above, by whether the
+    // payload arrived at all.
+    let grant = authority.grant.as_ref();
+    take(
+        &mut rows,
+        &mut budget,
+        kv(
+            "standing",
+            match grant {
+                Some(grant) => to_room(
+                    &format!(
+                        "{}{}",
+                        or_missing(grant.mode.as_ref()),
+                        match grant.days_left {
+                            Some(days) => format!(" · {days} d left"),
+                            // The owner did not date it. Left off rather than
+                            // computed here from `expires_at`: the grant
+                            // expires against the *owner's* clock, and a second
+                            // arithmetic in a window whose wall time may be
+                            // minutes out is how a card comes to disagree with
+                            // the desk about whether anything can still book.
+                            None => String::new(),
+                        }
+                    ),
+                    room,
+                ),
+                None => "none".to_string(),
+            },
+            match grant {
+                Some(_) => t.accent,
+                None => t.text_dim,
+            },
+        ),
+    );
+
+    // Then what is suspending it, above every ceiling below: an anomaly changes
+    // what happens on the next beat, and the ceilings do not.
+    //
+    // **Never worded as a revocation.** A suspended grant is still there and
+    // resumes when the condition clears, so the row says what is holding it
+    // rather than that it is gone — and the `standing` row above still carries
+    // the days it has left, which is the half that says the grant outlives the
+    // pause. The two labels are two different facts: with no grant there is
+    // nothing to pause, and a card that said "paused by" over an empty grant
+    // would report a state the desk is not in.
+    if let Some(first) = authority.anomalies.first() {
+        let more = authority.anomalies.len() - 1;
+        take(
+            &mut rows,
+            &mut budget,
+            kv(
+                match grant.is_some() {
+                    true => "paused by",
+                    false => "would pause",
+                },
+                to_room(
+                    &match more {
+                        0 => format::bounded(first, room),
+                        // Counted rather than dropped: an operator deciding
+                        // whether to revoke needs to know there is more than
+                        // one thing wrong, and the rest are on the owner's own
+                        // audit stream.
+                        n => format!("{} · +{n}", format::bounded(first, room)),
+                    },
+                    room,
+                ),
+                t.warning,
+            ),
+        );
+    }
+
+    let Some(grant) = grant else {
+        // The answer to the key that was just pressed comes first here, unlike
+        // the branch below: there is no ceiling on this card to protect, and
+        // the sentence under it is the same one it was before the key.
+        let mut rows = said(rows, note, sending, wide, &mut budget);
+        // No grant, and the remedy — because this client composes none. Every
+        // ceiling a grant carries is a number no client may default, so the
+        // card names the owner's own route rather than offering a key that
+        // would have to invent one.
+        for line in wrap_to(
+            "nothing books itself — every fill is the BOOK box, and \
+             POST /api/desk/authority grants one",
+            wide.max(1),
+        ) {
+            take(
+                &mut rows,
+                &mut budget,
+                Line::from(Span::styled(
+                    format!(" {line}"),
+                    Style::default().fg(t.text_dim),
+                )),
+            );
+        }
+        card(f, area, Card::Authority, "authority", at, rows);
+        return;
+    };
+
+    // What is left of the day, then the three scalar ceilings.
+    take(
+        &mut rows,
+        &mut budget,
+        kv(
+            "books",
+            match (grant.books_left(), grant.max_books_per_day) {
+                (Some(left), Some(cap)) => format!("{left} of {cap} left today"),
+                // Half a budget is not a budget: a count with no ceiling and a
+                // ceiling with no count both say nothing about what is left.
+                _ => MISSING.to_string(),
+            },
+            t.text_primary,
+        ),
+    );
+    take(
+        &mut rows,
+        &mut budget,
+        kv(
+            "per book",
+            to_room(
+                &format!(
+                    "{} · {} · {}",
+                    grant
+                        .max_notional
+                        .map(format::compact_money)
+                        .unwrap_or_else(|| MISSING.to_string()),
+                    opt_pct1(grant.max_turnover),
+                    match grant.max_orders {
+                        Some(orders) => format!("{orders} legs"),
+                        None => MISSING.to_string(),
+                    }
+                ),
+                room,
+            ),
+            t.text_primary,
+        ),
+    );
+
+    // The last row is contested, in the operator's own order and for the NEWS
+    // card's reason. A refusal or a wait is the answer to the key that was just
+    // pressed and outranks a standing fact for exactly as long as it is on
+    // screen — the next keystroke retires it and the universe comes back. With
+    // neither, the row carries the one ceiling that is a list rather than a
+    // number, which is why it is last: every other ceiling here is a scalar and
+    // fits whatever room is left.
+    let mut rows = said(rows, note, sending, wide, &mut budget);
+    take(
+        &mut rows,
+        &mut budget,
+        kv(
+            "universe",
+            match grant.allowed_universe.is_empty() {
+                true => MISSING.to_string(),
+                false => to_room(&grant.allowed_universe.join(" "), room),
+            },
+            t.text_secondary,
+        ),
+    );
+    card(f, area, Card::Authority, "authority", at, rows);
+}
+
+/// The one row this card spends on what it, or the owner, last said.
+///
+/// Bounded as foreign text rather than as a layout device — nothing on this
+/// path is guaranteed to be the owner's — and drawn only while there is a row
+/// left, because every statement above it is a fact about the desk and this one
+/// is about a keystroke.
+fn said(
+    mut rows: Vec<Line<'static>>,
+    note: Option<&str>,
+    sending: bool,
+    wide: usize,
+    budget: &mut usize,
+) -> Vec<Line<'static>> {
+    let t = theme();
+    let (text, tone) = match (note, sending) {
+        (Some(said), _) => (said.to_string(), t.warning),
+        (None, true) => (ASKING.to_string(), t.accent),
+        (None, false) => return rows,
+    };
+    // Bounded twice, and the second bound is the load-bearing one: `SAID_MAX`
+    // is the foreign-text guard every owner sentence on this pane passes, and
+    // the rows actually left are what decides how much is *drawn*. Cut here so
+    // the mark lands where the sentence stops, rather than letting the rows run
+    // out under a wrap nothing marked.
+    let held = format::bounded(&text, SAID_MAX);
+    for line in wrap_to(&to_room(&held, wide.max(1) * *budget), wide.max(1)) {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        rows.push(Line::from(Span::styled(
+            format!(" {line}"),
+            Style::default()
+                .fg(tone)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )));
+    }
+    rows
 }
 
 /// How this desk solves, what it may hold, and what else it could be pointed
@@ -3977,25 +4440,18 @@ fn draw_policy(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     };
     let limits = policy.constraints.clone().unwrap_or_default();
     let rows = vec![
-        // Two rows rather than `id · label`: the pair is wider than a
-        // half-width card, and the id is the one an operator types.
+        // The id and not the label: the pair is wider than a half-width card
+        // (which is why they were two rows), the id is the one an operator
+        // types, and the label is in the picker `m` opens one card up — see
+        // [`POLICY_H`] for what this card gave AUTHORITY and what it kept.
         kv("policy", or_missing(policy.id.as_ref()), t.accent),
-        kv("method", or_missing(policy.label.as_ref()), t.text_primary),
-        kv(
-            "algorithm",
-            or_missing(policy.algorithm_id.as_ref()),
-            t.text_secondary,
-        ),
-        kv(
-            "objective",
-            or_missing(policy.objective.as_ref()),
-            t.text_secondary,
-        ),
-        kv(
-            "solver",
-            or_missing(policy.solver.as_ref()),
-            t.text_secondary,
-        ),
+        // One row for the three, since AUTHORITY took the column's spare rows
+        // (see [`POLICY_H`]). They are one identity in every payload this desk
+        // serves — the algorithm the catalog ran, the objective it built, the
+        // solver it used — and all three values are still here rather than one
+        // standing in for the others, because "they agree" is a fact about
+        // today's mandate and not a rule this pane may assume.
+        kv("pipeline", pipeline(policy), t.text_secondary),
         kv("long only", yes_no(limits.long_only), t.text_primary),
         kv("budget", opt_pct1(limits.budget), t.text_primary),
         // One row for the pair: a floor without its ceiling is half a mandate,
@@ -4003,6 +4459,21 @@ fn draw_policy(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
         kv("per asset", weight_band(&limits), t.text_primary),
     ];
     card(f, area, Card::Policy, "policy", at, rows);
+}
+
+/// The algorithm, the objective and the solver, in the order the owner sends
+/// them and joined by the separator every composed value on this pane uses.
+///
+/// Absent stays absent per member rather than collapsing the row: `hrp · -- ·
+/// hrp` says the owner named two of three, where a row that fell back to one
+/// id would claim a pipeline nobody described.
+fn pipeline(policy: &crate::model::Policy) -> String {
+    [
+        or_missing(policy.algorithm_id.as_ref()),
+        or_missing(policy.objective.as_ref()),
+        or_missing(policy.solver.as_ref()),
+    ]
+    .join(" · ")
 }
 
 fn weight_band(limits: &Constraints) -> String {

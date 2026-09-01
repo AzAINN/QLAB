@@ -566,6 +566,23 @@ pub enum Rights {
     Rejected(String),
 }
 
+/// What the owner did with a revocation. Two outcomes, and the second is not an
+/// error — the same split every write on this seam makes.
+///
+/// `Revoked` carries the owner's own `grant_id` **as an `Option`**: this client
+/// sends no id, so the only way one reaches the receipt is off the answer, and
+/// a 200 that named none still revoked something. Composing an id here from the
+/// card would be a receipt for a grant the owner may not have been holding.
+///
+/// The refusals are considered answers with the remedy in them — no grant to
+/// revoke, or the chat asking for a decision that is the operator's — so they
+/// are rendered rather than folded into a broken socket.
+#[derive(Debug)]
+pub enum Authority {
+    Revoked(Option<String>),
+    Rejected(String),
+}
+
 /// What the owner did with a predictor lane. Two outcomes, and the second is
 /// not an error — the same split [`News`], [`Mandate`] and [`Choice`] make,
 /// for the same reason.
@@ -1365,6 +1382,52 @@ impl WriteClient {
             // as a broken request, because it is a considered answer with the
             // remedy in it — the operator sets rights here, on this card.
             Err(WriteError::Refused { status: 403, said }) => Ok(Rights::Rejected(sentence(&said))),
+            Err(err) => Err(err),
+        }
+    }
+
+    // -- the standing grant a fill may happen under ------------------------
+
+    /// Withdraw the standing grant the owner is holding.
+    ///
+    /// **No id and no ceilings on the wire — a reason and nothing else.** The
+    /// owner holds one live grant and is the only thing that knows which; a
+    /// body that named one could revoke the grant a card read seconds ago
+    /// rather than the one that is live now, and "revoke whatever stands" is
+    /// the safe reading of a stale card. Recorded with its reason like every
+    /// other governance transition.
+    ///
+    /// There is no `grant_authority` beside this, and its absence is the point:
+    /// no ceiling a grant carries may be defaulted by a client, so composing
+    /// one here is a thing this module deliberately cannot do.
+    pub async fn revoke_authority(&self, reason: &str) -> Result<Authority, WriteError> {
+        match self
+            .post("/api/desk/authority/revoke", json!({ "reason": reason }))
+            .await
+        {
+            // The owner's own id, read off the grant it answered with. A 200
+            // that named none still revoked — the change *happened* — and the
+            // refetch behind it is what says the card now holds nothing.
+            Ok(said) => Ok(Authority::Revoked(
+                said.get("grant")
+                    .and_then(|grant| grant.get("grant_id"))
+                    .or_else(|| said.get("grant_id"))
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string),
+            )),
+            // Nothing to revoke is a considered answer about a well-formed
+            // request, not a broken one: the desk is already in the state the
+            // key was asking for, and the sentence says so.
+            Err(WriteError::Refused { status: 400, said }) => {
+                Ok(Authority::Rejected(sentence(&said)))
+            }
+            // The route refuses chat origin outright, exactly as the rights
+            // route does. Unreachable from this client — nothing here sends
+            // that header — so the arm exists for the shape of the seam, and
+            // renders the owner's own words if one ever does.
+            Err(WriteError::Refused { status: 403, said }) => {
+                Ok(Authority::Rejected(sentence(&said)))
+            }
             Err(err) => Err(err),
         }
     }

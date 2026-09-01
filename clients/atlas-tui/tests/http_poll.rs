@@ -37,6 +37,15 @@ enum Seen {
     /// `Seen::Visual("circut")` exactly as the refusal does.
     Visual(String, Drew),
     Proposal(bool),
+    /// Whether a grant arrived, and how many anomalies came with it.
+    ///
+    /// Both halves, for `Rights`' reason: `{"grant": null}` is the desk saying
+    /// it holds none, which is what retires the card, and a variant carrying
+    /// only "an answer arrived" would be satisfied by exactly that. The
+    /// anomaly count rides along because the two are one payload and the card
+    /// draws them together — a fetch that dropped the anomalies would leave a
+    /// suspended grant reading as a live one.
+    Authority(bool, usize),
     Malformed(String),
     Other,
 }
@@ -81,6 +90,9 @@ fn seen(ev: &AppEvent) -> Seen {
         // test that could not tell it from a payload that never arrived could
         // not pin that at all.
         AppEvent::Proposal(proposal) => Seen::Proposal(proposal.is_some()),
+        AppEvent::Authority(authority) => {
+            Seen::Authority(authority.grant.is_some(), authority.anomalies.len())
+        }
         AppEvent::Http(HttpResult::Malformed { url, .. }) => Seen::Malformed(url.clone()),
         _ => Seen::Other,
     }
@@ -202,6 +214,17 @@ fn proposal_fixture() -> (&'static str, String) {
              "targets": {"ACWI": 0.3}, "targets_hash": "0f1e2d3c4b5a6978",
              "referee": {"verdict": "PASS", "source": "referee-agent",
                          "targets_hash": "0f1e2d3c4b5a6978"}}}"#
+            .to_string(),
+    )
+}
+
+fn authority_fixture() -> (&'static str, String) {
+    (
+        "/api/desk/authority",
+        r#"{"grant": {"grant_id": "9f31c0aa4b7d2e61", "mode": "PAPER_AUTO",
+             "allowed_universe": ["SPY"], "max_notional": 25000.0, "max_turnover": 0.35,
+             "max_orders": 8, "max_books_per_day": 3, "books_today": 1, "days_left": 6},
+            "anomalies": ["the book is halted"]}"#
             .to_string(),
     )
 }
@@ -705,6 +728,73 @@ async fn the_desks_open_question_rides_the_snapshot_beat_and_carries_no_lane() {
     assert!(
         !targets.iter().any(|t| t.starts_with("/api/desk/proposal?")),
         "the proposal was asked for with a lane it does not read: {targets:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_standing_grant_rides_the_snapshot_beat_and_carries_no_lane() {
+    // The same ruling as the proposal above, and for a sharper reason: what is
+    // *left* of a grant — the books it has spent today, the days it has left,
+    // and the anomalies suspending it — all move on the owner's own heartbeat,
+    // with nothing an operator does here to prompt a refetch. A card fetched
+    // once on entering SETTINGS would offer to revoke a grant that had already
+    // expired, and would draw a full day's budget over a desk that had spent it.
+    //
+    // And no `offline` lane: a grant is a registry row and the anomalies are
+    // read off the book, the reconcile and the order log — identical whichever
+    // data the desk analyses.
+    let owner = spawn_owner(vec![ready(), snapshot_fixture(), authority_fixture()]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _poller = spawn_poller(owner.base.clone(), true, tx);
+
+    let seen = drain_until(
+        &mut rx,
+        |ev| matches!(ev, Seen::Authority(..)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        seen.contains(&Seen::Authority(true, 1)),
+        "the grant never reached the bus: {seen:?}"
+    );
+    let targets = owner.targets();
+    assert!(
+        targets.iter().any(|t| t == "/api/desk/authority"),
+        "{targets:?}"
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|t| t.starts_with("/api/desk/authority?")),
+        "the grant was asked for with a lane it does not read: {targets:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_desk_that_holds_no_grant_says_so_on_the_bus() {
+    // `{"grant": null}` is an answer, not a missing one — and it is not the
+    // same fact as a route that never answered, which is what the card draws
+    // its "nothing has said" sentence for.
+    let owner = spawn_owner(vec![
+        ready(),
+        snapshot_fixture(),
+        (
+            "/api/desk/authority",
+            r#"{"grant": null, "anomalies": []}"#.to_string(),
+        ),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let _poller = spawn_poller(owner.base.clone(), true, tx);
+
+    let seen = drain_until(
+        &mut rx,
+        |ev| matches!(ev, Seen::Authority(..)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        seen.contains(&Seen::Authority(false, 0)),
+        "an empty grant never reached the bus: {seen:?}"
     );
 }
 

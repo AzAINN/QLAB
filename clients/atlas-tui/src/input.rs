@@ -806,6 +806,17 @@ pub const KEYMAP: &[Binding] = &[
         Source::View(ViewId::Settings),
         "on NEWS: save it and ask the owner to read one window per source first",
     ),
+    // Uppercase for AUDIT's reason — the shell owns lowercase `r` on every
+    // pane — and with no box behind it, unlike every other key here that moves
+    // an authority. Withdrawing one is the safe direction: the hash-bound
+    // challenge the BOOK box asks for exists to stop a fill nobody checked,
+    // not to slow down a stop.
+    w(
+        "Char('R')",
+        "R",
+        Source::View(ViewId::Settings),
+        "on AUTHORITY: revoke the standing grant at once — no box, nothing typed",
+    ),
     // -- SETT, the alpaca login form --------------------------------------
     w(
         "Char(c)",

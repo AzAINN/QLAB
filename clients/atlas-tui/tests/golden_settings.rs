@@ -203,7 +203,7 @@ fn every_card_answers_for_itself_and_no_card_is_marked_as_listening() {
     // failure the MODELS stamp was moved to the top over.
     let frame = settings().frame(120, 36);
     let body = content(&frame);
-    // Eight cards, eight statements, and the ones that carry keys in an armed
+    // Nine cards, nine statements, and the ones that carry keys in an armed
     // window get the specific ones: a glass window points the desk nowhere and
     // changes nothing about what it reads.
     assert!(
@@ -216,8 +216,8 @@ fn every_card_answers_for_itself_and_no_card_is_marked_as_listening() {
     );
     assert_eq!(
         body.matches("read-only").count(),
-        8,
-        "one footer per card, and this pane draws eight:\n{body}"
+        9,
+        "one footer per card, and this pane draws nine:\n{body}"
     );
     // And nothing is tinted. Focus is where a key would land, so a window with
     // no keys marks no card — a highlight that never moves under the arrows
@@ -1059,7 +1059,7 @@ mod cards {
 
     /// Walk the focus down to the card whose title this names.
     fn focus_on(client: &mut Client, title: &str) {
-        for _ in 0..8 {
+        for _ in 0..12 {
             if body_style_of(&client.buffer(120, 36), title).fg == Some(Theme::truecolor().accent) {
                 return;
             }
@@ -1085,13 +1085,16 @@ mod cards {
         );
         assert_eq!(body.matches("a login · t test").count(), 1, "{body}");
 
-        // One card down is NEWS, which has keys of its own; two down is METHOD,
-        // which has two of its own; and three down is POLICY, which has none at
-        // all and says so rather than going quiet: silence and "there is
-        // nothing here" are the two readings this pane spends rows to keep
-        // apart.
+        // One card down is NEWS, which has keys of its own; two down is
+        // AUTHORITY, which has the one key that takes an authority away; three
+        // down is METHOD, which has two of its own; and four down is POLICY,
+        // which has none at all and says so rather than going quiet: silence
+        // and "there is nothing here" are the two readings this pane spends
+        // rows to keep apart.
         press(&mut client, KeyCode::Down);
         assert!(content(&client.frame(120, 36)).contains("s save"));
+        press(&mut client, KeyCode::Down);
+        assert!(content(&client.frame(120, 36)).contains("R revokes"));
         press(&mut client, KeyCode::Down);
         assert!(content(&client.frame(120, 36)).contains("m method · k cap"));
         press(&mut client, KeyCode::Down);
@@ -1936,7 +1939,11 @@ mod news {
             !body.contains("s save"),
             "the walk never left NEWS:\n{body}"
         );
-        assert!(body.contains("no keys on this card"), "{body}");
+        // And it landed somewhere rather than nowhere. Seven arrows is one into
+        // the card, four through its rows, one out onto AUTHORITY and one more
+        // onto METHOD — which states its own two keys, so a frame that reached
+        // it cannot be confused with one still inside NEWS.
+        assert!(body.contains("m method · k cap"), "{body}");
         // And back up through it to the desk card.
         for _ in 0..7 {
             press(&mut client, KeyCode::Up);
@@ -2452,6 +2459,9 @@ mod method {
 
     /// METHOD is the card after NEWS, which is the card after DESK.
     fn on_method(client: &mut Client) {
+        // Three, since AUTHORITY leads the left column: DESK, NEWS, AUTHORITY,
+        // METHOD.
+        press(client, KeyCode::Down);
         press(client, KeyCode::Down);
         press(client, KeyCode::Down);
     }
@@ -3417,6 +3427,365 @@ mod rights {
         with_rights(&mut store, broken);
         let mut client = Client::new(store);
         client.press(KeyCode::Char('9'));
+        insta::assert_snapshot!(client.frame(120, 36));
+    }
+}
+
+// -- the standing authority a fill may happen under --------------------------
+
+/// The owner's own answer: one live grant and nothing suspending it.
+///
+/// Every field the route names, so a card that quietly read one of them as
+/// absent fails here rather than rendering `--` on a desk that books itself.
+fn authority_payload(books_today: i64, anomalies: &[&str]) -> atlas::model::DeskAuthority {
+    let said: Vec<String> = anomalies.iter().map(|s| format!("{s:?}")).collect();
+    serde_json::from_str(&format!(
+        r#"{{"grant": {{"grant_id": "9f31c0aa4b7d2e61", "mode": "PAPER_AUTO",
+              "allowed_universe": ["ACWI", "SPY", "QQQ", "XLK", "XLF"],
+              "max_notional": 25000.0, "max_turnover": 0.35, "max_orders": 8,
+              "max_books_per_day": 3, "valid_from": "2026-08-30T14:00:00+00:00",
+              "expires_at": "2026-09-06T14:00:00+00:00", "granted_by": "operator",
+              "books_today": {books_today}, "days_left": 6}},
+            "anomalies": [{}]}}"#,
+        said.join(", ")
+    ))
+    .unwrap()
+}
+
+/// The owner answered and holds no grant at all.
+fn no_grant_payload(anomalies: &[&str]) -> atlas::model::DeskAuthority {
+    let said: Vec<String> = anomalies.iter().map(|s| format!("{s:?}")).collect();
+    serde_json::from_str(&format!(
+        r#"{{"grant": null, "anomalies": [{}]}}"#,
+        said.join(", ")
+    ))
+    .unwrap()
+}
+
+fn with_authority(store: &mut Store, authority: atlas::model::DeskAuthority) {
+    store.apply(AppEvent::Authority(Box::new(authority)), Instant::now());
+}
+
+fn settings_with_authority(authority: atlas::model::DeskAuthority) -> Client {
+    let mut store = harness::fixture_store();
+    with_authority(&mut store, authority);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    client
+}
+
+#[test]
+fn a_desk_with_no_standing_grant_says_so_and_names_where_one_comes_from() {
+    // Absence stated, never blank: "nothing books itself" and "this card has
+    // gone quiet" are two readings an operator may not have to tell apart.
+    let frame = settings_with_authority(no_grant_payload(&[])).frame(120, 36);
+    let body = content(&frame);
+    assert!(body.contains("AUTHORITY"), "{body}");
+    assert!(line_with(&frame, "standing").contains("none"), "{frame}");
+    assert!(body.contains("nothing books itself"), "{body}");
+    // The remedy, because this client does not compose a grant: the route is
+    // where the ceilings are set, and a card that said only "none" would leave
+    // an operator with no next step at all.
+    assert!(body.contains("/api/desk/authority"), "{body}");
+}
+
+#[test]
+fn a_live_grant_shows_what_is_left_of_it_and_not_only_what_was_set() {
+    // What an operator decides on. `max_books_per_day` is what was granted;
+    // "one left today" is what is about to happen, and a card that drew only
+    // the ceiling would say a desk with nothing left could still book.
+    let frame = settings_with_authority(authority_payload(2, &[])).frame(120, 36);
+    let books = line_with(&frame, "books");
+    assert!(books.contains("1 of 3"), "{books}");
+    assert!(line_with(&frame, "standing").contains("6 d"), "{frame}");
+    // And the ceilings themselves, all four.
+    let per_book = line_with(&frame, "per book");
+    assert!(per_book.contains("$25.00K"), "{per_book}");
+    assert!(per_book.contains("35.0%"), "{per_book}");
+    assert!(per_book.contains("8 legs"), "{per_book}");
+    assert!(
+        line_with(&frame, "universe").contains("ACWI SPY QQQ"),
+        "{frame}"
+    );
+    assert!(
+        line_with(&frame, "standing").contains("PAPER_AUTO"),
+        "{frame}"
+    );
+}
+
+#[test]
+fn a_grant_with_no_books_left_today_says_zero_rather_than_going_quiet() {
+    let frame = settings_with_authority(authority_payload(3, &[])).frame(120, 36);
+    assert!(line_with(&frame, "books").contains("0 of 3"), "{frame}");
+}
+
+#[test]
+fn an_anomaly_is_named_on_the_card_and_never_reads_as_a_revocation() {
+    // A suspended grant is still there and resumes when the condition clears.
+    // A card that said "revoked" would send an operator to re-grant something
+    // they still hold.
+    let frame =
+        settings_with_authority(authority_payload(1, &["the book is halted"])).frame(120, 36);
+    let body = content(&frame);
+    let paused = line_with(&frame, "paused by");
+    assert!(paused.contains("the book is halted"), "{paused}");
+    assert!(!body.contains("revoked"), "{body}");
+    // Still granted, and it still says so — the days it has left are what says
+    // the grant outlives the pause.
+    assert!(line_with(&frame, "standing").contains("6 d"), "{frame}");
+}
+
+#[test]
+fn several_anomalies_are_counted_rather_than_dropped() {
+    let frame = settings_with_authority(authority_payload(
+        1,
+        &[
+            "the book is halted",
+            "the reconcile is dirty",
+            "an order was rejected",
+        ],
+    ))
+    .frame(120, 36);
+    let paused = line_with(&frame, "paused by");
+    assert!(paused.contains("the book is halted"), "{paused}");
+    assert!(paused.contains("+2"), "{paused}");
+}
+
+#[test]
+fn an_anomaly_with_no_grant_says_what_it_would_pause_rather_than_what_it_paused() {
+    // Nothing is suspended when nothing was granted, and a card that said
+    // "paused by" over an empty grant would report a state the desk is not in.
+    let frame = settings_with_authority(no_grant_payload(&["the book is halted"])).frame(120, 36);
+    let row = line_with(&frame, "would pause");
+    assert!(row.contains("the book is halted"), "{row}");
+}
+
+#[test]
+fn a_card_nothing_has_answered_for_says_so_rather_than_drawing_a_grant() {
+    // Invariant 4 in the frame: a route that has not answered is not a desk
+    // with no grant, and the two must not render the same.
+    let frame = settings().frame(120, 36);
+    let body = content(&frame);
+    assert!(
+        body.contains("nothing has said what may book itself"),
+        "{body}"
+    );
+    assert!(!body.contains("PAPER_AUTO"), "{body}");
+}
+
+#[test]
+fn a_ceiling_the_owner_did_not_send_is_absent_rather_than_zero() {
+    // The pane's own rule, on the card where breaking it is worst: a
+    // `max_notional` defaulted to `0.0` reads as a grant that authorises
+    // nothing, and a `books_today` defaulted to `0` reads as a full day's
+    // budget still to spend. Both are statements about what happens on the next
+    // beat that nobody made.
+    let bare: atlas::model::DeskAuthority =
+        serde_json::from_str(r#"{"grant": {"grant_id": "abc"}, "anomalies": []}"#).unwrap();
+    let mut store = harness::fixture_store();
+    with_authority(&mut store, bare);
+    let mut client = Client::new(store);
+    client.press(KeyCode::Char('9'));
+    let frame = client.frame(120, 36);
+    assert!(line_with(&frame, "books").contains("--"), "{frame}");
+    let per_book = line_with(&frame, "per book");
+    assert!(per_book.contains("-- · -- · --"), "{per_book}");
+    // And no invented zero anywhere on the card.
+    assert!(!per_book.contains("0.0%"), "{per_book}");
+    assert!(!line_with(&frame, "books").contains("0 of"), "{frame}");
+}
+
+#[test]
+fn the_universe_names_yield_to_the_pause_and_come_back_with_it() {
+    // The card's one contested row, pinned in both directions. A pause changes
+    // what happens on the next beat and the names do not, so the anomaly wins
+    // the row while it lasts — and the names return the moment it clears,
+    // rather than being lost for the rest of the grant.
+    // On the label, not on the names: the UNIVERSE card in the other column
+    // draws the same symbols, and a frame-wide search would pass on that one.
+    let paused =
+        settings_with_authority(authority_payload(1, &["the book is halted"])).frame(120, 36);
+    assert!(
+        !content(&paused).contains(" universe "),
+        "the names did not yield to the pause:\n{paused}"
+    );
+    let clear = settings_with_authority(authority_payload(1, &[])).frame(120, 36);
+    assert!(
+        line_with(&clear, "universe").contains("ACWI SPY QQQ XLK XLF"),
+        "{clear}"
+    );
+}
+
+#[test]
+fn the_authority_card_is_read_only_in_a_glass_window() {
+    // The posture, not the build. A window the desk did not arm is told what
+    // the card cannot do rather than offered a key it would refuse.
+    let body = content(&settings_with_authority(authority_payload(1, &[])).frame(120, 36));
+    assert!(body.contains("read-only — cannot revoke a grant"), "{body}");
+    assert!(!body.contains("R revokes"), "{body}");
+}
+
+#[cfg(feature = "operator")]
+mod authority {
+    use super::*;
+    use atlas::bus::Wrote;
+    use atlas::cmd::Command;
+    use atlas::store::Posture;
+    use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+
+    fn armed_with(authority: Option<atlas::model::DeskAuthority>) -> Client {
+        let mut store = harness::fixture_store();
+        store.posture = Posture::Operator;
+        if let Some(authority) = authority {
+            with_authority(&mut store, authority);
+        }
+        let mut client = Client::new(store);
+        client.press(KeyCode::Char('9'));
+        client.frame(120, 36);
+        client
+    }
+
+    fn press(client: &mut Client, code: KeyCode) -> Option<Command> {
+        let acted = atlas::ui::shell::on_key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+            &mut client.store,
+            &mut client.views,
+        );
+        client.frame(120, 36);
+        acted
+    }
+
+    /// Walk the focus onto AUTHORITY. Down rather than a jump, because that is
+    /// the only way an operator reaches it.
+    fn on_authority(client: &mut Client) {
+        for _ in 0..30 {
+            press(client, KeyCode::Down);
+        }
+        for _ in 0..30 {
+            press(client, KeyCode::Up);
+        }
+        // DESK, NEWS, then AUTHORITY — the card leads the left column.
+        press(client, KeyCode::Down);
+        press(client, KeyCode::Down);
+    }
+
+    #[test]
+    fn one_keystroke_revokes_and_nothing_is_typed_to_confirm_it() {
+        // **The deliberate opposite of the BOOK box.** Withdrawing authority is
+        // the safe direction: the modal exists to stop a fill nobody checked,
+        // and a box between an operator and "stop" is a hazard, not a guard.
+        let mut client = armed_with(Some(authority_payload(1, &[])));
+        on_authority(&mut client);
+        let acted = press(&mut client, KeyCode::Char('R'));
+        assert!(
+            matches!(acted, Some(Command::RevokeAuthority { .. })),
+            "{acted:?}"
+        );
+        // And no box came up on the way. A modal on this workstation owns the
+        // keyboard and draws its own border, so both are checked: a card that
+        // opened one would swallow the next keystroke and would be visible.
+        assert!(
+            !client.views.typing(atlas::store::ViewId::Settings),
+            "a box took the keyboard between R and stop"
+        );
+        let frame = client.frame(120, 36);
+        assert!(
+            !frame.contains('┌'),
+            "a box opened between R and stop:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn the_key_belongs_to_the_card_and_not_to_the_pane() {
+        // On any other card `R` is nobody's, so it stays free for whoever
+        // claims it next rather than revoking from a card that says nothing
+        // about a grant.
+        let mut client = armed_with(Some(authority_payload(1, &[])));
+        assert_eq!(press(&mut client, KeyCode::Char('R')), None);
+    }
+
+    #[test]
+    fn nothing_is_revoked_when_the_desk_holds_no_grant() {
+        // Said out loud rather than swallowed: a key that silently did nothing
+        // reads as a dead card.
+        let mut client = armed_with(Some(no_grant_payload(&[])));
+        on_authority(&mut client);
+        assert_eq!(press(&mut client, KeyCode::Char('R')), None);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("no grant to revoke"), "{body}");
+    }
+
+    #[test]
+    fn one_request_at_a_time_and_the_second_press_says_so() {
+        let mut client = armed_with(Some(authority_payload(1, &[])));
+        on_authority(&mut client);
+        assert!(press(&mut client, KeyCode::Char('R')).is_some());
+        assert_eq!(press(&mut client, KeyCode::Char('R')), None);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("asking the owner"), "{body}");
+    }
+
+    #[test]
+    fn the_owners_refusal_stands_on_the_card_that_asked() {
+        let mut client = armed_with(Some(authority_payload(1, &[])));
+        on_authority(&mut client);
+        press(&mut client, KeyCode::Char('R'));
+        client.views.wrote(&Wrote::AuthorityRefused {
+            said: "a chat may not revoke a grant".to_string(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("a chat may not revoke a grant"), "{body}");
+        // And the wait is retired, so the key works again.
+        assert!(press(&mut client, KeyCode::Char('R')).is_some());
+    }
+
+    #[test]
+    fn a_request_that_never_landed_does_not_leave_the_card_waiting() {
+        let mut client = armed_with(Some(authority_payload(1, &[])));
+        on_authority(&mut client);
+        press(&mut client, KeyCode::Char('R'));
+        client.views.wrote(&Wrote::AuthorityFailed {
+            said: "connection refused".to_string(),
+        });
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("connection refused"), "{body}");
+        assert!(press(&mut client, KeyCode::Char('R')).is_some());
+    }
+
+    #[test]
+    fn a_click_on_the_word_does_exactly_what_the_key_does() {
+        let mut client = armed_with(Some(authority_payload(1, &[])));
+        on_authority(&mut client);
+        let frame = client.frame(120, 36);
+        let row = frame
+            .lines()
+            .position(|line| line.contains("R revokes"))
+            .expect("the rule names the key") as u16;
+        let column = frame
+            .lines()
+            .nth(row as usize)
+            .and_then(|line| line.find("revokes"))
+            .expect("the word is on the rule") as u16;
+        let acted = atlas::ui::shell::on_mouse(
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut client.store,
+            &mut client.views,
+        );
+        assert!(
+            matches!(acted, Some(Command::RevokeAuthority { .. })),
+            "{acted:?}"
+        );
+    }
+
+    #[test]
+    fn the_armed_card_renders_at_120x36() {
+        let mut client = armed_with(Some(authority_payload(2, &["the book is halted"])));
+        on_authority(&mut client);
         insta::assert_snapshot!(client.frame(120, 36));
     }
 }

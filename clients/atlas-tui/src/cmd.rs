@@ -285,6 +285,29 @@ pub enum Command {
         field: Right,
         value: bool,
     },
+    /// Withdraw the standing grant the owner is holding.
+    ///
+    /// **The one write on this workstation that only ever narrows what can
+    /// happen next.** Every other command here asks the desk to do something;
+    /// this one asks it to stop. That asymmetry is why it is reachable in a
+    /// single keystroke with no typed challenge — the hash-bound BOOK box
+    /// exists to put a human between an unchecked plan and a fill, and a box
+    /// between an operator and "stop" would delay the only action that can
+    /// never make things worse.
+    ///
+    /// It carries a reason and **no grant id**: the owner holds one live grant
+    /// and is the only thing that knows which, and a client that named one
+    /// could revoke a grant it read seconds ago rather than the one that is
+    /// live now. Revoking whatever stands is the safe reading of a stale card.
+    ///
+    /// It creates nothing. There is no `GrantAuthority` beside it, and that is
+    /// deliberate rather than unfinished: every ceiling a grant carries is a
+    /// number no client may default, and the owner's own route is where they
+    /// are set.
+    #[cfg(feature = "operator")]
+    RevokeAuthority {
+        reason: String,
+    },
     /// Fit one predictor lane, against the board's own baseline.
     ///
     /// **A research run, and the only write on this workstation whose cost is

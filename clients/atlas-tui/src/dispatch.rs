@@ -23,7 +23,7 @@ mod armed {
     use crate::bus::{AppEvent, Tx, Wrote};
     use crate::cmd::{Command, ModelChoice};
     use crate::net::write::{
-        Board, Booked, Choice, Execution, Login, Mandate, News, Proposed, Rights, Start,
+        Authority, Board, Booked, Choice, Execution, Login, Mandate, News, Proposed, Rights, Start,
         WriteClient, WriteError,
     };
     use crate::store::Posture;
@@ -218,6 +218,11 @@ mod armed {
                 true => format!("grant atlas {}", field.as_str()),
                 false => format!("withdraw atlas {}", field.as_str()),
             },
+            // The reason is not named here. It is a note this client composes
+            // for the owner's audit row, not something an operator asked for,
+            // and a failed write that read it back would be reporting a
+            // sentence nobody typed.
+            Command::RevokeAuthority { .. } => "revoke the standing grant".to_string(),
             // The lane, and only the lane. The baseline the route runs beside
             // it is the owner's own decision, not something that was asked
             // for — a failed write naming both would report a request this
@@ -609,6 +614,27 @@ mod armed {
                     // other key's broken request.
                     Err(err) => Wrote::RightFailed {
                         field: field.as_str(),
+                        said: err.to_string(),
+                    },
+                }
+            }
+            // The one write here that only ever *narrows* what can happen
+            // next. Governance is not bypassed by it and cannot be: it takes
+            // an authority away, so there is no gate it could be argued past.
+            // The reason travels whole and the owner's own answer comes back
+            // either way — including the 400 that says there was nothing to
+            // revoke, which is the desk already being in the state the key was
+            // asking for.
+            Command::RevokeAuthority { reason } => {
+                match client.revoke_authority(&reason).await {
+                    Ok(Authority::Revoked(grant_id)) => Wrote::AuthorityRevoked { grant_id },
+                    // A considered no, not a broken request: the owner's
+                    // sentence names why, and folding it into `Err` would bury
+                    // the remedy under a transport error nobody can act on.
+                    Ok(Authority::Rejected(said)) => Wrote::AuthorityRefused { said },
+                    // Its own failure variant. See `Wrote::AuthorityFailed`:
+                    // the card retires its wait on this outcome and no other.
+                    Err(err) => Wrote::AuthorityFailed {
                         said: err.to_string(),
                     },
                 }

@@ -520,6 +520,44 @@ mod armed {
         assert_eq!(short.store.cmd.note(), Some("choose a scope"));
     }
 
+    /// The other direction of the same rule, for the one key on this
+    /// workstation that takes an authority *away*.
+    #[test]
+    fn the_overlay_names_the_revoke_key_to_an_armed_window_and_to_no_other() {
+        // Read off the rendered overlay rather than off `KEYMAP`, because the
+        // claim is about what an operator can discover: `input`'s own
+        // equivalence proves the row exists and is filed under SETT, and this
+        // proves the posture filter puts it on the screen an armed window sees
+        // and keeps it off the one a monitoring window sees. A greyed key would
+        // say "this client could do that if you asked", which is the claim the
+        // posture exists to make impossible.
+        let armed = atlas::ui::widgets::help::lines(Posture::Operator, 120);
+        let named = |lines: &[ratatui::text::Line<'static>], needle: &str| {
+            lines
+                .iter()
+                .any(|line| line.spans.iter().any(|s| s.content.contains(needle)))
+        };
+        assert!(
+            named(&armed, "revoke the standing grant"),
+            "the armed overlay does not name the key"
+        );
+        assert!(
+            named(&armed, "no box, nothing typed"),
+            "the overlay does not say what is absent"
+        );
+        let glass = atlas::ui::widgets::help::lines(Posture::Glass, 120);
+        assert!(
+            !named(&glass, "revoke the standing grant"),
+            "a monitoring window was offered the revoke key"
+        );
+        // And the glass overlay really rendered, or the negative above passes
+        // on an empty list.
+        assert!(
+            named(&glass, "refresh now"),
+            "the glass overlay drew nothing"
+        );
+    }
+
     #[test]
     fn the_armed_overlay_lists_the_keys_that_can_move_money() {
         // Below the fold on the first page, which is the point of the scroll:

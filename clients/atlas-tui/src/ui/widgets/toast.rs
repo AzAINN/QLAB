@@ -691,6 +691,31 @@ fn from_write(outcome: &crate::bus::Wrote) -> Toast {
             "predictor run failed",
             format!("run {lane} — {said}"),
         ),
+        // `Info`, not `Alarm`, and this is the one write where that is the
+        // careful choice rather than the cheerful one: every other receipt on
+        // this queue reports something the desk may now do, and this one
+        // reports an authority taken away. An alarm here would teach an
+        // operator that stopping the desk is the dangerous half.
+        Wrote::AuthorityRevoked { grant_id } => Toast::new(
+            Level::Info,
+            "standing authority revoked",
+            match grant_id {
+                Some(id) => format!("grant {id} is withdrawn — nothing books itself"),
+                // The owner did not name one and this client never sent one,
+                // so the receipt says what happened without inventing an id.
+                None => "the standing grant is withdrawn — nothing books itself".to_string(),
+            },
+        ),
+        Wrote::AuthorityRefused { said } => {
+            Toast::new(Level::Warn, "authority unchanged", said.clone())
+        }
+        Wrote::AuthorityFailed { said } => Toast::new(
+            Level::Alarm,
+            "revoke failed",
+            // The half an operator acts on: the grant may still be standing,
+            // and the card is where they look next.
+            format!("{said} — the grant may still stand"),
+        ),
         Wrote::Failed { what, said } => {
             Toast::new(Level::Alarm, "write failed", format!("{what} — {said}"))
         }

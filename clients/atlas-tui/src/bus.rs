@@ -1,7 +1,7 @@
 //! Application event bus: every input, tick, and network result flows through one channel.
 use crate::model::{
-    AtlasRights, LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, Proposal,
-    QualitativeMatrix, RegimePanel, Snapshot, Template, VisualAnswer, VisualEntry,
+    AtlasRights, DeskAuthority, LlmCatalog, MethodSettings, NewsSettings, PredictorDetail,
+    Proposal, QualitativeMatrix, RegimePanel, Snapshot, Template, VisualAnswer, VisualEntry,
 };
 
 pub enum AppEvent {
@@ -67,6 +67,18 @@ pub enum AppEvent {
     /// owner's reader with the remedy in the sentence, and a client that showed
     /// three granted rights over it would be inventing a desk state nobody set.
     Rights(Box<AtlasRights>),
+    /// The standing grant a fill may happen under, from
+    /// `GET /api/desk/authority`.
+    ///
+    /// It rides the **snapshot's own beat** rather than a pane entry, unlike
+    /// the rights beside it, and for `Proposal`'s reason: what is *left* of a
+    /// grant — the books it has spent today, the days it has left, and the
+    /// anomalies suspending it — all move on the owner's own heartbeat with
+    /// nothing here to prompt a refetch. A card fetched once on entering
+    /// SETTINGS would go on offering to revoke a grant that had already
+    /// expired, and would show a full day's budget over a desk that had spent
+    /// it.
+    Authority(Box<DeskAuthority>),
     /// The qualitative matrix, from `/api/research/qualitative`.
     ///
     /// The one of these four that rides a beat, and deliberately: the window
@@ -399,6 +411,27 @@ pub enum Wrote {
     /// `field` is what makes the match structural rather than a comparison of
     /// `dispatch::names`' prose.
     RightFailed { field: &'static str, said: String },
+    /// The owner revoked the standing grant.
+    ///
+    /// **The owner's own account of what it revoked**, never the request's
+    /// echo: this client sends a reason and no grant id — there is one live
+    /// grant and the owner is what knows which — so the id comes back off the
+    /// answer or not at all.
+    ///
+    /// Revocation is the one write on this workstation that *narrows* what can
+    /// happen next, which is why it is a plain `Info` and why no confirmation
+    /// stands between the key and it.
+    AuthorityRevoked { grant_id: Option<String> },
+    /// The owner would not revoke it — no grant to revoke, or the chat asking.
+    /// Its own sentence, which carries the remedy.
+    AuthorityRefused { said: String },
+    /// The request to revoke never got an answer.
+    ///
+    /// **Its own variant rather than a `Failed` the card matches by name**, for
+    /// `RightFailed`'s reason: the AUTHORITY card retires its wait on this
+    /// outcome and no other, and a generic failure would re-arm `R` over a
+    /// revocation still in flight.
+    AuthorityFailed { said: String },
     /// The owner fitted a predictor board.
     ///
     /// **The owner's own answer, never the request's echo.** `models` is what

@@ -12,9 +12,9 @@
 
 use crate::bus::{AppEvent, Channel, HttpResult, Tx};
 use crate::model::{
-    AtlasRights, LlmCatalog, MethodSettings, NewsSettings, PredictorDetail, ProposalPayload,
-    QualitativeMatrix, RegimePanel, Snapshot, Templates, Visual, VisualAnswer, VisualError,
-    VisualResult, VisualsList,
+    AtlasRights, DeskAuthority, LlmCatalog, MethodSettings, NewsSettings, PredictorDetail,
+    ProposalPayload, QualitativeMatrix, RegimePanel, Snapshot, Templates, Visual, VisualAnswer,
+    VisualError, VisualResult, VisualsList,
 };
 use crate::net::{because, emit, mark, Gone};
 use serde::de::DeserializeOwned;
@@ -304,6 +304,10 @@ async fn poll_loop(
     // No lane: what the owner can draw is a walk over its own package, and the
     // drawing itself is a pure function of the params — neither reads the feed.
     let visuals_url = format!("{base}/api/visuals");
+    // No lane: a grant is a registry row and the anomalies are read off the
+    // book, the reconcile and the order log — identical whichever data the
+    // desk analyses.
+    let authority_url = format!("{base}/api/desk/authority");
 
     // Two facts, not one. `up` is what the chips read — a payload this client
     // could actually use — and `reachable` is what the socket said.
@@ -403,6 +407,38 @@ async fn poll_loop(
                     // no proposal.
                     Fetched::Failed(error) => {
                         tracing::warn!(%error, "desk proposal poll failed")
+                    }
+                }
+            }
+
+            // The standing grant, on the snapshot's own beat and for the
+            // proposal's reason. What is *left* of a grant — the books it has
+            // spent today, the days it has left, and the anomalies suspending
+            // it — all move on the **owner's** heartbeat, with nothing here to
+            // prompt a refetch: a card fetched once on entering SETTINGS would
+            // offer to revoke a grant that had already expired, and would draw
+            // a full day's budget over a desk that had spent it. One registry
+            // read per poll beside a `/api/tui` that costs far more, and every
+            // write outcome brings it forward with the snapshot.
+            if up == Some(true) {
+                match fetch::<DeskAuthority>(&client, &authority_url).await {
+                    Fetched::Decoded(payload) => emit(&tx, AppEvent::Authority(Box::new(payload)))?,
+                    Fetched::Malformed(error) => emit(
+                        &tx,
+                        AppEvent::Http(HttpResult::Malformed {
+                            url: authority_url.clone(),
+                            error,
+                        }),
+                    )?,
+                    // What may book without a human is not whether the desk is
+                    // there: a failure here must not tell the operator the
+                    // owner went away when the snapshot that decides that is
+                    // still arriving. Same reasoning as the proposal above —
+                    // and the card says for itself that nothing has answered,
+                    // which is the state an owner too old to serve this route
+                    // leaves it in.
+                    Fetched::Failed(error) => {
+                        tracing::warn!(%error, "desk authority poll failed")
                     }
                 }
             }

@@ -1740,3 +1740,76 @@ impl RightsFlags {
         }
     }
 }
+
+// -- /api/desk/authority ---------------------------------------------------
+
+/// The standing grant a fill may happen under, and what is currently
+/// suspending it.
+///
+/// Its own payload rather than a section of the snapshot, for [`AtlasRights`]'
+/// reason: the owner reads it out of the `authority_grants` table and
+/// `/api/tui` carries none of it. Unlike the rights, it rides the snapshot's
+/// own beat — `books_today`, `days_left` and `anomalies` all move on the
+/// *owner's* heartbeat with nothing here to prompt a refetch, which is exactly
+/// the argument `ProposalPayload` is fetched per poll for.
+///
+/// **Both halves arrive together and neither implies the other.** A desk with
+/// no grant can still have anomalies (they are computed from live desk state,
+/// not from the grant), and a grant with none is simply live. A client that
+/// read `anomalies` as "the grant is suspended" would report a pause on a desk
+/// that has nothing to pause.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeskAuthority {
+    /// `null` when the owner holds no live grant — which is the desk's normal
+    /// state and is not an absence of an answer. The card tells the two apart
+    /// by whether this whole payload has arrived.
+    pub grant: Option<AuthorityGrant>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub anomalies: Vec<String>,
+}
+
+/// One standing grant, exactly as `qlab/governance/authority.py` composes it.
+///
+/// Every scalar is an `Option` by this module's own rule, and here it is
+/// load-bearing rather than defensive: a `max_notional` defaulted to `0.0`
+/// reads as a grant that authorises nothing, and a `books_today` defaulted to
+/// `0` reads as a full day's budget still to spend. Both are statements about
+/// what will happen next that nobody made.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuthorityGrant {
+    pub grant_id: Option<String>,
+    /// `PAPER_AUTO` is the only mode the owner can express; it is drawn rather
+    /// than assumed, because a client that hard-coded the word would keep
+    /// printing it if a second one ever arrived.
+    pub mode: Option<String>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub allowed_universe: Vec<String>,
+    pub max_notional: Option<f64>,
+    pub max_turnover: Option<f64>,
+    pub max_orders: Option<i64>,
+    pub max_books_per_day: Option<i64>,
+    pub valid_from: Option<String>,
+    pub expires_at: Option<String>,
+    pub granted_by: Option<String>,
+    /// How many books this grant has already spent today, counted by the owner
+    /// over the trading date — never by a clock read here.
+    pub books_today: Option<i64>,
+    /// Days until `expires_at`, computed by the owner. Not derived from the
+    /// stamp here: the grant expires against the owner's clock, and a second
+    /// arithmetic in a client whose wall time may be minutes out is how a card
+    /// comes to disagree with the desk about whether anything can still book.
+    pub days_left: Option<i64>,
+}
+
+impl AuthorityGrant {
+    /// Books left today, or `None` when either half is missing.
+    ///
+    /// The subtraction is here rather than in the view because it is the one
+    /// number on the card that is not the owner's own: what is *left* is what
+    /// an operator decides on, and a floor at zero keeps an over-spent day
+    /// from rendering as a negative budget.
+    pub fn books_left(&self) -> Option<i64> {
+        let (cap, spent) = (self.max_books_per_day?, self.books_today?);
+        Some((cap - spent).max(0))
+    }
+}

@@ -827,6 +827,56 @@ mod glass {
     }
 
     #[test]
+    fn a_monitoring_build_has_no_revoke_key_and_no_route_to_revoke_with() {
+        // The AUTHORITY card is *read* in this build — what may book without a
+        // human is exactly what a monitoring window is for — and none of it can
+        // be touched. Absence at every layer, checked where each one lives.
+        //
+        // The keymap first: `R` on SETTINGS is a `writes` row, so the overlay a
+        // monitoring window renders does not offer it, and this leg has no
+        // `Posture::Operator` to ask the other question with.
+        use atlas::input::{bindings, Binding, Source, KEYMAP};
+        use atlas::store::{Posture, ViewId};
+        let offered: Vec<&Binding> = bindings(Posture::Glass)
+            .filter(|b| b.code == "Char('R')" && b.source == Source::View(ViewId::Settings))
+            .collect();
+        assert!(
+            offered.is_empty(),
+            "a monitoring window was offered the revoke key: {offered:?}"
+        );
+        // The table still *carries* the row, in both builds, so this leg checks
+        // the same source text the armed one does rather than a smaller table
+        // that would pass for the wrong reason.
+        assert!(
+            KEYMAP.iter().any(|b| b.code == "Char('R')"
+                && b.source == Source::View(ViewId::Settings)
+                && b.action.contains("revoke")),
+            "SETTINGS lost its revoke row from the table"
+        );
+        // Then the command, which is gated verbatim — a `cfg` naming the wrong
+        // feature compiles cleanly in both legs and nothing else here would see
+        // it.
+        assert!(
+            super::source("cmd.rs")
+                .contains("#[cfg(feature = \"operator\")]\n    RevokeAuthority {"),
+            "cmd.rs must gate the revocation on the operator feature, verbatim"
+        );
+        // And the module that would act on it. `atlas::net::write` cannot be
+        // named in this leg at all, so what is left to check is that the file
+        // the gate removes is really the one holding the revoke call — and that
+        // there is no grant call beside it, in either build.
+        let writer = super::source("net/write.rs");
+        assert!(
+            writer.contains("pub async fn revoke_authority(&self, reason: &str)"),
+            "the gated module is the one that revokes"
+        );
+        assert!(
+            !writer.contains("fn grant_authority"),
+            "this client composes no grant: every ceiling is a number it may not default"
+        );
+    }
+
+    #[test]
     fn the_posture_a_glass_build_can_hold_is_glass_and_only_glass() {
         // One inhabitant, not one branch. `Posture::Operator` does not exist in
         // this build, so there is no value a bug could assign that would put the
@@ -842,7 +892,7 @@ mod glass {
 #[cfg(feature = "operator")]
 mod operator {
     use atlas::model::Snapshot;
-    use atlas::net::write::{Board, Booked, Choice, Execution, Rights, WriteClient};
+    use atlas::net::write::{Authority, Board, Booked, Choice, Execution, Rights, WriteClient};
     use atlas::store::Posture;
     use atlas::ui::widgets::confirm::Modal;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -3561,6 +3611,75 @@ mod operator {
         let client = WriteClient::new(&quiet.base).unwrap();
         match client.set_right("build", false).await {
             Ok(Rights::Applied(flags)) => assert_eq!(flags.build, None),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // -- the standing grant a fill may happen under -------------------------
+
+    #[tokio::test]
+    async fn revoking_travels_as_a_reason_on_the_owners_own_route() {
+        // A reason and nothing else. No id, because the owner holds one live
+        // grant and is the only thing that knows which — a body naming one
+        // could revoke the grant a card read seconds ago rather than the one
+        // that is live now — and no ceilings, because this client composes no
+        // grant at all.
+        let owner = spawn_owner(
+            200,
+            r#"{"grant": {"grant_id": "9f31c0aa4b7d2e61", "revoked_at":
+                "2026-09-01T12:00:00+00:00"}}"#,
+        );
+        let client = WriteClient::new(&owner.base).unwrap();
+        let revoked = client
+            .revoke_authority("revoked by the operator on the desk")
+            .await
+            .unwrap();
+        let seen = owner.only();
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path, "/api/desk/authority/revoke");
+        assert_eq!(
+            seen.body,
+            r#"{"reason":"revoked by the operator on the desk"}"#
+        );
+        // The owner's own id, off its own answer.
+        match revoked {
+            Authority::Revoked(id) => assert_eq!(id.as_deref(), Some("9f31c0aa4b7d2e61")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revocation_the_owner_will_not_make_is_a_refusal_and_not_a_failure() {
+        // Both of the owner's considered noes. Folded into `Err` they would
+        // arrive as "the owner refused with 400: {…}" — the remedy buried in a
+        // transport error nobody can act on — and the 400 here is the desk
+        // already being in the state the key was asking for.
+        for (status, said) in [
+            (400, "there is no standing grant to revoke"),
+            (
+                403,
+                "a chat may not revoke a standing grant — the operator does, on the desk",
+            ),
+        ] {
+            let owner = spawn_owner(status, serde_json::json!({"error": said}).to_string());
+            let client = WriteClient::new(&owner.base).unwrap();
+            match client.revoke_authority("why").await {
+                Ok(Authority::Rejected(back)) => assert_eq!(back, said),
+                other => panic!("{status}: {other:?}"),
+            }
+        }
+        // A 500 is the owner breaking mid-write, which is not a decision about
+        // the request: it reaches the card as a failed write and the grant is
+        // never reported as withdrawn.
+        let broken = spawn_owner(500, r#"{"error": "the registry is locked"}"#);
+        let client = WriteClient::new(&broken.base).unwrap();
+        assert!(client.revoke_authority("why").await.is_err());
+        // And a 200 that named no grant still revoked: the change *happened*,
+        // and the poll behind the write is what says the card now holds none.
+        let quiet = spawn_owner(200, "{}");
+        let client = WriteClient::new(&quiet.base).unwrap();
+        match client.revoke_authority("why").await {
+            Ok(Authority::Revoked(id)) => assert_eq!(id, None),
             other => panic!("{other:?}"),
         }
     }

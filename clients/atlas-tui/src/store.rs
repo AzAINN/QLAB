@@ -11,9 +11,10 @@ use crate::cmd::CmdLine;
 use crate::format::text;
 use crate::glyph::Mood;
 use crate::model::{
-    Algorithm, Approval, Asset, AtlasRights, Coordinator, DeskMode, LeaderboardRow, LlmCatalog,
-    LlmConfig, MethodSettings, NewsSettings, Plan, Policy, PredictorDetail, QualitativeMatrix,
-    RegimePanel, Run, Snapshot, System, Template, VisualAnswer, VisualEntry, Workflow,
+    Algorithm, Approval, Asset, AtlasRights, Coordinator, DeskAuthority, DeskMode, LeaderboardRow,
+    LlmCatalog, LlmConfig, MethodSettings, NewsSettings, Plan, Policy, PredictorDetail,
+    QualitativeMatrix, RegimePanel, Run, Snapshot, System, Template, VisualAnswer, VisualEntry,
+    Workflow,
 };
 use crate::net::http;
 use crate::ui::door::{Door, Step};
@@ -644,6 +645,15 @@ pub struct Store {
     /// `on` before anything answered would be this client stating a desk state
     /// nobody has confirmed.
     rights: Option<AtlasRights>,
+    /// The standing grant a fill may happen under, refreshed on the snapshot's
+    /// own beat.
+    ///
+    /// `None` is "nothing has answered" — including an owner too old to serve
+    /// the route — and `Some` with a `null` grant is the desk saying it holds
+    /// none. The card keeps the two apart, because only the second is a fact
+    /// about the desk, and drawing "no grant" over a route that never answered
+    /// would be this client reporting a state nobody confirmed (invariant 4).
+    authority: Option<DeskAuthority>,
     /// What the owner can draw, fetched when VISUALS opens.
     ///
     /// `None` is "not asked yet or not answered yet"; `Some([])` is the owner
@@ -893,6 +903,7 @@ impl Store {
             news: None,
             method: None,
             rights: None,
+            authority: None,
             qualitative: None,
             proposal: None,
             #[cfg(feature = "operator")]
@@ -1367,6 +1378,15 @@ impl Store {
                 self.dirty = true;
             }
             // Replaced wholesale for the same reason again: the route serves
+            // the grant and the anomalies together, and merging two answers
+            // would draw a day's budget from one reading beside the anomalies
+            // from another — which is precisely the pair that decides whether
+            // anything books on the next beat.
+            AppEvent::Authority(authority) => {
+                self.authority = Some(*authority);
+                self.dirty = true;
+            }
+            // Replaced wholesale for the same reason again: the route serves
             // one window's whole matrix, and merging two of them would draw a
             // name counted in one window beside a name counted in another,
             // under a single `window_hash` that describes neither.
@@ -1589,7 +1609,15 @@ impl Store {
                     // and the refetch behind the write is what the card draws —
                     // a client copy would be a second account of a file only
                     // the owner has read.
-                    Wrote::RightSet { .. }
+                    // And so is the grant. The owner's own
+                    // `/api/desk/authority` answer is what the card draws, and
+                    // the nudge behind every write outcome brings a fresh one
+                    // forward — a client copy would be a second account of a
+                    // registry row only the owner has read.
+                    Wrote::AuthorityRevoked { .. }
+                    | Wrote::AuthorityRefused { .. }
+                    | Wrote::AuthorityFailed { .. }
+                    | Wrote::RightSet { .. }
                     | Wrote::RightRefused { .. }
                     | Wrote::RightFailed { .. }
                     | Wrote::MethodSet { .. }
@@ -1775,6 +1803,13 @@ impl Store {
     /// of the two states it is in rather than drawing the default as a fact.
     pub fn rights(&self) -> Option<&AtlasRights> {
         self.rights.as_ref()
+    }
+
+    /// The standing grant and what is suspending it, or `None` while nothing
+    /// has answered. Never defaulted: an unanswered route and a desk with no
+    /// grant are two different facts with two different remedies.
+    pub fn authority(&self) -> Option<&DeskAuthority> {
+        self.authority.as_ref()
     }
 
     /// The qualitative matrix, if the beat has brought one back.

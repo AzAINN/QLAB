@@ -1,6 +1,6 @@
 ---
 source: tests/golden_settings.rs
-assertion_line: 3413
+assertion_line: 3422
 expression: "client.frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
@@ -27,10 +27,10 @@ expression: "client.frame(120, 36)"
 "        │                                        probed       12s ago                 │                                 "
 "        │                                        reasoner     ollama · qwen2.5:7b     │                                 "
 "        │                                        judgment     on                      │▌ ATLAS READ                     "
-"        │──────────────────────────────────────  workforce    claude · tiers decide   │ state      STRESS               "
-"        │▌ POLICY                               ▸web          on · chat, /cli tools   │ agreement  ALIGNED              "
-"        │ policy       hrp                       workflows    off · refused for chat  │ conviction 84.0%                "
-"        │ pipeline     hrp · hrp · hrp           build        on · the /build key     │ news       alpaca               "
+"        │                                        workforce    claude · tiers decide   │ state      STRESS               "
+"        │────────────────────────────────────── ▸web          on · chat, /cli tools   │ agreement  ALIGNED              "
+"        │▌ POLICY                                workflows    off · refused for chat  │ conviction 84.0%                "
+"        │ policy       hrp · hrp · hrp · hrp     build        on · the /build key     │ news       alpaca               "
 "        │ long only    yes                       nothing here binds a non-chat caller │─────────────────────────────────"
 "        │ budget       100.0%                    chat: ollama · /cli: claude's verb   │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
 "        │ per asset    0.0% – 40.0%              m model · ↑↓ space grants a right ───│ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "

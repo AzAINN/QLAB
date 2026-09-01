@@ -1,6 +1,6 @@
 ---
 source: tests/golden_settings.rs
-assertion_line: 2400
+assertion_line: 2409
 expression: "client.frame(120, 36)"
 ---
 " ACWI 152.47 ▼1.34%   SPY 729.46 ▼1.54%   QQQ 661.73 ▼2.04%   XLK 285.24 ▼2.08%   XLF 52.40 ▲1.24%   ACWI 152.47 ▼1.34% "
@@ -26,11 +26,11 @@ expression: "client.frame(120, 36)"
 "        │   risk_parity         B3              ▌ MODELS                              │                                 "
 "        │   min_variance        A1               probed       12s ago                 │                                 "
 "        │ not choosable — research stage         reasoner     ollama · qwen2.5:7b     │                                 "
-"        │   ▾ 3 more                             judgment     on                      │▌ ATLAS READ                     "
-"        │ read-only — cannot change the method   workforce    claude · tiers decide   │ state      STRESS               "
-"        │▌ POLICY                                web          -- · chat, /cli tools   │ agreement  ALIGNED              "
-"        │ policy       hrp                       workflows    -- · refused for chat   │ conviction 84.0%                "
-"        │ pipeline     hrp · hrp · hrp           build        -- · the /build key     │ news       alpaca               "
+"        │   regime_min_variance                  judgment     on                      │▌ ATLAS READ                     "
+"        │   ▾ 2 more                             workforce    claude · tiers decide   │ state      STRESS               "
+"        │ read-only — cannot change the method   web          -- · chat, /cli tools   │ agreement  ALIGNED              "
+"        │▌ POLICY                                workflows    -- · refused for chat   │ conviction 84.0%                "
+"        │ policy       hrp · hrp · hrp · hrp     build        -- · the /build key     │ news       alpaca               "
 "        │ long only    yes                       nothing here binds a non-chat caller │─────────────────────────────────"
 "        │ budget       100.0%                                                         │ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "
 "        │ per asset    0.0% – 40.0%              read-only — cannot grant a right ────│ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                    "

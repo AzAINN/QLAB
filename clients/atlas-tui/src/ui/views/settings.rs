@@ -701,19 +701,18 @@ impl View for SettingsView {
         // the bottom rather than stacked under the rationale, which has no
         // height of its own to end at.
         //
-        // METHOD leads the column, because the walk order is the draw order and
-        // it is walked after NEWS — and because it is the actionable half of
+        // METHOD is walked before POLICY because it is the actionable half of
         // the card under it: METHOD says which method is in force and what else
         // could be, POLICY says what every solve is then held to.
         //
-        // **The rationale is what yields for it**, and it is the only slot on
-        // this pane that could: the left column has twenty-two rows at the
-        // baseline height, POLICY and THEME are fixed at nine and three, and
-        // the `Min(0)` under them was nine rows carrying a three-line sentence.
-        // At 120x36 the rationale is now drawn in no rows at all and returns as
-        // the terminal grows — which is the trade this pane can make, because
-        // the owner writes a rationale *per method* and the picker `m` opens
-        // renders every one of them.
+        // **The rationale is what yields**, and it is the only slot on this
+        // pane that could: the left column has twenty-four rows at the baseline
+        // height, all of which AUTHORITY, METHOD, POLICY and THEME now name
+        // (see [`AUTHORITY_H`] for the arithmetic), and the `Min(0)` between
+        // them is what is left over. At 120x36 that is no rows at all and the
+        // rationale returns as the terminal grows — which is the trade this
+        // pane can make, because the owner writes a rationale *per method* and
+        // the picker `m` opens renders every one of them.
         //
         // **AUTHORITY leads the column**, ahead of both. What it says is
         // whether a fill needs a human at all, which outranks how the desk
@@ -3286,21 +3285,20 @@ impl SettingsView {
 /// out of the same rows — at eight it showed two sources of five and counted
 /// the rest, which turns the card an operator ticks into a pager.
 const DESK_H: u16 = 10;
-/// Header, five rows, and the rule.
+/// Header, four rows, and the rule.
 ///
-/// **Seven rather than ten since AUTHORITY arrived**, and this is where three
-/// of that card's rows came from. Two are redundancy rather than fact:
-/// `algorithm`, `objective` and `solver` are one pipeline identity — in every
-/// payload this desk serves they are the same id the `policy` row already
-/// names — and they are now one row carrying all three values.
+/// **Six rather than ten since AUTHORITY arrived**, and this is where four of
+/// that card's six rows came from. Three are redundancy rather than fact: the
+/// `policy` id, `algorithm`, `objective` and `solver` are one identity — in
+/// every payload this desk serves they are the same word four times — and they
+/// are now one row carrying all four values, in the order the owner sends them.
 ///
-/// The third is the `method` label ("Hierarchical risk parity"), which is one
+/// The fourth is the `method` label ("Hierarchical risk parity"), which is one
 /// keystroke away rather than gone: the picker `m` opens on the card above
 /// lists every method by id, arm and label, with the owner's rationale beside
-/// it. What stays here is what an operator cannot get that way — the id they
-/// type, the pipeline that ran, and the four constraints every solve is held
-/// to.
-const POLICY_H: u16 = 7;
+/// it. What stays here is what an operator cannot get that way — the pipeline
+/// that ran, and the four constraints every solve is held to.
+const POLICY_H: u16 = 6;
 
 /// Header, seven rows, and the rule.
 ///
@@ -3316,15 +3314,14 @@ const POLICY_H: u16 = 7;
 /// they did not draw, because every one of them is in the picker `m` opens,
 /// whole, with the owner's rationale beside it.
 ///
-/// **Eight rather than nine since AUTHORITY arrived**, and one row is all this
-/// card could give: what it drops is counted on its own last line and every
-/// entry it drops is in that picker, but the *warning* is on this card and
-/// nowhere else, and the longest one the owner composes — two clauses joined by
-/// ` · ` — needs five wrapped rows at this width. Seven put the second clause,
-/// which is the half an operator acts on, past the budget, and
-/// `the_owners_cap_warning_is_drawn_whole_and_outranks_the_lists` is the pin
-/// that said so.
-const METHOD_H: u16 = 8;
+/// **Unchanged when AUTHORITY arrived, after being tried at eight.** The card
+/// looks like the one that can yield — it counts what it drops, and every entry
+/// it drops is in the picker — but the *warning* is on this card and nowhere
+/// else on the workstation, not in the `m` picker and not in the `k` box, and
+/// the longest one the owner composes (two clauses joined by ` · `) needs five
+/// wrapped rows at this width. At eight it read `…at a 40% per-asset cap; every
+/// plan…` with the verdict cut off, which is the half an operator acts on.
+const METHOD_H: u16 = 9;
 
 /// Header, four rows, and the rule.
 ///
@@ -3338,15 +3335,14 @@ const METHOD_H: u16 = 8;
 ///   as the only elastic one on this pane, whose sentence is rendered whole,
 ///   per method, in the picker `m` opens. It draws in no rows at 120x36 and
 ///   returns as the terminal grows.
-/// * [`POLICY_H`], three rows — two of redundancy and one label the picker
-///   carries whole.
-/// * [`METHOD_H`], one row — a budget card that counts what it drops. One and
-///   not two: its warning is on that card and nowhere else, and five wrapped
-///   rows is what the longest one the owner composes needs.
+/// * [`POLICY_H`], four rows — three of redundancy (one identity spelled four
+///   times) and one label the picker carries whole.
 ///
-/// DESK and NEWS pay nothing — the band was tried a row shorter and NEWS became
-/// a pager over the catalog an operator ticks — and the right column pays
-/// nothing either.
+/// Nothing else pays. [`METHOD_H`] was tried a row shorter and put back: it
+/// counts what it drops, but its warning does not, and that warning is on that
+/// card and nowhere else. [`DESK_H`] was tried a row shorter and put back too —
+/// NEWS draws its catalog from the same band and became a pager over the rows
+/// an operator ticks. The right column pays nothing either.
 ///
 /// Four body rows is what that bought, and it is one short of the five this
 /// card would like: the mode and the days left share the first, the books left
@@ -3765,24 +3761,28 @@ fn authority_card(
     }
 
     let Some(grant) = grant else {
-        // The answer to the key that was just pressed comes first here, unlike
-        // the branch below: there is no ceiling on this card to protect, and
-        // the sentence under it is the same one it was before the key.
-        let mut rows = said(rows, note, sending, wide, &mut budget);
         // No grant, and the remedy — because this client composes none. Every
         // ceiling a grant carries is a number no client may default, so the
         // card names the owner's own route rather than offering a key that
         // would have to invent one.
-        for line in wrap_to(
-            "nothing books itself — every fill is the BOOK box, and \
-             POST /api/desk/authority grants one",
-            wide.max(1),
-        ) {
+        //
+        // **Two statements rather than one wrapped sentence, and the route
+        // leads.** A sentence wrapped over three rows lost its last row — and
+        // therefore the route — the first time an anomaly took a row above it,
+        // with nothing to say anything had been cut. Each line here fits the
+        // card whole at the baseline width, so what a short card drops is the
+        // second statement rather than the half of the first one that names the
+        // remedy.
+        let mut rows = said(rows, note, sending, wide, &mut budget);
+        for line in [
+            "POST /api/desk/authority grants one",
+            "nothing books itself without one",
+        ] {
             take(
                 &mut rows,
                 &mut budget,
                 Line::from(Span::styled(
-                    format!(" {line}"),
+                    format!(" {}", to_room(line, wide.max(1))),
                     Style::default().fg(t.text_dim),
                 )),
             );
@@ -3790,6 +3790,16 @@ fn authority_card(
         card(f, area, Card::Authority, "authority", at, rows);
         return;
     };
+
+    // **The answer to the key that was just pressed, before the ceilings.** It
+    // sat last, after them, and on a *suspended* grant the four statements
+    // above exhausted the card's rows before it was reached — so `R` on the one
+    // card state where an operator is most likely to press it drew nothing at
+    // all: no wait, no refusal, and no answer to the second press that a key
+    // looking dead invites. It costs one row, never more (see [`said`]), so
+    // what yields to it is a ceiling and never `books`, which is the row that
+    // says whether anything can still book today.
+    let mut rows = said(rows, note, sending, wide, &mut budget);
 
     // What is left of the day, then the three scalar ceilings.
     take(
@@ -3830,14 +3840,11 @@ fn authority_card(
         ),
     );
 
-    // The last row is contested, in the operator's own order and for the NEWS
-    // card's reason. A refusal or a wait is the answer to the key that was just
-    // pressed and outranks a standing fact for exactly as long as it is on
-    // screen — the next keystroke retires it and the universe comes back. With
-    // neither, the row carries the one ceiling that is a list rather than a
-    // number, which is why it is last: every other ceiling here is a scalar and
-    // fits whatever room is left.
-    let mut rows = said(rows, note, sending, wide, &mut budget);
+    // Last, and the first thing to yield: it is the one ceiling that is a list
+    // rather than a number, so a card that cannot draw it has still drawn every
+    // scalar bound whole. Everything above it is either a fact about what is
+    // left or the answer to a keystroke — the operator's own order, and the
+    // same one NEWS' note row is claimed in.
     take(
         &mut rows,
         &mut budget,
@@ -3855,10 +3862,15 @@ fn authority_card(
 
 /// The one row this card spends on what it, or the owner, last said.
 ///
-/// Bounded as foreign text rather than as a layout device — nothing on this
-/// path is guaranteed to be the owner's — and drawn only while there is a row
-/// left, because every statement above it is a fact about the desk and this one
-/// is about a keystroke.
+/// **Exactly one row, or none.** A wrapped note would take its rows out of the
+/// ceilings under it, and on a suspended grant there are four statements
+/// competing for four rows already — so a two-line refusal would push `books`
+/// off the card, which is the row that says whether anything can still book
+/// today. Cut to the card's width with the mark that says so, and the owner's
+/// whole sentence is on the toast this outcome also raised.
+///
+/// Bounded twice, and both bounds are foreign-text guards rather than layout
+/// devices: nothing on this path is guaranteed to be the owner's.
 fn said(
     mut rows: Vec<Line<'static>>,
     note: Option<&str>,
@@ -3867,29 +3879,22 @@ fn said(
     budget: &mut usize,
 ) -> Vec<Line<'static>> {
     let t = theme();
+    if *budget == 0 {
+        return rows;
+    }
     let (text, tone) = match (note, sending) {
         (Some(said), _) => (said.to_string(), t.warning),
         (None, true) => (ASKING.to_string(), t.accent),
         (None, false) => return rows,
     };
-    // Bounded twice, and the second bound is the load-bearing one: `SAID_MAX`
-    // is the foreign-text guard every owner sentence on this pane passes, and
-    // the rows actually left are what decides how much is *drawn*. Cut here so
-    // the mark lands where the sentence stops, rather than letting the rows run
-    // out under a wrap nothing marked.
     let held = format::bounded(&text, SAID_MAX);
-    for line in wrap_to(&to_room(&held, wide.max(1) * *budget), wide.max(1)) {
-        if *budget == 0 {
-            break;
-        }
-        *budget -= 1;
-        rows.push(Line::from(Span::styled(
-            format!(" {line}"),
-            Style::default()
-                .fg(tone)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        )));
-    }
+    *budget -= 1;
+    rows.push(Line::from(Span::styled(
+        format!(" {}", to_room(&held, wide.max(1))),
+        Style::default()
+            .fg(tone)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    )));
     rows
 }
 
@@ -4440,18 +4445,18 @@ fn draw_policy(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     };
     let limits = policy.constraints.clone().unwrap_or_default();
     let rows = vec![
-        // The id and not the label: the pair is wider than a half-width card
-        // (which is why they were two rows), the id is the one an operator
-        // types, and the label is in the picker `m` opens one card up — see
-        // [`POLICY_H`] for what this card gave AUTHORITY and what it kept.
-        kv("policy", or_missing(policy.id.as_ref()), t.accent),
-        // One row for the three, since AUTHORITY took the column's spare rows
-        // (see [`POLICY_H`]). They are one identity in every payload this desk
-        // serves — the algorithm the catalog ran, the objective it built, the
-        // solver it used — and all three values are still here rather than one
-        // standing in for the others, because "they agree" is a fact about
-        // today's mandate and not a rule this pane may assume.
-        kv("pipeline", pipeline(policy), t.text_secondary),
+        // One row for the four ids, since AUTHORITY took the column's spare
+        // rows (see [`POLICY_H`]). They are one identity in every payload this
+        // desk serves — the policy an operator types, the algorithm the catalog
+        // ran, the objective it built, the solver it used — and all four values
+        // are still here rather than one standing in for the others, because
+        // "they agree" is a fact about today's mandate and not a rule this pane
+        // may assume.
+        //
+        // The label is not: the id/label pair is wider than a half-width card,
+        // and the picker `m` opens one card up lists every method by id, arm
+        // and label with the owner's rationale beside it.
+        kv("policy", pipeline(policy), t.accent),
         kv("long only", yes_no(limits.long_only), t.text_primary),
         kv("budget", opt_pct1(limits.budget), t.text_primary),
         // One row for the pair: a floor without its ceiling is half a mandate,
@@ -4461,14 +4466,16 @@ fn draw_policy(f: &mut Frame, area: Rect, store: &Store, at: Option<Card>) {
     card(f, area, Card::Policy, "policy", at, rows);
 }
 
-/// The algorithm, the objective and the solver, in the order the owner sends
-/// them and joined by the separator every composed value on this pane uses.
+/// The policy id, the algorithm, the objective and the solver, in the order the
+/// owner sends them and joined by the separator every composed value on this
+/// pane uses.
 ///
 /// Absent stays absent per member rather than collapsing the row: `hrp · -- ·
-/// hrp` says the owner named two of three, where a row that fell back to one
-/// id would claim a pipeline nobody described.
+/// hrp · hrp` says the owner named three of four, where a row that fell back to
+/// one id would claim a pipeline nobody described.
 fn pipeline(policy: &crate::model::Policy) -> String {
     [
+        or_missing(policy.id.as_ref()),
         or_missing(policy.algorithm_id.as_ref()),
         or_missing(policy.objective.as_ref()),
         or_missing(policy.solver.as_ref()),

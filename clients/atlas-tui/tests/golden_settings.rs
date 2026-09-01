@@ -95,7 +95,17 @@ fn a_book_this_desk_cannot_log_into_is_named_on_the_card_and_not_only_flagged() 
 #[test]
 fn the_policy_card_carries_the_four_constraints_every_solve_is_held_to() {
     let frame = settings().frame(120, 36);
-    assert!(line_with(&frame, "policy").contains("hrp"), "{frame}");
+    // The identity row carries all four ids the owner sends — the policy an
+    // operator types, then the algorithm, the objective and the solver. They
+    // are one word four times in every payload this desk serves, which is why
+    // they share a row (see `POLICY_H`), and all four are still drawn rather
+    // than one standing in for the others: "they agree" is a fact about today's
+    // mandate, not a rule this pane may assume.
+    assert_eq!(
+        line_with(&frame, "policy").matches("hrp").count(),
+        4,
+        "the identity row lost one of the owner's four ids:\n{frame}"
+    );
     assert!(line_with(&frame, "long only").contains("yes"), "{frame}");
     assert!(line_with(&frame, "budget").contains("100.0%"), "{frame}");
     // One row for the pair, because a floor without its ceiling is half a
@@ -2366,6 +2376,32 @@ fn the_owners_cap_warning_is_drawn_whole_and_outranks_the_lists() {
         body.contains("per-asset cap"),
         "the second clause was cut:\n{body}"
     );
+    // **The whole sentence, unwrapped out of the card's own column.**
+    //
+    // Neither of the two assertions above holds this: "holds every" and
+    // "per-asset cap" both survive a card one row too short, which is how a
+    // `METHOD_H` that cut the last clause passed this test for a whole commit.
+    // `contains("will refuse")` does not hold it either — the *first* clause
+    // ends in those words. So the pin is the sentence entire, with the wrap
+    // taken back out, and it is what keeps `METHOD_H` where it is: at eight
+    // rows this card renders `…at a 40% per-asset cap; every plan…` and the
+    // verdict an operator acts on is gone.
+    let column: String = body
+        .lines()
+        // The card's own column, and the rail that starts each row taken out
+        // with it: a `│` left between two wrapped rows is a word this sentence
+        // does not have, and the substring below would never match.
+        .map(|row| row.chars().take(39).collect::<String>().replace('│', " "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let unwrapped = column.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        unwrapped.contains(
+            "Hierarchical risk parity holds every name; a cap of 5 will refuse its plans · \
+             a cap of 5 cannot reach 100% at a 40% per-asset cap; every plan will refuse"
+        ),
+        "the warning was cut:\n{body}"
+    );
     // And it is toned as a warning rather than sitting in the run of the card.
     assert_eq!(
         body_style_of(&buf, "holds every").fg,
@@ -3487,6 +3523,21 @@ fn a_desk_with_no_standing_grant_says_so_and_names_where_one_comes_from() {
     // where the ceilings are set, and a card that said only "none" would leave
     // an operator with no next step at all.
     assert!(body.contains("/api/desk/authority"), "{body}");
+
+    // **And with a row taken above it.** The remedy used to be one sentence
+    // wrapped over three rows; an anomaly took one of them and the third — the
+    // half that names the route — was dropped with nothing to say it had been.
+    // The route is the whole point of this state, so it is what survives.
+    let squeezed =
+        settings_with_authority(no_grant_payload(&["the book is halted"])).frame(120, 36);
+    let body = content(&squeezed);
+    assert!(
+        body.contains("POST /api/desk/authority grants one"),
+        "{body}"
+    );
+    assert!(body.contains("the book is halted"), "{body}");
+    // Whole, not cut mid-route: the line fits the card at the baseline width.
+    assert!(!body.contains("and POST\n"), "{body}");
 }
 
 #[test]
@@ -3750,6 +3801,93 @@ mod authority {
         let body = content(&client.frame(120, 36));
         assert!(body.contains("connection refused"), "{body}");
         assert!(press(&mut client, KeyCode::Char('R')).is_some());
+    }
+
+    /// **The three note states again, on a grant that is suspended.**
+    ///
+    /// Their own tests rather than a parameter on the three above, because the
+    /// bug they pin is a layout one and only this state reaches it: with a
+    /// grant *and* an anomaly the card has four statements for four rows, and
+    /// the note used to be drawn after all of them — so `R` on the one card
+    /// state where an operator is most likely to press it produced no wait, no
+    /// refusal and no answer to the second press. A key that looks dead invites
+    /// exactly the second press it cannot answer.
+    #[test]
+    fn a_suspended_grant_still_says_what_it_is_doing_about_the_key() {
+        let mut client = armed_with(Some(authority_payload(1, &["the book is halted"])));
+        on_authority(&mut client);
+        assert!(press(&mut client, KeyCode::Char('R')).is_some());
+        let body = content(&client.frame(120, 36));
+        assert!(
+            body.contains("asking the owner"),
+            "the wait was not drawn:\n{body}"
+        );
+        // And the pause is still named beside it — the note takes a ceiling's
+        // row, never the two rows that say what is left.
+        assert!(body.contains("the book is halted"), "{body}");
+        assert!(body.contains("2 of 3 left today"), "{body}");
+    }
+
+    #[test]
+    fn a_suspended_grant_answers_the_second_press_rather_than_looking_dead() {
+        let mut client = armed_with(Some(authority_payload(1, &["the book is halted"])));
+        on_authority(&mut client);
+        assert!(press(&mut client, KeyCode::Char('R')).is_some());
+        assert_eq!(press(&mut client, KeyCode::Char('R')), None);
+        let body = content(&client.frame(120, 36));
+        assert!(body.contains("asking the owner"), "{body}");
+    }
+
+    #[test]
+    fn a_suspended_grant_carries_the_owners_refusal_and_the_failure_too() {
+        for outcome in [
+            Wrote::AuthorityRefused {
+                said: "there is no standing grant to revoke".to_string(),
+            },
+            Wrote::AuthorityFailed {
+                said: "connection refused".to_string(),
+            },
+        ] {
+            let mut client = armed_with(Some(authority_payload(1, &["the book is halted"])));
+            on_authority(&mut client);
+            press(&mut client, KeyCode::Char('R'));
+            client.views.wrote(&outcome);
+            let body = content(&client.frame(120, 36));
+            let said = match &outcome {
+                Wrote::AuthorityRefused { said } | Wrote::AuthorityFailed { said } => said,
+                _ => unreachable!(),
+            };
+            assert!(
+                body.contains(said.as_str()),
+                "{outcome:?} was not drawn:\n{body}"
+            );
+            // And the wait is retired, so the key works again.
+            assert!(press(&mut client, KeyCode::Char('R')).is_some());
+        }
+    }
+
+    /// The remedy outranks the sentence beside it, pinned where it is decided.
+    ///
+    /// Three rows above it — the standing row, an anomaly, and the answer to
+    /// the key just pressed — leave the card one row for two statements, and
+    /// the one that has to survive is the route: a card saying only "nothing
+    /// books itself" tells an operator what they can already see. This is the
+    /// only state that squeezes the pair, which is why it is a keystroke test
+    /// rather than a rendering one.
+    #[test]
+    fn the_route_outlives_the_sentence_beside_it_when_the_card_runs_out_of_rows() {
+        let mut client = armed_with(Some(no_grant_payload(&["the book is halted"])));
+        on_authority(&mut client);
+        assert_eq!(press(&mut client, KeyCode::Char('R')), None);
+        let body = content(&client.frame(120, 36));
+        // All three rows above it are still drawn…
+        assert!(body.contains("no grant to revoke"), "{body}");
+        assert!(body.contains("would pause"), "{body}");
+        // …and the route is what the fourth row carries.
+        assert!(
+            body.contains("POST /api/desk/authority grants one"),
+            "the route yielded to the sentence beside it:\n{body}"
+        );
     }
 
     #[test]

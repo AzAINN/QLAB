@@ -241,6 +241,16 @@ _MARKET_EVENT_LIMIT = 500
 # How many approvals of *each* actionable status ride in one /api/tui payload.
 # Per status, not shared — see `UISession.actionable_approvals`.
 _SNAPSHOT_APPROVALS = 10
+# How far back a rejected or expired leg still suspends a standing grant. A
+# trading day, because the grant's own daily budget is counted by trading date:
+# an anomaly clearing sooner would leave the rest of the day's authority
+# standing on a book that had just refused an order.
+_ORDER_ANOMALY_WINDOW_HOURS = 24
+# The window is applied to a capped newest-first page of `orders` rather than to
+# a scan of the table, which grows with every leg the desk ever sent. The bound
+# is honest: an anomaly with more than this many *newer* legs inside the same
+# window is not seen, and a grant's own `max_orders` ceiling sits well below it.
+_ORDER_ANOMALY_SCAN = 200
 _STREAM_PAGE_CEILING = 5000
 _QUOTE_REFRESH_TTL_SECONDS = 30.0
 _QUOTE_MIN_INTERVAL_SECONDS = 5.0
@@ -5724,6 +5734,117 @@ class UISession:
         self.registry.record_event("approval_consumed",
                                    {"approval_id": approval_id, "plan_id": plan_id})
         return {"executed": True, "approval_id": approval_id, **result}
+
+    # -- standing authority: what suspends a grant --------------------------
+    def _grant_anomalies(self, offline: bool) -> list[str]:
+        """The conditions that suspend a standing grant, read off the desk now.
+
+        ``qlab.governance.authority.detect_anomalies`` names four and takes
+        them as booleans; this is where they come from. Each source is one the
+        *clicked* booking path already consults, so a grant is suspended
+        exactly when the desk a human would be looking at is in a state they
+        should see. A suspension does not revoke: the authority survives it.
+
+        An input the owner cannot compute is itself an anomaly (the design
+        record's ruling: unknown suspends, never proceeds). Such an input is
+        reported by its own sentence instead of ``detect_anomalies``' fixed
+        one, because "ledger and broker do not reconcile" is a claim about the
+        book and a reconcile that raised supports no claim about the book. The
+        list is non-empty either way, and non-empty is what suspends.
+
+        Takes no lock and touches no session state, so it is callable both
+        under the owner dispatch lock (``_LOCK``, which is not reentrant, so a
+        helper that took it would deadlock the booking route) and outside it,
+        as the heartbeat will. Deliberately uncached: ``Registry.run_revision``
+        moves only on ``log_run``, so a cache keyed on it the way the research
+        summaries are would go on reporting a clean desk after a halt.
+        """
+        from qlab.governance.authority import detect_anomalies
+        from qlab.trader.broker import get_broker
+        from qlab.trader.lifecycle import EXPIRED, REJECTED
+        from qlab.trader.reconcile import reconcile
+
+        tickers = self.mandate.universe_whitelist
+        # Each unreadable input's own sentence, kept apart from the four fixed
+        # strings so a refusal never asserts something the owner did not read.
+        unknown: list[str] = []
+
+        broker = None
+        halted = False
+        try:
+            broker = get_broker(
+                self.registry, offline=offline,
+                starting_cash=self.mandate.paper_capital, seed=self.seed,
+                universe=tickers, book=self.desk_mode.book)
+            # `halted` — the book's own halt flag. Per book, and both kinds:
+            # the registry column the kill switch latches (`Registry.set_halt`,
+            # written by `qlab/trader/plan.py` and `qlab/autopilot/loop.py`) on
+            # the simulated book, and the venue's `trading_blocked` on the
+            # Alpaca one. `portfolio_state` is where those become one field,
+            # and it is the same field `portfolio()` shows the operator.
+            halted = bool(broker.portfolio_state(tickers)["halted"])
+        except Exception as exc:
+            unknown.append(f"the book's halt flag could not be read: {exc}")
+
+        # `reconcile_clean` — the ledger-vs-broker check the owner already runs
+        # before it accepts a plan (`rebalance_preview`, this file) and the
+        # autopilot runs before any trade (`qlab/autopilot/loop.py`). One
+        # implementation, never re-derived per caller.
+        reconcile_clean = True   # quiet unless the check itself says otherwise
+        try:
+            if broker is None:
+                raise RuntimeError("the book could not be opened")
+            reconcile_clean = bool(
+                reconcile(self.registry, broker, tickers)["clean"])
+        except Exception as exc:
+            unknown.append(f"reconcile could not be run: {exc}")
+
+        # `data_execution_eligible` — the same two steps the execute gate takes
+        # before a fill (`execute_plan_with_approval`, above): the permit
+        # governs only a book whose *policy* is execution-eligible, and on a
+        # demo or research lane that gate demands none, so neither does this.
+        # Where one is demanded, the record is the newest `purpose="execution"`
+        # permit — the row `create_approval` binds an approval to and
+        # `check_approval_for_execution` re-checks at the door.
+        data_execution_eligible = True
+        try:
+            if self.data_policy(offline).execution_eligible:
+                permit = self.registry.current_data_permit("execution")
+                if permit is None:
+                    # Absence here is not ineligibility, it is silence: this
+                    # lane requires a permit and none has ever been recorded.
+                    unknown.append(
+                        "no execution data permit is on record for this book")
+                else:
+                    data_execution_eligible = bool(
+                        permit.get("eligible_for_execution"))
+        except Exception as exc:
+            unknown.append(f"the data permit could not be read: {exc}")
+
+        # `recent_order_anomaly` — a leg the venue rejected or expired inside
+        # the window. The terminal states are `qlab/trader/lifecycle.py`'s, on
+        # the rows `execute_plan` writes and the trade-update supervisor
+        # transitions. `created_at` is `Registry._now()`, the same offset-aware
+        # ISO shape as the cutoff, so the comparison is lexicographic.
+        recent_order_anomaly = False
+        try:
+            cutoff = (
+                datetime.now(timezone.utc)
+                - timedelta(hours=_ORDER_ANOMALY_WINDOW_HOURS)
+            ).isoformat()
+            recent_order_anomaly = any(
+                str(order.get("state") or "") in (REJECTED, EXPIRED)
+                and str(order.get("created_at") or "") >= cutoff
+                for order in self.registry.list_orders(_ORDER_ANOMALY_SCAN))
+        except Exception as exc:
+            unknown.append(f"recent orders could not be read: {exc}")
+
+        return detect_anomalies(
+            halted=halted,
+            reconcile_clean=reconcile_clean,
+            data_execution_eligible=data_execution_eligible,
+            recent_order_anomaly=recent_order_anomaly,
+        ) + unknown
 
     def book_current_proposal(self, body: dict, offline: bool) -> dict:
         """Approve the desk's own open question and execute it, once.

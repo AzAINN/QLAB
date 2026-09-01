@@ -7318,3 +7318,192 @@ def test_two_unknown_rights_are_refused_in_the_plural(session):
                              {"execute": False, "trade": False})
     assert status == 400
     assert "execute, trade are not rights" in two["error"]
+
+
+# --- standing authority: the four conditions that suspend a grant ------------
+#
+# `qlab.governance.authority.detect_anomalies` names four and takes them as
+# booleans nobody supplied. `UISession._grant_anomalies` is where they come
+# from — each read off the same live state the clicked booking path consults.
+# An input the owner cannot compute is itself an anomaly: unknown suspends, it
+# never proceeds, and it says which input it could not read rather than
+# asserting something about the book it never saw.
+
+
+def _execution_lane(session, monkeypatch):
+    """Point the desk at a policy whose fills require an execution permit.
+
+    An offline desk runs `DataPolicy.demo`, which is never execution-eligible,
+    and the execute gate demands no permit on that lane — so nothing about
+    permits is observable until the policy is one that asks for one.
+    """
+    from qlab.core.data import DataPolicy
+
+    monkeypatch.setattr(
+        session, "data_policy", lambda offline: DataPolicy.alpaca_operational())
+
+
+def _open_book(session):
+    """Open the simulated book once so its account row exists to be halted."""
+    from qlab.trader.broker import SimulatedPaperBroker
+
+    session.portfolio(True)
+    return SimulatedPaperBroker.name
+
+
+def test_a_clean_desk_suspends_no_grant(session):
+    assert session._grant_anomalies(True) == []
+
+
+def test_a_halted_book_suspends_a_grant(session):
+    session.registry.set_halt(True, book=_open_book(session))
+    assert session._grant_anomalies(True) == ["account is halted"]
+
+
+def test_a_dirty_reconcile_suspends_a_grant(session, monkeypatch):
+    # The simulated book reads its positions out of the very ledger reconcile
+    # compares them against, so it cannot diverge from itself; what a real
+    # venue produces is stood in for here.
+    monkeypatch.setattr(
+        "qlab.trader.reconcile.reconcile",
+        lambda *a, **k: {"clean": False, "diffs": {"SPY": {"broker_qty": 1.0}}})
+    assert session._grant_anomalies(True) == [
+        "ledger and broker do not reconcile"]
+
+
+def test_a_permit_that_refuses_execution_suspends_a_grant(session, monkeypatch):
+    _execution_lane(session, monkeypatch)
+    session.registry.record_data_permit({
+        "permit_id": "permit-ineligible", "snapshot_id": "snap",
+        "purpose": "execution", "provider": "alpaca", "feed": "iex",
+        "as_of": "2026-09-01", "eligible_for_execution": False})
+    assert session._grant_anomalies(True) == ["data is not execution-eligible"]
+
+
+def test_an_eligible_permit_suspends_nothing(session, monkeypatch):
+    _execution_lane(session, monkeypatch)
+    session.registry.record_data_permit({
+        "permit_id": "permit-ok", "snapshot_id": "snap", "purpose": "execution",
+        "provider": "alpaca", "feed": "iex", "as_of": "2026-09-01",
+        "eligible_for_execution": True})
+    assert session._grant_anomalies(True) == []
+
+
+def test_a_recently_rejected_order_suspends_a_grant(session):
+    session.registry.add_order("leg-rejected", "plan-1", "SPY", "buy", 100.0)
+    session.registry.update_order_state("leg-rejected", "rejected")
+    assert session._grant_anomalies(True) == [
+        "a recent order was rejected or expired"]
+
+
+def test_a_recently_expired_order_suspends_a_grant(session):
+    session.registry.add_order("leg-expired", "plan-1", "SPY", "buy", 100.0)
+    session.registry.update_order_state("leg-expired", "expired")
+    assert session._grant_anomalies(True) == [
+        "a recent order was rejected or expired"]
+
+
+def test_a_filled_order_suspends_nothing(session):
+    session.registry.add_order("leg-filled", "plan-1", "SPY", "buy", 100.0)
+    session.registry.update_order_state("leg-filled", "filled")
+    assert session._grant_anomalies(True) == []
+
+
+def test_a_rejection_older_than_the_window_suspends_nothing(session):
+    session.registry.add_order("leg-old", "plan-1", "SPY", "buy", 100.0)
+    session.registry.update_order_state("leg-old", "rejected")
+    stale = (datetime.now(timezone.utc)
+             - timedelta(hours=ui_server._ORDER_ANOMALY_WINDOW_HOURS + 1))
+    session.registry.con.execute(
+        "UPDATE orders SET created_at=? WHERE client_order_id=?",
+        [stale.isoformat(), "leg-old"])
+    assert session._grant_anomalies(True) == []
+
+
+def test_every_condition_the_module_names_has_a_live_source(session, monkeypatch):
+    """All four booleans `detect_anomalies` takes are supplied from the desk.
+
+    The module shipped with fourteen tests and no caller (invariant 10); this
+    is the pin that it now has one, in the module's own order.
+    """
+    session.registry.set_halt(True, book=_open_book(session))
+    monkeypatch.setattr("qlab.trader.reconcile.reconcile",
+                        lambda *a, **k: {"clean": False, "diffs": {"SPY": {}}})
+    _execution_lane(session, monkeypatch)
+    session.registry.record_data_permit({
+        "permit_id": "permit-ineligible", "snapshot_id": "snap",
+        "purpose": "execution", "provider": "alpaca", "feed": "iex",
+        "as_of": "2026-09-01", "eligible_for_execution": False})
+    session.registry.add_order("leg-rejected", "plan-1", "SPY", "buy", 100.0)
+    session.registry.update_order_state("leg-rejected", "rejected")
+
+    assert session._grant_anomalies(True) == [
+        "account is halted",
+        "ledger and broker do not reconcile",
+        "data is not execution-eligible",
+        "a recent order was rejected or expired",
+    ]
+
+
+def test_a_reconcile_that_raises_suspends_rather_than_proceeds(session,
+                                                               monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("broker unreachable")
+
+    monkeypatch.setattr("qlab.trader.reconcile.reconcile", _boom)
+    anomalies = session._grant_anomalies(True)
+    assert anomalies == ["reconcile could not be run: broker unreachable"]
+    # And it must not assert what it never read: a reconcile that raised is no
+    # evidence that the ledger and the broker disagree.
+    assert "ledger and broker do not reconcile" not in anomalies
+
+
+def test_a_book_that_cannot_be_opened_suspends(session, monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("no credentials for the alpaca book")
+
+    monkeypatch.setattr("qlab.trader.broker.get_broker", _boom)
+    assert session._grant_anomalies(True) == [
+        "the book's halt flag could not be read: no credentials for the "
+        "alpaca book",
+        "reconcile could not be run: the book could not be opened",
+    ]
+
+
+def test_a_lane_that_needs_a_permit_and_has_none_suspends(session, monkeypatch):
+    # Absence is not ineligibility, it is silence — and silence is one of the
+    # inputs the owner cannot compute.
+    _execution_lane(session, monkeypatch)
+    assert session._grant_anomalies(True) == [
+        "no execution data permit is on record for this book"]
+
+
+def test_a_permit_that_cannot_be_read_suspends(session, monkeypatch):
+    _execution_lane(session, monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("permit row unreadable")
+
+    monkeypatch.setattr(session.registry, "current_data_permit", _boom)
+    assert session._grant_anomalies(True) == [
+        "the data permit could not be read: permit row unreadable"]
+
+
+def test_orders_that_cannot_be_read_suspend(session, monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("orders unreadable")
+
+    monkeypatch.setattr(session.registry, "list_orders", _boom)
+    assert session._grant_anomalies(True) == [
+        "recent orders could not be read: orders unreadable"]
+
+
+def test_the_anomaly_read_takes_no_lock_of_its_own(session):
+    """Callable from a route that already holds the dispatch lock.
+
+    A later caller reaches this from inside `_LOCK` (the booking route) and
+    from the heartbeat's lock phase. `_LOCK` is a plain `threading.Lock`, so a
+    helper that took it would deadlock the first of those on the first beat.
+    """
+    with ui_server._LOCK:
+        assert session._grant_anomalies(True) == []

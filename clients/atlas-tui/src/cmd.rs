@@ -964,7 +964,12 @@ const DESK_MODES: [(&str, &str); 3] = [
 /// `pub(crate)` because the startup door offers the same two surfaces: one
 /// vocabulary, so the door cannot ask about a surface the line would refuse.
 pub(crate) const SURFACES: [&str; 2] = [REASONER, WORKFORCE];
-const REASONER: &str = "reasoner";
+/// The surface that answers the operator and reasons over templates — what
+/// "which mind runs Atlas" means, and the one the startup door writes when it
+/// is told to keep the mind the desk already has. `pub(crate)` for that caller:
+/// naming it by exclusion from [`WORKFORCE`] read as a fact about the owner's
+/// ordering, which is exactly what this pair is not.
+pub(crate) const REASONER: &str = "reasoner";
 pub(crate) const WORKFORCE: &str = "workforce";
 
 /// The reasoner's switch, spelled the way an operator says it out loud. The

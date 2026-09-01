@@ -943,7 +943,7 @@ impl Store {
     /// Open the door, if this desk needs one and none has been up yet.
     ///
     /// The predicate is [`Door::wanted`]; what "unchosen" means on the wire is
-    /// [`Store::desk_unchosen`], directly below.
+    /// [`Store::unchosen`], directly below.
     fn consider_door(&mut self) {
         if self.door_settled || self.door.is_some() {
             return;
@@ -964,7 +964,16 @@ impl Store {
         let step = Door::wanted(self.door_forced, answered, self.unchosen())
             .or_else(|| (answered && self.asking_posture()).then_some(Step::Mode));
         if let Some(step) = step {
-            self.door = Some(Door::opening(step));
+            // The cursor is placed here rather than left on the first row,
+            // because the catalog may already have arrived: the `Backends` arm
+            // settles a *standing* door and only for the first catalog, so one
+            // that landed before this door existed is one no arrival will ever
+            // settle. A model question parked on whichever pair the catalog
+            // happens to list first is one whose Enter is a change nobody asked
+            // for — the thing `Door::current_model` exists to prevent.
+            let mut door = Door::opening(step);
+            door.settle_model_cursor(self);
+            self.door = Some(door);
             self.dirty = true;
         }
     }

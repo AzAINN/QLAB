@@ -152,6 +152,17 @@ async fn main() -> Result<()> {
     // route rides no beat, so without this the door's line would be `--` until
     // somebody opened SETTINGS — which is after the door is gone.
     poller.news();
+    // And once for the catalog, for the same reason and on the same route
+    // shape: the startup door can open straight on the model question — a desk
+    // whose pair was named long ago and whose mind never was — and that list is
+    // built from `/api/llm/backends`, which rides no beat either. Without this
+    // the only producer of `Command::Backends` is a keystroke, so the first
+    // question an operator is ever asked about which mind runs Atlas would
+    // offer none until they pressed one. The door keeps its own retry row for
+    // when this answer does not arrive (an owner that is not up yet, a fetch
+    // that failed) — this is what makes that row the exception rather than the
+    // route.
+    poller.backends();
     // And once at startup for the rights, which is the *only* moment they are
     // owed one: the file is read when a chat session is launched, so what it
     // says is a fact about this desk before anybody opens SETTINGS, and nothing

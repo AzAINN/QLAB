@@ -23,7 +23,7 @@
 //!
 //! `desk_mode_payload()` now serves `chosen: bool`, computed where the
 //! three-way `or` resolves and set again by `set_desk_mode`, so the arm means
-//! what it was meant to mean. `Store::desk_unchosen` is where the two shapes of
+//! what it was meant to mean. `Store::unchosen` is where the shapes of
 //! "nobody chose this" are spelled out, including the one that is neither: an
 //! owner too old to carry the field is silent, not negative, and its silence
 //! keeps the reading it had before the field existed.
@@ -208,13 +208,20 @@ const CODEX_REFUSAL: &str =
 
 /// The row that fetches the catalog the model question is built from.
 ///
-/// It exists because of where the catalog comes from: nothing polls it, and the
-/// one thing that asks is a keystroke ([`Command::Backends`], sent by the
-/// `models →` row on the way in). A door that OPENED on the model question
-/// crossed no such transition and `Store::consider_door` has nowhere to send a
-/// command, so the ask becomes the first row — one keystroke, visible, and the
-/// only thing on this question an operator could act on before the desk has
-/// said what it can run.
+/// **The retry, not the only route.** The catalog rides no beat: `main` asks
+/// for it once at startup, beside the news the first question reads, and the
+/// only other producer of [`Command::Backends`] is a keystroke — the `models →`
+/// row on the way in, and SETTINGS entering the model scope. A door that OPENED
+/// on the model question crossed no such transition, and every one of those
+/// asks can come back with nothing: an owner that is not up yet, a fetch that
+/// failed (which is deliberately logged and not evented — `net::http` will not
+/// let a catalog failure claim the desk went away), or a door opened before the
+/// startup answer landed.
+///
+/// So this row is what an operator has when the list is empty however it got
+/// that way: one keystroke, visible, naming what has not happened. A question
+/// about which mind runs Atlas that offered no mind and no way to look for one
+/// would be the silent degradation invariant 4 exists to refuse.
 const ASK: &str = "ask what this desk can run";
 const ASK_SAID: &str = "nothing has asked yet";
 
@@ -366,7 +373,17 @@ impl Door {
         }
         self.at = self.current_model(store);
         self.top = 0;
-        self.scroll();
+        // The window is only meaningful once the box has been drawn. `cap` is
+        // read off the frame the door was last given and a door that has never
+        // had one reports room for a single row, so scrolling here would send a
+        // cursor on row four to the top of a list of nine and draw "▴ 4 above"
+        // on a box with room for all of them. This is the one caller that can
+        // run before a frame — `step_by` cannot, because every keystroke is
+        // refused until the door fits something ([`Door::fits`]) — and the
+        // first keystroke re-scrolls against the real frame either way.
+        if self.area.get().height > 0 {
+            self.scroll();
+        }
     }
 
     /// Which question is up. Public so a test can pin the walk rather than
@@ -720,7 +737,14 @@ impl Door {
             self.data = Some(SYNTHETIC);
             self.book = Some(SIMULATED);
         }
-        self.finish(store, views)
+        let acted = self.finish(store, views);
+        // Esc always leaves. `finish` declines to close when it has nothing to
+        // write and says so on the box instead, which is the right answer to
+        // the *keep* row and the wrong one to the key a human presses to get
+        // out of the way: a door that would not take Esc is a door with no
+        // exit, and the desk it leaves unchosen is one it will ask again.
+        self.closed = true;
+        acted
     }
 
     /// Apply the desk the door settled on, and decide what the operator lands
@@ -745,15 +769,30 @@ impl Door {
     /// desk already runs rather than nothing at all, and why it writes no pair:
     /// it never put the pair to anybody.
     fn finish(&mut self, store: &mut Store, views: &mut Views) -> Option<Command> {
-        self.closed = true;
         // A door that never asked about the pair does not write one: the desk
         // named its own long ago, and a POST of it here would be this box
         // claiming a decision it put to nobody. What it writes instead is the
         // answer it *did* take, by the rule two paragraphs up — the mind the
         // desk is already running, sent so that "keep" is durable.
+        //
+        // **It closes only if it has something to send.** `kept` is `None` for a
+        // desk whose `llm` block names no pair — unreachable while the owner
+        // serves one for every surface, which is exactly the kind of "cannot
+        // happen" that closes a door on a write nobody made. So the failure
+        // gets a sentence and the question stays up (invariant 4), which is
+        // also what the rest of this step does with a row it cannot take.
         if self.opened == Step::Model {
-            return kept(store);
+            let Some(acted) = kept(store) else {
+                self.note = Some(
+                    "the desk did not say which mind it is running, so there is nothing to keep"
+                        .to_string(),
+                );
+                return None;
+            };
+            self.closed = true;
+            return Some(acted);
         }
+        self.closed = true;
         let (data, book) = (self.data(store), self.book(store));
         // The third step, and the only condition it has: the desk is about to
         // be pointed at the real book and the owner cannot read a login for it.
@@ -1223,7 +1262,7 @@ fn word(
 
 /// Whether the pair the owner is serving is one it says somebody named.
 ///
-/// `Some(false)` only is the negative — the same rule `Store::desk_unchosen`
+/// `Some(false)` only is the negative — the same rule `Store::unchosen`
 /// states, read here for the marker rather than for the trigger. An owner too
 /// old to carry the flag is silent, and its silence leaves the marker reading
 /// exactly what it read before the field existed.
@@ -1294,23 +1333,21 @@ fn posture(armed: bool) -> Option<Command> {
 /// the owner's own, and re-sending them is what makes the owner stop reporting
 /// that nobody has answered.
 ///
-/// The reasoner, named as the surface that is not the workforce rather than by
-/// its position in `cmd::SURFACES`, which is the owner's own order and not a
-/// contract about which of the two this is. It is the surface this question's
+/// The reasoner, by name ([`cmd::REASONER`]): it is the surface this question's
 /// own footnote is about and the one an operator means by "which mind runs
-/// Atlas"; the workforce keeps whatever it had, because the owner replaces one
+/// Atlas". The workforce keeps whatever it had, because the owner replaces one
 /// surface per POST and a keystroke carries one command.
 ///
-/// A desk that named no pair composes nothing: this refuses rather than
-/// inventing a backend, and the door closes having written nothing — which
-/// leaves the question open, and open is what it is.
+/// `None` is a desk that named no pair to keep. This composes nothing out of a
+/// silence rather than inventing a backend; [`Door::finish`] turns that into a
+/// sentence, because a door that closed on a write it could not make would be
+/// the quiet failure this client refuses everywhere else.
 fn kept(store: &Store) -> Option<Command> {
-    let surface = cmd::SURFACES.into_iter().find(|s| *s != cmd::WORKFORCE)?;
     let running = store.llm()?.reasoner.as_ref()?;
     let backend = format::text(running.backend.as_ref())?;
     let model = format::text(running.model.as_ref())?;
     chose(
-        surface,
+        cmd::REASONER,
         ModelChoice::Pair {
             backend: backend.to_string(),
             model: model.to_string(),
@@ -1571,7 +1608,28 @@ mod tests {
     /// the pair here is deliberately `chosen: true` so nothing about it is.
     #[cfg(feature = "operator")]
     fn mind_said(chosen: Option<bool>) -> Store {
-        let mut store = Store::default();
+        mind_said_on(Store::default(), chosen)
+    }
+
+    /// The same desk folded onto a store that may already carry something — the
+    /// catalog, in the one test where it arrives before the snapshot does.
+    #[cfg(feature = "operator")]
+    fn mind_said_on(store: Store, chosen: Option<bool>) -> Store {
+        mind_running(
+            store,
+            serde_json::json!({
+                "reasoner": {"backend": "ollama", "model": "qwen2.5:7b"},
+                "workforce": {"backend": "claude", "model": "inherit"},
+                "reasoner_enabled": false,
+                "chosen": chosen,
+            }),
+        )
+    }
+
+    /// The same desk with whatever `llm` block the caller is asking about — the
+    /// one payload the mind question is decided by.
+    #[cfg(feature = "operator")]
+    fn mind_running(mut store: Store, llm: serde_json::Value) -> Store {
         store.apply(
             AppEvent::Snapshot(Box::new(
                 serde_json::from_value(serde_json::json!({
@@ -1581,12 +1639,7 @@ mod tests {
                         "credentials": "no ALPACA_API_KEY_ID in the environment or .env",
                         "credentials_ok": false,
                     },
-                    "llm": {
-                        "reasoner": {"backend": "ollama", "model": "qwen2.5:7b"},
-                        "workforce": {"backend": "claude", "model": "inherit"},
-                        "reasoner_enabled": false,
-                        "chosen": chosen,
-                    }
+                    "llm": llm
                 }))
                 .unwrap(),
             )),
@@ -2024,6 +2077,69 @@ mod tests {
                 book: SIMULATED.to_string()
             })
         );
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_catalog_that_arrived_before_the_door_did_still_places_its_cursor() {
+        // The arriving-catalog hook settles a *standing* door and only for the
+        // first catalog, so a catalog that landed before the door existed is one
+        // no arrival will ever settle — and that is not a corner: `main` fetches
+        // it at startup, so on a real desk it usually lands first. The door
+        // places its own cursor when it opens for exactly this reason.
+        let mut store = Store::default();
+        store.apply(
+            AppEvent::Backends(
+                serde_json::from_value(serde_json::json!({
+                    "backends": [
+                        {"name": "claude", "available": true, "reason": "claude CLI on PATH",
+                         "models": ["inherit", "sonnet", "opus", "haiku"]},
+                        {"name": "ollama", "available": true,
+                         "reason": "ollama at 127.0.0.1:11434, 1 model pulled",
+                         "models": ["qwen2.5:7b"]}
+                    ],
+                    "probed_at": "2026-08-03T04:10:08.417505+00:00"
+                }))
+                .unwrap(),
+            ),
+            Instant::now(),
+        );
+        assert!(store.door().is_none(), "a catalog opened a door by itself");
+        // Now the snapshot, which is what opens it.
+        let store = mind_said_on(store, Some(false));
+        let door = store.door().expect("an unchosen mind owes a door");
+        let rows = door.model_rows(&store);
+        assert!(
+            matches!(&rows[door.at], ModelRow::Offer { surface, value, current: true, .. }
+                     if *surface == "reasoner" && value == "ollama:qwen2.5:7b"),
+            "the cursor opened on a change nobody asked for: {:?}",
+            rows.get(door.at)
+        );
+        // And the window with it: a door that scrolled against the frame it has
+        // not been given yet reports room for one row, and would open showing
+        // "▴ 4 above" on a box with room for all nine.
+        assert_eq!(door.top, 0, "the box scrolled before it had been drawn");
+    }
+
+    #[cfg(feature = "operator")]
+    #[test]
+    fn a_desk_that_will_not_say_which_mind_it_runs_is_told_rather_than_closed_on() {
+        // `kept` composes nothing out of a silence, and a door that closed on a
+        // write it could not make is the quiet failure this client refuses
+        // everywhere else. Unreachable while the owner serves a pair for every
+        // surface — which is exactly the kind of "cannot happen" worth a
+        // sentence rather than a silent exit.
+        let mut store = mind_running(Store::default(), serde_json::json!({"chosen": false}));
+        let mut door = drawn(store.take_door().unwrap());
+        door.at = door.model_rows(&store).len() - 1;
+        assert_eq!(press(&mut door, KeyCode::Enter, &mut store), None);
+        assert!(door.standing(), "the door closed on a write it never made");
+        let said = model_said(&door, &store);
+        assert!(said.contains("nothing to keep"), "{said}");
+        // And Esc is still the way out, because a door that would not take the
+        // key a human presses to get out of the way is a door with no exit.
+        assert_eq!(press(&mut door, KeyCode::Esc, &mut store), None);
+        assert!(!door.standing(), "Esc left the door up");
     }
 
     #[cfg(feature = "operator")]
